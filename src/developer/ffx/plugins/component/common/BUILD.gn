@@ -16,7 +16,7 @@ rustc_library("ffx_component") {
     "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
     "//src/developer/ffx/lib/errors:lib",
     "//src/lib/fuchsia-url",
-    "//src/sys/lib/component_debug",
+    "//src/sys/lib/component_debug:component_debug_fdomain",
     "//src/sys/lib/moniker",
     "//third_party/rust_crates:anyhow",
   ]

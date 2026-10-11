@@ -118,8 +118,8 @@ impl<T, Access: Writable> MmioPtr<T, Access> {
     /// Also,
     ///
     /// * If `Access` expresses safe-writability (see
-    /// [`SafeWrite`](crate::SafeWrite)), that writing any value whatsoever to
-    /// this address cannot result in undefined behaviour.
+    ///   [`SafeWrite`](crate::SafeWrite)), that writing any value whatsoever to
+    ///   this address cannot result in undefined behaviour.
     ///
     /// Note that it is not assumed that the backing memory is immutable, or
     /// that a writable [`MmioPtr`] has exclusive access to it.

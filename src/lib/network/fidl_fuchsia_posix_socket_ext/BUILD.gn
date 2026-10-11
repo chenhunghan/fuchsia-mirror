@@ -47,17 +47,9 @@ fuchsia_test_component("fidl-fuchsia-posix-socket-ext-test") {
   manifest = "meta/fidl-fuchsia-posix-socket-ext-test.cml"
   deps = [
     ":fidl_fuchsia_posix_socket_ext_test",
-    "//src/connectivity/network/netstack:component-debug",
     "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
-
-  if (current_cpu == "riscv64") {
-    # Netstack2 is not available on RISC-V, so it must be excluded for this
-    # test to build. The test cases only attempt to run against Netstack2
-    # when built for non-RISC-V architectures.
-    deps -= [ "//src/connectivity/network/netstack:component-debug" ]
-  }
 }
 
 fuchsia_test_package("fidl-fuchsia-posix-socket-ext-tests") {

@@ -15,14 +15,14 @@ import threading
 import time
 from dataclasses import dataclass
 
-from antlion.controllers.ap_lib.hostapd_constants import (
+from antlion.libs.proc.process import Process
+from legacy_access_point.ap_lib.hostapd_constants import (
     CENTER_CHANNEL_MAP,
     FREQUENCY_MAP,
     VHT_CHANNEL,
 )
-from antlion.libs.proc.process import Process
-from antlion.types import ControllerConfig, Json
 from libs.ssh import connection, formatter, settings
+from libs.types import ControllerConfig, Json
 from mobly import asserts, logger
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "PacketCapture"

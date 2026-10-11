@@ -17,14 +17,21 @@ constexpr std::string_view kBootArgKey = "androidboot.bootreason";
 // The maximum property value size enforced by the bootloader.
 constexpr size_t kMaxRebootReasonSize = 512;
 
-// Maps an `androidboot.bootreason` value, compared as a single string, to a ZBI reboot reason.
+// Maps `androidboot.bootreason` values that start with `prefix` to a ZBI reboot reason.
+//
+// A boot reason is a comma-separated list of items (e.g. "reboot,ocp,pmic"), and `prefix` can match
+// it in one of two ways:
+//
+//  * As an item prefix (the default), `prefix` must end on an item boundary: the value either
+//    equals `prefix` or continues with ',' and more items. "reboot,longkey" matches
+//    "reboot,longkey" and "reboot,longkey,s2", but not "reboot,longkeys".
+//  * As a partial prefix, the last item of `prefix` may also be the start of a longer item.
+//    "reboot,ocp" matches "reboot,ocp,pmic" and also "reboot,ocp2,pmic".
 struct RebootReasonMap {
-  std::string_view reason;
+  std::string_view prefix;
   zbi_hw_reboot_reason_t value;
-  // If true, match any value starting with `reason` (e.g. "reboot,ocp" matches
-  // "reboot,ocp2,pmic,sub"); otherwise the value must equal `reason`, optionally
-  // followed by ',' and sub-reasons.
-  bool is_prefix = false;
+  // If true, `prefix` is a partial prefix; otherwise it is an item prefix.
+  bool is_partial = false;
 };
 
 constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
@@ -32,25 +39,25 @@ constexpr auto kRebootReasons = std::to_array<RebootReasonMap>({
     // Generally indicates the hardware has its state reset and ramoops/crashlog should retain
     // persistent
     // content.
-    {.reason = "warm", .value = ZBI_HW_REBOOT_REASON_WARM},
-    {.reason = "reboot,warm", .value = ZBI_HW_REBOOT_REASON_WARM},
+    {.prefix = "warm", .value = ZBI_HW_REBOOT_REASON_WARM},
+    {.prefix = "reboot,warm", .value = ZBI_HW_REBOOT_REASON_WARM},
 
     // Generally indicates the memory and the devices retain some state, and the ramoops/crashlog
     // backing
     // store contains persistent content.
-    {.reason = "hard", .value = ZBI_HW_REBOOT_REASON_WARM},
+    {.prefix = "hard", .value = ZBI_HW_REBOOT_REASON_WARM},
 
     // Generally indicates a full reset of all devices, including memory.
-    {.reason = "cold", .value = ZBI_HW_REBOOT_REASON_COLD},
-    {.reason = "reboot,cold", .value = ZBI_HW_REBOOT_REASON_COLD},
+    {.prefix = "cold", .value = ZBI_HW_REBOOT_REASON_COLD},
+    {.prefix = "reboot,cold", .value = ZBI_HW_REBOOT_REASON_COLD},
 
-    {.reason = "watchdog", .value = ZBI_HW_REBOOT_REASON_WATCHDOG},
-    {.reason = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
-    {.reason = "reboot,ocp", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_prefix = true},
-    {.reason = "reboot,sys_ldo_ok,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
-    {.reason = "reboot,smpl_timeout,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
-    {.reason = "reboot,master_dc,reset", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
-    {.reason = "reboot,longkey,s2", .value = ZBI_HW_REBOOT_REASON_USER_HARD_RESET},
+    {.prefix = "watchdog", .value = ZBI_HW_REBOOT_REASON_WATCHDOG},
+    {.prefix = "reboot,uvlo", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.prefix = "reboot,ocp", .value = ZBI_HW_REBOOT_REASON_BROWNOUT, .is_partial = true},
+    {.prefix = "reboot,sys_ldo_ok,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.prefix = "reboot,smpl_timeout,pmic", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.prefix = "reboot,master_dc,reset", .value = ZBI_HW_REBOOT_REASON_BROWNOUT},
+    {.prefix = "reboot,longkey", .value = ZBI_HW_REBOOT_REASON_USER_HARD_RESET},
 });
 
 }  // namespace
@@ -75,12 +82,12 @@ void RebootReasonItem::Init(const BootProperties& properties, const char* shim_n
     return;
   }
 
-  for (const auto& [reason, value, is_prefix] : kRebootReasons) {
+  for (const auto& [prefix, value, is_partial] : kRebootReasons) {
     // Values may carry sub-reasons after a known reason (e.g. "reboot,uvlo,pmic,sub" or
-    // "watchdog,apc"), so also match `reason` followed by a ','.
-    if (is_prefix ? reboot_reason.starts_with(reason)
-                  : reboot_reason == reason || (reboot_reason.starts_with(reason) &&
-                                                reboot_reason[reason.size()] == ',')) {
+    // "watchdog,apc"), so an item prefix also matches when followed by a ','.
+    if (is_partial ? reboot_reason.starts_with(prefix)
+                   : reboot_reason == prefix || (reboot_reason.starts_with(prefix) &&
+                                                 reboot_reason[prefix.size()] == ',')) {
       fprintf(log, "%s: INFO %.*s was <%.*s>.\n", shim_name, static_cast<int>(kBootArgKey.size()),
               kBootArgKey.data(), static_cast<int>(reboot_reason.size()), reboot_reason.data());
       set_payload(value);

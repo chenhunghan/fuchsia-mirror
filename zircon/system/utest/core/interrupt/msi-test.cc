@@ -44,6 +44,14 @@ class MsiTestVmo {
       return zx::error(status);
     }
 
+    // Zero the page since the test physical VMO is backed by unzeroed reserved RAM that is reused
+    // across tests. Use volatile word stores to avoid compiler/libc optimizations (like ARM64
+    // dc zva in memset) that fault on ZX_CACHE_POLICY_UNCACHED_DEVICE mappings.
+    auto* ptr = reinterpret_cast<volatile uint64_t*>(mapped_addr);
+    for (size_t i = 0; i < vmo_size / sizeof(uint64_t); ++i) {
+      ptr[i] = 0;
+    }
+
     std::unique_ptr<MsiTestVmo> res(new MsiTestVmo(std::move(vmo), mapped_addr, vmo_size));
     return zx::ok(std::move(res));
   }
@@ -127,12 +135,12 @@ struct Capability {
   uint8_t id;
   uint8_t next;
   uint16_t control;
-  uint64_t reserved1_;    // For 32 bit this is Address, Data, and a reserved field.
-                          // For 64 bit this is Address and Address Upper.
-  uint32_t mask_bits_32;  // For 64 bit this is Data and a reserved field.
+  uint32_t reserved1_[2];  // For 32 bit this is Address, Data, and a reserved field.
+                           // For 64 bit this is Address and Address Upper.
+  uint32_t mask_bits_32;   // For 64 bit this is Data and a reserved field.
   uint32_t mask_bits_64;
   uint32_t reserved2_;  // Pending Bits
-} __PACKED;
+};
 static_assert(offsetof(Capability, mask_bits_32) == 0x0C);
 static_assert(offsetof(Capability, mask_bits_64) == 0x10);
 static_assert(sizeof(Capability) == 24);
@@ -184,7 +192,7 @@ TEST_F(MsiTest, CreateSyscallArgs) {
       // |vmo_offset| is past the end of the VMO.
       { .msi = msi.get(), .opt = 0, .id = 0,       .vmo = vmo.get(), .off = vmo_size, .status = ZX_ERR_INVALID_ARGS},
       // |vmo_offset| doesn't provide enough space for the capability.
-      { .msi = msi.get(), .opt = 0, .id = 0,       .vmo = vmo.get(), .off = static_cast<uint32_t>(vmo_size - sizeof(FakeMsi::Capability)), .status = ZX_ERR_INVALID_ARGS },
+      { .msi = msi.get(), .opt = 0, .id = 0,       .vmo = vmo.get(), .off = static_cast<uint32_t>(vmo_size - sizeof(FakeMsi::Capability) + 1), .status = ZX_ERR_INVALID_ARGS },
       // |vmo_offset| is the max size possible.
       { .msi = msi.get(), .opt = 0, .id = 0,       .vmo = vmo.get(), .off = std::numeric_limits<uint32_t>::max(), .status = ZX_ERR_INVALID_ARGS },
   };

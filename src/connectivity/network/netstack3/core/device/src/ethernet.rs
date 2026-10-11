@@ -17,7 +17,7 @@ use netstack3_base::sync::{Mutex, RwLock};
 use netstack3_base::{
     BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext, EventContext,
     FrameDestination, GsoInfo, HandleableTimer, LinkDevice, NestedIntoCoreTimerCtx,
-    NetworkParsingContext, NetworkSerializer, ReceivableFrameMeta, RecvFrameContext,
+    NetworkParsingContext, NetworkSerializer, PacketType, ReceivableFrameMeta, RecvFrameContext,
     RecvIpFrameMeta, ResourceCounterContext, RngContext, SendFrameError, SendFrameErrorReason,
     SendableFrameMeta, TimerContext, TimerHandler, TxMetadataBindingsTypes, WeakDeviceIdentifier,
     WrapBroadcastMarker,
@@ -560,10 +560,11 @@ where
 
         let ethertype = ethernet.ethertype();
 
+        let packet_type = PacketType::from(frame_dst);
         core_ctx.handle_frame(
             bindings_ctx,
             &device_id,
-            ReceivedFrame::from_ethernet(ethernet, frame_dst).into(),
+            ReceivedFrame::from_ethernet(ethernet, frame_dst, packet_type).into(),
             whole_frame,
         );
 
@@ -605,7 +606,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv4>::new(
                         device_id,
                         Some(local_frame_dst),
-                        DeviceIpLayerMetadata::new_for_rx_packet(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(packet_type),
                         parsing_context,
                         gso_info,
                     ),
@@ -630,7 +631,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv6>::new(
                         device_id,
                         Some(local_frame_dst),
-                        DeviceIpLayerMetadata::new_for_rx_packet(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(packet_type),
                         parsing_context,
                         gso_info,
                     ),

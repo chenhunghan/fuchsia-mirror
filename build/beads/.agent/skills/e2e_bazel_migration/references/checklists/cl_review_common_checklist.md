@@ -34,9 +34,15 @@ This checklist defines the universal review criteria and standards for code chan
   - `sources` -> `srcs`
   - `public_deps` -> `deps`
   - `deps` -> `implementation_deps` or `deps`
+  - C/C++ dependencies of Rust targets -> `link_deps` (Rust rules only allow Rust targets in `deps`)
 * [ ] **Boolean Capitalization:** Boolean values in Starlark are capitalized (`True` / `False`).
 * [ ] **Value Parity:** Mapped attribute values match between GN and Bazel configurations.
 * [ ] **No Extra Attributes:** Extra attributes (except for `visibility` and platform compatibility constraints) are not added to `BUILD.bazel` if not present in `BUILD.gn`.
+* [ ] **No Disallowed Workspace Root Package Labels:**
+  - Do **not** reference files in subdirectories using the workspace root package label (e.g., `//:path/to/sub/file.ext`).
+  - Subdirectory files must be referenced from their containing package (e.g., using the colon syntax: `//path/to/sub:file.ext`).
+  - If a `BUILD.bazel` does not exist in that subdirectory, create one containing `exports_files(["file.ext"], visibility = [<package using the file>])` and `package(default_applicable_licenses = ["//:license"])`.
+  - Avoid adding nested subdirectory files to `exports_files` in `//build/bazel/toplevel.BUILD.bazel`.
 
 ---
 

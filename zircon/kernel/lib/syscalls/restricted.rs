@@ -7,8 +7,7 @@
 use crate::kernel::restricted::{restricted_enter, thread_current_set_restricted_state};
 use crate::kernel::restricted_state::RestrictedState;
 use crate::object::{
-    Dispatcher, HandleValue, InitialMutability, ProcessDispatcher, ThreadDispatcher,
-    VmObjectDispatcher,
+    HandleValue, InitialMutability, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher,
 };
 use crate::user_copy::UserOutPtr;
 use debug::ltracef;
@@ -100,7 +99,13 @@ pub fn sys_restricted_kick(handle: HandleValue, options: u32) -> Result<(), Stat
     }
 
     // TODO(https://fxbug.dev/42077353): Decide if this is the correct right for this operation.
-    let thread = Dispatcher::get_with_rights::<ThreadDispatcher>(handle, ZX_RIGHT_MANAGE_THREAD)?;
+    let thread = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_MANAGE_THREAD,
+        )
+    })?;
     thread.restricted_kick()?;
     Ok(())
 }

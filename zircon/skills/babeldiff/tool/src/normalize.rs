@@ -168,6 +168,42 @@ const NOISE_CALLS: &[&str] = &[
     "is_none",
     "is_null",
     "has_value",
+    "null",
+    // Cell and pin-init wrappers used for Rust interior mutability and
+    // in-place initialization.
+    "unsafe_cell",
+    "k_cell",
+    "pin_init",
+    "pinned_init",
+    "write_pin_init",
+    // C++ atomics use implicit conversion/assignment operators where Rust
+    // requires explicit `.load()` and `.store()`; memory ordering is checked
+    // separately by `check::ordering_diff`.
+    "load",
+    "store",
+    // Zircon singleton accessors and pointer/string/event conversions.
+    "node",
+    "get_halt_token",
+    "as",
+    "as_event",
+    "c_str",
+    "to_str",
+    "to_string_lossy",
+    "as_str",
+    "from_ptr",
+    "builtin_unreachable",
+    // Zircon C++ saturating time helpers and Rust time newtype wrappers.
+    "zx_time_add_duration",
+    "zx_time_sub_duration",
+    "zx_time_sub_time",
+    "zx_duration_add_duration",
+    "zx_duration_sub_duration",
+    "duration_mono",
+    "instant_mono",
+    "instant_unknown",
+    "duration_boot",
+    "instant_boot",
+    "timer_slack",
     // `zx::error(s)` / `zx::ok(v)` are C++'s `Err(s)` / `Ok(v)`.
     "error",
     "success",
@@ -195,7 +231,11 @@ pub fn call(name: &str) -> Option<String> {
             .map(str::trim)
             .filter(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))
         {
-            return Some(alias(&format!("get_{}", ident(ty))).to_string());
+            let get_name = format!("get_{}", ident(ty));
+            if NOISE_CALLS.contains(&get_name.as_str()) {
+                return None;
+            }
+            return Some(alias(&get_name).to_string());
         }
     }
     // `Foo::new(...)` constructs a Foo, like C++ `Foo foo{...}`.
@@ -205,15 +245,21 @@ pub fn call(name: &str) -> Option<String> {
     ) {
         if let Some(ty) = segs
             .next()
-            .filter(|s| s.trim().starts_with(|c: char| c.is_ascii_uppercase()))
+            .map(str::trim)
+            .filter(|s| s.starts_with(|c: char| c.is_ascii_uppercase()) && !s.starts_with("Atomic"))
         {
             n = ident(ty);
         }
     }
     // ksync's `guard_<lock>(&token)` gives field access under a lock that
     // is already held; it acquires nothing.
-    if NOISE_CALLS.contains(&n.as_str()) || n.starts_with("wrapping_") || n.starts_with("guard_") {
-        // Rust's wrapping arithmetic is C++'s unsigned arithmetic.
+    if NOISE_CALLS.contains(&n.as_str())
+        || n.starts_with("wrapping_")
+        || n.starts_with("saturating_")
+        || n.starts_with("guard_")
+    {
+        // Rust's wrapping and saturating arithmetic replaces C++ unsigned
+        // and `zx_time_*` arithmetic.
         return None;
     }
     // Rust spells variants of the same operation with suffixes.
@@ -227,9 +273,10 @@ pub fn call(name: &str) -> Option<String> {
     if n.is_empty() || NOISE_CALLS.contains(&n.as_str()) {
         return None;
     }
-    // C's `arch_zero_page()` is Rust's `arch::zero_page()`, and an
-    // architecture's `x86_foo()` is `foo()` inside its own crate.
-    for prefix in ["arch_", "x86_", "arm64_", "riscv64_"] {
+    // C's `arch_zero_page()` is Rust's `arch::zero_page()`, `pmm_foo()` is
+    // `pmm::node().foo()` / `pmm::foo()`, and an architecture's `x86_foo()`
+    // is `foo()` inside its own crate.
+    for prefix in ["arch_", "x86_", "arm64_", "riscv64_", "pmm_"] {
         if let Some(rest) = n.strip_prefix(prefix) {
             if !rest.is_empty() {
                 n = rest.to_string();
@@ -268,6 +315,9 @@ pub fn is_mutating(name: &str) -> bool {
         .unwrap_or(name)
         .trim_end_matches('!');
     let w = ident(last);
+    if matches!(w.as_str(), "try_from" | "try_into" | "into" | "into_inner") {
+        return false;
+    }
     const VERBS: &[&str] = &[
         "take",
         "pop",
@@ -398,6 +448,9 @@ fn alias(n: &str) -> &str {
         "sub_overflow" | "checked_sub" => "checked_sub",
         "mul_overflow" | "checked_mul" => "checked_mul",
         "adopt_ref" | "make_ref_counted" => "adopt_ref",
+        "formatted_bytes" | "format_size_rs" => "format_size",
+        "ispow2" | "is_power_of_two" => "is_power_of_two",
+        "create_with_priority" => "create",
         // Memory barriers.
         "mb"
         | "rmb"
@@ -665,6 +718,25 @@ mod tests {
         );
         assert_eq!(call("list.push_front_raw").as_deref(), Some("push_front"));
         assert_eq!(call("guard.as_mut"), None);
+        assert_eq!(call("self.flag.load"), None);
+        assert_eq!(call("self.flag.store"), None);
+        assert_eq!(call("time.saturating_sub"), None);
+        assert_eq!(call("zx_time_add_duration"), None);
+        assert_eq!(
+            call("pmm_count_free_pages").as_deref(),
+            Some("count_free_pages")
+        );
+        assert_eq!(
+            call("pmm::node().count_free_pages").as_deref(),
+            Some("count_free_pages")
+        );
+        assert_eq!(
+            call("pretty::format_size_rs").as_deref(),
+            Some("format_size")
+        );
+        assert_eq!(call("FormattedBytes").as_deref(), Some("format_size"));
+        assert_eq!(call("ispow2").as_deref(), Some("is_power_of_two"));
+        assert!(!is_mutating("PressureLevel::try_from"));
     }
 
     #[test]

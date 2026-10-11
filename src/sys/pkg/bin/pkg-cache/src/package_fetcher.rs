@@ -15,8 +15,14 @@ pub struct PackageFetcher {
     sender: work_queue::WorkSender<
         fuchsia_hash::Hash,
         QueueContext,
-        Result<Arc<crate::RootDir>, Arc<Error>>,
+        Result<MaybeCachedRootDir, Arc<Error>>,
     >,
+}
+
+#[derive(Debug, Clone)]
+enum MaybeCachedRootDir {
+    Uncached(Arc<crate::RootDir>),
+    Cached(Arc<crate::CachedRootDir>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,12 +90,38 @@ impl PackageFetcher {
         (queue.into_future(), Self { sender })
     }
 
-    pub(crate) async fn fetch(
+    pub(crate) async fn fetch_with_open_package_tracking(
+        &self,
+        pkg_id: fuchsia_hash::Hash,
+        blob_source: http::Uri,
+    ) -> Result<Arc<crate::CachedRootDir>, Arc<Error>> {
+        match self.fetch(pkg_id, blob_source, fpkg::GcProtection::OpenPackageTracking).await? {
+            MaybeCachedRootDir::Cached(root_dir) => Ok(root_dir),
+            MaybeCachedRootDir::Uncached(_) => {
+                unreachable!("QueueContext::try_merge does not merge different GcProtections")
+            }
+        }
+    }
+
+    pub(crate) async fn fetch_retained(
+        &self,
+        pkg_id: fuchsia_hash::Hash,
+        blob_source: http::Uri,
+    ) -> Result<Arc<crate::RootDir>, Arc<Error>> {
+        match self.fetch(pkg_id, blob_source, fpkg::GcProtection::Retained).await? {
+            MaybeCachedRootDir::Uncached(root_dir) => Ok(root_dir),
+            MaybeCachedRootDir::Cached(_) => {
+                unreachable!("QueueContext::try_merge does not merge different GcProtections")
+            }
+        }
+    }
+
+    async fn fetch(
         &self,
         pkg_id: fuchsia_hash::Hash,
         blob_source: http::Uri,
         gc_protection: fpkg::GcProtection,
-    ) -> Result<Arc<crate::RootDir>, Arc<Error>> {
+    ) -> Result<MaybeCachedRootDir, Arc<Error>> {
         self.sender
             .push(pkg_id, QueueContext { blob_source, gc_protection })
             .await
@@ -107,7 +139,7 @@ async fn fetch(
     root_dir_factory: &crate::root_dir::RootDirFactory,
     open_packages: &crate::RootDirCache,
     inspect: finspect::Node,
-) -> Result<Arc<crate::RootDir>, Arc<Error>> {
+) -> Result<MaybeCachedRootDir, Arc<Error>> {
     let gc_guard = package_index.write().await.start_writing(pkg_id, gc_protection);
     let fetch_ret = fetch_impl(
         pkg_id,
@@ -142,7 +174,7 @@ async fn fetch_impl(
     root_dir_factory: &crate::root_dir::RootDirFactory,
     open_packages: &crate::RootDirCache,
     inspect: finspect::Node,
-) -> Result<Arc<crate::RootDir>, Error> {
+) -> Result<MaybeCachedRootDir, Error> {
     inspect.record_int("start_boot_ns", zx::BootInstant::get().into_nanos());
     inspect.record_string("package_hash", pkg_id.to_string());
     inspect.record_string("gc_protection", format!("{gc_protection:?}"));
@@ -179,11 +211,7 @@ async fn fetch_impl(
         let () = package_index
             .write()
             .await
-            .add_blobs(
-                pkg_id,
-                HashSet::from_iter(subpackages.as_slice().iter().copied()),
-                gc_protection,
-            )
+            .add_blobs(pkg_id, HashSet::from_iter(subpackages.iter().copied()), gc_protection)
             .map_err(Error::ProtectBlobs)?;
         for sub in subpackages {
             if queued.insert(sub) {
@@ -214,11 +242,13 @@ async fn fetch_impl(
     }
     let root_dir = ret.expect("queue starts with an entry");
     Ok(match gc_protection {
-        fpkg::GcProtection::Retained => Arc::new(root_dir),
-        fpkg::GcProtection::OpenPackageTracking => open_packages
-            .get_or_insert(pkg_id, Some(root_dir))
-            .await
-            .map_err(Error::CreatingTrackedRootDir)?,
+        fpkg::GcProtection::Retained => MaybeCachedRootDir::Uncached(Arc::new(root_dir)),
+        fpkg::GcProtection::OpenPackageTracking => MaybeCachedRootDir::Cached(
+            open_packages
+                .get_or_insert(pkg_id, Some(root_dir))
+                .await
+                .map_err(Error::CreatingTrackedRootDir)?,
+        ),
     })
 }
 

@@ -17,8 +17,10 @@ rustc_library("lib") {
   with_unit_tests = true
 
   deps = [
+    "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
     "//src/developer/lib/uart_fpl",
+    "//src/developer/remote-control/fidl:fuchsia.developer.remotecontrol.connector_rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
@@ -30,6 +32,7 @@ rustc_library("lib") {
   test_deps = [ "//src/lib/fuchsia" ]
 
   sources = [
+    "src/coordinator.rs",
     "src/error.rs",
     "src/lib.rs",
     "src/receiver.rs",

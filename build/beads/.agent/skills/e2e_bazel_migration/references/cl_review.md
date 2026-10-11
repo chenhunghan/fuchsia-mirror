@@ -19,4 +19,4 @@ Based on the migrated target type, review the changes against the corresponding 
 
 ## 3. Update Status
 
-1. After completing the review, refer to [Bazel Migration Review Result Template](../assets/review_result_template.md) to generate review result and use "gerrit" skill to update the result to the reviewed CLs.
+1. After completing the review, refer to [Bazel Migration Review Result Template](../assets/review_result_template.md) to generate review result and use "fuchsia-gerrit-cli" skill to post the result to the reviewed CLs as resolved.

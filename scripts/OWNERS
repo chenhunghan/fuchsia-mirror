@@ -4,8 +4,7 @@
 
 # shell-, fx-, and ctf-related utilities.
 per-file fuchsia-vendored-python*,fx,fx-*,hermetic-env = crjohns@google.com
+per-file build_id_* = file://tools/devshell/contrib/lib/OWNERS
 
 # FIDL-related scripts.
 per-file generate-fidl-* = file://tools/fidl/OWNERS
-
-

@@ -569,6 +569,17 @@ where
     }
 }
 
+impl<P, Tag, S> Default for SinglyLinkedList<P, Tag, S>
+where
+    P: PtrTraits,
+    P::Target: SinglyLinkedListContainable<P::Target, Tag>,
+    S: SizeTracker,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An iterator over the elements of a `SinglyLinkedList`.
 pub struct Iterator<'a, P, Tag = DefaultObjectTag>
 where

@@ -1,0 +1,81 @@
+{
+    "name": "parmrk_ff_doubling",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "PARMRK"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ],
+        "c_cc": {
+            "VEOL": 255
+        }
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": [
+                97,
+                22,
+                255,
+                98,
+                10
+            ]
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": [
+                99,
+                255
+            ]
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "write_to_master",
+            "data": [
+                22,
+                255,
+                127,
+                10
+            ]
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "write_to_master",
+            "data": [
+                22,
+                255,
+                18,
+                10
+            ]
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_from_master"
+        }
+    ]
+}

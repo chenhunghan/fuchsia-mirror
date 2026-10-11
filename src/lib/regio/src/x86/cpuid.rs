@@ -63,6 +63,14 @@ impl<const LEAF: u32, const SUBLEAF: u32, const REG: u8, Layout: LayoutOver<u32>
     }
 }
 
+impl<const LEAF: u32, const SUBLEAF: u32, const REG: u8, Layout: LayoutOver<u32>> Default
+    for CpuidValue<LEAF, SUBLEAF, REG, Layout>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An abstracted means of reading CPUID values.
 pub trait Cpuid {
     /// Returns the CPUID values for a given leaf and subleaf.

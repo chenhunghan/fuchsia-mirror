@@ -73,6 +73,7 @@ class TestSdhci : public Sdhci {
 
   void TriggerCardInterrupt() { card_interrupt_ = true; }
   void InjectTransferError() { inject_error_ = true; }
+  void InjectCryptoError() { inject_crypto_error_ = true; }
 
   zx_status_t BeginIrqAckWait(zx::unowned_interrupt irq) {
     irq_ack_wait_.set_object(irq->get());
@@ -111,6 +112,9 @@ class TestSdhci : public Sdhci {
     zx_interrupt_trigger(irq_ack_wait_.object(), 0, {});
 
     auto interrupt_status = InterruptStatus::Get().FromValue(0).WriteTo(&*regs_mmio_buffer_);
+    if (regs_cqhci_mmio_buffer_) {
+      CryptoNonQueueInterruptStatus::Get().FromValue(0).WriteTo(&*regs_cqhci_mmio_buffer_);
+    }
 
     switch (GetRequestStatus()) {
       case RequestStatus::COMMAND:
@@ -120,6 +124,11 @@ class TestSdhci : public Sdhci {
         interrupt_status.set_transfer_complete(1);
         if (inject_error_) {
           interrupt_status.set_error(1).set_data_crc_error(1);
+        }
+        if (inject_crypto_error_) {
+          interrupt_status.set_cqhci_interrupt(1);
+          CryptoNonQueueInterruptStatus::Get().FromValue(0).set_general_crypto_error(1).WriteTo(
+              &*regs_cqhci_mmio_buffer_);
         }
         interrupt_status.WriteTo(&*regs_mmio_buffer_);
         return;
@@ -157,6 +166,7 @@ class TestSdhci : public Sdhci {
   std::atomic<uint16_t> current_block_ = 0;
   std::atomic<bool> card_interrupt_ = false;
   std::atomic<bool> inject_error_ = false;
+  std::atomic<bool> inject_crypto_error_ = false;
   async::WaitMethod<TestSdhci, &TestSdhci::InterruptAck> irq_ack_wait_;
 };
 
@@ -190,6 +200,11 @@ class FakeSdhci : public fdf::WireServer<fuchsia_hardware_sdhci::Device> {
     if (status != ZX_OK) {
       completer.buffer(arena).ReplyError(status);
       return;
+    }
+    if (supports_inline_crypto_) {
+      uint32_t caps =
+          CommandQueuingCapabilities::Get().FromValue(0).set_crypto_support(1).reg_value();
+      ASSERT_OK(vmo.write(&caps, CommandQueuingCapabilities::Get().addr(), sizeof(caps)));
     }
     completer.buffer(arena).ReplySuccess(std::move(vmo), 0);
   }
@@ -264,6 +279,7 @@ class FakeSdhci : public fdf::WireServer<fuchsia_hardware_sdhci::Device> {
   bool hw_reset_invoked() const { return hw_reset_invoked_; }
   void set_supports_set_bus_clock() { supports_set_bus_clock_ = true; }
   void set_supports_perform_tuning() { supports_perform_tuning_ = true; }
+  void set_supports_inline_crypto() { supports_inline_crypto_ = true; }
 
   std::vector<zx_paddr_t> dma_paddrs_;
   zx::unowned_bti unowned_bti_;
@@ -273,6 +289,7 @@ class FakeSdhci : public fdf::WireServer<fuchsia_hardware_sdhci::Device> {
   bool hw_reset_invoked_ = false;
   bool supports_set_bus_clock_ = false;
   bool supports_perform_tuning_ = false;
+  bool supports_inline_crypto_ = false;
   zx::interrupt irq_;
 
   fdf::ServerBindingGroup<fuchsia_hardware_sdhci::Device> binding_group_;
@@ -2453,6 +2470,58 @@ TEST_F(SdhciTest, TransferError) {
         EXPECT_TRUE(result->is_error());
       });
   driver_test().runtime().RunUntilIdle();
+
+  ASSERT_OK(StopDriver());
+}
+
+TEST_F(SdhciTest, TransferCryptoError) {
+  driver_test().RunInEnvironmentTypeContext([&](Environment& env) {
+    Capabilities0::Get()
+        .FromValue(0)
+        .set_adma2_support(1)
+        .set_v3_64_bit_system_address_support(1)
+        .WriteTo(&env.mmio());
+    env.sdhci().set_supports_inline_crypto();
+  });
+
+  ASSERT_OK(StartDriver());
+
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(512, 0, &vmo));
+
+  fuchsia_hardware_sdmmc::wire::SdmmcBufferRegion buffer = {
+      .buffer = fuchsia_hardware_sdmmc::wire::SdmmcBuffer::WithVmo(std::move(vmo)),
+      .offset = 0,
+      .size = 512,
+  };
+  fuchsia_hardware_sdmmc::wire::SdmmcReq request = {
+      .cmd_idx = SDMMC_WRITE_MULTIPLE_BLOCK,
+      .cmd_flags = SDMMC_WRITE_MULTIPLE_BLOCK_FLAGS,
+      .arg = 0x1234abcd,
+      .blocksize = 512,
+      .suppress_error_messages = false,
+      .client_id = 0,
+      .use_inline_crypto = true,
+      .slot = 0,
+      .dun = 1,
+      .buffers = fidl::VectorView<fuchsia_hardware_sdmmc::wire::SdmmcBufferRegion>::FromExternal(
+          &buffer, 1),
+  };
+
+  driver_test().driver()->reset_mask();
+  driver_test().driver()->InjectCryptoError();
+
+  fdf::Arena arena('TEST');
+  client_.buffer(arena)
+      ->Request(fidl::VectorView<fuchsia_hardware_sdmmc::wire::SdmmcReq>::FromExternal(&request, 1))
+      .ThenExactlyOnce([](auto& result) {
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result->is_error());
+        EXPECT_EQ(result->error_value(), ZX_ERR_IO);
+      });
+  driver_test().runtime().RunUntilIdle();
+
+  EXPECT_NE(driver_test().driver()->reset_mask(), 0);
 
   ASSERT_OK(StopDriver());
 }

@@ -78,7 +78,7 @@ class SimpleRedactor : public RedactorBase {
 
 TEST_F(LogMessageStoreTest, NotSafeAfterInterruption) {
   LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   EXPECT_FALSE(store.SafeAfterInterruption());
 }
 
@@ -86,7 +86,7 @@ TEST_F(LogMessageStoreTest, UnlimitedMessages) {
   // Set the block to hold 10 log messages while the buffer holds 1 log message (but the buffer
   // limits should be ignored because the component has just started up).
   LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -114,7 +114,8 @@ TEST_F(LogMessageStoreTest, AppliesRedaction) {
   // Set the block to hold 10 log messages while the buffer holds 1 log message (but the buffer
   // limits should be ignored because the component has just started up).
   SimpleRedactor redactor(/*count_calls=*/true);
-  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder());
+  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -143,7 +144,8 @@ TEST_F(LogMessageStoreTest, AppliesRedaction) {
 
 TEST_F(LogMessageStoreTest, AppliesRedactionToTags) {
   SimpleRedactor redactor(/*count_calls=*/false);
-  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder());
+  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(
       store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::duration(0), {"tag1", "tag2"})));
@@ -155,7 +157,8 @@ TEST_F(LogMessageStoreTest, RedactionCompressed) {
   // Set the block to hold 10 log messages while the buffer holds 1 log message (but the buffer
   // limits should be ignored because the component has just started up).
   SimpleRedactor redactor(/*count_calls=*/false);
-  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder());
+  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, &redactor, MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -178,7 +181,7 @@ TEST_F(LogMessageStoreTest, RedactionCompressed) {
 TEST_F(LogMessageStoreTest, VerifyBlock) {
   // Set the block to hold 2 log messages while the buffer holds 1 log message.
   LogMessageStore store(kMaxLogLineSize * 2, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
 
@@ -212,7 +215,7 @@ TEST_F(LogMessageStoreTest, VerifyBlock) {
 TEST_F(LogMessageStoreTest, AddAndConsume) {
   // Set up the store to hold 2 log lines.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -237,7 +240,7 @@ TEST_F(LogMessageStoreTest, AddAndConsume) {
 TEST_F(LogMessageStoreTest, DropsCorrectly) {
   // Set up the store to hold 2 log lines to test that the subsequent 3 are dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -258,7 +261,7 @@ TEST_F(LogMessageStoreTest, DropsSubsequentShorterMessages) {
   // Even though the store could hold 2 log lines, all the lines after the first one will be
   // dropped because the second log message is very long.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -280,7 +283,7 @@ TEST_F(LogMessageStoreTest, VerifyRepetitionMessage_AtConsume) {
   // Set up the store to hold 2 log line. With three repeated messages, the last two messages
   // should get reduced to a single repeated message.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -312,7 +315,7 @@ TEST_F(LogMessageStoreTest, VerifyRepetition_DoNotResetRepeatedWarningOnConsume)
   //
   // Note: xN = last message repeated N times
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -355,7 +358,7 @@ TEST_F(LogMessageStoreTest, VerifyRepetition_ResetRepeatedWarningOnConsume) {
   // -----------------
   // Note: xN = last message repeated N times
   LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -402,7 +405,8 @@ TEST_F(LogMessageStoreTest, VerifyRepetition_LimitRepetitionBuffers) {
   //
   // Note: xN = last message repeated N times, Rep = kMaxRepeatedBuffers.
   LogMessageStore store(2 * kMaxRepeatedBuffers * kMaxLogLineSize, 2 * kMaxLogLineSize,
-                        GetIdentityRedactor(), MakeIdentityEncoder());
+                        GetIdentityRedactor(), MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -435,7 +439,8 @@ TEST_F(LogMessageStoreTest, VerifyRepetitionMessage_WhenMessageChanges) {
   // Set up the store to hold 3 log line. Verify that a repetition message appears after input
   // repetition and before the input change.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2 + kRepeatedFormatStrSize,
-                        GetIdentityRedactor(), MakeIdentityEncoder());
+                        GetIdentityRedactor(), MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -454,7 +459,8 @@ TEST_F(LogMessageStoreTest, VerifyRepetitionMessage_WhenSeverityChanges) {
   // Set up the store to hold 3 log line. Verify that a repetition message appears after input
   // repetition and before the input severity change.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2 + kRepeatedFormatStrSize,
-                        GetIdentityRedactor(), MakeIdentityEncoder());
+                        GetIdentityRedactor(), MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -473,7 +479,8 @@ TEST_F(LogMessageStoreTest, VerifyRepetitionMessage_WhenTagsChange) {
   // Set up the store to hold 4 log lines. Verify that a repetition message appears after
   // input repetition and before the input change.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 3 + kRepeatedFormatStrSize,
-                        GetIdentityRedactor(), MakeIdentityEncoder());
+                        GetIdentityRedactor(), MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::duration(0), {"tag1"})));
@@ -493,7 +500,7 @@ TEST_F(LogMessageStoreTest, VerifyDroppedRepeatedMessage_OnBufferFull) {
   // Set up the store to hold 1 log line. Verify that repeated messages that occur after the
   // buffer is full get dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 1, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -511,7 +518,7 @@ TEST_F(LogMessageStoreTest, VerifyNoRepeatMessage_AfterFirstConsume) {
   // Set up the store to hold 1 log line. Verify that there is no repeat message right after
   // dropping messages.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 1, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -535,7 +542,7 @@ TEST_F(LogMessageStoreTest, VerifyRepeatMessage_AfterFirstConsume) {
   // Set up the store to hold 3 log lines. Verify that there can be a repeat message after
   // consume, when no messages were dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 3, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -561,7 +568,7 @@ TEST_F(LogMessageStoreTest, VerifyRepeatedAndDropped) {
   // Set up the store to hold 2 log lines. Verify that we can have the repeated message, and then
   // the dropped message.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -587,7 +594,7 @@ TEST_F(LogMessageStoreTest, VerifyNoRepeatMessage_TimeOrdering) {
   // Set up the store to hold 2 log line. Verify time ordering: a message cannot be counted as
   // repeated if it's in between messages, even if those messages get dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -615,7 +622,7 @@ TEST_F(LogMessageStoreTest, VerifyAppendToEnd) {
   // Set up the store to hold 2 log line. Verify time ordering: a message cannot be counted as
   // repeated if it's in between messages, even if those messages get dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -646,7 +653,7 @@ TEST_F(LogMessageStoreTest, VerifyNoRepeatWarningAfter_AppendToEnd) {
   // Set up the store to hold 2 log line. Verify time ordering: a message cannot be counted as
   // repeated if it's in between messages, even if those messages get dropped.
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
@@ -670,7 +677,7 @@ DONE
 
 TEST_F(LogMessageStoreTest, ConsumeReturnsExpectedResults) {
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 1")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2")));
@@ -683,7 +690,7 @@ TEST_F(LogMessageStoreTest, ConsumeReturnsExpectedResults) {
 
 TEST_F(LogMessageStoreTest, BlockStatsResetOnConsume) {
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 1")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2")));
@@ -701,7 +708,7 @@ TEST_F(LogMessageStoreTest, BlockStatsResetOnConsume) {
 
 TEST_F(LogMessageStoreTest, ResetClearsBufferAndStats) {
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 1")));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2")));
@@ -719,6 +726,93 @@ TEST_F(LogMessageStoreTest, ResetClearsBufferAndStats) {
   const ConsumeResult next_result = store.Consume();
   EXPECT_FALSE(next_result.log.empty());
   EXPECT_EQ(next_result.stats.message_count, 1u);
+}
+
+TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
+  const zx::time_boot kIgnoreBeforeTimestamp =
+      zx::time_boot((zx::sec(15604) + zx::sec(1)).to_nsecs());
+  SimpleRedactor redactor(/*count_calls=*/true);
+  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, &redactor, MakeIdentityEncoder(),
+                        kIgnoreBeforeTimestamp);
+
+  // Messages with timestamp <= kIgnoreBeforeTimestamp should be ignored without invoking the
+  // redactor, incrementing stats, or affecting repeat tracking.
+  EXPECT_FALSE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::sec(0))));
+  EXPECT_FALSE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "R: 1", zx::sec(1))));
+
+  // Messages with timestamp > kIgnoreBeforeTimestamp are added, including messages arriving out of
+  // order relative to each other as long as their timestamps are > kIgnoreBeforeTimestamp.
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::sec(3))));
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2", zx::sec(2))));
+
+  const ConsumeResult result = store.Consume();
+  EXPECT_EQ(result.log, R"([15607.000][07559][07687][] INFO: R: 1
+[15606.000][07559][07687][] INFO: R: 2
+)");
+  EXPECT_EQ(result.stats.message_count, 2u);
+  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
+  EXPECT_EQ(result.stats.first_timestamp, zx::time_boot((zx::sec(15604) + zx::sec(3)).to_nsecs()));
+  EXPECT_EQ(result.stats.last_timestamp, zx::time_boot((zx::sec(15604) + zx::sec(2)).to_nsecs()));
+}
+
+TEST_F(LogMessageStoreTest, ResetClearsIgnoreBeforeTimestamp) {
+  const zx::time_boot kIgnoreBeforeTimestamp =
+      zx::time_boot((zx::sec(15604) + zx::sec(1)).to_nsecs());
+  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
+                        MakeIdentityEncoder(), kIgnoreBeforeTimestamp);
+
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2", zx::sec(2))));
+  EXPECT_FALSE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::sec(0))));
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2", zx::sec(2))));
+  EXPECT_EQ(store.Consume().log, R"([15606.000][07559][07687][] INFO: line 2
+!!! MESSAGE REPEATED 1 MORE TIME !!!
+)");
+
+  store.Reset();
+
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::sec(0))));
+  const ConsumeResult result = store.Consume();
+  EXPECT_EQ(result.log, R"([15604.000][07559][07687][] INFO: line 0
+)");
+  EXPECT_EQ(result.stats.message_count, 1u);
+}
+
+TEST_F(LogMessageStoreTest, InsertRawMessage) {
+  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
+
+  store.InsertRawMessage("START\n");
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
+  store.AppendToEnd("END\n");
+
+  const ConsumeResult result = store.Consume();
+  EXPECT_EQ(result.log, R"(START
+[15604.000][07559][07687][] INFO: line 0
+END
+)");
+  EXPECT_EQ(result.stats.message_count, 1u);
+}
+
+TEST_F(LogMessageStoreTest, InsertRawMessageResetsRepeatTracking) {
+  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
+
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
+  store.InsertRawMessage("RAW\n");
+  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0")));
+
+  // The pending repeated warning is flushed before the raw message and the message after the raw
+  // message isn't treated as a repeat.
+  const ConsumeResult result = store.Consume();
+  EXPECT_EQ(result.log, R"([15604.000][07559][07687][] INFO: line 0
+!!! MESSAGE REPEATED 2 MORE TIMES !!!
+RAW
+[15604.000][07559][07687][] INFO: line 0
+)");
+  EXPECT_EQ(result.stats.message_count, 4u);
+  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
 }
 
 }  // namespace

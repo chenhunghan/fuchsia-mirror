@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use cm_rust_derive::{ExposeDeclCommon, ExposeDeclCommonAlwaysRequired, FidlDecl};
+use cm_rust_derive::{ExposeDeclCommon, ExposeDeclCommonAlwaysRequired, FidlDecl, ToGenericRef};
 use cm_types::{AllowedOffers, BorrowedSeparatedPath, LongName, Name, Path, RelativePath, Url};
 use directed_graph::DirectedGraph;
 use fidl_fuchsia_component_decl as fdecl;
@@ -1098,7 +1098,110 @@ fn to_fidl_dict_btree(dict: BTreeMap<String, DictionaryValue>) -> fdata::Diction
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error)]
+pub enum GenericRef {
+    Parent,
+    Self_,
+    Child(Name),
+    ChildInCollection(LongName, Name),
+    Collection(Name),
+    Framework,
+    Capability(Name),
+    Debug,
+    Void,
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    Environment,
+}
+
+impl std::fmt::Display for GenericRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parent => write!(f, "parent"),
+            Self::Self_ => write!(f, "self"),
+            Self::Child(name) => write!(f, "child {name}"),
+            Self::ChildInCollection(name, collection) => {
+                write!(f, "child {name} in collection {collection}")
+            }
+            Self::Collection(name) => write!(f, "collection {name}"),
+            Self::Framework => write!(f, "framework"),
+            Self::Capability(name) => write!(f, "capability {name}"),
+            Self::Debug => write!(f, "debug"),
+            Self::Void => write!(f, "void"),
+            #[cfg(fuchsia_api_level_at_least = "HEAD")]
+            Self::Environment => write!(f, "environment"),
+        }
+    }
+}
+
+pub trait ToGenericRef {
+    fn to_generic(self) -> GenericRef;
+}
+
+impl ToGenericRef for ChildRef {
+    fn to_generic(self) -> GenericRef {
+        if let Some(collection) = self.collection {
+            GenericRef::ChildInCollection(self.name, collection)
+        } else {
+            GenericRef::Child(self.name.to_short_infallible())
+        }
+    }
+}
+
+impl FidlIntoNative<GenericRef> for fdecl::Ref {
+    fn fidl_into_native(self) -> GenericRef {
+        match self {
+            fdecl::Ref::Parent(_) => GenericRef::Parent,
+            fdecl::Ref::Self_(_) => GenericRef::Self_,
+            fdecl::Ref::Child(child_ref) => {
+                let child_ref: ChildRef = child_ref.fidl_into_native();
+                child_ref.to_generic()
+            }
+            fdecl::Ref::Collection(collection) => {
+                GenericRef::Collection(collection.name.fidl_into_native())
+            }
+            fdecl::Ref::Framework(_) => GenericRef::Framework,
+            fdecl::Ref::Capability(capability) => {
+                GenericRef::Capability(capability.name.fidl_into_native())
+            }
+            fdecl::Ref::Debug(_) => GenericRef::Debug,
+            fdecl::Ref::VoidType(_) => GenericRef::Void,
+            #[cfg(fuchsia_api_level_at_least = "HEAD")]
+            fdecl::Ref::Environment(_) => GenericRef::Environment,
+            _ => panic!("unexpected fdecl::Ref variant found"),
+        }
+    }
+}
+
+impl NativeIntoFidl<fdecl::Ref> for GenericRef {
+    fn native_into_fidl(self) -> fdecl::Ref {
+        match self {
+            GenericRef::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
+            GenericRef::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
+            GenericRef::Child(name) => fdecl::Ref::Child(fdecl::ChildRef {
+                name: name.native_into_fidl(),
+                collection: None,
+            }),
+            GenericRef::ChildInCollection(name, collection) => fdecl::Ref::Child(fdecl::ChildRef {
+                name: name.native_into_fidl(),
+                collection: Some(collection.native_into_fidl()),
+            }),
+            GenericRef::Collection(name) => {
+                fdecl::Ref::Collection(fdecl::CollectionRef { name: name.native_into_fidl() })
+            }
+            GenericRef::Framework => fdecl::Ref::Framework(fdecl::FrameworkRef {}),
+            GenericRef::Capability(name) => {
+                fdecl::Ref::Capability(fdecl::CapabilityRef { name: name.native_into_fidl() })
+            }
+            GenericRef::Debug => fdecl::Ref::Debug(fdecl::DebugRef {}),
+            GenericRef::Void => fdecl::Ref::VoidType(fdecl::VoidRef {}),
+            #[cfg(fuchsia_api_level_at_least = "HEAD")]
+            GenericRef::Environment => fdecl::Ref::Environment(fdecl::EnvironmentRef {}),
+        }
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ToGenericRef)]
 pub enum EventScope {
     Child(ChildRef),
     Collection(Name),
@@ -1123,19 +1226,8 @@ impl FidlIntoNative<EventScope> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for EventScope {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            EventScope::Child(child) => fdecl::Ref::Child(child.native_into_fidl()),
-            EventScope::Collection(name) => {
-                fdecl::Ref::Collection(fdecl::CollectionRef { name: name.native_into_fidl() })
-            }
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ToGenericRef)]
 pub enum ExposeSource {
     Self_,
     Child(Name),
@@ -1175,28 +1267,8 @@ impl FidlIntoNative<ExposeSource> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for ExposeSource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            ExposeSource::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            ExposeSource::Child(name) => fdecl::Ref::Child(fdecl::ChildRef {
-                name: name.native_into_fidl(),
-                collection: None,
-            }),
-            ExposeSource::Collection(name) => {
-                fdecl::Ref::Collection(fdecl::CollectionRef { name: name.native_into_fidl() })
-            }
-            ExposeSource::Framework => fdecl::Ref::Framework(fdecl::FrameworkRef {}),
-            ExposeSource::Capability(name) => {
-                fdecl::Ref::Capability(fdecl::CapabilityRef { name: name.to_string() })
-            }
-            ExposeSource::Void => fdecl::Ref::VoidType(fdecl::VoidRef {}),
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, ToGenericRef)]
 pub enum ExposeTarget {
     Parent,
     Framework,
@@ -1221,15 +1293,6 @@ impl FidlIntoNative<ExposeTarget> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for ExposeTarget {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            ExposeTarget::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            ExposeTarget::Framework => fdecl::Ref::Framework(fdecl::FrameworkRef {}),
-        }
-    }
-}
-
 /// A source for a service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSource<T> {
@@ -1240,7 +1303,7 @@ pub struct ServiceSource<T> {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ToGenericRef)]
 pub enum StorageDirectorySource {
     Parent,
     Self_,
@@ -1258,20 +1321,8 @@ impl FidlIntoNative<StorageDirectorySource> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for StorageDirectorySource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            StorageDirectorySource::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            StorageDirectorySource::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            StorageDirectorySource::Child(child_name) => {
-                fdecl::Ref::Child(fdecl::ChildRef { name: child_name, collection: None })
-            }
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ToGenericRef)]
 pub enum DictionarySource {
     Parent,
     Self_,
@@ -1289,18 +1340,8 @@ impl FidlIntoNative<DictionarySource> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for DictionarySource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            Self::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            Self::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            Self::Child(c) => fdecl::Ref::Child(c.native_into_fidl()),
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ToGenericRef)]
 pub enum RegistrationSource {
     Parent,
     Self_,
@@ -1314,18 +1355,6 @@ impl FidlIntoNative<RegistrationSource> for fdecl::Ref {
             fdecl::Ref::Self_(_) => RegistrationSource::Self_,
             fdecl::Ref::Child(c) => RegistrationSource::Child(c.name),
             _ => panic!("invalid RegistrationSource variant"),
-        }
-    }
-}
-
-impl NativeIntoFidl<fdecl::Ref> for RegistrationSource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            RegistrationSource::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            RegistrationSource::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            RegistrationSource::Child(child_name) => {
-                fdecl::Ref::Child(fdecl::ChildRef { name: child_name, collection: None })
-            }
         }
     }
 }

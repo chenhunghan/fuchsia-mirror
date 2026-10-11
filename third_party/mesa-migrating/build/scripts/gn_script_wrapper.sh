@@ -25,5 +25,10 @@ OUT=${1}
 shift
 
 # -S to decrease start-up time by not looking for site packages.
-env PYTHONPATH="${PYTHONPATH}" "${PYTHON_EXE}" -S "$@" > ${OUT}
+#
+# -W ignore::SyntaxWarning to silence the invalid escape sequence warnings
+# from Mako 1.0.6, printed every time it is imported because bytecode is not
+# cached.
+# TODO(https://fxbug.dev/401351334): Remove once //third_party/mako is rolled.
+env PYTHONPATH="${PYTHONPATH}" "${PYTHON_EXE}" -S -W ignore::SyntaxWarning "$@" > ${OUT}
 exit $?

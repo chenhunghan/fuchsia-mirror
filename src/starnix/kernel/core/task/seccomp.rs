@@ -63,7 +63,7 @@ use starnix_uapi::__NR_time;
 use starnix_uapi::AUDIT_ARCH_X86_64;
 
 #[cfg(target_arch = "riscv64")]
-use starnix_uapi::AUDIT_ARCH_RISCV64;
+use starnix_uapi::{__NR_clock_gettime, AUDIT_ARCH_RISCV64};
 
 pub struct SeccompFilter {
     /// The BPF program associated with this filter.
@@ -225,6 +225,23 @@ fn make_seccomp_data(
     }
 }
 
+fn is_vdso_clock(clock_id: u64) -> bool {
+    let Ok(clock_id) = u32::try_from(clock_id) else {
+        return false;
+    };
+    matches!(
+        clock_id,
+        ::starnix_uapi::CLOCK_REALTIME
+            | ::starnix_uapi::CLOCK_MONOTONIC
+            | ::starnix_uapi::CLOCK_PROCESS_CPUTIME_ID
+            | ::starnix_uapi::CLOCK_THREAD_CPUTIME_ID
+            | ::starnix_uapi::CLOCK_MONOTONIC_RAW
+            | ::starnix_uapi::CLOCK_REALTIME_COARSE
+            | ::starnix_uapi::CLOCK_MONOTONIC_COARSE
+            | ::starnix_uapi::CLOCK_BOOTTIME
+    )
+}
+
 impl SeccompFilterContainer {
     /// Ensures that this set of seccomp filters can be "synced to" the given set.
     /// This means that our filters are a prefix of the given set of filters.
@@ -268,17 +285,32 @@ impl SeccompFilterContainer {
         // syscalls. So seccomp should ignore them until they're implemented correctly in the VDSO.
         #[cfg(target_arch = "x86_64")] // The set of VDSO calls is arch dependent.
         #[allow(non_upper_case_globals)]
-        if let __NR_clock_gettime | __NR_getcpu | __NR_gettimeofday | __NR_time =
-            syscall.decl.number as u32
-        {
+        if syscall.decl.number as u32 == __NR_clock_gettime {
+            if is_vdso_clock(syscall.arg0.raw()) {
+                return r;
+            }
+        } else if let __NR_getcpu | __NR_gettimeofday | __NR_time = syscall.decl.number as u32 {
             return r;
         }
         #[cfg(target_arch = "aarch64")]
         #[allow(non_upper_case_globals)]
-        if let __NR_clock_gettime | __NR_clock_getres | __NR_gettimeofday =
-            syscall.decl.number as u32
-        {
-            return r;
+        if !current_task.is_arch32() {
+            if syscall.decl.number as u32 == __NR_clock_gettime
+                || syscall.decl.number as u32 == __NR_clock_getres
+            {
+                if is_vdso_clock(syscall.arg0.raw()) {
+                    return r;
+                }
+            } else if let __NR_gettimeofday = syscall.decl.number as u32 {
+                return r;
+            }
+        }
+        #[cfg(target_arch = "riscv64")]
+        #[allow(non_upper_case_globals)]
+        if syscall.decl.number as u32 == __NR_clock_gettime {
+            if is_vdso_clock(syscall.arg0.raw()) {
+                return r;
+            }
         }
 
         let data = make_seccomp_data(
@@ -334,7 +366,7 @@ impl SeccompFilterContainer {
 /// Possible values for the current status of the seccomp filters for
 /// this process.
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum SeccompStateValue {
     None = SECCOMP_MODE_DISABLED as u8,
     Strict = SECCOMP_MODE_STRICT as u8,

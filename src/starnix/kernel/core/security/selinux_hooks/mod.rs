@@ -234,10 +234,6 @@ fn has_fs_node_permissions_dontaudit(
         "security.selinux.has_fs_node_permissions_dontaudit"
     );
 
-    if fs_node.is_private() {
-        return Ok(());
-    }
-
     let target = fs_node_effective_sid_and_class(fs_node);
     for permission in permissions {
         if !permission_check
@@ -262,6 +258,8 @@ fn has_fs_node_permissions(
 ) -> Result<(), Errno> {
     fuchsia_trace::duration!(CATEGORY_STARNIX_SECURITY, "security.selinux.has_fs_node_permissions");
 
+    // `FileObject` hooks may invoke `has_fs_node_permissions()` for files backed by kernel-private
+    // `FsNode`s after validating `fd { use }` access on the `FileObject` itself.
     if fs_node.is_private() {
         return Ok(());
     }
@@ -313,6 +311,7 @@ macro_rules! TODO_DENY {
 /// Returns the `SecurityId` and `FsNodeClass` that should be used for SELinux access control checks
 /// against `fs_node`.
 fn fs_node_effective_sid_and_class(fs_node: &FsNode) -> FsNodeSidAndClass {
+    debug_assert!(!fs_node.is_private());
     let label_class = fs_node.security_state.0.read();
     if matches!(label_class.label, FsNodeLabel::Uninitialized) {
         // We should never reach here, but for now enforce it in debug builds.
@@ -678,6 +677,7 @@ pub(super) struct BpfProgState {
 /// cause the security id to *not* be recomputed by the SELinux LSM when determining the effective
 /// security id of this [`FsNode`].
 pub(super) fn set_cached_sid(fs_node: &FsNode, sid: SecurityId) {
+    debug_assert!(!fs_node.is_private());
     fs_node.security_state.0.update_label(FsNodeLabel::SecurityId { sid });
 }
 
@@ -685,6 +685,7 @@ pub(super) fn set_cached_sid(fs_node: &FsNode, sid: SecurityId) {
 /// The effective security id of the [`FsNode`] will be that of the task, even if the security id
 /// of the task changes.
 fn fs_node_set_label_with_task(fs_node: &FsNode, task_persistent_info: &TaskPersistentInfo) {
+    debug_assert!(!fs_node.is_private());
     fs_node
         .security_state
         .0
@@ -695,6 +696,7 @@ fn fs_node_set_label_with_task(fs_node: &FsNode, task_persistent_info: &TaskPers
 /// As per the NSA report description, the security class is chosen based on the `FileMode`, unless
 /// a security class more specific than "file" has already been set on the node.
 fn fs_node_ensure_class(fs_node: &FsNode) -> Result<FsNodeClass, Errno> {
+    debug_assert!(!fs_node.is_private());
     let label_class = fs_node.security_state.0.read();
     if let Some(class) = label_class.class {
         return Ok(class);

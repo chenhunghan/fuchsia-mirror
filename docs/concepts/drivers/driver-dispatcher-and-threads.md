@@ -135,22 +135,11 @@ dispatcher for the driver. To retrieve this dispatcher, the driver may call the
 `fdf::Dispatcher::GetCurrent()` function during a driver hook, such as
 `Start()`, `PrepareStop()`, and `Stop()`.
 
-In DFv1, a driver host creates a new dispatcher for a driver when it is bound.
-To retrieve this dispatcher, the driver may call the
-`fdf::Dispatcher::GetCurrent()` function during a [driver hook][driver-hook] or
-[device hook][device-hook], such as `Bind()`, `Unbind()`, and `Release()`.
-
 ### Shutting down dispatchers {:#shutting-down-dispatchers}
 
 In DFv2, the driver host automatically shuts down all dispatchers for a driver
 before the driver’s `Stop()` hook is called. If a driver wishes to be notified
 before the shutdown occurs, the driver may implement the `PrepareStop()` hook.
-
-In DFv1, a driver’s default dispatcher automatically shuts down after the
-`Unbind()` hook in the driver’s main device is called (which also causes all
-child devices to be unbound), but before the `Release()` hook is called – the
-driver's main device is the device added by the driver's `Bind()` hook. The
-driver must handle the shutting down of any additional dispatchers it has created.
 
 When a dispatcher is shutting down, it dispatches all pending callbacks with the
 `ZX_ERR_CANCELED` status and calls the shutdown handler that was provided to

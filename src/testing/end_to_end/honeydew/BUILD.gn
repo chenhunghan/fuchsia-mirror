@@ -93,7 +93,6 @@ python_library("honeydew_no_testonly") {
     "affordances/connectivity/wlan/utils/types.py",
     "affordances/connectivity/wlan/wlan_policy/__init__.py",
     "affordances/connectivity/wlan/wlan_policy_ap/__init__.py",
-    "affordances/device_knobs/device_knobs.py",
     "affordances/drivers/__init__.py",
     "affordances/drivers/battery_manager/__init__.py",
     "affordances/drivers/battery_manager/utils/__init__.py",
@@ -164,6 +163,13 @@ python_library("honeydew_no_testonly") {
     "auxiliary_devices/usb_power_hub/linux_virtual_usb_hub.py",
     "auxiliary_devices/usb_power_hub/usb_power_hub.py",
     "auxiliary_devices/usb_power_hub/usb_power_hub_using_dmc.py",
+
+    # LINT.IfChange
+    "device_classes/__init__.py",
+    "device_classes/android_device.py",
+    "device_classes/smart_display.py",
+
+    # LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/__init__.py)
     "errors.py",
     "fuchsia_device/__init__.py",
     "fuchsia_device/fuchsia_device.py",
@@ -175,6 +181,7 @@ python_library("honeydew_no_testonly") {
     "transports/fastboot/__init__.py",
     "transports/fastboot/errors.py",
     "transports/fastboot/fastboot.py",
+    "transports/fastboot/types.py",
     "transports/ffx/__init__.py",
     "transports/ffx/config.py",
     "transports/ffx/errors.py",
@@ -332,6 +339,7 @@ group("unit_tests") {
       "honeydew/affordances/ui/user_input/tests/unit_tests:tests",
       "honeydew/auxiliary_devices/power_switch/tests/unit_tests:tests",
       "honeydew/auxiliary_devices/usb_power_hub/tests/unit_tests:tests",
+      "honeydew/device_classes/tests/unit_tests:tests",
       "honeydew/fuchsia_device/tests/unit_tests:tests",
       "honeydew/transports/adb/tests/unit_tests:tests",
       "honeydew/transports/fastboot/tests/unit_tests:tests",

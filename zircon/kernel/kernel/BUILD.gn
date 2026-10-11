@@ -24,6 +24,7 @@ source_set("kernel") {
     "event_ffi.cc",
     "idle_power_thread.cc",
     "init.cc",
+    "interrupt_ffi.cc",
     "koid_ffi.cc",
     "lazy_owned_wait_queue.cc",
     "mp.cc",
@@ -232,6 +233,22 @@ kernel_bindgen_crate("percpu-bindings") {
   ]
 }
 
+kernel_bindgen_crate("thread-lock-guard-bindings") {
+  visibility = [ "//zircon/kernel/*" ]
+  headers = [ "//zircon/kernel/include/kernel/thread_ffi.h" ]
+  non_rust_deps = [ ":kernel" ]
+  output_name = "thread_lock_guard_bindings.rs"
+  cpp = true
+
+  edition = "2024"
+  notice_year = 2026
+  type_allowlist = [ "ThreadLockGuard" ]
+  opaque_types = [ "ThreadLockGuard" ]
+  function_blocklist = [ "ThreadLockGuard_.*" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  raw_lines = [ "#![no_std]" ]
+}
+
 kernel_rust_mod("kernel-rs") {
   output_name = "kernel"
   source_root = "mod.rs"
@@ -240,6 +257,7 @@ kernel_rust_mod("kernel-rs") {
     "bits.rs",
     "deadline.rs",
     "event.rs",
+    "interrupt.rs",
     "koid.rs",
     "mod.rs",
     "mp.rs",
@@ -258,6 +276,7 @@ kernel_rust_mod("kernel-rs") {
   deps = [
     ":event-bindings",
     ":percpu-bindings",
+    ":thread-lock-guard-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
     "//src/lib/kalloc",

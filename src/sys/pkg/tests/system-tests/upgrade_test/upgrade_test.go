@@ -17,7 +17,6 @@ import (
 	"go.fuchsia.dev/fuchsia/src/sys/pkg/tests/system-tests/check"
 	"go.fuchsia.dev/fuchsia/src/sys/pkg/tests/system-tests/flash"
 	"go.fuchsia.dev/fuchsia/src/sys/pkg/tests/system-tests/pave"
-	"go.fuchsia.dev/fuchsia/src/testing/host-target-testing/artifacts"
 	"go.fuchsia.dev/fuchsia/src/testing/host-target-testing/device"
 	"go.fuchsia.dev/fuchsia/src/testing/host-target-testing/errutil"
 	"go.fuchsia.dev/fuchsia/src/testing/host-target-testing/ffx"
@@ -134,8 +133,8 @@ func doTest(ctx context.Context) error {
 		// we cut the next stepping stone.
 		logger.Infof(ctx, "Refreshing TUF metadata in build %s with latest ffx", build)
 
-		logger.Infof(ctx, "Calling GetPackageRepository with version: %q for build %s", buildWithVersion.Version, build)
-		repo, err := build.GetPackageRepository(ctx, artifacts.PrefetchBlobs, ffxRunDir, buildWithVersion.Version, latestFfx)
+		logger.Infof(ctx, "Calling GetPackageRepository with version: %q, blobFetchMode: %q for build %s", buildWithVersion.Version, buildWithVersion.BlobFetchMode, build)
+		repo, err := build.GetPackageRepository(ctx, buildWithVersion.BlobFetchMode, ffxRunDir, buildWithVersion.Version, latestFfx)
 		if err != nil {
 			return fmt.Errorf("error getting repository: %w", err)
 		}

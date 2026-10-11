@@ -84,10 +84,16 @@ pub fn sys_object_set_profile(
 
     PROFILE_SET.add(1);
 
-    let profile =
-        Dispatcher::get_with_rights::<ProfileDispatcher>(profile_handle, ZX_RIGHT_APPLY_PROFILE)?;
-
-    let (disp, rights) = Dispatcher::get_dispatcher_and_rights(handle)?;
+    let (profile, (disp, rights)) = ProcessDispatcher::with_current(|up| -> Result<_, Status> {
+        let profile = up.handle_table().get_dispatcher_with_rights::<ProfileDispatcher>(
+            up,
+            profile_handle,
+            ZX_RIGHT_APPLY_PROFILE,
+        )?;
+        let disp_and_rights =
+            up.handle_table().get_dispatcher_and_rights::<Dispatcher>(up, handle)?;
+        Ok((profile, disp_and_rights))
+    })?;
 
     if let Some(thread) = disp.downcast::<ThreadDispatcher>() {
         if (rights & ZX_RIGHT_MANAGE_THREAD) == 0 {

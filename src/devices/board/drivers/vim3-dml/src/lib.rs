@@ -66,7 +66,6 @@ impl Driver for Vim3DmlDriver {
             .get_board_info()
             .await
             .context("Failed to call GetBoardInfo")?
-            .map_err(|e| e.err().unwrap_or(zx::Status::INTERNAL))
             .context("GetBoardInfo returned error")?;
         info!("Board info: {board_info:?}");
 

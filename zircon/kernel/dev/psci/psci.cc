@@ -7,6 +7,7 @@
 #include <lib/console.h>
 #include <lib/counters.h>
 #include <lib/zbi-format/driver-config.h>
+#include <lib/zx/result.h>
 #include <string.h>
 #include <trace.h>
 
@@ -358,7 +359,7 @@ bool psci_is_cpu_suspend_supported() { return gPowerStates.target_cpu.has_value(
 
 void PsciInit(const zbi_dcfg_arm_psci_driver_t& config,
               ktl::span<const zbi_dcfg_arm_psci_cpu_suspend_state_t> psci_cpu_suspend_config) {
-  do_psci_call = config.use_hvc ? psci_hvc_call : psci_smc_call;
+  do_psci_call = (config.use_hvc && arm64_get_boot_el() < 2) ? psci_hvc_call : psci_smc_call;
   memcpy(shutdown_args, config.shutdown_args, sizeof(shutdown_args));
   memcpy(reboot_args, config.reboot_args, sizeof(reboot_args));
   memcpy(reboot_bootloader_args, config.reboot_bootloader_args, sizeof(reboot_bootloader_args));

@@ -37,7 +37,7 @@ that will impact the usability of a device.
 If a lock cycle is detected you will see a panic message like this:
 
 ```
-thread 'main' (1) panicked at ../../third_party/rust_crates/forks/tracing-mutex-0.3.2/src/reporting.rs:
+thread 'main' (1) panicked at ../../third_party/rust_crates/forks/tracing-mutex-0.3.3/src/reporting.rs:
 Found cycle in mutex dependency graph:
 disabled backtrace
 

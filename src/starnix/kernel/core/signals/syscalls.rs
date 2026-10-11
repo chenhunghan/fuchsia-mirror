@@ -529,14 +529,12 @@ pub fn sys_kill(
             // "If pid is less than -1, then sig is sent to every process in the
             // process group whose ID is -pid."
             let pid = match pid {
-                0 => current_task.thread_group().read().process_group.leader.clone(),
+                0 => current_task.thread_group().read().process_group.clone(),
                 _ => pids.get(negate_pid(pid)?)?,
             };
 
-            let process_group = pid.get_process_group();
-            let thread_groups =
-                process_group.iter().flat_map(|pg| pg.read().thread_groups().collect::<Vec<_>>());
-            signal_thread_groups(current_task, unchecked_signal, thread_groups)?;
+            let scope = RcuReadScope::new();
+            signal_thread_groups(current_task, unchecked_signal, pid.pgid_thread_groups(&scope))?;
         }
     };
 
@@ -923,7 +921,7 @@ pub fn sys_waitid(
         P_ALL => ProcessSelector::Any,
         P_PGID => {
             let pid = if id == 0 {
-                current_task.thread_group().read().process_group.leader.clone()
+                current_task.thread_group().read().process_group.clone()
             } else {
                 current_task.kernel().pids.get(id).map_err(|_| errno!(ECHILD))?
             };
@@ -1007,7 +1005,7 @@ pub fn sys_wait4(
     let waiting_options = WaitingOptions::new_for_wait4(options)?;
 
     let selector = if raw_selector == 0 {
-        ProcessSelector::Pgid(current_task.thread_group().read().process_group.leader.clone())
+        ProcessSelector::Pgid(current_task.thread_group().read().process_group.clone())
     } else if raw_selector == -1 {
         ProcessSelector::Any
     } else if raw_selector > 0 {

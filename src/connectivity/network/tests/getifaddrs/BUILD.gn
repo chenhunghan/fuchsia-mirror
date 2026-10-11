@@ -22,40 +22,22 @@ fuchsia_test_component("test-driver") {
   deps = [ ":test" ]
 }
 
-common_deps = [ ":test-driver" ]
-
-fuchsia_test_component("ns3-tests") {
-  manifest = "meta/netstack3.cml"
-  deps = common_deps + [ "//src/connectivity/network/testing/netemul/configurable-netstack:netstack3" ]
-}
-
-fuchsia_test_package("ns3-getifaddrs-test") {
-  test_components = [ ":ns3-tests" ]
-}
-
-all_test_targets = [
-  ":ns3-getifaddrs-test",
-  ":ns3-tests($host_toolchain)",
-]
-
-# The Go runtime on Fuchsia does not support RISC-V.
-if (target_cpu != "riscv64") {
-  fuchsia_test_component("ns2-tests") {
-    manifest = "meta/netstack2.cml"
-    deps = common_deps + [ "//src/connectivity/network/testing/netemul/configurable-netstack:netstack2" ]
-  }
-
-  fuchsia_test_package("ns2-getifaddrs-test") {
-    test_components = [ ":ns2-tests" ]
-  }
-
-  all_test_targets += [
-    ":ns2-tests($host_toolchain)",
-    ":ns2-getifaddrs-test",
+fuchsia_test_component("getifaddrs-test") {
+  manifest = "meta/getifaddrs-test.cml"
+  deps = [
+    ":test-driver",
+    "//src/connectivity/network/testing/netemul/configurable-netstack:netstack3",
   ]
+}
+
+fuchsia_test_package("getifaddrs-tests") {
+  test_components = [ ":getifaddrs-test" ]
 }
 
 group("tests") {
   testonly = true
-  deps = all_test_targets
+  deps = [
+    ":getifaddrs-test($host_toolchain)",
+    ":getifaddrs-tests",
+  ]
 }

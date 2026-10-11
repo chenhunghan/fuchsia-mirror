@@ -11,6 +11,7 @@ use netlink_packet_generic::ctrl::{GenlCtrl, GenlCtrlCmd};
 use netlink_packet_generic::message::EmptyDeserializeOptions;
 use nix::sys::socket;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use thermal_netlink::{GenlThermalCmd, GenlThermalPayload, ThermalAttr, celsius_to_millicelsius};
@@ -18,6 +19,7 @@ use thermal_netlink::{GenlThermalCmd, GenlThermalPayload, ThermalAttr, celsius_t
 pub const EXPECTED_TEMP_C: f32 = 25.0;
 const FREQUENCIES_HZ: [&'static str; 2] = ["1128000 1256000 1512000 2024000", "512000 1024000"];
 const MAX_FREQUENCIES_HZ: [&'static str; 2] = ["2024000", "1024000"];
+const MIN_FREQUENCIES_HZ: [&'static str; 2] = ["1128000", "512000"];
 
 fn main() {
     println!("started");
@@ -116,6 +118,16 @@ fn check_cpu_cooling_device() {
     std::fs::write("/sys/class/thermal/cooling_device0/cur_state", "1").unwrap();
     let new_cur_state = std::fs::read("/sys/class/thermal/cooling_device0/cur_state").unwrap();
     assert_eq!("1\n", str::from_utf8(&new_cur_state).unwrap());
+
+    let err = std::fs::write("/sys/class/thermal/cooling_device0/cur_state", "4").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    let unchanged_cur_state =
+        std::fs::read("/sys/class/thermal/cooling_device0/cur_state").unwrap();
+    assert_eq!("1\n", str::from_utf8(&unchanged_cur_state).unwrap());
+
+    std::fs::write("/sys/class/thermal/cooling_device0/cur_state", "0").unwrap();
+    let reset_cur_state = std::fs::read("/sys/class/thermal/cooling_device0/cur_state").unwrap();
+    assert_eq!("0\n", str::from_utf8(&reset_cur_state).unwrap());
 }
 
 fn check_cpufreq() {
@@ -132,6 +144,167 @@ fn check_cpufreq() {
 
     check_cpufreq_policy_dir(0, 0, "0 1");
     check_cpufreq_policy_dir(2, 1, "2 3 4 5");
+
+    check_scaling_max_freq();
+}
+
+fn read_sysfs(path: &str) -> String {
+    String::from_utf8(std::fs::read(path).unwrap()).unwrap()
+}
+
+/// Exercises `scaling_max_freq`, which is served by `fuchsia.power.cpu/DomainController` rather
+/// than by a value stored in the file.
+///
+/// Cluster 0's operating points run highest-first, the reverse of the order
+/// `scaling_available_frequencies` lists them in, so these cases also cover mapping a requested
+/// frequency onto the right operating point.
+fn check_scaling_max_freq() {
+    const POLICY0: &str = "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq";
+    const POLICY2: &str = "/sys/devices/system/cpu/cpufreq/policy2/scaling_max_freq";
+    const CPU1: &str = "/sys/devices/system/cpu/cpu1/cpufreq/scaling_max_freq";
+
+    // Initially uncapped, reporting the highest operating point of each cluster.
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+    assert_eq!("1024000\n", read_sysfs(POLICY2));
+
+    // An exact match caps at that operating point and persists across `close()` (which is what
+    // `std::fs::write` does, matching `libperfmgr` with default `HoldFd: false` and shell `echo`).
+    // 1256000 sits at sorted position 1 but at operating point 2, so confusing the two orders
+    // would show up here.
+    std::fs::write(POLICY0, "1256000").unwrap();
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    // A cap belongs to the domain, so the per-core view of the same domain agrees.
+    assert_eq!("1256000\n", read_sysfs(CPU1));
+    // Other domains are left alone.
+    assert_eq!("1024000\n", read_sysfs(POLICY2));
+
+    // Reopening the node (or writing through the per-core alias of the same node) with the
+    // sentinel clears the cap.
+    std::fs::write(CPU1, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+
+    // A request that falls between two operating points snaps down to the lower one.
+    std::fs::write(POLICY0, "1300000").unwrap();
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+
+    // A request below every operating point snaps up to the lowest one.
+    std::fs::write(POLICY0, "1").unwrap();
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+
+    // Writing the sentinel on a held descriptor also releases the cap. An invalid write must fail
+    // with EINVAL without disturbing an active cap.
+    let mut file = std::fs::OpenOptions::new().write(true).open(POLICY0).unwrap();
+    file.write_all(b"1128000").unwrap();
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+    let err = file.write_all(b"not_a_number").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+    file.write_all(b"9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+    drop(file);
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+
+    // Concurrent voters (across `vote_manager/*` and `scaling_max_freq`) are keyed by sysfs node
+    // identity, aggregate by taking the lowest ceiling, persist across `close()`, and step back to
+    // the remaining active vote when cleared with `"9999999"`. Each `vote_manager/*_max_freq` node
+    // reads back its own vote (or the domain maximum when uncapped), while `scaling_max_freq`
+    // reads back the aggregated domain ceiling.
+    const POWERHINT_MAX: &str =
+        "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/powerhint_max_freq";
+    const THERMAL_MAX: &str = "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/thermal_max_freq";
+    const SOFT_MAX: &str = "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/soft_max_freq";
+    const DEBUG_MAX: &str = "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/debug_max_freq";
+    assert_eq!("2024000\n", read_sysfs(SOFT_MAX));
+    assert_eq!("2024000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("2024000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("2024000\n", read_sysfs(DEBUG_MAX));
+
+    std::fs::write(SOFT_MAX, "1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(SOFT_MAX));
+    assert_eq!("2024000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(POWERHINT_MAX, "1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(THERMAL_MAX, "1256000").unwrap();
+    assert_eq!("1256000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    std::fs::write(DEBUG_MAX, "1128000").unwrap();
+    assert_eq!("1128000\n", read_sysfs(DEBUG_MAX));
+    assert_eq!("1256000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1512000\n", read_sysfs(SOFT_MAX));
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+
+    // Clearing the strictest voter restores the next strictest active voter's ceiling.
+    std::fs::write(DEBUG_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(DEBUG_MAX));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    std::fs::write(THERMAL_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(POWERHINT_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1512000\n", read_sysfs(SOFT_MAX));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(SOFT_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(SOFT_MAX));
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+
+    // Thermal `cooling_device0/cur_state` and `cpufreq` max-frequency nodes share the domain's
+    // ceiling vote table so neither overrides a stricter limit or clears the other's active cap.
+    const COOLING0_STATE: &str = "/sys/class/thermal/cooling_device0/cur_state";
+    std::fs::write(COOLING0_STATE, "2").unwrap();
+    assert_eq!("2\n", read_sysfs(COOLING0_STATE));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+
+    // A looser cpufreq vote (1512000, OPP 1) must not override the stricter cooling state (OPP 2).
+    std::fs::write(POWERHINT_MAX, "1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    assert_eq!("2\n", read_sysfs(COOLING0_STATE));
+
+    // A stricter cpufreq vote (1128000, OPP 3) lowers the effective frequency while preserving
+    // the cooling device's reported `cur_state`.
+    std::fs::write(THERMAL_MAX, "1128000").unwrap();
+    assert_eq!("1128000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+    assert_eq!("2\n", read_sysfs(COOLING0_STATE));
+
+    // Releasing the stricter cpufreq vote steps back to the cooling device's cap (1256000).
+    std::fs::write(THERMAL_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(THERMAL_MAX));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+
+    // Clearing the cooling device's state steps back to the remaining cpufreq vote (1512000)
+    // rather than wiping out all caps.
+    std::fs::write(COOLING0_STATE, "0").unwrap();
+    assert_eq!("0\n", read_sysfs(COOLING0_STATE));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+
+    std::fs::write(POWERHINT_MAX, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(POWERHINT_MAX));
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+}
+
+/// Checks the cpufreq nodes that the Power HAL writes but that Fuchsia cannot act on: they must
+/// accept writes and report a stable value, rather than failing the write.
+fn check_inert_cpufreq_nodes(dir: &str, min_frequency_str: &str) {
+    for rel_path in [
+        "scaling_min_freq",
+        "vote_manager/powerhint_min_freq",
+        "vote_manager/soft_min_freq",
+        "vote_manager/debug_min_freq",
+    ] {
+        let path = format!("{dir}/{rel_path}");
+        std::fs::write(&path, "1000000").unwrap();
+        assert_eq!(&format!("{min_frequency_str}\n"), &read_sysfs(&path));
+    }
+
+    std::fs::write(format!("{dir}/scaling_governor"), "schedutil").unwrap();
+    assert_eq!("performance\n", read_sysfs(&format!("{dir}/scaling_governor")));
+    assert_eq!("performance\n", read_sysfs(&format!("{dir}/scaling_available_governors")));
 }
 
 fn check_cpufreq_policy_dir(policy_id: u64, cluster_id: u64, expected_related_cpus: &str) {
@@ -147,6 +320,12 @@ fn check_cpufreq_policy_dir(policy_id: u64, cluster_id: u64, expected_related_cp
             .unwrap()
         )
         .unwrap()
+    );
+
+    let min_frequency_str = MIN_FREQUENCIES_HZ[cluster_id as usize];
+    assert_eq!(
+        &format!("{min_frequency_str}\n"),
+        &read_sysfs(&format!("/sys/devices/system/cpu/cpufreq/policy{policy_id}/cpuinfo_min_freq"))
     );
 
     let frequencies_str = FREQUENCIES_HZ[cluster_id as usize];
@@ -183,6 +362,11 @@ fn check_cpufreq_policy_dir(policy_id: u64, cluster_id: u64, expected_related_cp
         )
         .unwrap()
     );
+
+    check_inert_cpufreq_nodes(
+        &format!("/sys/devices/system/cpu/cpufreq/policy{policy_id}"),
+        min_frequency_str,
+    );
 }
 
 fn check_cpufreq_dir(core_id: u64, cluster_id: u64) {
@@ -199,6 +383,12 @@ fn check_cpufreq_dir(core_id: u64, cluster_id: u64) {
             .unwrap()
         )
         .unwrap()
+    );
+
+    let min_frequency_str = MIN_FREQUENCIES_HZ[cluster_id as usize];
+    assert_eq!(
+        &format!("{min_frequency_str}\n"),
+        &read_sysfs(&format!("/sys/devices/system/cpu/cpu{core_id}/cpufreq/cpuinfo_min_freq"))
     );
 
     let frequencies_str = FREQUENCIES_HZ[cluster_id as usize];
@@ -222,6 +412,11 @@ fn check_cpufreq_dir(core_id: u64, cluster_id: u64) {
             .unwrap()
         )
         .unwrap()
+    );
+
+    check_inert_cpufreq_nodes(
+        &format!("/sys/devices/system/cpu/cpu{core_id}/cpufreq"),
+        min_frequency_str,
     );
 
     assert!(std::fs::exists(format!("/sys/devices/system/cpu/cpu{core_id}/topology")).unwrap());

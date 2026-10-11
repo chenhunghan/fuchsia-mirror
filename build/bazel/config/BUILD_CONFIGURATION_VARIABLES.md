@@ -233,6 +233,10 @@ enable_special_feature = my_global_variable and target_cpu == "arm64"
 # LINT.ThenChange(//path/to/config.gni:derived_feature_flag)
 ```
 
+For example, `//build/bazel/config/derived/compilation_modes.bzl` derives
+`is_debug`, `is_balanced`, `is_release`, and `is_sanitizer` from the global
+`compilation_mode` arg.
+
 ---
 
 ### 3. Toolchain-Specific Declared Values

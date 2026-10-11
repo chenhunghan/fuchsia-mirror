@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
     let mut periodic_collection = fuchsia_async::Task::local({
         let attribution_data_provider = fast_attribution_data_provider.clone();
         let stall_provider = stall_provider.clone();
+        let page_refault_tracker = page_refault_tracker.clone();
         let kernel_stats = kernel_stats.clone();
         let metric_event_logger = metric_event_logger.clone();
         let bucket_definitions = bucket_definitions.clone();
@@ -136,6 +137,7 @@ async fn main() -> Result<()> {
                 kernel_stats,
                 &*attribution_data_provider,
                 &stall_provider,
+                &page_refault_tracker,
                 &metric_event_logger,
                 &*bucket_definitions,
                 root_node.create_child("logger"),
@@ -151,8 +153,9 @@ async fn main() -> Result<()> {
 
     let mut collect_stalls_task = fuchsia_async::Task::spawn({
         let stall_provider = stall_provider.clone();
+        let page_refault_tracker = page_refault_tracker.clone();
         let metric_event_logger = metric_event_logger.clone();
-        collect_stalls_forever(stall_provider, metric_event_logger)
+        collect_stalls_forever(stall_provider, page_refault_tracker, metric_event_logger)
     })
     .fuse();
     let collect_stalls_health = task_health_node.create_string("collect_stalls_health", "ok");

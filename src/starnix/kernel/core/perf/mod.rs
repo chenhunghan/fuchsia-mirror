@@ -36,9 +36,12 @@ use starnix_uapi::arch32::{
     perf_event_sample_format_PERF_SAMPLE_TIME, perf_event_type_PERF_RECORD_LOST,
     perf_event_type_PERF_RECORD_SAMPLE,
 };
+use starnix_uapi::auth::{CAP_PERFMON, CAP_SYS_ADMIN};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_HIGHEST_ADDRESS;
 use starnix_uapi::uapi::{
+    perf_callchain_context_PERF_CONTEXT_KERNEL, perf_callchain_context_PERF_CONTEXT_USER,
     perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_32, perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_64,
     perf_sample_regs_abi_PERF_SAMPLE_REGS_ABI_NONE,
 };
@@ -51,7 +54,7 @@ use starnix_uapi::{
     perf_event_read_format_PERF_FORMAT_TOTAL_TIME_RUNNING, tid_t, uapi,
 };
 
-use crate::security::{self, TargetTaskType};
+use crate::security::{self, PerfEventOpenType, PerfEventTarget, PerfEventType};
 use crate::task::Kernel;
 use crate::task::tracing::{LinuxIdentity, PidKoidSession};
 
@@ -569,13 +572,35 @@ fn write_record_to_vmo(
     }
 
     if (sample_type & perf_event_sample_format_PERF_SAMPLE_CALLCHAIN as u64) != 0 {
-        // nr
-        sample.extend(perf_record_sample.ips.len().to_ne_bytes());
+        // Callchains are structured into sections, each introduced by a
+        // PERF_CONTEXT_* marker, and readers rely on these markers to split
+        // kernel and user frames.
+        //
+        // Starnix normal-mode execution (>= GUEST_ASPACE_END, above
+        // restricted_return_loop) represents kernel execution from the guest's
+        // perspective and belongs in PERF_CONTEXT_KERNEL; restricted-mode
+        // guest execution (< GUEST_ASPACE_END) belongs in PERF_CONTEXT_USER.
+        // Both sections are always emitted; readers that unwind user stacks
+        // themselves (DWARF) stop at the PERF_CONTEXT_USER marker.
+        const GUEST_ASPACE_END: u64 = RESTRICTED_ASPACE_HIGHEST_ADDRESS as u64;
 
-        // ips[nr] - list of ips, u64 per ip.
-        for i in perf_record_sample.ips {
-            sample.extend(i.to_ne_bytes());
+        // Reserve nr, then fill it in once the markers and ips are written.
+        let nr_offset = sample.len();
+        sample.extend(0u64.to_ne_bytes());
+        let callchain_start = sample.len();
+
+        sample.extend(perf_callchain_context_PERF_CONTEXT_KERNEL.to_ne_bytes());
+        for ip in perf_record_sample.ips.iter().filter(|&&ip| ip >= GUEST_ASPACE_END) {
+            sample.extend(ip.to_ne_bytes());
         }
+        sample.extend(perf_callchain_context_PERF_CONTEXT_USER.to_ne_bytes());
+        for ip in perf_record_sample.ips.iter().filter(|&&ip| ip < GUEST_ASPACE_END) {
+            sample.extend(ip.to_ne_bytes());
+        }
+
+        // nr, counting the markers and ips.
+        let nr = ((sample.len() - callchain_start) / std::mem::size_of::<u64>()) as u64;
+        sample[nr_offset..callchain_start].copy_from_slice(&nr.to_ne_bytes());
     }
 
     // User registers (PERF_SAMPLE_REGS_USER): the ABI tag, then one u64 per
@@ -755,11 +780,22 @@ struct PerfRecordSample<'a> {
 
 async fn set_up_profiler(
     sample_period: zx::MonotonicDuration,
+    want_stack_samples: bool,
 ) -> Result<(profiler::SessionProxy, fidl::AsyncSocket), Errno> {
-    // Configuration for how we want to sample.
+    // Configuration for how we want to sample. Events that asked for register
+    // and stack state (PERF_SAMPLE_REGS_USER / PERF_SAMPLE_STACK_USER) need
+    // raw stack snapshots, which only the DWARF strategy captures. Events that
+    // just want a callchain (PERF_SAMPLE_CALLCHAIN) are served by the
+    // in-kernel sampler, which unwinds via frame pointers without suspending
+    // the sampled thread.
+    let strategy = if want_stack_samples {
+        profiler::CallgraphStrategy::Dwarf
+    } else {
+        profiler::CallgraphStrategy::FramePointer
+    };
     let sample = profiler::Sample {
         callgraph: Some(profiler::CallgraphConfig {
-            strategy: Some(profiler::CallgraphStrategy::FramePointer),
+            strategy: Some(strategy),
             ..Default::default()
         }),
         ..Default::default()
@@ -1154,20 +1190,72 @@ pub fn sys_perf_event_open(
         return error!(EINVAL);
     }
 
-    let target_task_type = match tid {
-        -1 => TargetTaskType::AllTasks,
-        0 => TargetTaskType::CurrentTask,
+    let target = match tid {
+        -1 => PerfEventTarget::AllTasks,
+        0 => PerfEventTarget::CurrentTask,
         _ => {
             track_stub!(TODO("https://fxbug.dev/409621963"), "[perf_event_open] implement tid > 0");
             return error!(ENOSYS);
         }
     };
-    security::check_perf_event_open_access(
-        current_task,
-        target_task_type,
-        &perf_event_attrs,
-        perf_event_attrs.type_.try_into()?,
-    )?;
+    let event_type: PerfEventType = perf_event_attrs.type_.try_into()?;
+
+    // Check access to open any perf_event first, before any capability check, so that it is
+    // evaluated and audited first.
+    security::check_perf_event_open_access(current_task, PerfEventOpenType::Open)?;
+
+    // Only require CAP_PERFMON (or CAP_SYS_ADMIN) when `perf_event_paranoid` exceeds the
+    // threshold for the requested event.
+    // TODO(https://fxbug.dev/398914921): Starnix currently starts a job-wide profiler session
+    // regardless of `target`, so apply the CPU-wide threshold (`paranoid > 0`) to all targets
+    // until sampling is scoped to the target task.
+    let paranoid = current_task.kernel().perf_event_paranoid.load(Ordering::Relaxed);
+    let requires_capability = (paranoid > 1 && perf_event_attrs.exclude_kernel() == 0)
+        || paranoid > 0
+        || (paranoid > -1 && event_type == PerfEventType::Tracepoint);
+    // Exceptionally, a tracepoint perf event on the current task that excludes the kernel never
+    // requires a capability. The kernel and CPU access checks below do not apply to such an event.
+    let is_exempt = matches!(
+        (event_type, perf_event_attrs.exclude_kernel(), &target),
+        (PerfEventType::Tracepoint, 1, PerfEventTarget::CurrentTask)
+    );
+    // CAP_SYS_ADMIN is checked without auditing, so that nothing is audit-logged if the caller has
+    // either capability, and only CAP_PERFMON is audit-logged if it has neither.
+    if requires_capability
+        && !is_exempt
+        && !security::is_task_capable_noaudit(current_task, CAP_SYS_ADMIN)
+    {
+        security::check_task_capable(current_task, CAP_PERFMON).map_err(|_| errno!(EACCES))?;
+    }
+
+    // Check access to monitor the kernel when `exclude_kernel` is 0.
+    if perf_event_attrs.exclude_kernel() == 0 {
+        security::check_perf_event_open_access(current_task, PerfEventOpenType::Kernel)?;
+    }
+
+    // Check access to monitor CPU-wide activity when
+    // - type is PERF_TYPE_SOFTWARE or
+    // - type is PERF_TYPE_HARDWARE or
+    // - type is in [CACHE, TRACEPOINT, BREAKPOINT, RAW) and pid == -1
+    // - or when a low `perf_event_paranoid` waived the capability requirement
+    //   (TODO(https://fxbug.dev/398914921): sampling is currently job-wide regardless of
+    //   target task or event type).
+    let check_cpu = !requires_capability
+        || match event_type {
+            PerfEventType::Software | PerfEventType::Hardware => true,
+            PerfEventType::HwCache
+            | PerfEventType::Tracepoint
+            | PerfEventType::Breakpoint
+            | PerfEventType::Raw => matches!(target, PerfEventTarget::AllTasks),
+        };
+    if check_cpu {
+        security::check_perf_event_open_access(current_task, PerfEventOpenType::Cpu)?;
+    }
+
+    // Check access to monitor tracepoints when the type is PERF_TYPE_TRACEPOINT.
+    if event_type == PerfEventType::Tracepoint {
+        security::check_perf_event_open_access(current_task, PerfEventOpenType::Tracepoint)?;
+    }
 
     // Channel used to send info between notifier and spawned task thread.
     // We somewhat arbitrarily picked 8 for now in case we get a bunch of ioctls that are in
@@ -1235,6 +1323,14 @@ pub fn sys_perf_event_open(
 
     let sample_period = sampling_period(&perf_event_file.attr);
 
+    // Events that request register and stack state need the profiler to
+    // capture raw stacks (the DWARF strategy); callchain-only events are
+    // unwound by the in-kernel sampler via frame pointers.
+    let want_stack_samples = (perf_event_file.sample_type
+        & (perf_event_sample_format_PERF_SAMPLE_REGS_USER as u64
+            | perf_event_sample_format_PERF_SAMPLE_STACK_USER as u64))
+        != 0;
+
     // SeqLock does not get instantiated with metadata values until mmap() is called.
     let seq_lock =
         Arc::new(OnceLock::<Result<SeqLock<PerfMetadataHeader, PerfMetadataValue>, Errno>>::new());
@@ -1258,14 +1354,15 @@ pub fn sys_perf_event_open(
                 continue;
             };
 
-            let (session_proxy, client) = match set_up_profiler(sample_period).await {
-                Ok(session) => session,
-                Err(e) => {
-                    log_warn!("Failed to profile: {}", e);
-                    let _ = profiling_complete_receiver.send(());
-                    continue;
-                }
-            };
+            let (session_proxy, client) =
+                match set_up_profiler(sample_period, want_stack_samples).await {
+                    Ok(session) => session,
+                    Err(e) => {
+                        log_warn!("Failed to profile: {}", e);
+                        let _ = profiling_complete_receiver.send(());
+                        continue;
+                    }
+                };
 
             // Record pid/koid mappings before the profiler starts sampling
             // so every sampled thread can be resolved. Dropping the session

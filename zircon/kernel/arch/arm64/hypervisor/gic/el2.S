@@ -7,7 +7,6 @@
 #include <arch/arm64/hypervisor/el2_state.h>
 #include <arch/asm_macros.h>
 #include <asm.h>
-#include <zircon/errors.h>
 
 // For details please refer to ARM Generic Interrupt Controller Architecture
 // Specification, version 3.0 and version 4.0. Table 8-6 Mapping of MSR and MRS
@@ -42,9 +41,6 @@
 #define ICH_LR15_EL2        ICH_LR8(7)
 
 #define ICH_LR(x)           ICH_LR ## x ## _EL2
-
-#define READ_SYSREG         0
-#define WRITE_SYSREG        1
 
 .section .text.el2,"ax",@progbits
 .align 12
@@ -81,28 +77,12 @@ reg_xc  .req x13
     br reg_xc
 .endm
 
-// void arm64_el2_gicv3_read_gich_state(zx_paddr_t state)
+// void arm64_el2_gicv3_read_gich_state(IchState* state)
 FUNCTION(arm64_el2_gicv3_read_gich_state)
-    mov reg_xa, READ_SYSREG
-    hvc 6
-    ret
-END_FUNCTION(arm64_el2_gicv3_read_gich_state)
-
-// void arm64_el2_gicv3_write_gich_state(zx_paddr_t state, uint32_t hcr)
-FUNCTION(arm64_el2_gicv3_write_gich_state)
-    mov reg_xa, WRITE_SYSREG
-    hvc 6
-    ret
-END_FUNCTION(arm64_el2_gicv3_write_gich_state)
-
-FUNCTION_LABEL(el2_hvc_gich_state)
-    cbnz reg_xa, el2_hvc_write_gich_state
-
-FUNCTION_LABEL(el2_hvc_read_gich_state)
-    msr ICH_HCR_EL2, xzr
     read_sysreg ICH_VMCR_EL2, IS_VMCR
     read_sysreg ICH_MISR_EL2, IS_MISR
     read_sysreg ICH_ELRSR_EL2, IS_ELRSR
+    msr ICH_HCR_EL2, xzr
 
     gic_index 4, IS_NUM_APRS
     gic_jump .Lread_ap0r
@@ -138,10 +118,12 @@ FUNCTION_LABEL(el2_hvc_read_gich_state)
     read_sysreg ICH_LR(2), IS_LR(2)
     read_sysreg ICH_LR(1), IS_LR(1)
     read_sysreg ICH_LR(0), IS_LR(0)
+    isb
+    ret
+END_FUNCTION(arm64_el2_gicv3_read_gich_state)
 
-    b el2_gicv3_done
-
-FUNCTION_LABEL(el2_hvc_write_gich_state)
+// void arm64_el2_gicv3_write_gich_state(IchState* state, uint32_t hcr)
+FUNCTION(arm64_el2_gicv3_write_gich_state)
     msr ICH_HCR_EL2, x1
     write_sysreg ICH_VMCR_EL2, IS_VMCR
 
@@ -179,20 +161,12 @@ FUNCTION_LABEL(el2_hvc_write_gich_state)
     write_sysreg ICH_LR(2), IS_LR(2)
     write_sysreg ICH_LR(1), IS_LR(1)
     write_sysreg ICH_LR(0), IS_LR(0)
-
-    b el2_gicv3_done
+    isb
+    ret
+END_FUNCTION(arm64_el2_gicv3_write_gich_state)
 
 // uint32_t arm64_el2_gicv3_read_gich_vtr()
 FUNCTION(arm64_el2_gicv3_read_gich_vtr)
-    hvc 7
+    mrs x0, ICH_VTR_EL2
     ret
 END_FUNCTION(arm64_el2_gicv3_read_gich_vtr)
-
-FUNCTION_LABEL(el2_hvc_gich_vtr)
-    mrs x0, ICH_VTR_EL2
-    b el2_gicv3_done
-
-FUNCTION_LABEL(el2_gicv3_done)
-    msr vttbr_el2, xzr
-    isb
-    eret

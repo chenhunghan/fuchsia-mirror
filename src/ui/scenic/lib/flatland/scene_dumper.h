@@ -6,7 +6,7 @@
 #define SRC_UI_SCENIC_LIB_FLATLAND_SCENE_DUMPER_H_
 
 #include <ostream>
-#include <vector>
+#include <span>
 
 #include "src/ui/scenic/lib/flatland/flatland_types.h"
 #include "src/ui/scenic/lib/flatland/global_resolved_layers.h"
@@ -15,9 +15,8 @@
 namespace flatland {
 
 // Dumps information about a flatland scene to an output stream.
-void DumpScene(const flatland::UberStruct::InstanceMap& snapshot,
-               const flatland::GlobalTopologyData& topology_data,
-               const std::vector<flatland::ResolvedLayer>& layers, std::ostream& output);
+void DumpScene(const UberStruct::InstanceMap& snapshot, const GlobalTopologyData& topology_data,
+               std::span<const ResolvedLayer> layers, std::ostream& output);
 
 }  // namespace flatland
 

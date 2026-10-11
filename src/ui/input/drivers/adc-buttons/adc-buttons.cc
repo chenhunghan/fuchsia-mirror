@@ -5,12 +5,15 @@
 #include "adc-buttons.h"
 
 #include <fidl/fuchsia.buttons/cpp/fidl.h>
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/driver/fidl.h>
 #include <fidl/fuchsia.input.report/cpp/fidl.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+
+#include "src/ui/input/drivers/adc-buttons/adc-buttons_parser.h"
 
 namespace adc_buttons {
 
@@ -23,6 +26,74 @@ struct MetadataValues {
   std::map<uint32_t, std::vector<fuchsia_buttons::Button>> configs;
   std::set<fuchsia_input_report::ConsumerControlButton> buttons;
 };
+
+fuchsia_input_report::ConsumerControlButton ConvertConsumerControlButton(
+    adc_buttons::ConsumerControlButton type) {
+  switch (type) {
+    case adc_buttons::ConsumerControlButton::kCameraDisable:
+      return fuchsia_input_report::ConsumerControlButton::kCameraDisable;
+    case adc_buttons::ConsumerControlButton::kFactoryReset:
+      return fuchsia_input_report::ConsumerControlButton::kFactoryReset;
+    case adc_buttons::ConsumerControlButton::kFunction:
+      return fuchsia_input_report::ConsumerControlButton::kFunction;
+    case adc_buttons::ConsumerControlButton::kMicMute:
+      return fuchsia_input_report::ConsumerControlButton::kMicMute;
+    case adc_buttons::ConsumerControlButton::kPause:
+      return fuchsia_input_report::ConsumerControlButton::kPause;
+    case adc_buttons::ConsumerControlButton::kPower:
+      return fuchsia_input_report::ConsumerControlButton::kPower;
+    case adc_buttons::ConsumerControlButton::kReboot:
+      return fuchsia_input_report::ConsumerControlButton::kReboot;
+    case adc_buttons::ConsumerControlButton::kVolumeDown:
+      return fuchsia_input_report::ConsumerControlButton::kVolumeDown;
+    case adc_buttons::ConsumerControlButton::kVolumeUp:
+      return fuchsia_input_report::ConsumerControlButton::kVolumeUp;
+  }
+}
+
+fuchsia_buttons::AdcButtonsMetadata ConvertMetadata(
+    const adc_buttons::Adc_buttonsMetadata& parsed) {
+  fuchsia_buttons::AdcButtonsMetadata metadata;
+
+  if (parsed.polling_rate_usec.has_value()) {
+    metadata.polling_rate_usec(*parsed.polling_rate_usec);
+  }
+
+  if (parsed.buttons.has_value()) {
+    std::vector<fuchsia_buttons::Button> buttons;
+    for (const auto& btn : *parsed.buttons) {
+      fuchsia_buttons::Button button;
+
+      if (btn.types.has_value()) {
+        std::vector<fuchsia_input_report::ConsumerControlButton> button_types;
+        for (const auto& type : *btn.types) {
+          button_types.push_back(ConvertConsumerControlButton(type));
+        }
+        button.types(std::move(button_types));
+      }
+
+      if (btn.button_config.has_value() && btn.button_config->adc.has_value()) {
+        const auto& adc = *btn.button_config->adc;
+        fuchsia_buttons::AdcButtonConfig adc_config;
+        if (adc.channel_idx.has_value()) {
+          adc_config.channel_idx(*adc.channel_idx);
+        }
+        if (adc.release_threshold.has_value()) {
+          adc_config.release_threshold(*adc.release_threshold);
+        }
+        if (adc.press_threshold.has_value()) {
+          adc_config.press_threshold(*adc.press_threshold);
+        }
+        button.button_config(fuchsia_buttons::ButtonConfig::WithAdc(std::move(adc_config)));
+      }
+
+      buttons.push_back(std::move(button));
+    }
+    metadata.buttons(std::move(buttons));
+  }
+
+  return metadata;
+}
 
 zx::result<MetadataValues> ParseMetadata(const fuchsia_buttons::AdcButtonsMetadata& metadata) {
   if (!metadata.polling_rate_usec().has_value()) {
@@ -74,12 +145,27 @@ zx::result<> AdcButtons::Start(fdf::DriverContext context) {
   fdf::PDev pdev{std::move(pdev_client_end.value())};
 
   // Get metadata.
+  fuchsia_buttons::AdcButtonsMetadata metadata;
   zx::result metadata_result = pdev.GetFidlMetadata<fuchsia_buttons::AdcButtonsMetadata>();
-  if (metadata_result.is_error()) {
-    fdf::error("Failed to get metadata: {}", metadata_result);
-    return metadata_result.take_error();
+  if (metadata_result.is_ok()) {
+    metadata = std::move(metadata_result.value());
+  } else {
+    // Fall back to reading fuchsia_driver_metadata::Dictionary
+    auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+        "fuchsia.buttons.AdcButtonsMetadata");
+    if (dict_result.is_error()) {
+      fdf::error("Failed to get metadata as AdcButtonsMetadata ({}) or Dictionary ({})",
+                 metadata_result, dict_result);
+      return metadata_result.take_error();
+    }
+    auto parsed = adc_buttons::Adc_buttonsMetadata::Parse(dict_result.value());
+    if (!parsed.has_value()) {
+      fdf::error("Failed to parse AdcButtonsMetadata from Dictionary");
+      return zx::error(ZX_ERR_INTERNAL);
+    }
+    metadata = ConvertMetadata(*parsed);
   }
-  zx::result values = ParseMetadata(metadata_result.value());
+  zx::result values = ParseMetadata(metadata);
   if (values.is_error()) {
     fdf::error("Failed to parse metadata: {}", values);
     return values.take_error();

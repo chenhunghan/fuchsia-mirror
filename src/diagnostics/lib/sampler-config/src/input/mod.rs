@@ -10,7 +10,53 @@
 
 use crate::common::{EventCode, MetricId, MetricType, ProjectId};
 use fidl_fuchsia_diagnostics::Selector;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
+use std::fmt;
+
+/// An event code in an input Sampler config, specified either as its numeric code or as its
+/// name in the Cobalt registry.
+#[derive(Debug, PartialEq)]
+pub enum EventCodeSpec {
+    /// A numeric event code.
+    Code(EventCode),
+    /// The name of an event code in the Cobalt registry.
+    Name(String),
+}
+
+impl<'de> Deserialize<'de> for EventCodeSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(EventCodeSpecVisitor)
+    }
+}
+
+struct EventCodeSpecVisitor;
+
+impl<'de> de::Visitor<'de> for EventCodeSpecVisitor {
+    type Value = EventCodeSpec;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a u32 event code or an event code name string")
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        u32::try_from(value)
+            .map(|code| EventCodeSpec::Code(EventCode(code)))
+            .map_err(|_| E::custom(format!("event code {value} does not fit in a u32")))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        u32::try_from(value)
+            .map(|code| EventCodeSpec::Code(EventCode(code)))
+            .map_err(|_| E::custom(format!("event code {value} does not fit in a u32")))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(EventCodeSpec::Name(value.to_owned()))
+    }
+}
 
 /// Configuration for a single project to map Inspect data to its Cobalt metrics.
 #[derive(Deserialize, Debug, PartialEq)]
@@ -57,7 +103,7 @@ pub struct MetricConfig {
     /// match the order of the defined dimensions in the Cobalt metric file.
     /// Missing field means the same as empty list.
     #[serde(default)]
-    pub event_codes: Vec<EventCode>,
+    pub event_codes: Vec<EventCodeSpec>,
 
     /// Optional boolean specifying whether to upload the specified metric only once, the first time
     /// it becomes available to the sampler. Defaults to false.
@@ -103,7 +149,7 @@ pub struct MetricTemplate {
     /// Event codes defining the dimensions of the Cobalt metric, after the FIRE component ID
     /// dimension. Missing field means the same as empty list.
     #[serde(default)]
-    pub event_codes: Vec<EventCode>,
+    pub event_codes: Vec<EventCodeSpec>,
 
     /// Optional boolean specifying whether to upload the specified metric only once, the first time
     /// it becomes available to the sampler. Defaults to false.
@@ -141,7 +187,7 @@ mod tests {
                         metric_id: None,
                         metric_name: Some("test_occurrence".into()),
                         metric_type: MetricType::Occurrence,
-                        event_codes: vec![EventCode(1)],
+                        event_codes: vec![EventCodeSpec::Code(EventCode(1))],
                         upload_once: false,
                     }],
                 }],
@@ -172,10 +218,53 @@ mod tests {
                     metric_id: None,
                     metric_name: Some("test_fire_histogram".into()),
                     metric_type: MetricType::IntHistogram,
-                    event_codes: vec![EventCode(2)],
+                    event_codes: vec![EventCodeSpec::Code(EventCode(2))],
                     upload_once: false,
                 }],
             }
         );
+    }
+
+    #[fuchsia::test]
+    fn parse_event_codes_with_names() {
+        let json = r#"{
+            selector: "{MONIKER}:root:val",
+            metric_name: "test_fire_histogram",
+            metric_type: "IntHistogram",
+            event_codes: [1, "Failed", "3"],
+        }"#;
+        let template: MetricTemplate = serde_json5::from_str(json).expect("parse json");
+        assert_eq!(
+            template.event_codes,
+            vec![
+                EventCodeSpec::Code(EventCode(1)),
+                EventCodeSpec::Name("Failed".into()),
+                EventCodeSpec::Name("3".into()),
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    fn parse_invalid_event_codes() {
+        for (event_code, expected_error) in [
+            ("-1", "event code -1 does not fit in a u32"),
+            ("4294967296", "event code 4294967296 does not fit in a u32"),
+            ("3.5", "expected a u32 event code or an event code name string"),
+            ("true", "expected a u32 event code or an event code name string"),
+        ] {
+            let json = format!(
+                r#"{{
+                    selector: "{{MONIKER}}:root:val",
+                    metric_name: "test_fire_histogram",
+                    metric_type: "IntHistogram",
+                    event_codes: [{event_code}],
+                }}"#
+            );
+            let err = serde_json5::from_str::<MetricTemplate>(&json).unwrap_err();
+            assert!(
+                err.to_string().contains(expected_error),
+                "event code {event_code}: unexpected error: {err}"
+            );
+        }
     }
 }

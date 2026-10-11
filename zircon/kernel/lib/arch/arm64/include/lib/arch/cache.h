@@ -12,6 +12,7 @@
 #include <lib/arch/asm.h>
 #else
 #include <lib/arch/arm64/cache.h>
+#include <lib/arch/arm64/system.h>
 #include <lib/arch/intrin.h>
 
 #include <cstddef>
@@ -119,7 +120,14 @@ inline void InvalidateGlobalInstructionCache() {
 //
 // Caller must perform an instruction barrier (e.g., `__isb(ARM_MB_SY)`)
 // prior to relying on the operation being complete.
-inline void InvalidateLocalTlbs() { asm volatile("tlbi vmalle1" ::: "memory"); }
+inline void InvalidateLocalTlbs() {
+  if (ArmCurrentEl::Read().el() == 2) {
+    asm volatile("tlbi alle2" ::: "memory");
+  } else {
+    asm volatile("tlbi vmalle1" ::: "memory");
+  }
+  __dsb(ARM_MB_NSH);
+}
 
 }  // namespace arch
 

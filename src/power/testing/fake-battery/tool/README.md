@@ -41,7 +41,6 @@ Query and print current battery telemetry and power source status:
 $ fake-battery-cli get
 === Fake Battery Status ===
   Level:                98.7%
-  Charge Status:        Charging
   Health:               Good
   Temperature:          380 mC (0.4°C)
   Remaining Capacity:   382000 µAh
@@ -56,22 +55,22 @@ $ fake-battery-cli get
 
 ### `set` - Inject Simulated Telemetry
 
-#### Change Battery Level and Status
+#### Change Battery Level
 ```bash
 # Set battery to 45% discharging
-$ fake-battery-cli set --level 45.0 --status discharging --source none
+$ fake-battery-cli set --level 45.0 --source none
 
 # Set battery to 100% full on AC
-$ fake-battery-cli set --level 100.0 --status full --source ac
+$ fake-battery-cli set --level 100.0 --source ac
 ```
 
 #### Change Power Source and Electrical Metrics
 ```bash
 # Simulate USB charging with 5V and 1.5A
-$ fake-battery-cli set --source usb --status charging --voltage-mv 5000 --current-ua 1500000
+$ fake-battery-cli set --source usb --voltage-mv 5000 --current-ua 1500000
 
 # Simulate discharging under load at 3.7V and 800mA draw
-$ fake-battery-cli set --source none --status discharging --voltage-mv 3700 --current-ua -800000
+$ fake-battery-cli set --source none --voltage-mv 3700 --current-ua -800000
 ```
 
 #### Change Battery Temperature and Health
@@ -89,7 +88,7 @@ You can run automated commands directly from your host machine without entering 
 ```bash
 [host]$ ffx component explore fake-battery \
     --tools fuchsia-pkg://fuchsia.com/fake_battery_cli_pkg \
-    -c "fake-battery-cli set --level 15.0 --source none --status discharging"
+    -c "fake-battery-cli set --level 15.0 --source none"
 ```
 
 ---

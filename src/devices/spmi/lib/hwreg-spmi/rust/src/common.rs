@@ -1597,4 +1597,620 @@ mod tests {
         let data = regs.spmi.read_reg(0x30, 6).await.unwrap();
         assert_eq!(data, &[0x11, 0x22, 0x33, 0x00, 0x56, 0x78]);
     }
+
+    spmi_register! {
+        synth_u8_reg, u8, 0x60, RW, {
+            pub enum SynthU8Mode {
+                Mode0 = 0,
+                Mode1 = 1,
+                Mode2 = 2,
+                Mode3 = 3,
+            }, mode, set_mode: 2, 1;
+            pub enable, set_enable: 3;
+            pub multi, set_multi: 6, 5;
+        }
+    }
+
+    spmi_register! {
+        synth_u16_le_reg, u16, 0x62, RW, LE, {
+            pub flag_low, set_flag_low: 1;
+            pub enum SynthU16LeMode {
+                Off = 0,
+                On = 1,
+                Standby = 2,
+                Active = 3,
+            }, mode, set_mode: 5, 4;
+            pub data, set_data: 11, 8;
+            pub flag_high, set_flag_high: 14;
+        }
+    }
+
+    spmi_register! {
+        synth_u16_be_reg, u16, 0x64, RW, BE, {
+            pub flag_low, set_flag_low: 2;
+            pub enum SynthU16BeMode {
+                Alpha = 0,
+                Beta = 1,
+                Gamma = 2,
+                Delta = 3,
+            }, mode, set_mode: 6, 5;
+            pub count, set_count: 12, 9;
+            pub flag_high, set_flag_high: 15;
+        }
+    }
+
+    spmi_register! {
+        synth_u32_le_reg, u32, 0x70, RW, LE, {
+            pub flag_low, set_flag_low: 3;
+            pub enum SynthU32LeMode {
+                Zero = 0,
+                One = 1,
+                Two = 2,
+                Three = 3,
+            }, mode, set_mode: 8, 7;
+            pub range, set_range: 22, 16;
+            pub flag_high, set_flag_high: 30;
+        }
+    }
+
+    spmi_register! {
+        synth_u32_be_reg, u32, 0x74, RW, BE, {
+            pub flag_low, set_flag_low: 2;
+            pub enum SynthU32BeMode {
+                Primary = 0,
+                Secondary = 1,
+                Tertiary = 2,
+                Quaternary = 3,
+            }, mode, set_mode: 10, 9;
+            pub chunk, set_chunk: 23, 17;
+            pub flag_high, set_flag_high: 31;
+        }
+    }
+
+    spmi_register_block! {
+        pub struct SynthRegs {
+            pub u8_reg => synth_u8_reg,
+            pub u16_le_reg => synth_u16_le_reg,
+            pub u16_be_reg => synth_u16_be_reg,
+            pub u32_le_reg => synth_u32_le_reg,
+            pub u32_be_reg => synth_u32_be_reg,
+        }
+    }
+
+    // Synthetic u8 register bitmasks (fields: mode [2:1], enable [3], multi [6:5]).
+    // Reserved bits: 0, 4, 7 (mask: 0x91).
+    const U8_MODE_MASK: u8 = 0x06;
+    const U8_ENABLE_MASK: u8 = 0x08;
+    const U8_MULTI_MASK: u8 = 0x60;
+    const U8_RESERVED_MASK: u8 = !(U8_MODE_MASK | U8_ENABLE_MASK | U8_MULTI_MASK);
+    const U8_MULTI_FIELD_MASK: u8 = 0x03;
+
+    // Synthetic u16 LE register bitmasks
+    // (fields: flag_low [1], mode [5:4], data [11:8], flag_high [14]).
+    // Reserved bits: 0, 2, 3, 6, 7, 12, 13, 15 (mask: 0xB0CD).
+    const U16_LE_FLAG_LOW_MASK: u16 = 0x0002;
+    const U16_LE_MODE_MASK: u16 = 0x0030;
+    const U16_LE_DATA_MASK: u16 = 0x0F00;
+    const U16_LE_FLAG_HIGH_MASK: u16 = 0x4000;
+    const U16_LE_RESERVED_MASK: u16 =
+        !(U16_LE_FLAG_LOW_MASK | U16_LE_MODE_MASK | U16_LE_DATA_MASK | U16_LE_FLAG_HIGH_MASK);
+    const U16_LE_DATA_FIELD_MASK: u16 = 0x0F;
+
+    // Synthetic u16 BE register bitmasks
+    // (fields: flag_low [2], mode [6:5], count [12:9], flag_high [15]).
+    // Reserved bits: 0, 1, 3, 4, 7, 8, 13, 14 (mask: 0x619B).
+    const U16_BE_FLAG_LOW_MASK: u16 = 0x0004;
+    const U16_BE_MODE_MASK: u16 = 0x0060;
+    const U16_BE_COUNT_MASK: u16 = 0x1E00;
+    const U16_BE_FLAG_HIGH_MASK: u16 = 0x8000;
+    const U16_BE_RESERVED_MASK: u16 =
+        !(U16_BE_FLAG_LOW_MASK | U16_BE_MODE_MASK | U16_BE_COUNT_MASK | U16_BE_FLAG_HIGH_MASK);
+    const U16_BE_COUNT_FIELD_MASK: u16 = 0x0F;
+
+    // Synthetic u32 LE register bitmasks
+    // (fields: flag_low [3], mode [8:7], range [22:16], flag_high [30]).
+    // Reserved bits: 0..2, 4..6, 9..15, 23..29, 31 (mask: 0xBF80_FE77).
+    const U32_LE_FLAG_LOW_MASK: u32 = 0x0000_0008;
+    const U32_LE_MODE_MASK: u32 = 0x0000_0180;
+    const U32_LE_RANGE_MASK: u32 = 0x007F_0000;
+    const U32_LE_FLAG_HIGH_MASK: u32 = 0x4000_0000;
+    const U32_LE_RESERVED_MASK: u32 =
+        !(U32_LE_FLAG_LOW_MASK | U32_LE_MODE_MASK | U32_LE_RANGE_MASK | U32_LE_FLAG_HIGH_MASK);
+    const U32_LE_RANGE_FIELD_MASK: u32 = 0x7F;
+
+    // Synthetic u32 BE register bitmasks
+    // (fields: flag_low [2], mode [10:9], chunk [23:17], flag_high [31]).
+    // Reserved bits: 0..1, 3..8, 11..16, 24..30 (mask: 0x7F01_F9FB).
+    const U32_BE_FLAG_LOW_MASK: u32 = 0x0000_0004;
+    const U32_BE_MODE_MASK: u32 = 0x0000_0600;
+    const U32_BE_CHUNK_MASK: u32 = 0x00FE_0000;
+    const U32_BE_FLAG_HIGH_MASK: u32 = 0x8000_0000;
+    const U32_BE_RESERVED_MASK: u32 =
+        !(U32_BE_FLAG_LOW_MASK | U32_BE_MODE_MASK | U32_BE_CHUNK_MASK | U32_BE_FLAG_HIGH_MASK);
+    const U32_BE_CHUNK_FIELD_MASK: u32 = 0x7F;
+
+    // Background patterns for bitfield isolation tests.
+    const U8_ALTERNATING_BITS_HIGH: u8 = 0xAA;
+    const U8_ALTERNATING_BITS_LOW: u8 = 0x55;
+    const U8_TEST_PATTERNS: [u8; 4] =
+        [u8::MIN, u8::MAX, U8_ALTERNATING_BITS_HIGH, U8_ALTERNATING_BITS_LOW];
+
+    const U16_ALTERNATING_BITS_HIGH: u16 = 0xAAAA;
+    const U16_ALTERNATING_BITS_LOW: u16 = 0x5555;
+    const U16_TEST_PATTERNS: [u16; 4] =
+        [u16::MIN, u16::MAX, U16_ALTERNATING_BITS_HIGH, U16_ALTERNATING_BITS_LOW];
+
+    const U32_ALTERNATING_BITS_HIGH: u32 = 0xAAAA_AAAA;
+    const U32_ALTERNATING_BITS_LOW: u32 = 0x5555_5555;
+    const U32_TEST_PATTERNS: [u32; 4] =
+        [u32::MIN, u32::MAX, U32_ALTERNATING_BITS_HIGH, U32_ALTERNATING_BITS_LOW];
+
+    // Register byte lengths for SPMI read operations.
+    const U8_REG_BYTES: u32 = std::mem::size_of::<u8>() as u32;
+    const U16_REG_BYTES: u32 = std::mem::size_of::<u16>() as u32;
+    const U32_REG_BYTES: u32 = std::mem::size_of::<u32>() as u32;
+
+    // Verifies bitfield isolation, field mutators, and reserved bit preservation for u8 registers.
+    #[test]
+    fn test_bitfield_isolation_and_reserved_bits_u8() {
+        assert_eq!(U8_RESERVED_MASK | U8_ENABLE_MASK | U8_MULTI_MASK | U8_MODE_MASK, u8::MAX);
+
+        let u8_chained_multi = 2;
+
+        for &base in &U8_TEST_PATTERNS {
+            let v = synth_u8_reg::Value::new(base);
+            let reserved = base & U8_RESERVED_MASK;
+
+            let v_en = v.set_enable(!v.enable());
+            assert_eq!(v_en.enable(), !v.enable());
+            assert_eq!(v_en.reg_value() & U8_RESERVED_MASK, reserved);
+            assert_eq!(v_en.multi(), v.multi());
+            assert_eq!(v_en.mode(), v.mode());
+            assert_eq!(v_en.reg_value() ^ v.reg_value(), U8_ENABLE_MASK);
+
+            let new_multi = (v.multi() + 1) & U8_MULTI_FIELD_MASK;
+            let v_multi = v.set_multi(new_multi);
+            assert_eq!(v_multi.multi(), new_multi);
+            assert_eq!(v_multi.reg_value() & U8_RESERVED_MASK, reserved);
+            assert_eq!(v_multi.enable(), v.enable());
+            assert_eq!(v_multi.mode(), v.mode());
+            assert_eq!((v_multi.reg_value() ^ v.reg_value()) & !U8_MULTI_MASK, 0);
+
+            let new_mode = synth_u8_reg::SynthU8Mode::Mode2;
+            let v_mode = v.set_mode(new_mode);
+            assert_eq!(v_mode.mode(), Ok(new_mode));
+            assert_eq!(v_mode.reg_value() & U8_RESERVED_MASK, reserved);
+            assert_eq!(v_mode.enable(), v.enable());
+            assert_eq!(v_mode.multi(), v.multi());
+            assert_eq!((v_mode.reg_value() ^ v.reg_value()) & !U8_MODE_MASK, 0);
+
+            let v_chained = v
+                .set_enable(true)
+                .set_multi(u8_chained_multi)
+                .set_mode(synth_u8_reg::SynthU8Mode::Mode1);
+            assert!(v_chained.enable());
+            assert_eq!(v_chained.multi(), u8_chained_multi);
+            assert_eq!(v_chained.mode(), Ok(synth_u8_reg::SynthU8Mode::Mode1));
+            assert_eq!(v_chained.reg_value() & U8_RESERVED_MASK, reserved);
+        }
+    }
+
+    // Verifies bitfield isolation, field mutators, and reserved bit preservation for u16 registers.
+    #[test]
+    fn test_bitfield_isolation_and_reserved_bits_u16() {
+        // 1. Little-endian u16 register
+        assert_eq!(
+            U16_LE_RESERVED_MASK
+                | U16_LE_FLAG_LOW_MASK
+                | U16_LE_MODE_MASK
+                | U16_LE_DATA_MASK
+                | U16_LE_FLAG_HIGH_MASK,
+            u16::MAX
+        );
+
+        let u16_le_chained_data = 0x7;
+
+        for &base in &U16_TEST_PATTERNS {
+            let v = synth_u16_le_reg::Value::new(base);
+            let reserved = base & U16_LE_RESERVED_MASK;
+
+            let v_fl = v.set_flag_low(!v.flag_low());
+            assert_eq!(v_fl.flag_low(), !v.flag_low());
+            assert_eq!(v_fl.reg_value() & U16_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_fl.mode(), v.mode());
+            assert_eq!(v_fl.data(), v.data());
+            assert_eq!(v_fl.flag_high(), v.flag_high());
+            assert_eq!(v_fl.reg_value() ^ v.reg_value(), U16_LE_FLAG_LOW_MASK);
+
+            let new_mode = synth_u16_le_reg::SynthU16LeMode::Active;
+            let v_mode = v.set_mode(new_mode);
+            assert_eq!(v_mode.mode(), Ok(new_mode));
+            assert_eq!(v_mode.reg_value() & U16_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_mode.flag_low(), v.flag_low());
+            assert_eq!(v_mode.data(), v.data());
+            assert_eq!(v_mode.flag_high(), v.flag_high());
+            assert_eq!((v_mode.reg_value() ^ v.reg_value()) & !U16_LE_MODE_MASK, 0);
+
+            let new_data = (v.data() + 1) & U16_LE_DATA_FIELD_MASK;
+            let v_data = v.set_data(new_data);
+            assert_eq!(v_data.data(), new_data);
+            assert_eq!(v_data.reg_value() & U16_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_data.flag_low(), v.flag_low());
+            assert_eq!(v_data.mode(), v.mode());
+            assert_eq!(v_data.flag_high(), v.flag_high());
+            assert_eq!((v_data.reg_value() ^ v.reg_value()) & !U16_LE_DATA_MASK, 0);
+
+            let v_fh = v.set_flag_high(!v.flag_high());
+            assert_eq!(v_fh.flag_high(), !v.flag_high());
+            assert_eq!(v_fh.reg_value() & U16_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_fh.flag_low(), v.flag_low());
+            assert_eq!(v_fh.mode(), v.mode());
+            assert_eq!(v_fh.data(), v.data());
+            assert_eq!(v_fh.reg_value() ^ v.reg_value(), U16_LE_FLAG_HIGH_MASK);
+
+            let v_chained = v
+                .set_flag_low(true)
+                .set_mode(synth_u16_le_reg::SynthU16LeMode::Standby)
+                .set_data(u16_le_chained_data)
+                .set_flag_high(false);
+            assert!(v_chained.flag_low());
+            assert_eq!(v_chained.mode(), Ok(synth_u16_le_reg::SynthU16LeMode::Standby));
+            assert_eq!(v_chained.data(), u16_le_chained_data);
+            assert!(!v_chained.flag_high());
+            assert_eq!(v_chained.reg_value() & U16_LE_RESERVED_MASK, reserved);
+        }
+
+        // 2. Big-endian u16 register
+        assert_eq!(
+            U16_BE_RESERVED_MASK
+                | U16_BE_FLAG_LOW_MASK
+                | U16_BE_MODE_MASK
+                | U16_BE_COUNT_MASK
+                | U16_BE_FLAG_HIGH_MASK,
+            u16::MAX
+        );
+
+        let u16_be_chained_count = 0xC;
+
+        for &base in &U16_TEST_PATTERNS {
+            let v = synth_u16_be_reg::Value::new(base);
+            let reserved = base & U16_BE_RESERVED_MASK;
+
+            let v_fl = v.set_flag_low(!v.flag_low());
+            assert_eq!(v_fl.flag_low(), !v.flag_low());
+            assert_eq!(v_fl.reg_value() & U16_BE_RESERVED_MASK, reserved);
+            assert_eq!(v_fl.reg_value() ^ v.reg_value(), U16_BE_FLAG_LOW_MASK);
+
+            let new_mode = synth_u16_be_reg::SynthU16BeMode::Gamma;
+            let v_mode = v.set_mode(new_mode);
+            assert_eq!(v_mode.mode(), Ok(new_mode));
+            assert_eq!(v_mode.reg_value() & U16_BE_RESERVED_MASK, reserved);
+            assert_eq!((v_mode.reg_value() ^ v.reg_value()) & !U16_BE_MODE_MASK, 0);
+
+            let new_count = (v.count() + 1) & U16_BE_COUNT_FIELD_MASK;
+            let v_count = v.set_count(new_count);
+            assert_eq!(v_count.count(), new_count);
+            assert_eq!(v_count.reg_value() & U16_BE_RESERVED_MASK, reserved);
+            assert_eq!((v_count.reg_value() ^ v.reg_value()) & !U16_BE_COUNT_MASK, 0);
+
+            let v_fh = v.set_flag_high(!v.flag_high());
+            assert_eq!(v_fh.flag_high(), !v.flag_high());
+            assert_eq!(v_fh.reg_value() & U16_BE_RESERVED_MASK, reserved);
+            assert_eq!(v_fh.reg_value() ^ v.reg_value(), U16_BE_FLAG_HIGH_MASK);
+
+            let v_chained = v
+                .set_flag_low(false)
+                .set_mode(synth_u16_be_reg::SynthU16BeMode::Beta)
+                .set_count(u16_be_chained_count)
+                .set_flag_high(true);
+            assert!(!v_chained.flag_low());
+            assert_eq!(v_chained.mode(), Ok(synth_u16_be_reg::SynthU16BeMode::Beta));
+            assert_eq!(v_chained.count(), u16_be_chained_count);
+            assert!(v_chained.flag_high());
+            assert_eq!(v_chained.reg_value() & U16_BE_RESERVED_MASK, reserved);
+        }
+    }
+
+    // Verifies bitfield isolation, field mutators, and reserved bit preservation for u32 registers.
+    #[test]
+    fn test_bitfield_isolation_and_reserved_bits_u32() {
+        // 1. Little-endian u32 register
+        assert_eq!(
+            U32_LE_RESERVED_MASK
+                | U32_LE_FLAG_LOW_MASK
+                | U32_LE_MODE_MASK
+                | U32_LE_RANGE_MASK
+                | U32_LE_FLAG_HIGH_MASK,
+            u32::MAX
+        );
+
+        let u32_le_chained_range = 0x3B;
+
+        for &base in &U32_TEST_PATTERNS {
+            let v = synth_u32_le_reg::Value::new(base);
+            let reserved = base & U32_LE_RESERVED_MASK;
+
+            let v_fl = v.set_flag_low(!v.flag_low());
+            assert_eq!(v_fl.flag_low(), !v.flag_low());
+            assert_eq!(v_fl.reg_value() & U32_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_fl.mode(), v.mode());
+            assert_eq!(v_fl.range(), v.range());
+            assert_eq!(v_fl.flag_high(), v.flag_high());
+            assert_eq!(v_fl.reg_value() ^ v.reg_value(), U32_LE_FLAG_LOW_MASK);
+
+            let new_mode = synth_u32_le_reg::SynthU32LeMode::Two;
+            let v_mode = v.set_mode(new_mode);
+            assert_eq!(v_mode.mode(), Ok(new_mode));
+            assert_eq!(v_mode.reg_value() & U32_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_mode.flag_low(), v.flag_low());
+            assert_eq!(v_mode.range(), v.range());
+            assert_eq!(v_mode.flag_high(), v.flag_high());
+            assert_eq!((v_mode.reg_value() ^ v.reg_value()) & !U32_LE_MODE_MASK, 0);
+
+            let new_range = (v.range() + 1) & U32_LE_RANGE_FIELD_MASK;
+            let v_range = v.set_range(new_range);
+            assert_eq!(v_range.range(), new_range);
+            assert_eq!(v_range.reg_value() & U32_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_range.flag_low(), v.flag_low());
+            assert_eq!(v_range.mode(), v.mode());
+            assert_eq!(v_range.flag_high(), v.flag_high());
+            assert_eq!((v_range.reg_value() ^ v.reg_value()) & !U32_LE_RANGE_MASK, 0);
+
+            let v_fh = v.set_flag_high(!v.flag_high());
+            assert_eq!(v_fh.flag_high(), !v.flag_high());
+            assert_eq!(v_fh.reg_value() & U32_LE_RESERVED_MASK, reserved);
+            assert_eq!(v_fh.flag_low(), v.flag_low());
+            assert_eq!(v_fh.mode(), v.mode());
+            assert_eq!(v_fh.range(), v.range());
+            assert_eq!(v_fh.reg_value() ^ v.reg_value(), U32_LE_FLAG_HIGH_MASK);
+
+            let v_chained = v
+                .set_flag_low(true)
+                .set_mode(synth_u32_le_reg::SynthU32LeMode::Three)
+                .set_range(u32_le_chained_range)
+                .set_flag_high(false);
+            assert!(v_chained.flag_low());
+            assert_eq!(v_chained.mode(), Ok(synth_u32_le_reg::SynthU32LeMode::Three));
+            assert_eq!(v_chained.range(), u32_le_chained_range);
+            assert!(!v_chained.flag_high());
+            assert_eq!(v_chained.reg_value() & U32_LE_RESERVED_MASK, reserved);
+        }
+
+        // 2. Big-endian u32 register
+        assert_eq!(
+            U32_BE_RESERVED_MASK
+                | U32_BE_FLAG_LOW_MASK
+                | U32_BE_MODE_MASK
+                | U32_BE_CHUNK_MASK
+                | U32_BE_FLAG_HIGH_MASK,
+            u32::MAX
+        );
+
+        let u32_be_chained_chunk = 0x6E;
+
+        for &base in &U32_TEST_PATTERNS {
+            let v = synth_u32_be_reg::Value::new(base);
+            let reserved = base & U32_BE_RESERVED_MASK;
+
+            let v_fl = v.set_flag_low(!v.flag_low());
+            assert_eq!(v_fl.flag_low(), !v.flag_low());
+            assert_eq!(v_fl.reg_value() & U32_BE_RESERVED_MASK, reserved);
+            assert_eq!(v_fl.reg_value() ^ v.reg_value(), U32_BE_FLAG_LOW_MASK);
+
+            let new_mode = synth_u32_be_reg::SynthU32BeMode::Quaternary;
+            let v_mode = v.set_mode(new_mode);
+            assert_eq!(v_mode.mode(), Ok(new_mode));
+            assert_eq!(v_mode.reg_value() & U32_BE_RESERVED_MASK, reserved);
+            assert_eq!((v_mode.reg_value() ^ v.reg_value()) & !U32_BE_MODE_MASK, 0);
+
+            let new_chunk = (v.chunk() + 1) & U32_BE_CHUNK_FIELD_MASK;
+            let v_chunk = v.set_chunk(new_chunk);
+            assert_eq!(v_chunk.chunk(), new_chunk);
+            assert_eq!(v_chunk.reg_value() & U32_BE_RESERVED_MASK, reserved);
+            assert_eq!((v_chunk.reg_value() ^ v.reg_value()) & !U32_BE_CHUNK_MASK, 0);
+
+            let v_fh = v.set_flag_high(!v.flag_high());
+            assert_eq!(v_fh.flag_high(), !v.flag_high());
+            assert_eq!(v_fh.reg_value() & U32_BE_RESERVED_MASK, reserved);
+            assert_eq!(v_fh.reg_value() ^ v.reg_value(), U32_BE_FLAG_HIGH_MASK);
+
+            let v_chained = v
+                .set_flag_low(false)
+                .set_mode(synth_u32_be_reg::SynthU32BeMode::Secondary)
+                .set_chunk(u32_be_chained_chunk)
+                .set_flag_high(true);
+            assert!(!v_chained.flag_low());
+            assert_eq!(v_chained.mode(), Ok(synth_u32_be_reg::SynthU32BeMode::Secondary));
+            assert_eq!(v_chained.chunk(), u32_be_chained_chunk);
+            assert!(v_chained.flag_high());
+            assert_eq!(v_chained.reg_value() & U32_BE_RESERVED_MASK, reserved);
+        }
+    }
+
+    // Verifies read-modify-write over SPMI preserves unmapped and reserved bits in LE registers.
+    #[fuchsia::test]
+    async fn test_spmi_read_modify_write_preserves_reserved_bits_le() {
+        let device = TestSpmiDevice::new();
+        let regs = SynthRegs::new(device);
+
+        // 1. Test u8 register with complementary seeds (verifies 0 and 1 bit preservation).
+        let u8_write_multi = 3;
+        for u8_reserved_seed in [
+            U8_RESERVED_MASK & U8_ALTERNATING_BITS_HIGH,
+            U8_RESERVED_MASK & U8_ALTERNATING_BITS_LOW,
+        ] {
+            // Verify the seed has a non-trivial mixture of 0 and 1 bits.
+            assert!(u8_reserved_seed != 0 && u8_reserved_seed != U8_RESERVED_MASK);
+
+            regs.spmi.write_reg(synth_u8_reg::ADDRESS, &[u8_reserved_seed]).await.unwrap();
+            let val_u8 = regs.u8_reg().read().await.unwrap();
+            let updated_u8 = val_u8
+                .set_enable(true)
+                .set_multi(u8_write_multi)
+                .set_mode(synth_u8_reg::SynthU8Mode::Mode1);
+            regs.u8_reg().write(updated_u8).await.unwrap();
+
+            let raw_u8 = regs.spmi.read_reg(synth_u8_reg::ADDRESS, U8_REG_BYTES).await.unwrap()[0];
+            assert_eq!(
+                raw_u8 & U8_RESERVED_MASK,
+                u8_reserved_seed,
+                "u8 reserved bits mismatch for seed {u8_reserved_seed:#04x}"
+            );
+            let final_u8 = regs.u8_reg().read().await.unwrap();
+            assert!(final_u8.enable());
+            assert_eq!(final_u8.multi(), u8_write_multi);
+            assert_eq!(final_u8.mode(), Ok(synth_u8_reg::SynthU8Mode::Mode1));
+        }
+
+        // 2. Test u16 LE register with complementary seeds (verifies 0 and 1 bit preservation).
+        let u16_le_write_data = 0x9;
+        for u16_le_reserved_seed in [
+            U16_LE_RESERVED_MASK & U16_ALTERNATING_BITS_HIGH,
+            U16_LE_RESERVED_MASK & U16_ALTERNATING_BITS_LOW,
+        ] {
+            // Verify the seed has a non-trivial mixture of 0 and 1 bits.
+            assert!(u16_le_reserved_seed != 0 && u16_le_reserved_seed != U16_LE_RESERVED_MASK);
+
+            regs.spmi
+                .write_reg(synth_u16_le_reg::ADDRESS, &u16_le_reserved_seed.to_le_bytes())
+                .await
+                .unwrap();
+            let val_u16 = regs.u16_le_reg().read().await.unwrap();
+            let updated_u16 = val_u16
+                .set_flag_low(true)
+                .set_flag_high(true)
+                .set_data(u16_le_write_data)
+                .set_mode(synth_u16_le_reg::SynthU16LeMode::Active);
+            regs.u16_le_reg().write(updated_u16).await.unwrap();
+
+            let raw_u16_bytes =
+                regs.spmi.read_reg(synth_u16_le_reg::ADDRESS, U16_REG_BYTES).await.unwrap();
+            let raw_u16 = u16::from_le_bytes(raw_u16_bytes.try_into().unwrap());
+            assert_eq!(
+                raw_u16 & U16_LE_RESERVED_MASK,
+                u16_le_reserved_seed,
+                "u16 LE reserved bits mismatch for seed {u16_le_reserved_seed:#06x}"
+            );
+            let final_u16 = regs.u16_le_reg().read().await.unwrap();
+            assert!(final_u16.flag_low());
+            assert!(final_u16.flag_high());
+            assert_eq!(final_u16.data(), u16_le_write_data);
+            assert_eq!(final_u16.mode(), Ok(synth_u16_le_reg::SynthU16LeMode::Active));
+        }
+
+        // 3. Test u32 LE register with complementary seeds (verifies 0 and 1 bit preservation).
+        let u32_le_write_range = 0x42;
+        for u32_le_reserved_seed in [
+            U32_LE_RESERVED_MASK & U32_ALTERNATING_BITS_HIGH,
+            U32_LE_RESERVED_MASK & U32_ALTERNATING_BITS_LOW,
+        ] {
+            // Verify the seed has a non-trivial mixture of 0 and 1 bits.
+            assert!(u32_le_reserved_seed != 0 && u32_le_reserved_seed != U32_LE_RESERVED_MASK);
+
+            regs.spmi
+                .write_reg(synth_u32_le_reg::ADDRESS, &u32_le_reserved_seed.to_le_bytes())
+                .await
+                .unwrap();
+            let val_u32 = regs.u32_le_reg().read().await.unwrap();
+            let updated_u32 = val_u32
+                .set_flag_low(true)
+                .set_flag_high(true)
+                .set_range(u32_le_write_range)
+                .set_mode(synth_u32_le_reg::SynthU32LeMode::Two);
+            regs.u32_le_reg().write(updated_u32).await.unwrap();
+
+            let raw_u32_bytes =
+                regs.spmi.read_reg(synth_u32_le_reg::ADDRESS, U32_REG_BYTES).await.unwrap();
+            let raw_u32 = u32::from_le_bytes(raw_u32_bytes.try_into().unwrap());
+            assert_eq!(
+                raw_u32 & U32_LE_RESERVED_MASK,
+                u32_le_reserved_seed,
+                "u32 LE reserved bits mismatch for seed {u32_le_reserved_seed:#010x}"
+            );
+            let final_u32 = regs.u32_le_reg().read().await.unwrap();
+            assert!(final_u32.flag_low());
+            assert!(final_u32.flag_high());
+            assert_eq!(final_u32.range(), u32_le_write_range);
+            assert_eq!(final_u32.mode(), Ok(synth_u32_le_reg::SynthU32LeMode::Two));
+        }
+    }
+
+    // Verifies read-modify-write over SPMI preserves unmapped and reserved bits in BE registers.
+    #[fuchsia::test]
+    async fn test_spmi_read_modify_write_preserves_reserved_bits_be() {
+        let device = TestSpmiDevice::new();
+        let regs = SynthRegs::new(device);
+
+        // 1. Test u16 BE register with complementary seeds (verifies 0 and 1 bit preservation).
+        let u16_be_write_count = 0xB;
+        for u16_be_reserved_seed in [
+            U16_BE_RESERVED_MASK & U16_ALTERNATING_BITS_HIGH,
+            U16_BE_RESERVED_MASK & U16_ALTERNATING_BITS_LOW,
+        ] {
+            // Verify the seed has a non-trivial mixture of 0 and 1 bits.
+            assert!(u16_be_reserved_seed != 0 && u16_be_reserved_seed != U16_BE_RESERVED_MASK);
+
+            regs.spmi
+                .write_reg(synth_u16_be_reg::ADDRESS, &u16_be_reserved_seed.to_be_bytes())
+                .await
+                .unwrap();
+            let val_u16 = regs.u16_be_reg().read().await.unwrap();
+            let updated_u16 = val_u16
+                .set_flag_low(true)
+                .set_flag_high(true)
+                .set_count(u16_be_write_count)
+                .set_mode(synth_u16_be_reg::SynthU16BeMode::Delta);
+            regs.u16_be_reg().write(updated_u16).await.unwrap();
+
+            let raw_u16_bytes =
+                regs.spmi.read_reg(synth_u16_be_reg::ADDRESS, U16_REG_BYTES).await.unwrap();
+            let raw_u16 = u16::from_be_bytes(raw_u16_bytes.try_into().unwrap());
+            assert_eq!(
+                raw_u16 & U16_BE_RESERVED_MASK,
+                u16_be_reserved_seed,
+                "u16 BE reserved bits mismatch for seed {u16_be_reserved_seed:#06x}"
+            );
+            let final_u16 = regs.u16_be_reg().read().await.unwrap();
+            assert!(final_u16.flag_low());
+            assert!(final_u16.flag_high());
+            assert_eq!(final_u16.count(), u16_be_write_count);
+            assert_eq!(final_u16.mode(), Ok(synth_u16_be_reg::SynthU16BeMode::Delta));
+        }
+
+        // 2. Test u32 BE register with complementary seeds (verifies 0 and 1 bit preservation).
+        let u32_be_write_chunk = 0x55;
+        for u32_be_reserved_seed in [
+            U32_BE_RESERVED_MASK & U32_ALTERNATING_BITS_HIGH,
+            U32_BE_RESERVED_MASK & U32_ALTERNATING_BITS_LOW,
+        ] {
+            // Verify the seed has a non-trivial mixture of 0 and 1 bits.
+            assert!(u32_be_reserved_seed != 0 && u32_be_reserved_seed != U32_BE_RESERVED_MASK);
+
+            regs.spmi
+                .write_reg(synth_u32_be_reg::ADDRESS, &u32_be_reserved_seed.to_be_bytes())
+                .await
+                .unwrap();
+            let val_u32 = regs.u32_be_reg().read().await.unwrap();
+            let updated_u32 = val_u32
+                .set_flag_low(true)
+                .set_flag_high(true)
+                .set_chunk(u32_be_write_chunk)
+                .set_mode(synth_u32_be_reg::SynthU32BeMode::Tertiary);
+            regs.u32_be_reg().write(updated_u32).await.unwrap();
+
+            let raw_u32_bytes =
+                regs.spmi.read_reg(synth_u32_be_reg::ADDRESS, U32_REG_BYTES).await.unwrap();
+            let raw_u32 = u32::from_be_bytes(raw_u32_bytes.try_into().unwrap());
+            assert_eq!(
+                raw_u32 & U32_BE_RESERVED_MASK,
+                u32_be_reserved_seed,
+                "u32 BE reserved bits mismatch for seed {u32_be_reserved_seed:#010x}"
+            );
+            let final_u32 = regs.u32_be_reg().read().await.unwrap();
+            assert!(final_u32.flag_low());
+            assert!(final_u32.flag_high());
+            assert_eq!(final_u32.chunk(), u32_be_write_chunk);
+            assert_eq!(final_u32.mode(), Ok(synth_u32_be_reg::SynthU32BeMode::Tertiary));
+        }
+    }
 }

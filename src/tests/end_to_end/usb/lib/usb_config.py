@@ -14,26 +14,76 @@ import asyncio
 import collections.abc
 import concurrent.futures
 import inspect
+import itertools
 import json
 import logging
 import re
 import shlex
-import time
 from typing import Any
 
 from honeydew import errors as honeydew_errors
 from honeydew.fuchsia_device import fuchsia_device
-from honeydew.transports.serial import errors as serial_errors
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _DONE_TOKEN: str = "[usb-cli:DONE]"
 _ERROR_TOKEN: str = "[usb-cli:ERROR]"
 _IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
 
-# How many consecutive failing serial reads to tolerate before giving up on
-# capturing console output. Each failing read costs ~1s (Honeydew's internal
-# socket timeout).
-_MAX_SERIAL_READ_FAILURES: int = 3
+GOOGLE_USB_VID: int = 0x18D1
+
+# Expected USB PID for each subset of functions (e.g. `cdc,adb` and `adb,cdc`
+# share 0xa026; build_config_matrix still tests every ordering).
+FUNCTION_PIDS: dict[frozenset[str], int] = {
+    frozenset({"cdc"}): 0xA020,
+    frozenset({"adb"}): 0xA025,
+    frozenset({"vsock"}): 0xA028,
+    frozenset({"cdc", "adb"}): 0xA026,
+    frozenset({"cdc", "vsock"}): 0xA029,
+    frozenset({"adb", "vsock"}): 0xA02A,
+    frozenset({"cdc", "adb", "vsock"}): 0xA02B,
+}
+
+# Class/subclass/protocol of each function's interfaces, as the host sees them.
+FUNCTION_INTERFACES: dict[str, list[str]] = {
+    "cdc": ["02/06/00", "0a/00/00"],  # Communication and data interfaces.
+    "adb": ["ff/42/01"],
+    "vsock": ["ff/43/00"],
+}
+
+# A kernel log line on the serial console, e.g.
+# "[00024.593] 15009:35497> [driver, usb-phy] INFO: ...". The kernel can print
+# one in the middle of a line of command output, so drop its newline too.
+KERNEL_LOG_RE: re.Pattern[str] = re.compile(r"\[\d+\.\d+\] \d+:\d+>[^\n]*\n?")
+
+
+def build_config_matrix(functions: list[str]) -> list[list[str]]:
+    """Returns every non-empty subset of `functions`, in every order."""
+    return [
+        list(p)
+        for k in range(1, len(functions) + 1)  # Subset size: 1, 2, ..., n.
+        for p in itertools.permutations(functions, k)  # Ordered picks of k.
+    ]
+
+
+def parse_get_config(output: str) -> dict[str, Any] | None:
+    """Returns the JSON object that `usb-cli get-config` printed, if any.
+
+    The serial console also echoes the command and interleaves kernel log
+    lines, even inside the JSON. So drop the log lines, then try each `{`
+    until one starts an object with "configurations".
+    """
+    output = KERNEL_LOG_RE.sub("", output)
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(output):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(output, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and "configurations" in value:
+            return value
+    return None
 
 
 def _invoke_maybe_async(
@@ -250,44 +300,14 @@ def _send_serial_command(
         return None
 
     try:
-        serial.send(cmd.strip())
+        output = serial.send_and_recv(
+            cmd=cmd.strip(),
+            stop_tokens=(_DONE_TOKEN, _ERROR_TOKEN),
+            timeout_sec=timeout_sec,
+        )
     except (honeydew_errors.HoneydewError, OSError) as e:
         _LOGGER.warning("Failed dispatching serial command %r: %s", cmd, e)
         return None
-
-    # Honeydew's read() opens a fresh connection, performs a single recv with a
-    # 1s timeout, and raises SerialError when nothing arrives in that window.
-    # It is also comparatively expensive (each call forks a liveness-check
-    # process), so poll conservatively and stop as soon as the console goes
-    # quiet. Depending on how the serial server is configured a read may also
-    # replay a buffer it has already served, so duplicate content ends the
-    # poll too.
-    output = ""
-    previous_chunk: str | None = None
-    consecutive_failures = 0
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() < deadline:
-        try:
-            chunk = serial.read()
-        except (serial_errors.SerialError, OSError) as e:
-            consecutive_failures += 1
-            _LOGGER.debug("Serial read failed while awaiting %r: %s", cmd, e)
-            # Stop once consecutive timeouts indicate nothing more is coming.
-            # Deliberately do not break merely because `output` is non-empty,
-            # since the console almost always echoes the command immediately
-            # while the [usb-cli:DONE] token takes another second to arrive.
-            if consecutive_failures >= _MAX_SERIAL_READ_FAILURES:
-                break
-            continue
-        consecutive_failures = 0
-        if chunk:
-            if chunk == previous_chunk:
-                break
-            previous_chunk = chunk
-            output += chunk
-            if _DONE_TOKEN in output or _ERROR_TOKEN in output:
-                break
-        time.sleep(0.25)
 
     _LOGGER.info(
         "Dispatched serial command %r; console output: %s",

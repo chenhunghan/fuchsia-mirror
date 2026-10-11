@@ -272,7 +272,7 @@ zx_koid_t FindParentView(const size_t index, const zx_koid_t view_ref_koid, cons
 // how view bounds, null/infinitely small bounds, and hit-testing interact.
 view_tree::BoundingBox ComputeBoundingBox(
     const TransformHandle transform_handle, const UberStruct::InstanceMap& uber_structs,
-    const std::unordered_map<TransformHandle, TransformHandle>& child_to_parent_transform_map) {
+    const GlobalTopologyData::ChildToParentTransformMap& child_to_parent_transform_map) {
   constexpr view_tree::BoundingBox kEmptyBox{.min = {0, 0}, .max = {0, 0}};
 
   // LLM Style Note: the previous version of this code used nested if-statements, more difficult for
@@ -326,14 +326,12 @@ struct ViewTreeData {
 
 // Computes and returns the ViewTree plus a list of implicit anonymous views (named views that are
 // part of an anonymous subtree) based on GlobalTopologyData.
-ViewTreeData ComputeViewTree(const zx_koid_t root, const size_t root_index,
-                             const GlobalTopologyData::TopologyVector& topology_vector,
-                             const GlobalTopologyData::ParentIndexVector& parent_indices,
-                             const ViewRefMap& view_refs,
-                             const UberStruct::InstanceMap& uber_structs,
-                             const std::vector<glm::mat3>& global_matrix_vector,
-                             const std::unordered_map<TransformHandle, TransformHandle>&
-                                 link_child_to_parent_transform_map) {
+ViewTreeData ComputeViewTree(
+    const zx_koid_t root, const size_t root_index,
+    const GlobalTopologyData::TopologyVector& topology_vector,
+    const GlobalTopologyData::ParentIndexVector& parent_indices, const ViewRefMap& view_refs,
+    const UberStruct::InstanceMap& uber_structs, const std::vector<glm::mat3>& global_matrix_vector,
+    const GlobalTopologyData::ChildToParentTransformMap& link_child_to_parent_transform_map) {
   TRACE_DURATION("gfx", "flatland::ComputeViewTree");
   ViewTreeData output;
   for (size_t i = root_index; i < topology_vector.size(); ++i) {
@@ -399,10 +397,6 @@ void GlobalTopologyData::Clear() {
   }
 }
 
-bool GlobalTopologyData::IsCleared() const {
-  return topology_vector.empty() && parent_indices.empty();
-}
-
 // static
 GlobalTopologyData GlobalTopologyData::ComputeGlobalTopologyData(
     const UberStruct::InstanceMap& uber_structs, const LinkTopologyMap& links,
@@ -419,7 +413,7 @@ void GlobalTopologyData::ComputeGlobalTopologyData(GlobalTopologyData& output,
                                                    TransformHandle::InstanceId link_instance_id,
                                                    TransformHandle root) {
   TRACE_DURATION("gfx", "flatland::ComputeGlobalTopologyData");
-  FX_DCHECK(output.IsCleared());
+  output.Clear();
   // There should never be an UberStruct for the |link_instance_id|.
   FX_DCHECK(!uber_structs.contains(link_instance_id));
 
@@ -607,8 +601,7 @@ std::unique_ptr<view_tree::SubtreeSnapshot> GlobalTopologyData::GenerateViewTree
     const GlobalTopologyData& data, const UberStruct::InstanceMap& uber_structs,
     HitRegions hit_regions, std::vector<TransformClipRegion> global_clip_regions,
     const std::vector<glm::mat3>& global_matrix_vector,
-    const std::unordered_map<TransformHandle, TransformHandle>&
-        link_child_to_parent_transform_map) {
+    const ChildToParentTransformMap& link_child_to_parent_transform_map) {
   TRACE_DURATION("gfx", "flatland::GenerateViewTreeSnapshot");
 
   // Compute the view_refs map on demand from uber_structs.

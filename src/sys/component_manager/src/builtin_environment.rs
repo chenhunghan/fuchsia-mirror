@@ -107,13 +107,6 @@ use vfs::execution_scope::ExecutionScope;
 use vfs::path::Path;
 use zx::{self, Resource};
 
-#[cfg(feature = "tracing")]
-use {
-    cm_config::TraceProvider,
-    fidl::endpoints::{self},
-    fidl_fuchsia_tracing_provider as ftp,
-};
-
 // Allow shutdown to take up to an hour.
 pub static SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
@@ -468,9 +461,6 @@ pub struct BuiltinEnvironment {
     // Keeps the inspect node alive.
     _component_escrow_duration_status: Arc<::diagnostics::escrow::DurationStats>,
     pub debug: bool,
-    // Where to look for the trace provider
-    #[cfg(feature = "tracing")]
-    pub trace_provider: TraceProvider,
     // TODO(https://fxbug.dev/332389972): Remove or explain #[allow(dead_code)].
     #[allow(dead_code)]
     pub num_threads: u8,
@@ -500,8 +490,6 @@ impl BuiltinEnvironment {
         scope: ExecutionScope,
     ) -> Result<BuiltinEnvironment, Error> {
         let debug = runtime_config.debug;
-        #[cfg(feature = "tracing")]
-        let trace_provider = runtime_config.trace_provider.clone();
 
         let num_threads = runtime_config.num_threads.clone();
         let top_instance = params.top_instance.clone();
@@ -740,8 +728,6 @@ impl BuiltinEnvironment {
             _component_lifecycle_time_stats: component_lifecycle_time_stats,
             _component_escrow_duration_status: component_escrow_duration_status,
             debug,
-            #[cfg(feature = "tracing")]
-            trace_provider,
             num_threads,
             realm_builder_resolver,
             capability_passthrough,
@@ -921,41 +907,13 @@ impl BuiltinEnvironment {
 
         self.model.start().await;
         component::health().set_ok();
-        #[cfg(feature = "tracing")]
-        if self.trace_provider == TraceProvider::RootExposed {
-            self.connect_to_tracing_from_exposed().await;
-        }
+
         self.wait_for_root_stop().await;
 
         // Stop serving the out directory, so that more connections to debug capabilities
         // cannot be made.
         drop(self._service_fs_task.take());
         Ok(())
-    }
-
-    /// Obtains a connection to tracing, and initializes tracing
-    #[cfg(feature = "tracing")]
-    async fn connect_to_tracing_from_exposed(&self) {
-        let (client_end, server) = endpoints::create_endpoints::<ftp::RegistryMarker>();
-        let root = self.model.root();
-        const FLAGS: fio::Flags = fio::Flags::PROTOCOL_SERVICE;
-        let mut object_request = FLAGS.to_object_request(server);
-        match root
-            .open_exposed(OpenRequest::new(
-                root.execution_scope.clone(),
-                FLAGS,
-                ftp::RegistryMarker::PROTOCOL_NAME.try_into().unwrap(),
-                &mut object_request,
-            ))
-            .await
-        {
-            Ok(()) => {
-                fuchsia_trace_provider::trace_provider_create_with_service(
-                    client_end.into_channel().into_raw(),
-                );
-            }
-            Err(e) => info!("Unable to open Registry server for tracing: {}", e),
-        }
     }
 }
 

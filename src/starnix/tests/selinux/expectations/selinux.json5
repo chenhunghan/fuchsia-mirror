@@ -12,7 +12,7 @@
         {
             type: "expect_failure",
             matchers: [
-                // TODO: https://fxbug.dev/398662840
+                // See https://fxbug.dev/398662840: Starnix doesn't support cgroup-seclabel.
                 "cgroupfs_label/001",
                 "cgroupfs_label/002",
 
@@ -145,12 +145,10 @@
 
                 // TODO: https://fxbug.dev/398696734
                 "key_socket/001",
-                "key_socket/002",
                 "key_socket/005",
 
-                // TODO: https://fxbug.dev/398699136
+                // See https://fxbug.dev/398699136: Starnix doesn't support the relevant syscalls.
                 "keys/001",
-                "keys/003",
                 "keys/005",
                 "keys/006",
                 "keys/007",
@@ -163,7 +161,7 @@
                 "keys/016",
                 "keys/017",
 
-                // TODO: https://fxbug.dev/398698176
+                // See https://fxbug.dev/398698176: Starnix can't set the mac_admin attribute on the label.
                 "mac_admin/001",
                 "mac_admin/002",
                 "mac_admin/003",
@@ -201,21 +199,16 @@
                 "msg/012",
                 "msg/013",
 
-                // TODO: https://fxbug.dev/448793080
-                "nlmsg/001",
-
-                // TODO: https://fxbug.dev/398696738
+                // See https://fxbug.dev/398696738: Starnix doesn't support the fanotify syscall.
                 "notify/002",
-                "notify/005",
                 "notify/006",
                 "notify/010",
-                "notify/011",
                 "notify/014",
                 "notify/016",
                 "notify/018",
 
                 // TODO: https://fxbug.dev/494562003
-                "perf_event/005",
+                "perf_event/006",
 
                 // TODO: https://fxbug.dev/398696740
                 "sem/001",
@@ -232,10 +225,6 @@
                 "shm/003",
                 "shm/004",
                 "shm/007",
-
-                // TODO: https://fxbug.dev/398696742
-                "sysctl/001",
-                "sysctl/002",
 
                 // TODO: https://fxbug.dev/398663323
                 "tun_tap/001",

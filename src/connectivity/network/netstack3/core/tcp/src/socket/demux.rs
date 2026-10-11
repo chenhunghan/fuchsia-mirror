@@ -18,8 +18,8 @@ use netstack3_base::socket::{
 };
 use netstack3_base::{
     BidirectionalConverter as _, Control, CounterContext, CtxPair, EitherDeviceId, IpDeviceAddr,
-    Marks, Mss, NotFoundError, Payload, Segment, SegmentHeader, SeqNum, StrongDeviceIdentifier,
-    VerifiedTcpSegment, WeakDeviceIdentifier,
+    Marks, Mss, NotFoundError, PacketType, Payload, Segment, SegmentHeader, SeqNum,
+    StrongDeviceIdentifier, VerifiedTcpSegment, WeakDeviceIdentifier,
 };
 use netstack3_filter::{
     FilterIpExt, SocketIngressFilterResult, SocketOpsFilter, TransportPacketSerializer,
@@ -138,7 +138,7 @@ where
         info: &mut LocalDeliveryPacketInfo<I, H>,
         early_demux_socket: Option<Self::EarlyDemuxSocket>,
     ) -> Result<(), (B, I::IcmpError)> {
-        let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
+        let LocalDeliveryPacketInfo { meta, header_info, marks, packet_type } = info;
         let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
         if let Some(delivery) = transparent_override {
             warn!(
@@ -249,6 +249,7 @@ where
             header_info,
             &incoming,
             marks,
+            *packet_type,
             early_demux_socket,
         );
         Ok(())
@@ -297,6 +298,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
     header_info: &H,
     incoming: &VerifiedTcpSegment<'_>,
     marks: &Marks,
+    packet_type: PacketType,
     mut early_demux_socket: Option<DualStackTcpSocketId<WireI, CC::WeakDeviceId, BC>>,
 ) where
     WireI: DualStackIpExt,
@@ -360,6 +362,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                             header_info,
                             &incoming,
                             marks,
+                            packet_type,
                         )
                     }
                     EitherStack::OtherStack(conn_id) => {
@@ -371,6 +374,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                             header_info,
                             &incoming,
                             marks,
+                            packet_type,
                         )
                     }
                 };
@@ -410,6 +414,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                                         move |conn, addr| converter.convert_back((conn, addr)),
                                         WireI::into_demux_socket_id,
                                         marks,
+                                        packet_type,
                                     )
                                 }
                                 MaybeDualStack::DualStack((core_ctx, converter)) => {
@@ -431,6 +436,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                                         },
                                         WireI::into_demux_socket_id,
                                         marks,
+                                        packet_type,
                                     )
                                 }
                             },
@@ -480,6 +486,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                                             },
                                             move |id| other_demux_id_converter.convert(id),
                                             marks,
+                                            packet_type,
                                         )
                                     }
                                 }
@@ -621,6 +628,7 @@ fn try_handle_incoming_for_connection_dual_stack<SockI, WireI, CC, BC, H>(
     header_info: &H,
     incoming: &VerifiedTcpSegment<'_>,
     packet_marks: &Marks,
+    packet_type: PacketType,
 ) -> ConnectionIncomingSegmentDisposition
 where
     SockI: DualStackIpExt,
@@ -647,6 +655,7 @@ where
             packet_marks,
             header_info,
             incoming.tcp_segment(),
+            packet_type,
         ) {
             SocketIngressFilterResult::Accept => (),
             SocketIngressFilterResult::Drop => {
@@ -1014,6 +1023,7 @@ fn try_handle_incoming_for_listener<SockI, WireI, CC, BC, DC, H>(
         TcpSocketId<SockI, CC::WeakDeviceId, BC>,
     ) -> WireI::DemuxSocketId<CC::WeakDeviceId, BC>,
     marks: &Marks,
+    packet_type: PacketType,
 ) -> ListenerIncomingSegmentDisposition<PrimaryRc<SockI, CC::WeakDeviceId, BC>>
 where
     SockI: DualStackIpExt,
@@ -1056,6 +1066,7 @@ where
         &marks,
         header_info,
         incoming.tcp_segment(),
+        packet_type,
     ) {
         SocketIngressFilterResult::Accept => (),
         SocketIngressFilterResult::Drop => {
@@ -1332,6 +1343,7 @@ fn run_socket_ingress_filter<I, BC, D>(
     packet_marks: &Marks,
     header_info: &impl IpHeaderInfo<I>,
     tcp_segment: &TcpSegment<&'_ [u8]>,
+    packet_type: PacketType,
 ) -> SocketIngressFilterResult
 where
     I: Ip,
@@ -1352,6 +1364,7 @@ where
         incoming_device,
         socket_info,
         &marks,
+        packet_type,
     )
 }
 

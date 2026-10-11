@@ -192,8 +192,8 @@ class Flags:
             and pathlib.Path(self.artifact_output_directory).is_file()
         ):
             raise FlagError("--artifact-output-directory cannot be a file")
-        if self.parallel < 0:
-            raise FlagError("--parallel must be non-negative")
+        if self.parallel <= 0:
+            raise FlagError("--parallel must be a positive number")
         if self.parallel_cases < 0:
             raise FlagError("--parallel-cases must be non-negative")
         if self.debugger_will_attach() and self.host:

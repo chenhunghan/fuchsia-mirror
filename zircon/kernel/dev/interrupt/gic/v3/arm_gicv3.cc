@@ -12,6 +12,7 @@
 #include <lib/ktrace.h>
 #include <lib/root_resource_filter.h>
 #include <lib/zbi-format/driver-config.h>
+#include <lib/zx/result.h>
 #include <trace.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
@@ -168,6 +169,12 @@ void gic_init_percpu_early() {
 
   // enable group 1 interrupts.
   gic_write_igrpen(1);
+
+  // Ensure the virtual CPU interface is disabled when running at EL2.
+  if (arm64_get_boot_el() >= 2) {
+    __arm_wsr64("ich_hcr_el2", 0);
+    __isb(ARM_MB_SY);
+  }
 }
 
 zx_status_t gic_init() {

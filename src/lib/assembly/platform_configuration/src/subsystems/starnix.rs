@@ -31,6 +31,7 @@ impl DefineSubsystemConfiguration<(&PlatformStarnixConfig, &PlatformConnectivity
             network_manager,
             enable_wakeup_test,
             prefetch_kernel,
+            remotevol_in_process,
         } = starnix_config;
 
         if *enabled {
@@ -116,6 +117,10 @@ impl DefineSubsystemConfiguration<(&PlatformStarnixConfig, &PlatformConnectivity
                             feature: Feature::WakeupTest,
                             raw_args: None,
                         }),
+                        remotevol_in_process.then_some(FeatureAndArgs {
+                            feature: Feature::RemotevolInProcess,
+                            raw_args: None,
+                        }),
                     ]
                     .into_iter()
                     .flatten()
@@ -178,6 +183,44 @@ mod tests {
         let error_message = result.unwrap_err().to_string();
         assert!(
             error_message.contains("Android Wi-fi requires the Wlanix policy layer to be enabled")
+        );
+    }
+
+    #[test]
+    fn test_define_configuration_remotevol_in_process() {
+        let board_config: BoardConfig = Default::default();
+
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &board_config,
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+
+        let starnix_config = PlatformStarnixConfig {
+            enabled: true,
+            remotevol_in_process: true,
+            ..Default::default()
+        };
+
+        let connectivity_config = PlatformConnectivityConfig { ..Default::default() };
+
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+
+        StarnixSubsystem::define_configuration(
+            &context,
+            &(&starnix_config, &connectivity_config),
+            &mut builder,
+        )
+        .unwrap();
+
+        let config = builder.build();
+        assert_eq!(
+            config.configuration_capabilities["fuchsia.starnix.config.container.ExtraFeatures"]
+                .value(),
+            serde_json::json!(["network_manager", "remotevol_in_process"])
         );
     }
 }

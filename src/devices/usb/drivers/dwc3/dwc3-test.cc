@@ -1394,49 +1394,6 @@ TEST_F(UnmanagedTestFixture, IrisExtensionCreatedWhenInterconnectAvailable) {
   EXPECT_OK(dut_.StopDriver().status_value());
 }
 
-TEST_F(UnmanagedTestFixture, IrisExtensionSuspendAndResumeBandwidthVotes) {
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    env.set_serve_platform_mocks(false);
-    env.usb_phy().set_initial_connected(true);
-  });
-
-  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
-    dwc3_config::Config cfg;
-    cfg.enable_suspend() = false;
-    cfg.bypass_platform_extension() = false;
-    args.config(cfg.ToVmo());
-  });
-  ASSERT_OK(res);
-  ASSERT_OK(WaitForPhy());
-
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
-
-  // Suspend
-  bool completer_called = false;
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    fdf_power::SuspendCompleter completer([&]() { completer_called = true; });
-    drv.Suspend(std::move(completer));
-  });
-  EXPECT_TRUE(completer_called);
-
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  // Resume
-  completer_called = false;
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    fdf_power::ResumeCompleter completer([&]() { completer_called = true; });
-    drv.Resume(std::move(completer));
-  });
-  EXPECT_TRUE(completer_called);
-
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
-
-  EXPECT_OK(dut_.StopDriver().status_value());
-}
-
 TEST_F(UnmanagedTestFixture, IrisExtensionHotplugMaintainsBandwidthAndResets) {
   auto reset_count = std::make_shared<std::atomic<uint32_t>>(0);
   dut_.RunInEnvironmentTypeContext([this, reset_count](Environment& env) {
@@ -1463,8 +1420,10 @@ TEST_F(UnmanagedTestFixture, IrisExtensionHotplugMaintainsBandwidthAndResets) {
 
   // Reset count should include Init() reset and initial disconnected event reset.
   EXPECT_EQ(2u, reset_count->load());
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u);
+    EXPECT_EQ(env.path().set_bandwidth_count(), 1u);
+  });
 
   // Connect: votes default HS (40 MB/s) and executes ResetHw().
   dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
@@ -1488,60 +1447,6 @@ TEST_F(UnmanagedTestFixture, IrisExtensionHotplugMaintainsBandwidthAndResets) {
   EXPECT_OK(dut_.StopDriver().status_value());
 }
 
-TEST_F(UnmanagedTestFixture, IrisExtensionSuspendAndResumeWhileDisconnected) {
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    env.set_serve_platform_mocks(false);
-    env.usb_phy().set_initial_connected(false);
-  });
-
-  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
-    dwc3_config::Config cfg;
-    cfg.enable_suspend() = false;
-    cfg.bypass_platform_extension() = false;
-    args.config(cfg.ToVmo());
-  });
-  ASSERT_OK(res);
-  ASSERT_OK(WaitForPhy());
-
-  dut_.runtime().RunUntilIdle();
-
-  // Initially disconnected, bandwidth is 0 bps.
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  // Suspend while disconnected.
-  bool completer_called = false;
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    fdf_power::SuspendCompleter completer([&]() { completer_called = true; });
-    drv.Suspend(std::move(completer));
-  });
-  EXPECT_TRUE(completer_called);
-
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  // Resume while disconnected: must preserve disconnected state and vote 0 bps (not kDefaultSpeed).
-  completer_called = false;
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    fdf_power::ResumeCompleter completer([&]() { completer_called = true; });
-    drv.Resume(std::move(completer));
-  });
-  EXPECT_TRUE(completer_called);
-
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  // Subsequent connect should transition bandwidth to provisional High-Speed (40 MB/s).
-  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
-  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerConnection(true); });
-  dut_.runtime().RunUntilIdle();
-  EXPECT_EQ(ZX_OK, WaitForPhy());
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
-
-  EXPECT_OK(dut_.StopDriver().status_value());
-}
-
 TEST_F(UnmanagedTestFixture, IrisExtensionDynamicSpeedBandwidthVotes) {
   dut_.RunInEnvironmentTypeContext([](Environment& env) {
     env.set_serve_platform_mocks(false);
@@ -1557,7 +1462,7 @@ TEST_F(UnmanagedTestFixture, IrisExtensionDynamicSpeedBandwidthVotes) {
   ASSERT_OK(res);
   ASSERT_OK(WaitForPhy());
 
-  // Default speed is High-Speed: 40 MB/s.
+  // Provisional speed upon connection is High-Speed: 40 MB/s.
   dut_.RunInEnvironmentTypeContext(
       [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
 
@@ -1718,6 +1623,205 @@ TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseQualcommPlatformEx
 TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseIrisPlatformExtension) {
   VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false,
                                  /*serve_platform_mocks=*/false);
+}
+
+TEST_F(UnmanagedTestFixture, SetConfigurationPreservesEp0AndIgnoresStaleCompletionAcrossBusReset) {
+  FakeUsbDciInterface fake_dci;
+  auto dalepena_val = std::make_shared<std::atomic<uint32_t>>(0);
+
+  dut_.RunInEnvironmentTypeContext([dalepena_val](Environment& env) {
+    auto& dalepena = env.reg_region()[DALEPENA::Get().addr()];
+    dalepena.SetWriteCallback(
+        [dalepena_val](uint64_t val_raw) { dalepena_val->store(static_cast<uint32_t>(val_raw)); });
+    dalepena.SetReadCallback([dalepena_val]() -> uint64_t { return dalepena_val->load(); });
+  });
+
+  SetUpAndPowerOnDriver();
+
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[DALEPENA::Get().addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[DALEPENA::Get().addr()].SetReadCallback([]() -> uint64_t { return 0; });
+    });
+  });
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  uint64_t gen_before = 0;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::EnableEp0(drv);
+    Dwc3TestHelper::SetEp0CurSpeed(drv, fdescriptor::wire::UsbSpeed::kSuper);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+
+    EXPECT_TRUE(Dwc3TestHelper::IsEpEnabled(drv, 0));
+    EXPECT_TRUE(Dwc3TestHelper::IsEpEnabled(drv, 1));
+    EXPECT_EQ(dalepena_val->load() & 0x3u, 0x3u);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurSpeed(drv), fdescriptor::wire::UsbSpeed::kSuper);
+    gen_before = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+  });
+
+  // Defer the DCI Control reply to hold the transfer in-flight.
+  libsync::Completion control_deferred;
+  dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.SetDeferControl(true, &control_deferred); });
+
+  // Send USB_REQ_SET_CONFIGURATION.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto setup = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 1,
+        0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+  });
+
+  control_deferred.Wait();
+  dut_.RunInDriverContext([&](Dwc3& drv) { ASSERT_TRUE(fake_dci.has_deferred_control()); });
+
+  // Verify that USB_REQ_SET_CONFIGURATION called ResetConfiguration() which resets user
+  // endpoints without calling Ep0Reset(): EP0 OUT/IN remain enabled in software,
+  // DALEPENA bits 0 and 1 remain set, and cur_speed is preserved.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    EXPECT_TRUE(Dwc3TestHelper::IsEpEnabled(drv, 0));
+    EXPECT_TRUE(Dwc3TestHelper::IsEpEnabled(drv, 1));
+    EXPECT_EQ(dalepena_val->load() & 0x3u, 0x3u);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurSpeed(drv), fdescriptor::wire::UsbSpeed::kSuper);
+  });
+
+  // Simulate a bus reset arriving while Control(SET_CONFIGURATION) is still pending.
+  dut_.RunInDriverContext([&](Dwc3& drv) { Dwc3TestHelper::HandleResetEvent(drv); });
+  dut_.runtime().RunUntilIdle();
+
+  // Reset puts the device in kDefault state and increments setup_generation.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kDefault);
+    EXPECT_GT(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_before);
+  });
+
+  // Now complete the stale deferred Control() call from before the reset.
+  dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.CompleteDeferredControl(ZX_OK); });
+  dut_.runtime().RunUntilIdle();
+
+  // The stale completion must be ignored and must not transition device state to kConfigured.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kDefault);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, Ep0QueueSetupIncrementsGenerationAndDropsStaleControlCompletion) {
+  FakeUsbDciInterface fake_dci;
+  SetUpAndPowerOnDriver();
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  uint64_t gen_before = 0;
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::EnableEp0(drv);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+    gen_before = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+  });
+
+  // Defer the DCI Control reply to hold the transfer in-flight.
+  libsync::Completion control_deferred;
+  dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.SetDeferControl(true, &control_deferred); });
+
+  // Send USB_REQ_SET_CONFIGURATION.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto setup = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 1,
+        0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+  });
+
+  control_deferred.Wait();
+  dut_.RunInDriverContext([&](Dwc3& drv) { ASSERT_TRUE(fake_dci.has_deferred_control()); });
+
+  // Simulate a new SETUP packet arriving, re-invoking Ep0QueueSetup on early abort.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    EXPECT_GT(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_before);
+  });
+
+  // Complete the stale deferred Control() call from the prior generation.
+  dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.CompleteDeferredControl(ZX_OK); });
+  dut_.runtime().RunUntilIdle();
+
+  // The stale completion must be dropped and must not transition device state to kConfigured.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    EXPECT_NE(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kConfigured);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, StartPeripheralModeRestoresCoreRegistersAfterExternalReset) {
+  ver_number_ = 0x5533310a;
+
+  auto gsbuscfg0_val = std::make_shared<std::atomic<uint32_t>>(0);
+  auto guctl2_val = std::make_shared<std::atomic<uint32_t>>(0);
+  auto gfladj_val = std::make_shared<std::atomic<uint32_t>>(0);
+
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[GSBUSCFG0::Get().addr()].SetReadCallback([]() -> uint64_t { return 0; });
+      env.reg_region()[GSBUSCFG0::Get().addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[GUCTL2::Get().addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[GFLADJ::Get().addr()].SetWriteCallback([](uint64_t) {});
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([gsbuscfg0_val, guctl2_val, gfladj_val](Environment& env) {
+    env.SetFrameLengthAdjustment(0xa0, /*refclk_lpm_sel=*/true);
+    env.reg_region()[GSBUSCFG0::Get().addr()].SetReadCallback(
+        []() -> uint64_t { return 0xabcd00ffu; });
+    env.reg_region()[GSBUSCFG0::Get().addr()].SetWriteCallback(
+        [gsbuscfg0_val](uint64_t val) { gsbuscfg0_val->store(static_cast<uint32_t>(val)); });
+    env.reg_region()[GUCTL2::Get().addr()].SetWriteCallback(
+        [guctl2_val](uint64_t val) { guctl2_val->store(static_cast<uint32_t>(val)); });
+    env.reg_region()[GFLADJ::Get().addr()].SetWriteCallback(
+        [gfladj_val](uint64_t val) { gfladj_val->store(static_cast<uint32_t>(val)); });
+  });
+
+  SetUpAndPowerOnDriver();
+
+  auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_TRUE(dci_service.is_ok());
+  fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
+
+  // Clear captured register values right before StartController() to simulate an external PHY/core
+  // reset occurring between ResetHw() and StartPeripheralMode().
+  gsbuscfg0_val->store(0);
+  guctl2_val->store(0);
+  gfladj_val->store(0);
+
+  auto start_res = dci->StartController();
+  ASSERT_TRUE(start_res.ok());
+  ASSERT_TRUE(start_res.value().is_ok());
+
+  EXPECT_EQ(gsbuscfg0_val->load(), 0xabcd0002u);
+  EXPECT_EQ(GUCTL2::Get().FromValue(guctl2_val->load()).Rst_actbitlater(), 1u);
+  auto gfladj = GFLADJ::Get().FromValue(gfladj_val->load());
+  EXPECT_EQ(gfladj.GFLADJ_30MHZ(), 0x20u);
+  EXPECT_EQ(gfladj.GFLADJ_30MHZ_SDBND_SEL(), 1u);
+  EXPECT_EQ(gfladj.GFLADJ_REFCLK_LPM_SEL(), 1u);
+
+  TearDownAndPowerOffDriver();
 }
 
 }  // namespace dwc3

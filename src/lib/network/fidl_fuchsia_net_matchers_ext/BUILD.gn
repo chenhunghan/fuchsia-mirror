@@ -67,6 +67,5 @@ group("tests") {
     ":fidl-fuchsia-net-matchers-ext-fdomain-tests",
     ":fidl-fuchsia-net-matchers-ext-tests",
     ":fidl_fuchsia_net_matchers_ext_fdomain_test($host_toolchain)",
-    ":fidl_fuchsia_net_matchers_ext_test($host_toolchain)",
   ]
 }

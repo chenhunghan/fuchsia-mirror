@@ -101,6 +101,7 @@ group("tests_no_e2e") {
     "//tools/devshell:tests($host_toolchain)",
     "//tools/doc_checker:tests",
     "//tools/docsgen:tests",
+    "//tools/driver-lab:tests($host_toolchain)",
     "//tools/fidl:tests",
     "//tools/fidlcat:fidlcat_host_tests($host_toolchain)",
     "//tools/fidlcat/tests",

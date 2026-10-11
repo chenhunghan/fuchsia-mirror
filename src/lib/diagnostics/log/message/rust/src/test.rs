@@ -2,11 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#![cfg_attr(
-    target_arch = "aarch64",
-    allow(clippy::unnecessary_cast, reason = "mass allow for https://fxbug.dev/381896734")
-)]
-
 use super::*;
 use assert_matches::assert_matches;
 use diagnostics_log_encoding::Record;
@@ -257,8 +252,8 @@ fn max_tags_with_message() {
     let msg_start = tags_start + (tag_size * MAX_TAGS);
     let msg_len = 5;
     let msg_end = msg_start + msg_len;
-    let msg_ascii = b'A' as c_char + MAX_TAGS as c_char;
-    packet.fill_data(msg_start..msg_end, msg_ascii);
+    let msg_ascii = b'A' + MAX_TAGS as u8;
+    packet.fill_data(msg_start..msg_end, msg_ascii as c_char);
 
     let min_buffer = &packet.as_bytes()[..METADATA_SIZE + msg_end + 1]; // null-terminated
     let full_buffer = packet.as_bytes();
@@ -272,8 +267,8 @@ fn max_tags_with_message() {
     let full_parsed =
         crate::from_logger(get_test_identity(), LoggerMessage::try_from(full_buffer).unwrap());
 
-    let tag_properties = (0..MAX_TAGS as _)
-        .map(|tag_num| String::from_utf8(vec![(b'A' as c_char + tag_num) as u8; tag_len]).unwrap())
+    let tag_properties = (0..MAX_TAGS as u8)
+        .map(|tag_num| String::from_utf8(vec![b'A' + tag_num; tag_len]).unwrap())
         .collect::<Vec<_>>();
     let mut builder = LogsDataBuilder::new(BuilderArgs {
         timestamp: Timestamp::from_nanos(packet.metadata.time),
@@ -283,7 +278,7 @@ fn max_tags_with_message() {
     })
     .set_dropped(packet.metadata.dropped_logs.into())
     .set_pid(packet.metadata.pid)
-    .set_message(String::from_utf8(vec![msg_ascii as u8; msg_len]).unwrap())
+    .set_message(String::from_utf8(vec![msg_ascii; msg_len]).unwrap())
     .set_tid(packet.metadata.tid);
     for tag in tag_properties {
         builder = builder.add_tag(tag);
@@ -332,9 +327,8 @@ fn max_tags() {
     .set_pid(packet.metadata.pid)
     .set_tid(packet.metadata.tid)
     .set_message("".to_string());
-    for tag_num in 0..MAX_TAGS as _ {
-        builder =
-            builder.add_tag(String::from_utf8(vec![(b'A' as c_char + tag_num) as u8; 2]).unwrap());
+    for tag_num in 0..MAX_TAGS as u8 {
+        builder = builder.add_tag(String::from_utf8(vec![b'A' + tag_num; 2]).unwrap());
     }
     assert_eq!(parsed, builder.build());
 }

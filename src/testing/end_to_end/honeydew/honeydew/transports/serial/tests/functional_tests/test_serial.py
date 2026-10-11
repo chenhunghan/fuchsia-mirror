@@ -52,6 +52,18 @@ class SerialTransportTests(fuchsia_base_test.FuchsiaBaseTest):
             f"Data not read within 10 seconds.",
         )
 
+    async def test_send_and_recv(self) -> None:
+        """Test case for Serial.send_and_recv()."""
+        output = self.dut.serial.send_and_recv(
+            cmd='echo "foo""bar"',
+            stop_tokens=("foobar",),
+        )
+        asserts.assert_in(
+            "foobar",
+            output,
+            f"Expected 'foobar' in output, got: {output!r}",
+        )
+
 
 if __name__ == "__main__":
     test_runner.main()

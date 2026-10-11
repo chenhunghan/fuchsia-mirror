@@ -36,9 +36,7 @@ pub fn soft_overlap(a: &[String], b: &[String]) -> f64 {
     let wa: Vec<Vec<String>> = a.iter().map(|x| crate::normalize::words(x)).collect();
     let wb: Vec<Vec<String>> = b.iter().map(|x| crate::normalize::words(x)).collect();
     let best = |x: &Vec<String>, ys: &[Vec<String>]| -> f64 {
-        ys.iter()
-            .map(|y| if x == y { 1.0 } else { seq_similarity(x, y) })
-            .fold(0.0, f64::max)
+        ys.iter().map(|y| if x == y { 1.0 } else { seq_similarity(x, y) }).fold(0.0, f64::max)
     };
     let sa: f64 = wa.iter().map(|x| best(x, &wb)).sum();
     let sb: f64 = wb.iter().map(|y| best(y, &wa)).sum();
@@ -57,9 +55,13 @@ pub fn is_handled_vs_propagated(a: &Unit, b: &Unit) -> bool {
 }
 
 /// C++ `return Foo();` passing a status on, against Rust's `foo()?;`.
-fn is_return_vs_propagated(a: &Unit, b: &Unit) -> bool {
-    let ret =
-        |u: &Unit| u.kind == UnitKind::Return && u.features.ret == Some(crate::model::Ret::Status);
+pub fn is_return_vs_propagated(a: &Unit, b: &Unit) -> bool {
+    let ret = |u: &Unit| {
+        u.kind == UnitKind::Return
+            && (matches!(u.features.ret, Some(crate::model::Ret::Status))
+                || (u.features.propagates
+                    && matches!(u.features.ret, Some(crate::model::Ret::Value))))
+    };
     let prop = |u: &Unit| u.kind == UnitKind::Stmt && u.features.propagates;
     (ret(a) && prop(b)) || (prop(a) && ret(b))
 }
@@ -76,15 +78,8 @@ pub fn case_vs_branch(a: &Unit, b: &Unit) -> Option<f64> {
     match branch.kind {
         UnitKind::If | UnitKind::ElseIf if !default => {
             let names = &case.features.names;
-            let hit = names
-                .iter()
-                .filter(|n| branch.features.names.contains(n))
-                .count();
-            Some(if hit == 0 {
-                0.0
-            } else {
-                0.3 + 0.6 * hit as f64 / names.len() as f64
-            })
+            let hit = names.iter().filter(|n| branch.features.names.contains(n)).count();
+            Some(if hit == 0 { 0.0 } else { 0.3 + 0.6 * hit as f64 / names.len() as f64 })
         }
         UnitKind::Else if default => Some(0.6),
         _ => None,
@@ -109,19 +104,11 @@ pub fn similarity(a: &Unit, b: &Unit) -> f64 {
             if u.kind == UnitKind::Cfg {
                 u.features.idents.clone()
             } else {
-                u.features
-                    .idents
-                    .iter()
-                    .map(|i| i.replace('_', ""))
-                    .collect()
+                u.features.idents.iter().map(|i| i.replace('_', "")).collect()
             }
         };
         let (wa, wb) = (words(a), words(b));
-        let overlap = if wa.is_empty() && wb.is_empty() {
-            1.0
-        } else {
-            jaccard(&wa, &wb)
-        };
+        let overlap = if wa.is_empty() && wb.is_empty() { 1.0 } else { jaccard(&wa, &wb) };
         return match (a.kind, b.kind) {
             (UnitKind::Cfg, UnitKind::Cfg) => 0.6 + 0.4 * overlap,
             (UnitKind::If | UnitKind::ElseIf, _) | (_, UnitKind::If | UnitKind::ElseIf)
@@ -167,11 +154,9 @@ pub fn similarity(a: &Unit, b: &Unit) -> f64 {
     if !fa.idents.is_empty() && !fb.idents.is_empty() {
         terms.push((1.0, jaccard(&fa.idents, &fb.idents)));
     }
-    for (w, a, b) in [
-        (2.0, &fa.names, &fb.names),
-        (2.0, &fa.errors, &fb.errors),
-        (2.0, &fa.locks, &fb.locks),
-    ] {
+    for (w, a, b) in
+        [(2.0, &fa.names, &fb.names), (2.0, &fa.errors, &fb.errors), (2.0, &fa.locks, &fb.locks)]
+    {
         if let Some(s) = set(a, b) {
             terms.push((w, s));
         }
@@ -204,10 +189,8 @@ pub struct Pair {
 /// Order-preserving alignment maximizing total similarity (a weighted LCS).
 pub fn align(a: &[Unit], b: &[Unit]) -> (Vec<Pair>, f64) {
     let (n, m) = (a.len(), b.len());
-    let sim: Vec<Vec<f64>> = a
-        .iter()
-        .map(|x| b.iter().map(|y| similarity(x, y)).collect())
-        .collect();
+    let sim: Vec<Vec<f64>> =
+        a.iter().map(|x| b.iter().map(|y| similarity(x, y)).collect()).collect();
     let mut dp = vec![vec![0.0f64; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
@@ -225,29 +208,17 @@ pub fn align(a: &[Unit], b: &[Unit]) -> (Vec<Pair>, f64) {
     let mut pending_b = Vec::new();
     let flush = |out: &mut Vec<Pair>, pa: &mut Vec<usize>, pb: &mut Vec<usize>| {
         for x in pa.drain(..) {
-            out.push(Pair {
-                cpp: Some(x),
-                rust: None,
-                score: 0.0,
-            });
+            out.push(Pair { cpp: Some(x), rust: None, score: 0.0 });
         }
         for y in pb.drain(..) {
-            out.push(Pair {
-                cpp: None,
-                rust: Some(y),
-                score: 0.0,
-            });
+            out.push(Pair { cpp: None, rust: Some(y), score: 0.0 });
         }
     };
     while i < n && j < m {
         let s = sim[i][j];
         if s >= THRESHOLD && (dp[i][j] - (dp[i + 1][j + 1] + s)).abs() < 1e-9 {
             flush(&mut out, &mut pending_a, &mut pending_b);
-            out.push(Pair {
-                cpp: Some(i),
-                rust: Some(j),
-                score: s,
-            });
+            out.push(Pair { cpp: Some(i), rust: Some(j), score: s });
             i += 1;
             j += 1;
         } else if (dp[i][j] - dp[i + 1][j]).abs() < 1e-9 {
@@ -263,11 +234,7 @@ pub fn align(a: &[Unit], b: &[Unit]) -> (Vec<Pair>, f64) {
     flush(&mut out, &mut pending_a, &mut pending_b);
     let out = pair_gaps(a, b, out, &sim);
     let total = dp[0][0];
-    let norm = if n + m == 0 {
-        1.0
-    } else {
-        2.0 * total / (n + m) as f64
-    };
+    let norm = if n + m == 0 { 1.0 } else { 2.0 * total / (n + m) as f64 };
     (out, norm)
 }
 
@@ -314,11 +281,7 @@ fn pair_gaps(a: &[Unit], b: &[Unit], rows: Vec<Pair>, sim: &[Vec<f64>]) -> Vec<P
                 continue;
             }
             let ok = xs.iter().zip(&ys).all(|(&i, &j)| {
-                let min = if a[i].kind == UnitKind::Stmt {
-                    0.2
-                } else {
-                    0.0
-                };
+                let min = if a[i].kind == UnitKind::Stmt { 0.2 } else { 0.0 };
                 sim[i][j] > min
             });
             if ok {
@@ -342,39 +305,19 @@ fn pair_gaps(a: &[Unit], b: &[Unit], rows: Vec<Pair>, sim: &[Vec<f64>]) -> Vec<P
         let (mut ia, mut ib) = (0usize, 0usize);
         for &(i, j) in &kept {
             while ia < ca.len() && ca[ia] < i {
-                out.push(Pair {
-                    cpp: Some(ca[ia]),
-                    rust: None,
-                    score: 0.0,
-                });
+                out.push(Pair { cpp: Some(ca[ia]), rust: None, score: 0.0 });
                 ia += 1;
             }
             while ib < cb.len() && cb[ib] < j {
-                out.push(Pair {
-                    cpp: None,
-                    rust: Some(cb[ib]),
-                    score: 0.0,
-                });
+                out.push(Pair { cpp: None, rust: Some(cb[ib]), score: 0.0 });
                 ib += 1;
             }
-            out.push(Pair {
-                cpp: Some(i),
-                rust: Some(j),
-                score: sim[i][j],
-            });
+            out.push(Pair { cpp: Some(i), rust: Some(j), score: sim[i][j] });
             ia += 1;
             ib += 1;
         }
-        out.extend(ca[ia..].iter().map(|&i| Pair {
-            cpp: Some(i),
-            rust: None,
-            score: 0.0,
-        }));
-        out.extend(cb[ib..].iter().map(|&j| Pair {
-            cpp: None,
-            rust: Some(j),
-            score: 0.0,
-        }));
+        out.extend(ca[ia..].iter().map(|&i| Pair { cpp: Some(i), rust: None, score: 0.0 }));
+        out.extend(cb[ib..].iter().map(|&j| Pair { cpp: None, rust: Some(j), score: 0.0 }));
     }
     out
 }

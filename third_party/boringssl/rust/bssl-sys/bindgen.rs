@@ -1209,6 +1209,7 @@ pub const EVP_R_PRIVATE_KEY_WAS_NOT_SEED: i32 = 139;
 pub const EVP_R_MISSING_PUBLIC_KEY: i32 = 140;
 pub const EVP_R_INVALID_CIPHERTEXT_LENGTH: i32 = 141;
 pub const EVP_R_INVALID_SECRET_LENGTH: i32 = 142;
+pub const EVP_R_INVALID_ENTROPY_LENGTH: i32 = 143;
 pub const EVP_R_OPERATON_NOT_INITIALIZED: i32 = 126;
 pub const EVP_AEAD_MAX_KEY_LENGTH: i32 = 80;
 pub const EVP_AEAD_MAX_NONCE_LENGTH: i32 = 24;
@@ -3534,6 +3535,15 @@ pub const NID_rdna_trustAnchorID_draft: i32 = 977;
 pub const SN_pe_mtcCertificationAuthority_draft: &[u8; 35] =
     b"pe-mtcCertificationAuthority-draft\0";
 pub const NID_pe_mtcCertificationAuthority_draft: i32 = 978;
+pub const SN_SLH_DSA_SHA2_128s: &[u8; 21] = b"id-slh-dsa-sha2-128s\0";
+pub const LN_SLH_DSA_SHA2_128s: &[u8; 18] = b"SLH-DSA-SHA2-128s\0";
+pub const NID_SLH_DSA_SHA2_128s: i32 = 979;
+pub const SN_SLH_DSA_SHAKE_256f: &[u8; 22] = b"id-slh-dsa-shake-256f\0";
+pub const LN_SLH_DSA_SHAKE_256f: &[u8; 19] = b"SLH-DSA-SHAKE-256f\0";
+pub const NID_SLH_DSA_SHAKE_256f: i32 = 980;
+pub const SN_SLH_DSA_SHA2_128s_WITH_SHA256: &[u8; 38] = b"id-hash-slh-dsa-sha2-128s-with-sha256\0";
+pub const LN_SLH_DSA_SHA2_128s_WITH_SHA256: &[u8; 30] = b"SLH-DSA-SHA2-128s-WITH-SHA256\0";
+pub const NID_SLH_DSA_SHA2_128s_WITH_SHA256: i32 = 981;
 pub const EVP_PKEY_NONE: i32 = 0;
 pub const EVP_PKEY_RSA: i32 = 6;
 pub const EVP_PKEY_RSA_PSS: i32 = 912;
@@ -5952,6 +5962,9 @@ unsafe extern "C" {
     pub fn OPENSSL_sk_value(sk: *const OPENSSL_STACK, i: usize) -> *mut ::core::ffi::c_void;
 }
 unsafe extern "C" {
+    pub fn OPENSSL_sk_last(sk: *const OPENSSL_STACK) -> *mut ::core::ffi::c_void;
+}
+unsafe extern "C" {
     pub fn OPENSSL_sk_set(
         sk: *mut OPENSSL_STACK,
         i: usize,
@@ -6141,6 +6154,10 @@ unsafe extern "C" {
     pub fn sk_void_value(sk: *const stack_st_void, i: usize) -> *mut ::core::ffi::c_void;
 }
 unsafe extern "C" {
+    #[link_name = "sk_void_last__extern"]
+    pub fn sk_void_last(sk: *const stack_st_void) -> *mut ::core::ffi::c_void;
+}
+unsafe extern "C" {
     #[link_name = "sk_void_set__extern"]
     pub fn sk_void_set(
         sk: *mut stack_st_void,
@@ -6306,6 +6323,10 @@ unsafe extern "C" {
         sk: *const stack_st_OPENSSL_STRING,
         i: usize,
     ) -> *mut ::core::ffi::c_char;
+}
+unsafe extern "C" {
+    #[link_name = "sk_OPENSSL_STRING_last__extern"]
+    pub fn sk_OPENSSL_STRING_last(sk: *const stack_st_OPENSSL_STRING) -> *mut ::core::ffi::c_char;
 }
 unsafe extern "C" {
     #[link_name = "sk_OPENSSL_STRING_set__extern"]
@@ -6475,6 +6496,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_BIO_value__extern"]
     pub fn sk_BIO_value(sk: *const stack_st_BIO, i: usize) -> *mut BIO;
+}
+unsafe extern "C" {
+    #[link_name = "sk_BIO_last__extern"]
+    pub fn sk_BIO_last(sk: *const stack_st_BIO) -> *mut BIO;
 }
 unsafe extern "C" {
     #[link_name = "sk_BIO_set__extern"]
@@ -8387,6 +8412,10 @@ unsafe extern "C" {
     pub fn sk_ASN1_INTEGER_value(sk: *const stack_st_ASN1_INTEGER, i: usize) -> *mut ASN1_INTEGER;
 }
 unsafe extern "C" {
+    #[link_name = "sk_ASN1_INTEGER_last__extern"]
+    pub fn sk_ASN1_INTEGER_last(sk: *const stack_st_ASN1_INTEGER) -> *mut ASN1_INTEGER;
+}
+unsafe extern "C" {
     #[link_name = "sk_ASN1_INTEGER_set__extern"]
     pub fn sk_ASN1_INTEGER_set(
         sk: *mut stack_st_ASN1_INTEGER,
@@ -8835,6 +8864,10 @@ unsafe extern "C" {
     pub fn sk_ASN1_OBJECT_value(sk: *const stack_st_ASN1_OBJECT, i: usize) -> *mut ASN1_OBJECT;
 }
 unsafe extern "C" {
+    #[link_name = "sk_ASN1_OBJECT_last__extern"]
+    pub fn sk_ASN1_OBJECT_last(sk: *const stack_st_ASN1_OBJECT) -> *mut ASN1_OBJECT;
+}
+unsafe extern "C" {
     #[link_name = "sk_ASN1_OBJECT_set__extern"]
     pub fn sk_ASN1_OBJECT_set(
         sk: *mut stack_st_ASN1_OBJECT,
@@ -9067,6 +9100,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_ASN1_TYPE_value__extern"]
     pub fn sk_ASN1_TYPE_value(sk: *const stack_st_ASN1_TYPE, i: usize) -> *mut ASN1_TYPE;
+}
+unsafe extern "C" {
+    #[link_name = "sk_ASN1_TYPE_last__extern"]
+    pub fn sk_ASN1_TYPE_last(sk: *const stack_st_ASN1_TYPE) -> *mut ASN1_TYPE;
 }
 unsafe extern "C" {
     #[link_name = "sk_ASN1_TYPE_set__extern"]
@@ -9481,6 +9518,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_ASN1_VALUE_value__extern"]
     pub fn sk_ASN1_VALUE_value(sk: *const stack_st_ASN1_VALUE, i: usize) -> *mut ASN1_VALUE;
+}
+unsafe extern "C" {
+    #[link_name = "sk_ASN1_VALUE_last__extern"]
+    pub fn sk_ASN1_VALUE_last(sk: *const stack_st_ASN1_VALUE) -> *mut ASN1_VALUE;
 }
 unsafe extern "C" {
     #[link_name = "sk_ASN1_VALUE_set__extern"]
@@ -10909,6 +10950,10 @@ unsafe extern "C" {
     pub fn sk_CONF_VALUE_value(sk: *const stack_st_CONF_VALUE, i: usize) -> *mut CONF_VALUE;
 }
 unsafe extern "C" {
+    #[link_name = "sk_CONF_VALUE_last__extern"]
+    pub fn sk_CONF_VALUE_last(sk: *const stack_st_CONF_VALUE) -> *mut CONF_VALUE;
+}
+unsafe extern "C" {
     #[link_name = "sk_CONF_VALUE_set__extern"]
     pub fn sk_CONF_VALUE_set(
         sk: *mut stack_st_CONF_VALUE,
@@ -11672,6 +11717,24 @@ unsafe extern "C" {
     pub fn ED25519_verify(
         message: *const u8,
         message_len: usize,
+        signature: *const u8,
+        public_key: *const u8,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn ED25519_sign_prehashed(
+        out_sig: *mut u8,
+        context: *const u8,
+        context_len: usize,
+        sha512_digest: *const u8,
+        private_key: *const u8,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn ED25519_verify_prehashed(
+        context: *const u8,
+        context_len: usize,
+        sha512_digest: *const u8,
         signature: *const u8,
         public_key: *const u8,
     ) -> ::core::ffi::c_int;
@@ -14196,6 +14259,9 @@ unsafe extern "C" {
     pub fn EVP_KEM_secret_len(kem: *const EVP_KEM) -> usize;
 }
 unsafe extern "C" {
+    pub fn EVP_KEM_entropy_len_for_testing(kem: *const EVP_KEM) -> usize;
+}
+unsafe extern "C" {
     pub fn EVP_KEM_encap(
         kem: *const EVP_KEM,
         out_ciphertext: *mut u8,
@@ -14203,6 +14269,18 @@ unsafe extern "C" {
         out_secret: *mut u8,
         secret_len: usize,
         peer_key: *const EVP_PKEY,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn EVP_KEM_encap_external_entropy_for_testing(
+        kem: *const EVP_KEM,
+        out_ciphertext: *mut u8,
+        ciphertext_len: usize,
+        out_secret: *mut u8,
+        secret_len: usize,
+        peer_key: *const EVP_PKEY,
+        entropy: *const u8,
+        entropy_len: usize,
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
@@ -14576,6 +14654,9 @@ unsafe extern "C" {
     pub fn EVP_HPKE_KEM_enc_len(kem: *const EVP_HPKE_KEM) -> usize;
 }
 unsafe extern "C" {
+    pub fn EVP_HPKE_KEM_shared_secret_len(kem: *const EVP_HPKE_KEM) -> usize;
+}
+unsafe extern "C" {
     pub fn EVP_hpke_hkdf_sha256() -> *const EVP_HPKE_KDF;
 }
 unsafe extern "C" {
@@ -14721,6 +14802,18 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn EVP_HPKE_CTX_setup_recipient_with_shared_secret(
+        ctx: *mut EVP_HPKE_CTX,
+        kem: *const EVP_HPKE_KEM,
+        kdf: *const EVP_HPKE_KDF,
+        aead: *const EVP_HPKE_AEAD,
+        shared_secret: *const u8,
+        shared_secret_len: usize,
+        info: *const u8,
+        info_len: usize,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn EVP_HPKE_CTX_setup_auth_sender(
         ctx: *mut EVP_HPKE_CTX,
         out_enc: *mut u8,
@@ -14829,6 +14922,7 @@ pub struct evp_hpke_key_st {
     pub kem: *const EVP_HPKE_KEM,
     pub private_key: [u8; 64usize],
     pub public_key: [u8; 1568usize],
+    pub pkey: *mut EVP_PKEY,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -15766,6 +15860,10 @@ unsafe extern "C" {
     ) -> *mut CRYPTO_BUFFER;
 }
 unsafe extern "C" {
+    #[link_name = "sk_CRYPTO_BUFFER_last__extern"]
+    pub fn sk_CRYPTO_BUFFER_last(sk: *const stack_st_CRYPTO_BUFFER) -> *mut CRYPTO_BUFFER;
+}
+unsafe extern "C" {
     #[link_name = "sk_CRYPTO_BUFFER_set__extern"]
     pub fn sk_CRYPTO_BUFFER_set(
         sk: *mut stack_st_CRYPTO_BUFFER,
@@ -16473,6 +16571,10 @@ unsafe extern "C" {
     pub fn sk_X509_value(sk: *const stack_st_X509, i: usize) -> *mut X509;
 }
 unsafe extern "C" {
+    #[link_name = "sk_X509_last__extern"]
+    pub fn sk_X509_last(sk: *const stack_st_X509) -> *mut X509;
+}
+unsafe extern "C" {
     #[link_name = "sk_X509_set__extern"]
     pub fn sk_X509_set(sk: *mut stack_st_X509, i: usize, p: *mut X509) -> *mut X509;
 }
@@ -16719,6 +16821,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_GENERAL_NAME_value__extern"]
     pub fn sk_GENERAL_NAME_value(sk: *const stack_st_GENERAL_NAME, i: usize) -> *mut GENERAL_NAME;
+}
+unsafe extern "C" {
+    #[link_name = "sk_GENERAL_NAME_last__extern"]
+    pub fn sk_GENERAL_NAME_last(sk: *const stack_st_GENERAL_NAME) -> *mut GENERAL_NAME;
 }
 unsafe extern "C" {
     #[link_name = "sk_GENERAL_NAME_set__extern"]
@@ -17079,6 +17185,10 @@ unsafe extern "C" {
     pub fn sk_X509_CRL_value(sk: *const stack_st_X509_CRL, i: usize) -> *mut X509_CRL;
 }
 unsafe extern "C" {
+    #[link_name = "sk_X509_CRL_last__extern"]
+    pub fn sk_X509_CRL_last(sk: *const stack_st_X509_CRL) -> *mut X509_CRL;
+}
+unsafe extern "C" {
     #[link_name = "sk_X509_CRL_set__extern"]
     pub fn sk_X509_CRL_set(sk: *mut stack_st_X509_CRL, i: usize, p: *mut X509_CRL)
         -> *mut X509_CRL;
@@ -17233,6 +17343,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_X509_REVOKED_value__extern"]
     pub fn sk_X509_REVOKED_value(sk: *const stack_st_X509_REVOKED, i: usize) -> *mut X509_REVOKED;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_REVOKED_last__extern"]
+    pub fn sk_X509_REVOKED_last(sk: *const stack_st_X509_REVOKED) -> *mut X509_REVOKED;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_REVOKED_set__extern"]
@@ -17870,6 +17984,10 @@ unsafe extern "C" {
     ) -> *mut X509_NAME_ENTRY;
 }
 unsafe extern "C" {
+    #[link_name = "sk_X509_NAME_ENTRY_last__extern"]
+    pub fn sk_X509_NAME_ENTRY_last(sk: *const stack_st_X509_NAME_ENTRY) -> *mut X509_NAME_ENTRY;
+}
+unsafe extern "C" {
     #[link_name = "sk_X509_NAME_ENTRY_set__extern"]
     pub fn sk_X509_NAME_ENTRY_set(
         sk: *mut stack_st_X509_NAME_ENTRY,
@@ -18047,6 +18165,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_X509_NAME_value__extern"]
     pub fn sk_X509_NAME_value(sk: *const stack_st_X509_NAME, i: usize) -> *mut X509_NAME;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_NAME_last__extern"]
+    pub fn sk_X509_NAME_last(sk: *const stack_st_X509_NAME) -> *mut X509_NAME;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_NAME_set__extern"]
@@ -18490,6 +18612,10 @@ unsafe extern "C" {
         sk: *const stack_st_X509_EXTENSION,
         i: usize,
     ) -> *mut X509_EXTENSION;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_EXTENSION_last__extern"]
+    pub fn sk_X509_EXTENSION_last(sk: *const stack_st_X509_EXTENSION) -> *mut X509_EXTENSION;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_EXTENSION_set__extern"]
@@ -18967,6 +19093,10 @@ unsafe extern "C" {
     ) -> *mut GENERAL_SUBTREE;
 }
 unsafe extern "C" {
+    #[link_name = "sk_GENERAL_SUBTREE_last__extern"]
+    pub fn sk_GENERAL_SUBTREE_last(sk: *const stack_st_GENERAL_SUBTREE) -> *mut GENERAL_SUBTREE;
+}
+unsafe extern "C" {
     #[link_name = "sk_GENERAL_SUBTREE_set__extern"]
     pub fn sk_GENERAL_SUBTREE_set(
         sk: *mut stack_st_GENERAL_SUBTREE,
@@ -19180,6 +19310,12 @@ unsafe extern "C" {
     ) -> *mut ACCESS_DESCRIPTION;
 }
 unsafe extern "C" {
+    #[link_name = "sk_ACCESS_DESCRIPTION_last__extern"]
+    pub fn sk_ACCESS_DESCRIPTION_last(
+        sk: *const stack_st_ACCESS_DESCRIPTION,
+    ) -> *mut ACCESS_DESCRIPTION;
+}
+unsafe extern "C" {
     #[link_name = "sk_ACCESS_DESCRIPTION_set__extern"]
     pub fn sk_ACCESS_DESCRIPTION_set(
         sk: *mut stack_st_ACCESS_DESCRIPTION,
@@ -19327,7 +19463,6 @@ unsafe extern "C" {
 pub struct DIST_POINT_NAME_st {
     pub type_: ::core::ffi::c_int,
     pub name: DIST_POINT_NAME_st__bindgen_ty_1,
-    pub dpname: *mut X509_NAME,
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -19419,6 +19554,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_DIST_POINT_value__extern"]
     pub fn sk_DIST_POINT_value(sk: *const stack_st_DIST_POINT, i: usize) -> *mut DIST_POINT;
+}
+unsafe extern "C" {
+    #[link_name = "sk_DIST_POINT_last__extern"]
+    pub fn sk_DIST_POINT_last(sk: *const stack_st_DIST_POINT) -> *mut DIST_POINT;
 }
 unsafe extern "C" {
     #[link_name = "sk_DIST_POINT_set__extern"]
@@ -19694,6 +19833,10 @@ unsafe extern "C" {
     ) -> *mut POLICYQUALINFO;
 }
 unsafe extern "C" {
+    #[link_name = "sk_POLICYQUALINFO_last__extern"]
+    pub fn sk_POLICYQUALINFO_last(sk: *const stack_st_POLICYQUALINFO) -> *mut POLICYQUALINFO;
+}
+unsafe extern "C" {
     #[link_name = "sk_POLICYQUALINFO_set__extern"]
     pub fn sk_POLICYQUALINFO_set(
         sk: *mut stack_st_POLICYQUALINFO,
@@ -19884,6 +20027,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_POLICYINFO_value__extern"]
     pub fn sk_POLICYINFO_value(sk: *const stack_st_POLICYINFO, i: usize) -> *mut POLICYINFO;
+}
+unsafe extern "C" {
+    #[link_name = "sk_POLICYINFO_last__extern"]
+    pub fn sk_POLICYINFO_last(sk: *const stack_st_POLICYINFO) -> *mut POLICYINFO;
 }
 unsafe extern "C" {
     #[link_name = "sk_POLICYINFO_set__extern"]
@@ -20094,6 +20241,10 @@ unsafe extern "C" {
     ) -> *mut POLICY_MAPPING;
 }
 unsafe extern "C" {
+    #[link_name = "sk_POLICY_MAPPING_last__extern"]
+    pub fn sk_POLICY_MAPPING_last(sk: *const stack_st_POLICY_MAPPING) -> *mut POLICY_MAPPING;
+}
+unsafe extern "C" {
     #[link_name = "sk_POLICY_MAPPING_set__extern"]
     pub fn sk_POLICY_MAPPING_set(
         sk: *mut stack_st_POLICY_MAPPING,
@@ -20297,6 +20448,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_X509_ALGOR_value__extern"]
     pub fn sk_X509_ALGOR_value(sk: *const stack_st_X509_ALGOR, i: usize) -> *mut X509_ALGOR;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_ALGOR_last__extern"]
+    pub fn sk_X509_ALGOR_last(sk: *const stack_st_X509_ALGOR) -> *mut X509_ALGOR;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_ALGOR_set__extern"]
@@ -20516,6 +20671,10 @@ unsafe extern "C" {
         sk: *const stack_st_X509_ATTRIBUTE,
         i: usize,
     ) -> *mut X509_ATTRIBUTE;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_ATTRIBUTE_last__extern"]
+    pub fn sk_X509_ATTRIBUTE_last(sk: *const stack_st_X509_ATTRIBUTE) -> *mut X509_ATTRIBUTE;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_ATTRIBUTE_set__extern"]
@@ -20831,6 +20990,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_X509_OBJECT_value__extern"]
     pub fn sk_X509_OBJECT_value(sk: *const stack_st_X509_OBJECT, i: usize) -> *mut X509_OBJECT;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_OBJECT_last__extern"]
+    pub fn sk_X509_OBJECT_last(sk: *const stack_st_X509_OBJECT) -> *mut X509_OBJECT;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_OBJECT_set__extern"]
@@ -22078,6 +22241,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_X509_INFO_value__extern"]
     pub fn sk_X509_INFO_value(sk: *const stack_st_X509_INFO, i: usize) -> *mut X509_INFO;
+}
+unsafe extern "C" {
+    #[link_name = "sk_X509_INFO_last__extern"]
+    pub fn sk_X509_INFO_last(sk: *const stack_st_X509_INFO) -> *mut X509_INFO;
 }
 unsafe extern "C" {
     #[link_name = "sk_X509_INFO_set__extern"]
@@ -23908,12 +24075,38 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn SSL_CTX_set_cert_cb_ex(
+        ctx: *mut SSL_CTX,
+        cb: ::core::option::Option<
+            unsafe extern "C" fn(
+                ssl: *mut SSL,
+                arg: *mut ::core::ffi::c_void,
+                out_alert: *mut u8,
+            ) -> ::core::ffi::c_int,
+        >,
+        arg: *mut ::core::ffi::c_void,
+    );
+}
+unsafe extern "C" {
     pub fn SSL_set_cert_cb(
         ssl: *mut SSL,
         cb: ::core::option::Option<
             unsafe extern "C" fn(
                 ssl: *mut SSL,
                 arg: *mut ::core::ffi::c_void,
+            ) -> ::core::ffi::c_int,
+        >,
+        arg: *mut ::core::ffi::c_void,
+    );
+}
+unsafe extern "C" {
+    pub fn SSL_set_cert_cb_ex(
+        ssl: *mut SSL,
+        cb: ::core::option::Option<
+            unsafe extern "C" fn(
+                ssl: *mut SSL,
+                arg: *mut ::core::ffi::c_void,
+                out_alert: *mut u8,
             ) -> ::core::ffi::c_int,
         >,
         arg: *mut ::core::ffi::c_void,
@@ -24286,6 +24479,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_SSL_CIPHER_value__extern"]
     pub fn sk_SSL_CIPHER_value(sk: *const stack_st_SSL_CIPHER, i: usize) -> *const SSL_CIPHER;
+}
+unsafe extern "C" {
+    #[link_name = "sk_SSL_CIPHER_last__extern"]
+    pub fn sk_SSL_CIPHER_last(sk: *const stack_st_SSL_CIPHER) -> *const SSL_CIPHER;
 }
 unsafe extern "C" {
     #[link_name = "sk_SSL_CIPHER_set__extern"]
@@ -25253,12 +25450,10 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
-    pub fn SSL_CREDENTIAL_add1_trust_anchor_group_inclusion(
+    pub fn SSL_CREDENTIAL_add1_trust_anchor_group(
         cred: *mut SSL_CREDENTIAL,
-        base: *const u8,
-        base_len: usize,
-        min: u64,
-        max: u64,
+        pattern: *const u8,
+        pattern_len: usize,
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
@@ -25569,6 +25764,12 @@ unsafe extern "C" {
     pub fn sk_SRTP_PROTECTION_PROFILE_value(
         sk: *const stack_st_SRTP_PROTECTION_PROFILE,
         i: usize,
+    ) -> *const SRTP_PROTECTION_PROFILE;
+}
+unsafe extern "C" {
+    #[link_name = "sk_SRTP_PROTECTION_PROFILE_last__extern"]
+    pub fn sk_SRTP_PROTECTION_PROFILE_last(
+        sk: *const stack_st_SRTP_PROTECTION_PROFILE,
     ) -> *const SRTP_PROTECTION_PROFILE;
 }
 unsafe extern "C" {
@@ -26951,6 +27152,10 @@ unsafe extern "C" {
     pub fn sk_SSL_COMP_value(sk: *const stack_st_SSL_COMP, i: usize) -> *mut SSL_COMP;
 }
 unsafe extern "C" {
+    #[link_name = "sk_SSL_COMP_last__extern"]
+    pub fn sk_SSL_COMP_last(sk: *const stack_st_SSL_COMP) -> *mut SSL_COMP;
+}
+unsafe extern "C" {
     #[link_name = "sk_SSL_COMP_set__extern"]
     pub fn sk_SSL_COMP_set(sk: *mut stack_st_SSL_COMP, i: usize, p: *mut SSL_COMP)
         -> *mut SSL_COMP;
@@ -27225,11 +27430,12 @@ unsafe extern "C" {
 }
 pub const ssl_compliance_policy_t_ssl_compliance_policy_none: ssl_compliance_policy_t = 0;
 pub const ssl_compliance_policy_t_ssl_compliance_policy_fips_202205: ssl_compliance_policy_t = 1;
+pub const ssl_compliance_policy_t_ssl_compliance_policy_fips_202609: ssl_compliance_policy_t = 2;
 pub const ssl_compliance_policy_t_ssl_compliance_policy_wpa3_192_202304: ssl_compliance_policy_t =
-    2;
-pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa_202407: ssl_compliance_policy_t = 3;
-pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa1_202603: ssl_compliance_policy_t = 4;
-pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa2_202603: ssl_compliance_policy_t = 5;
+    3;
+pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa_202407: ssl_compliance_policy_t = 4;
+pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa1_202603: ssl_compliance_policy_t = 5;
+pub const ssl_compliance_policy_t_ssl_compliance_policy_cnsa2_202603: ssl_compliance_policy_t = 6;
 pub type ssl_compliance_policy_t = ::core::ffi::c_uint;
 unsafe extern "C" {
     pub fn SSL_CTX_set_compliance_policy(
@@ -27364,6 +27570,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[link_name = "sk_TRUST_TOKEN_value__extern"]
     pub fn sk_TRUST_TOKEN_value(sk: *const stack_st_TRUST_TOKEN, i: usize) -> *mut TRUST_TOKEN;
+}
+unsafe extern "C" {
+    #[link_name = "sk_TRUST_TOKEN_last__extern"]
+    pub fn sk_TRUST_TOKEN_last(sk: *const stack_st_TRUST_TOKEN) -> *mut TRUST_TOKEN;
 }
 unsafe extern "C" {
     #[link_name = "sk_TRUST_TOKEN_set__extern"]

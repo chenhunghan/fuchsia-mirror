@@ -7,9 +7,7 @@
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::Event;
 use crate::kernel::thread::Interruptible;
-use crate::object::{
-    AutoBlocked, Blocked, HandleTableReadGuard, HandleValue, ProcessDispatcher, WaitSignalObserver,
-};
+use crate::object::{AutoBlocked, Blocked, HandleValue, ProcessDispatcher, WaitSignalObserver};
 use crate::platform_rs::timer::InstantUnknown;
 use crate::user_copy::{UserInOutPtr, UserOutPtr};
 use debug::ltracef;
@@ -38,14 +36,17 @@ pub fn sys_object_wait_one(
     let mut wait_signal_observer = WaitSignalObserver::new();
 
     let slack_deadline = ProcessDispatcher::with_current(|up| {
-        pin_init::stack_pin_init!(let guard = HandleTableReadGuard::new(up));
+        let handle_table = up.handle_table();
+        ksync::lock!(let guard = handle_table.read_lock());
 
-        let handle = guard.get_handle(handle_value).ok_or(Status::BAD_HANDLE)?;
+        let handle = handle_table
+            .get_handle_locked(guard.token(), up, handle_value)
+            .ok_or(Status::BAD_HANDLE)?;
         if !handle.has_rights(ZX_RIGHT_WAIT) {
             return Err(Status::ACCESS_DENIED);
         }
 
-        wait_signal_observer.begin(&guard, event.as_ref().get_ref(), &handle, signals)?;
+        wait_signal_observer.begin(guard.token(), event.as_ref().get_ref(), &handle, signals)?;
 
         let slack = up.get_timer_slack_policy();
         Ok(Deadline::new(InstantUnknown(deadline), slack))
@@ -116,16 +117,18 @@ pub fn sys_object_wait_many(
     // We may need to unwind (which can be done outside the lock).
     let mut num_added = 0;
     let begin_result = ProcessDispatcher::with_current(|up| {
-        pin_init::stack_pin_init!(let guard = HandleTableReadGuard::new(up));
+        let handle_table = up.handle_table();
+        ksync::lock!(let guard = handle_table.read_lock());
 
         for (ix, item) in items[..count].iter().enumerate() {
-            let handle =
-                guard.get_handle(HandleValue::new(item.handle)).ok_or(Status::BAD_HANDLE)?;
+            let handle = handle_table
+                .get_handle_locked(guard.token(), up, HandleValue::new(item.handle))
+                .ok_or(Status::BAD_HANDLE)?;
             if !handle.has_rights(ZX_RIGHT_WAIT) {
                 return Err(Status::ACCESS_DENIED);
             }
 
-            observers[ix].begin(&guard, event.as_ref().get_ref(), &handle, item.waitfor)?;
+            observers[ix].begin(guard.token(), event.as_ref().get_ref(), &handle, item.waitfor)?;
             num_added += 1;
         }
         Ok(())

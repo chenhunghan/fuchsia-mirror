@@ -4,13 +4,6 @@
 
 """Tests for the platform Bazel package and device test rules."""
 
-load(
-    "@fuchsia_build_info//:environments.bzl",
-    "aemu_env",
-    "basic_envs",
-    "nuc11_env",
-    "qemu_1cpu_env",
-)
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
@@ -26,6 +19,14 @@ load(
     "verify_fx_test_realms",
 )
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_test_environment.bzl",
+    "fx_test_environment",
+    "fx_test_environment_variant",
+)
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//build/testing/environments:device_types.bzl", "device_types")
+load(":fx_test_validation_tests.bzl", "fx_test_validation_tests")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -103,8 +104,8 @@ fx_test(
 # assertion on the `FuchsiaTestInfo` provider of the `fx_test()` it points at:
 # building it fails if the test's `environments` or `build_only` don't match
 # the expected values. They have no outputs and only need to be built (via
-# `build_only_tests`) to take effect. This guards `fx_test()`'s JSON
-# encode/decode round trip of `environments`; it does not check what the
+# `build_only_tests`) to take effect. This guards how `fx_test()` collects
+# environments from its `environments` targets; it does not check what the
 # tests.json cquery extracts from the provider, which is covered by
 # `FuchsiaTestInfoCqueryTest` in //build/bazel/scripts/bazel_tests_utils_test.py.
 verify_fx_test_environments(
@@ -117,9 +118,9 @@ verify_fx_test_environments(
 fx_test(
     name = "example_test_with_environments",
     environments = [
-        aemu_env,
-        nuc11_env,
-        qemu_1cpu_env,
+        "//build/testing/environments:aemu_env",
+        "//build/testing/environments:nuc11_env",
+        "//build/testing/environments:sherlock_env",
     ],
     package = ":example_test_package",
 )
@@ -128,24 +129,106 @@ verify_fx_test_environments(
     name = "verify_example_test_with_environments",
     testonly = True,
     expected_environments = [
-        aemu_env,
-        nuc11_env,
-        qemu_1cpu_env,
+        {"dimensions": {"device_type": device_types.aemu}},
+        {"dimensions": {"device_type": device_types.nuc11}},
+        {"dimensions": {"device_type": device_types.sherlock}},
     ],
     test = ":example_test_with_environments",
 )
 
+fx_test_environment(
+    name = "example_custom_env",
+    dimensions = {"device_type": device_types.qemu},
+    emulator = {
+        "device": "x64-emu-min",
+        "name": "example",
+    },
+    env_tags = ["example-tag"],
+    netboot = True,
+    service_account = "example@fuchsia.iam.gserviceaccount.com",
+)
+
+# An environment identical to `example_custom_env`, to check that `fx_test()`
+# dedupes it.
+fx_test_environment(
+    name = "example_custom_copy_env",
+    dimensions = {"device_type": device_types.qemu},
+    emulator = {
+        "device": "x64-emu-min",
+        "name": "example",
+    },
+    env_tags = ["example-tag"],
+    netboot = True,
+    service_account = "example@fuchsia.iam.gserviceaccount.com",
+)
+
+fx_test_environment(
+    name = "example_tagged_env",
+    dimensions = {"device_type": device_types.vim3},
+    env_tags = ["example-tag"],
+)
+
+# Variant tags are appended to the base's tags, without duplicates.
+fx_test_environment_variant(
+    name = "example_tagged_variant_env",
+    base = ":example_tagged_env",
+    env_tags = [
+        "example-tag",
+        "other-tag",
+    ],
+    service_account = "variant@fuchsia.iam.gserviceaccount.com",
+)
+
 fx_test(
-    name = "example_test_with_basic_envs",
-    environments = basic_envs,
+    name = "example_test_with_custom_environments",
+    environments = [
+        ":example_custom_env",
+        ":example_tagged_variant_env",
+        ":example_custom_copy_env",
+    ],
     package = ":example_test_package",
 )
 
 verify_fx_test_environments(
-    name = "verify_example_test_with_basic_envs",
+    name = "verify_example_test_with_custom_environments",
     testonly = True,
-    expected_environments = basic_envs,
-    test = ":example_test_with_basic_envs",
+    expected_environments = [
+        {
+            "dimensions": {"device_type": device_types.qemu},
+            "emulator": {
+                "device": "x64-emu-min",
+                "name": "example",
+            },
+            "netboot": True,
+            "service_account": "example@fuchsia.iam.gserviceaccount.com",
+            "tags": ["example-tag"],
+        },
+        {
+            "dimensions": {"device_type": device_types.vim3},
+            "service_account": "variant@fuchsia.iam.gserviceaccount.com",
+            "tags": [
+                "example-tag",
+                "other-tag",
+            ],
+        },
+    ],
+    test = ":example_test_with_custom_environments",
+)
+
+# Environments are labels, so they can be chosen with `select()`.
+fx_test(
+    name = "example_test_with_selected_environments",
+    environments = select({
+        "//conditions:default": ["//build/testing/environments:vim3_env"],
+    }),
+    package = ":example_test_package",
+)
+
+verify_fx_test_environments(
+    name = "verify_example_test_with_selected_environments",
+    testonly = True,
+    expected_environments = [{"dimensions": {"device_type": device_types.vim3}}],
+    test = ":example_test_with_selected_environments",
 )
 
 fx_test(
@@ -229,18 +312,27 @@ verify_fx_test_realms(
     test = ":example_multi_component_test",
 )
 
+# Checks that invalid `fx_test()` arguments fail analysis with a helpful error.
+fx_test_validation_tests(
+    name = "fx_test_validation_tests",
+    package = ":example_test_package",
+)
+
 filegroup(
     name = "build_only_tests",
     testonly = True,
     srcs = [
         ":example_build_only_test",
         ":example_test",
-        ":example_test_with_basic_envs",
+        ":example_test_with_custom_environments",
         ":example_test_with_environments",
+        ":example_test_with_selected_environments",
+        ":fx_test_validation_tests",
         ":verify_example_build_only_test",
         ":verify_example_test_default_environments",
-        ":verify_example_test_with_basic_envs",
+        ":verify_example_test_with_custom_environments",
         ":verify_example_test_with_environments",
+        ":verify_example_test_with_selected_environments",
     ],
     visibility = ["//build/bazel/rules/tests:__pkg__"],
 )
@@ -251,11 +343,76 @@ filegroup(
     testonly = True,
     srcs = [
         ":example_multi_component_test",
+        ":example_multi_unittest_package",
         ":example_test",
         ":example_test_with_test_type",
+        ":example_unittest_package",
+        ":example_unittest_package_default_name",
         ":verify_example_multi_component_test_realms",
+        ":verify_example_multi_unittest_package_realms",
         ":verify_example_test_default_realm",
         ":verify_example_test_with_test_type",
+        ":verify_example_unittest_package_default_name_realms",
+        ":verify_example_unittest_package_realms",
     ],
     visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "example_second_test_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    tags = ["manual"],
+)
+
+# Tests `fx_unittest_package()` with a single unit test binary.
+fx_unittest_package(
+    name = "example_unittest_package",
+    package_name = "fx-unittest-package-example",
+    unit_tests = [":example_test_bin"],
+)
+
+verify_fx_test_realms(
+    name = "verify_example_unittest_package_realms",
+    testonly = True,
+    expected_realms = {
+        "fx-unittest-package-example": "",
+    },
+    test = ":example_unittest_package",
+)
+
+# Tests that `fx_unittest_package()` names the package and component after
+# `name` when `package_name` is omitted.
+fx_unittest_package(
+    name = "example_unittest_package_default_name",
+    unit_tests = [":example_test_bin"],
+)
+
+verify_fx_test_realms(
+    name = "verify_example_unittest_package_default_name_realms",
+    testonly = True,
+    expected_realms = {
+        "example_unittest_package_default_name": "",
+    },
+    test = ":example_unittest_package_default_name",
+)
+
+# Tests `fx_unittest_package()` with multiple unit test binaries.
+fx_unittest_package(
+    name = "example_multi_unittest_package",
+    package_name = "fx-multi-unittest-package-example",
+    unit_tests = [
+        ":example_test_bin",
+        ":example_second_test_bin",
+    ],
+)
+
+verify_fx_test_realms(
+    name = "verify_example_multi_unittest_package_realms",
+    testonly = True,
+    expected_realms = {
+        "example_test_bin": "",
+        "example_second_test_bin": "",
+    },
+    test = ":example_multi_unittest_package",
 )

@@ -5,7 +5,7 @@
             metrics: [
                 {
                     event_codes: [
-                        4,
+                        "ipv4",
                     ],
                     metric_name: "need_more_fragments",
                     metric_type: "Occurrence",
@@ -13,7 +13,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "ipv6",
                     ],
                     metric_name: "need_more_fragments",
                     metric_type: "Occurrence",
@@ -21,7 +21,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "ipv4",
                     ],
                     metric_name: "conntrack_num_entries",
                     metric_type: "Integer",
@@ -29,7 +29,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "ipv6",
                     ],
                     metric_name: "conntrack_num_entries",
                     metric_type: "Integer",
@@ -37,7 +37,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "ipv4",
                     ],
                     metric_name: "conntrack_table_limit_hits",
                     metric_type: "Occurrence",
@@ -45,7 +45,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "ipv6",
                     ],
                     metric_name: "conntrack_table_limit_hits",
                     metric_type: "Occurrence",
@@ -53,7 +53,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "ipv4",
                     ],
                     metric_name: "conntrack_table_limit_drops",
                     metric_type: "Occurrence",
@@ -61,7 +61,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "ipv6",
                     ],
                     metric_name: "conntrack_table_limit_drops",
                     metric_type: "Occurrence",

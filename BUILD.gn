@@ -2265,6 +2265,10 @@ build_api_module("nuc11_fastboot_images_location") {
 #                 Bazel as top-level command line targets alongside 'bazel_target'.
 #     - Type: string
 #
+#   debug_symbols_manifest:
+#     - Optional: Path in the ninja outdir to write the debug symbols manifest to.
+#     - Type: string
+#
 #  The other fields depend on the 'type':
 #
 #     "file":
@@ -2349,7 +2353,6 @@ group("default") {
     "//:host",
     "//:product_bundles.check",
     "//:test-list",
-    "//build:bazel2gn_dir_list",
     "//build/assembly:validate_product_defs",
     "//build/bazel:gn_build_variables_for_bazel",
     "//bundles/assembly",
@@ -2528,6 +2531,7 @@ group("root_targets") {
     # The Fuchsia Bazel SDK generated from the Fuchsia IDK, and the associated
     # tests.
     "//sdk:final_fuchsia_sdk_tests",
+    "//sdk:final_fuchsia_sdk_tests.bazel",
 
     # The IDK generated for the in-tree @fuchsia_sdk Bazel workspace, and
     # associated tests.

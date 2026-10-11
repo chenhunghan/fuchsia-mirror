@@ -18,8 +18,8 @@ use starnix_core::vfs::pseudo::simple_file::BytesFile;
 use starnix_core::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
-    DirectoryEntryType, FileOps, FileSystemHandle, FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps,
-    FsStr, FsString,
+    DirEntry, DirectoryEntryType, FileOps, FileSystemHandle, FsNode, FsNodeHandle, FsNodeInfo,
+    FsNodeOps, FsStr, FsString,
 };
 use starnix_logging::bug_ref;
 use starnix_sync::{CgroupDirectoryInterfaceFilesLock, LockDepMutex};
@@ -377,7 +377,7 @@ impl FsNodeOps for CgroupDirectoryHandle {
 
     fn lookup(
         &self,
-        _node: &FsNode,
+        _entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {

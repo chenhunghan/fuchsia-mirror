@@ -97,6 +97,7 @@ struct LinkChecker {
     links: Vec<LinkReference>,
     reachability_graph: ReachabilityGraph,
     reference_docs_root: Option<PathBuf>,
+    pub(crate) glossary_terms: Option<HashSet<String>>,
 }
 
 impl LinkChecker {
@@ -202,10 +203,19 @@ impl DocCheck for LinkChecker {
                             LinkType::Inline => link_url,
                             LinkType::Reference => link_url,
                             LinkType::ReferenceUnknown => {
-                                errors.extend(handle_shortcut_unknown(
-                                    ele, link_url, link_title, elements,
-                                ));
-                                continue;
+                                // Glossary reference links (e.g. [text][glossary.term]) are
+                                // resolved by DocContext::handle_broken_link to canonical in-tree
+                                // links to /docs/glossary/README.md#<anchor>. Process them as normal
+                                // links so their targets and fragment anchors are validated against
+                                // docs/glossary/_glossary.yaml without routing to handle_shortcut_unknown.
+                                if link_url.starts_with("/docs/glossary") {
+                                    link_url
+                                } else {
+                                    errors.extend(handle_shortcut_unknown(
+                                        ele, link_url, link_title, elements,
+                                    ));
+                                    continue;
+                                }
                             }
                             LinkType::Collapsed => link_url,
                             LinkType::CollapsedUnknown => {
@@ -221,10 +231,19 @@ impl DocCheck for LinkChecker {
                             }
                             LinkType::Shortcut => link_url,
                             LinkType::ShortcutUnknown => {
-                                errors.extend(handle_shortcut_unknown(
-                                    ele, link_url, link_title, elements,
-                                ));
-                                continue;
+                                // Shortcut glossary links (e.g. [glossary.term]) are resolved by
+                                // DocContext::handle_broken_link to canonical in-tree links
+                                // to /docs/glossary/README.md#<anchor>. Process them as normal links
+                                // so their targets and fragment anchors are validated against
+                                // docs/glossary/_glossary.yaml without routing to handle_shortcut_unknown.
+                                if link_url.starts_with("/docs/glossary") {
+                                    link_url
+                                } else {
+                                    errors.extend(handle_shortcut_unknown(
+                                        ele, link_url, link_title, elements,
+                                    ));
+                                    continue;
+                                }
                             }
                             LinkType::Autolink => link_url,
                             LinkType::Email => return Ok(None),
@@ -370,6 +389,31 @@ impl DocCheck for LinkChecker {
                                             link_to_check
                                         ),
                                     ));
+                                }
+
+                                // If this link targets the glossary README, validate that the anchor
+                                // fragment corresponds to an actual defined term in _glossary.yaml.
+                                if let Some(ref glossary_terms) = self.glossary_terms {
+                                    if target_file
+                                        .ends_with(self.docs_folder.join("glossary/README.md"))
+                                    {
+                                        if let Some((_, anchor)) = link_to_check.split_once('#') {
+                                            let clean_anchor =
+                                                anchor.trim_matches('#').to_lowercase();
+                                            if !clean_anchor.is_empty()
+                                                && !glossary_terms.contains(&clean_anchor)
+                                            {
+                                                errors.push(DocCheckError::new_error(
+                                                    element.doc_line().line_num,
+                                                    element.doc_line().file_name.clone(),
+                                                    &format!(
+                                                        "invalid glossary anchor '{}' in link '{}': target term does not exist in the glossary",
+                                                        anchor, link_to_check
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Err(link_error) => {
@@ -865,11 +909,60 @@ fn tcp_options() -> TcpOptions {
     options
 }
 
+/// Loads the valid glossary term slugs and keys from docs/glossary/_glossary.yaml if present.
+fn load_glossary_terms(root_dir: &Path, docs_folder: &Path) -> Option<HashSet<String>> {
+    let glossary_path = root_dir.join(docs_folder).join("glossary/_glossary.yaml");
+    if !path_helper::exists(&glossary_path) {
+        return None;
+    }
+    let content = match std::fs::read_to_string(&glossary_path) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+    #[derive(serde::Deserialize)]
+    struct TermEntry {
+        term: String,
+        #[serde(default)]
+        short_description: String,
+    }
+    let entries: Vec<TermEntry> = match serde_yaml::from_str(&content) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    let mut terms = HashSet::new();
+    // As defined in docs/_common/_doc_widgets.md:34, DevSite only matches terms
+    // that have a non-empty short_description.
+    for entry in entries
+        .into_iter()
+        .filter(|e| !e.term.trim().is_empty() && !e.short_description.trim().is_empty())
+    {
+        let term = entry.term.trim();
+        // Slug form: lowercase, non-alphanumerics collapsed to '-'
+        let mut slug = String::new();
+        let mut last_dash = true;
+        for c in term.chars() {
+            if c.is_alphanumeric() {
+                slug.push(c.to_ascii_lowercase());
+                last_dash = false;
+            } else if !last_dash {
+                slug.push('-');
+                last_dash = true;
+            }
+        }
+        let trimmed_slug = slug.trim_matches('-').to_string();
+        if !trimmed_slug.is_empty() {
+            terms.insert(trimmed_slug);
+        }
+    }
+    Some(terms)
+}
+
 /// Called from main to register all the checks to preform which are implemented in this module.
 pub(crate) fn register_markdown_checks(
     opt: &DocCheckerArgs,
     reachability_graph: ReachabilityGraph,
 ) -> Result<Vec<Box<dyn DocCheck>>> {
+    let glossary_terms = load_glossary_terms(&opt.root, &opt.docs_folder);
     let checker = LinkChecker {
         root_dir: opt.root.clone(),
         project: opt.project.clone(),
@@ -879,6 +972,7 @@ pub(crate) fn register_markdown_checks(
         allow_fuchsia_src_links: opt.allow_fuchsia_src_links,
         reachability_graph,
         reference_docs_root: opt.reference_docs_root.clone(),
+        glossary_terms,
     };
     Ok(vec![Box::new(checker)])
 }
@@ -899,6 +993,7 @@ mod tests {
             allow_fuchsia_src_links: false,
             reachability_graph: Default::default(),
             reference_docs_root: None,
+            glossary_terms: None,
         };
         let filename = PathBuf::from("/my/root/fuchsia/docs/index.md");
 
@@ -1324,6 +1419,156 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_glossary_link_validation() -> Result<()> {
+        let root_dir = PathBuf::from("/my/root/fuchsia");
+        let docs_folder = PathBuf::from("docs");
+        let mut glossary_terms = HashSet::new();
+        glossary_terms.insert("product-bundle".to_string());
+        glossary_terms.insert("session-component".to_string());
+
+        let mut checker = LinkChecker {
+            root_dir: root_dir.clone(),
+            project: "fuchsia".to_string(),
+            docs_folder: docs_folder.clone(),
+            check_remote_links: false,
+            links: vec![],
+            allow_fuchsia_src_links: false,
+            reachability_graph: Default::default(),
+            reference_docs_root: None,
+            glossary_terms: Some(glossary_terms),
+        };
+
+        let file = PathBuf::from("/docs/README.md");
+
+        // 1. Valid glossary reference link
+        let input_valid = "See [product bundle][glossary.product-bundle].";
+        let callback_valid = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input_valid)
+        };
+        let ctx = DocContext::new(file.clone(), input_valid, Some(callback_valid));
+        for ele in ctx {
+            let errors = checker.check(&ele)?;
+            assert!(
+                errors.is_none(),
+                "Expected no errors for valid glossary link, got {:?}",
+                errors
+            );
+        }
+
+        // 2. Invalid glossary reference link (typo)
+        let input_invalid = "See [bad bundle][glossary.invalid-bundle-typo].";
+        let callback_invalid = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input_invalid)
+        };
+        let ctx = DocContext::new(file.clone(), input_invalid, Some(callback_invalid));
+        let mut saw_error = false;
+        for ele in ctx {
+            if let Some(errs) = checker.check(&ele)? {
+                for err in errs {
+                    if err.message.contains("invalid glossary anchor 'invalid-bundle-typo'") {
+                        saw_error = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_error, "Expected error for invalid glossary anchor 'invalid-bundle-typo'");
+
+        // 3. Valid shortcut glossary link
+        let input_shortcut_valid = "See [glossary.session-component].";
+        let callback_shortcut_valid = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input_shortcut_valid)
+        };
+        let ctx =
+            DocContext::new(file.clone(), input_shortcut_valid, Some(callback_shortcut_valid));
+        for ele in ctx {
+            let errors = checker.check(&ele)?;
+            assert!(
+                errors.is_none(),
+                "Expected no errors for valid shortcut glossary link, got {:?}",
+                errors
+            );
+        }
+
+        // 4. Invalid shortcut glossary link (typo)
+        let input_shortcut_invalid = "See [glossary.invalid-shortcut-typo].";
+        let callback_shortcut_invalid = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input_shortcut_invalid)
+        };
+        let ctx =
+            DocContext::new(file.clone(), input_shortcut_invalid, Some(callback_shortcut_invalid));
+        let mut saw_shortcut_error = false;
+        for ele in ctx {
+            if let Some(errs) = checker.check(&ele)? {
+                for err in errs {
+                    if err.message.contains("invalid glossary anchor 'invalid-shortcut-typo'") {
+                        saw_shortcut_error = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_shortcut_error,
+            "Expected error for invalid shortcut glossary anchor 'invalid-shortcut-typo'"
+        );
+
+        // 5. Invalid inline glossary link
+        let input_inline_invalid = "See [bad inline](/docs/glossary/README.md#nonexistent-term).";
+        let ctx = DocContext::new(file.clone(), input_inline_invalid, None::<&mut fn(_) -> _>);
+        let mut saw_inline_error = false;
+        for ele in ctx {
+            if let Some(errs) = checker.check(&ele)? {
+                for err in errs {
+                    if err.message.contains("invalid glossary anchor 'nonexistent-term'") {
+                        saw_inline_error = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_inline_error,
+            "Expected error for invalid inline glossary anchor 'nonexistent-term'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_glossary_terms() -> Result<()> {
+        let temp_dir =
+            std::env::temp_dir().join(format!("doc_checker_glossary_{}", std::process::id()));
+        let docs_dir = temp_dir.join("docs/glossary");
+        std::fs::create_dir_all(&docs_dir)?;
+
+        // Test missing file returns None
+        assert!(load_glossary_terms(&temp_dir, Path::new("nonexistent_docs")).is_none());
+
+        // Write a test _glossary.yaml
+        let glossary_yaml = r#"
+- term: Valid Term
+  short_description: A valid description.
+- term: Another-Term_With Punctuation!
+  short_description: Another description.
+- term: Empty Description
+  short_description: "   "
+- term: "   "
+  short_description: Missing term.
+- term: No Description
+"#;
+        std::fs::write(docs_dir.join("_glossary.yaml"), glossary_yaml)?;
+
+        let terms = load_glossary_terms(&temp_dir, Path::new("docs"))
+            .expect("Expected glossary terms to be loaded");
+
+        assert!(terms.contains("valid-term"));
+        assert!(terms.contains("another-term-with-punctuation"));
+        assert!(!terms.contains("empty-description"));
+        assert_eq!(terms.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
         Ok(())
     }
 }

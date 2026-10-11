@@ -278,6 +278,11 @@ pub fn new_remote_vol(
     options: FileSystemOptions,
 ) -> Result<FileSystemHandle, Errno> {
     let kernel = current_task.kernel();
+    if kernel.features.remotevol_in_process {
+        // TODO(https://fxbug.dev/570047887): In process volume implementation is in progress.
+        log_error!("TODO(b/570047887): remotevol_in_process is not yet implemented");
+        return Err(errno!(ENOTSUP));
+    }
     // TODO(https://fxbug.dev/460156877): Starnix cannot handle multiple volumes.
     let volume_provider = current_task
         .kernel()

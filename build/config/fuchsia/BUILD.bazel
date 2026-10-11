@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
 
 package(default_applicable_licenses = ["//:license"])
@@ -29,6 +30,18 @@ build_flags(
 )
 # LINT.ThenChange(//build/config/fuchsia/BUILD.gn:large_rust_stack)
 
+# LINT.IfChange(shared_library_config)
+build_flags(
+    name = "shared_library_config",
+    cflags = ["-fPIC"],
+    ldflags = ["-fPIC"],
+    # NOTE: commented out because build_flags() does not support asmflags.
+    # asmflags = ["-fPIC"],
+    visibility = ["//visibility:public"],
+)
+
+# LINT.ThenChange(BUILD.gn:shared_library_config)
+
 # LINT.IfChange(fdio_config)
 build_flags(
     name = "fdio_config",
@@ -40,6 +53,13 @@ build_flags(
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(//build/config/fuchsia/BUILD.gn:fdio_config)
+
+# LINT.IfChange(executable_config)
+build_flags(
+    name = "executable_config",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:executable_config)
 
 # LINT.IfChange(zircon_asserts)
 build_flags(
@@ -54,3 +74,31 @@ build_flags(
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(//build/config/fuchsia/BUILD.gn:zircon_asserts)
+
+# LINT.IfChange(no_cpp_standard_library)
+build_flags(
+    name = "no_cpp_standard_library",
+    ldflags = ["-nostdlib++"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:no_cpp_standard_library)
+
+# LINT.IfChange(static-pie-config)
+# This config is also used by Linux binaries, such as
+# //src/starnix/containers/default_init.
+# TODO(https://fxbug.dev/484422864): Prevent this from being used by host Linux
+# targets.
+compiler_build_flags(
+    name = "static-pie-config",
+    cflags = [
+        "-fno-sanitize=all",
+        "-fno-stack-protector",
+    ],
+    ldflags = [
+        "-nostdlib",
+        "-nostartfiles",
+    ],
+    linker_flags = ["-no-dynamic-linker"],
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:static-pie-config)

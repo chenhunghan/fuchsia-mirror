@@ -126,7 +126,6 @@ inline void arch_set_num_cpus(uint cpu_count) { riscv64_num_cpus = cpu_count; }
 inline uint arch_max_num_cpus() { return riscv64_num_cpus; }
 
 inline cpu_num_t arch_curr_cpu_num() { return READ_PERCPU_FIELD(cpu_num); }
-inline uint32_t riscv64_curr_hart_id() { return READ_PERCPU_FIELD(hart_id); }
 
 inline bool arch_get_restricted_flag() { return READ_PERCPU_FIELD(in_restricted_mode); }
 inline void arch_set_restricted_flag(bool restricted) {
@@ -143,6 +142,7 @@ void riscv64_mp_early_init_percpu(uint32_t hart_id, uint cpu_num);
 arch::HartMask riscv64_cpu_mask_to_hart_mask(cpu_mask_t cmask);
 
 uint32_t riscv64_boot_hart_id();
+uint32_t riscv64_curr_hart_id();
 zx_status_t riscv64_start_cpu(cpu_num_t cpu_num, uint32_t hart_id);
 
 // The start-up routine for secondary CPUs, which in turn calls the kernel

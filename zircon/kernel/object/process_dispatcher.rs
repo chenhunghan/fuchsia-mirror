@@ -6,6 +6,7 @@
 
 use super::dispatcher::DispatcherOps;
 use super::handle::{HandleOwner, HandleValue, KernelHandle};
+use super::handle_table::HandleTable;
 use super::job_dispatcher::JobDispatcher;
 #[cfg(target_arch = "x86_64")]
 use super::process_dispatcher_ffi::cpp_process_dispatcher_hw_trace_context_id;
@@ -14,41 +15,26 @@ use super::process_dispatcher_ffi::{
     cpp_process_dispatcher_aspace_at, cpp_process_dispatcher_create,
     cpp_process_dispatcher_create_shared, cpp_process_dispatcher_current,
     cpp_process_dispatcher_enforce_basic_policy, cpp_process_dispatcher_exit_current,
-    cpp_process_dispatcher_get_debug_addr, cpp_process_dispatcher_get_dispatcher_with_rights,
-    cpp_process_dispatcher_get_dyn_break_on_load, cpp_process_dispatcher_get_info,
-    cpp_process_dispatcher_get_timer_slack_policy,
-    cpp_process_dispatcher_get_timer_slack_policy_amount,
-    cpp_process_dispatcher_handle_table_add_handle_locked,
-    cpp_process_dispatcher_handle_table_get_handle_locked,
-    cpp_process_dispatcher_handle_table_koid, cpp_process_dispatcher_handle_table_lock,
-    cpp_process_dispatcher_handle_table_map_handle_to_value,
-    cpp_process_dispatcher_handle_table_remove_handle_locked,
-    cpp_process_dispatcher_handle_table_remove_handle_ptr_locked,
+    cpp_process_dispatcher_get_debug_addr, cpp_process_dispatcher_get_dyn_break_on_load,
+    cpp_process_dispatcher_get_info, cpp_process_dispatcher_get_timer_slack_policy,
+    cpp_process_dispatcher_get_timer_slack_policy_amount, cpp_process_dispatcher_handle_table,
     cpp_process_dispatcher_is_current, cpp_process_dispatcher_job, cpp_process_dispatcher_kill,
     cpp_process_dispatcher_make_and_add_handle,
-    cpp_process_dispatcher_make_and_add_handle_from_ref, cpp_process_dispatcher_remove_handle,
-    cpp_process_dispatcher_resume, cpp_process_dispatcher_set_critical_to_job,
-    cpp_process_dispatcher_set_debug_addr, cpp_process_dispatcher_set_dyn_break_on_load,
-    cpp_process_dispatcher_start, cpp_process_dispatcher_suspend,
-    cpp_process_dispatcher_vdso_base_address, cpp_process_futex_grow_pool,
-    cpp_process_futex_shrink_pool, cpp_process_get_job_koid, cpp_process_remove_thread,
+    cpp_process_dispatcher_make_and_add_handle_from_ref, cpp_process_dispatcher_resume,
+    cpp_process_dispatcher_set_critical_to_job, cpp_process_dispatcher_set_debug_addr,
+    cpp_process_dispatcher_set_dyn_break_on_load, cpp_process_dispatcher_start,
+    cpp_process_dispatcher_suspend, cpp_process_dispatcher_vdso_base_address,
+    cpp_process_futex_grow_pool, cpp_process_futex_shrink_pool, cpp_process_get_job_koid,
+    cpp_process_remove_thread,
 };
 use super::thread_dispatcher::ThreadDispatcher;
 use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
 use crate::arch_rs::UserEntryState;
-use crate::kernel::thread::{AutoExpiringPreemptDisabler, ThreadPtr};
+use crate::kernel::thread::ThreadPtr;
 use crate::vm::vm_aspace::VmAspace;
 use core::mem::MaybeUninit;
-use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
 use zx_types::{zx_info_process_t, zx_rights_t, zx_vaddr_t};
-
-/// Lock class tag for the handle table's reader-writer lock.
-pub struct HandleTableLockClass;
-
-impl ksync::LockClass for HandleTableLockClass {
-    const ID: *mut core::ffi::c_void = core::ptr::null_mut();
-}
 
 crate::object::dispatcher::impl_dispatcher_facade!(
     pub struct ProcessDispatcher,
@@ -101,6 +87,14 @@ impl ProcessDispatcher {
         unsafe { cpp_process_dispatcher_is_current(self.as_ffi()) }
     }
 
+    /// Returns a reference to this process's [`HandleTable`].
+    #[inline]
+    pub fn handle_table(&self) -> &HandleTable {
+        // SAFETY: `self` is a valid `ProcessDispatcher`, and its handle table is valid for the
+        // lifetime of `self`.
+        unsafe { &*cpp_process_dispatcher_handle_table(self.as_ffi()) }
+    }
+
     /// Starts execution of this process.
     pub fn start(
         &self,
@@ -128,15 +122,6 @@ impl ProcessDispatcher {
             )
         };
         Status::ok(status)
-    }
-
-    /// Removes a handle from this process's handle table and returns the owned handle if found.
-    pub fn remove_handle(&self, handle: HandleValue) -> Option<HandleOwner> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let raw =
-            unsafe { cpp_process_dispatcher_remove_handle(self.as_ffi_mut(), handle.raw_value()) };
-        // SAFETY: `raw` was exported by C++ `RemoveHandle.release()` or is null.
-        unsafe { HandleOwner::from_raw(raw) }
     }
 
     /// Kills this process with the given return code.
@@ -237,50 +222,6 @@ impl ProcessDispatcher {
             cpp_process_dispatcher_get_timer_slack_policy(self.as_ffi(), &mut slack);
         }
         slack
-    }
-
-    /// Returns a reference to the handle table's priority-inheriting reader-writer lock.
-    #[inline]
-    pub fn handle_table_lock(&self) -> &ksync::BrwLockPi<HandleTableLockClass> {
-        // SAFETY: `self` is a valid `ProcessDispatcher`, and its handle table lock is a valid `BrwLockPi`.
-        unsafe {
-            let lock_ptr = cpp_process_dispatcher_handle_table_lock(self.as_ffi());
-            &*(lock_ptr as *const ksync::BrwLockPi<HandleTableLockClass>)
-        }
-    }
-
-    /// Returns the KOID of this process's handle table.
-    #[inline]
-    pub fn handle_table_koid(&self) -> zx_types::zx_koid_t {
-        unsafe { cpp_process_dispatcher_handle_table_koid(self as *const _) }
-    }
-
-    /// Resolves a handle to a dispatcher of type `T` with the required `rights` in this process's
-    /// handle table in a single FFI call.
-    #[inline]
-    pub fn get_dispatcher_with_rights<T>(
-        &self,
-        handle_value: HandleValue,
-        rights: zx_rights_t,
-    ) -> Result<fbl::RefPtr<T>, Status>
-    where
-        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
-    {
-        const { assert!(T::TYPE != zx_types::ZX_OBJ_TYPE_NONE) };
-        let mut ref_ptr = MaybeUninit::<fbl::RefPtr<super::Dispatcher>>::uninit();
-        // SAFETY: `self` is a valid `ProcessDispatcher` and `ref_ptr` points to valid uninitialized
-        // memory. C++ checks `T::TYPE` and `rights` before initializing `ref_ptr`.
-        unsafe {
-            let status = cpp_process_dispatcher_get_dispatcher_with_rights(
-                self.as_ffi(),
-                handle_value,
-                T::TYPE,
-                rights,
-                ref_ptr.as_mut_ptr(),
-            );
-            Status::ok(status)?;
-            Ok(ref_ptr.assume_init().cast::<T>())
-        }
     }
 
     /// Returns information about this process.
@@ -571,144 +512,25 @@ impl ProcessDispatcher {
         unsafe { cpp_process_remove_thread(self.as_ffi(), thread as *const _) }
     }
 
-    /// Maps a handle to its user-visible `HandleValue` for this process.
-    #[inline]
-    pub fn map_handle_to_value(&self, handle: super::handle::HandleRef<'_>) -> HandleValue {
-        // SAFETY: `self` is a valid `ProcessDispatcher` and `handle` is a valid `HandleRef`.
-        let raw = unsafe {
-            cpp_process_dispatcher_handle_table_map_handle_to_value(self.as_ffi(), handle.as_ptr())
-        };
-        HandleValue::new(raw)
+    /// Returns the process's normal `Exceptionate`.
+    pub fn exceptionate(&self) -> &super::exceptionate::Exceptionate {
+        // SAFETY: `self` is a valid `ProcessDispatcher`, which owns `exceptionate_` for its entire
+        // lifetime.
+        unsafe {
+            &*super::process_dispatcher_ffi::cpp_process_dispatcher_exceptionate(self.as_ffi_mut())
+        }
     }
 
-    /// Removes a slice of raw handle values from this process's handle table.
-    ///
-    /// Matching C++ `HandleTable::RemoveHandles(ProcessDispatcher&, ktl::span<const zx_handle_t>)`,
-    /// `ZX_HANDLE_INVALID` entries are skipped, and if any non-zero handle is missing, returns
-    /// `ZX_ERR_BAD_HANDLE` after processing the remaining handles.
-    pub fn remove_handles(&self, handles: &[zx_types::zx_handle_t]) -> Result<(), Status> {
-        let mut status = Ok(());
-        let _preempt_disable = AutoExpiringPreemptDisabler::with_default_timeslice_extension();
-        ksync::lock!(let guard = HandleTableWriteGuard::new(self));
-        for &handle in handles {
-            if handle != zx_types::ZX_HANDLE_INVALID
-                && guard.remove_handle(HandleValue::new(handle)).is_none()
-            {
-                status = Err(Status::BAD_HANDLE);
-            }
+    /// Returns the process's debug `Exceptionate`.
+    pub fn debug_exceptionate(&self) -> &super::exceptionate::Exceptionate {
+        // SAFETY: `self` is a valid `ProcessDispatcher`, which owns `debug_exceptionate_` for its
+        // entire lifetime.
+        unsafe {
+            &*super::process_dispatcher_ffi::cpp_process_dispatcher_debug_exceptionate(
+                self.as_ffi_mut(),
+            )
         }
-        status
     }
 }
 
 zr::static_assert!(core::mem::size_of::<ProcessDispatcher>() == 0);
-
-/// RAII reader lock guard for a process's handle table.
-///
-/// Encapsulates the reader lock on the handle table, ensuring that handle lookups and rights
-/// checks can only occur while the lock is held.
-#[pin_data]
-pub struct HandleTableReadGuard<'a> {
-    process: &'a ProcessDispatcher,
-    #[pin]
-    guard: ksync::BrwLockPiReadGuard<'a, HandleTableLockClass>,
-}
-
-impl<'a> HandleTableReadGuard<'a> {
-    /// Creates a stack-pinned handle table reader lock guard for `process`.
-    pub fn new(process: &'a ProcessDispatcher) -> impl PinInit<Self, core::convert::Infallible> {
-        pin_init!(Self {
-            process,
-            guard <- process.handle_table_lock().read_lock(),
-        })
-    }
-
-    /// Retrieves a handle reference while holding the handle table lock.
-    pub fn get_handle(&self, handle_value: HandleValue) -> Option<super::handle::HandleRef<'_>> {
-        // SAFETY: `self.process` is valid and the handle table lock is held for the duration of `self`.
-        let ptr = unsafe {
-            cpp_process_dispatcher_handle_table_get_handle_locked(
-                self.process.as_ffi(),
-                handle_value.raw_value(),
-            )
-        };
-        core::ptr::NonNull::new(ptr).map(|ptr| unsafe { super::handle::HandleRef::from_raw(ptr) })
-    }
-}
-
-/// RAII writer lock guard for a process's handle table.
-///
-/// Encapsulates the writer lock on the handle table, allowing handle lookups, additions, and
-/// removals while the lock is held.
-#[pin_data]
-pub struct HandleTableWriteGuard<'a> {
-    process: &'a ProcessDispatcher,
-    #[pin]
-    guard: ksync::BrwLockPiWriteGuard<'a, HandleTableLockClass>,
-}
-
-impl<'a> HandleTableWriteGuard<'a> {
-    /// Creates a stack-pinned handle table writer lock guard for `process`.
-    pub fn new(process: &'a ProcessDispatcher) -> impl PinInit<Self, core::convert::Infallible> {
-        pin_init!(Self {
-            process,
-            guard <- process.handle_table_lock().write_lock(),
-        })
-    }
-
-    /// Retrieves a handle reference while holding the handle table write lock.
-    #[inline]
-    pub fn get_handle(&self, handle_value: HandleValue) -> Option<super::handle::HandleRef<'_>> {
-        // SAFETY: `self.process` is valid and the handle table write lock is held for the duration
-        // of `self`.
-        let ptr = unsafe {
-            cpp_process_dispatcher_handle_table_get_handle_locked(
-                self.process.as_ffi(),
-                handle_value.raw_value(),
-            )
-        };
-        core::ptr::NonNull::new(ptr).map(|ptr| unsafe { super::handle::HandleRef::from_raw(ptr) })
-    }
-
-    /// Adds an owned handle to the handle table while holding the write lock.
-    #[inline]
-    pub fn add_handle(&self, handle: HandleOwner) {
-        // SAFETY: `self.process` is valid, the handle table write lock is held, and `handle`
-        // ownership is transferred to C++.
-        unsafe {
-            cpp_process_dispatcher_handle_table_add_handle_locked(
-                self.process.as_ffi_mut(),
-                handle.release(),
-            );
-        }
-    }
-
-    /// Removes a handle by value from the handle table while holding the write lock.
-    #[inline]
-    pub fn remove_handle(&self, handle_value: HandleValue) -> Option<HandleOwner> {
-        // SAFETY: `self.process` is valid and the handle table write lock is held.
-        let raw = unsafe {
-            cpp_process_dispatcher_handle_table_remove_handle_locked(
-                self.process.as_ffi_mut(),
-                handle_value.raw_value(),
-            )
-        };
-        // SAFETY: `raw` is a valid owned handle pointer released from the handle table or null.
-        unsafe { HandleOwner::from_raw(raw) }
-    }
-
-    /// Removes a handle known to be in this process's handle table while holding the write lock.
-    #[inline]
-    pub fn remove_handle_ref(&self, handle: super::handle::HandleRef<'_>) -> HandleOwner {
-        // SAFETY: `self.process` is valid, the handle table write lock is held, and `handle` was
-        // looked up in `self.process`'s handle table under the same lock.
-        let raw = unsafe {
-            cpp_process_dispatcher_handle_table_remove_handle_ptr_locked(
-                self.process.as_ffi_mut(),
-                handle.as_ptr() as *mut _,
-            )
-        };
-        // SAFETY: `raw` is a non-null owned handle pointer released from the handle table.
-        unsafe { HandleOwner::from_raw(raw).unwrap() }
-    }
-}

@@ -178,8 +178,11 @@ bazel_build_action("final_fuchsia_idk.exported") {
     ":final_fuchsia_idk.archive",
     ":final_fuchsia_idk.archive.tarmaker",
     ":final_fuchsia_idk_bazel_sdk_tests_arm64",
+    ":final_fuchsia_idk_bazel_sdk_tests_arm64.bazel",
     ":final_fuchsia_idk_bazel_sdk_tests_riscv64",
+    ":final_fuchsia_idk_bazel_sdk_tests_riscv64.bazel",
     ":final_fuchsia_idk_bazel_sdk_tests_x64",
+    ":final_fuchsia_idk_bazel_sdk_tests_x64.bazel",
     ":final_fuchsia_idk_manifest_golden",
     ":final_fuchsia_sdk",
     "//:bazel_build_action_targets",
@@ -243,10 +246,14 @@ run_fuchsia_bazel_sdk_tests("final_fuchsia_sdk_tests") {
   fuchsia_sdk_target = ":final_fuchsia_sdk"
 
   # NOTE: For now, nothing should depend on the :final_fuchsia_sdk_test
-  # target, except //:root_targets. This ensures the target is always
-  # defined in the GN graph, but can only be built explicitly.
+  # target, except //:root_targets and //:build_only. This ensures the
+  # target is always defined in the GN graph, but can only be built
+  # explicitly.
   visibility = []
-  visibility = [ "//:root_targets" ]
+  visibility = [
+    "//:build_only",
+    "//:root_targets",
+  ]
 }
 
 sdk_final_manifest_golden("final_fuchsia_idk_manifest_golden") {
@@ -821,6 +828,7 @@ if (current_toolchain == default_toolchain) {
     visibility = []
     visibility = [
       ":bazel_in_tree_idk_tests_${target_cpu}",
+      ":bazel_in_tree_idk_tests_${target_cpu}.bazel",
       ":ensure_bazel_in_tree_idk_is_populated_for_bazel_action",
       "//build/bazel/bazel_sdk:*",
     ]

@@ -283,17 +283,6 @@ void WlanPhyDevice::GetPowerSaveMode(GetPowerSaveModeCompleter::Sync& completer)
   completer.Reply(fit::error(ZX_ERR_NOT_SUPPORTED));
 }
 
-void WlanPhyDevice::PowerDown(PowerDownCompleter::Sync& completer) {
-  WLAN_TRACE_DURATION();
-  fdf::warn("{}: PowerDown() not supported", name_);
-  completer.Reply(fit::error(ZX_ERR_NOT_SUPPORTED));
-}
-void WlanPhyDevice::PowerUp(PowerUpCompleter::Sync& completer) {
-  WLAN_TRACE_DURATION();
-  fdf::warn("{}: PowerUp() not supported", name_);
-  completer.Reply(fit::error(ZX_ERR_NOT_SUPPORTED));
-}
-
 void WlanPhyDevice::Reset(ResetCompleter::Sync& completer) {
   WLAN_TRACE_DURATION();
   fdf::warn("{}: Reset() not supported", name_);

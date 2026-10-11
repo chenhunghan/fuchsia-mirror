@@ -18,7 +18,7 @@ fuchsia_unittest_package("threadstack-unittests") {
   manifest = "meta/threadstack-unittests.cml"
   deps = [
     ":unittests-bin",
-    "//src/connectivity/network/netstack:component",
+    "//src/connectivity/network/netstack3:component-for-tests",
   ]
 }
 
@@ -32,7 +32,7 @@ fuchsia_unittest_package("threadstack-bootstrap-unittests") {
   manifest = "meta/threadstack-bootstrap-unittests.cml"
   deps = [
     ":bootstrap-unittests-bin",
-    "//src/connectivity/network/netstack:component",
+    "//src/connectivity/network/netstack3:component-for-tests",
   ]
 
   test_specs = {

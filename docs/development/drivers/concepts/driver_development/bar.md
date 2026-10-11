@@ -6,9 +6,6 @@
 
 # Configuration
 
-Caution: This page may contain information that is specific to the legacy
-version of the driver framework (DFv1).
-
 Hardware peripherals are attached to the CPU through a bus, such as the PCI bus.
 
 During bootup, the BIOS (or equivalent platform startup software)
@@ -31,21 +28,30 @@ It's where the BIOS stores information about the device, such as the assigned in
 and addresses of control registers.
 Other, device specific information, is stored there as well.
 
-Call **Pci::MapMmio()**
-to cause the BAR register to be mapped into the driver host's address space:
+Drivers connect to the `fuchsia.hardware.pci/Device` protocol from their incoming
+namespace:
 
 ```cpp
-#include <lib/device-protocol/pci.h>
+#include <fidl/fuchsia.hardware.pci/cpp/wire.h>
 
-zx_status_t Pci::MapMmio(uint32_t bar_id, uint32_t cache_policy,
-                         std::optional<fdf::MmioBuffer>* mmio);
+// In Driver::Start(fdf::DriverContext context)
+zx::result pci_client_end = context.incoming().Connect<fuchsia_hardware_pci::Service::Device>();
+if (pci_client_end.is_error()) {
+  return pci_client_end.take_error();
+}
+fidl::WireSyncClient<fuchsia_hardware_pci::Device> pci(std::move(pci_client_end.value()));
 ```
 
-The `ddk::Pci` class is the interface drivers use to talk to the PCI bus.
+Call `GetBar(bar_id)` on the `fuchsia.hardware.pci/Device` client to retrieve the BAR
+resource (where `bar_id` is the BAR register number, starting with `0`), and then call
+**fdf::MmioBuffer::Create()** to map the BAR's VMO into the driver's address space:
 
-The first parameter, `bar_id`, is the BAR register number, starting with `0`.
+```cpp
+zx::result<fdf::MmioBuffer> MmioBuffer::Create(zx_off_t offset, size_t size, zx::vmo vmo,
+                                               uint32_t cache_policy);
+```
 
-The second parameter, `cache_policy`, determines the caching policy for access,
+The `cache_policy` parameter determines the caching policy for access,
 and can take on the following values:
 
 `cache_policy` value                | Meaning
@@ -58,20 +64,31 @@ and can take on the following values:
 Note that `ZX_CACHE_POLICY_UNCACHED_DEVICE` is architecture dependent
 and may in fact be equivalent to `ZX_CACHE_POLICY_UNCACHED` on some architectures.
 
-The last argument is an output parameter for the created buffer.
-
 ## Reading and writing memory
 
-Once the **Pci::MapMmio()**
-function returns with a valid result, you can access the BAR with through the `MmioBuffer` interface, for example:
+Once **fdf::MmioBuffer::Create()**
+returns a valid buffer, you can access the BAR through the `fdf::MmioBuffer` interface, for example:
 
 ```cpp
-#include <lib/device-protocol/pci.h>
-#include <lib/mmio/mmio-buffer.h>
+#include <fidl/fuchsia.hardware.pci/cpp/wire.h>
+#include <lib/driver/mmio/cpp/mmio-buffer.h>
 
-std::optional<fdf::MmioBuffer> mmio;
-zx_status_t status = pci.MapMmio(0, ZX_CACHE_POLICY_UNCACHED_DEVICE, &mmio);
-if (status == ZX_OK) {
-  mmio.Write32(0x1234, REGISTER_X);  // configure register X for deep sleep mode
+fidl::WireResult bar_result = pci->GetBar(0);
+if (!bar_result.ok()) {
+  return zx::error(bar_result.status());
+}
+if (bar_result->is_error()) {
+  return bar_result->take_error();
+}
+
+fuchsia_hardware_pci::wire::Bar& bar = bar_result->value()->result;
+if (!bar.result.is_vmo()) {
+  return zx::error(ZX_ERR_WRONG_TYPE);
+}
+
+zx::result<fdf::MmioBuffer> mmio = fdf::MmioBuffer::Create(
+    0, bar.size, std::move(bar.result.vmo()), ZX_CACHE_POLICY_UNCACHED_DEVICE);
+if (mmio.is_ok()) {
+  mmio->Write32(0x1234, REGISTER_X);  // configure register X for deep sleep mode
 }
 ```

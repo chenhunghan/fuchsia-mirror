@@ -174,7 +174,7 @@ Command CommandParser::Parse() {
       uint16_t port;
       std::vector<std::string> text;
 
-      if (!MatchWhitespace() || !(MatchUint16(port)) || !MatchWhitespace() || !(MatchText(text))) {
+      if (!MatchWhitespace() || !(MatchUint16(port)) || !(MatchText(text))) {
         return Command::Help(CommandVerb::kPublishInstance);
       }
 
@@ -549,13 +549,18 @@ bool CommandParser::MatchText(std::vector<std::string>& value_out) {
   std::vector<std::string> value;
 
   while (true) {
+    size_t saved_chars_remaining = chars_remaining();
+    if (!MatchWhitespace()) {
+      break;
+    }
+
     std::string text_string;
     if (!MatchTextString(text_string)) {
+      SetCharsRemaining(saved_chars_remaining);
       break;
     }
 
     value.push_back(text_string);
-    MatchWhitespace();
   }
 
   value_out = std::move(value);

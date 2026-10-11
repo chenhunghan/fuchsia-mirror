@@ -9,11 +9,10 @@ use std::sync::{Arc, LazyLock};
 use zx;
 
 use fidl::endpoints::create_request_stream;
+use fidl_fuchsia_feedback as ffeedback;
+use fidl_fuchsia_hardware_power_statecontrol as fpower;
 use fidl_fuchsia_ui_input::MediaButtonsEvent;
-use {
-    fidl_fuchsia_feedback as ffeedback, fidl_fuchsia_hardware_power_statecontrol as fpower,
-    fidl_fuchsia_ui_policy as fuipolicy,
-};
+use fidl_fuchsia_ui_policy as fuipolicy;
 
 static MAX_PRESS_INTERVAL_NS: LazyLock<i64> = LazyLock::new(|| 500 * 1_000_000); // 500ms in nanoseconds
 const REQUIRED_PRESS_COUNT: u32 = 5;
@@ -30,11 +29,24 @@ impl Clock for BootClock {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CurrentButtons {
+    power_pressed: bool,
+    volume_up_pressed: bool,
+    volume_down_pressed: bool,
+}
+
+impl CurrentButtons {
+    fn both_volume_pressed(self) -> bool {
+        self.volume_up_pressed && self.volume_down_pressed
+    }
+}
+
 #[derive(Debug)]
 struct ButtonPressState {
     count: u32,
     last_press_time_ns: i64,
-    power_was_pressed: bool,
+    buttons: CurrentButtons,
     crash_report_in_progress: bool,
     #[cfg(test)]
     action_triggered_count: u32,
@@ -45,7 +57,7 @@ impl ButtonPressState {
         Self {
             count: 0,
             last_press_time_ns: 0,
-            power_was_pressed: false,
+            buttons: CurrentButtons::default(),
             crash_report_in_progress: false,
             #[cfg(test)]
             action_triggered_count: 0,
@@ -60,6 +72,7 @@ pub struct DebugState<C: Clock> {
     clock: C,
     crash_reporter_source: Option<ffeedback::CrashReporterProxy>,
     power_statecontrol_admin_source: Option<fpower::AdminProxy>,
+    listener_task: Mutex<Option<fuchsia_async::Task<()>>>,
 }
 
 /// The concrete `DebugState` used in production.
@@ -81,6 +94,7 @@ impl DebugState<BootClock> {
             >()
             .map_err(|e| warn!("Failed to connect to PowerStateControlAdmin: {e}"))
             .ok(),
+            listener_task: Mutex::new(None),
         }
     }
 }
@@ -99,6 +113,7 @@ impl<C: Clock + 'static> DebugState<C> {
             clock,
             crash_reporter_source: crash_reporter_proxy,
             power_statecontrol_admin_source: power_statecontrol_admin_proxy,
+            listener_task: Mutex::new(None),
         }
     }
 
@@ -108,8 +123,15 @@ impl<C: Clock + 'static> DebugState<C> {
             return;
         }
 
+        let mut task_lock = self.listener_task.lock();
+        if task_lock.is_some() {
+            // Already listening.
+            return;
+        }
+
         info!("Registering for media button events to enable 5-button press for debug.");
-        fuchsia_async::Task::spawn(async move {
+        let weak_this = Arc::downgrade(&self);
+        let task = fuchsia_async::Task::spawn(async move {
             match fuchsia_component::client::connect_to_protocol::<
                 fuipolicy::DeviceListenerRegistryMarker,
             >() {
@@ -126,16 +148,25 @@ impl<C: Clock + 'static> DebugState<C> {
                             responder,
                         } = request
                         {
-                            if self.process_button_event(&event) {
-                                info!("Detected 5 function button presses in a row. Filing crash report.");
-                                if self.file_crash_report().await {
-                                    if !self.reboot_device().await {
-                                        self.button_press_state.lock().crash_report_in_progress =
+                            if let Some(this) = weak_this.upgrade() {
+                                if this.process_button_event(&event) {
+                                    info!(
+                                        "Detected 5 volume up+down button presses in a row. Filing crash report."
+                                    );
+                                    if this.file_crash_report().await {
+                                        if !this.reboot_device().await {
+                                            this.button_press_state
+                                                .lock()
+                                                .crash_report_in_progress = false;
+                                        }
+                                    } else {
+                                        this.button_press_state.lock().crash_report_in_progress =
                                             false;
                                     }
-                                } else {
-                                    self.button_press_state.lock().crash_report_in_progress = false;
                                 }
+                            } else {
+                                // DebugState was dropped, exit the task.
+                                break;
                             }
                             if let Err(e) = responder.send() {
                                 warn!("Failed to send response for media buttons event: {e:?}");
@@ -147,39 +178,54 @@ impl<C: Clock + 'static> DebugState<C> {
                     warn!("Failed to connect to fuchsia.ui.policy.DeviceListenerRegistry: {e:?}");
                 }
             }
-        })
-        .detach();
+        });
+        *task_lock = Some(task);
     }
 
     fn process_button_event(&self, event: &MediaButtonsEvent) -> bool {
         let mut state = self.button_press_state.lock();
-        if state.crash_report_in_progress {
-            info!("Crash report in progress, ignoring button event.");
-            return false;
+        // Update volume button states from discrete fields. We deliberately ignore
+        // the legacy `volume: int8` field here because simultaneous button presses
+        // cancel out in that representation.
+        let was_both_pressed = state.buttons.both_volume_pressed();
+
+        if let Some(v_up) = event.volume_up {
+            state.buttons.volume_up_pressed = v_up;
         }
+        if let Some(v_down) = event.volume_down {
+            state.buttons.volume_down_pressed = v_down;
+        }
+
+        let both_volume_pressed = state.buttons.both_volume_pressed();
+        let is_new_press = both_volume_pressed && !was_both_pressed;
+
         if let Some(power_is_pressed) = event.power
-            && (power_is_pressed || state.power_was_pressed)
+            && (power_is_pressed || state.buttons.power_pressed)
         {
             if state.count >= 3 {
                 info!(
-                    "Detected overlapping POWER button activity; resetting FUNCTION button counter."
+                    "Detected overlapping POWER button activity; resetting VOLUME button counter."
                 );
             } else {
                 debug!(
-                    "Detected overlapping POWER button activity; resetting FUNCTION button counter."
+                    "Detected overlapping POWER button activity; resetting VOLUME button counter."
                 );
             }
-            state.power_was_pressed = power_is_pressed;
+            state.buttons.power_pressed = power_is_pressed;
             state.count = 0;
             return false;
         }
 
-        if event.function != Some(true) {
-            // Function button could have been released. Ignore it.
+        if state.crash_report_in_progress {
+            info!("Crash report in progress, ignoring button event.");
             return false;
         }
 
-        // At this point, we have a pure function press event.
+        if !is_new_press {
+            return false;
+        }
+
+        // Rising edge of simultaneous press: both buttons are pressed at the same time.
         let now_ns = self.clock.now_ns();
 
         if now_ns - state.last_press_time_ns > *MAX_PRESS_INTERVAL_NS {
@@ -192,7 +238,7 @@ impl<C: Clock + 'static> DebugState<C> {
 
         if state.count >= 3 {
             info!(
-                "Identified {:?} side button presses in a row. {:?} in a row will trigger a crash report and reboot sequence.",
+                "Identified {:?} volume up+down button presses in a row. {:?} in a row will trigger a crash report and reboot sequence.",
                 state.count, REQUIRED_PRESS_COUNT
             );
         }
@@ -312,25 +358,45 @@ mod tests {
         }
     }
 
+    fn make_both_press_event() -> fui_input::MediaButtonsEvent {
+        fui_input::MediaButtonsEvent {
+            volume_up: Some(true),
+            volume_down: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn make_release_event() -> fui_input::MediaButtonsEvent {
+        fui_input::MediaButtonsEvent {
+            volume_up: Some(false),
+            volume_down: Some(false),
+            ..Default::default()
+        }
+    }
+
     #[fuchsia::test]
-    fn test_successful_press_sequence() {
+    fn test_successful_simultaneous_press_sequence() {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
+        let press_event = make_both_press_event();
+        let release_event = make_release_event();
 
-        // Press the button REQUIRED_PRESS_COUNT - 1 times, which should not trigger the debug state.
+        // Press the buttons REQUIRED_PRESS_COUNT - 1 times, which should not trigger the debug state.
         for i in 1..REQUIRED_PRESS_COUNT {
             assert!(
                 !debug_state.process_button_event(&press_event),
                 "Incorrectly triggered action after {i} presses"
             );
             let state = debug_state.button_press_state.lock();
+            assert_eq!(state.count, i);
             assert_eq!(
                 state.action_triggered_count, 0,
                 "Incorrectly incremented trigger count after {i} presses. State: {state:?}"
             );
+            drop(state);
+
+            assert!(!debug_state.process_button_event(&release_event));
         }
 
         assert!(
@@ -342,18 +408,65 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn test_staggered_press_triggers() {
+        let clock = Arc::new(FakeClock::new());
+        let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
+
+        let vol_up_event =
+            fui_input::MediaButtonsEvent { volume_up: Some(true), ..Default::default() };
+        let vol_down_event =
+            fui_input::MediaButtonsEvent { volume_down: Some(true), ..Default::default() };
+        let release_event = make_release_event();
+
+        for i in 1..REQUIRED_PRESS_COUNT {
+            assert!(!debug_state.process_button_event(&vol_up_event));
+            assert!(!debug_state.process_button_event(&vol_down_event));
+            let state = debug_state.button_press_state.lock();
+            assert_eq!(state.count, i);
+            drop(state);
+
+            assert!(!debug_state.process_button_event(&release_event));
+        }
+
+        assert!(!debug_state.process_button_event(&vol_up_event));
+        assert!(debug_state.process_button_event(&vol_down_event));
+        let state = debug_state.button_press_state.lock();
+        assert_eq!(state.action_triggered_count, 1);
+    }
+
+    #[fuchsia::test]
+    fn test_holding_both_buttons_does_not_repeat_count() {
+        let clock = Arc::new(FakeClock::new());
+        let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
+
+        let press_event = make_both_press_event();
+
+        // Initial press
+        assert!(!debug_state.process_button_event(&press_event));
+        assert_eq!(debug_state.button_press_state.lock().count, 1);
+
+        // Repeated events with both still pressed (e.g. from repeat or other metadata changes)
+        assert!(!debug_state.process_button_event(&press_event));
+        assert_eq!(debug_state.button_press_state.lock().count, 1);
+        assert!(!debug_state.process_button_event(&press_event));
+        assert_eq!(debug_state.button_press_state.lock().count, 1);
+    }
+
+    #[fuchsia::test]
     fn test_counter_resets_after_successful_sequence() {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
+        let press_event = make_both_press_event();
+        let release_event = make_release_event();
 
         // Test that the counter resets after a successful sequence.
         for _ in 1..REQUIRED_PRESS_COUNT {
             assert!(!debug_state.process_button_event(&press_event));
             let state = debug_state.button_press_state.lock();
             assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
+            drop(state);
+            assert!(!debug_state.process_button_event(&release_event));
         }
         assert!(debug_state.process_button_event(&press_event));
         {
@@ -364,6 +477,7 @@ mod tests {
             state.crash_report_in_progress = false;
         }
 
+        assert!(!debug_state.process_button_event(&release_event));
         assert!(
             !debug_state.process_button_event(&press_event),
             "The next press should start a new sequence."
@@ -378,12 +492,13 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
+        let press_event = make_both_press_event();
+        let release_event = make_release_event();
 
         // Trigger the crash report.
         for _ in 1..REQUIRED_PRESS_COUNT {
             assert!(!debug_state.process_button_event(&press_event));
+            assert!(!debug_state.process_button_event(&release_event));
         }
         assert!(debug_state.process_button_event(&press_event));
         {
@@ -393,7 +508,9 @@ mod tests {
         }
 
         // Try to press again, it should be ignored.
+        assert!(!debug_state.process_button_event(&release_event));
         assert!(!debug_state.process_button_event(&press_event));
+        assert!(!debug_state.process_button_event(&release_event));
         {
             let state = debug_state.button_press_state.lock();
             assert!(state.crash_report_in_progress);
@@ -415,14 +532,13 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
+        let press_event = make_both_press_event();
+        let release_event = make_release_event();
 
         // Test that the counter resets after a timeout.
         for _ in 1..REQUIRED_PRESS_COUNT - 1 {
             assert!(!debug_state.process_button_event(&press_event));
-            let state = debug_state.button_press_state.lock();
-            assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
+            assert!(!debug_state.process_button_event(&release_event));
         }
         // Wait for longer than the max interval.
         clock.advance_ns(*MAX_PRESS_INTERVAL_NS + 1);
@@ -441,15 +557,16 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
+        let press_event = make_both_press_event();
+        let release_event = make_release_event();
         let power_press_event =
             fui_input::MediaButtonsEvent { power: Some(true), ..Default::default() };
 
         assert!(
             !debug_state.process_button_event(&press_event),
-            "first function press should not trigger action"
+            "first volume press should not trigger action"
         );
+        assert!(!debug_state.process_button_event(&release_event));
         {
             let state = debug_state.button_press_state.lock();
             assert_eq!(state.count, 1, "should have count of 1. State: {state:?}");
@@ -460,10 +577,7 @@ mod tests {
         );
         {
             let state = debug_state.button_press_state.lock();
-            assert_eq!(
-                state.count, 0,
-                "A non-function-button press should reset the counter. State: {state:?}"
-            );
+            assert_eq!(state.count, 0, "A power press should reset the counter. State: {state:?}");
             assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
         }
 
@@ -481,10 +595,8 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let function_press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
-        let function_release_event =
-            fui_input::MediaButtonsEvent { function: Some(false), ..Default::default() };
+        let vol_press_event = make_both_press_event();
+        let vol_release_event = make_release_event();
         let power_press_event =
             fui_input::MediaButtonsEvent { power: Some(true), ..Default::default() };
         let power_release_event =
@@ -499,16 +611,17 @@ mod tests {
             assert_eq!(state.count, 0, "count should be 0 after power press. State: {state:?}");
         }
         assert!(
-            !debug_state.process_button_event(&function_press_event),
-            "function press should not trigger action"
+            !debug_state.process_button_event(&vol_press_event),
+            "volume press should not trigger action"
         );
+        assert!(!debug_state.process_button_event(&vol_release_event));
         {
             let state = debug_state.button_press_state.lock();
-            assert_eq!(state.count, 1, "count should be 1 after function press. State: {state:?}");
+            assert_eq!(state.count, 1, "count should be 1 after volume press. State: {state:?}");
         }
         assert!(
             !debug_state.process_button_event(&power_release_event),
-            "A non-function-button release should reset the counter."
+            "A power button release should reset the counter."
         );
         {
             let state = debug_state.button_press_state.lock();
@@ -516,20 +629,7 @@ mod tests {
             assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
         }
         assert!(
-            !debug_state.process_button_event(&function_release_event),
-            "function release should not trigger action"
-        );
-        {
-            let state = debug_state.button_press_state.lock();
-            assert_eq!(
-                state.count, 0,
-                "count should be 0 after function release. State: {state:?}"
-            );
-            assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
-        }
-
-        assert!(
-            !debug_state.process_button_event(&function_press_event),
+            !debug_state.process_button_event(&vol_press_event),
             "The next press should start a new sequence."
         );
         let state = debug_state.button_press_state.lock();
@@ -538,39 +638,29 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_ignores_function_button_releases() {
+    fn test_single_button_press_does_not_increment() {
         let clock = Arc::new(FakeClock::new());
         let debug_state = DebugState::new_for_test(true, clock.clone(), None, None);
 
-        let press_event =
-            fui_input::MediaButtonsEvent { function: Some(true), ..Default::default() };
-        let function_release_event =
-            fui_input::MediaButtonsEvent { function: Some(false), ..Default::default() };
+        let vol_up_event =
+            fui_input::MediaButtonsEvent { volume_up: Some(true), ..Default::default() };
+        let vol_down_event =
+            fui_input::MediaButtonsEvent { volume_down: Some(true), ..Default::default() };
+        let release_event = make_release_event();
 
-        assert!(
-            !debug_state.process_button_event(&press_event),
-            "first function press should not trigger action"
-        );
-        {
-            let state = debug_state.button_press_state.lock();
-            assert_eq!(state.count, 1, "count should be 1. State: {state:?}");
+        // REQUIRED_PRESS_COUNT presses of Volume Up only
+        for _ in 0..REQUIRED_PRESS_COUNT {
+            assert!(!debug_state.process_button_event(&vol_up_event));
+            assert!(!debug_state.process_button_event(&release_event));
         }
-        assert!(
-            !debug_state.process_button_event(&function_release_event),
-            "A button release should be ignored and not affect the counter."
-        );
-        {
-            let state = debug_state.button_press_state.lock();
-            assert_eq!(state.count, 1, "count should still be 1. State: {state:?}");
-            assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
+        assert_eq!(debug_state.button_press_state.lock().count, 0);
+
+        // REQUIRED_PRESS_COUNT presses of Volume Down only
+        for _ in 0..REQUIRED_PRESS_COUNT {
+            assert!(!debug_state.process_button_event(&vol_down_event));
+            assert!(!debug_state.process_button_event(&release_event));
         }
-        assert!(
-            !debug_state.process_button_event(&press_event),
-            "second function press should not trigger action"
-        );
-        let state = debug_state.button_press_state.lock();
-        assert_eq!(state.count, 2, "count should be 2. State: {state:?}");
-        assert_eq!(state.action_triggered_count, 0, "State: {state:?}");
+        assert_eq!(debug_state.button_press_state.lock().count, 0);
     }
 
     async fn run_report_server(mut stream: ffeedback::CrashReporterRequestStream) {

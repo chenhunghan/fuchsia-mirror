@@ -9,6 +9,12 @@
             startup: "eager",
             environment: "#core-env",
         },
+        {
+            name: "fdomain-uart-driver",
+            url: "fuchsia-pkg://fuchsia.com/remote-control#meta/fdomain-uart-driver.cm",
+            startup: "eager",
+            environment: "#core-env",
+        },
     ],
     offer: [
         {
@@ -95,6 +101,23 @@
             from: "#remote-control",
             to: "self/toolbox",
             target_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.developer.remotecontrol.connector.Connector",
+            from: "#remote-control",
+            to: "#fdomain-uart-driver",
+        },
+        {
+            directory: "dev-class",
+            from: "parent",
+            as: "dev-class-serial",
+            to: "#fdomain-uart-driver",
+            subdir: "serial",
+        },
+        {
+            protocol: "fuchsia.boot.Arguments",
+            from: "parent",
+            to: "#fdomain-uart-driver",
         },
     ],
 }

@@ -208,4 +208,29 @@ TEST(ZbiTests, RelocateKernelToTailBufferToSmall) {
   ASSERT_EQ(buffer_size, sizeof(buffer) + 1);
 }
 
+TEST(ZbiTests, RelocateKernelReserveMemorySizeOverflow) {
+  TestZirconKernelImage test_kernel = CreateTestZirconKernelImage();
+  // Set reserve_memory_size so that kernel_len + reserve_memory_size wraps to 0.
+  test_kernel.kernel.data_kernel.reserve_memory_size =
+      std::numeric_limits<size_t>::max() - sizeof(TestZbiKernel) + 1;
+  uint8_t relocate_buffer[sizeof(TestZbiKernel)]
+      __attribute__((__aligned__(ZIRCON_BOOT_KERNEL_ALIGN)));
+  size_t buffer_size = 1;
+  ASSERT_EQ(RelocateKernel(reinterpret_cast<const zbi_header_t*>(&test_kernel), relocate_buffer,
+                           &buffer_size),
+            nullptr);
+}
+
+TEST(ZbiTests, RelocateKernelToTailReserveMemorySizeOverflow) {
+  TestZirconKernelImage test_kernel = CreateTestZirconKernelImage();
+  test_kernel.kernel.data_kernel.reserve_memory_size =
+      std::numeric_limits<size_t>::max() - sizeof(TestZbiKernel) + 1;
+  static uint8_t buffer[RelocateToTailExpectedLayout::RequiredZbiCapacity()]
+      __attribute__((__aligned__(ZIRCON_BOOT_KERNEL_ALIGN)));
+  memset(buffer, 0, sizeof(buffer));
+  memcpy(buffer, &test_kernel, sizeof(test_kernel));
+  size_t buffer_size = offsetof(RelocateToTailExpectedLayout, relocated) + 1;
+  ASSERT_EQ(RelocateKernelToTail(reinterpret_cast<zbi_header_t*>(buffer), &buffer_size), nullptr);
+}
+
 }  // namespace

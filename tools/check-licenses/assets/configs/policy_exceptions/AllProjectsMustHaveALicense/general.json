@@ -12,7 +12,6 @@
                     "src/lib/fxl/third_party/icu",
                     "third_party",
                     "third_party/github.com/jd/tenacity",
-                    "third_party/jinja2",
                     "third_party/network-conformance/vendor"
                 ]
             }

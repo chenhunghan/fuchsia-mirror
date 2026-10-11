@@ -43,6 +43,7 @@ enum class CommandTag {
   kWifiChipTriggerSubsystemRestart,
   kWifiChipSelectTxPowerScenario,
   kWifiChipResetTxPowerScenario,
+  kWifiStaIfaceRegisterEventCallback,
   kWifiStaIfaceGetName,
   kWifiStaIfaceSetScanOnlyMode,
   kWifiStaIfaceSetMacAddress,
@@ -50,6 +51,9 @@ enum class CommandTag {
   kWifiStaIfaceInstallApfPacketFilter,
   kWifiStaIfaceReadApfPacketFilterData,
   kWifiStaIfaceGetLinkLayerStats,
+  kWifiStaIfaceGetFeatureSet,
+  kWifiStaIfaceStartRssiMonitoring,
+  kWifiStaIfaceStopRssiMonitoring,
   kWifiStaIfaceUnknownMethod,
   kSupplicantAddStaInterface,
   kSupplicantRemoveInterface,
@@ -109,8 +113,10 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
                              fidl::UnknownMethodCompleter::Sync& completer) override;
 
   // Wifi methods
-  void RegisterEventCallback(fuchsia_wlan_wlanix::wire::WifiRegisterEventCallbackRequest* request,
-                             RegisterEventCallbackCompleter::Sync& completer) override;
+  void RegisterEventCallback(
+      fuchsia_wlan_wlanix::wire::WifiRegisterEventCallbackRequest* request,
+      fidl::WireServer<fuchsia_wlan_wlanix::Wifi>::RegisterEventCallbackCompleter::Sync& completer)
+      override;
   void Start(StartCompleter::Sync& completer) override;
   void Stop(StopCompleter::Sync& completer) override;
   void GetState(GetStateCompleter::Sync& completer) override;
@@ -144,6 +150,10 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
                              fidl::UnknownMethodCompleter::Sync& completer) override;
 
   // WifiStaIface methods
+  void RegisterEventCallback(
+      fuchsia_wlan_wlanix::wire::WifiStaIfaceRegisterEventCallbackRequest* request,
+      fidl::WireServer<fuchsia_wlan_wlanix::WifiStaIface>::RegisterEventCallbackCompleter::Sync&
+          completer) override;
   void GetName(GetNameCompleter::Sync& completer) override;
   void SetScanOnlyMode(fuchsia_wlan_wlanix::wire::WifiStaIfaceSetScanOnlyModeRequest* request,
                        SetScanOnlyModeCompleter::Sync& completer) override;
@@ -155,6 +165,12 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
       InstallApfPacketFilterCompleter::Sync& completer) override;
   void ReadApfPacketFilterData(ReadApfPacketFilterDataCompleter::Sync& completer) override;
   void GetLinkLayerStats(GetLinkLayerStatsCompleter::Sync& completer) override;
+  void GetFeatureSet(GetFeatureSetCompleter::Sync& completer) override;
+  void StartRssiMonitoring(
+      fuchsia_wlan_wlanix::wire::WifiStaIfaceStartRssiMonitoringRequest* request,
+      StartRssiMonitoringCompleter::Sync& completer) override;
+  void StopRssiMonitoring(fuchsia_wlan_wlanix::wire::WifiStaIfaceStopRssiMonitoringRequest* request,
+                          StopRssiMonitoringCompleter::Sync& completer) override;
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_wlan_wlanix::WifiStaIface> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override;

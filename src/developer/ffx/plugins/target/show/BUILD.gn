@@ -16,7 +16,6 @@ ffx_plugin("ffx_target_show") {
     "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust_fdomain",
     "//sdk/fidl/fuchsia.update.channel:fuchsia.update.channel_rust_fdomain",
     "//sdk/fidl/fuchsia.update.channelcontrol:fuchsia.update.channelcontrol_rust_fdomain",
-    "//sdk/rust/zx-status",
     "//src/developer/ffx/lib/errors:lib",
     "//src/developer/ffx/lib/fho:lib",
     "//src/developer/ffx/lib/netext:lib",

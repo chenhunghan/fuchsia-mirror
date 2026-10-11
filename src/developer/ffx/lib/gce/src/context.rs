@@ -9,8 +9,10 @@ use credentials::Credentials;
 use discovery::gce_watcher::Instance;
 use ffx_config::EnvironmentContext;
 use gcs::auth::new_access_token;
+use std::path::{Path, PathBuf};
 
-/// Execution context for GCE commands, encapsulating project, zone, and an authenticated GCE API client.
+/// Execution context for GCE commands, encapsulating project, zone, and an authenticated GCE API
+/// client.
 #[derive(Debug)]
 pub struct GceContext {
     pub env_context: EnvironmentContext,
@@ -30,7 +32,7 @@ impl GceContext {
         let project = resolve_setting(&env_context, project_flag, "GCP project", "project")?;
         let zone = resolve_setting(&env_context, zone_flag, "GCE zone", "zone")?;
 
-        let creds = Credentials::load_or_new().await;
+        let creds = load_credentials_or_adc().await;
         Self::new_with_credentials(env_context, project, zone, creds).await
     }
 
@@ -58,6 +60,11 @@ impl GceContext {
             .unwrap_or_else(|| format!("{}-{default_suffix}", self.project))
     }
 
+    /// Returns `true` if a GCS bucket was explicitly specified via `--bucket` or `gce.bucket`.
+    pub fn has_explicit_bucket(&self, bucket_flag: Option<&str>) -> bool {
+        resolve_config_string(&self.env_context, bucket_flag, "gce.bucket").is_some()
+    }
+
     /// Derives the GCE SSH serial port gateway endpoint for this context's zone.
     /// e.g. "us-central1-a" -> "us-central1-ssh-serialport.googleapis.com:9600"
     pub fn serial_endpoint(&self) -> String {
@@ -81,6 +88,72 @@ impl GceContext {
     pub fn stop_tunnel(&self, instance_name: &str) -> Result<()> {
         GceTunnel::stop_tunnel(&self.env_context, &self.project, &self.zone, instance_name)
     }
+
+    /// Streams serial port output from an instance over the GCE SSH serial port gateway.
+    pub async fn stream_ssh_serial<W: std::io::Write>(
+        &self,
+        instance_name: &str,
+        port: u32,
+        follow: bool,
+        writer: &mut W,
+    ) -> Result<()> {
+        GceTunnel::stream_ssh_serial(
+            &self.env_context,
+            &self.project,
+            &self.zone,
+            instance_name,
+            port,
+            follow,
+            writer,
+        )
+        .await
+    }
+}
+
+/// Loads Fuchsia [`Credentials`], falling back to Google Cloud Application Default Credentials
+/// (`application_default_credentials.json`) if no OAuth2 refresh token is configured in
+/// `~/.fuchsia/debug/google_credentials.json`.
+async fn load_credentials_or_adc() -> Credentials {
+    let mut creds = Credentials::load_or_new().await;
+    if !creds.oauth2.refresh_token.is_empty() {
+        return creds;
+    }
+    for path in adc_candidate_paths() {
+        if let Some(oauth2) = load_adc_oauth2(&path) {
+            log::debug!("Loaded OAuth2 credentials from {}", path.display());
+            creds.oauth2 = oauth2;
+            break;
+        }
+    }
+    creds
+}
+
+/// Returns candidate paths for Google Cloud Application Default Credentials in priority order.
+fn adc_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+    {
+        paths.push(path);
+    }
+    if let Some(dir) =
+        std::env::var_os("CLOUDSDK_CONFIG").filter(|s| !s.is_empty()).map(PathBuf::from)
+    {
+        paths.push(dir.join("application_default_credentials.json"));
+    }
+    if let Some(home) = home::home_dir() {
+        paths.push(home.join(".config/gcloud/application_default_credentials.json"));
+    }
+    paths
+}
+
+/// Parses an OAuth2 user credentials JSON file (such as `application_default_credentials.json`)
+/// if it exists and contains a non-empty `refresh_token`.
+fn load_adc_oauth2(path: &Path) -> Option<credentials::OAuth2Credentials> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let oauth2: credentials::OAuth2Credentials = serde_json::from_str(&content).ok()?;
+    (!oauth2.refresh_token.is_empty()).then_some(oauth2)
 }
 
 /// Derives the GCE SSH serial port gateway endpoint for a given zone.
@@ -135,6 +208,73 @@ mod tests {
         let err = res.unwrap_err().to_string();
         assert!(err.contains("No Google Cloud credentials found"));
         assert!(err.contains("ffx auth generate"));
+        assert!(err.contains("gcloud auth application-default login"));
+    }
+
+    #[fuchsia::test]
+    fn test_load_adc_oauth2() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let adc_path = temp.path().join("application_default_credentials.json");
+
+        // Missing file returns None.
+        assert!(load_adc_oauth2(&adc_path).is_none());
+
+        // Valid ADC authorized_user JSON with refresh_token returns Some.
+        std::fs::write(
+            &adc_path,
+            r#"{
+                "account": "",
+                "client_id": "test-client-id.apps.googleusercontent.com",
+                "client_secret": "test-client-secret",
+                "quota_project_id": "my-project",
+                "refresh_token": "test-refresh-token",
+                "type": "authorized_user",
+                "universe_domain": "googleapis.com"
+            }"#,
+        )
+        .expect("write adc file");
+        let loaded = load_adc_oauth2(&adc_path).expect("should parse valid ADC");
+        assert_eq!(loaded.client_id, "test-client-id.apps.googleusercontent.com");
+        assert_eq!(loaded.client_secret, "test-client-secret");
+        assert_eq!(loaded.refresh_token, "test-refresh-token");
+
+        // Empty refresh_token returns None.
+        std::fs::write(
+            &adc_path,
+            r#"{
+                "client_id": "id",
+                "client_secret": "secret",
+                "refresh_token": ""
+            }"#,
+        )
+        .expect("write empty adc file");
+        assert!(load_adc_oauth2(&adc_path).is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_has_explicit_bucket() {
+        let env = ffx_config::test_init().expect("test env");
+        let ctx = GceContext {
+            env_context: env.context.clone(),
+            project: "my-gcp-project".to_string(),
+            zone: "us-central1-a".to_string(),
+            client: GceClient::new("token".to_string()),
+        };
+        assert!(!ctx.has_explicit_bucket(None));
+        assert!(!ctx.has_explicit_bucket(Some("   ")));
+        assert!(ctx.has_explicit_bucket(Some("custom-bucket")));
+
+        let configured_env = ffx_config::test_env()
+            .user_config("gce.bucket", "configured-bucket")
+            .build()
+            .expect("configured test env");
+        let configured_ctx = GceContext {
+            env_context: configured_env.context.clone(),
+            project: "my-gcp-project".to_string(),
+            zone: "us-central1-a".to_string(),
+            client: GceClient::new("token".to_string()),
+        };
+        assert!(configured_ctx.has_explicit_bucket(None));
     }
 
     #[fuchsia::test]

@@ -20,7 +20,10 @@
     "events": [
         {
             "type": "write_to_master",
-            "data": "foo\u001c\n"
+            "data": "foo\u001c\n",
+            "signals": [
+                "SIGQUIT"
+            ]
         },
         {
             "type": "read_from_master",

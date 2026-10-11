@@ -11,6 +11,7 @@ use super::metadata::{
     POLICYDB_VERSION_MIN, SELINUX_MAGIC,
 };
 use super::rules::{RuleKey, RuleKind};
+use crate::InitialSid;
 
 /// Errors that may be encountered parsing a binary policy.
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -106,6 +107,10 @@ pub enum ValidateError {
         "expected extensible bitmap item start bit to be multiple of item size {found_size}, but found {found_start_bit}"
     )]
     MisalignedExtensibleBitmapItemStartBit { found_start_bit: u32, found_size: u32 },
+    #[error("missing initial SID {initial_sid:?}")]
+    MissingInitialSid { initial_sid: InitialSid },
+    #[error("missing mandatory 'object_r' role")]
+    MissingObjectRRole,
     #[error(
         "expected extensible bitmap items to be in sorted order, but found item starting at {found_start_bit} after item that ends at {min_start}"
     )]

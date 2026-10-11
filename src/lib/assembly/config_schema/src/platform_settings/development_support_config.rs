@@ -54,6 +54,12 @@ pub struct DevelopmentSupportConfig {
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub include_netsvc: bool,
 
+    /// Whether to include `devscreen`, a readable boot dashboard for
+    /// display-only builds that would otherwise show the virtual console's
+    /// logo tab. Off by default; not allowed on user builds.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub include_devscreen: bool,
+
     /// Override tracing inclusion on the target.
     ///
     // TODO(https://fxbug.dev/461878941): Soft transition to remove this in favor of

@@ -12,9 +12,9 @@ use cm_fidl_analyzer::component_instance::ComponentInstanceForAnalyzer;
 use cm_fidl_analyzer::component_model::{AnalyzerModelError, ComponentModelForAnalyzer};
 use cm_fidl_analyzer::route::VerifyRouteResult;
 use cm_fidl_analyzer::{BreadthFirstModelWalker, ComponentInstanceVisitor, ComponentModelWalker};
-use cm_rust::CapabilityTypeName;
+use cm_rust::{CapabilityTypeName, GenericRef};
 use futures::FutureExt;
-use routing::error::{ComponentInstanceError, PrettyPrintRef, RoutingError};
+use routing::error::{ComponentInstanceError, RoutingError};
 use scrutiny_collection::model::DataModel;
 use scrutiny_collection::v2_component_model::V2ComponentModel;
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ impl From<VerifyRouteResult> for ResultBySeverity {
                         ComponentInstanceError::InstanceNotFound { .. },
                     )
                     | AnalyzerModelError::RoutingError(RoutingError::RouteSourceNotFound {
-                        source: PrettyPrintRef::Child(_),
+                        source: GenericRef::Child(_),
                         ..
                     }) => WarningResult {
                         using_node: verify_route_result.using_node,

@@ -142,8 +142,8 @@ impl AddAssign<Self> for MeasurementsQueue {
 
         // Once one of the queues is empty, just append everything left in the other.
         // (Only one of these extends will actually do anything)
-        merged.extend(self.values.drain(..));
-        merged.extend(other.values.drain(..));
+        merged.append(&mut self.values);
+        merged.append(&mut other.values);
 
         self.values = merged;
         self.most_recent_measurement.combine(other.most_recent_measurement);

@@ -45,6 +45,98 @@
             ],
             availability: "optional",
         },
+
+        // Whether the Audio Gateway can reject incoming calls. Setting this to true will mean
+        // headsets can reject calls.
+        {
+            config: "fuchsia.bluetooth.RejectIncomingVoiceCall",
+            key: "reject_incoming_voice_call",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+
+        // Three way calling support
+        // TODO(https://fxbug.dev/42153736): limited support for three-way calls implemented
+        {
+            config: "fuchsia.bluetooth.ThreeWayCalling",
+            key: "three_way_calling",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+
+        // Echo Cancelling and Noise Reduction
+        // This controls whether the headset connected can turn off echo cancelling (as an in-ear
+        // headset, for example)
+        {
+            config: "fuchsia.bluetooth.EchoCancelingAndNoiseReduction",
+            key: "echo_canceling_and_noise_reduction",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+
+        // Attach Phone Number to Voice Tag
+        // Controls the feature flag sent to the handsfree peer.
+        {
+            config: "fuchsia.bluetooth.AttachPhoneNumberToVoiceTag",
+            key: "attach_phone_number_to_voice_tag",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+
+        // Enhanced Call Controls
+        // Whether the enhanced call controls are available. See HFP Spec v1.8 Sec 4.33
+        {
+            config: "fuchsia.bluetooth.EnhancedCallControls",
+            key: "enhanced_call_controls",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+
+        // Wide Band Speech
+        // Controls whether we will use higher quality codecs for audio. Highly recommended.
+        {
+            config: "fuchsia.bluetooth.WideBandSpeech",
+            key: "wide_band_speech",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
+
+        // Whether the controller on this product supports encoding in each of these codecs.
+        // Codecs that are not supported by the controller are encoded locally and sent through
+        // the BT transport.
+        {
+            config: "fuchsia.bluetooth.ControllerEncodingCvsd",
+            key: "controller_encoding_cvsd",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
+        {
+            config: "fuchsia.bluetooth.ControllerEncodingMsbc",
+            key: "controller_encoding_msbc",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
+
+        // What type of audio control to use for controller-encoded audio
+        // Types available:
+        //   - dai - find and use DAI devices, and publish a StreamConfig to Audio Core (full_stack audio)
+        //   - registry - publish a Codec device to the AudioDeviceRegistry (partial_stack audio)
+        {
+            config: "fuchsia.bluetooth.OffloadType",
+            key: "offload_type",
+            type: "string",
+            max_size: 8,
+            availability: "optional",
+            default: "dai",
+        },
     ],
     expose: [
         {
@@ -55,67 +147,4 @@
             from: "self",
         },
     ],
-    config: {
-        // Whether the Audio Gateway can reject incoming calls. Setting this to true will mean
-        // headsets can reject calls.
-        reject_incoming_voice_call: { type: "bool" },
-
-        // Three way calling support
-        // TODO(https://fxbug.dev/42153736): limited support for three-way calls implemented
-        three_way_calling: { type: "bool" },
-
-        // In band ringtone support
-        // TODO(https://fxbug.dev/42155342): in-band ringtone is not supported yet, setting to true will have no
-        // effect yet.
-        in_band_ringtone: { type: "bool" },
-
-        // Echo Cancelling and Noise Reduction
-        // This controls whether the headset connected can turn off echo cancelling (as an in-ear
-        // headset, for example)
-        echo_canceling_and_noise_reduction: { type: "bool" },
-
-        // Voice Recognition
-        // If set to true, the headset will be able to activate voice recognition actions
-        // TODO(https://fxbug.dev/42144778): unimplememented. setting this to true will be ignored
-        voice_recognition: { type: "bool" },
-
-        // Attach Phone Number to Voice Tag
-        // Controls the feature flag sent to the handsfree peer.
-        attach_phone_number_to_voice_tag: { type: "bool" },
-
-        // Enhanced Call Controls
-        // Whether the enhanced call controls are available. See HFP Spec v1.8 Sec 4.33
-        enhanced_call_controls: { type: "bool" },
-
-        // Enhanced Voice Recognition
-        // See HFP Spec v1.8 Sec 4.25
-        // TODO(https://fxbug.dev/42144778): unimplemented, ignored for now
-        enhanced_voice_recognition: { type: "bool" },
-
-        // Wide Band Speech
-        // Controls whether we will use higher quality codecs for audio. Highly recommended.
-        wide_band_speech: { type: "bool" },
-
-        // Enhanced Voice Recognition with text
-        // Provides textual versions of the voice responses, to be displayed on a visual screen for
-        // example.
-        // See HFP Spec v1.8 Sec 4.26
-        // TODO(https://fxbug.dev/42144778): unimplemented, ignored for now
-        enhanced_voice_recognition_with_text: { type: "bool" },
-
-        // Whether the controller on this product supports encoding in each of these codecs.
-        // Codecs that are not supported by the controller are encoded locally and sent through
-        // the BT transport.
-        controller_encoding_cvsd: { type: "bool" },
-        controller_encoding_msbc: { type: "bool" },
-
-        // What type of audio control to use for controller-encoded audio
-        // Types available:
-        //   - dai - find and use DAI devices, and publish a StreamConfig to Audio Core (full_stack audio)
-        //   - registry - publish a Codec device to the AudioDeviceRegistry (partial_stack audio)
-        offload_type: {
-            type: "string",
-            max_size: 8,
-        },
-    },
 }

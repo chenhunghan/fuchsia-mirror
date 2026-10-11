@@ -6,8 +6,8 @@ use crate::security;
 use crate::task::CurrentTask;
 use crate::vfs::{
     CheckAccessReason, DirectoryMode, FileHandle, FileObject, FsLockDepType, FsNodeHandle,
-    FsNodeLinkBehavior, FsStr, FsString, LookupVec, MountInfo, Mounts, NamespaceNode, UnlinkKind,
-    inotify_hook, path,
+    FsNodeLinkBehavior, FsStr, FsString, LookupVec, MountInfo, Mounts, NamespaceNode, PathBuilder,
+    UnlinkKind, inotify_hook, path,
 };
 use atomic_bitflags::atomic_bitflags;
 use bitflags::bitflags;
@@ -348,9 +348,10 @@ impl DirEntry {
         mount: &MountInfo,
         name: &FsStr,
     ) -> Result<DirEntryHandle, Errno> {
-        let (node, _) = self.get_or_create_child(current_task, mount, name, |d, mount, name| {
-            Ok((d.lookup(current_task, mount, name)?, CreationStatus::Existed))
-        })?;
+        let (node, _) =
+            self.get_or_create_child(current_task, mount, name, |d, _mount, name| {
+                Ok((d.node.ops().lookup(d, current_task, name)?, CreationStatus::Existed))
+            })?;
         Ok(node)
     }
 
@@ -369,15 +370,11 @@ impl DirEntry {
                 current_task,
                 mount,
                 names[i],
-                |parent_node, _mount, _name| {
+                |d, _mount, _name| {
                     let node = if let Some(node) = next_node {
                         node?
                     } else {
-                        nodes = parent_node.ops().lookup_pipelined(
-                            parent_node,
-                            current_task,
-                            &names[i..],
-                        );
+                        nodes = d.node.ops().lookup_pipelined(d, current_task, &names[i..]);
                         nodes.reverse();
                         nodes.pop().expect("lookup_pipelined must return at least one result")?
                     };
@@ -452,10 +449,10 @@ impl DirEntry {
         }
         let (entry, status) =
             self.get_or_create_child(current_task, mount, name, |d, mount, name| {
-                match d.lookup(current_task, mount, name) {
+                match d.node.ops().lookup(d, current_task, name) {
                     Ok(node) => Ok((node, CreationStatus::Existed)),
                     Err(e) if e == ENOENT => {
-                        Ok((create_node_fn(d, mount, name)?, CreationStatus::Created))
+                        Ok((create_node_fn(&d.node, mount, name)?, CreationStatus::Created))
                     }
                     Err(e) => Err(e),
                 }
@@ -961,6 +958,29 @@ impl DirEntry {
         }
     }
 
+    /// Verifies that `name` is not a reserved `.` or `..` entry, that this entry is a directory,
+    /// and that `current_task` has search (`EXEC`) permission on it.
+    fn check_search_access(
+        &self,
+        current_task: &CurrentTask,
+        mount: &MountInfo,
+        name: &FsStr,
+    ) -> Result<(), Errno> {
+        assert!(!DirEntry::is_reserved_name(name));
+        // Only directories can have children.
+        if !self.node.is_dir() {
+            return error!(ENOTDIR);
+        }
+        // The user must be able to search the directory (requires the EXEC permission).
+        self.node.check_access(
+            current_task,
+            mount,
+            Access::EXEC,
+            CheckAccessReason::InternalPermissionChecks,
+            self,
+        )
+    }
+
     /// Retrieves a child `DirEntry` from the cache or obtains one via `create_fn`.
     ///
     /// Checks the in-memory child cache. A cached child is validated using `revalidate()` and
@@ -973,24 +993,12 @@ impl DirEntry {
         mount: &MountInfo,
         name: &FsStr,
         create_fn: impl FnOnce(
-            &FsNodeHandle,
+            &DirEntryHandle,
             &MountInfo,
             &FsStr,
         ) -> Result<(FsNodeHandle, CreationStatus), Errno>,
     ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
-        assert!(!DirEntry::is_reserved_name(name));
-        // Only directories can have children.
-        if !self.node.is_dir() {
-            return error!(ENOTDIR);
-        }
-        // The user must be able to search the directory (requires the EXEC permission)
-        self.node.check_access(
-            current_task,
-            mount,
-            Access::EXEC,
-            CheckAccessReason::InternalPermissionChecks,
-            self,
-        )?;
+        self.check_search_access(current_task, mount, name)?;
 
         // Check if the child is already in children. In that case, we can simply return the
         // child if it is still valid, and we do not need to call create_fn.
@@ -1271,10 +1279,11 @@ impl<'a> DirEntryLockedChildren<'a> {
         mount: &MountInfo,
         name: &FsStr,
     ) -> Result<DirEntryHandle, Errno> {
-        assert!(!DirEntry::is_reserved_name(name));
-        let (node, _) = self.get_or_create_child(current_task, mount, name, |d, mount, name| {
-            Ok((d.lookup(current_task, mount, name)?, CreationStatus::Existed))
-        })?;
+        self.entry.check_search_access(current_task, mount, name)?;
+        let (node, _) =
+            self.get_or_create_child(current_task, mount, name, |d, _mount, name| {
+                Ok((d.node.ops().lookup(d, current_task, name)?, CreationStatus::Existed))
+            })?;
         Ok(node)
     }
 
@@ -1284,7 +1293,7 @@ impl<'a> DirEntryLockedChildren<'a> {
         mount: &MountInfo,
         name: &FsStr,
         create_fn: impl FnOnce(
-            &FsNodeHandle,
+            &DirEntryHandle,
             &MountInfo,
             &FsStr,
         ) -> Result<(FsNodeHandle, CreationStatus), Errno>,
@@ -1297,7 +1306,7 @@ impl<'a> DirEntryLockedChildren<'a> {
             return Ok((child, CreationStatus::Existed));
         }
 
-        let (node, status) = create_fn(&self.entry.node, mount, name)?;
+        let (node, status) = create_fn(self.entry, mount, name)?;
 
         assert!(
             node.info().mode & FileMode::IFMT != FileMode::EMPTY,
@@ -1325,19 +1334,25 @@ impl<'a> DirEntryLockedChildren<'a> {
 impl fmt::Debug for DirEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let scope = RcuReadScope::new();
-        let mut parents = vec![];
-        let mut maybe_parent = self.parent();
-        while let Some(parent) = maybe_parent {
-            parents.push(parent.local_name.read(&scope));
-            maybe_parent = parent.parent();
+        let mut path = PathBuilder::new();
+        let mut parent_holder;
+        let mut current = self;
+        loop {
+            // Root and unnamed unrooted entries have an empty `local_name`.
+            let name = current.local_name(&scope);
+            if !name.is_empty() {
+                path.prepend_element(name);
+            }
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            parent_holder = parent;
+            current = &parent_holder;
         }
-        let mut builder = f.debug_struct("DirEntry");
-        builder.field("id", &(self as *const DirEntry));
-        builder.field("local_name", &self.local_name.read(&scope).to_owned());
-        if !parents.is_empty() {
-            builder.field("parents", &parents);
-        }
-        builder.finish()
+        f.debug_struct("DirEntry")
+            .field("fs", &self.node.fs().name())
+            .field("path", &path.build_absolute())
+            .finish()
     }
 }
 
@@ -1580,6 +1595,30 @@ impl Drop for DirEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::spawn_kernel_and_run;
+    use crate::vfs::pseudo::simple_directory::SimpleDirectory;
+
+    #[fuchsia::test]
+    async fn test_dir_entry_debug() {
+        spawn_kernel_and_run(async |current_task| {
+            let fs = current_task.fs().root().entry.node.fs();
+            let check = |parent: Option<&DirEntryHandle>, name: &str, expected_path: &str| {
+                let node = SimpleDirectory::new().into_node(&fs, 0o755);
+                let entry = DirEntry::new(node, parent.cloned(), name.into());
+                assert_eq!(
+                    format!("{entry:?}"),
+                    format!("DirEntry {{ fs: {:?}, path: {expected_path:?} }}", fs.name())
+                );
+                entry
+            };
+
+            let root = check(None, "", "/");
+            let bus = check(Some(&root), "bus", "/bus");
+            check(Some(&bus), "pci", "/bus/pci");
+            check(None, "[eventfd]", "/[eventfd]");
+        })
+        .await;
+    }
 
     #[test]
     fn test_canonicalize_name() {

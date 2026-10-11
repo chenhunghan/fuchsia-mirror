@@ -3,9 +3,8 @@
 // found in the LICENSE file.
 
 use super::ReadValue;
-use fidl::{HandleRef, Signals};
+use fidl::{HandleRef, OnSignalsRef, Signals};
 use fidl_fuchsia_overnet_protocol::{SignalUpdate, Signals as WireSignals};
-use fuchsia_async::OnSignalsRef;
 use futures::FutureExt;
 use std::pin::Pin;
 use std::task::{Context, Poll};

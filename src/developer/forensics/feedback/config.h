@@ -30,6 +30,11 @@ enum class CrashReportUploadPolicy {
   kReadFromPrivacySettings,
 };
 
+enum class DiskEndurance : std::uint8_t {
+  kHigh,
+  kLow,
+};
+
 enum class SpontaneousRebootReason : std::uint8_t {
   kSpontaneous,
   kBriefPowerLoss,
@@ -61,6 +66,7 @@ struct FeedbackConfig {
   StorageSize report_persistence_max_tmp_size;
   std::optional<StorageSize> snapshot_persistence_max_cache_size;
   std::optional<StorageSize> snapshot_persistence_max_tmp_size;
+  DiskEndurance disk_endurance;
   SpontaneousRebootReason spontaneous_reboot_reason;
   bool remote_device_id_provider;
   bool supports_user_initiated_poweroffs;
@@ -80,6 +86,7 @@ void ExposeConfig(inspect::Node& inspect_root, const FeedbackConfig& feedback_co
 
 // Returns the string version of the enum.
 std::string ToString(CrashReportUploadPolicy upload_policy);
+std::string ToString(DiskEndurance disk_endurance);
 
 }  // namespace forensics::feedback
 

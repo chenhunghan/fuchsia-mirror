@@ -1,0 +1,58 @@
+{
+    "name": "canonical_partial_read",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "abcdef\nxyz\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 3,
+            "data": "abc"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 10,
+            "data": "def\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 10,
+            "data": "xyz\n"
+        },
+        {
+            "type": "read_once_from_slave_blocked",
+            "size": 10
+        },
+        {
+            "type": "read_from_master",
+            "data": "abcdef\r\nxyz\r\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    }
+}

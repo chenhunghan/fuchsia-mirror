@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
+	botanistconstants "go.fuchsia.dev/fuchsia/tools/botanist/constants"
 	"go.fuchsia.dev/fuchsia/tools/build"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder/metadata"
@@ -33,6 +35,7 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/lib/subprocess"
 	sshutilconstants "go.fuchsia.dev/fuchsia/tools/net/sshutil/constants"
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
+	"go.fuchsia.dev/fuchsia/tools/testing/testrunner/constants"
 )
 
 type fakeSSHClient struct {
@@ -91,16 +94,23 @@ type fakeCmdRunner struct {
 	runErrs  []error
 	runCalls int
 	lastCmd  []string
+	onRun    func(context.Context)
 }
 
-func (r *fakeCmdRunner) Run(_ context.Context, command []string, _ subprocess.RunOptions) error {
+func (r *fakeCmdRunner) Run(ctx context.Context, command []string, _ subprocess.RunOptions) error {
 	r.runCalls++
 	r.lastCmd = command
-	if r.runErrs == nil {
-		return nil
+	if r.onRun != nil {
+		r.onRun(ctx)
+	}
+	if len(r.runErrs) == 0 {
+		return ctx.Err()
 	}
 	err, remainingErrs := r.runErrs[0], r.runErrs[1:]
 	r.runErrs = remainingErrs
+	if err == nil {
+		return ctx.Err()
+	}
 	return err
 }
 
@@ -300,7 +310,7 @@ func TestSubprocessTester(t *testing.T) {
 			}
 			tester := SubprocessTester{
 				localOutputDir: tmpDir,
-				testRuns:       make(map[string]string),
+				testRuns:       make(map[string]subprocessTestRun),
 			}
 			if c.useSandboxing {
 				tester.sProps = &sandboxingProps{
@@ -366,6 +376,84 @@ func TestSubprocessTester(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("power cycles target on exit code 40 in ProcessResult", func(t *testing.T) {
+		exit40Err := exec.Command("sh", "-c", "exit 40").Run()
+		t.Setenv(constants.DMCPathEnvKey, "/path/to/dmc")
+		t.Setenv(botanistconstants.NodenameEnvKey, "device-nodename")
+
+		for _, tc := range []struct {
+			name              string
+			powerCycleTimeout time.Duration
+			hangPowerCycle    bool
+			wantErr           bool
+		}{
+			{
+				name: "succeeds with default power cycle timeout",
+			},
+			{
+				name:              "fails when power cycle times out",
+				powerCycleTimeout: time.Nanosecond,
+				hangPowerCycle:    true,
+				wantErr:           true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				runner := &fakeCmdRunner{
+					runErrs: []error{exit40Err},
+				}
+				oldNewRunner := newRunner
+				t.Cleanup(func() {
+					newRunner = oldNewRunner
+				})
+				newRunner = func(dir string, env []string) cmdRunner {
+					return runner
+				}
+
+				tester := SubprocessTester{
+					localOutputDir:    tmpDir,
+					testRuns:          make(map[string]subprocessTestRun),
+					powerCycleTimeout: tc.powerCycleTimeout,
+				}
+				outDir := filepath.Join(tmpDir, failingTest)
+				test := testsharder.Test{
+					Test: build.Test{Path: failingTest},
+				}
+				testResult, err := tester.Test(context.Background(), test, io.Discard, io.Discard, outDir)
+				if err != nil {
+					t.Fatalf("tester.Test got unexpected error: %s", err)
+				}
+				if runner.runCalls != 1 {
+					t.Fatalf("tester.Test ran %d commands, want 1 (power cycle must run in ProcessResult)", runner.runCalls)
+				}
+				if tc.hangPowerCycle {
+					runner.onRun = func(ctx context.Context) {
+						<-ctx.Done()
+					}
+				}
+				testResult, err = tester.ProcessResult(context.Background(), test, outDir, testResult, err)
+				if tc.wantErr {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("tester.ProcessResult got error %v, want %v", err, context.DeadlineExceeded)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("tester.ProcessResult got unexpected error: %s", err)
+				}
+				if testResult.Status != runtests.TestFailure {
+					t.Errorf("tester.ProcessResult got status %s, want %s", testResult.Status, runtests.TestFailure)
+				}
+				if runner.runCalls != 2 {
+					t.Fatalf("after ProcessResult got %d commands run, want 2", runner.runCalls)
+				}
+				wantCmd := []string{"/path/to/dmc", "set-power-state", "--nodename", "device-nodename", "--state", "cycle"}
+				if diff := cmp.Diff(wantCmd, runner.lastCmd); diff != "" {
+					t.Errorf("Unexpected power cycle command (-want +got):\n%s", diff)
+				}
+			})
+		}
+	})
 }
 
 type fakeDataSinkCopier struct {
@@ -409,7 +497,6 @@ func TestFFXTester(t *testing.T) {
 		connErr               bool
 		experiments           []string
 		output                string
-		stderrOutput          string
 	}{
 		{
 			name:           "run v2 tests with ffx",
@@ -417,17 +504,9 @@ func TestFFXTester(t *testing.T) {
 			experiments:    []string{"use_ffx_test", "use_ffx_test_parallel"},
 		},
 		{
-			name:                  "ffx test fails",
-			expectedStatus:        runtests.TestFailure,
-			expectedFailureReason: runtests.FailureReasonFromMessage("unknown failure reason"),
-			experiments:           []string{"use_ffx_test"},
-		},
-		{
-			name:                  "ffx test fails with stderr",
-			expectedStatus:        runtests.TestFailure,
-			expectedFailureReason: runtests.FailureReasonFromMessage("There was an internal error running tests: Fidl(ClientRead(Other(Transport(None))))"),
-			stderrOutput:          "There was an internal error running tests: Fidl(ClientRead(Other(Transport(None))))\n",
-			experiments:           []string{"use_ffx_test"},
+			name:           "ffx test fails",
+			expectedStatus: runtests.TestFailure,
+			experiments:    []string{"use_ffx_test"},
 		},
 		{
 			name:                  "ffx test times out",
@@ -442,12 +521,11 @@ func TestFFXTester(t *testing.T) {
 			experiments:    []string{"use_ffx_test"},
 		},
 		{
-			name:                  "ffx test returns ssh connection failure",
-			expectedStatus:        runtests.TestFailure,
-			expectedFailureReason: runtests.FailureReasonFromMessage("unknown failure reason"),
-			connErr:               true,
-			experiments:           []string{"use_ffx_test"},
-			output:                sshutilconstants.ProcessTerminatedMsg + "\n" + ffxutilconstants.ClientChannelClosedMsg,
+			name:           "ffx test returns ssh connection failure",
+			expectedStatus: runtests.TestFailure,
+			connErr:        true,
+			experiments:    []string{"use_ffx_test"},
+			output:         sshutilconstants.ProcessTerminatedMsg + "\n" + ffxutilconstants.ClientChannelClosedMsg,
 		},
 	}
 	for _, c := range cases {
@@ -464,9 +542,8 @@ func TestFFXTester(t *testing.T) {
 				outcome = ffxutil.TestNotStarted
 			}
 			ffx := &ffxutil.MockFFXInstance{
-				TestOutcome:  outcome,
-				Output:       c.output,
-				StderrOutput: c.stderrOutput,
+				TestOutcome: outcome,
+				Output:      c.output,
 			}
 			localOutputDir := t.TempDir()
 			experiments := botanist.GetExperiments(c.experiments)
@@ -1287,7 +1364,7 @@ func TestProcessTestResult(t *testing.T) {
 		},
 	}
 
-	testDetails, err := processTestResult(runResult, test, "", 5*time.Second, false)
+	testDetails, err := processTestResult(runResult, test, 5*time.Second, false)
 	if err != nil {
 		t.Fatalf("processTestResult failed: %s", err)
 	}

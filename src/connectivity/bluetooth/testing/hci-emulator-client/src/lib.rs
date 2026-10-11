@@ -10,7 +10,7 @@ use fidl_fuchsia_hardware_bluetooth::{
 };
 use fidl_fuchsia_io::DirectoryProxy;
 use fuchsia_async::{DurationExt as _, TimeoutExt as _};
-use fuchsia_bluetooth::constants::{DEV_DIR, HCI_DEVICE_DIR, INTEGRATION_TIMEOUT as WATCH_TIMEOUT};
+use fuchsia_bluetooth::constants::{DEV_DIR, INTEGRATION_TIMEOUT as WATCH_TIMEOUT};
 
 use futures::TryFutureExt as _;
 use log::error;
@@ -76,32 +76,6 @@ impl Emulator {
             .map_err(|e: EmulatorError| format_err!("failed to publish bt-hci device: {:#?}", e))
     }
 
-    pub async fn publish_and_wait_for_device_path(
-        &self,
-        settings: EmulatorSettings,
-    ) -> Result<String, Error> {
-        let () = self.publish(settings).await?;
-        let dev = self.dev.as_ref().expect("emulator device accessed after it was destroyed!");
-        let topo = dev.get_topological_path().await?;
-        let TestDevice { dev_directory, controller: _, emulator: _ } = dev;
-        let hci_dir = fuchsia_fs::directory::open_directory_async(
-            dev_directory,
-            HCI_DEVICE_DIR,
-            fuchsia_fs::Flags::empty(),
-        )?;
-
-        let hci_device_path = device_watcher::wait_for_device_with(
-            &hci_dir,
-            |device_watcher::DeviceInfo { filename, topological_path }| {
-                topological_path.starts_with(&topo).then(|| filename.to_string())
-            },
-        )
-        .on_timeout(WATCH_TIMEOUT, || Err(format_err!("timed out waiting for device to appear")))
-        .await?;
-
-        Ok(hci_device_path)
-    }
-
     /// Sends the test device a destroy message which will unbind the driver.
     /// This will wait for the test device to be unpublished from devfs.
     pub async fn destroy_and_wait(&mut self) -> Result<(), Error> {
@@ -135,6 +109,7 @@ impl Drop for Emulator {
 /// execution of destroy() to know about device removal. Instead, the caller should watch for the
 /// device path to be removed.
 struct TestDevice {
+    #[cfg(test)]
     dev_directory: DirectoryProxy,
     controller: ControllerProxy,
     emulator: EmulatorProxy,
@@ -200,7 +175,12 @@ impl TestDevice {
             EmulatorMarker,
         >(&directory, fidl_fuchsia_device_fs::DEVICE_PROTOCOL_NAME)?;
 
-        Ok(Self { dev_directory, controller, emulator })
+        Ok(Self {
+            #[cfg(test)]
+            dev_directory,
+            controller,
+            emulator,
+        })
     }
 
     /// Sends the test device a destroy message which will unbind the driver.

@@ -54,7 +54,7 @@ CRATE_ANNOTATION_OVERWRITES = {
         crate.annotation(
             version = "*",
             gen_build_script = False,
-            deps = [
+            link_deps = [
                 "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
             ],
         ),
@@ -161,7 +161,7 @@ CRATE_ANNOTATION_OVERWRITES = {
             # NOTE: Build script of this crate doesn't run due to missing
             # dependency. See https://fxbug.dev/345712835.
             gen_build_script = False,
-            deps = [
+            link_deps = [
                 "//third_party/rust_crates/compat/ring-0.17.14:ring-core",
             ],
             rustc_env = {

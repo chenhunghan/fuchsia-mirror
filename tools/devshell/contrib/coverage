@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Test
+#### PREBUILTS=${PREBUILT_CLANG_DIR} ${PREBUILT_PYTHON3}
 ### Runs test and exports coverage data.
 
 ## usage: fx coverage [--lcov-output-path <path>] [--html-output-dir <directory>] [--json-output-path <path>] [--include-filename-regex <pattern>] [--ignore-filename-regex <pattern>] [--test-output-dir <directory>] [-v|--verbose] [-h|--help] [testName ...]

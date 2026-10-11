@@ -1,0 +1,7 @@
+[
+    {
+        "name": "core.x64",
+        "product_version": "33.20260911.5.1",
+        "transfer_manifest_url": "gs://fuchsia-artifacts/builds/1234/product_bundles/core.x64/transfer.json"
+    }
+]

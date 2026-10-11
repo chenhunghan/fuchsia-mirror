@@ -22,7 +22,9 @@
 #include <string.h>
 #include <zircon/compiler.h>
 
+#include <limits>
 #include <string>
+#include <utility>
 
 #include <third_party/bcmdhd/crossdriver/dhd.h>
 
@@ -161,5 +163,23 @@ std::string brcmu_ssid_format_vector(const std::vector<uint8_t>& ssid);
  * corresponding to the bytes of the SSID.
  */
 std::string brcmu_ssid_format_bytes(uint8_t const ssid_bytes[], size_t ssid_len);
+
+/*
+ * Clamp `value` to the range [`low`, `high`], which defaults to the full range of T, and convert
+ * the result to T. The comparisons are sign-aware, so the result is correct even when T and U
+ * differ in signedness. Only integer types are supported.
+ */
+template <typename T, typename U>
+requires(std::is_integral_v<T> && std::is_integral_v<U>)
+constexpr T clamp_to_type(U value, T low = std::numeric_limits<T>::min(),
+                          T high = std::numeric_limits<T>::max()) {
+  if (std::cmp_less(value, low)) {
+    return low;
+  }
+  if (std::cmp_greater(value, high)) {
+    return high;
+  }
+  return static_cast<T>(value);
+}
 
 #endif  // SRC_CONNECTIVITY_WLAN_DRIVERS_THIRD_PARTY_BROADCOM_BRCMFMAC_BRCMU_UTILS_H_

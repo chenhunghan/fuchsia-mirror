@@ -53,43 +53,44 @@ pub fn defer<F: FnOnce()>(action: F) -> Deferred<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::Cell;
 
     #[test]
     fn test_defer_runs_on_drop() {
-        let mut executed = false;
+        let executed = Cell::new(false);
         {
             let _guard = defer(|| {
-                executed = true;
+                executed.set(true);
             });
-            assert!(!executed);
+            assert!(!executed.get());
         }
-        assert!(executed);
+        assert!(executed.get());
     }
 
     #[test]
     fn test_defer_cancel() {
-        let mut executed = false;
+        let executed = Cell::new(false);
         {
             let mut guard = defer(|| {
-                executed = true;
+                executed.set(true);
             });
             guard.cancel();
         }
-        assert!(!executed);
+        assert!(!executed.get());
     }
 
     #[test]
     fn test_defer_call_early() {
-        let mut count = 0;
+        let count = Cell::new(0);
         {
             let mut guard = defer(|| {
-                count += 1;
+                count.set(count.get() + 1);
             });
-            assert_eq!(count, 0);
+            assert_eq!(count.get(), 0);
             guard.call();
-            assert_eq!(count, 1);
+            assert_eq!(count.get(), 1);
         }
         // Should not run again on drop
-        assert_eq!(count, 1);
+        assert_eq!(count.get(), 1);
     }
 }

@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Test
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### Finds and runs tests affected by the current change.
 
 ## USAGE:

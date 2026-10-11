@@ -92,6 +92,5 @@ group("tests") {
     ":fidl-fuchsia-net-routes-ext-fdomain-tests",
     ":fidl-fuchsia-net-routes-ext-tests",
     ":fidl_fuchsia_net_routes_ext_fdomain_test($host_toolchain)",
-    ":fidl_fuchsia_net_routes_ext_test($host_toolchain)",
   ]
 }

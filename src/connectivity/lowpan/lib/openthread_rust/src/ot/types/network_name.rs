@@ -93,11 +93,19 @@ impl NetworkName {
     }
 }
 
+impl core::str::FromStr for NetworkName {
+    type Err = ot::WrongSize;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        NetworkName::try_from_slice(value.as_bytes())
+    }
+}
+
 impl<'a> TryFrom<&'a str> for NetworkName {
     type Error = ot::WrongSize;
 
     fn try_from(value: &'a str) -> Result<Self, Self::Error> {
-        NetworkName::try_from_slice(value.as_bytes())
+        value.parse()
     }
 }
 

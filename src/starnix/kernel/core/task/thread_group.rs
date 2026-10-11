@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::device::terminal::{Terminal, TerminalController};
+use crate::device::terminal::{ControllingSession, ControllingTerminal, Terminal, TerminalSide};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::ptrace::{
     AtomicStopState, PtraceAllowedPtracers, PtraceEvent, PtraceOptions, PtraceStatus, PtraceTracer,
@@ -16,18 +16,20 @@ use crate::signals::{
 };
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::{
-    ControllingTerminal, CurrentTask, ExitStatus, Kernel, Pid, PidTable, PidTableGuard,
-    ProcessGroup, Session, SessionDisassociation, Task, TaskMutableState, TaskPersistentInfo,
-    TypedWaitQueue, WaitResult, ZombieProcess, ZombieState,
+    CurrentTask, ExitStatus, Kernel, Pid, PidTableGuard, Task, TaskMutableState,
+    TaskPersistentInfo, TypedWaitQueue, WaitResult, ZombieProcess, ZombieState,
 };
 use crate::time::{IntervalTimerHandle, TimerTable};
+use fuchsia_rcu::subtle::RcuPtr;
+use fuchsia_rcu::{RcuDroppable, RcuReadScope};
+use fuchsia_rcu_collections::rcu_intrusive_list::{Link, RcuListAdapter, rcu_list_adapter};
 use itertools::Itertools;
 use macro_rules_attribute::apply;
 use starnix_lifecycle::{AtomicCounter, DropNotifier};
 use starnix_logging::{log_debug, log_error, log_info, log_warn, track_stub};
 use starnix_sync::{
     LockDepMutex, LockDepRwLock, ThreadGroupLimits, ThreadGroupMutableStateLock,
-    ThreadGroupPendingSignalsLock, ThreadGroupPtraceesLock, allow_subclass, ordered_write_lock,
+    ThreadGroupPendingSignalsLock, ThreadGroupPtraceesLock, allow_subclass,
 };
 use starnix_task_command::TaskCommand;
 use starnix_types::ownership::{OwnedRef, Releasable};
@@ -164,8 +166,14 @@ pub struct ThreadGroupMutableState {
     /// tree.
     pub is_child_subreaper: bool,
 
-    /// The IDs used to perform shell job control.
-    pub process_group: Arc<ProcessGroup>,
+    /// The process group leader PID.
+    pub process_group: Pid,
+
+    /// The session leader PID.
+    pub session: Pid,
+
+    /// The controlling terminal of the thread group.
+    pub controlling_terminal: Option<ControllingTerminal>,
 
     pub did_exec: bool,
 
@@ -244,6 +252,12 @@ pub struct ThreadGroup {
     /// The lead task is typically the initial thread created in the thread group.
     pub leader: Pid,
 
+    /// Current node in `PidEntry::pgid_thread_groups`. Protected by `PidTableLock`.
+    pub(super) pgrp_node: RcuPtr<ThreadGroupLinkNode>,
+
+    /// Current node in `PidEntry::sid_thread_groups`. Protected by `PidTableLock`.
+    pub(super) session_node: RcuPtr<ThreadGroupLinkNode>,
+
     /// The signal actions that are registered for this process.
     pub signal_actions: Arc<SignalActions>,
 
@@ -301,6 +315,10 @@ impl fmt::Debug for ThreadGroup {
 }
 
 impl ThreadGroup {
+    pub fn to_owned(&self) -> Arc<Self> {
+        self.weak_self.upgrade().expect("ThreadGroup is alive")
+    }
+
     pub fn sync_syscall_log_level(&self) {
         let command = self.read().leader_command();
         let filters = self.kernel.syscall_log_filters.lock();
@@ -335,6 +353,31 @@ impl PartialEq for ThreadGroup {
     }
 }
 
+/// Non-reusable list node linking a [`ThreadGroup`] into a process group or session list.
+///
+/// Allocated per list attachment (`attach_pgid` / `attach_sid`) and retired via `rcu_drop`
+/// upon detachment so moving a process between process groups or sessions never clobbers
+/// `link.next` for concurrent lock-free RCU readers.
+#[derive(Debug, RcuDroppable)]
+pub(super) struct ThreadGroupLinkNode {
+    pub(super) thread_group: Weak<ThreadGroup>,
+    pub(super) link: Link,
+}
+
+impl ThreadGroupLinkNode {
+    pub(super) fn new(thread_group: Weak<ThreadGroup>) -> Self {
+        Self { thread_group, link: Link::default() }
+    }
+}
+
+/// RCU intrusive list adapter for [`ThreadGroupLinkNode`].
+#[derive(Debug, RcuDroppable)]
+pub(super) struct ThreadGroupLinkAdapter;
+
+impl RcuListAdapter<ThreadGroupLinkNode> for ThreadGroupLinkAdapter {
+    rcu_list_adapter!(ThreadGroupLinkNode, link);
+}
+
 impl Drop for ThreadGroup {
     fn drop(&mut self) {
         let state = self.mutable_state.get_mut();
@@ -343,16 +386,21 @@ impl Drop for ThreadGroup {
         assert!(state.zombie_children.is_empty());
         assert!(state.zombie_ptracees.is_empty());
         #[cfg(any(test, debug_assertions))]
-        assert!(
-            state
-                .parent
-                .as_ref()
-                .and_then(|p| p
-                    .thread_group
-                    .upgrade()
-                    .map(|p| !p.read().children.contains(&self.leader)))
-                .unwrap_or(true)
-        );
+        {
+            let scope = fuchsia_rcu::RcuReadScope::new();
+            assert!(self.pgrp_node.read(&scope).is_null());
+            assert!(self.session_node.read(&scope).is_null());
+            assert!(
+                state
+                    .parent
+                    .as_ref()
+                    .and_then(|p| p
+                        .thread_group
+                        .upgrade()
+                        .map(|p| !p.read().children.contains(&self.leader)))
+                    .unwrap_or(true)
+            );
+        }
     }
 }
 
@@ -440,7 +488,7 @@ impl ProcessSelector {
             ProcessSelector::Any => true,
             ProcessSelector::Pgid(pgid) => {
                 if let Ok(task_ref) = tid.get_task() {
-                    &task_ref.thread_group().read().process_group.leader == pgid
+                    &task_ref.thread_group().read().process_group == pgid
                 } else {
                     false
                 }
@@ -466,29 +514,15 @@ impl ThreadGroup {
         parent: Option<ThreadGroupWriteGuard<'_>>,
         leader: Pid,
         exit_signal: Option<Signal>,
-        process_group: Arc<ProcessGroup>,
         signal_actions: Arc<SignalActions>,
     ) -> Arc<ThreadGroup> {
         debug_assert!(!process.is_invalid());
         debug_assert!(!root_vmar.is_invalid());
-        Self::new_internal(
-            kernel,
-            process,
-            root_vmar,
-            parent,
-            leader,
-            exit_signal,
-            process_group,
-            signal_actions,
-        )
+        Self::new_internal(kernel, process, root_vmar, parent, leader, exit_signal, signal_actions)
     }
 
     /// Creates a ThreadGroup for a kernel system task (e.g., kthreadd).
-    pub fn for_system(
-        kernel: Arc<Kernel>,
-        leader: Pid,
-        process_group: Arc<ProcessGroup>,
-    ) -> Arc<ThreadGroup> {
+    pub fn for_system(kernel: Arc<Kernel>, leader: Pid) -> Arc<ThreadGroup> {
         Self::new_internal(
             kernel,
             zx::Process::invalid(),
@@ -496,7 +530,6 @@ impl ThreadGroup {
             None,
             leader,
             Some(SIGCHLD),
-            process_group,
             SignalActions::default(),
         )
     }
@@ -513,7 +546,6 @@ impl ThreadGroup {
         process: zx::Process,
         parent: ThreadGroupWriteGuard<'_>,
         leader: Pid,
-        process_group: Arc<ProcessGroup>,
     ) -> Arc<ThreadGroup> {
         Self::new_internal(
             kernel,
@@ -522,7 +554,6 @@ impl ThreadGroup {
             Some(parent),
             leader,
             Some(SIGCHLD),
-            process_group,
             SignalActions::default(),
         )
     }
@@ -534,17 +565,22 @@ impl ThreadGroup {
         parent: Option<ThreadGroupWriteGuard<'_>>,
         leader: Pid,
         exit_signal: Option<Signal>,
-        process_group: Arc<ProcessGroup>,
         signal_actions: Arc<SignalActions>,
     ) -> Arc<ThreadGroup> {
         Arc::new_cyclic(|weak_self| {
             let process = ZirconProcess::new(process);
+            let process_group =
+                parent.as_ref().map(|p| p.process_group.clone()).unwrap_or_else(|| leader.clone());
+            let session =
+                parent.as_ref().map(|p| p.session.clone()).unwrap_or_else(|| leader.clone());
             let mut thread_group = ThreadGroup {
                 weak_self: weak_self.clone(),
                 kernel,
                 process,
                 root_vmar,
                 leader,
+                pgrp_node: RcuPtr::null(),
+                session_node: RcuPtr::null(),
                 signal_actions,
                 timers: Default::default(),
                 drop_notifier: Default::default(),
@@ -579,7 +615,9 @@ impl ThreadGroup {
                     deferred_zombie_ptracers: vec![],
                     lifecycle_waiters: TypedWaitQueue::<ThreadGroupLifecycleWaitValue>::default(),
                     is_child_subreaper: false,
-                    process_group: Arc::clone(&process_group),
+                    process_group,
+                    session,
+                    controlling_terminal: None,
                     did_exec: false,
                     last_signal: None,
                     run_state: Default::default(),
@@ -599,7 +637,6 @@ impl ThreadGroup {
             if let Some(mut parent) = parent {
                 thread_group.next_seccomp_filter_id.reset(parent.base.next_seccomp_filter_id.get());
                 parent.children.insert(thread_group.leader.clone());
-                process_group.insert(&thread_group);
             };
             thread_group
         })
@@ -675,7 +712,6 @@ impl ThreadGroup {
     /// ThreadGroup are always valid as they are still valid when removed.
     pub fn remove(&self, mut pids: PidTableGuard<'_>, task: &Arc<Task>) {
         task.set_ptrace_zombie(&mut pids);
-        pids.remove_task(&task.tid);
 
         let mut state = self.write();
 
@@ -683,10 +719,16 @@ impl ThreadGroup {
             // The task has never been added. The only expected case is that this thread group
             // is not running.
             debug_assert!(!state.is_running());
+            pids.remove_task(&task.tid);
             return;
         }
 
         if state.tasks.is_empty() {
+            let pgid = Arc::clone(&state.process_group);
+            let sid = Arc::clone(&state.session);
+            pids.detach_pgid(&pgid, self);
+            pids.detach_sid(&sid, self);
+
             let exit_status = if let ThreadGroupRunState::Exiting(exit_status) = &state.run_state {
                 exit_status.clone()
             } else {
@@ -701,16 +743,20 @@ impl ThreadGroup {
             // Detach from any ptraced zombie tasks.
             let zombie_notifications = state.zombie_ptracees.detach_all(&mut pids);
 
-            // Replace PID table entry with a zombie.
+            // Replace PID table entry with a zombie before clearing `task.tid` so that
+            // lock-free RCU readers calling `PidEntry::get_process_task()` never observe
+            // an empty `ThreadGroup` before `ProcessEntry::Zombie` is published.
             let zombie = ZombieProcess::new(
                 task.clone(),
                 state.as_ref(),
                 exit_status,
                 state.exit_signal.clone(),
             );
-            pids.kill_process(&self.leader);
+            pids.kill_process(&self.leader, Arc::downgrade(task));
+            pids.remove_task(&task.tid);
 
-            let session = state.leave_process_group(&mut pids);
+            let disassociated_controlling_terminal =
+                if state.session == self.leader { state.controlling_terminal.take() } else { None };
 
             // I have no idea if dropping the lock here is correct, and I don't want to think about
             // it. If problems do turn up with another thread observing an intermediate state of
@@ -723,9 +769,14 @@ impl ThreadGroup {
             // for an idea.
             std::mem::drop(state);
 
-            // `disassociate_controlling_terminal` can not be called while holding the
-            // ThreadGroup state lock.
-            session.disassociate_controlling_terminal();
+            // Disassociate the controlling terminal when the session leader exits.
+            // This cannot be called while holding the ThreadGroup state lock.
+            if let Some(controlling_terminal) = disassociated_controlling_terminal {
+                controlling_terminal.terminal.disassociate_controlling_session_if(
+                    Some(&sid),
+                    Some(controlling_terminal.side),
+                );
+            }
 
             for notification in zombie_notifications {
                 notification.deliver(&mut pids);
@@ -757,60 +808,65 @@ impl ThreadGroup {
             //   the child installs a handler using the sigaction(2) SA_SIGINFO flag,
             //   the si_pid field of the siginfo_t argument of the handler contains
             //   the PID of the terminating parent process.
-            let mut children_to_signal = Vec::new();
+            let mut children = Vec::new();
             {
                 // Reparent the children.
                 if let Some(reaper) = reaper {
                     let reaper = reaper.upgrade();
                     {
                         let mut reaper_state = reaper.write();
-                        // This allow_subclass is safe because we lock the reaper (an ancestor)
-                        // before locking `self` and its children. Lock ordering follows
+                        // Locking the reaper (an ancestor) before `self` and its children follows
                         // strictly top-down traversal in the process tree, avoiding cycles.
                         let _token = allow_subclass();
                         let mut state = self.write();
                         for child_pid in std::mem::take(&mut state.children) {
                             if let Ok(child) = child_pid.get_thread_group() {
-                                // This allow_subclass is safe because we lock the reaper (an
-                                // ancestor) before locking `self` and its children. Lock ordering
-                                // follows strictly top-down traversal in the process tree, avoiding
-                                // cycles.
-                                let _token = allow_subclass();
-                                let mut child_state = child.write();
+                                let signal = {
+                                    // Locking the reaper (an ancestor) before `self` and its
+                                    // children follows strictly top-down traversal in the process
+                                    // tree, avoiding cycles.
+                                    let _token = allow_subclass();
+                                    let mut child_state = child.write();
 
-                                if let Some(signal) = child_state
-                                    .parent_death_signal_for_exiting_task(
+                                    let signal = child_state.parent_death_signal_for_exiting_task(
                                         task,
                                         state.is_child_subreaper,
-                                    )
-                                {
-                                    children_to_signal.push((child.clone(), signal));
-                                }
-                                child_state.exit_signal = Some(SIGCHLD);
-                                child_state.parent =
-                                    Some(ThreadGroupParent::from_reaper(Arc::downgrade(&reaper)));
+                                    );
+                                    child_state.exit_signal = Some(SIGCHLD);
+                                    child_state.parent = Some(ThreadGroupParent::from_reaper(
+                                        Arc::downgrade(&reaper),
+                                    ));
+                                    signal
+                                };
                                 reaper_state.children.insert(child_pid);
+                                children.push((child, signal));
                             }
                         }
                         reaper_state.zombie_children.append(&mut state.zombie_children);
                     }
                     ZombiePtracees::reparent(self, &reaper);
+
+                    for (child, _) in &children {
+                        child.kill_orphaned_pgrp(&pids, Some(self), None);
+                    }
                 } else {
-                    // If we don't have a reaper then just drop the zombies.
+                    // Without a reaper, drop the zombies directly.
                     let mut state = self.write();
                     for child_pid in std::mem::take(&mut state.children) {
                         if let Ok(child) = child_pid.get_thread_group() {
-                            // This allow_subclass is safe because we lock `self` (the parent)
-                            // before locking its children.
-                            let _token = allow_subclass();
-                            let mut child_state = child.write();
-                            if let Some(signal) = child_state.parent_death_signal_for_exiting_task(
-                                task,
-                                state.is_child_subreaper,
-                            ) {
-                                children_to_signal.push((child.clone(), signal));
-                            }
-                            child_state.parent = None;
+                            let signal = {
+                                // Locking `self` (the parent) before its children follows strictly
+                                // top-down traversal in the process tree, avoiding cycles.
+                                let _token = allow_subclass();
+                                let mut child_state = child.write();
+                                let signal = child_state.parent_death_signal_for_exiting_task(
+                                    task,
+                                    state.is_child_subreaper,
+                                );
+                                child_state.parent = None;
+                                signal
+                            };
+                            children.push((child, signal));
                         }
                     }
                     for zombie in state.zombie_children.drain(..) {
@@ -819,7 +875,10 @@ impl ThreadGroup {
                 }
             }
 
-            self.send_parent_death_signals(task, children_to_signal);
+            self.send_parent_death_signals(
+                task,
+                children.into_iter().filter_map(|(child, signal)| Some((child, signal?))),
+            );
 
             // Clear the `parent` reference now that children have been re-`parent`ed.
             self.write().parent = None;
@@ -859,13 +918,12 @@ impl ThreadGroup {
 
             // Once the last zircon thread stops, the zircon process will also stop executing.
 
-            if let Some(parent) = parent {
-                let parent = parent.upgrade();
-                parent.check_orphans(&pids);
-            }
+            let parent_tg = parent.as_ref().map(|p| p.upgrade());
+            self.kill_orphaned_pgrp(&pids, parent_tg.as_deref(), Some(self));
 
             self.write().set_exited();
         } else {
+            pids.remove_task(&task.tid);
             // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
             //
             //   The "parent" in this case is considered to be the thread that created
@@ -892,7 +950,7 @@ impl ThreadGroup {
     fn send_parent_death_signals(
         &self,
         task: &Arc<Task>,
-        children_to_signal: Vec<(Arc<ThreadGroup>, Signal)>,
+        children_to_signal: impl IntoIterator<Item = (Arc<ThreadGroup>, Signal)>,
     ) {
         let uid = task.real_creds().uid;
         for (child, signal) in children_to_signal {
@@ -1010,7 +1068,7 @@ impl ThreadGroup {
                 drop(state);
                 {
                     // Tell the parent to expect a notification later.
-                    let tracee_pgid = tracee.thread_group().read().process_group.leader.clone();
+                    let tracee_pgid = tracee.thread_group().read().process_group.clone();
                     let mut parent_state = parent.write();
                     parent_state.deferred_zombie_ptracers.push(DeferredZombiePTracer::new(
                         self,
@@ -1064,14 +1122,62 @@ impl ThreadGroup {
     pub fn setsid(&self) -> Result<(), Errno> {
         let mut pids = self.kernel.pids.lock();
         let pid = self.leader.clone();
-        if pid.get_process_group().is_ok() {
+
+        // Calling thread group must not already be a process group or session leader.
+        let scope = RcuReadScope::new();
+        if self.leader.is_process_group(&scope) || self.leader.is_session(&scope) {
             return error!(EPERM);
         }
-        let process_group = ProcessGroup::new(pid, None);
-        pids.add_process_group(&process_group);
-        let session = self.write().set_process_group(process_group, &mut pids);
-        session.disassociate_controlling_terminal();
-        self.check_orphans(&pids);
+
+        let self_arc = self.to_owned();
+        let (old_process_group, check_old_pgrp, child_pgrps) = {
+            let mut state = self.write();
+            if !state.is_running() {
+                return error!(ESRCH);
+            }
+            if state.session == self.leader || state.process_group == self.leader {
+                return error!(EPERM);
+            }
+            let old_process_group = std::mem::replace(&mut state.process_group, pid.clone());
+            let old_session = std::mem::replace(&mut state.session, pid.clone());
+            state.controlling_terminal = None;
+
+            pids.detach_pgid(&old_process_group, self);
+            pids.detach_sid(&old_session, self);
+            pids.attach_pgid(&pid, &self_arc);
+            pids.attach_sid(&pid, &self_arc);
+
+            let parent_tg = state.parent.as_ref().map(|p| p.upgrade());
+            let mut child_pgrps = HashSet::new();
+            for child in state.children() {
+                let _token = allow_subclass();
+                let child_state = child.read();
+                if child_state.session == old_session
+                    && child_state.process_group != old_process_group
+                {
+                    child_pgrps.insert(Arc::clone(&child_state.process_group));
+                }
+            }
+            std::mem::drop(state);
+
+            let check_old_pgrp = parent_tg.is_some_and(|parent_tg| {
+                let parent_state = parent_tg.read();
+                parent_state.session == old_session
+                    && parent_state.process_group != old_process_group
+            });
+
+            (old_process_group, check_old_pgrp, child_pgrps)
+        };
+        std::mem::drop(scope);
+
+        // Evaluate the vacated process group and any child process groups in the old session
+        // that may have lost their job-controlling parent.
+        if check_old_pgrp {
+            Self::check_orphaned_pgrp(&pids, &old_process_group, None);
+        }
+        for child_pgrp in child_pgrps {
+            Self::check_orphaned_pgrp(&pids, &child_pgrp, None);
+        }
 
         Ok(())
     }
@@ -1084,69 +1190,74 @@ impl ThreadGroup {
     ) -> Result<(), Errno> {
         let mut pids = self.kernel.pids.lock();
 
-        {
-            let current_process_group = Arc::clone(&self.read().process_group);
+        let (old_process_group, check_old_pgrp, check_new_pgrp) = {
+            let current_session = Arc::clone(&self.read().session);
 
-            // The target process must be either the current process of a child of the current process
+            // The target process must be either the current process or a child of the current process.
             let mut target_thread_group = target.thread_group().write();
-            let is_target_current_process_child = target_thread_group
-                .parent
-                .as_ref()
-                .is_some_and(|tg| tg.upgrade().leader == self.leader);
+            if !target_thread_group.is_running() {
+                return error!(ESRCH);
+            }
+            let parent_tg = target_thread_group.parent.as_ref().map(|p| p.upgrade());
+            let is_target_current_process_child =
+                parent_tg.as_ref().is_some_and(|tg| tg.leader == self.leader);
             if target_thread_group.base.leader != self.leader && !is_target_current_process_child {
                 return error!(ESRCH);
             }
 
-            // If the target process is a child of the current task, it must not have executed one of the exec
-            // function.
+            // If the target process is a child of the current task, it must not have executed an exec function.
             if is_target_current_process_child && target_thread_group.did_exec {
                 return error!(EACCES);
             }
 
-            let new_process_group;
+            // The target process must not be a session leader and must be in the same session as the current process.
+            if target_thread_group.base.leader == target_thread_group.session
+                || current_session != target_thread_group.session
             {
-                let target_process_group = &target_thread_group.process_group;
+                return error!(EPERM);
+            }
 
-                // The target process must not be a session leader and must be in the same session as the current process.
-                if target_thread_group.base.leader == target_process_group.session.leader
-                    || current_process_group.session != target_process_group.session
-                {
-                    return error!(EPERM);
-                }
+            if *pgid == target_thread_group.process_group {
+                return Ok(());
+            }
 
-                if *pgid == target_process_group.leader {
-                    return Ok(());
-                }
-
-                // If the process group already exists, join it. Both process groups must be in the
-                // same session.
-                if let Ok(process_group) = pgid.get_process_group() {
-                    if process_group.session != target_process_group.session {
-                        return error!(EPERM);
-                    }
-                    security::check_setpgid_access(current_task, target)?;
-                    new_process_group = process_group;
-                } else if *pgid == target_thread_group.base.leader {
-                    security::check_setpgid_access(current_task, target)?;
-                    // Create a new process group.
-                    new_process_group = ProcessGroup::new(
-                        target_thread_group.base.leader.clone(),
-                        Some(target_process_group.session.clone()),
-                    );
-                    pids.add_process_group(&new_process_group);
-                } else {
+            // If joining an existing process group, it must be non-empty and belong to the same session.
+            if *pgid != target_thread_group.base.leader {
+                let scope = RcuReadScope::new();
+                if !pgid.is_process_group_in_session(&target_thread_group.session, &scope) {
                     return error!(EPERM);
                 }
             }
+            security::check_setpgid_access(current_task, target)?;
 
-            let session = target_thread_group.set_process_group(new_process_group, &mut pids);
+            let old_process_group =
+                std::mem::replace(&mut target_thread_group.process_group, pgid.clone());
+            pids.detach_pgid(&old_process_group, target.thread_group());
+            pids.attach_pgid(pgid, target.thread_group());
+
+            let check_new_pgrp = target_thread_group.children().any(|child| {
+                let _token = allow_subclass();
+                child.read().process_group == *pgid
+            });
             std::mem::drop(target_thread_group);
-            // `disassociate_controlling_terminal` can not be called while holding the
-            // ThreadGroup state lock.
-            session.disassociate_controlling_terminal();
-        }
 
-        target.thread_group().check_orphans(&pids);
+            let check_old_pgrp = parent_tg.is_some_and(|parent_tg| {
+                let parent_state = parent_tg.read();
+                parent_state.session == current_session
+                    && parent_state.process_group != old_process_group
+            });
+
+            (old_process_group, check_old_pgrp, check_new_pgrp)
+        };
+
+        // Evaluate the vacated and destination process groups for orphanhood if the move
+        // removed an external job-controlling parent link.
+        if check_old_pgrp {
+            Self::check_orphaned_pgrp(&pids, &old_process_group, None);
+        }
+        if check_new_pgrp {
+            Self::check_orphaned_pgrp(&pids, pgid, None);
+        }
 
         Ok(())
     }
@@ -1242,32 +1353,40 @@ impl ThreadGroup {
         self.write().set_stopped(new_stopped, siginfo, finalize_only)
     }
 
-    /// Ensures |session| is the controlling session inside of |terminal_controller|, and returns a
-    /// reference to the |TerminalController|.
-    fn check_terminal_controller(
-        session: &Arc<Session>,
-        terminal_controller: &Option<TerminalController>,
+    /// Returns the controlling terminal of this thread group, if any.
+    pub fn controlling_terminal(&self) -> Option<ControllingTerminal> {
+        self.read().controlling_terminal.clone()
+    }
+
+    /// Ensures |session| is the controlling session inside of |controlling_session|.
+    fn check_controlling_session(
+        session: &Pid,
+        controlling_session: &Option<ControllingSession>,
     ) -> Result<(), Errno> {
-        if let Some(terminal_controller) = terminal_controller {
-            if let Some(terminal_session) = terminal_controller.session.upgrade() {
-                if Arc::ptr_eq(session, &terminal_session) {
-                    return Ok(());
-                }
-            }
+        if controlling_session.as_ref().is_some_and(|cs| Arc::ptr_eq(session, &cs.session)) {
+            Ok(())
+        } else {
+            error!(ENOTTY)
         }
-        error!(ENOTTY)
     }
 
     pub fn get_foreground_process_group(&self, terminal: &Terminal) -> Result<pid_t, Errno> {
         let state = self.read();
-        let process_group = &state.process_group;
         let terminal_state = terminal.read();
 
         // "When fd does not refer to the controlling terminal of the calling
         // process, -1 is returned" - tcgetpgrp(3)
-        Self::check_terminal_controller(&process_group.session, &terminal_state.controller)?;
-        let pid = process_group.session.read().get_foreground_process_group_leader().id;
-        Ok(pid)
+        Self::check_controlling_session(&state.session, &terminal_state.controlling_session)?;
+        if !state
+            .controlling_terminal
+            .as_ref()
+            .is_some_and(|ct| std::ptr::eq(terminal, Arc::as_ptr(&ct.terminal)))
+        {
+            return error!(ENOTTY);
+        }
+        let controlling_session =
+            terminal_state.controlling_session.as_ref().ok_or_else(|| errno!(ENOTTY))?;
+        Ok(controlling_session.foreground_pgid())
     }
 
     pub fn set_foreground_process_group(
@@ -1282,30 +1401,41 @@ impl ThreadGroup {
             // Keep locks to ensure atomicity.
             let state = self.read();
             process_group = Arc::clone(&state.process_group);
-            let terminal_state = terminal.read();
-            Self::check_terminal_controller(&process_group.session, &terminal_state.controller)?;
-
-            let new_process_group = pgid.get_process_group()?;
-            if new_process_group.session != process_group.session {
-                return error!(EPERM);
+            let mut terminal_state = terminal.write();
+            Self::check_controlling_session(&state.session, &terminal_state.controlling_session)?;
+            if !state
+                .controlling_terminal
+                .as_ref()
+                .is_some_and(|ct| std::ptr::eq(terminal, Arc::as_ptr(&ct.terminal)))
+            {
+                return error!(ENOTTY);
             }
 
-            let mut session_state = process_group.session.write();
+            // Verify session membership lock-free under RcuReadScope.
+            {
+                let scope = RcuReadScope::new();
+                if !pgid.is_process_group_in_session(&state.session, &scope) {
+                    return error!(EPERM);
+                }
+            }
+
+            let controlling_session =
+                terminal_state.controlling_session.as_mut().ok_or_else(|| errno!(ENOTTY))?;
+
             // If the calling process is a member of a background group and not ignoring SIGTTOU, a
             // SIGTTOU signal is sent to all members of this background process group.
-            send_ttou = &process_group.leader
-                != session_state.get_foreground_process_group_leader()
+            send_ttou = process_group.id != controlling_session.foreground_pgid()
                 && !current_task.read().signal_mask().has_signal(SIGTTOU)
                 && self.signal_actions.get(SIGTTOU).sa_handler != SIG_IGN;
 
             if !send_ttou {
-                session_state.set_foreground_process_group(pgid);
+                controlling_session.set_foreground_process_group(pgid.clone());
             }
         }
 
         // Locks must not be held when sending signals.
         if send_ttou {
-            process_group.send_signals(&[SIGTTOU]);
+            process_group.send_signals_to_pgid(&[SIGTTOU]);
             return error!(EINTR);
         }
 
@@ -1316,71 +1446,67 @@ impl ThreadGroup {
         &self,
         current_task: &CurrentTask,
         terminal: &Terminal,
-        is_main: bool,
+        side: TerminalSide,
         steal: bool,
         is_readable: bool,
     ) -> Result<(), Errno> {
-        // Keep locks to ensure atomicity.
-        let state = self.read();
-        let process_group = &state.process_group;
-        let mut terminal_state = terminal.write();
+        let steal_from_session;
+        let new_controlling_terminal = ControllingTerminal::new(terminal, side);
+        {
+            // Keep locks to ensure atomicity.
+            let mut state = self.write();
+            let mut terminal_state = terminal.write();
 
-        // It might be necessary to lock the existing session, to steal the terminal
-        // for it. Because of ordering requirement, it must be locked now.
-        let other_session = terminal_state.controller.as_ref().and_then(|cs| cs.session.upgrade());
-        let (mut session_writer, other_session) =
-            if let Some(other_session) = other_session.as_ref() {
-                if *other_session == process_group.session {
-                    (process_group.session.mutable_state.write(), None)
-                } else {
-                    let (session_writer, other_session_writer) = ordered_write_lock(
-                        &process_group.session.mutable_state,
-                        &other_session.mutable_state,
-                    );
-                    (session_writer, Some((other_session, other_session_writer)))
-                }
-            } else {
-                (process_group.session.mutable_state.write(), None)
-            };
-
-        // "The calling process must be a session leader and not have a
-        // controlling terminal already." - tty_ioctl(4)
-        if process_group.session.leader != self.leader {
-            return error!(EINVAL);
-        }
-        if let Some(ref current_ct) = session_writer.controlling_terminal {
-            if current_ct.matches(terminal, is_main) {
-                return Ok(());
-            } else {
-                return error!(EINVAL);
-            }
-        }
-
-        let mut has_admin_capability_determined = false;
-
-        // "If this terminal is already the controlling terminal of a different
-        // session group, then the ioctl fails with EPERM, unless the caller
-        // has the CAP_SYS_ADMIN capability and arg equals 1, in which case the
-        // terminal is stolen, and all processes that had it as controlling
-        // terminal lose it." - tty_ioctl(4)
-        if let Some((other_session, mut other_session_writer)) = other_session {
-            debug_assert!(*other_session != process_group.session);
-            if !steal {
+            // "The calling process must be a session leader and not have a
+            // controlling terminal already." - tty_ioctl(4)
+            if state.session != self.leader {
                 return error!(EPERM);
             }
-            security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
-            has_admin_capability_determined = true;
 
-            // Steal the TTY away. Unlike TIOCNOTTY, don't send signals.
-            other_session_writer.controlling_terminal = None;
+            if let Some(ref current_ct) = state.controlling_terminal {
+                if current_ct.matches(terminal, side) {
+                    return Ok(());
+                } else {
+                    return error!(EPERM);
+                }
+            }
+
+            let session_pid = state.session.clone();
+            let other_session_pid = terminal_state.controlling_session().cloned();
+            let mut has_admin_capability_determined = false;
+            let mut stolen_session = None;
+
+            if let Some(other_sid) = other_session_pid {
+                if other_sid != session_pid {
+                    // "If this terminal is already the controlling terminal of a different
+                    // session group, then the ioctl fails with EPERM, unless the caller
+                    // has the CAP_SYS_ADMIN capability and arg equals 1, in which case the
+                    // terminal is stolen, and all processes that had it as controlling
+                    // terminal lose it." - tty_ioctl(4)
+                    if !steal {
+                        return error!(EPERM);
+                    }
+                    security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+                    has_admin_capability_determined = true;
+                    stolen_session = Some(other_sid);
+                }
+            }
+
+            if !is_readable && !has_admin_capability_determined {
+                security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+            }
+
+            state.controlling_terminal = Some(new_controlling_terminal);
+            terminal_state.controlling_session =
+                Some(ControllingSession::new(&session_pid, &state.process_group));
+            steal_from_session = stolen_session;
         }
 
-        if !is_readable && !has_admin_capability_determined {
-            security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+        // Steal the TTY away from the previous session's processes. Unlike TIOCNOTTY, don't send signals.
+        if let Some(other_sid) = steal_from_session {
+            other_sid.clear_controlling_terminal(Some((terminal, None)));
         }
 
-        session_writer.controlling_terminal = Some(ControllingTerminal::new(terminal, is_main));
-        terminal_state.controller = TerminalController::new(&process_group.session);
         Ok(())
     }
 
@@ -1388,53 +1514,75 @@ impl ThreadGroup {
         &self,
         _current_task: &CurrentTask,
         terminal: &Terminal,
-        is_main: bool,
+        side: TerminalSide,
     ) -> Result<(), Errno> {
-        let process_group;
-        {
+        let controlling_session = {
             // Keep locks to ensure atomicity.
-            let state = self.read();
-            process_group = Arc::clone(&state.process_group);
+            let mut state = self.write();
+            let is_session_leader = state.session == self.leader;
             let mut terminal_state = terminal.write();
-            let mut session_writer = process_group.session.write();
 
             // tty must be the controlling terminal.
-            Self::check_terminal_controller(&process_group.session, &terminal_state.controller)?;
-            if !session_writer
-                .controlling_terminal
-                .as_ref()
-                .map_or(false, |ct| ct.matches(terminal, is_main))
-            {
+            Self::check_controlling_session(&state.session, &terminal_state.controlling_session)?;
+            if !state.controlling_terminal.as_ref().is_some_and(|ct| ct.matches(terminal, side)) {
                 return error!(ENOTTY);
             }
 
-            // "If the process was session leader, then send SIGHUP and SIGCONT to the foreground
-            // process group and all processes in the current session lose their controlling terminal."
-            // - tty_ioctl(4)
+            state.controlling_terminal = None;
+            is_session_leader.then(|| terminal_state.controlling_session.take()).flatten()
+        };
 
-            // Remove tty as the controlling tty for each process in the session, then
-            // send them SIGHUP and SIGCONT.
-
-            session_writer.controlling_terminal = None;
-            terminal_state.controller = None;
-        }
-
-        if process_group.session.leader == self.leader {
-            process_group.send_signals(&[SIGHUP, SIGCONT]);
+        if let Some(controlling_session) = controlling_session {
+            controlling_session.disassociate(terminal, Some(side));
         }
 
         Ok(())
     }
 
-    fn check_orphans(&self, pids: &PidTable) {
-        let mut thread_groups = self.read().children().collect::<Vec<_>>();
-        let this = self.weak_self.upgrade().unwrap();
-        thread_groups.push(this);
-        let process_groups =
-            thread_groups.iter().map(|tg| Arc::clone(&tg.read().process_group)).unique();
-        for pg in process_groups {
-            pg.check_orphaned(pids);
+    /// Checks whether `pgrp` is orphaned and has stopped jobs, sending `SIGHUP` and `SIGCONT` if
+    /// so.
+    fn check_orphaned_pgrp(
+        _pids: &PidTableGuard<'_>,
+        pgrp: &Pid,
+        ignored_tg: Option<&ThreadGroup>,
+    ) {
+        let scope = RcuReadScope::new();
+        if pgrp.will_become_orphaned_pgrp(&scope, ignored_tg) && pgrp.has_stopped_jobs(&scope) {
+            pgrp.send_signals_to_pgid(&[SIGHUP, SIGCONT]);
         }
+    }
+
+    /// Evaluates whether this thread group's process group became newly orphaned
+    /// due to process termination or reparenting, and sends SIGHUP + SIGCONT if stopped jobs exist.
+    ///
+    /// - `parent`: The parent thread group that was outside this group.
+    /// - `ignored_tg`: An optional thread group to ignore during orphan checks.
+    pub fn kill_orphaned_pgrp(
+        &self,
+        pids: &PidTableGuard<'_>,
+        parent: Option<&ThreadGroup>,
+        ignored_tg: Option<&ThreadGroup>,
+    ) {
+        let Some(parent_tg) = parent else {
+            return;
+        };
+
+        let (pgrp, my_sid) = {
+            let state = self.read();
+            (Arc::clone(&state.process_group), state.session.id)
+        };
+
+        let (parent_pgid, parent_sid) = {
+            let parent_state = parent_tg.read();
+            (parent_state.process_group.id, parent_state.session.id)
+        };
+
+        // Filter: Did the exiting parent provide an external link in the same session?
+        if parent_pgid == pgrp.id || parent_sid != my_sid {
+            return;
+        }
+
+        Self::check_orphaned_pgrp(pids, &pgrp, ignored_tg);
     }
 
     pub fn get_rlimit(&self, resource: Resource) -> u64 {
@@ -1997,6 +2145,10 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         self.tasks.iter().flat_map(|info| info.tid.get_task().ok()).collect()
     }
 
+    pub fn first_task(&self) -> Option<Arc<Task>> {
+        self.tasks.iter().find_map(|info| info.tid.get_task().ok())
+    }
+
     pub fn task_ids(&self) -> impl Iterator<Item = tid_t> + '_ {
         self.tasks.iter().map(|info| info.tid.id)
     }
@@ -2018,43 +2170,6 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
             Some(parent) => parent.upgrade().leader.id,
             None => 0,
         }
-    }
-
-    /// Changes the process group of the thread group.
-    ///
-    /// Returns a `SessionDisassociation`, which the caller must use to explicitly
-    /// disassociate the controlling terminal if the thread group was previously a session
-    /// leader.
-    /// This must be done after the ThreadGroup state lock is released to avoid lock order
-    /// violations.
-    fn set_process_group(
-        &mut self,
-        process_group: Arc<ProcessGroup>,
-        pids: &mut PidTableGuard<'_>,
-    ) -> SessionDisassociation {
-        if self.process_group == process_group {
-            return SessionDisassociation::new(None);
-        }
-        let session = self.leave_process_group(pids);
-        self.process_group = process_group;
-        self.process_group.insert(self.base);
-        session
-    }
-
-    /// Removes the thread group from its current process group.
-    ///
-    /// Returns a `SessionDisassociation`, which the caller must use to explicitly
-    /// disassociate the controlling terminal if the thread group was previously a session
-    /// leader.
-    /// This must be done after the ThreadGroup state lock is released to avoid lock order
-    /// violations.
-    fn leave_process_group(&mut self, pids: &mut PidTableGuard<'_>) -> SessionDisassociation {
-        let (is_empty, disassociation) = self.process_group.remove(self.base);
-        if is_empty {
-            self.process_group.session.write().remove(&self.process_group.leader);
-            pids.remove_process_group(&self.process_group.leader);
-        }
-        disassociation
     }
 
     /// Reaps the given zombie, making its PID available for reuse.
@@ -2115,7 +2230,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
                 // in a strictly top-down traversal of the ThreadGroup tree (from parent
                 // to child), so no lock ordering cycles can be formed.
                 let _token = allow_subclass();
-                &child.read().process_group.leader == pgid
+                &child.read().process_group == pgid
             }
         };
 
@@ -2232,6 +2347,22 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         self.tasks
             .iter()
             .find_map(|info| info.tid.get_task().ok().filter(|task| task.is_running()))
+            .ok_or_else(|| errno!(ESRCH))
+    }
+
+    /// Returns a running task with an intact file table in the current thread group, preferring
+    /// the thread group leader.
+    pub fn get_running_task_with_files(&self) -> Result<Arc<Task>, Errno> {
+        if let Ok(task) = self.base.leader.get_task() {
+            if task.is_running() && task.files().is_ok() {
+                return Ok(task);
+            }
+        }
+        self.tasks
+            .iter()
+            .find_map(|info| {
+                info.tid.get_task().ok().filter(|task| task.is_running() && task.files().is_ok())
+            })
             .ok_or_else(|| errno!(ESRCH))
     }
 
@@ -2418,7 +2549,7 @@ mod test {
     #[::fuchsia::test]
     async fn test_setsid() {
         spawn_kernel_and_run(async |current_task| {
-            fn get_process_group(task: &Task) -> Arc<ProcessGroup> {
+            fn get_process_group(task: &Task) -> Pid {
                 Arc::clone(&task.thread_group().read().process_group)
             }
             assert_eq!(current_task.thread_group().setsid(), error!(EPERM));
@@ -2428,11 +2559,13 @@ mod test {
 
             let old_process_group = child_task.thread_group().read().process_group.clone();
             assert_eq!(child_task.thread_group().setsid(), Ok(()));
-            assert_eq!(
-                child_task.thread_group().read().process_group.session.leader,
-                child_task.pid
+            assert_eq!(child_task.thread_group().read().session, child_task.pid);
+            let scope = RcuReadScope::new();
+            assert!(
+                !old_process_group
+                    .pgid_thread_groups(&scope)
+                    .any(|tg| Arc::ptr_eq(&tg, child_task.thread_group()))
             );
-            assert!(!old_process_group.read().thread_groups().contains(child_task.thread_group()));
         })
         .await;
     }
@@ -2508,19 +2641,21 @@ mod test {
                 child_task1.thread_group().setpgid(&current_task, &child_task1, &child_task1.pid),
                 Ok(())
             );
-            assert_eq!(
-                child_task1.thread_group().read().process_group.session.leader,
-                current_task.tid
-            );
-            assert_eq!(child_task1.thread_group().read().process_group.leader, child_task1.tid);
+            assert_eq!(child_task1.thread_group().read().session, current_task.tid);
+            assert_eq!(child_task1.thread_group().read().process_group, child_task1.tid);
 
             let old_process_group = child_task2.thread_group().read().process_group.clone();
             assert_eq!(
                 current_task.thread_group().setpgid(&current_task, &child_task2, &child_task1.pid),
                 Ok(())
             );
-            assert_eq!(child_task2.thread_group().read().process_group.leader, child_task1.tid);
-            assert!(!old_process_group.read().thread_groups().contains(child_task2.thread_group()));
+            assert_eq!(child_task2.thread_group().read().process_group, child_task1.tid);
+            let scope = RcuReadScope::new();
+            assert!(
+                !old_process_group
+                    .pgid_thread_groups(&scope)
+                    .any(|tg| Arc::ptr_eq(&tg, child_task2.thread_group()))
+            );
 
             let child_task3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
             assert_eq!(
@@ -2532,14 +2667,14 @@ mod test {
                 current_task.thread_group().setpgid(&current_task, &child_task1, &child_task3.pid),
                 Ok(())
             );
-            assert_eq!(child_task1.thread_group().read().process_group.leader, child_task3.tid);
+            assert_eq!(child_task1.thread_group().read().process_group, child_task3.tid);
 
             // Rejoin child_task1's original process group (which still contains child_task2).
             assert_eq!(
                 child_task1.thread_group().setpgid(&current_task, &child_task1, &child_task1.pid),
                 Ok(())
             );
-            assert_eq!(child_task1.thread_group().read().process_group.leader, child_task1.tid);
+            assert_eq!(child_task1.thread_group().read().process_group, child_task1.tid);
             let pg1 = child_task1.thread_group().read().process_group.clone();
             let pg2 = child_task2.thread_group().read().process_group.clone();
             assert_eq!(pg1, pg2);
@@ -2688,6 +2823,139 @@ mod test {
             // It should still be valid to call `get_ppid()` on `tg2`, though is parent ThreadGroup
             // no longer exists.
             let _ = tg2.read().get_ppid();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_thread_group_rcu_links_and_adapters() {
+        spawn_kernel_and_run(async |current_task| {
+            let scope = RcuReadScope::new();
+            let tg = current_task.thread_group();
+            let node_ptr = tg.pgrp_node.read(&scope);
+            assert!(!node_ptr.is_null());
+            let link_ptr = ThreadGroupLinkAdapter::to_link(node_ptr);
+            assert_eq!(ThreadGroupLinkAdapter::from_link(link_ptr).as_ptr(), node_ptr.as_ptr());
+
+            let init_pid = current_task.pid.clone();
+
+            assert!(init_pid.is_process_group(&scope));
+            assert!(init_pid.is_session(&scope));
+            assert_eq!(init_pid.pgid_thread_groups(&scope).count(), 1);
+            assert_eq!(init_pid.sid_thread_groups(&scope).count(), 1);
+
+            let child = current_task.clone_task_for_test(0, None);
+            assert_eq!(init_pid.pgid_thread_groups(&scope).count(), 2);
+            assert_eq!(init_pid.sid_thread_groups(&scope).count(), 2);
+
+            // Moving `child` into its own process group within the same session updates PGID
+            // membership without detaching SID membership.
+            child
+                .thread_group()
+                .setpgid(&current_task, &child, &child.pid)
+                .expect("setpgid failed");
+            assert_eq!(init_pid.pgid_thread_groups(&scope).count(), 1);
+            assert_eq!(init_pid.sid_thread_groups(&scope).count(), 2);
+            assert!(child.pid.is_process_group(&scope));
+            assert!(!child.pid.is_session(&scope));
+            assert_eq!(child.pid.pgid_thread_groups(&scope).count(), 1);
+
+            // Move `child` back to `init_pid`'s process group so `setsid()` succeeds.
+            child
+                .thread_group()
+                .setpgid(&current_task, &child, &init_pid)
+                .expect("setpgid back to init failed");
+            assert_eq!(init_pid.pgid_thread_groups(&scope).count(), 2);
+            assert_eq!(init_pid.sid_thread_groups(&scope).count(), 2);
+
+            child.thread_group().setsid().expect("setsid failed");
+            assert_eq!(init_pid.pgid_thread_groups(&scope).count(), 1);
+            assert_eq!(init_pid.sid_thread_groups(&scope).count(), 1);
+            assert!(child.pid.is_process_group(&scope));
+            assert!(child.pid.is_session(&scope));
+            assert_eq!(child.pid.pgid_thread_groups(&scope).count(), 1);
+            assert_eq!(child.pid.sid_thread_groups(&scope).count(), 1);
+
+            // Clone a grandchild in `child`'s session, then exit and reap `child` (the session
+            // leader). Calling `setpgid` on `grandchild` within that session must retain `child`'s
+            // session `PidEntry` in `PidTable`.
+            let grandchild = child.clone_task_for_test(0, None);
+            let child_pid = child.pid.clone();
+            child.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child);
+            {
+                let mut pids = current_task.kernel().pids.lock();
+                for zombie in current_task.thread_group().write().zombie_children.drain(..) {
+                    zombie.release(&mut pids);
+                }
+            }
+            assert!(child_pid.get_process().is_none());
+            assert!(current_task.kernel().pids.get(child_pid.id).is_ok());
+
+            grandchild
+                .thread_group()
+                .setpgid(&grandchild, &grandchild, &grandchild.pid)
+                .expect("grandchild setpgid failed");
+            assert!(!child_pid.is_process_group(&scope));
+            assert!(child_pid.is_session(&scope));
+            assert!(current_task.kernel().pids.get(child_pid.id).is_ok());
+            assert!(grandchild.pid.is_process_group(&scope));
+
+            grandchild.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(grandchild);
+            {
+                let mut pids = current_task.kernel().pids.lock();
+                for zombie in current_task.thread_group().write().zombie_children.drain(..) {
+                    zombie.release(&mut pids);
+                }
+            }
+
+            assert!(!child_pid.is_process_group(&scope));
+            assert!(!child_pid.is_session(&scope));
+            assert!(current_task.kernel().pids.get(child_pid.id).is_err());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_orphaned_pgrp_signals_stopped_jobs() {
+        spawn_kernel_and_run(async |init| {
+            // 1. Exiting a job-controlling parent orphans the child's process group and sends
+            // SIGHUP + SIGCONT to stopped jobs via `kill_orphaned_pgrp`.
+            let parent = init.clone_task_for_test(0, Some(SIGCHLD));
+            parent.thread_group().setsid().expect("setsid");
+            let child = parent.clone_task_for_test(0, Some(SIGCHLD));
+            child.thread_group().setpgid(&child, &child, &child.pid).expect("setpgid");
+
+            child.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            assert_eq!(child.thread_group().load_stopped(), StopState::GroupStopped);
+            assert!(!child.read().has_signal_pending(SIGHUP));
+
+            parent.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(parent);
+
+            assert!(child.read().has_signal_pending(SIGHUP));
+            assert_ne!(child.thread_group().load_stopped(), StopState::GroupStopped);
+
+            child.thread_group().kill(ExitStatus::Exit(0), None);
+            std::mem::drop(child);
+
+            // 2. A parent leaving the session via `setsid` orphans its child's process group and
+            // sends SIGHUP + SIGCONT to stopped jobs via `check_orphaned_pgrp`.
+            let session_leader = init.clone_task_for_test(0, Some(SIGCHLD));
+            session_leader.thread_group().setsid().expect("setsid");
+            let middle = session_leader.clone_task_for_test(0, Some(SIGCHLD));
+            let leaf = middle.clone_task_for_test(0, Some(SIGCHLD));
+            leaf.thread_group().setpgid(&leaf, &leaf, &leaf.pid).expect("setpgid");
+
+            leaf.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            assert_eq!(leaf.thread_group().load_stopped(), StopState::GroupStopped);
+            assert!(!leaf.read().has_signal_pending(SIGHUP));
+
+            middle.thread_group().setsid().expect("middle setsid");
+
+            assert!(leaf.read().has_signal_pending(SIGHUP));
+            assert_ne!(leaf.thread_group().load_stopped(), StopState::GroupStopped);
         })
         .await;
     }

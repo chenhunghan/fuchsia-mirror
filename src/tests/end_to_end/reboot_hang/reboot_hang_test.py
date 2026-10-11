@@ -16,8 +16,6 @@ class RebootHangTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_test(self) -> None:
         await super().setup_test()
         self.device = self.fuchsia_devices[0]
-        # Initialize fastboot transport while the device is still online.
-        await self.device.fastboot.make_ready()
 
     async def test_reboot_to_bootloader_on_hang(self) -> None:
         # 0. Register the test driver (since it is ephemeral).
@@ -72,70 +70,30 @@ class RebootHangTest(fuchsia_base_test.FuchsiaBaseTest):
             bound, "Failed to bind hang-on-stop driver to hang_parent"
         )
 
-        # 2. Trigger reboot to bootloader.
-        # The reboot command may succeed before the driver host hangs. Since we
-        # verified the driver is bound above, we know the hang is guaranteed.
-        # We ignore the result and wait for the device to go offline.
+        # 2. Trigger reboot to bootloader and wait for device to enter Fastboot.
         _LOGGER.info("Triggering reboot to bootloader...")
-        try:
-            self.device.ffx.run(
-                ["target", "reboot", "--bootloader"], timeout=30
-            )
-        except Exception as e:
-            _LOGGER.info(
-                f"Reboot command finished with exception (likely connection lost): {e}"
-            )
+        self.device.fastboot.boot_to_fastboot_mode()
 
-        # 3. Wait for device to go offline.
-        _LOGGER.info("Waiting for device to go offline...")
-        # wait_for_offline is synchronous in Honeydew, so we run it in a thread.
-        # (wait_for_online is async and is awaited directly below).
-        await asyncio.to_thread(self.device.wait_for_offline)
-
-        # 4. Wait for device to enter Fastboot.
-        # We use a generous timeout to allow the device to reboot and enter fastboot.
-        _LOGGER.info("Waiting for device to enter Fastboot mode...")
-        fastboot_transport = self.device.fastboot
-        try:
-            node_id = await fastboot_transport.node_id()
-            _LOGGER.info(f"Expected Fastboot Node ID: {node_id}")
-        except Exception as e:
-            _LOGGER.warning(f"Could not retrieve fastboot node_id: {e}")
-
-        try:
-            await asyncio.wait_for(
-                fastboot_transport.wait_for_fastboot_mode(),
-                timeout=180.0,
-            )
-        except asyncio.TimeoutError:
-            try:
-                out = self.device.ffx.run(["target", "list"])
-                _LOGGER.info(f"ffx target list output: {out}")
-            except Exception as ex:
-                _LOGGER.warning(f"Failed to run ffx target list: {ex}")
-            asserts.fail("Timed out waiting for device to enter Fastboot mode")
-
-        # 5. Assert we are in fastboot.
+        # 3. Assert we are in fastboot.
         asserts.assert_true(
-            await fastboot_transport.is_in_fastboot_mode(),
+            self.device.fastboot.is_in_fastboot_mode(),
             "Device failed to boot into fastboot",
         )
 
-        # 6. Recovery: Reboot back to Fuchsia.
+        # 4. Recovery: Reboot back to Fuchsia.
         _LOGGER.info("Rebooting back to Fuchsia...")
-        await fastboot_transport.boot_to_fuchsia_mode()
+        await self.device.fastboot.boot_to_fuchsia_mode()
         await self.device.wait_for_online()
         _LOGGER.info("Device is back online.")
 
     async def teardown_test(self) -> None:
         # Ensure we always attempt to recover the device if it got stuck in fastboot
         try:
-            fastboot_transport = self.device.fastboot
-            if await fastboot_transport.is_in_fastboot_mode():
+            if self.device.fastboot.is_in_fastboot_mode():
                 _LOGGER.warning(
                     "Device stuck in fastboot during teardown, attempting recovery..."
                 )
-                await fastboot_transport.boot_to_fuchsia_mode()
+                await self.device.fastboot.boot_to_fuchsia_mode()
                 await self.device.wait_for_online()
         except Exception as e:
             _LOGGER.error(f"Failed to recover device in teardown: {e}")

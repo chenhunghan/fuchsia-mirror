@@ -343,7 +343,6 @@ MessageParser* CreateMessageParserForFormat(fuchsia::diagnostics::Format format)
     case fuchsia::diagnostics::Format::JSON:
     case fuchsia::diagnostics::Format::TEXT:
     case fuchsia::diagnostics::Format::CBOR:
-    case fuchsia::diagnostics::Format::LEGACY_FXT:
       return nullptr;
     case fuchsia::diagnostics::Format::FXT:
       return fuchsia_new_message_parser();

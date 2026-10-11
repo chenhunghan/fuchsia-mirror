@@ -118,6 +118,10 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
   uint8_t* NextOutputBlock();
 
   std::optional<Context> context_;
+  // Minimum output buffer size from the most recent `CreateContext()` call, retained across
+  // `CleanUpAfterStream()` so `CoreCodecGetBufferCollectionConstraints2(kOutputPort)` can succeed
+  // after a stream stops before the next stream processes its format details.
+  std::optional<uint32_t> min_output_buffer_size_ __TA_GUARDED(lock_);
   // The output packet we are currently encoding into.
   CodecPacket* output_packet_ = nullptr;
   // The output buffer we are currently encoding into.

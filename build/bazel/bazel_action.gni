@@ -636,6 +636,11 @@ template("bazel_action") {
     # The final, unique, stamp path:
     _stamp_path = "${_out_dir}/${_bazel_label}.${_dedupe_suffix}.bazel_target_can_only_be_referenced_by_one_bazel_action"
 
+    _debug_symbols_manifest =
+        "${target_out_dir}/${target_name}.debug_symbols.json"
+    _rebased_debug_symbols_manifest =
+        rebase_path(_debug_symbols_manifest, root_build_dir)
+
     action(target_name) {
       forward_variables_from(invoker,
                              [
@@ -665,6 +670,9 @@ template("bazel_action") {
 
         # Starlark query files
         "//build/bazel/starlark/FuchsiaPackageInfo_archive.cquery",
+
+        # Imported by bazel_action_utils.py
+        "//build/bazel/scripts/bazel_build_events.py",
 
         # Imported by bazel_ninja_delayed_actions.py
         # LINT.IfChange(delayed_action_imports)
@@ -734,6 +742,10 @@ template("bazel_action") {
         "--depfile",
         rebase_path(depfile, root_build_dir),
       ]
+
+      if (invoker.command == "build") {
+        outputs += [ _debug_symbols_manifest ]
+      }
 
       # Set the expected outputs
       foreach(output, _all_outputs) {
@@ -818,10 +830,24 @@ template("bazel_action") {
                     rebase_path(invoker.extra_bazel_targets_file,
                                 root_build_dir)
               }
+
+              if (invoker.command == "build") {
+                debug_symbols_manifest = _rebased_debug_symbols_manifest
+              }
             },
           ]
           # LINT.ThenChange(//BUILD.gn:bazel_target_infos,
           # //build/bazel/scripts/bazel_action_utils.py:bazel_target_infos)
+        }
+
+        if (invoker.command == "build") {
+          # Used by //:debug_symbols
+          debug_symbol_manifests = [
+            {
+              label = get_label_info(":$target_name", "label_no_toolchain")
+              manifest = _rebased_debug_symbols_manifest
+            },
+          ]
         }
       }
 

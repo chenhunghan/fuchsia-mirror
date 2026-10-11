@@ -115,9 +115,7 @@ impl Driver for LabSampleDriver {
             .get_mmio_by_id(0)
             .await
             .map_err(|_| DriverError::Status(zx::Status::IO))?
-            .map_err(|status| {
-            DriverError::Status(status.err().unwrap_or(zx::Status::INTERNAL))
-        })?;
+            .map_err(DriverError::Status)?;
         let vmo = mmio.vmo.ok_or(DriverError::Status(zx::Status::INVALID_ARGS))?;
         let offset = mmio.offset.unwrap_or(0) as usize;
         let size = mmio.size.unwrap_or(0x1000) as usize;
@@ -126,7 +124,7 @@ impl Driver for LabSampleDriver {
             .get_interrupt_by_id(0, 0)
             .await
             .map_err(|_| DriverError::Status(zx::Status::IO))?
-            .map_err(|status| DriverError::Status(status.err().unwrap_or(zx::Status::INTERNAL)))?
+            .map_err(DriverError::Status)?
             .irq;
 
         // Map the VMO for the driver's own state machine and seed registers.

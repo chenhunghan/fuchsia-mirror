@@ -35,7 +35,7 @@
                     "third_party/rust_crates/forks/rustyline",
                     "third_party/rust_crates/forks/security-framework",
                     "third_party/rust_crates/forks/tracing-core",
-                    "third_party/rust_crates/forks/tracing-mutex-0.3.2",
+                    "third_party/rust_crates/forks/tracing-mutex-0.3.3",
                     "third_party/rust_crates/forks/trust-dns-proto-0.22.0",
                     "third_party/rust_crates/forks/trust-dns-resolver-0.22.0",
                     "third_party/rust_crates/forks/vt100-0.16.2",

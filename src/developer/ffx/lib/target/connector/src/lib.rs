@@ -97,8 +97,10 @@ where
 mod tests {
     use super::*;
     use ffx_config::test_env;
+    use std::cell::RefCell;
     use target_behavior::ConnectionBehavior;
 
+    #[derive(Debug)]
     struct DummyHolder;
 
     #[async_trait(?Send)]
@@ -106,6 +108,18 @@ mod tests {
         type Error = ffx_command_error::Error;
         async fn try_from_env(_env: &FhoEnvironment) -> Result<Self, Self::Error> {
             Ok(DummyHolder)
+        }
+    }
+
+    #[derive(Debug)]
+    struct PlaceholderConnector;
+    impl ffx_target::TargetConnector for PlaceholderConnector {
+        const CONNECTION_TYPE: &'static str = "placeholder";
+        async fn connect(
+            &mut self,
+        ) -> std::result::Result<ffx_target::TargetConnection, ffx_target::TargetConnectionError>
+        {
+            Ok(ffx_target::TargetConnection::FDomain(ffx_target::FDomainConnection::invalid()))
         }
     }
 
@@ -119,17 +133,6 @@ mod tests {
         let target_env = target_behavior::target_interface(&fho_env);
 
         let resolution = ffx_target::Resolution::mock(|| unreachable!());
-        #[derive(Debug)]
-        struct PlaceholderConnector;
-        impl ffx_target::TargetConnector for PlaceholderConnector {
-            const CONNECTION_TYPE: &'static str = "placeholder";
-            async fn connect(
-                &mut self,
-            ) -> Result<ffx_target::TargetConnection, ffx_target::TargetConnectionError>
-            {
-                Ok(ffx_target::TargetConnection::FDomain(ffx_target::FDomainConnection::invalid()))
-            }
-        }
         let conn = ffx_target::Connection::new(PlaceholderConnector).await.unwrap();
         resolution.set_connection_for_test(Some(conn)).await;
         let behavior = ConnectionBehavior::fake_direct_connector(resolution);
@@ -143,5 +146,81 @@ mod tests {
 
         let res_indef = connector.try_connect_indefinitely(|_, _| Ok(())).await;
         assert!(res_indef.is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_connector_try_connect_target_not_found_fails_immediately() {
+        let env_failure = test_env()
+            .user_config("connectivity.enable_network", serde_json::json!(false))
+            .user_config("connectivity.enable_usb", serde_json::json!(false))
+            .user_config("discovery.mdns.enabled", serde_json::json!(false))
+            .build()
+            .unwrap();
+
+        let fho_env_failure =
+            FhoEnvironment::new_with_args(&env_failure.context, &["some", "test"]);
+        let connector_failure =
+            Connector::<DummyHolder>::try_from_env(&fho_env_failure).await.unwrap();
+
+        let log_target_wait_called = RefCell::new(false);
+        let res_failure = connector_failure
+            .try_connect(|_, _| {
+                *log_target_wait_called.borrow_mut() = true;
+                Ok(())
+            })
+            .await;
+
+        let err = res_failure.unwrap_err();
+        match err {
+            ffx_command_error::Error::User(e) => {
+                let ffx_err = e.downcast_ref::<errors::FfxError>().expect("Expected FfxError");
+                let inner = match ffx_err {
+                    errors::FfxError::OpenTargetError { err, .. } => err
+                        .downcast_ref::<target_errors::FfxTargetError>()
+                        .expect("Expected FfxTargetError"),
+                    _ => panic!("Expected FfxError::OpenTargetError"),
+                };
+                assert!(matches!(
+                    inner,
+                    target_errors::FfxTargetError::OpenTargetError {
+                        err: fidl_fuchsia_developer_ffx::OpenTargetError::TargetNotFound,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected Error::User(FfxTargetError)"),
+        }
+        assert!(!*log_target_wait_called.borrow());
+    }
+
+    #[fuchsia::test]
+    async fn test_connector_try_connect_explicit_ip_succeeds() {
+        let mut env_success = test_env().build().unwrap();
+        env_success.context.override_target_specifier(&Some("127.0.0.1:8022".to_string()));
+        let fho_env_success =
+            FhoEnvironment::new_with_args(&env_success.context, &["some", "test"]);
+
+        let target_env = target_interface(&fho_env_success);
+        let behavior = target_env.init_connection_behavior(&env_success.context).await.unwrap();
+        let dc = match &*behavior {
+            ConnectionBehavior::Direct(dc) => dc,
+        };
+        let resolution = dc.resolution().await.unwrap();
+
+        let conn = ffx_target::Connection::new(PlaceholderConnector).await.unwrap();
+        resolution.set_connection_for_test(Some(conn)).await;
+
+        let connector_success =
+            Connector::<DummyHolder>::try_from_env(&fho_env_success).await.unwrap();
+        let log_target_wait_called_success = RefCell::new(false);
+        let res_success = connector_success
+            .try_connect(|_, _| {
+                *log_target_wait_called_success.borrow_mut() = true;
+                Ok(())
+            })
+            .await;
+
+        assert!(res_success.is_ok());
+        assert!(!*log_target_wait_called_success.borrow());
     }
 }

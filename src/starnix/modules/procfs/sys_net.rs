@@ -18,9 +18,9 @@ use starnix_core::vfs::pseudo::simple_file::{
 };
 use starnix_core::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_core::vfs::{
-    DirectoryEntryType, DirentSink, FileObject, FileOps, FsNode, FsNodeHandle, FsNodeOps, FsStr,
-    emit_dotdot, fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_unbounded_seek,
-    fs_node_impl_dir_readonly,
+    DirEntry, DirectoryEntryType, DirentSink, FileObject, FileOps, FsNode, FsNodeHandle, FsNodeOps,
+    FsStr, emit_dotdot, fileops_impl_directory, fileops_impl_noop_sync,
+    fileops_impl_unbounded_seek, fs_node_impl_dir_readonly,
 };
 use starnix_logging::{bug_ref, log_error, log_warn, track_stub};
 
@@ -148,12 +148,12 @@ impl FsNodeOps for ProcSysNetIpv4Conf {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if get_netstack_device(current_task, name).is_some() {
-            let fs = node.fs();
+            let fs = entry.node.fs();
             let dir = SysctlDirectory::<{ uapi::CAP_NET_ADMIN }>::new();
             dir.edit(&fs, |dir| {
                 dir.entry(
@@ -193,12 +193,12 @@ impl FsNodeOps for ProcSysNetIpv4Neigh {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if let Some(interface) = get_netstack_device(current_task, name) {
-            let fs = node.fs();
+            let fs = entry.node.fs();
             let dir = SysctlDirectory::<{ uapi::CAP_NET_ADMIN }>::new();
             dir.edit(&fs, |dir| {
                 dir.entry(
@@ -253,12 +253,12 @@ impl FsNodeOps for ProcSysNetIpv6Conf {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if let Some(interface) = get_netstack_device(current_task, name) {
-            let fs = node.fs();
+            let fs = entry.node.fs();
             let dir = SysctlDirectory::<{ uapi::CAP_NET_ADMIN }>::new();
             dir.edit(&fs, |dir| {
                 dir.entry(
@@ -368,12 +368,12 @@ impl FsNodeOps for ProcSysNetIpv6Neigh {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if let Some(interface) = get_netstack_device(current_task, name) {
-            let fs = node.fs();
+            let fs = entry.node.fs();
             let dir = SysctlDirectory::<{ uapi::CAP_NET_ADMIN }>::new();
             dir.edit(&fs, |dir| {
                 dir.entry(

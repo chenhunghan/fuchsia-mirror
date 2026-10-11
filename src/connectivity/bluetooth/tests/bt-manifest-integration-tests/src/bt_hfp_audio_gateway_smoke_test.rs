@@ -218,6 +218,27 @@ async fn hfp_audio_gateway_v2_capability_routing() {
         )
         .await
         .expect("Failed adding LogSink route to test components");
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration(
+                    "fuchsia.bluetooth.AttachPhoneNumberToVoiceTag",
+                ))
+                .capability(Capability::configuration("fuchsia.bluetooth.ControllerEncodingCvsd"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ControllerEncodingMsbc"))
+                .capability(Capability::configuration(
+                    "fuchsia.bluetooth.EchoCancelingAndNoiseReduction",
+                ))
+                .capability(Capability::configuration("fuchsia.bluetooth.EnhancedCallControls"))
+                .capability(Capability::configuration("fuchsia.bluetooth.OffloadType"))
+                .capability(Capability::configuration("fuchsia.bluetooth.RejectIncomingVoiceCall"))
+                .capability(Capability::configuration("fuchsia.bluetooth.ThreeWayCalling"))
+                .capability(Capability::configuration("fuchsia.bluetooth.WideBandSpeech"))
+                .from(Ref::void())
+                .to(&hfp),
+        )
+        .await
+        .expect("Failed adding route for optional config capabilities from void");
     let test_topology = builder.build().await.unwrap();
 
     // If the routing is correctly configured, we expect 6 events:

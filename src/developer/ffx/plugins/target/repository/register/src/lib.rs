@@ -834,7 +834,7 @@ mod test {
 
         let err = tool.main(writer).await.expect_err("register error");
         let want = "BUG: An internal command error occurred.\nError: Failed to register repository: RepositoryManagerError";
-        assert_eq!(err.to_string(), want)
+        assert_eq!(err.to_string().split("\n\nStack backtrace:\n").next().unwrap(), want)
     }
 
     #[fuchsia::test]
@@ -893,7 +893,12 @@ mod test {
         let err = format!("json must adhere to schema: {json}");
         <RegisterTool as FfxMain>::Writer::verify_schema(&json).expect(&err);
 
-        assert_eq!(json, serde_json::json!({"unexpected_error":{"message": want}}));
+        match serde_json::from_value::<CommandStatus>(json) {
+            Ok(CommandStatus::UnexpectedError { message }) => {
+                assert_eq!(message.split("\n\nStack backtrace:\n").next().unwrap(), want);
+            }
+            other => panic!("Unexpected status: {other:?}"),
+        }
     }
 
     #[fuchsia::test]

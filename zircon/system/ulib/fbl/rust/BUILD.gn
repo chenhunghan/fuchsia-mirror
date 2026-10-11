@@ -55,10 +55,8 @@ rustc_library("fbl") {
     "//third_party/rust_crates:zerocopy",
   ]
 
-  # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
   if (is_kernel) {
     features = [ "kernel" ]
-    configs += [ "//zircon/kernel/switch:allow-new-without-default" ]
   }
 }
 

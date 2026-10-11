@@ -5,7 +5,7 @@
 use crate::collections::{FlatMap, FlatSet};
 use crate::eval::ShellState;
 use crate::parser::ast::ASTBuilder;
-use crate::serialization::{Deserialize, Serialize};
+use crate::serialization::{Deserialize, OPTION_NONE_TAG, OPTION_SOME_TAG, Serialize};
 use crate::subshell::{
     SubshellPayloadHeader, deserialize_subshell_payload, serialize_subshell_payload,
 };
@@ -59,6 +59,19 @@ fn test_u64_serialization() {
     let buf = vec![1, 2, 3, 4, 5, 6, 7];
     let mut offset = 0;
     assert!(u64::deserialize(&buf, &mut offset).is_err());
+}
+
+#[test]
+fn test_koid_serialization() {
+    assert_serialization(zx::Koid::from_raw(0), &[0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_serialization(
+        zx::Koid::from_raw(0x123456789abcdef0),
+        &[0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12],
+    );
+
+    let buf = vec![1, 2, 3, 4, 5, 6, 7];
+    let mut offset = 0;
+    assert!(zx::Koid::deserialize(&buf, &mut offset).is_err());
 }
 
 #[test]
@@ -117,6 +130,27 @@ fn test_flat_set_serialization() {
 
     set.insert(BString::from("a"));
     assert_serialization(set, &[1, 0, 0, 0, 1, 0, 0, 0, b'a']);
+}
+
+#[test]
+fn test_option_serialization() {
+    assert_serialization(None::<BString>, &[OPTION_NONE_TAG]);
+    assert_serialization(
+        Some(BString::from("abc")),
+        &[OPTION_SOME_TAG, 3, 0, 0, 0, b'a', b'b', b'c'],
+    );
+
+    // EOF reading tag
+    let mut offset = 0;
+    assert!(Option::<BString>::deserialize(&[], &mut offset).is_err());
+
+    // Invalid tag
+    let mut offset = 0;
+    assert!(Option::<BString>::deserialize(&[2], &mut offset).is_err());
+
+    // Truncated payload in Some
+    let mut offset = 0;
+    assert!(Option::<BString>::deserialize(&[OPTION_SOME_TAG, 3, 0], &mut offset).is_err());
 }
 
 #[test]

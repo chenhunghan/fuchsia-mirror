@@ -28,6 +28,12 @@ namespace {
 
 class UinputTest : public ::testing::Test {
  public:
+  static void SetUpTestSuite() {
+    // Real input hardware may already be registered, so record the devices that exist before any
+    // test runs instead of assuming /dev/input is empty.
+    baseline_devices_ = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+  }
+
   void SetUp() override {
     // TODO(https://fxbug.dev/317285180) don't skip on baseline
     if (getuid() != 0) {
@@ -39,28 +45,23 @@ class UinputTest : public ::testing::Test {
         << "open(\"/dev/uinput\") failed: " << strerror(errno) << "(" << errno << ")";
   }
 
+  void TearDown() override {
+    if (!uinput_fd_.is_valid()) {
+      return;
+    }
+    ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
+    uinput_fd_.reset();
+
+    EXPECT_TRUE(test_helper::WaitForDevicesRemoved(baseline_devices_))
+        << "devices created by the test were not removed from /dev/input";
+  }
+
  protected:
+  static inline std::set<std::string> baseline_devices_;
   fbl::unique_fd uinput_fd_;
 };
 
 const uint16_t GOOGLE_VENDOR_ID = 0x18d1;
-
-void WaitForDeviceClosed(const std::string& device_name) {
-  if (test_helper::IsStarnix()) {
-    for (int i = 0; i < 100; ++i) {
-      fbl::unique_fd fd(open(("/dev/input/" + device_name).c_str(), O_RDWR));
-      if (!fd.is_valid() && errno == ENOENT) {
-        break;
-      }
-      usleep(50000);
-    }
-  }
-
-  // Check that the device file no longer exists. Open should fail.
-  fbl::unique_fd fd(open(("/dev/input/" + device_name).c_str(), O_RDWR));
-  EXPECT_FALSE(fd.is_valid());
-  EXPECT_EQ(errno, ENOENT);
-}
 
 TEST_F(UinputTest, UiGetVersion) {
   // Pass null to UI_GET_VERSION expect EFAULT.
@@ -138,8 +139,18 @@ TEST_F(UinputTest, UiDevCreateKeyboard) {
   int res = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(res, 0);
 
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
+  ASSERT_EQ(res, 0);
+
+  auto diff = test_helper::WaitForDevice(ls_before);
+  EXPECT_EQ(diff.size(), 1u);
+
+  res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   EXPECT_EQ(res, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, UiDevCreateTouchscreen) {
@@ -151,8 +162,18 @@ TEST_F(UinputTest, UiDevCreateTouchscreen) {
   res = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(res, 0);
 
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
+  ASSERT_EQ(res, 0);
+
+  auto diff = test_helper::WaitForDevice(ls_before);
+  EXPECT_EQ(diff.size(), 1u);
+
+  res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   EXPECT_EQ(res, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
@@ -180,7 +201,7 @@ TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
   auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
 
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
-  EXPECT_EQ(res, 0);
+  ASSERT_EQ(res, 0);
 
   auto diff = test_helper::WaitForDevice(ls_before);
   ASSERT_EQ(diff.size(), 1u);
@@ -191,12 +212,20 @@ TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
   auto new_device_fd = fbl::unique_fd(open(("/dev/input/" + new_device_name).c_str(), O_RDWR));
   ASSERT_TRUE(new_device_fd.is_valid());
 
+  // On Starnix, the event node is created by the input relay when the device is registered with
+  // the Fuchsia input pipeline. The UI_ABS_SETUP range is only used to map uinput coordinates
+  // into display coordinates; events delivered through the node are in view coordinates, so the
+  // node reports the display size instead of the configured range.
   {
     input_absinfo buf{};
     ASSERT_EQ(0, ioctl(new_device_fd.get(), EVIOCGABS(ABS_MT_POSITION_X), &buf))
         << "get x-axis info failed: " << strerror(errno);
     ASSERT_EQ(0.0, buf.minimum);
-    EXPECT_NEAR(buf.maximum, 1001.0, 0.1);
+    if (test_helper::IsStarnix()) {
+      EXPECT_GT(buf.maximum, 0);
+    } else {
+      EXPECT_NEAR(buf.maximum, 1001.0, 0.1);
+    }
   }
 
   {
@@ -204,8 +233,18 @@ TEST_F(UinputTest, UiDevCreateTouchscreenWithSize) {
     ASSERT_EQ(0, ioctl(new_device_fd.get(), EVIOCGABS(ABS_MT_POSITION_Y), &buf))
         << "get y-axis info failed: " << strerror(errno);
     ASSERT_EQ(0.0, buf.minimum);
-    EXPECT_NEAR(buf.maximum, 1002.0, 0.1);
+    if (test_helper::IsStarnix()) {
+      EXPECT_GT(buf.maximum, 0);
+    } else {
+      EXPECT_NEAR(buf.maximum, 1002.0, 0.1);
+    }
   }
+
+  new_device_fd.reset();
+  res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
+  EXPECT_EQ(res, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, UiDevCreateDestroyTouchscreenEvIoGid) {
@@ -242,8 +281,8 @@ TEST_F(UinputTest, UiDevCreateDestroyTouchscreenEvIoGid) {
 
   res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   ASSERT_EQ(res, 0);
-
-  WaitForDeviceClosed(new_device_name);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, UiDevCreateDestroyKeyboardEvIoGid) {
@@ -276,8 +315,8 @@ TEST_F(UinputTest, UiDevCreateDestroyKeyboardEvIoGid) {
 
   res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   ASSERT_EQ(res, 0);
-
-  WaitForDeviceClosed(new_device_name);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, UiDevDestroy) {
@@ -286,11 +325,18 @@ TEST_F(UinputTest, UiDevDestroy) {
   int res = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(res, 0);
 
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+
   res = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
   ASSERT_EQ(res, 0);
 
+  auto diff = test_helper::WaitForDevice(ls_before);
+  EXPECT_EQ(diff.size(), 1u);
+
   res = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
   EXPECT_EQ(res, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, WriteEVKEY) {
@@ -300,8 +346,13 @@ TEST_F(UinputTest, WriteEVKEY) {
   int r = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(r, 0);
 
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+
   r = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
-  EXPECT_EQ(r, 0);
+  ASSERT_EQ(r, 0);
+
+  auto diff = test_helper::WaitForDevice(ls_before);
+  ASSERT_EQ(diff.size(), 1u);
 
   /* timestamp values are ignored */
   struct timeval t = {.tv_sec = 0, .tv_usec = 0};
@@ -324,6 +375,11 @@ TEST_F(UinputTest, WriteEVKEY) {
   // Report the event
   res = write(uinput_fd_.get(), &sync_e, sizeof(sync_e));
   EXPECT_EQ(res, static_cast<ssize_t>(sizeof(sync_e)));
+
+  r = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
+  EXPECT_EQ(r, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 TEST_F(UinputTest, WriteEVABS) {
@@ -336,8 +392,13 @@ TEST_F(UinputTest, WriteEVABS) {
   r = ioctl(uinput_fd_.get(), UI_DEV_SETUP, &usetup);
   ASSERT_EQ(r, 0);
 
+  auto ls_before = test_helper::ListDirectory("/dev/input").value_or(std::set<std::string>{});
+
   r = ioctl(uinput_fd_.get(), UI_DEV_CREATE);
-  EXPECT_EQ(r, 0);
+  ASSERT_EQ(r, 0);
+
+  auto diff = test_helper::WaitForDevice(ls_before);
+  ASSERT_EQ(diff.size(), 1u);
 
   /* timestamp values are ignored */
   struct timeval t = {.tv_sec = 0, .tv_usec = 0};
@@ -373,6 +434,11 @@ TEST_F(UinputTest, WriteEVABS) {
   // Report the event
   res = write(uinput_fd_.get(), &sync_e, sizeof(sync_e));
   EXPECT_EQ(res, static_cast<ssize_t>(sizeof(sync_e)));
+
+  r = ioctl(uinput_fd_.get(), UI_DEV_DESTROY);
+  EXPECT_EQ(r, 0);
+  uinput_fd_.reset();
+  EXPECT_TRUE(test_helper::WaitForDevicesRemoved(ls_before));
 }
 
 }  // namespace

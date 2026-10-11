@@ -24,7 +24,6 @@ fuchsia_rust_driver("usb-vsock-service-driver") {
     "src/vsock_service.rs",
   ]
   deps = [
-    ":usb_vsock_service_bind",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.hardware.vsock:fuchsia.hardware.vsock_rust",
     "//sdk/fidl/fuchsia.hardware.vsockbridge:fuchsia.hardware.vsockbridge_rust",
@@ -56,7 +55,10 @@ fuchsia_unittest_package("usb-vsock-service-driver-unit-test") {
 
 fuchsia_driver_component("usb-vsock-service") {
   component_name = "usb-vsock-service"
-  deps = [ ":usb-vsock-service-driver" ]
+  deps = [
+    ":usb-vsock-service-driver",
+    ":usb_vsock_service_bind",
+  ]
   info = "meta/usb_vsock_service_info.json"
   manifest = "meta/usb-vsock-service.cml"
 }

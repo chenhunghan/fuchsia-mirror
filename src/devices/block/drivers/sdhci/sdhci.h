@@ -180,7 +180,8 @@ class Sdhci : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_s
         : cmd_idx(request.cmd_idx),
           cmd_flags(request.cmd_flags),
           blocksize(request.blocksize),
-          status(InterruptStatus::Get().FromValue(0).set_error(1)) {}
+          status(InterruptStatus::Get().FromValue(0).set_error(1)),
+          crypto_status(CryptoNonQueueInterruptStatus::Get().FromValue(0)) {}
 
     bool data_transfer_complete() const {
       return !(cmd_flags & SDMMC_RESP_DATA_PRESENT) || data.empty();
@@ -205,6 +206,10 @@ class Sdhci : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_s
     // register (and always sets the general error bit). If no error  occurred the interrupt thread
     // sets this field to zero.
     InterruptStatus status;
+
+    // If a crypto error occurred, the interrupt thread sets this field to the value of the
+    // non-queue crypto interrupt status register.
+    CryptoNonQueueInterruptStatus crypto_status;
 
     // For a non-DMA request, data points to the buffer to read from/write to. This buffer may be
     // owned by vmo_mapper.
@@ -234,7 +239,8 @@ class Sdhci : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_s
 
   void HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_status_t status,
                  const zx_packet_interrupt_t* interrupt) TA_EXCL(mtx_);
-  void HandleTransferInterrupt(InterruptStatus status) TA_REQ(mtx_);
+  void HandleTransferInterrupt(InterruptStatus status, CryptoNonQueueInterruptStatus crypto_status)
+      TA_REQ(mtx_);
 
   zx::result<fidl::Array<uint32_t, 4>> Request(
       const fuchsia_hardware_sdmmc::wire::SdmmcReq& request);

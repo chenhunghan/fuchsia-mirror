@@ -14,16 +14,16 @@ from typing import Literal
 import fidl_fuchsia_wlan_internal as fidl_security
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib import hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
-from antlion.controllers.ap_lib.hostapd_security import (
-    SecurityMode as DeprecatedSecurityMode,
-)
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
+)
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib import hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
+)
+from legacy_access_point.ap_lib.hostapd_security import (
+    SecurityMode as DeprecatedSecurityMode,
 )
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib import capabilities
@@ -44,7 +44,13 @@ from openwrt_access_point.lib.access_point_config_mapper import (
 
 logger = logging.getLogger(__name__)
 
-# Capabilities unsupported on OpenWrt One APs (MT7981B + MT7976C 3T3R 5 GHz).
+# AC capabilities unsupported on OpenWrt One (MT7981B + MT7976C 3T3R 5 GHz,
+# VHT capab 0x339a59f6):
+# * 80+80 MHz channel width ([VHT160-80PLUS80])
+# * 4x4 beamforming ([SOUNDING-DIMENSION-4], [BF-ANTENNA-4])
+# * Multi-stream RX STBC ([RX-STBC-12], [RX-STBC-123], [RX-STBC-1234])
+# * HTC-VHT and VHT link adaptation ([HTC-VHT], [VHT-LINK-ADAPT2/3])
+# * VHT TXOP power save ([VHT-TXOP-PS])
 OPENWRT_ONE_UNSUPPORTED_AC_CAPS: frozenset[str] = frozenset(
     {
         capabilities.AC_CAPABILITY_VHT160_80PLUS80,  # driver doesn't support 80+80
@@ -245,14 +251,6 @@ class WlanPhyCompliance11ACTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     For test matrix design and rationale, see http://go/wlan-test-optimization.
 
-    AC capabilities unsupported on OpenWrt One (MT7981B + MT7976C 3T3R 5 GHz,
-    VHT capab 0x339a59f6):
-    * 80+80 MHz channel width ([VHT160-80PLUS80])
-    * 4x4 beamforming ([SOUNDING-DIMENSION-4], [BF-ANTENNA-4])
-    * Multi-stream RX STBC ([RX-STBC-12], [RX-STBC-123], [RX-STBC-1234])
-    * HTC-VHT and VHT link adaptation ([HTC-VHT], [VHT-LINK-ADAPT2/3])
-    * VHT TXOP power save ([VHT-TXOP-PS])
-
     Test Bed Requirement:
     * One Fuchsia device
     * One Access Point
@@ -309,7 +307,8 @@ class WlanPhyCompliance11ACTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             # Maintain legacy naming for BUILD.gn filters
             return f"test_11ac_{params.vht_bandwidth_mhz}mhz_wpa2{''.join(ret)}"
 
-        # Deduplicate overlapping baseline/capability configurations across clusters.
+        # Map test names as dict keys to collapse duplicates, then extract the unique
+        # parameter values (avoids set() since TestParams contains an unhashable list).
         test_args = list(
             {generate_test_name(p): (p,) for (p,) in raw_test_args}.values()
         )

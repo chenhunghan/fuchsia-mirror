@@ -11,7 +11,7 @@ use super::dispatcher::{
 use super::fifo_dispatcher_ffi::cpp_fifo_dispatcher_create;
 use super::handle::KernelHandle;
 use crate::arch_rs::{
-    UserCopyCaptureFaultsError, arch_copy_from_user_capture_faults,
+    CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user_capture_faults,
     arch_copy_to_user_capture_faults,
 };
 use crate::counters::define_kcounter;
@@ -259,12 +259,13 @@ impl FifoDispatcher {
 
             let data_ptr = self.state().guard_mu_mut(token).data_mut().as_mut_ptr();
             // SAFETY: `data_ptr.add(byte_offset)` points to `copy_bytes` bytes within `data`,
-            // and `src` is a user pointer of length `copy_bytes`.
+            // `src` is a user pointer of length `copy_bytes`, and no spinlock is held.
             let res = unsafe {
                 arch_copy_from_user_capture_faults(
                     data_ptr.add(byte_offset).cast(),
                     src.as_ptr().cast(),
                     copy_bytes,
+                    CopyContext::BlockingAllowed,
                 )
             };
             if let Err(err) = res {
@@ -383,12 +384,13 @@ impl FifoDispatcher {
 
             let data_ptr = self.state().guard_mu(token).data().as_ptr();
             // SAFETY: `data_ptr.add(byte_offset)` points to `copy_bytes` bytes within `data`,
-            // and `dst` is a user pointer of length `copy_bytes`.
+            // `dst` is a user pointer of length `copy_bytes`, and no spinlock is held.
             let res = unsafe {
                 arch_copy_to_user_capture_faults(
                     dst.as_ptr().cast(),
                     data_ptr.add(byte_offset).cast(),
                     copy_bytes,
+                    CopyContext::BlockingAllowed,
                 )
             };
             if let Err(err) = res {

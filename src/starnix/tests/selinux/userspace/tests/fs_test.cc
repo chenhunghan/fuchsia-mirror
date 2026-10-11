@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <sys/sendfile.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -11,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
@@ -18,6 +21,7 @@ extern std::string DoPrePolicyLoadWork() { return "fs_test_policy"; }
 
 namespace {
 constexpr char kDirLabel[] = "test_u:object_r:test_fs_readdir_dir_t:s0";
+constexpr char kSendfileSrcLabel[] = "test_u:object_r:test_fs_sendfile_src_t:s0";
 
 TEST(FsTest, ReaddirAllowed) {
   // Create a directory with the specific label.
@@ -56,6 +60,50 @@ TEST(FsTest, ReaddirDenied) {
   }));
 }
 
+TEST(FsTest, ReadWriteOPathFdWithoutPermissionsReturnsEbadf) {
+  auto fscreate = ScopedTaskAttrResetter::SetTaskAttr("fscreate", kDirLabel);
+  test_helper::ScopedTempDir temp_dir;
+  auto src_file = ScopedTempFDWithLabel(kSendfileSrcLabel);
+  ASSERT_TRUE(src_file.is_valid());
+
+  fbl::unique_fd dir_fd(open(temp_dir.path().c_str(), O_PATH | O_DIRECTORY));
+  ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
+  fbl::unique_fd file_fd(open(src_file.name().c_str(), O_PATH));
+  ASSERT_THAT(file_fd.get(), SyscallSucceeds());
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_no_read_t:s0", [&]() {
+    char buf[1024] = {};
+    EXPECT_THAT(syscall(SYS_getdents64, dir_fd.get(), buf, sizeof(buf)),
+                SyscallFailsWithErrno(EBADF));
+    EXPECT_THAT(read(dir_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+    EXPECT_THAT(write(dir_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+
+    EXPECT_THAT(syscall(SYS_getdents64, file_fd.get(), buf, sizeof(buf)),
+                SyscallFailsWithErrno(EBADF));
+    EXPECT_THAT(read(file_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+    EXPECT_THAT(write(file_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+  }));
+}
+
+// Verify that readlink() on a directory fails with EINVAL, without checking the read permission
+// needed to read symbolic links. `realpath()` relies on this when resolving paths through
+// directories that a domain can search but not read.
+TEST(FsTest, ReadlinkOnDirectoryFailsWithoutCheck) {
+  // Create a directory with the specific label.
+  auto fscreate = ScopedTaskAttrResetter::SetTaskAttr("fscreate", kDirLabel);
+  test_helper::ScopedTempDir temp_dir;
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  // Run as a domain that can search, but not read, the directory.
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_no_read_t:s0", [&]() {
+    char buf[1024];
+    EXPECT_THAT(readlink(temp_dir.path().c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(EINVAL));
+  }));
+}
+
 constexpr char kFallocateFileLabel[] = "test_u:object_r:test_fs_fallocate_file_t:s0";
 
 // Verify that fallocate succeeds for a domain with write permission.
@@ -80,10 +128,68 @@ TEST(FsTest, FallocateDenied) {
   }));
 }
 
-constexpr char kSendfileSrcLabel[] = "test_u:object_r:test_fs_sendfile_src_t:s0";
+// Verify that attempting a write from a domain denied write access fails with EACCES and
+// preserves the SUID and SGID bits on the file.
+TEST(FsTest, WriteDeniedPreservesSuid) {
+  auto test_file = ScopedTempFDWithLabel(kFallocateFileLabel);
+  ASSERT_TRUE(test_file.is_valid());
+
+  ASSERT_THAT(fchmod(test_file.fd(), S_ISUID | S_ISGID | S_IRWXU), SyscallSucceeds());
+
+  struct stat file_stat;
+  ASSERT_THAT(fstat(test_file.fd(), &file_stat), SyscallSucceeds());
+  ASSERT_NE(file_stat.st_mode & S_ISUID, 0u);
+  ASSERT_NE(file_stat.st_mode & S_ISGID, 0u);
+
+  test_helper::UnsetCapability(CAP_FSETID);
+  auto restore_cap = fit::defer([]() { test_helper::SetCapabilityEffective(CAP_FSETID); });
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_no_write_t:s0", [&]() {
+    char buf[] = "x";
+    EXPECT_THAT(write(test_file.fd(), buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
+  }));
+
+  ASSERT_THAT(fstat(test_file.fd(), &file_stat), SyscallSucceeds());
+  EXPECT_NE(file_stat.st_mode & S_ISUID, 0u);
+  EXPECT_NE(file_stat.st_mode & S_ISGID, 0u);
+}
+
 constexpr char kSendfileDstLabel[] = "test_u:object_r:test_fs_sendfile_dst_t:s0";
 constexpr char kPayload[] = "foo";
 constexpr size_t kPayloadSize = sizeof(kPayload) - 1;
+
+TEST(FsTest, GetdentsOnFileFdWithoutPermissionsReturnsEnotdir) {
+  auto src_file = ScopedTempFDWithLabel(kSendfileSrcLabel);
+  ASSERT_TRUE(src_file.is_valid());
+  fbl::unique_fd wronly_fd(open(src_file.name().c_str(), O_WRONLY));
+  ASSERT_THAT(wronly_fd.get(), SyscallSucceeds());
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_no_read_t:s0", [&]() {
+    char buf[1024] = {};
+    EXPECT_THAT(syscall(SYS_getdents64, src_file.fd(), buf, sizeof(buf)),
+                SyscallFailsWithErrno(ENOTDIR));
+    EXPECT_THAT(syscall(SYS_getdents64, wronly_fd.get(), buf, sizeof(buf)),
+                SyscallFailsWithErrno(ENOTDIR));
+  }));
+}
+
+TEST(FsTest, ReadWriteOnlyFileFdWithoutPermissionsReturnsEbadf) {
+  auto src_file = ScopedTempFDWithLabel(kSendfileSrcLabel);
+  ASSERT_TRUE(src_file.is_valid());
+  fbl::unique_fd wronly_fd(open(src_file.name().c_str(), O_WRONLY));
+  ASSERT_THAT(wronly_fd.get(), SyscallSucceeds());
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_no_read_t:s0", [&]() {
+    char buf[1024] = {};
+    EXPECT_THAT(read(wronly_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+  }));
+}
 
 struct FsSecurityTestParams {
   const char* test_domain;

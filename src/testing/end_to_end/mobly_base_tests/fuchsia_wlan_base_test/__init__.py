@@ -8,12 +8,14 @@ import time
 
 import fuchsia_base_test
 import openwrt_access_point
-from antlion.controllers import access_point
 from honeydew.affordances.connectivity import netstack
 from honeydew.affordances.connectivity.netstack.types import (
     InterfaceProperties,
     PortClass,
 )
+from iperf import iperf_server
+from iperf.iperf_server import IPerfServerOverSsh
+from legacy_access_point import access_point
 from mobly import signals
 from mobly.config_parser import TestRunConfig
 from openwrt_access_point import OpenWrtAP
@@ -31,6 +33,7 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         self.access_point: access_point.AccessPoint | None = None
         self.access_points: list[access_point.AccessPoint] = []
         self.openwrt_aps: list[OpenWrtAP] = []
+        self.iperf_server: IPerfServerOverSsh | None = None
         self.test_start_marker: str | None = None
 
     async def setup_class(self) -> None:
@@ -65,8 +68,31 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         for openwrt_ap in self.openwrt_aps:
             openwrt_ap.log_to_syslog(self.test_start_marker)
 
+    async def setup_iperf_server(self) -> IPerfServerOverSsh:
+        """Resolves and starts the single iPerf server in the testbed.
+
+        Returns:
+            The resolved and started IPerfServerOverSsh instance.
+        """
+        iperf_servers: list[IPerfServerOverSsh] = (
+            await self.register_controller(
+                iperf_server,
+                required=False,
+            )
+            or []
+        )
+        if self.openwrt_ap is not None:
+            self.iperf_server = self.openwrt_ap.iperf_server
+        elif iperf_servers:
+            self.iperf_server = iperf_servers[0]
+        else:
+            raise signals.TestError("Requires at least one iperf server")
+
+        self.iperf_server.start()
+        return self.iperf_server
+
     def _download_ap_logs(self, directory: str) -> None:
-        """Downloads the DHCP and hostapd logs from all access points."""
+        """Downloads DHCP and hostapd logs from access points, and iPerf server logs if present."""
         for access_point in self.access_points:
             try:
                 access_point.download_ap_logs(directory)
@@ -77,6 +103,11 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                 openwrt_ap.download_logs(directory, start_marker=None)
             except Exception as e:
                 logging.warning(f"Failed to download OpenWrt logs: {e}")
+        if self.iperf_server is not None:
+            try:
+                self.iperf_server.download_logs(directory)
+            except Exception as e:
+                logging.warning(f"Failed to download iPerf server logs: {e}")
 
     async def teardown_test(self) -> None:
         for openwrt_ap in self.openwrt_aps:

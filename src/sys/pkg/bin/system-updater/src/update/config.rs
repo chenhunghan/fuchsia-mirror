@@ -2,80 +2,54 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::metrics;
-use fidl_fuchsia_update_installer_ext::options::Range;
-use fidl_fuchsia_update_installer_ext::{Initiator as ExtInitiator, Options};
+use fidl_fuchsia_update_installer_ext::Options;
+#[cfg(test)]
+use fidl_fuchsia_update_installer_ext::{Initiator, options::Range};
 use std::time::{Instant, SystemTime};
 
 /// Configuration for an update attempt.
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct Config {
-    pub initiator: Initiator,
     pub update_url: http::Uri,
-    pub should_write_recovery: bool,
+    pub options: Options,
     pub(super) start_time: SystemTime,
     pub(super) start_time_mono: Instant,
-    pub allow_attach_to_existing_attempt: bool,
-    pub manifest_range: Option<Range>,
-    pub manifest_headers: Vec<fidl_fuchsia_net_http::Header>,
 }
 
 impl Config {
-    /// Constructs update configuration from url, options and signature.
+    /// Constructs update configuration from url and options.
     pub fn new(update_url: http::Uri, options: Options) -> Self {
         let start_time = SystemTime::now();
-        let start_time_mono =
-            metrics::system_time_to_monotonic_time(start_time).unwrap_or_else(Instant::now);
+        let start_time_mono = Instant::now();
 
-        Self {
-            initiator: options.initiator.into(),
-            update_url,
-            should_write_recovery: options.should_write_recovery,
-            start_time,
-            start_time_mono,
-            allow_attach_to_existing_attempt: options.allow_attach_to_existing_attempt,
-            manifest_range: options.manifest_range,
-            manifest_headers: options.manifest_headers,
-        }
+        Self { update_url, options, start_time, start_time_mono }
     }
 }
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("initiator", &self.initiator)
+            .field("initiator", &self.options.initiator)
             .field("update_url", &self.update_url.to_string())
-            .field("should_write_recovery", &self.should_write_recovery)
+            .field("should_write_recovery", &self.options.should_write_recovery)
             .field("start_time", &chrono::DateTime::<chrono::Utc>::from(self.start_time))
             .field("start_time_mono", &self.start_time_mono)
-            .field("allow_attach_to_existing_attempt", &self.allow_attach_to_existing_attempt)
-            .field("manifest_range", &self.manifest_range)
-            .field("manifest_headers", &self.manifest_headers)
+            .field(
+                "allow_attach_to_existing_attempt",
+                &self.options.allow_attach_to_existing_attempt,
+            )
+            .field("manifest_range", &self.options.manifest_range)
+            // Only print the names of the headers, to avoid logging potentially sensitive data.
+            .field(
+                "manifest_header_names",
+                &self
+                    .options
+                    .manifest_headers
+                    .iter()
+                    .map(|h| String::from_utf8_lossy(&h.name))
+                    .collect::<Vec<_>>(),
+            )
             .finish()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum Initiator {
-    Automatic,
-    Manual,
-}
-
-impl From<Initiator> for ExtInitiator {
-    fn from(args_initiator: Initiator) -> Self {
-        match args_initiator {
-            Initiator::Manual => ExtInitiator::User,
-            Initiator::Automatic => ExtInitiator::Service,
-        }
-    }
-}
-
-impl From<ExtInitiator> for Initiator {
-    fn from(ext_initiator: ExtInitiator) -> Self {
-        match ext_initiator {
-            ExtInitiator::User => Initiator::Manual,
-            ExtInitiator::Service => Initiator::Automatic,
-        }
     }
 }
 
@@ -84,6 +58,7 @@ pub struct ConfigBuilder<'a> {
     update_url: &'a str,
     should_write_recovery: bool,
     allow_attach_to_existing_attempt: bool,
+    manifest_range: Option<Range>,
 }
 
 #[cfg(test)]
@@ -93,6 +68,7 @@ impl<'a> ConfigBuilder<'a> {
             update_url: "fuchsia-pkg://fuchsia.test/update",
             should_write_recovery: true,
             allow_attach_to_existing_attempt: false,
+            manifest_range: None,
         }
     }
     pub fn update_url(mut self, update_url: &'a str) -> Self {
@@ -110,15 +86,24 @@ impl<'a> ConfigBuilder<'a> {
         self.should_write_recovery = should_write_recovery;
         self
     }
+    pub fn manifest_range(mut self, manifest_range: Option<Range>) -> Self {
+        self.manifest_range = manifest_range;
+        self
+    }
     pub fn build(self) -> Result<Config, anyhow::Error> {
-        let Self { update_url, should_write_recovery, allow_attach_to_existing_attempt } = self;
+        let Self {
+            update_url,
+            should_write_recovery,
+            allow_attach_to_existing_attempt,
+            manifest_range,
+        } = self;
         Ok(Config::new(
             update_url.parse()?,
             Options {
                 allow_attach_to_existing_attempt,
                 should_write_recovery,
-                initiator: ExtInitiator::User,
-                manifest_range: None,
+                initiator: Initiator::User,
+                manifest_range,
                 manifest_headers: vec![],
             },
         ))
@@ -132,7 +117,7 @@ mod tests {
     #[test]
     fn config_new() {
         let options = Options {
-            initiator: ExtInitiator::User,
+            initiator: Initiator::User,
             allow_attach_to_existing_attempt: true,
             should_write_recovery: true,
             manifest_range: None,
@@ -140,18 +125,15 @@ mod tests {
         };
         let update_url: http::Uri = "fuchsia-pkg://fuchsia.test/foo".parse().unwrap();
 
-        let config = Config::new(update_url.clone(), options);
+        let config = Config::new(update_url.clone(), options.clone());
 
         assert_matches::assert_matches!(
             config,
             Config {
-                initiator: Initiator::Manual,
                 update_url: url,
-                should_write_recovery: true,
-                allow_attach_to_existing_attempt: true,
-                manifest_range: None,
+                options: opts,
                 ..
-            } if url == update_url
+            } if url == update_url && opts == options
         );
     }
 }

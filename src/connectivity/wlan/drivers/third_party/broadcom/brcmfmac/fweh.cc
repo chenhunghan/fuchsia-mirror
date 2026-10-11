@@ -19,6 +19,8 @@
 #include <threads.h>
 #include <zircon/status.h>
 
+#include <utility>
+
 #include "brcmu_utils.h"
 #include "brcmu_wifi.h"
 #include "cfg80211.h"
@@ -139,11 +141,15 @@ static void brcmf_fweh_queue_event(brcmf_pub* drvr, brcmf_fweh_info* fweh,
 }
 
 // Add eapol frame to the same queue as events (to ensure processing order).
-void brcmf_fweh_queue_eapol_frame(struct brcmf_if* ifp, const void* data, size_t datalen) {
+void brcmf_fweh_queue_eapol_frame(struct brcmf_if* ifp, const void* data, uint32_t datalen) {
   brcmf_pub* drvr = ifp->drvr;
   // in SIM we do not use the queue - all events are processed inline.
   if (brcmf_bus_get_bus_type(drvr->bus_if) == BRCMF_BUS_TYPE_SIM) {
     brcmf_cfg80211_handle_eapol_frame(ifp, data, datalen);
+    return;
+  }
+  if (!std::in_range<uint8_t>(ifp->ifidx)) {
+    BRCMF_ERR("Invalid interface index %d", ifp->ifidx);
     return;
   }
 
@@ -152,11 +158,11 @@ void brcmf_fweh_queue_eapol_frame(struct brcmf_if* ifp, const void* data, size_t
   // brcmf_fweh_event_worker().
   event = static_cast<decltype(event)>(calloc(1, sizeof(*event) + datalen));
   if (!event) {
-    BRCMF_ERR("calloc failed for eapol frame: %zu", datalen);
+    BRCMF_ERR("calloc failed for eapol frame: %u", datalen);
     return;
   }
   event->item_type = BRCMF_FWEH_EAPOL_FRAME;
-  event->ifidx = ifp->ifidx;
+  event->ifidx = static_cast<uint8_t>(ifp->ifidx);
   memcpy(event->data, data, datalen);
   event->datalen = datalen;
   // Queue the event item.

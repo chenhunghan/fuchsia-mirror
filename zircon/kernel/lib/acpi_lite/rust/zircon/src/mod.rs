@@ -106,7 +106,7 @@ impl PhysMemReader for ZirconPhysmemReader {
             vmo,
             0,
             ARCH_MMU_FLAG_PERM_READ,
-            c"acpi",
+            b"acpi",
         )?;
 
         if let Err(err) = map_result.mapping.map_range(0, size, true, false) {

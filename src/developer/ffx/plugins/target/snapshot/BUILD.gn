@@ -31,6 +31,7 @@ ffx_plugin("ffx_snapshot") {
     "//src/lib/fdomain/local",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:tempfile",
   ]
 
   args_sources = [ "src/args.rs" ]

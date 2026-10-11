@@ -37,10 +37,6 @@ struct SetOptions {
     #[argh(option, short = 'l')]
     level: Option<f32>,
 
-    /// battery charging status: "charging", "discharging", "not_charging", "full"
-    #[argh(option, short = 'c')]
-    status: Option<String>,
-
     /// battery/source voltage in millivolts (e.g. 4200 for 4.2V)
     #[argh(option, short = 'v')]
     voltage_mv: Option<u32>,
@@ -79,19 +75,6 @@ struct SetOptions {
 #[argh(subcommand, name = "get")]
 struct GetOptions {}
 
-fn parse_charge_status(s: &str) -> Result<fbattery::ChargeStatus, Error> {
-    match s.to_ascii_lowercase().as_str() {
-        "charging" => Ok(fbattery::ChargeStatus::Charging),
-        "discharging" => Ok(fbattery::ChargeStatus::Discharging),
-        "not_charging" | "not-charging" | "notcharging" => Ok(fbattery::ChargeStatus::NotCharging),
-        "full" => Ok(fbattery::ChargeStatus::Full),
-        _ => Err(anyhow!(
-            "Invalid charge status '{}'. Expected: charging, discharging, not_charging, full",
-            s
-        )),
-    }
-}
-
 fn parse_health_status(s: &str) -> Result<fbattery::HealthStatus, Error> {
     match s.to_ascii_lowercase().as_str() {
         "good" => Ok(fbattery::HealthStatus::Good),
@@ -123,10 +106,6 @@ fn build_battery_status(opts: &SetOptions) -> Result<fbattery::Status, Error> {
             return Err(anyhow!("Level percent must be between 0.0 and 100.0, got {}", level));
         }
         status.level_percent = Some(level);
-    }
-
-    if let Some(ref st) = opts.status {
-        status.charge_status = Some(parse_charge_status(st)?);
     }
 
     if let Some(ref h) = opts.health {
@@ -174,9 +153,6 @@ fn print_battery_status(status: &fbattery::Status) {
         println!("  Level:                {:.1}%", level);
     }
 
-    if let Some(ref cs) = status.charge_status {
-        println!("  Charge Status:        {:?}", cs);
-    }
     if let Some(ref h) = status.health {
         println!("  Health:               {:?}", h);
     }
@@ -281,7 +257,6 @@ mod tests {
         let options = SetOptions {
             present: Some(true),
             level: Some(75.5),
-            status: Some("charging".to_string()),
             voltage_mv: Some(4200),
             current_ua: Some(250000),
             temp_celsius: Some(28.0),
@@ -294,7 +269,6 @@ mod tests {
         let status = build_battery_status(&options).expect("build status failed");
         assert_eq!(status.present, Some(true));
         assert_eq!(status.level_percent, Some(75.5));
-        assert_eq!(status.charge_status, Some(fbattery::ChargeStatus::Charging));
         assert_eq!(status.health, Some(fbattery::HealthStatus::Good));
         assert_eq!(status.temp_celsius, Some(28.0));
         assert_eq!(status.voltage_uv, Some(4200 * 1000));
@@ -306,25 +280,6 @@ mod tests {
 
         let res = proxy.set_battery_status(&status).await;
         assert!(res.is_ok());
-    }
-
-    #[test]
-    fn test_parse_charge_status() {
-        assert_eq!(parse_charge_status("charging").unwrap(), fbattery::ChargeStatus::Charging);
-        assert_eq!(
-            parse_charge_status("discharging").unwrap(),
-            fbattery::ChargeStatus::Discharging
-        );
-        assert_eq!(
-            parse_charge_status("not_charging").unwrap(),
-            fbattery::ChargeStatus::NotCharging
-        );
-        assert_eq!(
-            parse_charge_status("not-charging").unwrap(),
-            fbattery::ChargeStatus::NotCharging
-        );
-        assert_eq!(parse_charge_status("full").unwrap(), fbattery::ChargeStatus::Full);
-        assert!(parse_charge_status("invalid").is_err());
     }
 
     #[test]

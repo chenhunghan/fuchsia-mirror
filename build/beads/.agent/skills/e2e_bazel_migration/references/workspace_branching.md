@@ -8,4 +8,4 @@
         * If the **migration branch** exists, switch to it.
         * If the **migration branch** does not exist, create the branch and switch to it.
 
-3.  Run `jiri update` to update repository and `git rebase origin/main` to rebase. Resolve any conflicts if they arise.
+3.  Run `jiri update` to update repository and then `git reset --hard origin/main` to start the **migration branch** from the latest `origin/main`. Planter uploads every migration to Gerrit, so the **migration branch** never holds local commits worth keeping; the reset drops Planter commits left behind by earlier runs, so they are not uploaded again under the next CL.

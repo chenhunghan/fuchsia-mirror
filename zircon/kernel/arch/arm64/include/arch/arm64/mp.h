@@ -75,14 +75,13 @@ struct arm64_percpu {
 static_assert(offsetof(struct arm64_percpu, in_restricted_mode) == PERCPU_IN_RESTRICTED_MODE,
               "in_restricted mode is at the wrong offset");
 
-void arch_init_cpu_map(uint cluster_count, const uint* cluster_cpus);
-void arch_register_mpid(uint cpu_id, uint64_t mpid);
-void arm64_init_percpu_early();
+extern "C" void arch_register_mpid(uint cpu_id, uint64_t mpid);
+extern "C" void arm64_init_percpu_early();
 
 // The cold start-up routine for secondary CPUs when starting from an OFF state.
 //
 // |stack| is the pointer to the stack that should be put in SP with a bootstrap
-// payload placed at the top (see arm64_stack_info).
+// payload placed at the top (see arm64_sp_info in secondary.cc).
 extern "C" void arm64_secondary_start(void* stack);
 
 // The start-up routine for secondary CPUs when resuming primary or secondary
@@ -219,13 +218,13 @@ inline void arch_set_num_cpus(uint cpu_count) { arm_num_cpus = cpu_count; }
 inline uint arch_max_num_cpus() { return arm_num_cpus; }
 
 // Translate a CPU number back to the MPIDR of the CPU.
-uint64_t arch_cpu_num_to_mpidr(cpu_num_t cpu_num);
+extern "C" uint64_t arch_cpu_num_to_mpidr(cpu_num_t cpu_num);
 
 // Translate mpidr to cpu number.
-cpu_num_t arm64_mpidr_to_cpu_num(uint64_t mpidr);
+extern "C" cpu_num_t arm64_mpidr_to_cpu_num(uint64_t mpidr);
 
 // Setup the high-level percpu struct pointer for |cpu_num|.
-void arch_setup_percpu(cpu_num_t cpu_num, struct percpu* percpu);
+extern "C" void arch_setup_percpu(cpu_num_t cpu_num, struct percpu* percpu);
 
 inline void arch_set_restricted_flag(bool restricted) {
   WRITE_PERCPU_FIELD(in_restricted_mode, restricted ? 1 : 0);

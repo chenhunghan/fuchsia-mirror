@@ -39,6 +39,8 @@ pub struct DaemonMetrics {
     pub last_write_timestamp_ms: u64,
     /// Number of outbound frames currently buffered in the transmission queue.
     pub outgoing_queue_len: u32,
+    /// Most recent channel error reported by the target over the UART link, if any.
+    pub last_target_error: Option<String>,
 }
 
 impl Default for DaemonMetrics {
@@ -53,6 +55,7 @@ impl Default for DaemonMetrics {
             last_read_timestamp_ms: 0,
             last_write_timestamp_ms: 0,
             outgoing_queue_len: 0,
+            last_target_error: None,
         }
     }
 }

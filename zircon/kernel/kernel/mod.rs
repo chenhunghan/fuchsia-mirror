@@ -8,6 +8,7 @@ pub mod align;
 pub mod bits;
 pub mod deadline;
 pub mod event;
+pub mod interrupt;
 pub mod koid;
 pub mod mp;
 pub mod owned_wait_queue;

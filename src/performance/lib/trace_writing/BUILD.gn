@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/host.gni")
+import("//build/python/python_binary.gni")
+import("//build/python/python_library.gni")
+
+assert(is_host)
+
+python_library("trace_writing") {
+  testonly = true
+  library_name = "trace_writing"
+  source_root = "trace_writing"
+  sources = [
+    "__init__.py",
+    "fxt.py",
+  ]
+}
+
+python_binary("json2fxt_bin") {
+  testonly = true
+  main_source = "scripts/json2fxt.py"
+  deps = [ ":trace_writing" ]
+  output_name = "json2fxt.pyz"
+}
+
+# Rename the resulting .pyz for the host tool
+copy("copy_json2fxt_pyz") {
+  testonly = true
+  deps = [ ":json2fxt_bin" ]
+  sources = [ "${target_out_dir}/json2fxt.pyz" ]
+  outputs = [ "${root_out_dir}/json2fxt" ]
+}
+
+install_host_tools("json2fxt") {
+  testonly = true
+  deps = [ ":copy_json2fxt_pyz" ]
+  outputs = [ "json2fxt" ]
+}
+
+group("tests") {
+  testonly = true
+  public_deps = [ "tests" ]
+}

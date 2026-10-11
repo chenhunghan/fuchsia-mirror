@@ -9,7 +9,6 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use assert_matches::assert_matches;
 use core::any::Any;
-use core::fmt::Display;
 use core::hash::Hash;
 use core::time::Duration;
 
@@ -17,7 +16,7 @@ use derivative::Derivative;
 use net_types::ip::{GenericOverIp, Ip, IpVersionMarker};
 use netstack3_hashmap::HashMap;
 use netstack3_hashmap::hash_map::Entry;
-use packet_formats::ip::{IpExt, IpProto, Ipv4Proto, Ipv6Proto};
+use packet_formats::ip::IpExt;
 
 use crate::context::FilterBindingsTypes;
 use crate::logic::FilterTimerId;
@@ -432,6 +431,7 @@ where
                     Ok(Some((Connection::Shared(conn), direction)))
                 }
             },
+            Err(ConnectionUpdateError::MalformedPacket) => Ok(None),
             Err(ConnectionUpdateError::InvalidPacket) => {
                 Err(GetConnectionError::InvalidPacket(connection, direction))
             }
@@ -509,58 +509,136 @@ where
     }
 }
 
+/// The direction of a message in an ICMP request/response pair.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum IcmpMessageDirection {
+    Request,
+    Reply,
+}
+
+/// The transport-layer portion of a [`Tuple`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum TransportTuple {
+    Tcp { src_port: u16, dst_port: u16 },
+    Udp { src_port: u16, dst_port: u16 },
+    IcmpEcho { id: u16, direction: IcmpMessageDirection },
+}
+
+impl TransportTuple {
+    pub(crate) fn invert(self) -> Self {
+        match self {
+            Self::Tcp { src_port, dst_port } => {
+                Self::Tcp { src_port: dst_port, dst_port: src_port }
+            }
+            Self::Udp { src_port, dst_port } => {
+                Self::Udp { src_port: dst_port, dst_port: src_port }
+            }
+            Self::IcmpEcho { id, direction } => Self::IcmpEcho {
+                id,
+                direction: match direction {
+                    IcmpMessageDirection::Request => IcmpMessageDirection::Reply,
+                    IcmpMessageDirection::Reply => IcmpMessageDirection::Request,
+                },
+            },
+        }
+    }
+
+    /// Returns the source port (or ID for protocols like ICMP) for the tuple.
+    pub fn src_port_or_id(&self) -> u16 {
+        match *self {
+            Self::Tcp { src_port, .. } | Self::Udp { src_port, .. } => src_port,
+            Self::IcmpEcho { id, .. } => id,
+        }
+    }
+
+    /// Returns the destination port (or ID for protocols like ICMP) for the tuple.
+    pub fn dst_port_or_id(&self) -> u16 {
+        match *self {
+            Self::Tcp { dst_port, .. } | Self::Udp { dst_port, .. } => dst_port,
+            Self::IcmpEcho { id, .. } => id,
+        }
+    }
+
+    pub(crate) fn set_src_port_or_id(&mut self, port_or_id: u16) {
+        match self {
+            Self::Tcp { src_port, .. } | Self::Udp { src_port, .. } => {
+                *src_port = port_or_id;
+            }
+            Self::IcmpEcho { id, .. } => {
+                *id = port_or_id;
+            }
+        }
+    }
+
+    pub(crate) fn set_dst_port_or_id(&mut self, port_or_id: u16) {
+        match self {
+            Self::Tcp { dst_port, .. } | Self::Udp { dst_port, .. } => {
+                *dst_port = port_or_id;
+            }
+            Self::IcmpEcho { id, .. } => {
+                *id = port_or_id;
+            }
+        }
+    }
+
+    pub(crate) fn protocol_name(&self) -> &'static str {
+        match self {
+            Self::Tcp { .. } => "TCP",
+            Self::Udp { .. } => "UDP",
+            Self::IcmpEcho { .. } => "ICMP",
+        }
+    }
+}
+
+impl From<&TransportPacketData> for TransportTuple {
+    fn from(transport_data: &TransportPacketData) -> Self {
+        match *transport_data {
+            TransportPacketData::Tcp { src_port, dst_port, .. } => Self::Tcp { src_port, dst_port },
+            TransportPacketData::Udp { src_port, dst_port } => Self::Udp { src_port, dst_port },
+            TransportPacketData::IcmpEcho { id, direction } => Self::IcmpEcho { id, direction },
+        }
+    }
+}
+
 /// A tuple for a flow in a single direction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, GenericOverIp)]
 #[generic_over_ip(I, Ip)]
 pub struct Tuple<I: IpExt> {
-    /// The IP protocol number of the flow.
-    pub protocol: TransportProtocol,
     /// The source IP address of the flow.
     pub src_addr: I::Addr,
     /// The destination IP address of the flow.
     pub dst_addr: I::Addr,
-    /// The transport-layer source port or ID of the flow.
-    pub src_port_or_id: u16,
-    /// The transport-layer destination port or ID of the flow.
-    pub dst_port_or_id: u16,
+    /// The transport-layer portion of the tuple.
+    pub transport: TransportTuple,
 }
 
 impl<I: IpExt> Tuple<I> {
-    fn new(
-        src_addr: I::Addr,
-        dst_addr: I::Addr,
-        src_port_or_id: u16,
-        dst_port_or_id: u16,
-        protocol: TransportProtocol,
-    ) -> Self {
-        Self { protocol, src_addr, dst_addr, src_port_or_id, dst_port_or_id }
+    fn new(src_addr: I::Addr, dst_addr: I::Addr, transport: TransportTuple) -> Self {
+        Self { src_addr, dst_addr, transport }
     }
 
     /// Returns the inverted version of the tuple.
     ///
-    /// This means the src and dst addresses are swapped. For TCP and UDP, the
-    /// ports are reversed, but for ICMP, where the ports stand in for other
-    /// information, things are more complicated.
+    /// This means the src and dst addresses are swapped as well as the ports
+    /// (for protocols like TCP and UDP that have ports) or ICMP direction.
     pub(crate) fn invert(self) -> Tuple<I> {
-        // TODO(https://fxbug.dev/328064082): Support tracking different ICMP
-        // request/response types.
         Self {
-            protocol: self.protocol,
             src_addr: self.dst_addr,
             dst_addr: self.src_addr,
-            src_port_or_id: self.dst_port_or_id,
-            dst_port_or_id: self.src_port_or_id,
+            transport: self.transport.invert(),
         }
     }
 }
 
 impl<I: IpExt> Inspectable for Tuple<I> {
     fn record<Inspector: netstack3_base::Inspector>(&self, inspector: &mut Inspector) {
-        inspector.record_debug("protocol", self.protocol);
+        inspector.record_str("protocol", self.transport.protocol_name());
         inspector.record_ip_addr("src_addr", self.src_addr);
         inspector.record_ip_addr("dst_addr", self.dst_addr);
-        inspector.record_usize("src_port_or_id", self.src_port_or_id);
-        inspector.record_usize("dst_port_or_id", self.dst_port_or_id);
+        inspector.record_usize("src_port_or_id", self.transport.src_port_or_id());
+        inspector.record_usize("dst_port_or_id", self.transport.dst_port_or_id());
     }
 }
 
@@ -603,6 +681,9 @@ enum ConnectionUpdateError {
     /// The packet was invalid. The caller may decide whether to drop this
     /// packet or not.
     InvalidPacket,
+
+    /// The packet was malformed and should not be tracked.
+    MalformedPacket,
 }
 
 /// An error returned from [`Table::get_connection_for_packet_and_update`].
@@ -809,7 +890,7 @@ impl<I: IpExt, E: Inspectable> Inspectable for ConnectionCommon<I, E> {
 enum ProtocolState {
     Tcp(tcp::Connection),
     Udp,
-    Other,
+    IcmpEcho,
 }
 
 impl ProtocolState {
@@ -819,14 +900,11 @@ impl ProtocolState {
         transport_data: &TransportPacketData,
     ) -> Result<ConnectionUpdateAction, ConnectionUpdateError> {
         match self {
-            ProtocolState::Tcp(tcp_conn) => {
-                let (segment, payload_len) = assert_matches!(
-                    transport_data,
-                    TransportPacketData::Tcp { segment, payload_len, .. } => (segment, payload_len)
-                );
-                tcp_conn.update(&segment, *payload_len, dir)
-            }
-            ProtocolState::Udp | ProtocolState::Other => Ok(ConnectionUpdateAction::NoAction),
+            ProtocolState::Tcp(tcp_conn) => match transport_data.unwrap_tcp_header_and_len() {
+                None => Err(ConnectionUpdateError::MalformedPacket),
+                Some((header, len)) => tcp_conn.update(&header, len, dir),
+            },
+            ProtocolState::Udp | ProtocolState::IcmpEcho => Ok(ConnectionUpdateAction::NoAction),
         }
     }
 }
@@ -903,11 +981,11 @@ impl<BT: FilterBindingsTypes> ConnectionState<BT> {
         let expiry_duration = match &self.protocol_state {
             ProtocolState::Tcp(tcp_conn) => tcp_conn.expiry_duration(self.establishment_lifecycle),
             ProtocolState::Udp => CONNECTION_EXPIRY_TIME_UDP,
-            // ICMP ends up here. The ICMP messages we track are simple
-            // request/response protocols, so we always expect to get a response
-            // quickly (within 2 RTT). Any followup messages (e.g. if making
-            // periodic ECHO requests) should reuse this existing connection.
-            ProtocolState::Other => CONNECTION_EXPIRY_OTHER,
+            // The ICMP messages we track are simple request/response
+            // protocols, so we always expect to get a response quickly (within
+            // 2 RTT). Any followup messages (e.g. if making periodic ECHO
+            // requests) should reuse this existing connection.
+            ProtocolState::IcmpEcho => CONNECTION_EXPIRY_OTHER,
         };
 
         duration >= expiry_duration
@@ -966,37 +1044,11 @@ impl<I: IpExt, E, BT: FilterBindingsTypes> ConnectionExclusive<I, E, BT> {
     }
 
     pub(crate) fn rewrite_reply_src_port_or_id(&mut self, port_or_id: u16) {
-        self.inner.reply_tuple.src_port_or_id = port_or_id;
-        match self.inner.reply_tuple.protocol {
-            TransportProtocol::Icmp => {
-                // ICMP uses a single ID and conntrack keeps track of it in both
-                // ID fields. This makes it easier to keep a single logic to
-                // flip the direction. Hence we need to update the rest of the
-                // tuple.
-                //
-                // TODO(https://fxbug.dev/328064082): Probably needs revisiting
-                // as part of better support for ICMP request/response.
-                self.inner.reply_tuple.dst_port_or_id = port_or_id;
-            }
-            TransportProtocol::Tcp | TransportProtocol::Udp | TransportProtocol::Other(_) => {}
-        }
+        self.inner.reply_tuple.transport.set_src_port_or_id(port_or_id);
     }
 
     pub(crate) fn rewrite_reply_dst_port_or_id(&mut self, port_or_id: u16) {
-        self.inner.reply_tuple.dst_port_or_id = port_or_id;
-        match self.inner.reply_tuple.protocol {
-            TransportProtocol::Icmp => {
-                // ICMP uses a single ID and conntrack keeps track of it in both
-                // ID fields. This makes it easier to keep a single logic to
-                // flip the direction. Hence we need to update the rest of the
-                // tuple.
-                //
-                // TODO(https://fxbug.dev/328064082): Probably needs revisiting
-                // as part of better support for ICMP request/response.
-                self.inner.reply_tuple.src_port_or_id = port_or_id;
-            }
-            TransportProtocol::Tcp | TransportProtocol::Udp | TransportProtocol::Other(_) => {}
-        }
+        self.inner.reply_tuple.transport.set_dst_port_or_id(port_or_id);
     }
 }
 
@@ -1018,6 +1070,23 @@ where
         let reply_tuple = tuple.clone().invert();
         let self_connected = reply_tuple == *tuple;
 
+        let protocol_state = match transport_data {
+            TransportPacketData::Tcp { header_and_payload_len: None, .. } => return None,
+            TransportPacketData::Tcp {
+                header_and_payload_len: Some((segment, payload_len)),
+                ..
+            } => ProtocolState::Tcp(tcp::Connection::new(segment, *payload_len, self_connected)?),
+            TransportPacketData::Udp { .. } => ProtocolState::Udp,
+            TransportPacketData::IcmpEcho { direction: IcmpMessageDirection::Request, .. } => {
+                ProtocolState::IcmpEcho
+            }
+            // Avoid creating a new conntrack entry on a reply. If this was in
+            // response to a previous request, then we'd have an entry for it.
+            TransportPacketData::IcmpEcho { direction: IcmpMessageDirection::Reply, .. } => {
+                return None;
+            }
+        };
+
         Some(Self {
             inner: ConnectionCommon {
                 original_tuple: tuple.clone(),
@@ -1027,27 +1096,7 @@ where
             state: ConnectionState {
                 last_packet_time: bindings_ctx.now(),
                 establishment_lifecycle: EstablishmentLifecycle::SeenOriginal,
-                protocol_state: match tuple.protocol {
-                    TransportProtocol::Tcp => {
-                        let (segment, payload_len) = match transport_data.tcp_segment_and_len() {
-                            Some(v) => v,
-                            // This should be impossible as PacketMetadata
-                            // ensures the Tuple and transport information
-                            // are the same protocol.
-                            None => unreachable!(
-                                "protocol was TCP, but didn't have TCP info: {transport_data:?}"
-                            ),
-                        };
-
-                        ProtocolState::Tcp(tcp::Connection::new(
-                            segment,
-                            payload_len,
-                            self_connected,
-                        )?)
-                    }
-                    TransportProtocol::Udp => ProtocolState::Udp,
-                    TransportProtocol::Icmp | TransportProtocol::Other(_) => ProtocolState::Other,
-                },
+                protocol_state,
             },
             do_not_insert: false,
         })
@@ -1064,66 +1113,6 @@ where
 pub struct ConnectionShared<I: IpExt, E, BT: FilterBindingsTypes> {
     inner: ConnectionCommon<I, E>,
     state: Mutex<ConnectionState<BT>>,
-}
-
-/// The IP-agnostic transport protocol of a packet.
-#[allow(missing_docs)]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, GenericOverIp)]
-#[generic_over_ip()]
-pub enum TransportProtocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Other(u8),
-}
-
-impl From<Ipv4Proto> for TransportProtocol {
-    fn from(value: Ipv4Proto) -> Self {
-        match value {
-            Ipv4Proto::Proto(IpProto::Tcp) => TransportProtocol::Tcp,
-            Ipv4Proto::Proto(IpProto::Udp) => TransportProtocol::Udp,
-            Ipv4Proto::Icmp => TransportProtocol::Icmp,
-            v => TransportProtocol::Other(v.into()),
-        }
-    }
-}
-
-impl From<Ipv6Proto> for TransportProtocol {
-    fn from(value: Ipv6Proto) -> Self {
-        match value {
-            Ipv6Proto::Proto(IpProto::Tcp) => TransportProtocol::Tcp,
-            Ipv6Proto::Proto(IpProto::Udp) => TransportProtocol::Udp,
-            Ipv6Proto::Icmpv6 => TransportProtocol::Icmp,
-            v => TransportProtocol::Other(v.into()),
-        }
-    }
-}
-
-impl From<IpProto> for TransportProtocol {
-    fn from(value: IpProto) -> Self {
-        match value {
-            IpProto::Tcp => TransportProtocol::Tcp,
-            IpProto::Udp => TransportProtocol::Udp,
-            v @ IpProto::Reserved => TransportProtocol::Other(v.into()),
-        }
-    }
-}
-
-impl Display for TransportProtocol {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            TransportProtocol::Tcp => write!(f, "TCP"),
-            TransportProtocol::Udp => write!(f, "UDP"),
-            TransportProtocol::Icmp => write!(f, "ICMP"),
-            TransportProtocol::Other(n) => write!(f, "Other({n})"),
-        }
-    }
-}
-
-impl Debug for TransportProtocol {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        Display::fmt(&self, f)
-    }
 }
 
 impl<I: IpExt, E, BT: FilterBindingsTypes> ConnectionShared<I, E, BT> {
@@ -1159,9 +1148,7 @@ pub trait CompatibleWith {
 }
 
 /// A struct containing relevant fields extracted from the IP and transport
-/// headers that means we only have to touch the incoming packet once. Also acts
-/// as a witness type that the tuple and transport data have the same transport
-/// protocol.
+/// headers that means we only have to touch the incoming packet once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PacketMetadata<I: IpExt> {
     Full { tuple: Tuple<I>, transport_data: TransportPacketData },
@@ -1172,38 +1159,18 @@ impl<I: IpExt> PacketMetadata<I> {
     pub(crate) fn new(
         src_addr: I::Addr,
         dst_addr: I::Addr,
-        protocol: TransportProtocol,
         transport_data: TransportPacketData,
     ) -> Self {
-        match protocol {
-            TransportProtocol::Tcp => {
-                assert_matches!(transport_data, TransportPacketData::Tcp { .. })
-            }
-            TransportProtocol::Udp | TransportProtocol::Icmp | TransportProtocol::Other(_) => {
-                assert_matches!(transport_data, TransportPacketData::Generic { .. })
-            }
-        }
-
-        Self::Full {
-            tuple: Tuple::new(
-                src_addr,
-                dst_addr,
-                transport_data.src_port(),
-                transport_data.dst_port(),
-                protocol,
-            ),
-            transport_data,
-        }
+        let transport = TransportTuple::from(&transport_data);
+        Self::Full { tuple: Tuple::new(src_addr, dst_addr, transport), transport_data }
     }
 
     pub(crate) fn new_from_icmp_error(
         src_addr: I::Addr,
         dst_addr: I::Addr,
-        src_port: u16,
-        dst_port: u16,
-        protocol: TransportProtocol,
+        transport: TransportTuple,
     ) -> Self {
-        Self::IcmpError(Tuple::new(src_addr, dst_addr, src_port, dst_port, protocol))
+        Self::IcmpError(Tuple::new(src_addr, dst_addr, transport))
     }
 
     pub(crate) fn tuple(&self) -> Tuple<I> {
@@ -1330,24 +1297,27 @@ mod tests {
     }
 
     #[ip_test(I)]
-    #[test_case(TransportProtocol::Udp)]
-    #[test_case(TransportProtocol::Tcp)]
-    fn tuple_invert_udp_tcp<I: IpExt + TestIpExt>(protocol: TransportProtocol) {
-        let orig_tuple = Tuple::<I> {
-            protocol: protocol,
-            src_addr: I::SRC_IP,
-            dst_addr: I::DST_IP,
-            src_port_or_id: I::SRC_PORT,
-            dst_port_or_id: I::DST_PORT,
-        };
+    #[test_case(
+        TransportTuple::Udp { src_port: 1000, dst_port: 2000 },
+        TransportTuple::Udp { src_port: 2000, dst_port: 1000 }
+    )]
+    #[test_case(
+        TransportTuple::Tcp { src_port: 1000, dst_port: 2000 },
+        TransportTuple::Tcp { src_port: 2000, dst_port: 1000 }
+    )]
+    #[test_case(
+        TransportTuple::IcmpEcho { id: 1000, direction: IcmpMessageDirection::Request },
+        TransportTuple::IcmpEcho { id: 1000, direction: IcmpMessageDirection::Reply }
+    )]
+    fn tuple_invert<I: IpExt + TestIpExt>(
+        orig_transport: TransportTuple,
+        expected_transport: TransportTuple,
+    ) {
+        let orig_tuple =
+            Tuple::<I> { src_addr: I::SRC_IP, dst_addr: I::DST_IP, transport: orig_transport };
 
-        let expected = Tuple::<I> {
-            protocol: protocol,
-            src_addr: I::DST_IP,
-            dst_addr: I::SRC_IP,
-            src_port_or_id: I::DST_PORT,
-            dst_port_or_id: I::SRC_PORT,
-        };
+        let expected =
+            Tuple::<I> { src_addr: I::DST_IP, dst_addr: I::SRC_IP, transport: expected_transport };
 
         let inverted = orig_tuple.invert();
 
@@ -1357,22 +1327,18 @@ mod tests {
     #[ip_test(I)]
     fn tuple_from_tcp_packet<I: IpExt + TestIpExt>() {
         let expected = Tuple::<I> {
-            protocol: TransportProtocol::Tcp,
             src_addr: I::SRC_IP,
             dst_addr: I::DST_IP,
-            src_port_or_id: I::SRC_PORT,
-            dst_port_or_id: I::DST_PORT,
+            transport: TransportTuple::Tcp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         };
 
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::SRC_PORT,
                 dst_port: I::DST_PORT,
-                segment: SegmentHeader::arbitrary_value(),
-                payload_len: 4,
+                header_and_payload_len: Some((SegmentHeader::arbitrary_value(), 4)),
             },
         );
 
@@ -1386,8 +1352,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
         let original_tuple = packet.tuple();
         let reply_tuple = packet.tuple().invert();
@@ -1407,8 +1372,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
         let original_tuple = packet.tuple();
         let reply_tuple = original_tuple.clone().invert();
@@ -1437,8 +1401,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
         let original_tuple = packet.tuple();
         let reply_tuple = original_tuple.clone().invert();
@@ -1466,14 +1429,13 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
         let original_tuple = packet.tuple();
         let reply_tuple = original_tuple.clone().invert();
 
         let mut other_tuple = original_tuple.clone();
-        other_tuple.src_port_or_id += 1;
+        other_tuple.transport.set_src_port_or_id(I::SRC_PORT + 1);
 
         let connection: ConnectionExclusive<_, (), _> =
             ConnectionExclusive::from_deconstructed_packet(&bindings_ctx, &packet).unwrap();
@@ -1497,15 +1459,13 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let reply_packet = PacketMetadata::<I>::new(
             I::DST_IP,
             I::SRC_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
+            TransportPacketData::Udp { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
         );
 
         let connection =
@@ -1548,16 +1508,13 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let reply_packet = PacketMetadata::<I>::new_from_icmp_error(
             I::DST_IP,
             I::SRC_IP,
-            I::DST_PORT,
-            I::SRC_PORT,
-            TransportProtocol::Udp,
+            TransportTuple::Udp { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
         );
 
         let connection =
@@ -1597,9 +1554,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new_from_icmp_error(
             I::DST_IP,
             I::SRC_IP,
-            I::DST_PORT,
-            I::SRC_PORT,
-            TransportProtocol::Udp,
+            TransportTuple::Udp { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
         );
 
         // Because `packet` is an ICMP error, we shouldn't create and return a
@@ -1622,15 +1577,13 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let reply_packet = PacketMetadata::<I>::new(
             I::DST_IP,
             I::SRC_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
+            TransportPacketData::Udp { src_port: I::DST_PORT, dst_port: I::SRC_PORT },
         );
 
         let original_tuple = packet.tuple();
@@ -1702,15 +1655,13 @@ mod tests {
         let original_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let nated_original_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT + 1, dst_port: I::DST_PORT + 1 },
+            TransportPacketData::Udp { src_port: I::SRC_PORT + 1, dst_port: I::DST_PORT + 1 },
         );
 
         let conn1 = Connection::Exclusive(
@@ -1762,8 +1713,7 @@ mod tests {
         let original_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         // Simulate a race where two packets in the same flow both end up
@@ -1830,21 +1780,18 @@ mod tests {
         let first_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let second_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT + 1, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT + 1, dst_port: I::DST_PORT },
         );
         let second_packet_reply = PacketMetadata::<I>::new(
             I::DST_IP,
             I::SRC_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::DST_PORT, dst_port: I::SRC_PORT + 1 },
+            TransportPacketData::Udp { src_port: I::DST_PORT, dst_port: I::SRC_PORT + 1 },
         );
 
         let first_tuple = first_packet.tuple();
@@ -2309,8 +2256,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::SRC_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::SRC_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::SRC_PORT },
         );
 
         let tuple = packet.tuple();
@@ -2352,35 +2298,37 @@ mod tests {
         let original_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::SRC_PORT,
                 dst_port: I::DST_PORT,
-                segment: SegmentHeader {
-                    seq: SeqNum::new(1024),
-                    wnd: UnscaledWindowSize::from(16u16),
-                    control: Some(Control::SYN),
-                    ..Default::default()
-                },
-                payload_len: 0,
+                header_and_payload_len: Some((
+                    SegmentHeader {
+                        seq: SeqNum::new(1024),
+                        wnd: UnscaledWindowSize::from(16u16),
+                        control: Some(Control::SYN),
+                        ..Default::default()
+                    },
+                    0,
+                )),
             },
         );
 
         let reply_packet = PacketMetadata::<I>::new(
             I::DST_IP,
             I::SRC_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::DST_PORT,
                 dst_port: I::SRC_PORT,
-                segment: SegmentHeader {
-                    seq: SeqNum::new(0),
-                    ack: Some(SeqNum::new(1025)),
-                    wnd: UnscaledWindowSize::from(16u16),
-                    control: Some(Control::RST),
-                    ..Default::default()
-                },
-                payload_len: 0,
+                header_and_payload_len: Some((
+                    SegmentHeader {
+                        seq: SeqNum::new(0),
+                        ack: Some(SeqNum::new(1025)),
+                        wnd: UnscaledWindowSize::from(16u16),
+                        control: Some(Control::RST),
+                        ..Default::default()
+                    },
+                    0,
+                )),
             },
         );
 
@@ -2427,8 +2375,7 @@ mod tests {
         let packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Udp,
-            TransportPacketData::Generic { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
+            TransportPacketData::Udp { src_port: I::SRC_PORT, dst_port: I::DST_PORT },
         );
 
         let tuple = packet.tuple();
@@ -2460,17 +2407,18 @@ mod tests {
         let syn_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::SRC_PORT,
                 dst_port: I::DST_PORT,
-                segment: SegmentHeader {
-                    seq: SeqNum::new(1000),
-                    wnd: UnscaledWindowSize::from(1000u16),
-                    control: Some(Control::SYN),
-                    ..Default::default()
-                },
-                payload_len: 0,
+                header_and_payload_len: Some((
+                    SegmentHeader {
+                        seq: SeqNum::new(1000),
+                        wnd: UnscaledWindowSize::from(1000u16),
+                        control: Some(Control::SYN),
+                        ..Default::default()
+                    },
+                    0,
+                )),
             },
         );
 
@@ -2490,18 +2438,19 @@ mod tests {
         let syn_ack_packet = PacketMetadata::<I>::new(
             I::DST_IP,
             I::SRC_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::DST_PORT,
                 dst_port: I::SRC_PORT,
-                segment: SegmentHeader {
-                    seq: SeqNum::new(2000),
-                    ack: Some(SeqNum::new(1001)),
-                    wnd: UnscaledWindowSize::from(1000u16),
-                    control: Some(Control::SYN),
-                    ..Default::default()
-                },
-                payload_len: 0,
+                header_and_payload_len: Some((
+                    SegmentHeader {
+                        seq: SeqNum::new(2000),
+                        ack: Some(SeqNum::new(1001)),
+                        wnd: UnscaledWindowSize::from(1000u16),
+                        control: Some(Control::SYN),
+                        ..Default::default()
+                    },
+                    0,
+                )),
             },
         );
 
@@ -2533,17 +2482,18 @@ mod tests {
         let invalid_ack_packet = PacketMetadata::<I>::new(
             I::SRC_IP,
             I::DST_IP,
-            TransportProtocol::Tcp,
             TransportPacketData::Tcp {
                 src_port: I::SRC_PORT,
                 dst_port: I::DST_PORT,
-                segment: SegmentHeader {
-                    seq: SeqNum::new(1001),
-                    ack: Some(SeqNum::new(2002)),
-                    wnd: UnscaledWindowSize::from(1000u16),
-                    ..Default::default()
-                },
-                payload_len: 0,
+                header_and_payload_len: Some((
+                    SegmentHeader {
+                        seq: SeqNum::new(1001),
+                        ack: Some(SeqNum::new(2002)),
+                        wnd: UnscaledWindowSize::from(1000u16),
+                        ..Default::default()
+                    },
+                    0,
+                )),
             },
         );
 
@@ -2560,5 +2510,128 @@ mod tests {
                 .establishment_lifecycle,
             EstablishmentLifecycle::SeenReply
         );
+
+        // A TCP packet with a malformed header (represented as
+        // `head_and_payload_len: None` transport data) should be ignored by
+        // conntrack (`Ok(None)`) without advancing the connection lifecycle.
+        let malformed_packet = PacketMetadata::<I>::new(
+            I::SRC_IP,
+            I::DST_IP,
+            TransportPacketData::Tcp {
+                src_port: I::SRC_PORT,
+                dst_port: I::DST_PORT,
+                header_and_payload_len: None,
+            },
+        );
+        assert_matches!(
+            table.get_connection_for_packet_and_update(&bindings_ctx, malformed_packet),
+            Ok(None)
+        );
+        assert_matches!(
+            table
+                .get_connection(&syn_packet.tuple())
+                .expect("should exist")
+                .state()
+                .establishment_lifecycle,
+            EstablishmentLifecycle::SeenReply
+        );
+
+        let malformed_new_conn_packet = PacketMetadata::<I>::new(
+            I::SRC_IP,
+            I::DST_IP,
+            TransportPacketData::Tcp {
+                src_port: I::SRC_PORT.wrapping_add(1),
+                dst_port: I::DST_PORT,
+                header_and_payload_len: None,
+            },
+        );
+        assert_matches!(
+            table.get_connection_for_packet_and_update(&bindings_ctx, malformed_new_conn_packet),
+            Ok(None)
+        );
+    }
+
+    #[ip_test(I)]
+    fn icmp_echo<I: TestIpExt>() {
+        let mut bindings_ctx = FakeBindingsCtx::new();
+        let table = Table::<_, (), _>::new::<IntoCoreTimerCtx>(&mut bindings_ctx);
+
+        let echo_packet = |src, dst, direction| {
+            PacketMetadata::<I>::new(
+                src,
+                dst,
+                TransportPacketData::IcmpEcho { id: I::SRC_PORT, direction },
+            )
+        };
+        let request_a_to_b = echo_packet(I::SRC_IP, I::DST_IP, IcmpMessageDirection::Request);
+        let reply_b_to_a = echo_packet(I::DST_IP, I::SRC_IP, IcmpMessageDirection::Reply);
+
+        // Requests can create new entries, but replies do not.
+        assert_matches!(
+            table.get_connection_for_packet_and_update(&bindings_ctx, reply_b_to_a.clone()),
+            Ok(None)
+        );
+
+        let (conn_a, dir_a) = table
+            .get_connection_for_packet_and_update(&bindings_ctx, request_a_to_b)
+            .expect("packet should be valid")
+            .expect("connection should be created for echo request");
+        assert_eq!(dir_a, ConnectionDirection::Original);
+        let conn_a = assert_matches!(
+            table.finalize_connection(&mut bindings_ctx, conn_a),
+            Ok((true, Some(conn))) => conn
+        );
+
+        let (matched_a, dir) = table
+            .get_connection_for_packet_and_update(&bindings_ctx, reply_b_to_a)
+            .expect("packet should be valid")
+            .expect("connection should be present for echo reply");
+        assert_eq!(dir, ConnectionDirection::Reply);
+        let matched_a = assert_matches!(matched_a, Connection::Shared(conn) => conn);
+        assert!(Arc::ptr_eq(&conn_a, &matched_a));
+    }
+
+    #[ip_test(I)]
+    fn icmp_echo_self<I: TestIpExt>() {
+        let mut bindings_ctx = FakeBindingsCtx::new();
+        let table = Table::<_, (), _>::new::<IntoCoreTimerCtx>(&mut bindings_ctx);
+
+        // Self-pings aren't symmetric, unlike self-connected TCP and UDP
+        // flows, because they're request/response.
+        let self_request = PacketMetadata::<I>::new(
+            I::SRC_IP,
+            I::SRC_IP,
+            TransportPacketData::IcmpEcho {
+                id: I::SRC_PORT,
+                direction: IcmpMessageDirection::Request,
+            },
+        );
+        let self_reply = PacketMetadata::<I>::new(
+            I::SRC_IP,
+            I::SRC_IP,
+            TransportPacketData::IcmpEcho {
+                id: I::SRC_PORT,
+                direction: IcmpMessageDirection::Reply,
+            },
+        );
+
+        let (conn_self, dir) = table
+            .get_connection_for_packet_and_update(&bindings_ctx, self_request)
+            .expect("packet should be valid")
+            .expect("connection should be created");
+        assert_eq!(dir, ConnectionDirection::Original);
+        assert_ne!(conn_self.original_tuple(), conn_self.reply_tuple());
+        let conn_self = assert_matches!(
+            table.finalize_connection(&mut bindings_ctx, conn_self),
+            Ok((true, Some(conn))) => conn
+        );
+
+        let (reply_conn, dir) = table
+            .get_connection_for_packet_and_update(&bindings_ctx, self_reply)
+            .expect("packet should be valid")
+            .expect("connection should be present");
+        assert_eq!(dir, ConnectionDirection::Reply);
+        let reply_conn = assert_matches!(reply_conn, Connection::Shared(conn) => conn);
+        assert!(Arc::ptr_eq(&conn_self, &reply_conn));
     }
 }

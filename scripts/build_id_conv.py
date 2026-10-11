@@ -98,7 +98,9 @@ def fix_path(path: str, rel_to: str | None) -> str:
     return os.path.relpath(path, rel_to)
 
 
-def write_ids_txt(ids_path: str, rel_to: str, mods: dict[str, str]) -> None:
+def write_ids_txt(
+    ids_path: str, rel_to: str | None, mods: dict[str, str]
+) -> None:
     assert rel_to is None or os.path.isabs(rel_to)
     with open(ids_path, "w") as f:
         for build_id, path in sorted(mods.items()):

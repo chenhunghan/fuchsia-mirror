@@ -4,7 +4,7 @@
 
 use errors::{FfxError, IntoExitCode};
 use ffx_config::{ConfigLevel, ConfigSource};
-use fidl_fuchsia_developer_ffx::{OpenTargetError, TargetConnectionError, TunnelError};
+use fidl_fuchsia_developer_ffx::{OpenTargetError, TargetConnectionError};
 use traceable_error::TraceableError;
 
 /// Describes the source of a target specifier.
@@ -171,13 +171,6 @@ pub enum FfxTargetError {
 
     #[cfg(not(target_os = "fuchsia"))]
     #[error("{}", match .err {
-            TunnelError::CouldNotListen => "Could not establish a host-side TCP listen socket".to_string(),
-            TunnelError::TargetConnectFailed => "Couldn not connect to target to establish a tunnel".to_string(),
-        })]
-    TunnelError { err: TunnelError, target: Option<String> },
-
-    #[cfg(not(target_os = "fuchsia"))]
-    #[error("{}", match .err {
             TargetConnectionError::PermissionDenied => format!("Could not establish SSH connection to the target {}: Permission denied.", target_string(.target)),
             TargetConnectionError::ConnectionRefused => format!("Could not establish SSH connection to the target {}: Connection refused.", target_string(.target)),
             TargetConnectionError::ConnectionClosedByRemoteHost => format!("Could not establish SSH connection to the target {}: Connection closed by remote host.", target_string(.target)),
@@ -221,9 +214,6 @@ impl IntoExitCode for FfxTargetError {
             FfxTargetError::OpenTargetError { err, .. } => {
                 i32::try_from(err.into_primitive()).unwrap_or(1)
             }
-            FfxTargetError::TunnelError { err, .. } => {
-                i32::try_from(err.into_primitive()).unwrap_or(1)
-            }
             FfxTargetError::TargetConnectionError { err, .. } => {
                 i32::try_from(err.into_primitive()).unwrap_or(1)
             }
@@ -238,9 +228,6 @@ impl Into<FfxError> for FfxTargetError {
                 target: target.clone(),
                 exit_code: self.exit_code(),
             },
-            FfxTargetError::TunnelError { ref target, .. } => {
-                FfxError::TunnelError { err: Box::new(self.clone()), target: target.clone() }
-            }
             FfxTargetError::TargetConnectionError { ref logs, ref target, .. } => {
                 FfxError::TargetConnectionError {
                     err: Box::new(self.clone()),
@@ -260,7 +247,6 @@ impl TraceableError for FfxTargetError {
     fn layer_code(&self) -> String {
         let variant_str = match self {
             Self::OpenTargetError { err, .. } => format!("OpenTargetError({:?})", err),
-            Self::TunnelError { err, .. } => format!("TunnelError({:?})", err),
             Self::TargetConnectionError { err, .. } => format!("TargetConnectionError({:?})", err),
         };
         format!("target_errors::FfxTargetError::{}", variant_str)
@@ -416,13 +402,6 @@ mod tests {
         assert_eq!(
             open_err.layer_code(),
             "target_errors::FfxTargetError::OpenTargetError(TargetNotFound)"
-        );
-
-        let tunnel_err =
-            FfxTargetError::TunnelError { err: TunnelError::CouldNotListen, target: None };
-        assert_eq!(
-            tunnel_err.layer_code(),
-            "target_errors::FfxTargetError::TunnelError(CouldNotListen)"
         );
     }
 }

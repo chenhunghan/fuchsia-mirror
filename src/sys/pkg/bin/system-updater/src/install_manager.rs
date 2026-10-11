@@ -89,7 +89,8 @@ async fn run<N, U, E>(
 
         // Now we can actually start the task that manages the update attempt.
         let update_url = &config.update_url.clone();
-        let should_write_recovery = config.should_write_recovery;
+        let should_write_recovery = config.options.should_write_recovery;
+        let manifest_range = config.options.manifest_range;
         let (cancel_sender, cancel_receiver) = oneshot::channel();
         let (attempt_id, attempt_stream) =
             updater.update(config, env, reboot_controller, cancel_receiver).await;
@@ -148,6 +149,7 @@ async fn run<N, U, E>(
                         &attempt_id,
                         update_url,
                         should_write_recovery,
+                        manifest_range,
                         &mut suspend_state,
                         suspend_deadline,
                         &mut cancel_sender,
@@ -229,6 +231,7 @@ async fn handle_active_control_request<N>(
     attempt_id: &str,
     update_url: &http::Uri,
     should_write_recovery: bool,
+    manifest_range: Option<fidl_fuchsia_update_installer_ext::options::Range>,
     suspend_state: &mut SuspendState,
     suspend_deadline: fasync::BootInstant,
     cancel_sender: &mut Option<oneshot::Sender<()>>,
@@ -250,18 +253,19 @@ async fn handle_active_control_request<N>(
             // Note: We can only attach a reboot controller during the FIRST start request.
             // Any subsequent request with a reboot controller should fail.
             if reboot_controller.is_none()
-                && config.allow_attach_to_existing_attempt
+                && config.options.allow_attach_to_existing_attempt
                 && &config.update_url == update_url
-                && config.should_write_recovery == should_write_recovery
+                && config.options.should_write_recovery == should_write_recovery
+                && config.options.manifest_range == manifest_range
             {
                 if let Err(e) = monitor_queue.add_client(monitor).await {
                     warn!("error adding client to monitor queue: {:#}", anyhow!(e));
                 }
                 let _ = responder.send(Ok(attempt_id.to_string()));
+                suspend_state.resume();
             } else {
                 let _ = responder.send(Err(UpdateNotStartedReason::AlreadyInProgress));
             }
-            suspend_state.resume();
         }
         ControlRequest::Monitor(MonitorRequestData { attempt_id, monitor, responder }) => {
             // If an attempt ID is provided, ensure it matches the current attempt.
@@ -305,18 +309,21 @@ async fn handle_active_control_request<N>(
                 let _ = responder.send(Err(CancelError::AttemptIdMismatch));
                 return;
             }
+            if *num_cancel_requests >= MAX_NUM_CANCEL_REQUESTS {
+                let _ = responder.send(Err(CancelError::CancelLimitExceeded));
+                return;
+            }
 
             let response = match cancel_sender.take() {
                 Some(cancel_sender) => {
-                    if *num_cancel_requests >= MAX_NUM_CANCEL_REQUESTS {
-                        let _ = responder.send(Err(CancelError::CancelLimitExceeded));
-                        return;
-                    }
                     *num_cancel_requests += 1;
                     cancel_sender.send(()).map_err(|()| CancelError::UpdateCannotBeCanceled)
                 }
                 None => Ok(()),
             };
+            if response.is_ok() {
+                suspend_state.resume();
+            }
             let _ = responder.send(response);
         }
     }
@@ -433,15 +440,15 @@ impl<N: Notify> ControlRequest<N> {
         match self {
             Self::Start(data) => {
                 node.record_string("request", "start");
-                node.record_string("initiator", format!("{:?}", data.config.initiator));
+                node.record_string("initiator", format!("{:?}", data.config.options.initiator));
                 node.record_string("update_url", data.config.update_url.to_string());
                 node.record_string(
                     "should_write_recovery",
-                    format!("{:?}", data.config.should_write_recovery),
+                    format!("{:?}", data.config.options.should_write_recovery),
                 );
                 node.record_string(
                     "allow_attach_to_existing_attempt",
-                    format!("{:?}", data.config.allow_attach_to_existing_attempt),
+                    format!("{:?}", data.config.options.allow_attach_to_existing_attempt),
                 );
             }
             Self::Monitor(data) => {
@@ -970,6 +977,19 @@ mod tests {
         let mut recv_fut = state_receiver.next();
         assert_eq!(exec.run_until_stalled(&mut recv_fut), Poll::Pending);
 
+        // A rejected start_update request should not resume the suspended update.
+        let () = run_fut(&mut exec, async {
+            let (notifier2, _state_receiver2) = FakeStateNotifier::new_callback_and_receiver();
+            assert_eq!(
+                install_manager_ch
+                    .start_update(ConfigBuilder::new().build().unwrap(), notifier2, None)
+                    .await,
+                Ok(Err(UpdateNotStartedReason::AlreadyInProgress))
+            );
+        });
+        assert_eq!(exec.run_until_stalled(&mut send_fut), Poll::Pending);
+        assert_eq!(exec.run_until_stalled(&mut recv_fut), Poll::Pending);
+
         assert_eq!(
             exec.wake_next_boot_timer().unwrap() - exec.boot_now(),
             MAX_SUSPEND_DURATION.into()
@@ -997,9 +1017,8 @@ mod tests {
         ) -> (String, Self::UpdateStream) {
             let stream = async_generator::generate(move |mut co| async move {
                 co.yield_(State::Prepare).await;
-                if let Ok(()) = cancel_receiver.await {
-                    co.yield_(State::Canceled).await;
-                }
+                let () = cancel_receiver.await.expect("cancel sender should not be dropped");
+                co.yield_(State::Canceled).await;
             })
             .into_yielded();
             ("my-attempt".to_string(), Box::pin(stream))
@@ -1094,6 +1113,7 @@ mod tests {
                 Ok(Ok("my-attempt".to_string()))
             );
             assert_eq!(state_receiver.next().await, Some(State::Prepare));
+            assert_eq!(install_manager_ch.suspend_update(None).await, Ok(Ok(())));
             assert_eq!(install_manager_ch.cancel_update(None).await, Ok(Ok(())));
             assert_eq!(state_receiver.next().await, Some(State::Canceled));
         }
@@ -1106,6 +1126,11 @@ mod tests {
             Ok(Ok("my-attempt".to_string()))
         );
         assert_eq!(state_receiver.next().await, Some(State::Prepare));
+        assert_eq!(
+            install_manager_ch.cancel_update(None).await,
+            Ok(Err(CancelError::CancelLimitExceeded))
+        );
+        // The update should still be running and cancel_sender should not have been dropped.
         assert_eq!(
             install_manager_ch.cancel_update(None).await,
             Ok(Err(CancelError::CancelLimitExceeded))
@@ -1186,6 +1211,27 @@ mod tests {
                         .build()
                         .unwrap(),
                     notifier3,
+                    None
+                )
+                .await,
+            Ok(Err(UpdateNotStartedReason::AlreadyInProgress))
+        );
+
+        // Fails because incompatible configs (i.e. manifest_range is different).
+        let (notifier_range, _state_receiver_range) =
+            FakeStateNotifier::new_callback_and_receiver();
+        assert_eq!(
+            install_manager_ch
+                .start_update(
+                    ConfigBuilder::new()
+                        .allow_attach_to_existing_attempt(true)
+                        .manifest_range(Some(fidl_fuchsia_update_installer_ext::options::Range {
+                            offset: 10,
+                            size: 20,
+                        }))
+                        .build()
+                        .unwrap(),
+                    notifier_range,
                     None
                 )
                 .await,
@@ -1296,7 +1342,7 @@ mod tests {
                             already_in_progress_attempt_id: "None",
                             boot_ns: AnyProperty,
                             allow_attach_to_existing_attempt: "false",
-                            initiator: "Manual",
+                            initiator: "User",
                             should_write_recovery: "true",
                             update_url: "fuchsia-pkg://fuchsia.test/update",
                         },

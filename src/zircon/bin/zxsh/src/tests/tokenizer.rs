@@ -75,8 +75,17 @@ fn test_tokenizer_words_quotes_escapes() {
         Ok(vec![word(&[ql("hello "), qv("world"), ql(" "), qc("cmd")])])
     );
 
-    // Empty double quotes
-    assert_eq!(tokenize(b"\"\""), Ok(vec![word(&[])]));
+    // Empty quotes and composite empty-quote words
+    assert_eq!(tokenize(b"\"\" ''"), Ok(vec![qw(""), qw("")]));
+    assert_eq!(
+        tokenize(b"\"\"$unset ''$unset $unset\"\" $unset''"),
+        Ok(vec![
+            word(&[ql(""), v("unset")]),
+            word(&[ql(""), v("unset")]),
+            word(&[v("unset"), ql("")]),
+            word(&[v("unset"), ql("")]),
+        ])
+    );
 }
 
 #[test]
@@ -106,7 +115,7 @@ fn test_tokenizer_operators() {
 #[test]
 fn test_tokenizer_redirects() {
     assert_eq!(
-        tokenize(b"cmd >file <file2 >>append 2>&1 2<&-"),
+        tokenize(b"cmd >file <file2 >>append 2>&1 2<&- <>rw 3<>rw2"),
         Ok(vec![
             w("cmd"),
             Token::RedirectOut(None),
@@ -119,6 +128,10 @@ fn test_tokenizer_redirects() {
             w("1"),
             Token::RedirectDupIn(Some(2)),
             w("-"),
+            Token::RedirectReadWrite(None),
+            w("rw"),
+            Token::RedirectReadWrite(Some(3)),
+            w("rw2"),
         ])
     );
 }
@@ -209,6 +222,24 @@ fn test_tokenizer_redirect_with_fd() {
             w("2"),
         ])
     );
+
+    // Valid i32::MAX fd prefix vs overflowing digit sequences (i32::MAX + 1 and large numbers)
+    assert_eq!(
+        tokenize(b"2147483647>out 2147483648>out 999999999999>out 999999999999<in"),
+        Ok(vec![
+            Token::RedirectOut(Some(i32::MAX)),
+            w("out"),
+            w("2147483648"),
+            Token::RedirectOut(None),
+            w("out"),
+            w("999999999999"),
+            Token::RedirectOut(None),
+            w("out"),
+            w("999999999999"),
+            Token::RedirectIn(None),
+            w("in"),
+        ])
+    );
 }
 
 #[test]
@@ -253,7 +284,7 @@ fn test_tokenizer_double_quote_patterns() {
     assert_eq!(
         tokenize(b"\"\\\n\" \"\\a\" \"\\\"\" \"prefix`echo`\" \"prefix$((1+1))\" \"prefix${var}\" \"$%\""),
         Ok(vec![
-            word(&[]),
+            qw(""),
             qw("\\a"),
             qw("\""),
             word(&[ql("prefix"), qc("echo")]),
@@ -369,4 +400,164 @@ fn test_tokenizer_exhaustive_coverage() {
     );
     assert_eq!(tokenize(b"lone $"), Ok(vec![w("lone"), w("$")]));
     assert_eq!(tokenize(b"word\\\nmore"), Ok(vec![w("wordmore")]));
+}
+
+#[test]
+fn test_tokenizer_nested_and_quoted_delimiters() {
+    // 1. ${...} containing quoted, escaped, or nested '}'
+    assert_eq!(
+        tokenize(b"${x:-\"}\"} ${x:-'}'} ${x:-\\}} \"${x:-\"}\"}\" ${x:-${y:-inner}} ${x:-$(printf \"}\")}"),
+        Ok(vec![
+            var("x:-\"}\""),
+            var("x:-'}'"),
+            var("x:-\\}"),
+            word(&[qv("x:-\"}\"")]),
+            var("x:-${y:-inner}"),
+            var("x:-$(printf \"}\")"),
+        ])
+    );
+    // Pattern removal with single quotes inside double quotes, and apostrophe in default inside double quotes
+    assert_eq!(
+        tokenize(b"\"${x#'}'}\" \"${1#'}'}\" \"${?#'}'}\" \"${x:-it's}\" ${x:-`echo \"}\"`} ${x:-$((1+2))}"),
+        Ok(vec![
+            word(&[qv("x#'}'")]) ,
+            word(&[qv("1#'}'")]) ,
+            word(&[qv("?#'}'")]) ,
+            word(&[qv("x:-it's")]),
+            var("x:-`echo \"}\"`"),
+            var("x:-$((1+2))"),
+        ])
+    );
+
+    // 2. $(...) containing quoted/escaped ')', comments, and `case ... esac`
+    assert_eq!(
+        tokenize(b"$(printf \")\") $(printf ')') $(printf \\)) \"$(printf \")\")\""),
+        Ok(vec![
+            cmd("printf \")\""),
+            cmd("printf ')'"),
+            cmd("printf \\)"),
+            word(&[qc("printf \")\"")]),
+        ])
+    );
+    assert_eq!(tokenize(b"$(printf ok # comment )\n)"), Ok(vec![cmd("printf ok # comment )\n")]));
+    assert_eq!(
+        tokenize(b"$(case x in x) printf matched ;; esac) $(case x in (x) printf matched ;; esac)"),
+        Ok(vec![
+            cmd("case x in x) printf matched ;; esac"),
+            cmd("case x in (x) printf matched ;; esac"),
+        ])
+    );
+    assert_eq!(
+        tokenize(
+            b"$(FOO=\"a)\" B=1 if ! true; then case x in a) (echo sub) ;; b) echo esac; esac; fi)"
+        ),
+        Ok(vec![cmd(
+            "FOO=\"a)\" B=1 if ! true; then case x in a) (echo sub) ;; b) echo esac; esac; fi"
+        )])
+    );
+    assert_eq!(
+        tokenize(b"$(case x in esac) $(echo `printf \")\"` ${x:-\")\"} $((1+1)) >out <in)"),
+        Ok(vec![cmd("case x in esac"), cmd("echo `printf \")\"` ${x:-\")\"} $((1+1)) >out <in"),])
+    );
+
+    // 3. $((...)) with stray ')', quotes, escapes, and nested expansions
+    assert_eq!(
+        tokenize(b"$(( 1 ) )) $(( $(echo \")\") + '1' + \"2\" + `echo 3` + \\4 ))"),
+        Ok(vec![arith(" 1 ) "), arith(" $(echo \")\") + '1' + \"2\" + `echo 3` + \\4 "),])
+    );
+
+    // 4. Double-quoted backtick command substitution with escaped `\"` and escaped `\`
+    assert_eq!(
+        tokenize(b"\"hello `printf \\\"world\\\"`\" \"\\`literal\\`\""),
+        Ok(vec![word(&[ql("hello "), qc("printf \"world\"")]), qw("`literal`"),])
+    );
+
+    // Double-quoted segments inside ${...} and $(...) with backslash escapes, backticks, and $-expansions
+    assert_eq!(
+        tokenize(
+            b"${x:-\"\\\"}\"} $(printf \"\\\")\") ${x:-\"`echo \"}\" \\` `\"} $(printf \"`echo \")\"`\") ${x:-\"${y:-\"}\"}\"} $(printf \"$(echo \")\")\") ${x:-\"$((1+1)) $y $\"}"
+        ),
+        Ok(vec![
+            var("x:-\"\\\"}\""),
+            cmd("printf \"\\\")\""),
+            var("x:-\"`echo \"}\" \\` `\""),
+            cmd("printf \"`echo \")\"`\""),
+            var("x:-\"${y:-\"}\"}\""),
+            cmd("printf \"$(echo \")\")\""),
+            var("x:-\"$((1+1)) $y $\""),
+        ])
+    );
+
+    // 5. Unclosed nested quotes/expansions inside ${...}, $(...), $((...))
+    assert_eq!(tokenize(b"${x:-'unclosed}"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(tokenize(b"${x:-\"unclosed}"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(tokenize(b"${x:-\"\\"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(
+        tokenize(b"${x:-\"`unclosed\"}"),
+        Err(ParseError::Incomplete(IncompleteReason::Brace))
+    );
+    assert_eq!(
+        tokenize(b"${x:-\"${unclosed\"}"),
+        Err(ParseError::Incomplete(IncompleteReason::Brace))
+    );
+    assert_eq!(
+        tokenize(b"${x:-\"$(unclosed\"}"),
+        Err(ParseError::Incomplete(IncompleteReason::Brace))
+    );
+    assert_eq!(
+        tokenize(b"${x:-\"$((unclosed\"}"),
+        Err(ParseError::Incomplete(IncompleteReason::Brace))
+    );
+    assert_eq!(tokenize(b"${x:-$"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(tokenize(b"${x:-`unclosed}"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(tokenize(b"${x:-$(unclosed}"), Err(ParseError::Incomplete(IncompleteReason::Brace)));
+    assert_eq!(
+        tokenize(b"$(echo 'unclosed)"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(
+        tokenize(b"$(echo \"unclosed)"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(tokenize(b"$(echo \"\\"), Err(ParseError::Incomplete(IncompleteReason::Paren)));
+    assert_eq!(
+        tokenize(b"$(echo \"`unclosed\")"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(
+        tokenize(b"$(echo \"${unclosed\")"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(
+        tokenize(b"$(echo `unclosed)"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(
+        tokenize(b"$(echo ${unclosed)"),
+        Err(ParseError::Incomplete(IncompleteReason::Paren))
+    );
+    assert_eq!(
+        tokenize(b"$(( 'unclosed ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
+    assert_eq!(
+        tokenize(b"$(( \"unclosed ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
+    assert_eq!(
+        tokenize(b"$(( \"`unclosed\" ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
+    assert_eq!(
+        tokenize(b"$(( \"${unclosed\" ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
+    assert_eq!(
+        tokenize(b"$(( `unclosed ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
+    assert_eq!(
+        tokenize(b"$(( $(unclosed ))"),
+        Err(ParseError::Incomplete(IncompleteReason::Arithmetic))
+    );
 }

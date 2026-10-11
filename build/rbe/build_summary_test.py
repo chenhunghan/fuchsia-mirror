@@ -3,6 +3,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import contextlib
+import dataclasses
+import io
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -1204,6 +1208,67 @@ class MainArgsParsingTest(unittest.TestCase):
             ["--format=json", log_dir]
         )
         self.assertEqual(args.format, "json")
+
+
+@dataclasses.dataclass(frozen=True)
+class _SummaryTestCase:
+    name: str
+    file_content: str | None = None
+    expected_result: build_summary.JSONObject | None = None
+    expected_warning: str | None = None
+
+
+class SummarizeRbeMetricsFromLogdirTests(unittest.TestCase):
+    def test_summarize_rbe_metrics_from_logdir(self) -> None:
+        cases = [
+            _SummaryTestCase(
+                name="missing_file",
+            ),
+            _SummaryTestCase(
+                name="valid_metrics_file",
+                file_content='stats: < name: "CompletionStatus" counts_by_value: < name: "STATUS_CACHE_HIT" count: 5 > >\n',
+                expected_result={
+                    "execution_statuses": {"all": {"STATUS_CACHE_HIT": 5}},
+                    "data_sizes_bytes": {},
+                },
+            ),
+            _SummaryTestCase(
+                name="parse_error",
+                file_content="invalid: < unclosed text proto\n",
+                expected_warning="Warning: Failed to parse text proto",
+            ),
+            _SummaryTestCase(
+                name="other_metrics_only",
+                file_content='stats: < name: "OtherStats" counts_by_value: < name: "FOO" count: 1 > >\n',
+                expected_result={
+                    "execution_statuses": {},
+                    "data_sizes_bytes": {},
+                },
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            log_dir = Path(td)
+            metrics_file = log_dir / build_summary.RBE_METRICS_TXT
+            for case in cases:
+                with self.subTest(name=case.name):
+                    if case.file_content is not None:
+                        metrics_file.write_text(case.file_content)
+                    elif metrics_file.exists():
+                        metrics_file.unlink()
+
+                    f = io.StringIO()
+                    with contextlib.redirect_stderr(f):
+                        res = build_summary.summarize_rbe_metrics_from_logdir(
+                            log_dir
+                        )
+
+                    if case.expected_result is not None:
+                        self.assertEqual(res, case.expected_result)
+                    else:
+                        self.assertIsNone(res)
+
+                    if case.expected_warning is not None:
+                        self.assertIn(case.expected_warning, f.getvalue())
 
 
 if __name__ == "__main__":

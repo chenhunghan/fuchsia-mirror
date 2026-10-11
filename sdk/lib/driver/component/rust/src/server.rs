@@ -8,13 +8,14 @@ use std::num::NonZero;
 use std::ops::ControlFlow;
 use std::sync::OnceLock;
 
-use log::{debug, warn};
+use log::{debug, error, warn};
 use zx::Status;
 
-use fdf::{Channel, DispatcherBuilder, DriverDispatcherRef};
+use fdf::{
+    AsAsyncDispatcherRef, AsyncDispatcher, Channel, DispatcherBuilder, DriverDispatcherRef,
+    DriverHandle, Message, OnDispatcher, fdf_handle_t,
+};
 use fidl_fuchsia_driver_framework::DriverRequest;
-
-use fdf::{AsAsyncDispatcherRef, AsyncDispatcher, DriverHandle, Message, fdf_handle_t};
 
 use crate::{Driver, DriverContext, DriverError};
 use fdf_sys::fdf_dispatcher_get_current_dispatcher;
@@ -67,6 +68,42 @@ impl<T: Driver> DriverServer<T> {
         // triggering the driver host to call `destroy`.
         let server = unsafe { &mut *server_ptr };
 
+        // Read the initial start message on the root dispatcher so we can configure the
+        // rust async dispatcher with the driver's default scheduler role if one was specified.
+        // The returned task handle is detached on drop and continues to run on the dispatcher.
+        let root_dispatcher_always_on = root_dispatcher.always_on_dispatcher();
+        root_dispatcher_always_on
+            .spawn(server.start_rust_async_dispatcher(root_dispatcher_always_on.clone()));
+
+        // Take the pointer of the server object to use as the identifier for the server to the
+        // driver runtime. It uses this as an opaque identifier and expects no particular layout of
+        // the object pointed to, and we use it to free the box at unload in `Self::destroy`.
+        server_ptr.cast()
+    }
+
+    async fn start_rust_async_dispatcher(
+        &'static mut self,
+        read_dispatcher: DriverDispatcherRef<'static>,
+    ) {
+        let Some(first_message) = self.read_next_message(read_dispatcher.clone()).await else {
+            self.server_handle.take();
+            return;
+        };
+        let first_request = match DriverRequest::read_from_message(first_message) {
+            Ok((_, request)) => request,
+            Err(e) => {
+                error!("Failed to parse initial driver request message: {e}, exiting main loop.");
+                self.server_handle.take();
+                return;
+            }
+        };
+        let scheduler_role = match &first_request {
+            DriverRequest::Start { start_args, .. } => {
+                Self::get_default_scheduler_role(start_args).unwrap_or("")
+            }
+            _ => "",
+        };
+
         // Build a new dispatcher that we can have spin on a fuchsia-async executor main loop
         // to act as a reactor for non-driver events. Use the always_on_dispatcher on it because
         // this thread is always running and we don't want to hold up the driver's dispatcher
@@ -74,40 +111,56 @@ impl<T: Driver> DriverServer<T> {
         let rust_async_dispatcher = DispatcherBuilder::new()
             .name("fuchsia-async")
             .allow_thread_blocking()
+            .scheduler_role(scheduler_role)
             .create_released()
             .expect("failure creating blocking dispatcher for rust async")
             .always_on_dispatcher();
         // Post the task to the dispatcher that will run the fuchsia-async loop, and have it run
         // the server's message loop waiting for start and stop messages from the driver host.
-        let root_dispatcher_always_on = root_dispatcher.always_on_dispatcher();
         rust_async_dispatcher
             .post_task_sync(move |status| {
                 // bail immediately if we were somehow cancelled before we started
-                if status.is_err() {
-                    return;
+                if status.is_ok() {
+                    self.run_executor_loop(first_request, read_dispatcher);
                 }
-                fdf_core::override_current_dispatcher(root_dispatcher.clone(), || {
-                    // create and run a fuchsia-async executor, giving it the "root" dispatcher to
-                    // actually execute driver tasks on, as this thread will be effectively blocked
-                    // by the reactor loop.
-                    let port = zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT);
-                    let mut executor = LocalExecutorBuilder::new().port(port).build();
-                    executor.run_singlethreaded(async move {
-                        server.message_loop(root_dispatcher_always_on).await;
-                        // take the server handle so it can drop after the async block is done,
-                        // which will signal to the driver host that the driver has finished
-                        // shutdown, so that we are can guarantee that when `destroy` is called, we
-                        // are not still using `server`.
-                        server.server_handle.take()
-                    });
-                });
             })
             .expect("failure spawning main event loop for rust async dispatch");
+    }
 
-        // Take the pointer of the server object to use as the identifier for the server to the
-        // driver runtime. It uses this as an opaque identifier and expects no particular layout of
-        // the object pointed to, and we use it to free the box at unload in `Self::destroy`.
-        server_ptr.cast()
+    fn run_executor_loop(
+        &'static mut self,
+        first_request: DriverRequest,
+        read_dispatcher: DriverDispatcherRef<'static>,
+    ) {
+        fdf_core::override_current_dispatcher(self.root_dispatcher.clone(), || {
+            // create and run a fuchsia-async executor, giving it the "root" dispatcher to
+            // actually execute driver tasks on, as this thread will be effectively blocked
+            // by the reactor loop.
+            let port = zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT);
+            let mut executor = LocalExecutorBuilder::new().port(port).build();
+            executor.run_singlethreaded(async move {
+                if let ControlFlow::Continue(()) = self.handle_request(first_request).await {
+                    self.message_loop(read_dispatcher).await;
+                }
+                // take the server handle so it can drop after the async block is done,
+                // which will signal to the driver host that the driver has finished
+                // shutdown, so that we can guarantee that when `destroy` is called, we
+                // are not still using `self`.
+                self.server_handle.take()
+            });
+        });
+    }
+
+    fn get_default_scheduler_role(start_args: &DriverStartArgs) -> Option<&str> {
+        let entries = start_args.program.as_ref()?.entries.as_ref()?;
+        for entry in entries {
+            if entry.key == "default_dispatcher_scheduler_role"
+                && let Some(fidl_fuchsia_data::DictionaryValue::Str(role)) = entry.value.as_deref()
+            {
+                return Some(role.as_str());
+            }
+        }
+        None
     }
 
     /// Called by the driver host after shutting down a driver and once the handle passed to
@@ -124,29 +177,41 @@ impl<T: Driver> DriverServer<T> {
         unsafe { drop(Box::from_raw(obj)) }
     }
 
+    async fn read_next_message(
+        &mut self,
+        dispatcher: DriverDispatcherRef<'_>,
+    ) -> Option<Message<[u8]>> {
+        let server_handle_lock = self.server_handle.get_mut();
+        let Some(server_handle) = server_handle_lock else {
+            panic!("driver already shut down while message loop was running")
+        };
+        match server_handle.read_bytes(dispatcher).await {
+            Ok(Some(message)) => Some(message),
+            Ok(None) => panic!("unexpected empty message on server channel"),
+            Err(status @ Status::PEER_CLOSED) | Err(status @ Status::UNAVAILABLE) => {
+                warn!(
+                    "Driver server channel closed before a stop message with status {status}, exiting main loop early but stop() will not be called."
+                );
+                None
+            }
+            Err(e) => panic!("unexpected error on server channel {e}"),
+        }
+    }
+
     /// Implements the main message loop for handling start and stop messages from rust
     /// driver host and passing them on to the implementation of [`Driver`] we contain.
     async fn message_loop(&mut self, dispatcher: DriverDispatcherRef<'_>) {
-        loop {
-            let server_handle_lock = self.server_handle.get_mut();
-            let Some(server_handle) = server_handle_lock else {
-                panic!("driver already shut down while message loop was running")
-            };
-            match server_handle.read_bytes(dispatcher.clone()).await {
-                Ok(Some(message)) => {
-                    if let ControlFlow::Break(_) = self.handle_message(message).await {
-                        // driver shut down or failed to start, exit message loop
-                        return;
-                    }
-                }
-                Ok(None) => panic!("unexpected empty message on server channel"),
-                Err(status @ Status::PEER_CLOSED) | Err(status @ Status::UNAVAILABLE) => {
-                    warn!(
-                        "Driver server channel closed before a stop message with status {status}, exiting main loop early but stop() will not be called."
-                    );
+        while let Some(message) = self.read_next_message(dispatcher.clone()).await {
+            let request = match DriverRequest::read_from_message(message) {
+                Ok((_, request)) => request,
+                Err(e) => {
+                    error!("Failed to parse driver request message: {e}, exiting main loop.");
                     return;
                 }
-                Err(e) => panic!("unexpected error on server channel {e}"),
+            };
+            if let ControlFlow::Break(()) = self.handle_request(request).await {
+                // driver shut down or failed to start, exit message loop
+                return;
             }
         }
     }
@@ -195,8 +260,7 @@ impl<T: Driver> DriverServer<T> {
     ///
     /// This method panics if the messages are received out of order somehow (two start messages,
     /// stop before start, etc).
-    async fn handle_message(&mut self, message: Message<[u8]>) -> ControlFlow<()> {
-        let (_, request) = DriverRequest::read_from_message(message).unwrap();
+    async fn handle_request(&mut self, request: DriverRequest) -> ControlFlow<()> {
         match request {
             DriverRequest::Start { start_args, responder } => {
                 let res = self.handle_start(start_args).await.map_err(Status::into_raw);
@@ -414,7 +478,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(res.unwrap_err(), Err(Status::INVALID_ARGS));
+            assert_eq!(res.unwrap_err(), Status::INVALID_ARGS);
 
             client_task.await.unwrap();
 
@@ -463,7 +527,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(res.unwrap_err(), Err(Status::INTERNAL));
+            assert_eq!(res.unwrap_err(), Status::INTERNAL);
 
             client_task.await.unwrap();
 

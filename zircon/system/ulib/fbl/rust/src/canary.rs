@@ -59,7 +59,7 @@ impl<const MAGIC: u32> Canary<MAGIC> {
     pub fn assert(&self) {
         let observed_magic = unsafe { core::ptr::read_volatile(&self.magic) };
         if observed_magic != MAGIC {
-            panic!("Invalid canary (expt: {:08x}, got: {:08x})", MAGIC, observed_magic);
+            canary_failed(MAGIC, observed_magic);
         }
     }
 
@@ -85,6 +85,13 @@ impl<const MAGIC: u32> Drop for Canary<MAGIC> {
             core::ptr::write_volatile(&mut self.magic, 0);
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn canary_failed(expected: u32, observed: u32) -> ! {
+    panic!("Invalid canary (expt: {:08x}, got: {:08x})", expected, observed);
 }
 
 /// Function for generating canary magic values from strings

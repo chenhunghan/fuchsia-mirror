@@ -6,12 +6,15 @@
 #include <lib/inspect/cpp/hierarchy.h>
 #include <lib/inspect/cpp/reader.h>
 #include <lib/inspect/testing/cpp/inspect.h>
+#include <zircon/compiler.h>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <usb-inspect/usb-inspect.h>
+#include <usb/descriptors.h>
 
 namespace usb_inspect {
+namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 using namespace inspect::testing;
 
@@ -276,6 +279,355 @@ TEST_F(UsbInspectTest, TestZeroCapacity) {
   auto hierarchy = ReadInspect(inspector);
   EXPECT_THAT(hierarchy.GetByPath({"endpoint_test", "event_history"}), ::testing::IsNull());
   EXPECT_THAT(hierarchy.GetByPath({"endpoint_test", "transfer_snapshots"}), ::testing::IsNull());
+}
+
+TEST_F(UsbInspectTest, TestTruncatedDescriptors) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+
+  func.Init(inspector.GetRoot(), "function_test", 1);
+  func.UpdateConfiguration(1, true);
+
+  // Provide a truncated interface descriptor (b_length is smaller than
+  // sizeof(usb_interface_descriptor_t))
+  std::vector<uint8_t> truncated = {
+      4,
+      fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+      0,
+      0,  // 4 bytes only, but type is interface (4 == kInterface)
+  };
+  func.SetDescriptors(std::move(truncated));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* func_node = hierarchy.GetByPath({"function_test"});
+  ASSERT_THAT(func_node, ::testing::NotNull());
+  // Should not crash and should not have created child nodes for the truncated descriptor.
+  EXPECT_THAT(hierarchy.GetByPath({"function_test", "interface-000"}), ::testing::IsNull());
+  EXPECT_THAT(func_node->node(),
+              PropertyList(::testing::Contains(UintIs("malformed_descriptors", 1))));
+}
+
+TEST_F(UsbInspectTest, TestInspectMalformedSsCompanionWithoutEp) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  struct {
+    usb_interface_descriptor_t intf;
+    usb_ss_ep_comp_descriptor_t ss_comp;
+  } __PACKED malformed = {
+      .intf =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 0,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 1,
+              .b_interface_class = 8,
+              .b_interface_sub_class = 6,
+              .b_interface_protocol = 80,
+              .i_interface = 0,
+          },
+      .ss_comp =
+          {
+              .b_length = sizeof(usb_ss_ep_comp_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kSsEpCompanion),
+              .b_max_burst = 0,
+              .bm_attributes = 0,
+              .w_bytes_per_interval = 0,
+          },
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&malformed),
+                             reinterpret_cast<uint8_t*>(&malformed) + sizeof(malformed));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+  ASSERT_THAT(hierarchy.GetByPath({"function_test"}), ::testing::NotNull());
+}
+
+TEST_F(UsbInspectTest, TestClassSpecificDescriptors) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  struct {
+    usb_interface_descriptor_t intf;
+    uint8_t hid_desc[9];
+  } __PACKED cs_test = {
+      .intf =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 0,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 0,
+              .b_interface_class = 3,
+              .b_interface_sub_class = 1,
+              .b_interface_protocol = 2,
+              .i_interface = 0,
+          },
+      .hid_desc = {9, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x3f, 0x00},
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&cs_test),
+                             reinterpret_cast<uint8_t*>(&cs_test) + sizeof(cs_test));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* desc_node = hierarchy.GetByPath({"function_test", "interface-000", "descriptor-0x21"});
+  ASSERT_THAT(desc_node, ::testing::NotNull());
+
+  EXPECT_THAT(desc_node->node(), PropertyList(::testing::UnorderedElementsAre(
+                                     UintIs("type_code", 0x21), UintIs("length", 9),
+                                     StringIs("hex_payload", "11 01 00 01 22 3f 00"))));
+}
+
+TEST_F(UsbInspectTest, TestInterfaceAssociationDescriptor) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  usb_interface_assoc_descriptor_t iad = {
+      .b_length = sizeof(usb_interface_assoc_descriptor_t),
+      .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterfaceAssociation),
+      .b_first_interface = 2,
+      .b_interface_count = 2,
+      .b_function_class = 14,     // Video
+      .b_function_sub_class = 3,  // Video Interface Collection
+      .b_function_protocol = 0,
+      .i_function = 0,
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&iad),
+                             reinterpret_cast<uint8_t*>(&iad) + sizeof(iad));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* iad_node = hierarchy.GetByPath({"function_test", "iad-0x02"});
+  ASSERT_THAT(iad_node, ::testing::NotNull());
+
+  EXPECT_THAT(iad_node->node(), PropertyList(::testing::UnorderedElementsAre(
+                                    UintIs("first_interface", 2), UintIs("interface_count", 2),
+                                    UintIs("function_class", 14), UintIs("function_subclass", 3),
+                                    UintIs("function_protocol", 0))));
+}
+
+TEST_F(UsbInspectTest, TestTruncatedInterfaceAssociationDescriptor) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  // A truncated IAD with length smaller than sizeof(usb_interface_assoc_descriptor_t)
+  std::vector<uint8_t> truncated_iad = {
+      4,
+      fidl::ToUnderlying(fdescriptor::DescriptorType::kInterfaceAssociation),
+      2,
+      2,
+  };
+  func.SetDescriptors(std::move(truncated_iad));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* func_node = hierarchy.GetByPath({"function_test"});
+  ASSERT_THAT(func_node, ::testing::NotNull());
+  EXPECT_THAT(hierarchy.GetByPath({"function_test", "iad-0x02"}), ::testing::IsNull());
+  EXPECT_THAT(func_node->node(),
+              PropertyList(::testing::IsSupersetOf({
+                  UintIs("malformed_descriptors", 1),
+                  StringIs("descriptor_error",
+                           "Truncated interface_association at offset 0: type 0x0b, length 4 < "
+                           "expected 8"),
+              })));
+}
+
+TEST_F(UsbInspectTest, TestTruncatedEndpointDescriptor) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  struct {
+    usb_interface_descriptor_t intf;
+    uint8_t truncated_ep[4];
+  } __PACKED bad_ep_test = {
+      .intf =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 0,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 1,
+              .b_interface_class = 0,
+              .b_interface_sub_class = 0,
+              .b_interface_protocol = 0,
+              .i_interface = 0,
+          },
+      .truncated_ep =
+          {
+              4,
+              fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              0x81,
+              2,
+          },
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&bad_ep_test),
+                             reinterpret_cast<uint8_t*>(&bad_ep_test) + sizeof(bad_ep_test));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* func_node = hierarchy.GetByPath({"function_test"});
+  ASSERT_THAT(func_node, ::testing::NotNull());
+  EXPECT_THAT(func_node->node(),
+              PropertyList(::testing::IsSupersetOf({
+                  UintIs("malformed_descriptors", 1),
+                  StringIs("descriptor_error",
+                           "Truncated endpoint at offset 9: type 0x05, length 4 < expected 7"),
+              })));
+}
+
+TEST_F(UsbInspectTest, TestMultipleInterfacesAndFlushing) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  struct {
+    usb_interface_descriptor_t intf0;
+    usb_endpoint_descriptor_t ep0;
+    usb_interface_descriptor_t intf1;
+    usb_endpoint_descriptor_t ep1;
+  } __PACKED multi_test = {
+      .intf0 =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 0,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 1,
+              .b_interface_class = 0,
+              .b_interface_sub_class = 0,
+              .b_interface_protocol = 0,
+              .i_interface = 0,
+          },
+      .ep0 =
+          {
+              .b_length = sizeof(usb_endpoint_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              .b_endpoint_address = 0x01,
+              .bm_attributes = 2,
+              .w_max_packet_size = 64,
+              .b_interval = 0,
+          },
+      .intf1 =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 1,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 1,
+              .b_interface_class = 0,
+              .b_interface_sub_class = 0,
+              .b_interface_protocol = 0,
+              .i_interface = 0,
+          },
+      .ep1 =
+          {
+              .b_length = sizeof(usb_endpoint_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              .b_endpoint_address = 0x82,
+              .bm_attributes = 2,
+              .w_max_packet_size = 64,
+              .b_interval = 0,
+          },
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&multi_test),
+                             reinterpret_cast<uint8_t*>(&multi_test) + sizeof(multi_test));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+
+  ASSERT_THAT(hierarchy.GetByPath({"function_test", "interface-000", "endpoint-0x01"}),
+              ::testing::NotNull());
+  ASSERT_THAT(hierarchy.GetByPath({"function_test", "interface-001", "endpoint-0x82"}),
+              ::testing::NotNull());
+}
+
+TEST_F(UsbInspectTest, TestValidSsEpCompanion) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  struct {
+    usb_interface_descriptor_t intf;
+    usb_endpoint_descriptor_t ep;
+    usb_ss_ep_comp_descriptor_t ss_comp;
+  } __PACKED valid_test = {
+      .intf =
+          {
+              .b_length = sizeof(usb_interface_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kInterface),
+              .b_interface_number = 0,
+              .b_alternate_setting = 0,
+              .b_num_endpoints = 1,
+              .b_interface_class = 0,
+              .b_interface_sub_class = 0,
+              .b_interface_protocol = 0,
+              .i_interface = 0,
+          },
+      .ep =
+          {
+              .b_length = sizeof(usb_endpoint_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+              .b_endpoint_address = 0x81,
+              .bm_attributes = 2,
+              .w_max_packet_size = 1024,
+              .b_interval = 0,
+          },
+      .ss_comp =
+          {
+              .b_length = sizeof(usb_ss_ep_comp_descriptor_t),
+              .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kSsEpCompanion),
+              .b_max_burst = 3,
+              .bm_attributes = 0,
+              .w_bytes_per_interval = 0,
+          },
+  };
+
+  std::vector<uint8_t> descs(reinterpret_cast<uint8_t*>(&valid_test),
+                             reinterpret_cast<uint8_t*>(&valid_test) + sizeof(valid_test));
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+
+  auto* comp_node =
+      hierarchy.GetByPath({"function_test", "interface-000", "endpoint-0x81", "ss_companion"});
+  ASSERT_THAT(comp_node, ::testing::NotNull());
+
+  EXPECT_THAT(comp_node->node(), PropertyList(::testing::UnorderedElementsAre(
+                                     UintIs("max_burst", 3), UintIs("attributes", 0),
+                                     UintIs("bytes_per_interval", 0))));
+}
+
+TEST_F(UsbInspectTest, TestGenericDescriptorAtRoot) {
+  inspect::Inspector inspector;
+  FunctionInspect func;
+  func.Init(inspector.GetRoot(), "function_test", 1);
+
+  // A generic descriptor before any interface
+  std::vector<uint8_t> descs = {
+      0x05,              // b_length
+      0xFF,              // b_descriptor_type (Vendor Specific)
+      0xAA, 0xBB, 0xCC,  // Payload
+  };
+  func.SetDescriptors(std::move(descs));
+
+  auto hierarchy = ReadInspect(inspector);
+  auto* root_desc = hierarchy.GetByPath({"function_test", "descriptor-0xff"});
+  ASSERT_THAT(root_desc, ::testing::NotNull());
+
+  EXPECT_THAT(root_desc->node(), PropertyList(::testing::UnorderedElementsAre(
+                                     UintIs("type_code", 0xFF), UintIs("length", 5),
+                                     StringIs("hex_payload", "aa bb cc"))));
 }
 
 }  // namespace usb_inspect

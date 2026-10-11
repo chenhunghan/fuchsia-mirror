@@ -92,8 +92,8 @@ func TestReadRunInput(t *testing.T) {
 			},
 		},
 		{
-			name:     "Success With FfxConfig, Engine, and Device",
-			jsonData: "{\"emulator\": {\"ffx_path\":\"foo\",\"local_pb\":\"pb/dir\",\"ffx_config\":{\"sdk.overrides.qemu_internal\":\"/path/to/qemu\"},\"engine\":\"qemu\",\"device\":\"x64-emu-large\"}}",
+			name:     "Success With FfxConfig, Engine, Device, and Gpu",
+			jsonData: "{\"emulator\": {\"ffx_path\":\"foo\",\"local_pb\":\"pb/dir\",\"ffx_config\":{\"sdk.overrides.qemu_internal\":\"/path/to/qemu\"},\"engine\":\"qemu\",\"device\":\"x64-emu-large\",\"gpu\":\"swiftshader_indirect\"}}",
 			wantResult: &RunInput{
 				Emulator: EmulatorRunInput{
 					TargetRunInput: TargetRunInput{
@@ -105,6 +105,7 @@ func TestReadRunInput(t *testing.T) {
 					},
 					Engine: "qemu",
 					Device: "x64-emu-large",
+					Gpu:    "swiftshader_indirect",
 				},
 			},
 		},

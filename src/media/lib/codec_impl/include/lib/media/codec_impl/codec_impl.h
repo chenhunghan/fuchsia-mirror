@@ -631,6 +631,12 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     // if SetInputFormatDetails() is used and the oob_bytes don't match
     // the effective oob_bytes before.  This way we avoid causing extra
     // input format changes for the core codec.
+    //
+    // Note that we intentionally do not send pending input format details to
+    // the CodecAdapter when an otherwise-empty stream encounters input EOS, as
+    // doing so would cause some CodecAdapter(s) to call
+    // onCoreCodecMidStreamOutputConstraintsChange(true), forcing an unnecessary
+    // output buffer reconfiguration for an empty stream.
     void SetOobConfigPending(bool pending);
     __WARN_UNUSED_RESULT bool oob_config_pending();
     void SetInputEndOfStream();

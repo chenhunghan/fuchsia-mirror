@@ -181,12 +181,9 @@ async fn handle_command(
             .await,
             "poll_udp",
         ),
-        ntr_args::Subcommand::StartHermeticNetworkRealm(ntr_args::StartHermeticNetworkRealm {
-            netstack,
-        }) => (
-            controller.start_hermetic_network_realm(netstack).await,
-            "start_hermetic_network_realm",
-        ),
+        ntr_args::Subcommand::StartHermeticNetworkRealm(ntr_args::StartHermeticNetworkRealm {}) => {
+            (controller.start_hermetic_network_realm().await, "start_hermetic_network_realm")
+        }
         ntr_args::Subcommand::StartStub(ntr_args::StartStub { component_url }) => {
             (controller.start_stub(&component_url).await, "start_stub")
         }
@@ -460,17 +457,13 @@ mod test {
     #[fuchsia::test]
     async fn start_hermetic_network_realm() {
         let client = fdomain_local::local_client_empty();
-        let expected_netstack = fntr::Netstack::V2;
         net_test_realm_command_test(
             &client,
-            ntr_args::Subcommand::StartHermeticNetworkRealm(ntr_args::StartHermeticNetworkRealm {
-                netstack: expected_netstack,
-            }),
+            ntr_args::Subcommand::StartHermeticNetworkRealm(ntr_args::StartHermeticNetworkRealm {}),
             |request| {
-                let (netstack, responder) = request
+                let responder = request
                     .into_start_hermetic_network_realm()
                     .expect("expected request of type StartHermeticNetworkRealm");
-                assert_eq!(expected_netstack, netstack);
                 responder.send(Ok(())).expect("failed to send StartHermeticNetworkRealm response");
             },
         )

@@ -19,6 +19,7 @@ rustc_binary("hwinfo_bin") {
     "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/rust/zbi",
+    "//src/lib/detect-stall",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",

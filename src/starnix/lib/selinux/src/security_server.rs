@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::access_vector_cache::{
-    AccessVectorCache, CacheStats, KernelXpermsAccessDecision, Query,
-};
 use crate::exceptions_config::ExceptionsConfig;
+use crate::kernel::{
+    AccessVectorCache, AccessVectorComputer, CacheStats, FsUseLabelAndType, KernelAccessDecision,
+    KernelXpermsAccessDecision, Query,
+};
 use crate::new_policy::traits::{HasName, HasPolicyId};
 use crate::new_policy::{HandleUnknown, NewPolicy};
 use crate::permission_check::{PerThreadCache, PermissionCheck};
 use crate::policy::parser::PolicyData;
 use crate::policy::{
-    AccessDecision, AccessVector, AccessVectorComputer, ClassId, FsUseLabelAndType, FsUseType,
-    KernelAccessDecision, PermissionId, Policy, SELINUX_AVD_FLAGS_PERMISSIVE, SecurityContext,
-    XpermsBitmap, XpermsKind, parse_policy_by_value,
+    AccessDecision, AccessVector, ClassId, FsUseType, PermissionId, Policy,
+    SELINUX_AVD_FLAGS_PERMISSIVE, SecurityContext, XpermsBitmap, XpermsKind, parse_policy_by_value,
 };
 use crate::sid_table::SidTable;
 use crate::sync::{LockDepRwLock, SeLinuxSecurityServerStateLock};
@@ -737,9 +737,9 @@ impl AccessVectorComputer for SecurityServerBackend {
     fn access_decision_to_kernel_access_decision(
         &self,
         class: KernelClass,
-        av: AccessDecision,
+        access_decision: AccessDecision,
     ) -> KernelAccessDecision {
-        self.state.read().access_decision_to_kernel_access_decision(class, av)
+        self.state.read().access_decision_to_kernel_access_decision(class, access_decision)
     }
 }
 
@@ -747,10 +747,12 @@ impl AccessVectorComputer for SecurityServerState {
     fn access_decision_to_kernel_access_decision(
         &self,
         class: KernelClass,
-        av: AccessDecision,
+        access_decision: AccessDecision,
     ) -> KernelAccessDecision {
         match &self.active_policy {
-            Some(policy) => policy.parsed.access_decision_to_kernel_access_decision(class, av),
+            Some(policy) => {
+                policy.parsed.access_decision_to_kernel_access_decision(class, access_decision)
+            }
             None => KernelAccessDecision {
                 allow: AccessVector::ALL,
                 audit: AccessVector::NONE,

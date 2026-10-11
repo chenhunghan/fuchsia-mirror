@@ -15,7 +15,9 @@ mod vmpl_rs {
         VmPageOrMarker, ZeroRangeDirtyState,
     };
     use page::SIZE as PAGE_SIZE_USIZE;
-    use unittest::{expect_eq, expect_false, expect_gt, expect_ok, expect_true, unwrap_ok};
+    use unittest::{
+        expect_eq, expect_err, expect_false, expect_gt, expect_ok, expect_true, unwrap_ok,
+    };
     use zx_status::Status;
 
     const PAGE_SIZE: u64 = PAGE_SIZE_USIZE as u64;
@@ -590,6 +592,404 @@ mod vmpl_rs {
         expect_true!(pl.is_offset_in_zero_interval(span));
         expect_true!(pl.is_offset_in_zero_interval(end_off));
         expect_false!(pl.is_offset_in_zero_interval(span * 2));
+
+        pl.remove_all_content(|_| {});
+    }
+
+    /// Tests `for_every_page_and_contiguous_run_in_range`.
+    #[test]
+    fn vmpl_contiguous_run_test() {
+        let mut list = VmPageList::new();
+
+        const COUNT: usize = 6;
+        let test_pages = get_pages::<COUNT>();
+
+        const FAN_OUT: u64 = VmPageListNode::PAGE_FAN_OUT as u64;
+        // Add test pages, some in the same node, and some in different nodes. This is so that the
+        // code below adds pages in new nodes as expected.
+        expect_gt!(FAN_OUT, 4);
+        // single page, then gap
+        expect_true!(add_page(&mut list, test_pages[0], 0));
+        // gap in the same node, then two pages
+        expect_true!(add_page(&mut list, test_pages[1], 2 * PAGE_SIZE));
+        expect_true!(add_page(&mut list, test_pages[2], 3 * PAGE_SIZE));
+        // gap moving to the next node, then three pages spanning the node boundary
+        expect_true!(add_page(&mut list, test_pages[3], (FAN_OUT * 2 - 1) * PAGE_SIZE));
+        expect_true!(add_page(&mut list, test_pages[4], FAN_OUT * 2 * PAGE_SIZE));
+        expect_true!(add_page(&mut list, test_pages[5], (FAN_OUT * 2 + 1) * PAGE_SIZE));
+
+        // Perform a basic iteration to see if we can list the ranges correctly.
+        let mut range_offsets = [0u64; COUNT];
+        let expected_offsets: [u64; COUNT] = [0, 1, 2, 4, FAN_OUT * 2 - 1, FAN_OUT * 2 + 2];
+        let mut index = 0usize;
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            FAN_OUT * 3 * PAGE_SIZE,
+            |_p, _off| true,
+            |_p, _off| Status::NEXT,
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                Status::NEXT
+            },
+        );
+
+        expect_ok!(status);
+        expect_eq!(6, index);
+        for i in 0..COUNT {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        let mut free_list = fbl::Vector::<VmPagePtr>::new();
+        list.remove_all_content(|mut p| {
+            if p.is_page() {
+                free_list.push_back(p.release_page()).expect("vector push");
+            }
+        });
+        expect_eq!(6, free_list.len());
+
+        free_pages(test_pages);
+    }
+
+    /// Tests that the contiguous run traversal splits runs on the compare function.
+    #[test]
+    fn vmpl_contiguous_run_compare_test() {
+        let mut list = VmPageList::new();
+
+        const COUNT: usize = 5;
+        let test_pages = get_pages::<COUNT>();
+
+        // Add 5 consecutive pages. The ranges will be divided up based on the compare function.
+        for (i, page) in test_pages.iter().enumerate() {
+            expect_true!(add_page(&mut list, *page, (i as u64) * PAGE_SIZE));
+        }
+
+        // Random bools to use as results of comparison for each page.
+        let compare_results = [false, true, true, false, true];
+        let mut page_visited = [false; COUNT];
+        // Expected ranges based on the compare function.
+        let expected_offsets: [u64; 4] = [1, 3, 4, 5];
+        let mut range_offsets = [0u64; 4];
+        let mut index = 0usize;
+
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (VmPageListNode::PAGE_FAN_OUT as u64) * PAGE_SIZE,
+            |_p, off| compare_results[(off / PAGE_SIZE) as usize],
+            |_p, off| {
+                page_visited[(off / PAGE_SIZE) as usize] = true;
+                Status::NEXT
+            },
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                Status::NEXT
+            },
+        );
+
+        expect_ok!(status);
+
+        for i in 0..COUNT {
+            expect_eq!(compare_results[i], page_visited[i]);
+        }
+        expect_eq!(4, index);
+        for i in 0..4 {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        let mut free_list = fbl::Vector::<VmPagePtr>::new();
+        list.remove_all_content(|mut p| {
+            if p.is_page() {
+                free_list.push_back(p.release_page()).expect("vector push");
+            }
+        });
+        expect_eq!(5, free_list.len());
+
+        free_pages(test_pages);
+    }
+
+    /// Tests graceful early termination of `for_every_page_and_contiguous_run_in_range`.
+    #[test]
+    fn vmpl_contiguous_traversal_end_test() {
+        let mut list = VmPageList::new();
+
+        const COUNT: usize = 3;
+        let test_pages = get_pages::<COUNT>();
+
+        // Add 3 consecutive pages.
+        for (i, page) in test_pages.iter().enumerate() {
+            expect_true!(add_page(&mut list, *page, (i as u64) * PAGE_SIZE));
+        }
+
+        let mut page_visited = [false; COUNT];
+        let mut range_offsets = [0u64; 2];
+        let mut index = 0usize;
+        // The compare function evaluates to true for all pages, but the traversal ends early due to
+        // Status::STOP in the per-page function.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (VmPageListNode::PAGE_FAN_OUT as u64) * PAGE_SIZE,
+            |_p, _off| true,
+            |_p, off| {
+                page_visited[(off / PAGE_SIZE) as usize] = true;
+                // Stop the traversal at page 1. This means the last page processed should be page 1
+                // and should be included in the contiguous range. Traversal will stop *after* this
+                // page.
+                if off / PAGE_SIZE < 1 { Status::NEXT } else { Status::STOP }
+            },
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                Status::NEXT
+            },
+        );
+
+        expect_ok!(status);
+        // Should have visited the first two pages.
+        expect_true!(page_visited[0]);
+        expect_true!(page_visited[1]);
+        expect_false!(page_visited[2]);
+
+        expect_eq!(2, index);
+        let expected_offsets: [u64; 2] = [0, 2];
+        for i in 0..2 {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        // Attempt another traversal. This time it ends early because of Status::STOP in the
+        // contiguous range function.
+        index = 0;
+        page_visited = [false; COUNT];
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (VmPageListNode::PAGE_FAN_OUT as u64) * PAGE_SIZE,
+            // Include even indexed pages in the range.
+            |_p, off| (off / PAGE_SIZE).is_multiple_of(2),
+            |_p, off| {
+                page_visited[(off / PAGE_SIZE) as usize] = true;
+                Status::NEXT
+            },
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                // End traversal after the first range.
+                Status::STOP
+            },
+        );
+
+        expect_ok!(status);
+        // Should only have visited the first page.
+        expect_true!(page_visited[0]);
+        expect_false!(page_visited[1]);
+        expect_false!(page_visited[2]);
+
+        expect_eq!(2, index);
+        let expected_offsets: [u64; 2] = [0, 1];
+        for i in 0..2 {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        let mut free_list = fbl::Vector::<VmPagePtr>::new();
+        list.remove_all_content(|mut p| {
+            if p.is_page() {
+                free_list.push_back(p.release_page()).expect("vector push");
+            }
+        });
+        expect_eq!(3, free_list.len());
+
+        free_pages(test_pages);
+    }
+
+    /// Tests error propagation out of `for_every_page_and_contiguous_run_in_range`.
+    #[test]
+    fn vmpl_contiguous_traversal_error_test() {
+        let mut list = VmPageList::new();
+
+        const COUNT: usize = 3;
+        let test_pages = get_pages::<COUNT>();
+
+        // Add 3 consecutive pages.
+        for (i, page) in test_pages.iter().enumerate() {
+            expect_true!(add_page(&mut list, *page, (i as u64) * PAGE_SIZE));
+        }
+
+        let mut page_visited = [false; COUNT];
+        let mut range_offsets = [0u64; 2];
+        let mut index = 0usize;
+        // The compare function evaluates to true for all pages, but the traversal ends early due to
+        // an error returned by the per-page function.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (VmPageListNode::PAGE_FAN_OUT as u64) * PAGE_SIZE,
+            |_p, _off| true,
+            |_p, off| {
+                page_visited[(off / PAGE_SIZE) as usize] = true;
+                // Only page 0 returns success.
+                if off / PAGE_SIZE < 1 { Status::NEXT } else { Status::BAD_STATE }
+            },
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                Status::NEXT
+            },
+        );
+
+        expect_err!(status, Status::BAD_STATE);
+        // Should have visited the first two pages.
+        expect_true!(page_visited[0]);
+        expect_true!(page_visited[1]);
+        expect_false!(page_visited[2]);
+
+        expect_eq!(2, index);
+        // Should have been able to process the contiguous range till right before the page that
+        // failed.
+        let expected_offsets: [u64; 2] = [0, 1];
+        for i in 0..2 {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        // Attempt another traversal. This time it ends early because of an error returned by the
+        // contiguous range function.
+        index = 0;
+        page_visited = [false; COUNT];
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (VmPageListNode::PAGE_FAN_OUT as u64) * PAGE_SIZE,
+            // Include even indexed pages in the range.
+            |_p, off| (off / PAGE_SIZE).is_multiple_of(2),
+            |_p, off| {
+                page_visited[(off / PAGE_SIZE) as usize] = true;
+                Status::NEXT
+            },
+            |start, end, is_interval| {
+                if is_interval {
+                    return Status::BAD_STATE;
+                }
+                range_offsets[index] = start;
+                range_offsets[index + 1] = end;
+                index += 2;
+                // Error after the first range.
+                Status::BAD_STATE
+            },
+        );
+
+        expect_err!(status, Status::BAD_STATE);
+        // Should only have visited the first page.
+        expect_true!(page_visited[0]);
+        expect_false!(page_visited[1]);
+        expect_false!(page_visited[2]);
+
+        expect_eq!(2, index);
+        let expected_offsets: [u64; 2] = [0, 1];
+        for i in 0..2 {
+            expect_eq!(expected_offsets[i] * PAGE_SIZE, range_offsets[i]);
+        }
+
+        let mut free_list = fbl::Vector::<VmPagePtr>::new();
+        list.remove_all_content(|mut p| {
+            if p.is_page() {
+                free_list.push_back(p.release_page()).expect("vector push");
+            }
+        });
+        expect_eq!(3, free_list.len());
+
+        free_pages(test_pages);
+    }
+
+    /// Tests iterating over contiguous entries in a page list with a cursor.
+    #[test]
+    fn vmpl_cursor_test() {
+        let mut pl = VmPageList::new();
+
+        const FAN_OUT: u64 = VmPageListNode::PAGE_FAN_OUT as u64;
+
+        // Add some entries to produce some contiguous and non-contiguous nodes.
+        const OFF1: u64 = FAN_OUT * 3 + 4;
+        const OFF2: u64 = FAN_OUT * 5 + 4;
+        const OFF3: u64 = FAN_OUT * 6 + 1;
+        const OFF4: u64 = FAN_OUT * 6 + 2;
+        const OFF5: u64 = FAN_OUT * 8 + 1;
+
+        expect_true!(add_marker(&mut pl, OFF1 * PAGE_SIZE));
+        expect_true!(add_marker(&mut pl, OFF2 * PAGE_SIZE));
+        expect_true!(add_marker(&mut pl, OFF3 * PAGE_SIZE));
+        expect_true!(add_marker(&mut pl, OFF4 * PAGE_SIZE));
+        expect_true!(add_marker(&mut pl, OFF5 * PAGE_SIZE));
+
+        // Looking up offsets that fall completely out of a node should yield an invalid cursor.
+        let cursor = pl.lookup_mut_cursor((OFF1 - FAN_OUT) * PAGE_SIZE);
+        expect_true!(cursor.current().is_none());
+        let cursor = pl.lookup_mut_cursor((OFF1 + FAN_OUT) * PAGE_SIZE);
+        expect_true!(cursor.current().is_none());
+
+        // Looking up in a node should yield a cursor, even if nothing at the exact entry.
+        let mut cursor = pl.lookup_mut_cursor((OFF1 - 1) * PAGE_SIZE);
+        expect_true!(cursor.current().is_some());
+        expect_true!(cursor.current().is_some_and(|slot| slot.is_empty()));
+
+        // Cursor should iterate into the marker though.
+        cursor.step();
+        expect_true!(cursor.current().is_some());
+        expect_true!(cursor.current().is_some_and(|slot| slot.is_marker()));
+
+        // Further iteration should terminate at the end of this node, as the next node is not
+        // contiguous.
+        cursor.step();
+        while let Some(is_empty) = cursor.current().map(|slot| slot.is_empty()) {
+            expect_true!(is_empty);
+            cursor.step();
+        }
+
+        // Should be able to iterate across contiguous nodes.
+        let mut cursor = pl.lookup_mut_cursor(OFF2 * PAGE_SIZE);
+        expect_true!(cursor.current().is_some());
+        expect_true!(cursor.current().is_some_and(|slot| slot.is_marker()));
+        cursor.step();
+
+        // Iterate to the next marker, which is in a different node, and count the number of items.
+        let mut items: u64 = 0;
+        expect_ok!(cursor.for_every_contiguous(|page_or_marker| {
+            items += 1;
+            if page_or_marker.is_marker() { Status::STOP } else { Status::NEXT }
+        }));
+        expect_eq!(OFF3 - OFF2, items);
+
+        // `for_every_contiguous` will have left us at OFF3 when we stopped, so the next item should
+        // be OFF4, which is also a marker.
+        cursor.step();
+        expect_true!(cursor.current().is_some());
+        expect_true!(cursor.current().is_some_and(|slot| slot.is_marker()));
+
+        // Attempting to do this again should fail as the next item is in the next node.
+        items = 0;
+        cursor.step();
+        expect_ok!(cursor.for_every_contiguous(|page_or_marker| {
+            items += 1;
+            if page_or_marker.is_marker() { Status::STOP } else { Status::NEXT }
+        }));
+        expect_true!(cursor.current().is_none());
+        // Should have iterated the remaining items in a node after OFF4.
+        expect_eq!(FAN_OUT - (OFF4 % FAN_OUT) - 1, items);
 
         pl.remove_all_content(|_| {});
     }
@@ -1350,6 +1750,260 @@ mod vmpl_rs {
         // SAFETY: `page` was removed from `list`.
         unsafe { pmm::free_page(page) };
     }
+
+    /// Contiguous run traversal over an interval that spans multiple nodes.
+    #[test]
+    fn vmpl_interval_contig_full_test() {
+        let mut list = VmPageList::new();
+
+        const FAN_OUT: u64 = VmPageListNode::PAGE_FAN_OUT as u64;
+        // Interval spanning across 3 nodes, with the middle one unpopulated.
+        const EXPECTED_START: u64 = 1;
+        const EXPECTED_END: u64 = 2 * FAN_OUT;
+        const SIZE: u64 = 3 * FAN_OUT;
+        expect_gt!(SIZE, EXPECTED_END);
+        expect_ok!(list.add_zero_interval(
+            EXPECTED_START * PAGE_SIZE,
+            (EXPECTED_END + 1) * PAGE_SIZE,
+            ZeroRangeDirtyState::Dirty
+        ));
+
+        expect_true!(list.any_pages_or_intervals_in_range(0, SIZE * PAGE_SIZE));
+
+        let expected_pages: [u64; 2] = [EXPECTED_START, EXPECTED_END];
+        let expected_contig: [u64; 2] = [EXPECTED_START, EXPECTED_END + 1];
+        let mut pages = [0u64; 2];
+        let mut contig = [0u64; 2];
+        let mut page_index = 0usize;
+        let mut contig_index = 0usize;
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            SIZE * PAGE_SIZE,
+            |_p, _off| true,
+            |p, off| {
+                if !(p.is_interval_start() || p.is_interval_end()) {
+                    return Status::BAD_STATE;
+                }
+                if p.is_interval_start() {
+                    if !page_index.is_multiple_of(2) {
+                        return Status::BAD_STATE;
+                    }
+                } else if page_index.is_multiple_of(2) {
+                    return Status::BAD_STATE;
+                }
+                pages[page_index] = off;
+                page_index += 1;
+                Status::NEXT
+            },
+            |begin, end, is_interval| {
+                if !is_interval {
+                    return Status::BAD_STATE;
+                }
+                contig[contig_index] = begin;
+                contig[contig_index + 1] = end;
+                contig_index += 2;
+                Status::NEXT
+            },
+        );
+        expect_ok!(status);
+
+        expect_eq!(2, page_index);
+        for i in 0..page_index {
+            expect_eq!(expected_pages[i] * PAGE_SIZE, pages[i]);
+        }
+
+        expect_eq!(2, contig_index);
+        for i in 0..contig_index {
+            expect_eq!(expected_contig[i] * PAGE_SIZE, contig[i]);
+        }
+
+        list.remove_all_content(|_| {});
+    }
+
+    /// Contiguous run traversal that starts and/or ends partway inside an interval.
+    #[test]
+    fn vmpl_interval_contig_partial_test() {
+        let mut list = VmPageList::new();
+
+        const FAN_OUT: u64 = VmPageListNode::PAGE_FAN_OUT as u64;
+        // Interval spanning across 3 nodes, with the middle one unpopulated.
+        const EXPECTED_START: u64 = 1;
+        const EXPECTED_END: u64 = 2 * FAN_OUT;
+        const SIZE: u64 = 3 * FAN_OUT;
+        expect_gt!(SIZE, EXPECTED_END);
+        expect_ok!(list.add_zero_interval(
+            EXPECTED_START * PAGE_SIZE,
+            (EXPECTED_END + 1) * PAGE_SIZE,
+            ZeroRangeDirtyState::Dirty
+        ));
+
+        expect_true!(list.any_pages_or_intervals_in_range(0, SIZE * PAGE_SIZE));
+
+        let mut page = 0u64;
+        let mut contig = [0u64; 2];
+        let mut contig_index = 0usize;
+        // Start the traversal partway into the interval.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            (EXPECTED_START + 1) * PAGE_SIZE,
+            SIZE * PAGE_SIZE,
+            |_p, _off| true,
+            |p, off| {
+                if !p.is_interval_end() {
+                    return Status::BAD_STATE;
+                }
+                page = off;
+                Status::NEXT
+            },
+            |begin, end, is_interval| {
+                if !is_interval {
+                    return Status::BAD_STATE;
+                }
+                contig[contig_index] = begin;
+                contig[contig_index + 1] = end;
+                contig_index += 2;
+                Status::NEXT
+            },
+        );
+        expect_ok!(status);
+
+        // Should only have visited the end.
+        expect_eq!(EXPECTED_END * PAGE_SIZE, page);
+        let expected_contig: [u64; 2] = [EXPECTED_START + 1, EXPECTED_END + 1];
+        expect_eq!(2, contig_index);
+        for i in 0..contig_index {
+            expect_eq!(expected_contig[i] * PAGE_SIZE, contig[i]);
+        }
+
+        contig_index = 0;
+        // End the traversal partway into the interval.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (EXPECTED_END - 1) * PAGE_SIZE,
+            |_p, _off| true,
+            |p, off| {
+                if !p.is_interval_start() {
+                    return Status::BAD_STATE;
+                }
+                page = off;
+                Status::NEXT
+            },
+            |begin, end, is_interval| {
+                if !is_interval {
+                    return Status::BAD_STATE;
+                }
+                contig[contig_index] = begin;
+                contig[contig_index + 1] = end;
+                contig_index += 2;
+                Status::NEXT
+            },
+        );
+        expect_ok!(status);
+
+        // Should only have visited the start.
+        expect_eq!(EXPECTED_START * PAGE_SIZE, page);
+        let expected_contig: [u64; 2] = [EXPECTED_START, EXPECTED_END - 1];
+        expect_eq!(2, contig_index);
+        for i in 0..contig_index {
+            expect_eq!(expected_contig[i] * PAGE_SIZE, contig[i]);
+        }
+
+        contig_index = 0;
+        // Start and end the traversal partway into the interval.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            (EXPECTED_START + 1) * PAGE_SIZE,
+            (EXPECTED_END - 1) * PAGE_SIZE,
+            |_p, _off| true,
+            // Should not visit any slot.
+            |_p, _off| Status::BAD_STATE,
+            |begin, end, is_interval| {
+                if !is_interval {
+                    return Status::BAD_STATE;
+                }
+                contig[contig_index] = begin;
+                contig[contig_index + 1] = end;
+                contig_index += 2;
+                Status::NEXT
+            },
+        );
+        expect_ok!(status);
+
+        // Should have seen the requested contiguous range, even though neither the start nor the
+        // end was visited.
+        let expected_contig: [u64; 2] = [EXPECTED_START + 1, EXPECTED_END - 1];
+        expect_eq!(2, contig_index);
+        for i in 0..contig_index {
+            expect_eq!(expected_contig[i] * PAGE_SIZE, contig[i]);
+        }
+
+        list.remove_all_content(|_| {});
+    }
+
+    /// Contiguous run traversal where only one of the interval sentinels passes the comparison.
+    #[test]
+    fn vmpl_interval_contig_compare_test() {
+        let mut list = VmPageList::new();
+
+        const FAN_OUT: u64 = VmPageListNode::PAGE_FAN_OUT as u64;
+        // Interval spanning across 3 nodes, with the middle one unpopulated.
+        const EXPECTED_START: u64 = 1;
+        const EXPECTED_END: u64 = 2 * FAN_OUT;
+        const SIZE: u64 = 3 * FAN_OUT;
+        expect_gt!(SIZE, EXPECTED_END);
+        expect_ok!(list.add_zero_interval(
+            EXPECTED_START * PAGE_SIZE,
+            (EXPECTED_END + 1) * PAGE_SIZE,
+            ZeroRangeDirtyState::Dirty
+        ));
+
+        expect_true!(list.any_pages_or_intervals_in_range(0, SIZE * PAGE_SIZE));
+
+        let mut page = 0u64;
+        // Start the traversal partway into the interval.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            (EXPECTED_START + 1) * PAGE_SIZE,
+            SIZE * PAGE_SIZE,
+            // Interval start evaluates to false.
+            |p, _off| !p.is_interval_start(),
+            |p, off| {
+                if !p.is_interval_end() {
+                    return Status::BAD_STATE;
+                }
+                page = off;
+                Status::NEXT
+            },
+            // The start does not fulfill the condition, so we should not find a valid contiguous
+            // run.
+            |_begin, _end, _is_interval| Status::INVALID_ARGS,
+        );
+        expect_ok!(status);
+
+        // Should only have visited the end.
+        expect_eq!(EXPECTED_END * PAGE_SIZE, page);
+
+        // End the traversal partway into the interval.
+        let status = list.for_every_page_and_contiguous_run_in_range(
+            0,
+            (EXPECTED_END - 1) * PAGE_SIZE,
+            // Interval end evaluates to false.
+            |p, _off| !p.is_interval_end(),
+            |p, off| {
+                if !p.is_interval_start() {
+                    return Status::BAD_STATE;
+                }
+                page = off;
+                Status::NEXT
+            },
+            // The end does not fulfill the condition, so we should not find a valid contiguous run.
+            |_begin, _end, _is_interval| Status::INVALID_ARGS,
+        );
+        expect_ok!(status);
+
+        // Should only have visited the start.
+        expect_eq!(EXPECTED_START * PAGE_SIZE, page);
+
+        list.remove_all_content(|_| {});
+    }
+
     /// Tests populating all slots across a 5-node interval.
     #[test]
     fn vmpl_interval_populate_full_test() {

@@ -246,6 +246,13 @@ impl NetdeviceWorker {
         let mut rx_ready_storage = session.new_rx_ready_storage();
         // Maintain persistent GRO buffer storage to avoid repeated allocations.
         let mut gro_storage = GroBufferStorage::new();
+        // A dedicated clone of `ctx` and device API object whose only purpose
+        // is to hold the borrow of the GRO counters for the lifetime of the
+        // worker, leaving `ctx` free to be borrowed mutably by `receive_frame`
+        // while a GRO iterator is alive.
+        let mut gro_ctx = ctx.clone();
+        let mut gro_api = gro_ctx.api().device_any();
+        let gro_counters = gro_api.gro_counters();
         loop {
             let rx_buffers = futures::select! {
                 r = session.recv(&mut rx_ready_storage).fuse() => r.map_err(Error::Client)?,
@@ -259,7 +266,7 @@ impl NetdeviceWorker {
             // significant problem since ports are seldom added or removed.
             let state = state.lock().await;
             let mut rx_buffers = ShortCircuit::new(rx_buffers.map(build_gro_input));
-            let mut gro = gro_storage.coalesce(&mut rx_buffers, tcp_gro_enabled);
+            let mut gro = gro_storage.coalesce(&mut rx_buffers, tcp_gro_enabled, gro_counters);
             while let Some(item) = gro.next() {
                 let GroOutputItem {
                     target: GroPortTarget { port, frame_type },

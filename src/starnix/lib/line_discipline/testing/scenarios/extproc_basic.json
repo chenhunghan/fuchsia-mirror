@@ -1,0 +1,85 @@
+{
+    "name": "extproc_basic",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "pre"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "set_packet_mode",
+            "enabled": true
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IXON"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ISIG",
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOCTL",
+                    "IEXTEN",
+                    "EXTPROC"
+                ]
+            }
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "check_poll",
+            "side": "main"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "write_to_master",
+            "data": "hello\u007f\u0003"
+        },
+        {
+            "action": "read_once_from_master",
+            "expect_block": true
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

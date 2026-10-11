@@ -67,14 +67,16 @@ struct ArmCurrentEl : public SysRegBase<ArmCurrentEl, uint64_t> {
 };
 ARCH_ARM64_SYSREG(ArmCurrentEl, "CurrentEL");
 
-// If we are executing at an exception level higher than EL1, this disables EL2
+// If we are executing at EL2 and FEAT_VHE is supported, this configures EL2
+// host mode (HCR_EL2.{RW, E2H, TGE} = 1) and stays in EL2h. Otherwise, if we
+// are executing at an exception level higher than EL1, this disables EL2
 // monitoring, ensures would-be EL2 traps are routed to EL3, installs the
 // current stack in SP_EL1 (if any), and then drops to EL1. If we are already
 // at EL1, then this call is a no-op.
 //
 // This function is safe to call in any context. Care is taken to avoid using
 // the stack and only uses scratch registers.
-extern "C" void ArmDropToEl1WithoutEl2Monitor();
+extern "C" void ArmDropToEl1();
 
 // This type covers the following register formats:
 // * [arm/sysreg]/mpidr_el1: Multiprocessor Affinity Register (EL1)
@@ -342,8 +344,7 @@ struct ArmTranslationControlRegisterEl2Base
     set_res1_bit23(1);
   }
 
-  DEF_RSVDZ_FIELD(63, 62);
-  DEF_BIT(33, mtx);
+  // Bits [63:33] differ between TCR_EL2 and VTCR_EL2.  See below.
   DEF_BIT(32, ds);
   DEF_BIT(31, res1_bit32);  // RES1: should be preserved or written as 1.
   // Bits [30:29] differ between TCR_EL2 and VTCR_EL2.  See below.
@@ -389,6 +390,8 @@ struct ArmTcrEl2 : public SysRegDerived<ArmTcrEl2, ArmTranslationControlRegister
     return *this;
   }
 
+  DEF_RSVDZ_FIELD(63, 62);
+  DEF_BIT(33, mtx);
   DEF_BIT(30, tcma);
   DEF_BIT(29, tbid);
   DEF_BIT(24, hpd);  // Hierarchical Permission Disable

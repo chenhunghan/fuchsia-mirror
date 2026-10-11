@@ -19,14 +19,14 @@ pub trait LedgerNodeOp {
     fn make_all(&self, display_mode: LedgerViewMode) -> Vec<LedgerViewNode>;
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, schemars::JsonSchema)]
 pub struct LedgerNodeValue {
     data: String,
     outcome: LedgerOutcome,
     mode: LedgerMode,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, schemars::JsonSchema)]
 pub struct LedgerNode {
     value: LedgerNodeValue,
     children: Vec<LedgerNode>,
@@ -206,7 +206,7 @@ impl LedgerNodeOp for LedgerNode {
     }
 }
 
-#[derive(Serialize, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Debug, Serialize, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerOutcome {
     ValidRangeStart,
@@ -231,7 +231,7 @@ impl LedgerOutcome {
 }
 
 // Mode type for nodes.
-#[derive(Serialize, Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Serialize, Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LedgerMode {
     Normal,

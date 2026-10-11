@@ -258,8 +258,7 @@ LocalCodecFactory::~LocalCodecFactory() {
   // We need ~factory_binding_ to run on shared_fidl_thread() else it's not safe
   // to un-bind unilaterally (without the channel closing).  Unless not bound in
   // the first place.
-  ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread() ||
-                  !factory_binding_.is_bound());
+  ZX_DEBUG_ASSERT(device_->driver()->IsSharedFidlSynchronized() || !factory_binding_.is_bound());
 
   // ~factory_binding_ here + fact that we're running on shared_fidl_thread()
   // (if Bind() previously called) means error_handler won't be running
@@ -271,14 +270,14 @@ void LocalCodecFactory::SetErrorHandler(fit::closure error_handler) {
   ZX_DEBUG_ASSERT(!factory_binding_.is_bound());
   factory_binding_.set_error_handler([this, error_handler = std::move(error_handler)](
                                          zx_status_t status) mutable {
-    ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+    ZX_DEBUG_ASSERT(device_->driver()->IsSharedFidlSynchronized());
     // This queues after the similar posting in CreateDecoder() (via
     // TryAddCodec()), so that LocalCodecFactory won't get deleted until
     // after previously-started TryAddCodec()s are done.
     device_->codec_admission_control()->PostAfterPreviouslyStartedClosesDone(
         [this, closure_queue = closure_queue_, error_handler = std::move(error_handler)]() mutable {
           closure_queue->Enqueue([this, error_handler = std::move(error_handler)] {
-            ZX_DEBUG_ASSERT(thrd_current() == device_->driver()->shared_fidl_thread());
+            ZX_DEBUG_ASSERT(device_->driver()->IsSharedFidlSynchronized());
             error_handler();
             // "this" is gone
           });

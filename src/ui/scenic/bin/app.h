@@ -146,9 +146,6 @@ class App {
   std::shared_ptr<view_tree::SnapshotHolder> snapshot_holder_;
   async_patterns::DispatcherBound<input::InputManager> input_manager_;
 
-  uint64_t flatland_frame_count_ = 0;
-  uint64_t skipped_frame_count_ = 0;
-
   const bool enable_snapshot_dump_ = false;
 
   // Must be last to ensure it is destroyed before the members it references

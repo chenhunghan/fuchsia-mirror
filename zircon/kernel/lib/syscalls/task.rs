@@ -19,7 +19,9 @@ const LOCAL_TRACE: u32 = 0;
 pub fn sys_task_kill(handle: HandleValue) -> Result<(), Status> {
     ltracef!("handle {:#x}\n", handle.raw_value());
 
-    let dispatcher = Dispatcher::get_with_rights::<Dispatcher>(handle, ZX_RIGHT_DESTROY)?;
+    let dispatcher = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<Dispatcher>(up, handle, ZX_RIGHT_DESTROY)
+    })?;
 
     if let Some(job) = dispatcher.downcast::<JobDispatcher>() {
         job.kill(ZX_TASK_RETCODE_SYSCALL_KILL);
@@ -38,7 +40,9 @@ pub fn sys_task_kill(handle: HandleValue) -> Result<(), Status> {
 pub fn sys_task_suspend(handle: HandleValue, token: &mut HandleValue) -> Result<(), Status> {
     ltracef!("handle {:#x}\n", handle.raw_value());
 
-    let task = Dispatcher::get_with_rights::<Dispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let task = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<Dispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     let (new_token, rights) = SuspendTokenDispatcher::create(task)?;
     *token = ProcessDispatcher::with_current(|up| up.make_and_add_handle(new_token, rights))?;
     Ok(())

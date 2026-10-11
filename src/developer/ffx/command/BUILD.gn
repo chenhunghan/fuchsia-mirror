@@ -68,7 +68,6 @@ if (is_host) {
       "//src/developer/ffx/frontends/*",
       "//src/developer/ffx/lib/diagnostics/*",
       "//src/developer/ffx/lib/fho:*",
-      "//src/developer/ffx/lib/fho/testing:*",
       "//src/developer/ffx/plugins/completion:*",
       "//src/developer/ffx/plugins/doctor:*",
       "//src/developer/ffx/plugins/target/list:*",

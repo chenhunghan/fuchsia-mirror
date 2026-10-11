@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
@@ -35,6 +38,9 @@ var (
 	// are concerned, they only need to distinguish between the name prefixes
 	// "sponge" and "resultstore".
 	validBuildEventServices = []string{"sponge", "resultstore"} // constant
+
+	// Experiments supported by fint.
+	supportedExperiments = []string{"use_test_pilot"}
 )
 
 const (
@@ -44,6 +50,44 @@ const (
 	CompilationModeBalanced  string = "balanced"
 	CompilationModeSanitizer string = "sanitizer"
 )
+
+// for testability
+var randInt = func(n int) int {
+	return rand.Intn(n)
+}
+
+func GetEnabledExperiments(experiments []string) ([]string, error) {
+	enabledExperiments := []string{}
+	for _, exp := range experiments {
+		if exp == "" {
+			return nil, fmt.Errorf("Experiments must be non-empty")
+		}
+		split := strings.Split(exp, ":")
+		percentage := 100
+		if len(split) > 2 {
+			return nil, fmt.Errorf("Invalid experiment format: %q:\nExperiments format is <experiment_name>[:<percentage>]. experiment_names must not contain ':' characters", exp)
+		}
+		name := split[0]
+		if !slices.Contains(supportedExperiments, name) {
+			return nil, fmt.Errorf("unsupported experiment %q. Supported experiments: %q", name, supportedExperiments)
+		}
+		if len(split) == 2 {
+			var err error
+			percentage, err = strconv.Atoi(split[1])
+			if err != nil {
+				return nil, fmt.Errorf("Invalid experiment format: %q:\nExperiments format is <experiment_name>[:<percentage>]. Could not parse percentage: %s", exp, err)
+			}
+		}
+		if percentage < 0 || percentage > 100 {
+			return nil, fmt.Errorf("invalid experiment percentage %d, must be between 0 and 100", percentage)
+		}
+		r := randInt(100)
+		if r < percentage {
+			enabledExperiments = append(enabledExperiments, name)
+		}
+	}
+	return enabledExperiments, nil
+}
 
 // canonicalizeBuildEventService translates a GN configuration name for
 // build event services into a canonical name to be used in recipes.
@@ -104,7 +148,12 @@ func setImpl(
 		return nil, fmt.Errorf("build_dir must be set")
 	}
 
-	genArgs, err := genArgs(ctx, staticSpec, contextSpec, skipLocalArgs, assemblyOverridesStrings)
+	enabledExperiments, err := GetEnabledExperiments(staticSpec.Experiments)
+	if err != nil {
+		return nil, err
+	}
+
+	genArgs, err := genArgs(ctx, staticSpec, contextSpec, skipLocalArgs, assemblyOverridesStrings, enabledExperiments)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +171,9 @@ func setImpl(
 		BuildEventServiceNinja: canonicalizeBuildEventService(staticSpec.BuildEventServiceNinja),
 		// True if any toolchain is using RBE and needs reproxy to run.
 		// Note: bazel+RBE doesn't require reproxy.
-		EnableRbe: staticSpec.RustRbeEnable || staticSpec.CxxRbeEnable || staticSpec.LinkRbeEnable,
+		EnableRbe:          staticSpec.RustRbeEnable || staticSpec.CxxRbeEnable || staticSpec.LinkRbeEnable,
+		ExperimentSpecs:    staticSpec.Experiments,
+		EnabledExperiments: enabledExperiments,
 	}
 
 	if contextSpec.ArtifactDir != "" {
@@ -230,6 +281,7 @@ func genArgs(
 	contextSpec *fintpb.Context,
 	skipLocalArgs bool,
 	assemblyOverridesStrings []string,
+	enabledExperiments []string,
 ) ([]string, error) {
 	// GN variables to set via args (mapping from variable name to value).
 	vars := make(map[string]any)
@@ -276,6 +328,10 @@ func genArgs(
 	}
 	if staticSpec.DisableXattrForRbe {
 		vars["disable_xattr_for_rbe"] = staticSpec.DisableXattrForRbe
+	}
+
+	if slices.Contains(enabledExperiments, "use_test_pilot") {
+		vars["use_test_pilot"] = true
 	}
 
 	if staticSpec.Product != "" {

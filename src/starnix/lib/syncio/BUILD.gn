@@ -65,6 +65,7 @@ rustc_library("syncio") {
     "src/zxio.rs",
   ]
   edition = "2024"
+  link_deps = [ ":zxio_static" ]
   lint_config = "//src/starnix/build:kernel_library_config"
   test_deps = [
     "//src/lib/fuchsia",
@@ -82,7 +83,6 @@ rustc_library("syncio") {
   ]
   with_unit_tests = true
   deps = [
-    ":zxio_static",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/rust/zx",

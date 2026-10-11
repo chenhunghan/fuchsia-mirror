@@ -230,43 +230,85 @@ template("run_fuchsia_bazel_sdk_tests") {
     # LINT.ThenChange(//build/bazel/enable_vendor_mode.bazelrc:bazel_registry_dir)
   }
 
+  if (defined(invoker.visibility)) {
+    visibility = invoker.visibility + [ ":*" ]
+  }
+
+  _bazel_bin = "//prebuilt/third_party/bazel/${host_os}-${host_cpu}/bazel"
+  _prerequisite_deps = [
+    _rules_fuchsia_target,
+    prebuilt_content_hash_labels.clang,
+    prebuilt_content_hash_labels.python,
+  ]
+  _prerequesite_args = []
+  if (_use_idk_exported) {
+    _prerequisite_deps += [ _idk_exported_target ]
+    _prerequesite_args += [
+      "--fuchsia_idk_directory",
+      rebase_path(_idk_exported_path, root_build_dir),
+    ]
+  } else if (_use_fuchsia_sdk) {
+    _prerequisite_deps += [ _fuchsia_sdk_target ]
+    _prerequesite_args += [
+      "--fuchsia_build_dir",
+      rebase_path(root_build_dir, root_build_dir),
+      "--fuchsia_sdk_directory",
+      rebase_path(_fuchsia_sdk_path, root_build_dir),
+    ]
+  } else {
+    _prerequisite_deps += [ "//build/bazel/bazel_sdk:in_tree_fuchsia_sdk" ]
+    _prerequesite_args += [
+      # Using @fuchsia_sdk, which depends on @fuchsia_in_tree_idk
+      "--fuchsia-in-tree-sdk",
+      "--fuchsia_build_dir=" + rebase_path(root_build_dir, root_build_dir),
+    ]
+  }
+
   _all_targets = []
+  _all_launcher_targets = []
   foreach(_target_cpu, _target_cpus) {
     _cpu_target_name = "${target_name}_${_target_cpu}"
+    _launcher_target_name = "${_cpu_target_name}.bazel"
     _all_targets += [ ":${_cpu_target_name}" ]
+    _all_launcher_targets += [ ":${_launcher_target_name}" ]
 
-    action(_cpu_target_name) {
+    if (_target_cpu == target_cpu) {
+      _launcher_file = "${target_out_dir}/${target_name}/${target_name}.bazel"
+    } else {
+      _launcher_file =
+          "${target_out_dir}/${target_name}/${_cpu_target_name}.bazel"
+    }
+    _launcher_config_file = "${_launcher_file}.config"
+    _launcher_json_file = "${_launcher_file}.json"
+
+    action(_launcher_target_name) {
       testonly = true
-      script = "//build/bazel_sdk/tests/scripts/bazel_test.py"
+      script = "//build/bazel_sdk/tests/scripts/generate_bazel_launcher.py"
       inputs = [
-        "//prebuilt/third_party/bazel/${host_os}-${host_cpu}/bazel",
-        "//build/bazel_sdk/tests/MODULE.bazel",
+        _bazel_bin,
+        "//build/bazel_sdk/tests/scripts/bazel_launcher.sh",
+        prebuilt_content_hash_files.python,
+        prebuilt_content_hash_files.clang,
       ]
       outputs = [
-        "$target_gen_dir/$target_name.stamp",
-        "$target_out_dir/$target_name.bazel_events_logs.json",
+        _launcher_config_file,
+        _launcher_file,
+        _launcher_json_file,
       ]
-      _exec_log = "$target_out_dir/$target_name.bazel_exec_log.pb.zstd"
-      depfile = "$target_gen_dir/$target_name.d"
 
       args = [
-        "--verbose",
+        "--output=" + rebase_path(_launcher_file, root_build_dir),
         "--fuchsia_source_dir=" + rebase_path("//", root_build_dir),
         "--rules_fuchsia_dir=" +
             rebase_path(_rules_fuchsia_dir, root_build_dir),
         "--output_base=" + rebase_path(_output_base, root_build_dir),
         "--output_user_root=" + rebase_path(_output_user_root, root_build_dir),
         "--target_cpu=${_target_cpu}",
-        "--bazel=" + rebase_path(inputs[0], root_build_dir),
-        "--stamp-file=" + rebase_path(outputs[0], root_build_dir),
-        "--depfile=" + rebase_path(depfile, root_build_dir),
+        "--bazel=" + rebase_path(_bazel_bin, root_build_dir),
         "--bazel-vendor-dir=" + rebase_path(_bazel_vendor_dir, root_build_dir),
         "--bazel-registry-dir=" +
             rebase_path(_bazel_registry_dir, root_build_dir),
-        "--quiet",
       ]
-
-      deps = [ _rules_fuchsia_target ]
 
       _remote_build = enable_bazel_remote_rbe
       _remote_build_strategy = bazel_rbe_exec_strategy
@@ -294,33 +336,60 @@ template("run_fuchsia_bazel_sdk_tests") {
         args += [ "--bazel-config=" + bazel_upload_build_events ]
       }
 
-      if (_use_idk_exported) {
-        args += [
-          "--fuchsia_idk_directory",
-          rebase_path(_idk_exported_path, root_build_dir),
-        ]
-        deps += [ _idk_exported_target ]
-      } else if (_use_fuchsia_sdk) {
-        args += [
-          "--fuchsia_build_dir",
-          rebase_path(root_build_dir, root_build_dir),
-          "--fuchsia_sdk_directory",
-          rebase_path(_fuchsia_sdk_path, root_build_dir),
-        ]
-        deps += [ _fuchsia_sdk_target ]
-      } else {
-        # Using @fuchsia_sdk, which depends on @fuchsia_in_tree_idk
-        args += [
-          "--fuchsia-in-tree-sdk",
-          "--fuchsia_build_dir=" + rebase_path(root_build_dir, root_build_dir),
-        ]
-        deps += [ "//build/bazel/bazel_sdk:in_tree_fuchsia_sdk" ]
-      }
       args += [
         "--prebuilt-python-version-file",
         rebase_path(prebuilt_content_hash_files.python, root_build_dir),
         "--prebuilt-clang-version-file",
         rebase_path(prebuilt_content_hash_files.clang, root_build_dir),
+      ]
+
+      args += _prerequesite_args
+
+      # Ensure that building the launcher also builds the pre-requisite
+      # dependencies.
+      deps = _prerequisite_deps + [
+               prebuilt_content_hash_labels.clang,
+               prebuilt_content_hash_labels.python,
+             ]
+      hermetic_deps = false
+
+      # The generated launcher script embeds absolute paths so it can be invoked
+      # from any working directory.
+      check_for_output_dir_leaks = false
+    }
+
+    action(_cpu_target_name) {
+      testonly = true
+      script = "//build/bazel_sdk/tests/scripts/run_tests.py"
+      inputs = [
+        _bazel_bin,
+        "//build/bazel_sdk/tests/MODULE.bazel",
+        "//build/bazel_sdk/tests/scripts/generate_bazel_launcher.py",
+        "//build/bazel_sdk/tests/scripts/bazel_launcher.sh",
+
+        # The .config file is read implicitly by the launcher script
+        # which expects it to be in the same directory. There is no
+        # run_tests.py option to specify its location.
+        _launcher_config_file,
+        _launcher_file,
+        _launcher_json_file,
+      ]
+      outputs = [
+        "$target_gen_dir/$target_name.stamp",
+        "$target_out_dir/$target_name.bazel_events_logs.json",
+      ]
+      _exec_log = "$target_out_dir/$target_name.bazel_exec_log.pb.zstd"
+      depfile = "$target_gen_dir/$target_name.d"
+
+      args = [
+        "--verbose",
+        "--quiet",
+        "--launcher=" + rebase_path(_launcher_file, root_build_dir),
+        "--launcher-json=" + rebase_path(_launcher_json_file, root_build_dir),
+        "--stamp-file=" + rebase_path(outputs[0], root_build_dir),
+        "--depfile=" + rebase_path(depfile, root_build_dir),
+        "--bazel-build-events-log-json",
+        rebase_path(outputs[1], root_build_dir),
       ]
 
       if (bazel_execution_logs) {
@@ -329,10 +398,6 @@ template("run_fuchsia_bazel_sdk_tests") {
           rebase_path(_exec_log, root_build_dir),
         ]
       }
-      args += [
-        "--bazel-build-events-log-json",
-        rebase_path(outputs[1], root_build_dir),
-      ]
 
       metadata = {
         # Used by //:bazel_build_events_logs Build API module
@@ -351,10 +416,7 @@ template("run_fuchsia_bazel_sdk_tests") {
             [ rebase_path(outputs[0], root_build_dir) + ",60000" ]
       }
 
-      deps += [
-        prebuilt_content_hash_labels.clang,
-        prebuilt_content_hash_labels.python,
-      ]
+      deps = [ ":${_launcher_target_name}" ]
       pool = "//:console"
       hermetic_deps = false
 
@@ -363,8 +425,13 @@ template("run_fuchsia_bazel_sdk_tests") {
     }
   }
 
+  group("${_main_target_name}.bazel") {
+    testonly = true
+    deps = _all_launcher_targets
+  }
+
   group(_main_target_name) {
     testonly = true
-    deps = _all_targets
+    deps = _all_targets + [ ":${_main_target_name}.bazel" ]
   }
 }

@@ -137,7 +137,7 @@ fuchsia_test_package("remote-control-lib-tests") {
   test_components = [ ":lib_test-component" ]
   deps = [
     ":lib_test-test-driver",
-    "//src/connectivity/network/netstack:component",
+    "//src/connectivity/network/netstack3:component-for-tests",
   ]
   test_specs = {
     log_settings = {

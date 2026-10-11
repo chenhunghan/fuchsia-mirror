@@ -52,10 +52,7 @@ pub fn render_html(report: &Report, opts: &HtmlOptions) -> String {
          <button type=\"button\" id=\"opt-keys\" title=\"Keyboard shortcuts\">?</button>\
          </div>\n</header>",
         esc(&opts.title),
-        chip(
-            if issues == 0 { "good" } else { "bad" },
-            &count(issues, "issue")
-        ),
+        chip(if issues == 0 { "good" } else { "bad" }, &count(issues, "issue")),
         chip("warn", &count(report.notes(), "note")),
         chip("plain", &count(report.pairs.len(), "function pair")),
         if report.lints.is_empty() {
@@ -64,11 +61,7 @@ pub fn render_html(report: &Report, opts: &HtmlOptions) -> String {
             format!(
                 "<a href=\"#lints\">{}</a>",
                 chip(
-                    if report.lint_issues() == 0 {
-                        "warn"
-                    } else {
-                        "bad"
-                    },
+                    if report.lint_issues() == 0 { "warn" } else { "bad" },
                     &count(report.lints.len(), "rubric lint")
                 )
             )
@@ -230,24 +223,20 @@ fn render_pair(out: &mut String, i: usize, p: &PairReport) {
         esc(&p.rust.location()),
     );
     let via = match &p.link {
-        Link::Ffi {
-            shim,
-            shim_location,
-        } => Some(format!(
+        Link::Ffi { shim, shim_location } => Some(format!(
             "Paired because C++ now calls the FFI shim <code>{}</code> <span class=\"loc\">{}</span>",
             esc(shim),
             esc(shim_location)
         )),
-        Link::FfiName {
-            shim,
-            shim_location,
-        } => Some(format!(
+        Link::FfiName { shim, shim_location } => Some(format!(
             "Paired by the name of the FFI shim <code>{}</code> <span class=\"loc\">{}</span>",
             esc(shim),
             esc(shim_location)
         )),
         Link::Forced => Some("Paired with <code>--pair</code>".into()),
-        Link::Similarity if !p.rationale.is_empty() => Some(format!("Paired: {}", esc(&p.rationale))),
+        Link::Similarity if !p.rationale.is_empty() => {
+            Some(format!("Paired: {}", esc(&p.rationale)))
+        }
         Link::Similarity => Some("Paired by name and body similarity".into()),
     };
     if let Some(v) = via {
@@ -295,13 +284,7 @@ fn render_checks(out: &mut String, p: &PairReport) {
             "none".to_string()
         } else {
             v.iter()
-                .map(|e| {
-                    if e == "?" {
-                        "? (propagated)"
-                    } else {
-                        e.as_str()
-                    }
-                })
+                .map(|e| if e == "?" { "? (propagated)" } else { e.as_str() })
                 .collect::<Vec<_>>()
                 .join(", ")
         }
@@ -336,13 +319,7 @@ fn render_checks(out: &mut String, p: &PairReport) {
     let flow: Vec<String> = s
         .flow
         .iter()
-        .map(|(k, a, b)| {
-            if a == b {
-                format!("{k} {a}")
-            } else {
-                format!("<b>{k} {a} vs {b}</b>")
-            }
-        })
+        .map(|(k, a, b)| if a == b { format!("{k} {a}") } else { format!("<b>{k} {a} vs {b}</b>") })
         .collect();
     cards.push((
         flow_same,
@@ -434,11 +411,7 @@ fn render_findings(out: &mut String, i: usize, p: &PairReport) {
         };
         let (cpp, rows) = blocks[b];
         let row = &rows[k];
-        let anchor = if b == 0 {
-            format!("p{i}r{k}")
-        } else {
-            format!("p{i}o{}r{k}", b - 1)
-        };
+        let anchor = if b == 0 { format!("p{i}r{k}") } else { format!("p{i}o{}r{k}", b - 1) };
         let at = |u: Option<usize>, f: &Function| {
             u.map(|j| {
                 let unit = &f.units[j];
@@ -448,10 +421,8 @@ fn render_findings(out: &mut String, i: usize, p: &PairReport) {
                 }
             })
         };
-        let loc: Vec<String> = [at(row.cpp, cpp), at(row.rust, &p.rust)]
-            .into_iter()
-            .flatten()
-            .collect();
+        let loc: Vec<String> =
+            [at(row.cpp, cpp), at(row.rust, &p.rust)].into_iter().flatten().collect();
         let _ = writeln!(
             out,
             "<li class=\"{class}\"><a href=\"#{anchor}\"><span class=\"icon\">{icon}</span>\
@@ -481,12 +452,7 @@ impl<'a> Side<'a> {
             .map(|u| leading(f.line(u.start_line)))
             .filter(|&n| n != usize::MAX)
             .unwrap_or(0);
-        Side {
-            f,
-            indent,
-            last: 0,
-            in_comment: false,
-        }
+        Side { f, indent, last: 0, in_comment: false }
     }
 
     fn line_html(&mut self, no: &str, text: &str, class: &str, title: &str) -> String {
@@ -504,15 +470,12 @@ impl<'a> Side<'a> {
         title: &str,
     ) -> String {
         let code = highlight(text, self.f.lang, &mut self.in_comment);
-        let title = if title.is_empty() {
-            String::new()
-        } else {
-            format!(" title=\"{}\"", esc(title))
-        };
-        let file = file
-            .map(|f| format!(" data-p=\"{}\"", esc(f)))
-            .unwrap_or_default();
-        format!("<div class=\"ln{class}\"{title}{file}><span class=\"no\">{no}</span><span class=\"tx\">{code}</span></div>")
+        let title =
+            if title.is_empty() { String::new() } else { format!(" title=\"{}\"", esc(title)) };
+        let file = file.map(|f| format!(" data-p=\"{}\"", esc(f))).unwrap_or_default();
+        format!(
+            "<div class=\"ln{class}\"{title}{file}><span class=\"no\">{no}</span><span class=\"tx\">{code}</span></div>"
+        )
     }
 
     fn unit(&mut self, u: &Unit) -> String {
@@ -643,11 +606,15 @@ fn render_code(out: &mut String, id: &str, cpp: &Function, rust: &Function, rows
     // A run of one-sided rows carries its note on the first row only.
     let mut run_sev: Option<(Marker, Severity)> = None;
     for (k, row) in rows.iter().enumerate() {
-        // A safety comment is an expected addition: shown, but not flagged.
-        let expected_title = match row.rust.map(|j| &rust.units[j].features) {
+        // A safety comment or a doc comment on a `pub` function is an expected
+        // addition: shown, but not flagged.
+        let expected_title = match row.rust.map(|j| (j, &rust.units[j].features)) {
             _ if row.cpp.is_some() || !row.notes.is_empty() => None,
-            Some(f) if f.safety => Some("Safety comment, expected in Rust"),
-            Some(f) if f.lock_plumbing => Some("ksync lock bookkeeping, expected in Rust"),
+            Some((_, f)) if f.safety => Some("Safety comment, expected in Rust"),
+            Some((_, f)) if f.lock_plumbing => Some("ksync lock bookkeeping, expected in Rust"),
+            Some((j, _)) if rust.is_pub && crate::check::new_doc(rust, j) => {
+                Some("Doc comment, expected in Rust")
+            }
             _ => None,
         };
         let expected = expected_title.is_some();
@@ -681,21 +648,13 @@ fn render_code(out: &mut String, id: &str, cpp: &Function, rust: &Function, rows
         let _ = write!(
             html,
             "<div class=\"row {}\" id=\"{id}r{k}\">",
-            if expected {
-                "ronly expected"
-            } else {
-                row_class(row, inherited)
-            }
+            if expected { "ronly expected" } else { row_class(row, inherited) }
         );
         let _ = write!(
             html,
             "<div class=\"cell c{}\">{left}</div>{}<div class=\"cell r{}\">{right}</div>",
             if row.cpp.is_none() { " none" } else { "" },
-            if expected {
-                &expected_mk
-            } else {
-                marker_html(row.marker)
-            },
+            if expected { &expected_mk } else { marker_html(row.marker) },
             if row.rust.is_none() { " none" } else { "" },
         );
         if !row.notes.is_empty() {
@@ -749,10 +708,7 @@ fn render_leftovers(out: &mut String, report: &Report) {
                 crate::check::Severity::Note => ("n-warn", "~"),
             };
             let related = l.related.as_ref().map_or(String::new(), |(p, n)| {
-                format!(
-                    " <span class=\"loc\">C++ at {}</span>",
-                    esc(&format!("{p}:{n}"))
-                )
+                format!(" <span class=\"loc\">C++ at {}</span>", esc(&format!("{p}:{n}")))
             });
             let _ = writeln!(
                 out,
@@ -840,10 +796,7 @@ fn render_leftovers(out: &mut String, report: &Report) {
             let helper = if callers.is_empty() {
                 String::new()
             } else {
-                format!(
-                    " <span class=\"tag\">helper for {}</span>",
-                    esc(&callers.join(", "))
-                )
+                format!(" <span class=\"tag\">helper for {}</span>", esc(&callers.join(", ")))
             };
             let _ = writeln!(
                 out,
@@ -929,11 +882,7 @@ fn short(path: &str) -> &str {
 }
 
 fn leading(s: &str) -> usize {
-    if s.trim().is_empty() {
-        usize::MAX
-    } else {
-        s.len() - s.trim_start().len()
-    }
+    if s.trim().is_empty() { usize::MAX } else { s.len() - s.trim_start().len() }
 }
 
 fn cut(s: &str, n: usize) -> String {
@@ -1040,11 +989,7 @@ const RUST_KEYWORDS: &[&str] = &[
 fn ident_key(id: &str) -> String {
     let id = id.strip_prefix("r#").unwrap_or(id);
     let b = id.as_bytes();
-    let id = if b.len() > 1 && b[0] == b'k' && b[1].is_ascii_uppercase() {
-        &id[1..]
-    } else {
-        id
-    };
+    let id = if b.len() > 1 && b[0] == b'k' && b[1].is_ascii_uppercase() { &id[1..] } else { id };
     normalize::ident(id)
 }
 
@@ -1178,11 +1123,7 @@ pub fn highlight(line: &str, lang: Lang, in_comment: &mut bool) -> String {
                     esc(&word)
                 );
             } else if word == "ZX_OK" || (lang == Lang::Rust && word == "Ok") {
-                let _ = write!(
-                    o,
-                    "<span class=\"ok\" data-k=\"e:OK\">{}</span>",
-                    esc(&word)
-                );
+                let _ = write!(o, "<span class=\"ok\" data-k=\"e:OK\">{}</span>", esc(&word));
             } else if keywords.contains(&word.as_str()) {
                 let _ = write!(o, "<span class=\"kw\">{}</span>", esc(&word));
             } else if lang == Lang::Rust && chars.get(j) == Some(&'!') {

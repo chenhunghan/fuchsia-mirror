@@ -19,6 +19,7 @@ source_set("threads") {
     ":test-thread",
     ":thread-functions",
     "//src/lib/captive-thread",
+    "//src/zircon/testing/maybe-standalone-test",
     "//zircon/kernel/lib/arch",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/mini-process",

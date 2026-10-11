@@ -34,23 +34,19 @@ source_set("impl") {
   visibility = [ ":*" ]
   sources = [
     "driver.cc",
-    "exceptions.cc",
     "futex.cc",
     "handle_ops.cc",
-    "hypervisor.cc",
     "membarrier_ffi.cc",
     "object.cc",
     "object_info_ffi.cc",
     "object_property_ffi.cc",
     "object_wait.cc",
-    "pager.cc",
     "port.cc",
     "system.cc",
     "system_${zircon_cpu}.cc",
     "system_ffi.cc",
     "test.cc",
     "thread_ffi.cc",
-    "vmar.cc",
   ]
   deps = [
     ":dispatch",
@@ -126,6 +122,7 @@ kernel_rust_mod("syscalls-rs") {
     "debug.rs",
     "debuglog.rs",
     "event.rs",
+    "exceptions.rs",
     "fifo.rs",
     "guest.rs",
     "iob.rs",
@@ -138,6 +135,7 @@ kernel_rust_mod("syscalls-rs") {
     "object_info.rs",
     "object_property.rs",
     "object_wait.rs",
+    "pager.rs",
     "pmt.rs",
     "process.rs",
     "profile.rs",
@@ -153,6 +151,7 @@ kernel_rust_mod("syscalls-rs") {
     "thread.rs",
     "ticks.rs",
     "timer.rs",
+    "vcpu.rs",
     "vmar.rs",
     "vmo.rs",
   ]

@@ -14,6 +14,7 @@ use super::thread::GeneralRegsSource;
 use super::user_copy::{RISCV_CAPTURE_USER_COPY_FAULTS_BIT, arch_copy_from_user};
 use super::vm::is_user_accessible;
 use crate::counters;
+use crate::kernel::interrupt::{IntHandlerSavedState, int_handler_finish, int_handler_start};
 use core::fmt::Write;
 use debug::ltrace::KernelConsoleWriter;
 use debug::{dprintf, ltracef};
@@ -210,15 +211,14 @@ pub unsafe extern "C" fn rust_riscv64_print_frame(
 unsafe extern "C" {
     fn cpp_platform_halt(action: u32, reason: u32) -> !;
     fn cpp_set_crashlog_regs(iframe: *const Iframe, cause: i64, tval: u64);
-    fn cpp_dispatch_user_exception(
+    // Declared `extern "C"` in <arch/exception.h>; no shim needed.
+    fn dispatch_user_exception(
         exception_type: u32,
         context: *const ArchExceptionContext,
     ) -> Result<(), Status>;
     fn cpp_vmm_page_fault_handler(tval: u64, flags: u32) -> Result<(), Status>;
     // Defined in exceptions.S and already `extern "C"`; no shim needed.
     fn riscv64_syscall_dispatcher(frame: *mut Iframe) -> SyscallResult;
-    fn cpp_int_handler_start(state: *mut u64);
-    fn cpp_int_handler_finish(state: *mut u64) -> u32;
     fn cpp_dump_common_exception_context(context: *const ArchExceptionContext);
     fn cpp_cpu_stats_inc_page_faults();
 }
@@ -316,7 +316,7 @@ fn try_dispatch_user_exception(
     super::arch::arch_enable_ints();
     // SAFETY: `context` is a live local; the callee copies out of it and does not
     // retain the pointer past the call.
-    let status = unsafe { cpp_dispatch_user_exception(exception_type, &context) };
+    let status = unsafe { dispatch_user_exception(exception_type, &context) };
     super::arch::arch_disable_ints();
     status
 }
@@ -605,10 +605,8 @@ unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, ca
     let mut do_preempt = false;
 
     if cause < 0 {
-        let mut state = 0u64;
-        // SAFETY: `state` is a live local that stays borrowed until the matching
-        // `cpp_int_handler_finish` below.
-        unsafe { cpp_int_handler_start(&mut state) };
+        let mut state = IntHandlerSavedState::default();
+        int_handler_start(&mut state);
 
         match cause & i64::MAX {
             RISCV64_INTERRUPT_SSWI => {
@@ -632,8 +630,7 @@ unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, ca
             _ => unsafe { fatal_exception(cause, 0, frame) },
         }
 
-        // SAFETY: `state` is the same live local passed to `cpp_int_handler_start`.
-        do_preempt = unsafe { cpp_int_handler_finish(&mut state) } != 0;
+        do_preempt = int_handler_finish(&mut state);
     } else {
         // SAFETY: reading `stval` has no side effects; it holds the faulting
         // address or instruction for the trap being handled.
@@ -855,7 +852,7 @@ pub extern "C" fn arch_dispatch_user_policy_exception(
     };
     // SAFETY: `context` is a live local; the callee copies out of it and does not
     // retain the pointer past the call.
-    unsafe { cpp_dispatch_user_exception(ZX_EXCP_POLICY_ERROR, &context) }
+    unsafe { dispatch_user_exception(ZX_EXCP_POLICY_ERROR, &context) }
 }
 
 /// Install suspended register context on a thread.

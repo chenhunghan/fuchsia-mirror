@@ -8,15 +8,24 @@
 #include <stdlib.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #include <gtest/gtest.h>
+#include <linux/futex.h>
 
+#include "src/lib/files/file.h"
+#include "src/lib/fxl/strings/string_number_conversions.h"
+#include "src/lib/fxl/strings/trim.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
@@ -359,6 +368,95 @@ TEST(SetRLimitTest, SpliceFromRegularFileToPipeWithZeroFSize) {
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
+}
+
+struct RLimitTestCase {
+  int resource;
+  std::string_view name;  // Short name without RLIMIT_ prefix.
+  rlim_t expected_cur;
+  rlim_t expected_max;
+};
+
+class RLimitDefaultTest : public testing::TestWithParam<RLimitTestCase> {};
+
+TEST_P(RLimitDefaultTest, CurAndMaxDefaults) {
+  const RLimitTestCase& test_case = GetParam();
+
+  struct rlimit limit;
+  ASSERT_THAT(getrlimit(test_case.resource, &limit), SyscallSucceeds());
+  EXPECT_EQ(limit.rlim_cur, test_case.expected_cur);
+  EXPECT_EQ(limit.rlim_max, test_case.expected_max);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    KernelDefaults, RLimitDefaultTest,
+    testing::Values(RLimitTestCase{RLIMIT_CORE, "CORE", 0, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_CPU, "CPU", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_DATA, "DATA", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_FSIZE, "FSIZE", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_MEMLOCK, "MEMLOCK", 8 * 1024 * 1024, 8 * 1024 * 1024},
+                    RLimitTestCase{RLIMIT_NOFILE, "NOFILE", 1024, 524288},
+                    RLimitTestCase{RLIMIT_STACK, "STACK", 8 * 1024 * 1024, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_AS, "AS", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_RSS, "RSS", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_LOCKS, "LOCKS", RLIM_INFINITY, RLIM_INFINITY},
+                    RLimitTestCase{RLIMIT_MSGQUEUE, "MSGQUEUE", 819200, 819200},
+                    RLimitTestCase{RLIMIT_NICE, "NICE", 0, 0},
+                    RLimitTestCase{RLIMIT_RTPRIO, "RTPRIO", 0, 0},
+                    RLimitTestCase{RLIMIT_RTTIME, "RTTIME", RLIM_INFINITY, RLIM_INFINITY}),
+    [](const testing::TestParamInfo<RLimitTestCase>& info) {
+      return std::string(info.param.name);
+    });
+
+// Verifies default values of RLIMIT_NPROC and RLIMIT_SIGPENDING.
+//
+// Per proc_sys_kernel(5), /proc/sys/kernel/threads-max:
+//   "This file specifies the system-wide limit on the number of threads
+//   (tasks) that can be created on the system."
+//   ...
+//   "If the thread structures would occupy too much (more than 1/8th) of the
+//   available RAM pages, threads-max is reduced accordingly."
+//
+// On Linux, RLIMIT_NPROC and RLIMIT_SIGPENDING are initialized with equal soft
+// and hard limits set to half of /proc/sys/kernel/threads-max.
+TEST(RLimitScaledDefaultTest, NProcAndSigpending) {
+  struct rlimit nproc;
+  ASSERT_THAT(getrlimit(RLIMIT_NPROC, &nproc), SyscallSucceeds());
+  EXPECT_EQ(nproc.rlim_cur, nproc.rlim_max);
+
+  struct rlimit sigpending;
+  ASSERT_THAT(getrlimit(RLIMIT_SIGPENDING, &sigpending), SyscallSucceeds());
+  EXPECT_EQ(sigpending.rlim_cur, sigpending.rlim_max);
+  EXPECT_EQ(nproc.rlim_cur, sigpending.rlim_cur);
+
+  std::string threads_max_str;
+  ASSERT_TRUE(files::ReadFileToString("/proc/sys/kernel/threads-max", &threads_max_str));
+  uint64_t threads_max = 0;
+  ASSERT_TRUE(
+      fxl::StringToNumberWithError(fxl::TrimString(threads_max_str, " \t\r\n"), &threads_max))
+      << "threads-max: " << threads_max_str;
+  EXPECT_EQ(nproc.rlim_cur, threads_max / 2);
+
+  struct sysinfo si;
+  ASSERT_THAT(sysinfo(&si), SyscallSucceeds());
+
+  // Align with Linux, which budgets 16 KiB per thread stack regardless of the
+  // system page size (e.g., 4 pages on 4 KiB kernels or 1 page on 16 KiB
+  // kernels), limiting total thread stacks to 1/8th of available RAM and
+  // clamping threads-max to [20, FUTEX_TID_MASK].
+  constexpr uint64_t kThreadStackSize = 16384;
+  constexpr uint64_t kMinThreads = 20;
+  constexpr uint64_t kMaxThreads = FUTEX_TID_MASK;
+
+  uint64_t total_ram_bytes = static_cast<uint64_t>(si.totalram) * si.mem_unit;
+  uint64_t expected_threads_max =
+      std::clamp<uint64_t>(total_ram_bytes / (8 * kThreadStackSize), kMinThreads, kMaxThreads);
+  uint64_t expected_limit = expected_threads_max / 2;
+
+  EXPECT_GE(nproc.rlim_cur, 10u);
+  // Available RAM in Linux excludes reserved kernel boot pages, so allow a 5% margin.
+  EXPECT_GE(nproc.rlim_cur, expected_limit - expected_limit / 20);
+  EXPECT_LE(nproc.rlim_cur, expected_limit);
 }
 
 }  //  namespace

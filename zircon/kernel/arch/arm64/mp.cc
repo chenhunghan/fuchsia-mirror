@@ -130,15 +130,15 @@ zx_status_t arch_mp_cpu_hotplug(cpu_num_t cpu_id) {
   }
 
   // Create a stack for the thread running on the CPU.
-  zx::result<uintptr_t> result = arm64_create_secondary_stack(cpu_id);
-  if (result.is_error()) {
-    return result.status_value();
+  uintptr_t stack;
+  zx_status_t status = arm64_create_secondary_stack(cpu_id, &stack);
+  if (status != ZX_OK) {
+    return status;
   }
-  const uintptr_t stack = result.value();
 
   // Start the CPU.
   uint64_t mpid = arm64_cpu_list[cpu_id];
-  zx_status_t status = platform_start_cpu(cpu_id, mpid, stack);
+  status = platform_start_cpu(cpu_id, mpid, stack);
   if (status != ZX_OK) {
     // Start failed, so free the stack.
     [[maybe_unused]] zx_status_t free_stack_status = arm64_free_secondary_stack(cpu_id);

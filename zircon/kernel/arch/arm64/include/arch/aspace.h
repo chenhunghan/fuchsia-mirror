@@ -21,10 +21,9 @@
 #include <vm/mapping_cursor.h>
 
 enum class ArmAspaceType : uint8_t {
-  kUser,        // Userspace address space.
-  kKernel,      // Kernel address space.
-  kGuest,       // Second-stage address space.
-  kHypervisor,  // EL2 hypervisor address space.
+  kUser,    // Userspace address space.
+  kKernel,  // Kernel address space.
+  kGuest,   // Second-stage address space.
 };
 
 enum class ArmAspaceRole : uint8_t {

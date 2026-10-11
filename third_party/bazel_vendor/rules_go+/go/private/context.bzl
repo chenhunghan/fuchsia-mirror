@@ -118,6 +118,10 @@ _COMPILER_OPTIONS_DENYLIST = dict({
     "-fmax-errors=": None,
     "-Wall": None,
 
+    "-Werror": None,
+    "-Werror=": None,
+    "-Wstrict-prototypes": None,
+    "-std=": None,
     # Symbols are needed by Go, so keep them
     "-g0": None,
 

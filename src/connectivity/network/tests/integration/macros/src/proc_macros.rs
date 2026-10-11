@@ -42,10 +42,7 @@ impl syn::parse::Parse for Variant {
 #[derive(Debug, Copy, Clone)]
 enum VariantType {
     Ip,
-    Netstack,
-    DhcpClient,
     Manager,
-    NetstackAndDhcpClient,
 }
 
 impl FromStr for VariantType {
@@ -54,10 +51,7 @@ impl FromStr for VariantType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Ip" => Ok(Self::Ip),
-            "Netstack" => Ok(Self::Netstack),
-            "DhcpClient" => Ok(Self::DhcpClient),
             "Manager" => Ok(Self::Manager),
-            "NetstackAndDhcpClient" => Ok(Self::NetstackAndDhcpClient),
             _ => Err(()),
         }
     }
@@ -65,27 +59,13 @@ impl FromStr for VariantType {
 
 impl VariantType {
     // NB: Extracted to constants so they can be reused in tests.
-    const NETSTACK2: &'static str = "netstack_testing_common::realms::Netstack2";
-    const NETSTACK3: &'static str = "netstack_testing_common::realms::Netstack3";
     const IPV4: &'static str = "net_types::ip::Ipv4";
     const IPV6: &'static str = "net_types::ip::Ipv6";
+    const NETCFG_BASIC: &'static str = "netstack_testing_common::realms::NetCfgBasic";
+    const NETCFG_ADVANCED: &'static str = "netstack_testing_common::realms::NetCfgAdvanced";
 
     fn implementations(&self) -> Vec<Implementation> {
-        let disable_on_riscv = || syn::parse_quote!(#[cfg(not(target_arch = "riscv64"))]);
-
         match self {
-            Self::Netstack => vec![
-                Implementation {
-                    type_name: str_to_syn_path(Self::NETSTACK2),
-                    suffix: "ns2",
-                    attrs: vec![disable_on_riscv()],
-                },
-                Implementation {
-                    type_name: str_to_syn_path(Self::NETSTACK3),
-                    suffix: "ns3",
-                    attrs: vec![],
-                },
-            ],
             Self::Ip => vec![
                 Implementation {
                     type_name: str_to_syn_path(Self::IPV4),
@@ -100,48 +80,13 @@ impl VariantType {
             ],
             Self::Manager => vec![
                 Implementation {
-                    type_name: str_to_syn_path("netstack_testing_common::realms::NetCfgBasic"),
+                    type_name: str_to_syn_path(Self::NETCFG_BASIC),
                     suffix: "netcfg_basic",
                     attrs: vec![],
                 },
                 Implementation {
-                    type_name: str_to_syn_path("netstack_testing_common::realms::NetCfgAdvanced"),
+                    type_name: str_to_syn_path(Self::NETCFG_ADVANCED),
                     suffix: "netcfg_advanced",
-                    attrs: vec![],
-                },
-            ],
-            Self::DhcpClient => vec![
-                Implementation {
-                    type_name: str_to_syn_path("netstack_testing_common::realms::InStack"),
-                    suffix: "dhcp_in_stack",
-                    attrs: vec![],
-                },
-                Implementation {
-                    type_name: str_to_syn_path("netstack_testing_common::realms::OutOfStack"),
-                    suffix: "dhcp_out_of_stack",
-                    attrs: vec![],
-                },
-            ],
-            Self::NetstackAndDhcpClient => vec![
-                Implementation {
-                    type_name: str_to_syn_path(
-                        "netstack_testing_common::realms::Netstack2AndInStackDhcpClient",
-                    ),
-                    suffix: "ns2_with_dhcp_in_stack",
-                    attrs: vec![disable_on_riscv()],
-                },
-                Implementation {
-                    type_name: str_to_syn_path(
-                        "netstack_testing_common::realms::Netstack2AndOutOfStackDhcpClient",
-                    ),
-                    suffix: "ns2_with_dhcp_out_of_stack",
-                    attrs: vec![disable_on_riscv()],
-                },
-                Implementation {
-                    type_name: str_to_syn_path(
-                        "netstack_testing_common::realms::Netstack3AndOutOfStackDhcpClient",
-                    ),
-                    suffix: "ns3_with_dhcp_out_of_stack",
                     attrs: vec![],
                 },
             ],
@@ -515,20 +460,20 @@ fn netstack_test_inner(
 ///
 /// ```
 /// #[netstack_test]
-/// #[variant(N, Netstack)]
-/// async fn test_foo<N: Netstack>(name: &str) {}
+/// #[variant(I, Ip)]
+/// async fn test_foo<I: Ip>(name: &str) {}
 /// ```
 ///
 /// Expands to:
 /// ```
-/// async fn test_foo<N: Netstack>(name: &str){/*...*/}
+/// async fn test_foo<I: Ip>(name: &str){/*...*/}
 /// #[fuchsia::test]
-/// async fn test_foo_ns2() {
-///     test_foo::<netstack_testing_common::realms::Netstack2>("test_foo_ns2").await
+/// async fn test_foo_v4() {
+///     test_foo::<net_types::ip::Ipv4>("test_foo_v4").await
 /// }
 /// #[fuchsia::test]
-/// async fn test_foo_ns3() {
-///     test_foo::<netstack_testing_common::realms::Netstack3>("test_foo_ns3").await
+/// async fn test_foo_v6() {
+///     test_foo::<net_types::ip::Ipv6>("test_foo_v6").await
 /// }
 /// ```
 ///
@@ -539,50 +484,50 @@ fn netstack_test_inner(
 /// async fn test_foo<M: Manager>(name: &str) {/*...*/}
 /// ```
 ///
-/// Expands equivalently to the netstack variant.
+/// Expands equivalently to the ip variant.
 ///
 /// This macro also supports expanding with multiple variations, including
 /// multiple occurrences of the same trait bound.
 /// ```
 /// #[netstack_test]
-/// #[variant(N1, Netstack)]
-/// #[variant(N2, Netstack)]
-/// async fn test_foo<N1: Netstack, N2: Netstack>(name: &str) {/*...*/}
+/// #[variant(I1, Ip)]
+/// #[variant(I2, Ip)]
+/// async fn test_foo<I1: Ip, I2: Ip>(name: &str) {/*...*/}
 /// ```
 ///
 /// Expands to:
 /// ```
-/// async fn test_foo<N1: Netstack, N2: Netstack>(name: &str) {/*...*/}
+/// async fn test_foo<I1: Ip, I2: Ip>(name: &str) {/*...*/}
 /// #[fuchsia::test]
-/// async fn test_foo_ns2_ns2() {
+/// async fn test_foo_ipv4_ipv4() {
 ///     test_foo::<
-///         netstack_testing_common::realms::Netstack2,
-///         netstack_testing_common::realms::Netstack2,
-///     >("test_foo_ns2_ns2")
+///         net_types::ip::Ipv4,
+///         net_types::ip::Ipv4,
+///     >("test_foo_ipv4_ipv4")
 ///     .await
 /// }
 /// #[fuchsia::test]
-/// async fn test_foo_ns2_ns3() {
+/// async fn test_foo_ipv4_ipv6() {
 ///     test_foo::<
-///         netstack_testing_common::realms::Netstack2,
-///         netstack_testing_common::realms::Netstack3,
-///     >("test_foo_ns2_ns3")
+///         net_types::ip::Ipv4,
+///         net_types::ip::Ipv6,
+///     >("test_foo_ipv4_ipv6")
 ///     .await
 /// }
 /// #[fuchsia::test]
-/// async fn test_foo_ns3_ns2() {
+/// async fn test_foo_ipv6_ipv4() {
 ///     test_foo::<
-///         netstack_testing_common::realms::Netstack3,
-///         netstack_testing_common::realms::Netstack2,
-///     >("test_foo_ns3_ns2")
+///         net_types::ip::Ipv6,
+///         net_types::ip::Ipv4,
+///     >("test_foo_ipv6_ipv4")
 ///     .await
 /// }
 /// #[fuchsia::test]
-/// async fn test_foo_ns3_ns3() {
+/// async fn test_foo_ipv6_ipv6() {
 ///     test_foo::<
-///         netstack_testing_common::realms::Netstack3,
-///         netstack_testing_common::realms::Netstack3,
-///     >("test_foo_ns3_ns3")
+///         net_types::ip::Ipv6,
+///         net_types::ip::Ipv6,
+///     >("test_foo_ipv6_ipv6")
 ///     .await
 /// }
 /// ```
@@ -654,38 +599,38 @@ mod tests {
         params: vec![],
         suffix: "",
     }]; "default")]
-    #[test_case(vec!["N"] => vec![VariantExpectation {
-        params: vec![VariantType::NETSTACK2],
-        suffix: "_ns2",
+    #[test_case(vec!["I"] => vec![VariantExpectation {
+        params: vec![VariantType::IPV4],
+        suffix: "_v4",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK3],
-        suffix: "_ns3",
+        params: vec![VariantType::IPV6],
+        suffix: "_v6",
     }]; "simple case")]
-    #[test_case(vec!["N", "I"] => vec![VariantExpectation {
-        params: vec![VariantType::NETSTACK2, VariantType::IPV4],
-        suffix: "_ns2_v4",
+    #[test_case(vec!["M", "I"] => vec![VariantExpectation {
+        params: vec![VariantType::NETCFG_BASIC, VariantType::IPV4],
+        suffix: "_netcfg_basic_v4",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK2, VariantType::IPV6],
-        suffix: "_ns2_v6",
+        params: vec![VariantType::NETCFG_BASIC, VariantType::IPV6],
+        suffix: "_netcfg_basic_v6",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK3, VariantType::IPV4],
-        suffix: "_ns3_v4",
+        params: vec![VariantType::NETCFG_ADVANCED, VariantType::IPV4],
+        suffix: "_netcfg_advanced_v4",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK3, VariantType::IPV6],
-        suffix: "_ns3_v6",
+        params: vec![VariantType::NETCFG_ADVANCED, VariantType::IPV6],
+        suffix: "_netcfg_advanced_v6",
     }]; "two traits")]
-    #[test_case(vec!["N", "NN"] => vec![VariantExpectation {
-        params: vec![VariantType::NETSTACK2, VariantType::NETSTACK2],
-        suffix: "_ns2_ns2",
+    #[test_case(vec!["I", "II"] => vec![VariantExpectation {
+        params: vec![VariantType::IPV4, VariantType::IPV4],
+        suffix: "_v4_v4",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK2, VariantType::NETSTACK3],
-        suffix: "_ns2_ns3",
+        params: vec![VariantType::IPV4, VariantType::IPV6],
+        suffix: "_v4_v6",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK3, VariantType::NETSTACK2],
-        suffix: "_ns3_ns2",
+        params: vec![VariantType::IPV6, VariantType::IPV4],
+        suffix: "_v6_v4",
     }, VariantExpectation {
-        params: vec![VariantType::NETSTACK3, VariantType::NETSTACK3],
-        suffix: "_ns3_ns3",
+        params: vec![VariantType::IPV6, VariantType::IPV6],
+        suffix: "_v6_v6",
     }]; "two occurrences of a single variant type")]
     fn permutation(generics: impl IntoIterator<Item = &'static str>) -> Vec<TestVariation> {
         let generics = generics
@@ -697,18 +642,18 @@ mod tests {
         permutations_over_type_generics(
             &mut [
                 Variant {
-                    ident: syn::parse_str("N").unwrap(),
-                    variant_type: VariantType::Netstack,
-                    seen: false,
-                },
-                Variant {
-                    ident: syn::parse_str("NN").unwrap(),
-                    variant_type: VariantType::Netstack,
-                    seen: false,
-                },
-                Variant {
                     ident: syn::parse_str("I").unwrap(),
                     variant_type: VariantType::Ip,
+                    seen: false,
+                },
+                Variant {
+                    ident: syn::parse_str("II").unwrap(),
+                    variant_type: VariantType::Ip,
+                    seen: false,
+                },
+                Variant {
+                    ident: syn::parse_str("M").unwrap(),
+                    variant_type: VariantType::Manager,
                     seen: false,
                 },
             ],

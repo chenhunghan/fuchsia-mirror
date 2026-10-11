@@ -53,9 +53,6 @@ pub(crate) trait IfaceManager: Send + Sync {
     fn list_ifaces(&self) -> Vec<u16>;
     async fn get_country(&self, phy_id: u16) -> Result<[u8; 2], Error>;
     async fn set_country(&self, phy_id: u16, country: [u8; 2]) -> Result<(), Error>;
-    async fn power_down(&self, phy_id: u16) -> Result<(), Error>;
-    async fn power_up(&self, phy_id: u16) -> Result<(), Error>;
-    async fn get_power_state(&self, phy_id: u16) -> Result<bool, Error>;
     async fn get_power_element_dependency_token(
         &self,
         phy_id: u16,
@@ -67,7 +64,7 @@ pub(crate) trait IfaceManager: Send + Sync {
     async fn query_iface_capabilities(
         &self,
         iface_id: u16,
-    ) -> Result<fidl_common::ApfPacketFilterSupport, Error>;
+    ) -> Result<fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse, Error>;
     async fn create_client_iface(&self, phy_id: u16) -> Result<u16, Error>;
     async fn reset_phy(&self, phy_id: u16) -> Result<(), Error>;
     async fn reset_tx_power_scenario(&self, phy_id: u16) -> Result<(), Error>;
@@ -134,39 +131,6 @@ impl IfaceManager for DeviceMonitorIfaceManager {
         }
     }
 
-    async fn power_down(&self, phy_id: u16) -> Result<(), Error> {
-        let result = self.monitor_svc.power_down(phy_id).await.map_err(Into::<Error>::into)?;
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) => match zx::Status::ok(e) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e.into()),
-            },
-        }
-    }
-
-    async fn power_up(&self, phy_id: u16) -> Result<(), Error> {
-        let result = self.monitor_svc.power_up(phy_id).await.map_err(Into::<Error>::into)?;
-        match result {
-            Ok(()) => Ok(()),
-            Err(e) => match zx::Status::ok(e) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e.into()),
-            },
-        }
-    }
-
-    async fn get_power_state(&self, phy_id: u16) -> Result<bool, Error> {
-        let result = self.monitor_svc.get_power_state(phy_id).await.map_err(Into::<Error>::into)?;
-        match result {
-            Ok(power_state) => Ok(power_state),
-            Err(e) => match zx::Status::ok(e) {
-                Err(e) => Err(e.into()),
-                Ok(()) => Err(format_err!("get_power_state returned error with ok status")),
-            },
-        }
-    }
-
     async fn get_power_element_dependency_token(
         &self,
         phy_id: u16,
@@ -203,11 +167,10 @@ impl IfaceManager for DeviceMonitorIfaceManager {
     async fn query_iface_capabilities(
         &self,
         iface_id: u16,
-    ) -> Result<fidl_common::ApfPacketFilterSupport, Error> {
+    ) -> Result<fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse, Error> {
         self.monitor_svc
             .query_iface_capabilities(iface_id)
             .await?
-            .map(|resp| resp.apf_support.unwrap_or_default())
             .map_err(zx::Status::err_from_raw)
             .context("Could not query iface device capabilities")
     }
@@ -428,6 +391,12 @@ pub(crate) trait ClientIface: Sync + Send {
     async fn set_mac_address(&self, mac_addr: [u8; 6]) -> Result<(), zx::Status>;
     async fn install_apf_packet_filter(&self, program: Vec<u8>) -> Result<(), zx::Status>;
     async fn read_apf_packet_filter_data(&self) -> Result<Vec<u8>, zx::Status>;
+    async fn start_rssi_monitor(
+        &self,
+        min_rssi_dbm: i8,
+        max_rssi_dbm: i8,
+    ) -> Result<(), zx::Status>;
+    async fn stop_rssi_monitor(&self) -> Result<(), zx::Status>;
     async fn start_sched_scan(
         &self,
         request: fidl_common::ScheduledScanRequest,
@@ -1022,6 +991,32 @@ impl ClientIface for SmeClientIface {
             .map_err(zx::Status::err_from_raw)
     }
 
+    async fn start_rssi_monitor(
+        &self,
+        min_rssi_dbm: i8,
+        max_rssi_dbm: i8,
+    ) -> Result<(), zx::Status> {
+        self.sme_proxy
+            .start_rssi_monitor(min_rssi_dbm, max_rssi_dbm)
+            .await
+            .map_err(|e| {
+                error!("FIDL error calling start_rssi_monitor: {:?}", e);
+                zx::Status::INTERNAL
+            })?
+            .map_err(zx::Status::err_from_raw)
+    }
+
+    async fn stop_rssi_monitor(&self) -> Result<(), zx::Status> {
+        self.sme_proxy
+            .stop_rssi_monitor()
+            .await
+            .map_err(|e| {
+                error!("FIDL error calling stop_rssi_monitor: {:?}", e);
+                zx::Status::INTERNAL
+            })?
+            .map_err(zx::Status::err_from_raw)
+    }
+
     async fn start_sched_scan(
         &self,
         request: fidl_common::ScheduledScanRequest,
@@ -1201,6 +1196,22 @@ pub mod test_utils {
             factory_addr: [1, 2, 3, 4, 5, 6],
         };
 
+    pub const FAKE_IFACE_CAPABILITIES:
+        fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse =
+        fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse {
+            apf_support: Some(fidl_common::ApfPacketFilterSupport {
+                supported: Some(true),
+                version: Some(1),
+                max_filter_length: Some(1),
+                __source_breaking: fidl::marker::SourceBreaking,
+            }),
+            rssi_monitor_support: Some(fidl_common::RssiMonitorSupport {
+                supported: Some(true),
+                __source_breaking: fidl::marker::SourceBreaking,
+            }),
+            __source_breaking: fidl::marker::SourceBreaking,
+        };
+
     pub fn fake_scan_result() -> fidl_sme::ScanResult {
         fidl_sme::ScanResult {
             compatibility: fidl_sme::Compatibility::Incompatible(fidl_sme::Incompatible {
@@ -1264,6 +1275,11 @@ pub mod test_utils {
         SetMacAddress([u8; 6]),
         InstallApfPacketFilter(Vec<u8>),
         ReadApfPacketFilterData,
+        StartRssiMonitor {
+            min_rssi_dbm: i8,
+            max_rssi_dbm: i8,
+        },
+        StopRssiMonitor,
         StartSchedScan {
             _request: fidl_common::ScheduledScanRequest,
         },
@@ -1435,6 +1451,22 @@ pub mod test_utils {
             Ok(vec![2, 2, 2, 2])
         }
 
+        async fn start_rssi_monitor(
+            &self,
+            min_rssi_dbm: i8,
+            max_rssi_dbm: i8,
+        ) -> Result<(), zx::Status> {
+            self.calls
+                .lock()
+                .push(ClientIfaceCall::StartRssiMonitor { min_rssi_dbm, max_rssi_dbm });
+            Ok(())
+        }
+
+        async fn stop_rssi_monitor(&self) -> Result<(), zx::Status> {
+            self.calls.lock().push(ClientIfaceCall::StopRssiMonitor);
+            Ok(())
+        }
+
         async fn start_sched_scan(
             &self,
             request: fidl_common::ScheduledScanRequest,
@@ -1499,9 +1531,6 @@ pub mod test_utils {
         CreateClientIface(u16),
         GetClientIface(u16),
         DestroyIface(u16),
-        PowerDown(u16),
-        PowerUp(u16),
-        GetPowerState(u16),
         GetPowerElementDependencyToken(u16),
         ResetTxPowerScenario(u16),
         SetTxPowerScenario { phy_id: u16, scenario: fidl_internal::TxPowerScenario },
@@ -1512,11 +1541,8 @@ pub mod test_utils {
         pub client_iface: Mutex<Option<Arc<TestClientIface>>>,
         pub calls: Arc<Mutex<Vec<IfaceManagerCall>>>,
         country: Arc<Mutex<[u8; 2]>>,
-        pub power_state: Arc<Mutex<bool>>,
         mock_create_client_iface_result: Result<u16, Error>,
         mock_destroy_client_iface_result: Result<(), Error>,
-        mock_power_up_result: Result<(), Error>,
-        mock_power_down_result: Result<(), Error>,
         mock_reset_tx_power_scenario_result: Result<(), Error>,
         mock_set_tx_power_scenario_result: Result<(), Error>,
         mock_reset_phy_result: Result<(), Error>,
@@ -1531,11 +1557,8 @@ pub mod test_utils {
                 client_iface: Mutex::new(None),
                 calls: Arc::new(Mutex::new(vec![])),
                 country: Arc::new(Mutex::new(*b"XX")),
-                power_state: Arc::new(Mutex::new(true)),
                 mock_create_client_iface_result: Ok(FAKE_IFACE_RESPONSE.id),
                 mock_destroy_client_iface_result: Ok(()),
-                mock_power_up_result: Ok(()),
-                mock_power_down_result: Ok(()),
                 mock_reset_tx_power_scenario_result: Ok(()),
                 mock_set_tx_power_scenario_result: Ok(()),
                 mock_reset_phy_result: Ok(()),
@@ -1590,14 +1613,6 @@ pub mod test_utils {
                 )),
                 ..self
             }
-        }
-
-        pub fn mock_power_up_failure(self) -> Self {
-            Self { mock_power_up_result: Err(format_err!("mocked PowerUp failure")), ..self }
-        }
-
-        pub fn mock_power_down_failure(self) -> Self {
-            Self { mock_power_down_result: Err(format_err!("mocked PowerDown failure")), ..self }
         }
 
         pub fn mock_reset_tx_power_scenario_failure(self) -> Self {
@@ -1687,15 +1702,11 @@ pub mod test_utils {
         async fn query_iface_capabilities(
             &self,
             iface_id: u16,
-        ) -> Result<fidl_common::ApfPacketFilterSupport, Error> {
+        ) -> Result<fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse, Error>
+        {
             self.calls.lock().push(IfaceManagerCall::QueryIfaceCapabilities(iface_id));
             if self.client_iface.lock().is_some() && iface_id == *self.iface_id.lock() {
-                Ok(fidl_common::ApfPacketFilterSupport {
-                    supported: Some(true),
-                    version: Some(1),
-                    max_filter_length: Some(1),
-                    ..fidl_common::ApfPacketFilterSupport::default()
-                })
+                Ok(FAKE_IFACE_CAPABILITIES)
             } else {
                 Err(format_err!("Unexpected query for iface id {}", iface_id))
             }
@@ -1734,33 +1745,6 @@ pub mod test_utils {
                 Err(e) => bail!("{e}"),
             }
             Ok(())
-        }
-
-        async fn power_down(&self, phy_id: u16) -> Result<(), Error> {
-            self.calls.lock().push(IfaceManagerCall::PowerDown(phy_id));
-            match &self.mock_power_down_result {
-                Ok(()) => {
-                    *self.power_state.lock() = false;
-                    Ok(())
-                }
-                Err(e) => bail!("{e}"),
-            }
-        }
-
-        async fn power_up(&self, phy_id: u16) -> Result<(), Error> {
-            self.calls.lock().push(IfaceManagerCall::PowerUp(phy_id));
-            match &self.mock_power_up_result {
-                Ok(()) => {
-                    *self.power_state.lock() = true;
-                    Ok(())
-                }
-                Err(e) => bail!("{e}"),
-            }
-        }
-
-        async fn get_power_state(&self, phy_id: u16) -> Result<bool, Error> {
-            self.calls.lock().push(IfaceManagerCall::GetPowerState(phy_id));
-            Ok(*self.power_state.lock())
         }
 
         async fn get_power_element_dependency_token(
@@ -1811,7 +1795,7 @@ mod tests {
     use fidl_ieee80211::WlanBand::TwoGhz;
     use std::pin::pin;
 
-    use super::test_utils::FAKE_IFACE_RESPONSE;
+    use super::test_utils::{FAKE_IFACE_CAPABILITIES, FAKE_IFACE_RESPONSE};
     use super::*;
     use crate::security::wep::WepKeys;
     use fidl::endpoints::create_proxy_and_stream;
@@ -2020,22 +2004,13 @@ mod tests {
             Poll::Ready(Ok(fidl_device_service::DeviceMonitorRequest::QueryIfaceCapabilities { iface_id, responder })) => (iface_id, responder));
         assert_eq!(req_iface_id, iface_id);
 
-        let apf_support = fidl_common::ApfPacketFilterSupport {
-            supported: Some(true),
-            version: Some(1),
-            max_filter_length: Some(1024),
-            ..Default::default()
-        };
         responder
-            .send(Ok(&fidl_device_service::DeviceMonitorQueryIfaceCapabilitiesResponse {
-                apf_support: Some(apf_support.clone()),
-                ..Default::default()
-            }))
+            .send(Ok(&FAKE_IFACE_CAPABILITIES))
             .expect("Failed to respond to QueryIfaceCapabilities");
 
         let result =
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Ok(info)) => info);
-        assert_eq!(result, apf_support);
+        assert_eq!(result, FAKE_IFACE_CAPABILITIES);
     }
 
     #[test]
@@ -2372,6 +2347,40 @@ mod tests {
 
         let result = assert_matches!(test_values.exec.run_until_stalled(&mut read_fut), Poll::Ready(Ok(data)) => data);
         assert_eq!(result, test_data);
+    }
+
+    #[test]
+    fn test_start_rssi_monitor_on_iface() {
+        let mut test_values = setup_test_manager_with_iface();
+        let mut start_fut = test_values.iface.start_rssi_monitor(-80, -40);
+
+        assert_matches!(test_values.exec.run_until_stalled(&mut start_fut), Poll::Pending);
+
+        let (min_rssi_dbm, max_rssi_dbm, responder) = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.sme_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::ClientSmeRequest::StartRssiMonitor { min_rssi_dbm, max_rssi_dbm, responder }))) => (min_rssi_dbm, max_rssi_dbm, responder)
+        );
+        assert_eq!(min_rssi_dbm, -80);
+        assert_eq!(max_rssi_dbm, -40);
+        responder.send(Ok(())).expect("Failed to send StartRssiMonitor response");
+
+        assert_matches!(test_values.exec.run_until_stalled(&mut start_fut), Poll::Ready(Ok(())));
+    }
+
+    #[test]
+    fn test_stop_rssi_monitor_on_iface() {
+        let mut test_values = setup_test_manager_with_iface();
+        let mut stop_fut = test_values.iface.stop_rssi_monitor();
+
+        assert_matches!(test_values.exec.run_until_stalled(&mut stop_fut), Poll::Pending);
+
+        let responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.sme_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::ClientSmeRequest::StopRssiMonitor { responder }))) => responder
+        );
+        responder.send(Ok(())).expect("Failed to send StopRssiMonitor response");
+
+        assert_matches!(test_values.exec.run_until_stalled(&mut stop_fut), Poll::Ready(Ok(())));
     }
 
     #[test]

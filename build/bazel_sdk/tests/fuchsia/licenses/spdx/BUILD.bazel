@@ -91,7 +91,7 @@ fuchsia_licenses_spdx(
 
 diff_failure_message = """
 When the diffs don't match, you may update them via:
-    ./build/bazel_sdk/tests/scripts/bazel_test.py \\
+    ./build/bazel_sdk/tests/scripts/run_tests.py \\
       --test_target //:licenses_tests \\
       --output_base /tmp/bazel_sdk_tests_output
     cp \\

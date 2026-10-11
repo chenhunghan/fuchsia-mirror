@@ -1,0 +1,90 @@
+// Copyright 2026 The Fuchsia Authors
+//
+// Use of this source code is governed by a MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT
+
+#include <zircon/types.h>
+
+#include <kernel/ffi.h>
+#include <ktl/utility.h>
+#include <vm/vm_address_region.h>
+#include <vm/vm_address_region_ffi.h>
+#include <vm/vm_object.h>
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" {
+FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_address_region_get_ref_counted(
+    VmAddressRegion* vmar) {
+  return vmar;
+}
+FFI_ALWAYS_INLINE void cpp_vm_address_region_free(VmAddressRegion* vmar) { delete vmar; }
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_destroy(VmAddressRegion* vmar) {
+  return vmar->Destroy();
+}
+FFI_ALWAYS_INLINE const fbl::RefPtr<VmAspace>* cpp_vm_address_region_aspace(VmAddressRegion* vmar) {
+  return &vmar->aspace();
+}
+FFI_ALWAYS_INLINE vaddr_t cpp_vm_address_region_base(VmAddressRegion* vmar) { return vmar->base(); }
+FFI_ALWAYS_INLINE size_t cpp_vm_address_region_size(VmAddressRegion* vmar) { return vmar->size(); }
+FFI_ALWAYS_INLINE uint32_t cpp_vm_address_region_flags(VmAddressRegion* vmar) {
+  return vmar->flags();
+}
+FFI_ALWAYS_INLINE const char* cpp_vm_address_region_name(VmAddressRegion* vmar) {
+  return vmar->name();
+}
+FFI_ALWAYS_INLINE bool cpp_vm_address_region_has_parent(VmAddressRegion* vmar) {
+  return vmar->has_parent();
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_set_memory_priority(
+    VmAddressRegion* vmar, VmAddressRegion::MemoryPriority priority) {
+  return vmar->SetMemoryPriority(priority);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base,
+                                                          size_t size,
+                                                          VmAddressRegionOpChildren op_children) {
+  return vmar->Unmap(base, size, op_children);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_protect(VmAddressRegion* vmar, vaddr_t base,
+                                                            size_t size,
+                                                            arch_mmu_flags_t new_arch_mmu_flags,
+                                                            VmAddressRegionOpChildren op_children) {
+  return vmar->Protect(base, size, new_arch_mmu_flags, op_children);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_range_op(VmAddressRegion* vmar,
+                                                             VmAddressRegion::RangeOpType op,
+                                                             vaddr_t base, size_t len,
+                                                             VmAddressRegionOpChildren op_children,
+                                                             void* buffer, size_t buffer_size) {
+  return vmar->RangeOp(op, base, len, op_children, make_user_inout_ptr(buffer), buffer_size);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_reserve_space(VmAddressRegion* vmar,
+                                                                  const char* name, size_t base,
+                                                                  size_t size,
+                                                                  arch_mmu_flags_t arch_mmu_flags) {
+  return vmar->ReserveSpace(name, base, size, arch_mmu_flags);
+}
+FFI_ALWAYS_INLINE VmAddressRegion* cpp_vm_address_region_create_sub_vmar(
+    VmAddressRegion* vmar, size_t offset, size_t size, uint8_t align_pow2, uint32_t vmar_flags,
+    const char* name, zx_status_t* out_status) {
+  fbl::RefPtr<VmAddressRegion> sub_vmar;
+  *out_status = vmar->CreateSubVmar(offset, size, align_pow2, vmar_flags, name, &sub_vmar);
+  return fbl::ExportToRawPtr(&sub_vmar);
+}
+FFI_ALWAYS_INLINE VmMapping* cpp_vm_address_region_create_vm_mapping(
+    VmAddressRegion* vmar, size_t mapping_offset, size_t size, uint8_t align_pow2,
+    uint32_t vmar_flags, const VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
+    const char* name, vaddr_t* out_base, zx_status_t* out_status) {
+  fbl::RefPtr<VmObject> vmo_ref = fbl::ImportFromRawPtr(const_cast<VmObject*>(vmo));
+  auto result = vmar->CreateVmMapping(mapping_offset, size, align_pow2, vmar_flags,
+                                      ktl::move(vmo_ref), vmo_offset, arch_mmu_flags, name);
+  if (result.is_error()) {
+    *out_status = result.status_value();
+    return nullptr;
+  }
+  *out_status = ZX_OK;
+  *out_base = result->base;
+  fbl::RefPtr<VmMapping> mapping = ktl::move(result->mapping);
+  return fbl::ExportToRawPtr(&mapping);
+}
+}  // extern "C"

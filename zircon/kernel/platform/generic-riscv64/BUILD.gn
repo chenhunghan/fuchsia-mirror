@@ -4,38 +4,42 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_rust_mod.gni")
 import("//zircon/kernel/params.gni")
 
-source_set("generic-riscv64") {
+kernel_rust_mod("generic-riscv64-rs") {
+  output_name = "generic_riscv64"
+  source_root = "src/mod.rs"
   sources = [
-    "dev-init.cc",
-    "platform.cc",
-    "timer.cc",
+    "src/dev_init.rs",
+    "src/mod.rs",
+    "src/platform.rs",
+    "src/timer.rs",
   ]
   deps = [
-    "//src/lib/zbitl",
-    "//zircon/kernel/dev/hw_rng",
-    "//zircon/kernel/dev/hw_watchdog/generic32",
+    "//sdk/rust/zbi",
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/kprint",
+    "//src/lib/zr",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/init:init_rust",
+    "//zircon/system/ulib/fbl/rust:fbl",
+  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
+}
+
+source_set("generic-riscv64") {
+  sources = [ "generic_riscv64_ffi.cc" ]
+  deps = [
+    ":generic-riscv64-rs",
+    "//src/lib/lazy_init",
     "//zircon/kernel/dev/interrupt/plic",
     "//zircon/kernel/dev/pdev/power",
-    "//zircon/kernel/dev/pdev/timer",
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/lib/cbuf",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/crashlog",
-    "//zircon/kernel/lib/fbl",
-    "//zircon/kernel/lib/init",
-    "//zircon/kernel/lib/jtrace",
-    "//zircon/kernel/lib/lockdep",
-    "//zircon/kernel/lib/persistent-debuglog",
-    "//zircon/kernel/lib/root_resource_filter",
     "//zircon/kernel/lib/topology",
-    "//zircon/kernel/object",
     "//zircon/kernel/phys:handoff",
-    "//zircon/kernel/phys/lib/memalloc:range",
     "//zircon/kernel/platform:headers",
-    "//zircon/kernel/vm",
-    "//zircon/system/ulib/explicit-memory",
     "//zircon/system/ulib/ram-crashlog",
   ]
 

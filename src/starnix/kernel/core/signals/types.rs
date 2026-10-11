@@ -703,7 +703,9 @@ impl SignalInfo {
         } else {
             std::mem::size_of::<uapi::siginfo_t>()
         };
-        ma.zero(addr.addr(), size)?;
+        if ma.zero(addr.addr(), size)? != size {
+            return error!(EFAULT);
+        }
         Ok(())
     }
 

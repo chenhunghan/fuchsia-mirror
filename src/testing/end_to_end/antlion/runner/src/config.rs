@@ -142,7 +142,7 @@ fn default_pdu_device() -> String {
 #[derive(Clone, Debug, Serialize)]
 /// Declares an access point for use with antlion as defined by [access_point.py].
 ///
-/// [access_point.py]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/testing/end_to_end/antlion/packages/antlion/controllers/access_point.py
+/// [access_point.py]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/testing/end_to_end/mobly_controller/legacy_access_point/access_point.py
 pub(crate) struct AccessPoint {
     pub wan_interface: String,
     #[serde(skip_serializing_if = "Option::is_none")]

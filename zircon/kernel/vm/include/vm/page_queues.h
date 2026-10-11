@@ -33,6 +33,50 @@ class PageQueues;
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" FFI_ALWAYS_INLINE void cpp_page_queues_stop_threads(PageQueues* queues);
 
+extern "C" {
+void rust_page_queues_set_wired(const void* storage, vm_page_t* page, VmCowPages* object,
+                                uint64_t page_offset);
+void rust_page_queues_set_anonymous(const void* storage, vm_page_t* page, VmCowPages* object,
+                                    uint64_t page_offset, bool skip_reclaim);
+void rust_page_queues_set_reclaim(const void* storage, vm_page_t* page, VmCowPages* object,
+                                  uint64_t page_offset);
+void rust_page_queues_set_pager_backed_dirty(const void* storage, vm_page_t* page,
+                                             VmCowPages* object, uint64_t page_offset);
+void rust_page_queues_set_anonymous_zero_fork(const void* storage, vm_page_t* page,
+                                              VmCowPages* object, uint64_t page_offset);
+void rust_page_queues_set_high_priority(const void* storage, vm_page_t* page, VmCowPages* object,
+                                        uint64_t page_offset);
+
+void rust_page_queues_change_object_offset(const void* storage, vm_page_t* page, VmCowPages* object,
+                                           uint64_t page_offset);
+void rust_page_queues_change_object_offset_array(const void* storage, vm_page_t** pages,
+                                                 VmCowPages* object, const uint64_t* offsets,
+                                                 size_t count);
+void rust_page_queues_change_object_offset_locked_list(const void* storage, vm_page_t* page,
+                                                       VmCowPages* object, uint64_t page_offset);
+
+void rust_page_queues_remove(const void* storage, vm_page_t* page);
+void rust_page_queues_remove_array_into_list(const void* storage, vm_page_t** pages, size_t count,
+                                             VmPageDoublyLinkedList* out_list);
+
+void rust_page_queues_get_reclaim_queue_counts(const void* storage, void* out_counts);
+void rust_page_queues_queue_counts(const void* storage, void* out_counts);
+void rust_page_queues_get_active_inactive_counts(const void* storage, void* out_counts);
+
+bool rust_page_queues_reclaim_is_only_pager_backed(const void* storage);
+bool rust_page_queues_is_page_reclaimable(const vm_page_t* page);
+
+bool rust_page_queues_debug_page_is_reclaim(const void* storage, const vm_page_t* page,
+                                            size_t* out_queue);
+bool rust_page_queues_debug_page_is_reclaim_isolate(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_pager_backed_dirty(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_anonymous(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_anonymous_zero_fork(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_any_anonymous(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_wired(const void* storage, const vm_page_t* page);
+bool rust_page_queues_debug_page_is_high_priority(const void* storage, const vm_page_t* page);
+}  // extern "C"
+
 // Allocated pages that are part of the cow pages in a VmObjectPaged can be placed in a page queue.
 // The page queues provide a way to
 //  * Classify and group pages across VMO boundaries
@@ -107,15 +151,31 @@ class PageQueues {
   // offset, the backlink information must be updated either by calling ChangeObjectOffsetLocked, or
   // removing the page completely from the queues.
 
-  void SetWired(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
+  // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+  FFI_ALWAYS_INLINE void SetWired(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
+    rust_page_queues_set_wired(this, page, object, page_offset);
+  }
   // |skip_reclaim| controls whether reclaiming the page should be forcibly skipped regardless of
   // whether anonymous pages are considered reclaimable in general.
-  void SetAnonymous(vm_page_t* page, VmCowPages* object, uint64_t page_offset,
-                    bool skip_reclaim = false);
-  void SetReclaim(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
-  void SetPagerBackedDirty(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
-  void SetAnonymousZeroFork(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
-  void SetHighPriority(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
+  FFI_ALWAYS_INLINE void SetAnonymous(vm_page_t* page, VmCowPages* object, uint64_t page_offset,
+                                      bool skip_reclaim = false) {
+    rust_page_queues_set_anonymous(this, page, object, page_offset, skip_reclaim);
+  }
+  FFI_ALWAYS_INLINE void SetReclaim(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
+    rust_page_queues_set_reclaim(this, page, object, page_offset);
+  }
+  FFI_ALWAYS_INLINE void SetPagerBackedDirty(vm_page_t* page, VmCowPages* object,
+                                             uint64_t page_offset) {
+    rust_page_queues_set_pager_backed_dirty(this, page, object, page_offset);
+  }
+  FFI_ALWAYS_INLINE void SetAnonymousZeroFork(vm_page_t* page, VmCowPages* object,
+                                              uint64_t page_offset) {
+    rust_page_queues_set_anonymous_zero_fork(this, page, object, page_offset);
+  }
+  FFI_ALWAYS_INLINE void SetHighPriority(vm_page_t* page, VmCowPages* object,
+                                         uint64_t page_offset) {
+    rust_page_queues_set_high_priority(this, page, object, page_offset);
+  }
 
   // All Move operations change the queue that a page is considered to be in, but do not change the
   // object or offset backlink information. The page must currently be in a valid page queue.
@@ -146,20 +206,30 @@ class PageQueues {
 
   // Changes the backlink information for a page and should only be called by the page owner under
   // its lock (that is the VMO lock). The page must currently be in a valid page queue.
-  void ChangeObjectOffset(vm_page_t* page, VmCowPages* object, uint64_t page_offset);
-  void ChangeObjectOffsetArray(vm_page_t** pages, VmCowPages* object, uint64_t* offsets,
-                               size_t count);
+  FFI_ALWAYS_INLINE void ChangeObjectOffset(vm_page_t* page, VmCowPages* object,
+                                            uint64_t page_offset) {
+    rust_page_queues_change_object_offset(this, page, object, page_offset);
+  }
+  FFI_ALWAYS_INLINE void ChangeObjectOffsetArray(vm_page_t** pages, VmCowPages* object,
+                                                 uint64_t* offsets, size_t count) {
+    rust_page_queues_change_object_offset_array(this, pages, object, offsets, count);
+  }
 
-  // Externally locked variant of CHangeObjectOffset that can be used for more efficient batch
+  // Externally locked variant of ChangeObjectOffset that can be used for more efficient batch
   // operations. In addition to the annotated lock_, the VMO lock of the owner is also required to
   // be held.
-  void ChangeObjectOffsetLockedList(vm_page_t* page, VmCowPages* object, uint64_t page_offset)
-      TA_REQ(list_lock_);
+  FFI_ALWAYS_INLINE void ChangeObjectOffsetLockedList(vm_page_t* page, VmCowPages* object,
+                                                      uint64_t page_offset) TA_REQ(get_lock()) {
+    rust_page_queues_change_object_offset_locked_list(this, page, object, page_offset);
+  }
 
   // Removes the page from any page list and returns ownership of the queue_node.
-  void Remove(vm_page_t* page);
+  FFI_ALWAYS_INLINE void Remove(vm_page_t* page) { rust_page_queues_remove(this, page); }
   // Batched version of Remove that also places all the pages in the specified list
-  void RemoveArrayIntoList(vm_page_t** page, size_t count, VmPageDoublyLinkedList* out_list);
+  FFI_ALWAYS_INLINE void RemoveArrayIntoList(vm_page_t** page, size_t count,
+                                             VmPageDoublyLinkedList* out_list) {
+    rust_page_queues_remove_array_into_list(this, page, count, out_list);
+  }
 
   // Tells the page queue this page has been accessed, and it should have its position in the queues
   // updated.
@@ -266,7 +336,7 @@ class PageQueues {
   };
   ActiveInactiveCounts GetActiveInactiveCounts() const;
 
-  void Dump() TA_EXCL(lock_);
+  void Dump() const TA_EXCL(lock_);
 
   // Returns a global count of all pages compressed at the point of LRU change. This is a global
   // method and will include stats from every PageQueues that has been instantiated.
@@ -280,12 +350,13 @@ class PageQueues {
   void EnableAnonymousReclaim(bool zero_forks);
 
   // Returns whether or not the reclaim queues only include pager backed pages or not.
-  bool ReclaimIsOnlyPagerBacked() const { return !anonymous_is_reclaimable_; }
+  FFI_ALWAYS_INLINE bool ReclaimIsOnlyPagerBacked() const {
+    return rust_page_queues_reclaim_is_only_pager_backed(this);
+  }
 
   // Returns true if the page is in an isolate queue.
-  static bool IsPageReclaimable(const vm_page_t* page) {
-    return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) ==
-           PageQueueReclaimIsolate;
+  FFI_ALWAYS_INLINE static bool IsPageReclaimable(const vm_page_t* page) {
+    return rust_page_queues_is_page_reclaimable(page);
   }
 
   // These query functions are marked Debug as it is generally a racy way to determine a pages state
@@ -433,21 +504,6 @@ class PageQueues {
     return queue_age(page_queue, mru) < kNumActiveQueues;
   }
 
-  // Returns whether the given page queue would be considered inactive against a given mru.
-  // This is valid to call on any page queue, not just reclaimable ones, and as such this returning
-  // false does not imply the queue is active.
-  static constexpr bool queue_is_inactive(PageQueue page_queue, PageQueue mru) {
-    // The Isolate queue does not have an age, and so we cannot call queue_age on it, but it should
-    // definitely be considered part of the inactive set.
-    if (page_queue == PageQueueReclaimIsolate) {
-      return true;
-    }
-    if (page_queue < PageQueueReclaimBase) {
-      return false;
-    }
-    return queue_age(page_queue, mru) >= kNumActiveQueues;
-  }
-
   PageQueue mru_gen_to_queue() const {
     return gen_to_queue(mru_gen_.load(ktl::memory_order_relaxed));
   }
@@ -470,9 +526,6 @@ class PageQueues {
 
   // Helpers for adding and removing to the queues. All of the public Set/Move/Remove operations
   // are convenience wrappers around these.
-  void RemoveLockedList(vm_page_t* page) TA_REQ(list_lock_);
-  void SetQueueBacklinkLockedList(vm_page_t* page, void* object, uintptr_t page_offset,
-                                  PageQueue queue) TA_REQ(list_lock_);
   void MoveToQueueLockedList(vm_page_t* page, PageQueue queue) TA_REQ(list_lock_);
   void MoveToIsolateLockedList(vm_page_t* page, size_t isolate_queue_index) TA_REQ(list_lock_);
   // Potentially calls |CheckActiveRatioAgingLocked| based on the kActiveInactiveErrorMargin.
@@ -522,16 +575,6 @@ class PageQueues {
   void LruThread();
   void MaybeTriggerLruProcessingLocked() TA_REQ(lock_);
   bool NeedsLruProcessingLocked() const TA_REQ(lock_);
-
-  // Returns true if a page is both in one of the Reclaim queues, and succeeds the passed in
-  // validator, which takes a fbl::RefPtr<VmCowPages>.
-  template <typename F>
-  bool DebugPageIsSpecificReclaim(const vm_page_t* page, F validator, size_t* queue) const;
-
-  // Returns true if a page is both in the specified |queue|, and succeeds the passed in validator,
-  // which takes a fbl::RefPtr<VmCowPages>.
-  template <typename F>
-  bool DebugPageIsSpecificQueue(const vm_page_t* page, PageQueue queue, F validator) const;
 
   // Records that |pages| have potentially changed queue impacting the active/inactive ratio, and
   // returns |true| if checking the active ratio can be skipped.

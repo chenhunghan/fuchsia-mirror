@@ -27,8 +27,8 @@ edition = "2024"
 [dependencies]
 # keep-sorted start
 aes = "0.9.1"
-aes-gcm = "0.11.0"
-aes-gcm-siv = "0.12.0-rc.3"
+aes-gcm = "0.11.1"
+aes-gcm-siv = "0.12.1"
 ansi_term = "0.12.0"
 anyhow = "1.0.104"
 arbitrary = { version = "1.4.2", features = ["derive"] }
@@ -195,7 +195,7 @@ proptest = "1.11.0"
 proptest-derive = "0.8.0"
 prost = "0.14.4"
 prost-build = "0.14.4"
-rand = { version = "0.10.2", default-features = false }
+rand = { version = "0.10.3", default-features = false }
 rand-0_8 = { package = "rand", version = "0.8.4" }
 rand_core = "0.10.1"
 rand_xorshift = "0.5.0"
@@ -261,7 +261,7 @@ toml = "1.1.6"
 toml_edit = "0.24.0"
 tower-service = "0.3"
 tracing = { version = "0.1.44", default-features = false, features = ["std", "attributes", "log"] }
-tracing-mutex = { version = "0.3.2", features = ["experimental", "lockapi", "parkinglot"] }
+tracing-mutex = { version = "0.3.3", features = ["experimental", "lockapi", "parkinglot"] }
 tuf = { path = "forks/tuf-0.3.0-beta14", default-features = false, features = ["hyper"] }
 typed-builder = "0.23.2"
 unic-char-range = "0.9"
@@ -271,7 +271,7 @@ unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
 unicode-xid = "0.2.6"
 untrusted = "0.9"
-uom = "0.36.0"
+uom = "0.38.0"
 url = { version = "2.5.8", features = ["serde"] }
 utf8parse = "0.2.2"
 uuid = { version = "1.23.3", features = ["serde", "v4"] }
@@ -283,6 +283,7 @@ which = "8.0.4"
 winnow = "1.0.4"
 xml = "1.4.0"
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
+zerotrie = { version = "0.2.5", features = ["alloc"] }
 zstd = "0.13.3"
 zstd-safe = "7.2.4"
 # keep-sorted end
@@ -295,7 +296,7 @@ lock_api = { version = "0.4.14", default-features = false }
 num-traits = { version = "0.2.19", default-features = false }
 paste = "1.0.15"
 pin-init = { version = "0.3.0", default-features = false }
-rand = { version = "0.10.2", default-features = false }
+rand = { version = "0.10.3", default-features = false }
 zerocopy = { version = "0.8.48", features = ["derive"] }
 # keep-sorted end
 
@@ -493,7 +494,7 @@ rapidhash = { path = "forks/rapidhash-1.4.0" }
 semver = { path = "forks/semver-1.0.28" }
 tokio = { path = "forks/tokio-1.53.1" }
 tracing-core = { path = "forks/tracing-core" }
-tracing-mutex = { path = "forks/tracing-mutex-0.3.2" }
+tracing-mutex = { path = "forks/tracing-mutex-0.3.3" }
 trait-make = { path = "forks/trait-make" }
 trust-dns-proto = { path = "forks/trust-dns-proto-0.22.0" }
 trust-dns-resolver = { path = "forks/trust-dns-resolver-0.22.0" }
@@ -656,6 +657,9 @@ env_vars = [
   "CARGO_PKG_VERSION_PATCH=2",
 ]
 
+[gn.package.crossbeam-epoch."0.9.21"]
+rustflags = []
+
 [gn.package.crossbeam-utils."0.8.23"]
 rustflags = []
 
@@ -779,9 +783,9 @@ rustflags = [
   "--cfg=httparse_simd_neon_intrinsics",
 ]
 
-[gn.package.icu_normalizer_data."2.2.0"]
+[gn.package.icu_normalizer_data."2.3.0"]
 
-[gn.package.icu_properties_data."2.2.0"]
+[gn.package.icu_properties_data."2.3.0"]
 
 [gn.package.indexmap."1.9.2"]
 rustflags = ["--cfg=has_std"]
@@ -1008,7 +1012,7 @@ license_files = ["LICENSE-APACHE"]
 [gn.package.rand."0.8.4"]
 groups = [ { name = "rand-0.8", visibility = [ ":*" ] } ]
 
-[gn.package.rand."0.10.2".platform."cfg(not(kernel))"]
+[gn.package.rand."0.10.3".platform."cfg(not(kernel))"]
 deps = [
   ":chacha20-v0_10_2",
   ":getrandom-v0_4_3",
@@ -1398,7 +1402,7 @@ rustflags = [
   "--cfg=tokio_unstable",
 ]
 
-[gn.package.tracing-mutex."0.3.2"]
+[gn.package.tracing-mutex."0.3.3"]
 rustflags = [
   # Our toolchain comes from nightly and has this type available.
   "--cfg=has_std__sync__LazyLock",

@@ -506,7 +506,10 @@ fn test_ip_layer_packet_metadata_multicast_and_device_conversion<
 
     // Verify `from_device_ip_layer_metadata` sets `socket_info` to `None` even if
     // `marks` are present, and that it threads through `gso_info`.
-    let device_meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks(marks);
+    let device_meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks_and_packet_type(
+        marks,
+        PacketType::Host,
+    );
     let rx_meta = IpLayerPacketMetadata::<
         I,
         crate::internal::device::state::WeakAddressId<I, FakeBindingsCtx>,
@@ -517,10 +520,11 @@ fn test_ip_layer_packet_metadata_multicast_and_device_conversion<
         device_meta,
         Some(gso_info),
     );
-    let (_, _, rx_marks, rx_socket_info, rx_gso_info) = rx_meta.into_parts();
+    let (_, _, rx_marks, rx_socket_info, rx_gso_info, packet_type) = rx_meta.into_parts();
     assert_eq!(rx_marks, marks);
     assert_eq!(rx_socket_info, None);
     assert_eq!(rx_gso_info, Some(gso_info));
+    assert_eq!(packet_type, PacketType::Host);
 
     // Verify `split_for_multicast` preserves marks, socket_info, and gso_info
     // across multiple splits.
@@ -555,26 +559,32 @@ fn test_ip_layer_packet_metadata_multicast_and_device_conversion<
     let SplitMulticastPacketMetadata { primary: split2, secondary: tx_meta } =
         tx_meta.split_for_multicast();
 
-    let (_, _, marks1, sock1, gso1) = split1.into_parts();
+    let (_, _, marks1, sock1, gso1, packet_type1) = split1.into_parts();
     assert_eq!(marks1, marks);
     assert_eq!(sock1, Some(socket_info.clone()));
     assert_eq!(gso1, Some(gso_info));
+    assert_eq!(packet_type1, PacketType::Outgoing);
 
-    let (_, _, marks2, sock2, gso2) = split2.into_parts();
+    let (_, _, marks2, sock2, gso2, packet_type2) = split2.into_parts();
     assert_eq!(marks2, marks);
     assert_eq!(sock2, Some(socket_info.clone()));
     assert_eq!(gso2, Some(gso_info));
+    assert_eq!(packet_type2, PacketType::Outgoing);
 
-    let (_, _, marks_rem, sock_rem, gso_rem) = tx_meta.into_parts();
+    let (_, _, marks_rem, sock_rem, gso_rem, packet_type_rem) = tx_meta.into_parts();
     assert_eq!(marks_rem, marks);
     assert_eq!(sock_rem, Some(socket_info));
     assert_eq!(gso_rem, Some(gso_info));
+    assert_eq!(packet_type_rem, PacketType::Outgoing);
 }
 
 #[test]
 fn test_device_ip_layer_metadata_split_for_multiple_frames() {
     let marks = Marks::new([(MarkDomain::Mark1, 100), (MarkDomain::Mark2, 200)]);
-    let meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks(marks);
+    let meta = DeviceIpLayerMetadata::<FakeBindingsCtx>::with_marks_and_packet_type(
+        marks,
+        PacketType::Multicast,
+    );
 
     // Verify `split_for_multiple_frames` preserves shareable metadata across
     // multiple splits.
@@ -584,8 +594,14 @@ fn test_device_ip_layer_metadata_split_for_multiple_frames() {
         meta.split_for_multiple_frames();
 
     for m in [split1, split2, meta] {
-        let DeviceIpLayerMetadata { conntrack_entry, tx_metadata: _, marks: split_marks } = m;
+        let DeviceIpLayerMetadata {
+            conntrack_entry,
+            tx_metadata: _,
+            marks: split_marks,
+            packet_type,
+        } = m;
         assert_eq!(split_marks, marks);
         assert_matches!(conntrack_entry, None);
+        assert_eq!(packet_type, PacketType::Multicast);
     }
 }

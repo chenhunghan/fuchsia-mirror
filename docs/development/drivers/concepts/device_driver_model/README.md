@@ -8,6 +8,4 @@
 - [Power management](device-power.md)
 - [Device protocol](protocol.md)
 - [Platform bus](platform-bus.md)
-- [FIDL](fidl.md)
 - [Composite devices](composite.md)
-- [Device firmware](firmware.md)

@@ -2984,6 +2984,120 @@ class RemoteActionConstructionTests(unittest.TestCase):
             local_status=3,
         )
 
+    def test_strategy_local_fallback_timeout_retry_succeeds(self) -> None:
+        command = ["echo", "hello"]
+        action = self._make_remote_action(
+            command=command,
+            exec_strategy="remote_local_fallback",
+        )
+        self.assertEqual(action.exec_strategy, "remote_local_fallback")
+        # Rewrapper receives --exec_strategy=remote so Python can retry first.
+        self.assertIn("--exec_strategy=remote", action.options)
+        self.assertNotIn(
+            "--exec_strategy=remote_local_fallback", action.options
+        )
+
+        with mock.patch.object(
+            remote_action.RemoteAction,
+            "_run_maybe_remotely",
+            side_effect=[
+                cl_utils.SubprocessResult(remote_action._RBE_TIMEOUT_STATUS),
+                cl_utils.SubprocessResult(0),
+            ],
+        ) as mock_remote:
+            with mock.patch.object(
+                remote_action.RemoteAction,
+                "_run_locally",
+            ) as mock_local:
+                with mock.patch.object(
+                    remote_action.RemoteAction, "_cleanup"
+                ) as mock_cleanup:
+                    with mock.patch.object(
+                        remote_action.RemoteAction,
+                        "downloader",
+                        return_value=_FAKE_DOWNLOADER,
+                    ):
+                        self.assertEqual(action.run(), 0)
+
+        self.assertEqual(len(mock_remote.call_args_list), 2)
+        mock_local.assert_not_called()
+        mock_cleanup.assert_called_once()
+
+    def test_strategy_local_fallback_timeout_retry_fails_then_falls_back_locally(
+        self,
+    ) -> None:
+        command = ["echo", "hello"]
+        action = self._make_remote_action(
+            command=command,
+            exec_strategy="remote_local_fallback",
+        )
+        self.assertEqual(action.exec_strategy, "remote_local_fallback")
+        self.assertIn("--exec_strategy=remote", action.options)
+
+        with mock.patch.object(
+            remote_action.RemoteAction,
+            "_run_maybe_remotely",
+            side_effect=[
+                cl_utils.SubprocessResult(remote_action._RBE_TIMEOUT_STATUS),
+                cl_utils.SubprocessResult(remote_action._RBE_TIMEOUT_STATUS),
+            ],
+        ) as mock_remote:
+            with mock.patch.object(
+                remote_action.RemoteAction,
+                "_run_locally",
+                return_value=0,
+            ) as mock_local:
+                with mock.patch.object(
+                    remote_action.RemoteAction, "_cleanup"
+                ) as mock_cleanup:
+                    with mock.patch.object(
+                        remote_action.RemoteAction,
+                        "downloader",
+                        return_value=_FAKE_DOWNLOADER,
+                    ):
+                        self.assertEqual(action.run(), 0)
+
+        self.assertEqual(len(mock_remote.call_args_list), 2)
+        mock_local.assert_called_once_with()
+        mock_cleanup.assert_called_once()
+
+    def test_strategy_local_fallback_same_command_falls_back_locally(
+        self,
+    ) -> None:
+        command = ["echo", "hello"]
+        action = self._make_remote_action(
+            command=command,
+            exec_strategy="remote_local_fallback",
+        )
+        self.assertEqual(action.exec_strategy, "remote_local_fallback")
+        self.assertEqual(action.local_only_command, action.remote_only_command)
+        self.assertFalse(action._should_rerun_locally_on_failure)
+        self.assertIn("--exec_strategy=remote", action.options)
+
+        with mock.patch.object(
+            remote_action.RemoteAction,
+            "_run_maybe_remotely",
+            return_value=cl_utils.SubprocessResult(1),
+        ) as mock_remote:
+            with mock.patch.object(
+                remote_action.RemoteAction,
+                "_run_locally",
+                return_value=0,
+            ) as mock_local:
+                with mock.patch.object(
+                    remote_action.RemoteAction, "_cleanup"
+                ) as mock_cleanup:
+                    with mock.patch.object(
+                        remote_action.RemoteAction,
+                        "downloader",
+                        return_value=_FAKE_DOWNLOADER,
+                    ):
+                        self.assertEqual(action.run(), 0)
+
+        mock_remote.assert_called_once_with()
+        mock_local.assert_called_once_with()
+        mock_cleanup.assert_called_once()
+
 
 def _fake_downloader() -> remotetool.RemoteTool:
     return remotetool.RemoteTool(

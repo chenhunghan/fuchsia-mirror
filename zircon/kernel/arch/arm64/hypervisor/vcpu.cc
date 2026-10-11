@@ -36,7 +36,7 @@ static constexpr uint32_t kSpsrNzcv = 0b1111 << 28;
 
 static uint64_t vmpidr_of(uint16_t vpid) {
   constexpr uint64_t res1 = 1ul << 31;
-  return (vpid - 1) | res1;
+  return vpid | res1;
 }
 
 template <typename F>
@@ -205,7 +205,8 @@ zx::result<ktl::unique_ptr<Vcpu>> Vcpu::Create(Guest& guest, zx_vaddr_t entry) {
   vcpu->el2_state_->ich_state.vmcr = gic_default_gich_vmcr();
   vcpu->el2_state_->ich_state.elrsr = (1ul << num_lrs) - 1;
   vcpu->hcr_ = HCR_EL2_VM | HCR_EL2_PTW | HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO | HCR_EL2_TWI |
-               HCR_EL2_TWE | HCR_EL2_TSC | HCR_EL2_TSW | HCR_EL2_TVM | HCR_EL2_RW | HCR_EL2_DC;
+               HCR_EL2_TWE | HCR_EL2_TID3 | HCR_EL2_TSC | HCR_EL2_TSW | HCR_EL2_TVM | HCR_EL2_RW |
+               HCR_EL2_E2H | HCR_EL2_DC;
 
   return zx::ok(ktl::move(vcpu));
 }
@@ -328,7 +329,7 @@ zx::result<> Vcpu::Enter(zx_port_packet_t& packet) {
       KTRACE_DURATION_BEGIN("kernel:arch", "vcpu");
 
       GUEST_STATS_INC(vm_entries);
-      status = arm64_el2_enter(vttbr, el2_state_.PhysicalAddress(), hcr_);
+      status = arm64_el2_enter(vttbr, el2_state_.get(), hcr_);
       GUEST_STATS_INC(vm_exits);
     }
     gich_state_.TrackAllListRegisters(ich_state);
@@ -373,7 +374,7 @@ zx::result<> Vcpu::ReadState(zx_vcpu_state_t& state) const {
   ASSERT(sizeof(state.x) >= sizeof(el2_state_->guest_state.x));
   memcpy(state.x, el2_state_->guest_state.x, sizeof(el2_state_->guest_state.x));
   state.sp = el2_state_->guest_state.system_state.sp_el1;
-  state.cpsr = el2_state_->guest_state.system_state.spsr_el2 & kSpsrNzcv;
+  state.cpsr = static_cast<uint32_t>(el2_state_->guest_state.system_state.spsr_el2 & kSpsrNzcv);
   return zx::ok();
 }
 
@@ -385,7 +386,9 @@ zx::result<> Vcpu::WriteState(const zx_vcpu_state_t& state) {
   ASSERT(sizeof(el2_state_->guest_state.x) >= sizeof(state.x));
   memcpy(el2_state_->guest_state.x, state.x, sizeof(state.x));
   el2_state_->guest_state.system_state.sp_el1 = state.sp;
-  el2_state_->guest_state.system_state.spsr_el2 |= state.cpsr & kSpsrNzcv;
+  el2_state_->guest_state.system_state.spsr_el2 =
+      (el2_state_->guest_state.system_state.spsr_el2 & ~static_cast<uint64_t>(kSpsrNzcv)) |
+      (state.cpsr & kSpsrNzcv);
   return zx::ok();
 }
 

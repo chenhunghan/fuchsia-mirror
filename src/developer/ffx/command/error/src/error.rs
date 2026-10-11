@@ -79,6 +79,9 @@ fn write_detailed(f: &mut std::fmt::Formatter<'_>, error: &anyhow::Error) -> std
     for (i, e) in error.chain().skip(1).enumerate() {
         write!(f, "\n  {: >3}.  {}", i + 1, e)?;
     }
+    if error.backtrace().status() == std::backtrace::BacktraceStatus::Captured {
+        write!(f, "\n\nStack backtrace:\n{}", error.backtrace().to_string().trim_end())?;
+    }
     Ok(())
 }
 
@@ -412,5 +415,51 @@ mod tests {
 
         let formatted = top.to_string();
         assert_eq!(formatted, "Prefix: NonFatal: TargetNotFound");
+    }
+
+    #[test]
+    fn test_unexpected_error_backtrace_captured() {
+        if std::env::var("FFX_TEST_BACKTRACE_CHILD").as_deref() == Ok("1") {
+            let err = Error::Unexpected(anyhow!("root cause").context("top context"));
+            let formatted = format!("{err}");
+            assert!(
+                formatted.starts_with(
+                    "BUG: An internal command error occurred.\nError: top context\n    1.  root cause\n\nStack backtrace:\n"
+                ),
+                "unexpected format: {formatted}"
+            );
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("error::tests::test_unexpected_error_backtrace_captured")
+            .env("FFX_TEST_BACKTRACE_CHILD", "1")
+            .env("RUST_BACKTRACE", "1")
+            .env_remove("RUST_LIB_BACKTRACE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn test_unexpected_error_backtrace_disabled() {
+        if std::env::var("FFX_TEST_BACKTRACE_CHILD").as_deref() == Ok("1") {
+            let err = Error::Unexpected(anyhow!("root cause").context("top context"));
+            let formatted = format!("{err}");
+            assert_eq!(
+                formatted,
+                "BUG: An internal command error occurred.\nError: top context\n    1.  root cause"
+            );
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("error::tests::test_unexpected_error_backtrace_disabled")
+            .env("FFX_TEST_BACKTRACE_CHILD", "1")
+            .env("RUST_BACKTRACE", "0")
+            .env("RUST_LIB_BACKTRACE", "0")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

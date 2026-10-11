@@ -211,10 +211,27 @@ pub async fn check_targets_locally<W: Write>(
     retry_delay: Duration,
 ) -> Result<()> {
     let query = TargetInfoQuery::try_from(target_str)?;
+    let is_specific_query = !matches!(query, TargetInfoQuery::First);
     let targets = {
         let mut discovery_node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
         let find_res = find_targets_locally(env_context, query).await;
-        check_target_discovery(&mut discovery_node, find_res)
+        let found = check_target_discovery(&mut discovery_node, find_res);
+        if found.is_empty() && is_specific_query {
+            discovery_node
+                .add_node("Searching for all available targets", LedgerMode::Automatic)
+                .set_outcome(LedgerOutcome::Info);
+            if let Ok(other_targets) =
+                find_targets_locally(env_context, TargetInfoQuery::First).await
+            {
+                report_non_matching_targets(
+                    &mut discovery_node,
+                    target_str,
+                    env_context,
+                    &other_targets,
+                );
+            }
+        }
+        found
     };
     if targets.is_empty() {
         return Ok(());
@@ -261,6 +278,39 @@ pub fn check_target_discovery<W: Write>(
     }
 }
 
+pub fn report_non_matching_targets<W: Write>(
+    ledger: &mut LedgerNodeGuard<'_, W>,
+    target_str: &str,
+    env_context: &EnvironmentContext,
+    other_targets: &[TargetHandle],
+) {
+    if other_targets.is_empty() {
+        return;
+    }
+    let names = other_targets.iter().map(target_name).collect::<Vec<_>>().join(", ");
+    let target_source = match ffx_target::get_target_specifier_with_source(env_context) {
+        Ok((Some(spec), source)) if spec == target_str => source,
+        _ => None,
+    };
+    let message = match target_source {
+        Some(src) if !src.is_explicit() => format!(
+            "Default target '{target_str}' was not found ({}), but other targets were discovered: {names}. {}",
+            src.source_description(),
+            src.remediation_hint(),
+        ),
+        Some(src) => format!(
+            "Target specification '{target_str}' was not found ({}), but other targets were discovered: {names}. {}",
+            src.source_description(),
+            src.remediation_hint(),
+        ),
+        None => format!(
+            "Target specification '{target_str}' was not found, but other targets were discovered: {names}. \
+             Use `ffx target list` to list known targets, and use a different target query."
+        ),
+    };
+    ledger.add_node(&message, LedgerMode::Normal).set_outcome(LedgerOutcome::SoftWarning);
+}
+
 pub async fn find_targets_locally(
     env_context: &EnvironmentContext,
     query: TargetInfoQuery,
@@ -271,6 +321,8 @@ pub async fn find_targets_locally(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doctor_ledger::{DoctorLedger, LedgerViewMode};
+    use crate::ledger_view::RecordLedgerView;
 
     #[test]
     fn test_make_ssh_fix_suggestion() {
@@ -295,5 +347,115 @@ mod tests {
             )
         );
         assert_eq!(make_ssh_fix_suggestion("some other error"), None);
+    }
+
+    #[fuchsia::test]
+    async fn test_report_non_matching_targets_env_nodename() {
+        let env = ffx_config::test_env()
+            .env_var("FUCHSIA_NODENAME", "fuchsia-3a40-6b66-017b")
+            .build()
+            .unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Normal,
+            );
+            let mut node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
+            let other = vec![TargetHandle {
+                node_name: Some("fuchsia-4407-0bbf-aed4".to_string()),
+                state: TargetState::Unknown,
+                manual: false,
+            }];
+            report_non_matching_targets(&mut node, "fuchsia-3a40-6b66-017b", &env.context, &other);
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(
+            "Default target 'fuchsia-3a40-6b66-017b' was not found (target configured by $FUCHSIA_NODENAME)"
+        ));
+        assert!(output.contains("fuchsia-4407-0bbf-aed4"));
+        assert!(output.contains("fx unset-device"));
+    }
+
+    #[fuchsia::test]
+    async fn test_report_non_matching_targets_env_device_addr() {
+        let env =
+            ffx_config::test_env().env_var("FUCHSIA_DEVICE_ADDR", "192.168.1.1").build().unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Normal,
+            );
+            let mut node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
+            let other = vec![TargetHandle {
+                node_name: Some("fuchsia-4407-0bbf-aed4".to_string()),
+                state: TargetState::Unknown,
+                manual: false,
+            }];
+            report_non_matching_targets(&mut node, "192.168.1.1", &env.context, &other);
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(
+            "Default target '192.168.1.1' was not found (target configured by $FUCHSIA_DEVICE_ADDR)"
+        ));
+        assert!(output.contains("fuchsia-4407-0bbf-aed4"));
+        assert!(output.contains("setting/unsetting $FUCHSIA_DEVICE_ADDR"));
+    }
+
+    #[fuchsia::test]
+    async fn test_report_non_matching_targets_command_line() {
+        let env = ffx_config::test_env()
+            .runtime_config(ffx_config::keys::TARGET_DEFAULT_KEY, "fuchsia-3a40-6b66-017b")
+            .build()
+            .unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Normal,
+            );
+            let mut node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
+            let other = vec![TargetHandle {
+                node_name: Some("fuchsia-4407-0bbf-aed4".to_string()),
+                state: TargetState::Unknown,
+                manual: false,
+            }];
+            report_non_matching_targets(&mut node, "fuchsia-3a40-6b66-017b", &env.context, &other);
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(
+            "Target specification 'fuchsia-3a40-6b66-017b' was not found (specified on the command line)"
+        ));
+        assert!(output.contains("fuchsia-4407-0bbf-aed4"));
+        assert!(output.contains("ffx target list"));
+    }
+
+    #[fuchsia::test]
+    async fn test_report_non_matching_targets_unconfigured() {
+        let env = ffx_config::test_env().build().unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Normal,
+            );
+            let mut node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
+            let other = vec![TargetHandle {
+                node_name: Some("fuchsia-4407-0bbf-aed4".to_string()),
+                state: TargetState::Unknown,
+                manual: false,
+            }];
+            report_non_matching_targets(&mut node, "fuchsia-3a40-6b66-017b", &env.context, &other);
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(
+            "Target specification 'fuchsia-3a40-6b66-017b' was not found, but other targets were discovered: fuchsia-4407-0bbf-aed4."
+        ));
+        assert!(output.contains("ffx target list"));
     }
 }

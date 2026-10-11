@@ -30,15 +30,15 @@ void fail() {
 template <auto F, typename... Args>
 auto ensure(size_t caller_lineno, const std::string& callee, Args... args) {
   auto res = F(args...);
-  if (errno != 0) {
-    fprintf(stderr, "`%s` failed: %s (called from line %zu)", callee.c_str(), strerror(errno),
+  if (res < 0) {
+    fprintf(stderr, "`%s` failed: %s (called from line %zu)\n", callee.c_str(), strerror(errno),
             caller_lineno);
     fail();
   }
   return res;
 }
 
-// Invoke `function`, then `abort()` if `errno` is non-zero.
+// Invoke `function`, then `fail()` if return value is negative.
 // In case of failure, logs the caller line number and callee name.
 #define ENSURE(function, ...) ensure<function>(__LINE__, #function, __VA_ARGS__)
 
@@ -127,22 +127,22 @@ void relay_events(int epoll_fd, size_t num_of_events) {
 
 int open_device(int epoll_fd, const std::string& device_path) {
   int device_fd = -1;
-  // Mouse device may be lazily registered upon the first mouse event.
+  // Device may be dynamically or lazily registered.
   // Retry if the device node is not yet present.
-  for (int attempt = 0; attempt < 50; ++attempt) {
+  for (int attempt = 0; attempt < 100; ++attempt) {
     device_fd = open(device_path.c_str(), O_RDONLY);
     if (device_fd >= 0) {
       break;
     }
     if (errno == ENOENT) {
-      errno = 0;
-      usleep(20000);  // 20ms
+      usleep(50000);
       continue;
     }
     break;
   }
   if (device_fd < 0) {
-    device_fd = ENSURE(open, device_path.c_str(), O_RDONLY);
+    fprintf(stderr, "failed to open %s: %s\n", device_path.c_str(), strerror(errno));
+    fail();
   }
   epoll_event epoll_params = {.events = EPOLLIN, .data = {.fd = device_fd}};
   ENSURE(epoll_ctl, epoll_fd, EPOLL_CTL_ADD, device_fd, &epoll_params);
@@ -159,8 +159,10 @@ void write_message_to_stdout(const std::string& message) {
   ASSERT_EQ(message.size(), static_cast<size_t>(n_written), "expected n_written=%zu, but got %zd");
 }
 
+// Each integration test runs in an isolated realm that dynamically registers a single input
+// device, which therefore receives event0.
 constexpr std::string kTouchDevice = "/dev/input/event0";
-constexpr std::string kMouseDevice = "/dev/input/event2";
+constexpr std::string kMouseDevice = "/dev/input/event0";
 
 int main() {
   int epoll_fd = ENSURE(epoll_create, 1);  // Per manual page, must be >0.

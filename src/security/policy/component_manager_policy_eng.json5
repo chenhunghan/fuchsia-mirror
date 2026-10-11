@@ -323,26 +323,62 @@
                 ],
             },
             {
-                source_moniker: "/core/pkg-resolver",
+                source_moniker: "/bootstrap/pkg-cache",
                 source: "component",
-                source_name: "fuchsia.pkg.PackageResolver",
-                capability: "protocol",
+                source_name: "bin",
+                capability: "directory",
+                target_monikers: [
+                    "/bootstrap/console-launcher",
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/bootstrap/pkg-cache",
+                source: "component",
+                source_name: "build-info",
+                capability: "directory",
+                target_monikers: [
+                    "/core/build-info",
+                    "/core/feedback",
+                    "/core/system-update/omaha-client-service",
+                    "/core/system-update/system-update-checker",
+                    "/core/system-update/system-updater",
+                    "/toolbox",
+
+                    // TODO(crbug.com/1326674): Is this still needed for one
+                    // or both realms?
+                    // TODO(https://fxbug.dev/42173552): Once we can define test realms out of tree
+                    // we should remove this.
+                    "/core/test_manager/chromium-system-tests:**",
+                    "/core/test_manager/chromium-tests:**",
+                    "/core/testing/chromium-tests:**",
+                ],
+            },
+            {
+                source_moniker: "/bootstrap/pkg-cache",
+                source: "component",
+                source_name: "pkgfs",
+                capability: "directory",
+                target_monikers: [
+                    "/bootstrap/console-launcher",
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/bootstrap/pkg-cache",
+                source: "component",
+                source_name: "system",
+                capability: "directory",
                 target_monikers: [
                     "/bootstrap",
                     "/bootstrap/console-launcher",
-                    "/bootstrap/driver_index",
                     "/bootstrap/driver_manager",
-                    "/bootstrap/netsvc",
-                    "/core/debug-dash-launcher",
-                    "/core/process_resolver",
+                    "/core/system-update/omaha-client-service",
+                    "/core/system-update/system-update-checker",
+                    "/core/system-update/system-updater",
                     "/toolbox",
-                    "/core/system-update-checker",
-                    "/core/test_manager",
-                    "/core/testing/component-framework-tests:**",
                 ],
             },
-
-            // Allow garbage collection on eng builds.
             {
                 source_moniker: "/bootstrap/pkg-cache",
                 source: "component",
@@ -352,15 +388,34 @@
                     "/toolbox",
                 ],
             },
-
-            // Allow full packages to resolve on eng builds.
             {
-                source_moniker: "/core/pkg-resolver",
+                source_moniker: "/bootstrap/pkg-cache",
                 source: "component",
-                source_name: "full-resolver",
-                capability: "resolver",
+                source_name: "fuchsia.pkg.PackageCache",
+                capability: "protocol",
                 target_monikers: [
-                    "/**",
+                    "/core/pkg-resolver",
+                    "/core/system-update/system-updater",
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/bootstrap/pkg-cache",
+                source: "component",
+                source_name: "fuchsia.pkg.PackageResolver-base",
+                capability: "protocol",
+                target_monikers: [
+                    "/core/debug-dash-launcher",
+                    "/core/process_resolver",
+                ],
+            },
+            {
+                source_moniker: "/bootstrap/pkg-cache",
+                source: "component",
+                source_name: "fuchsia.pkg.RetainedPackages",
+                capability: "protocol",
+                target_monikers: [
+                    "/core/system-update/system-updater",
                 ],
             },
             {
@@ -375,10 +430,38 @@
             {
                 source_moniker: "/core/pkg-resolver",
                 source: "component",
+                source_name: "fuchsia.pkg.PackageResolver",
+                capability: "protocol",
+                target_monikers: [
+                    "/bootstrap",
+                    "/bootstrap/console-launcher",
+                    "/bootstrap/driver_index",
+                    "/bootstrap/driver_manager",
+                    "/bootstrap/full_resolver",
+                    "/bootstrap/netsvc",
+                    "/core/debug-dash-launcher",
+                    "/core/process_resolver",
+                    "/core/test_manager",
+                    "/core/testing/component-framework-tests:**",
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/pkg-resolver",
+                source: "component",
                 source_name: "fuchsia.pkg.resolution.PackageResolver",
                 capability: "protocol",
                 target_monikers: [
                     "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/pkg-resolver",
+                source: "component",
+                source_name: "full-resolver",
+                capability: "resolver",
+                target_monikers: [
+                    "/**",
                 ],
             },
             {

@@ -1,8 +1,5 @@
 # Notifications
 
-## "STOP" Condition
-* Use "gmail" skill: refer to the templates in the [Notification Templates](../assets/notification_templates.md) to send the "Interrupted" notification.
+This document handles standard, non-error notifications (e.g., Start and Complete). For error handling, refer to the error_handling.md file.
 
-## "STOP and CLEANUP" Condition
-* Use `git` command to revert the changes.
-* Use "gmail" skill: refer to the templates in the [Notification Templates](../assets/notification_templates.md) to send the "Interrupted" notification.
+* Use "gmail" skill: refer to the templates in the [Notification Templates](../assets/notification_templates.md) to draft the notification for the triggering condition and send it to the user.

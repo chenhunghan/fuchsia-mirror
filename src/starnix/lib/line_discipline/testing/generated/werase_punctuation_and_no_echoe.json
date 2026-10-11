@@ -1,0 +1,139 @@
+{
+    "name": "werase_punctuation_and_no_echoe",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "foo_bar...   \u0017x\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "foo_bar...   \b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \b\b \bx\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "x\n"
+        },
+        {
+            "type": "write_to_master",
+            "data": "foo---bar\u0017\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "foo---bar\b \b\b \b\b \b\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "foo---\n"
+        },
+        {
+            "type": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "type": "write_to_master",
+            "data": "abc\u007f\u0017\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "abc^?\b \b\b \b\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "\n"
+        },
+        {
+            "type": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IUTF8"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOK",
+                    "ECHOCTL",
+                    "ECHOKE",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "type": "write_to_master",
+            "data": "foo \u00e9\u0017\n\u00e9abc\u0017\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "foo \u00e9\b \b\r\n\u00e9abc\b \b\b \b\b \b\b \b\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "foo \n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IUTF8"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    }
+}

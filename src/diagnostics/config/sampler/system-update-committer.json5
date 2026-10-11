@@ -5,7 +5,7 @@
             metrics: [
                 {
                     event_codes: [
-                        1,
+                        "true",
                     ],
                     metric_name: "ota_successful_commit_boot_attempts_count",
                     metric_type: "Integer",
@@ -14,7 +14,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "false",
                     ],
                     metric_name: "ota_successful_commit_boot_attempts_count",
                     metric_type: "Integer",
@@ -23,7 +23,7 @@
                 },
                 {
                     event_codes: [
-                        0,
+                        "success",
                     ],
                     metric_name: "ota_verification_duration_migrated",
                     metric_type: "Integer",
@@ -32,7 +32,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "failure_health_check",
                     ],
                     metric_name: "ota_verification_duration_migrated",
                     metric_type: "Integer",
@@ -41,7 +41,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "failure_timeout",
                     ],
                     metric_name: "ota_verification_duration_migrated",
                     metric_type: "Integer",
@@ -50,7 +50,7 @@
                 },
                 {
                     event_codes: [
-                        5,
+                        "failure_internal",
                     ],
                     metric_name: "ota_verification_duration_migrated",
                     metric_type: "Integer",
@@ -59,8 +59,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "failure_health_check",
+                        "verify",
                     ],
                     metric_name: "ota_verification_failure_migrated",
                     metric_type: "Occurrence",
@@ -69,8 +69,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        3,
+                        "failure_timeout",
+                        "timeout",
                     ],
                     metric_name: "ota_verification_failure_migrated",
                     metric_type: "Occurrence",
@@ -79,8 +79,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        4,
+                        "failure_internal",
+                        "internal",
                     ],
                     metric_name: "ota_verification_failure_migrated",
                     metric_type: "Occurrence",

@@ -119,6 +119,7 @@ class MemoryTest(unittest.TestCase):
                 reporting_metrics.TestCaseResult(
                     label="Memory/System/PageRefaults",
                     unit=reporting_metrics.Unit.count,
+                    direction=reporting_metrics.Direction.smallerIsBetter,
                     values=(99,),
                 ),
                 reporting_metrics.TestCaseResult(

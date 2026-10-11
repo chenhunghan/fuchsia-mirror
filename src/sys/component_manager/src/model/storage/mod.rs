@@ -14,8 +14,8 @@ use capability_source::{
     CapabilitySource, CapabilityToCapabilitySource, ComponentCapability, ComponentSource,
     NamespaceSource, StorageBackingDirectorySource,
 };
-use cm_rust::{CapabilityTypeName, NativeIntoFidl, StorageDirectorySource};
-use cm_types::RelativePath;
+use cm_rust::{CapabilityTypeName, GenericRef, StorageDirectorySource};
+use cm_types::{Name, RelativePath};
 use component_id_index::InstanceId;
 use derivative::Derivative;
 use errors::{ModelError, StorageError};
@@ -180,19 +180,23 @@ pub async fn route_backing_directory(
         }
     };
 
-    let source_dictionary = match &storage_decl.source {
-        StorageDirectorySource::Parent => {
-            storage_component.component_sandbox().await?.component_input.capabilities()
-        }
+    let (source_dictionary, source_ref) = match &storage_decl.source {
+        StorageDirectorySource::Parent => (
+            storage_component.component_sandbox().await?.component_input.capabilities(),
+            GenericRef::Parent,
+        ),
         StorageDirectorySource::Self_ => {
-            storage_component.component_sandbox().await?.program_output_dict.clone()
+            (storage_component.component_sandbox().await?.program_output_dict, GenericRef::Self_)
         }
         StorageDirectorySource::Child(name) => {
             let child_name = ChildName::parse(name)
                 .expect("invalid child name, this should be prevented by manifest validation");
             let child_component = storage_component.get_child_maybe_resolve(&child_name).await?.expect("resolver registration references nonexistent static child, this should be prevented by manifest validation");
             let child_sandbox = child_component.component_sandbox().await?;
-            child_sandbox.component_output.capabilities().clone()
+            (
+                child_sandbox.component_output.capabilities(),
+                GenericRef::Child(Name::new(name).unwrap()),
+            )
         }
     };
     let backing_dir_router: Arc<Router<DirConnector>> = IntermediateRouter::new(
@@ -209,7 +213,7 @@ pub async fn route_backing_directory(
         target.as_weak().into(),
         target.moniker().clone(),
         RouteVerb::Declare,
-        storage_decl.source.clone().native_into_fidl(),
+        source_ref,
     )
     .try_into()
     .expect("wrong type from intermediate router");

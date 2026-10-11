@@ -64,10 +64,10 @@ std::unique_ptr<SystemCallTest> ZxVcpuResume(int64_t result, std::string_view re
               .type = ZX_PKT_GUEST_VCPU_STARTUP,                                              \
               .startup =                                                                      \
                   {                                                                           \
-                      .id = 1234,                                                             \
+                      .target = 1234,                                                         \
                       .entry = 0x123456,                                                      \
+                      .context = 5678,                                                        \
                   },                                                                          \
-              .reserved = 0,                                                                  \
           },                                                                                  \
   };                                                                                          \
   PerformDisplayTest("$plt(zx_vcpu_resume)", ZxVcpuResume(result, #result, kHandle, &packet), \
@@ -92,11 +92,11 @@ VCPU_RESUME_DISPLAY_TEST(
     "      guest_vcpu: \x1B[32mzx_packet_guest_vcpu_t\x1B[0m = {\n"
     "        type: \x1B[32mzx.packet_guest_vcpu::type\x1B[0m = "
     "\x1B[34mZX_PKT_GUEST_VCPU_STARTUP\x1B[0m\n"
-    "        startup: \x1B[32mzx_packet_guest_vcpu_startup_t\x1B[0m = { "
-    "id: \x1B[32muint64\x1B[0m = \x1B[34m1234\x1B[0m, "
-    "entry: \x1B[32mzx.gpaddr\x1B[0m = \x1B[34m0000000000123456\x1B[0m"
-    " }\n"
-    "        reserved: \x1B[32muint64\x1B[0m = \x1B[34m0\x1B[0m\n"
+    "        startup: \x1B[32mzx_packet_guest_vcpu_startup_t\x1B[0m = {\n"
+    "          target: \x1B[32muint64\x1B[0m = \x1B[34m1234\x1B[0m\n"
+    "          entry: \x1B[32mzx.gpaddr\x1B[0m = \x1B[34m0000000000123456\x1B[0m\n"
+    "          context: \x1B[32muint64\x1B[0m = \x1B[34m5678\x1B[0m\n"
+    "        }\n"
     "      }\n"
     "    }\n")
 
@@ -145,11 +145,10 @@ std::unique_ptr<SystemCallTest> ZxVcpuReadState(int64_t result, std::string_view
   return value;
 }
 
-#define VCPU_READ_STATE_DISPLAY_TEST_CONTENT(result, buffer, expected)                   \
-  PerformDisplayTest(                                                                    \
-      "$plt(zx_vcpu_read_state)",                                                        \
-      ZxVcpuReadState(result, #result, kHandle, ZX_VCPU_STATE, &buffer, sizeof(buffer)), \
-      expected)
+#define VCPU_READ_STATE_DISPLAY_TEST_CONTENT(result, buffer, expected) \
+  PerformDisplayTest(                                                  \
+      "$plt(zx_vcpu_read_state)",                                      \
+      ZxVcpuReadState(result, #result, kHandle, ZX_VCPU_STATE, &buffer, sizeof(buffer)), expected)
 
 TEST_F(InterceptionWorkflowTestArm, ZxVcpuReadStateAArch64) {
   zx_vcpu_state_aarch64_t buffer;
@@ -254,11 +253,10 @@ std::unique_ptr<SystemCallTest> ZxVcpuWriteState(int64_t result, std::string_vie
   return value;
 }
 
-#define VCPU_WRITE_STATE_DISPLAY_TEST_CONTENT(result, buffer, expected)                  \
-  PerformDisplayTest(                                                                    \
-      "$plt(zx_vcpu_write_state)",                                                       \
-      ZxVcpuReadState(result, #result, kHandle, ZX_VCPU_STATE, &buffer, sizeof(buffer)), \
-      expected)
+#define VCPU_WRITE_STATE_DISPLAY_TEST_CONTENT(result, buffer, expected) \
+  PerformDisplayTest(                                                   \
+      "$plt(zx_vcpu_write_state)",                                      \
+      ZxVcpuReadState(result, #result, kHandle, ZX_VCPU_STATE, &buffer, sizeof(buffer)), expected)
 
 TEST_F(InterceptionWorkflowTestArm, ZxVcpuWriteStateAArch64) {
   zx_vcpu_state_aarch64_t buffer;

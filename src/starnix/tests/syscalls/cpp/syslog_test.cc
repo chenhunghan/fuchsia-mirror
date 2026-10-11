@@ -214,8 +214,9 @@ TEST_F(SyslogTest, ProcKmsgPoll) {
   // Drain the logs.
   char buf[4096];
   do {
-    size_t size_read = read(proc_kmsg_fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    std::fill_n(buf, sizeof(buf), 0);
+    ssize_t size_read = read(proc_kmsg_fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
   } while (strstr(buf, "ProcKmsgPoll -- log one") == nullptr);
 
   struct pollfd fds[] = {{
@@ -224,11 +225,21 @@ TEST_F(SyslogTest, ProcKmsgPoll) {
       .revents = 42,
   }};
 
-  // With no timeout, this returns immediately.
-  EXPECT_EQ(0, poll(fds, 1, 0));
-
-  // Ensure syslog returns that the unread size is 0.
-  EXPECT_EQ(0, klogctl(SYSLOG_ACTION_SIZE_UNREAD, nullptr, 0));
+  // Drain any background logs. Since other processes might write to kmsg concurrently,
+  // we loop until it appears empty.
+  int flags = fcntl(proc_kmsg_fd, F_GETFL);
+  fcntl(proc_kmsg_fd, F_SETFL, flags | O_NONBLOCK);
+  bool empty = false;
+  for (int i = 0; i < 1000; i++) {
+    if (poll(fds, 1, 0) == 0 && klogctl(SYSLOG_ACTION_SIZE_UNREAD, nullptr, 0) == 0) {
+      empty = true;
+      break;
+    }
+    ssize_t drain_read = read(proc_kmsg_fd, buf, sizeof(buf) - 1);
+    (void)drain_read;
+  }
+  fcntl(proc_kmsg_fd, F_SETFL, flags);
+  EXPECT_TRUE(empty);
 
   // Write a log.
   const char *second_message = "ProcKmsgPoll -- log two\n";

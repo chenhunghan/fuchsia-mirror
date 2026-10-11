@@ -28,6 +28,10 @@ Common references and templates used across multiple migration skills are mainta
 
 For repository-wide Bazel file conventions (such as copyright headers, load ordering, and package licensing), see [`//build/bazel/references/build_bazel_header_template.md`](../bazel/references/build_bazel_header_template.md).
 
+For general Bazel style, including writing rules and macros, see the [Bazel style guide](../../docs/development/languages/bazel/style/README.md).
+
+For reading GN build arguments and configuration values from Bazel, see [`BUILD_CONFIGURATION_VARIABLES.md`](../bazel/config/BUILD_CONFIGURATION_VARIABLES.md).
+
 To make these skills discoverable by Gemini, follow [Skill discovery and
 configuration](http://go/fuchsia-skills-guide#skill-discovery-and-configuration)
 from Fuchsia skills guide. One common approach is to have the following entry

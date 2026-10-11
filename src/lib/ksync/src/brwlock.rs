@@ -91,15 +91,6 @@ impl<'a, Class: LockClass> BrwLockPiReadGuard<'a, Class> {
         &self.token
     }
 
-    /// Returns a mutable reference to the lock proof `LockToken` inside this pinned projection.
-    #[inline]
-    pub fn token_mut(self: Pin<&mut Self>) -> &mut crate::LockToken<'a, Class> {
-        // SAFETY: We are accessing `token` mutably but `LockToken` is a ZST and does not require
-        // pinning invariants to be maintained.
-        let me = unsafe { self.get_unchecked_mut() };
-        &mut me.token
-    }
-
     /// Temporarily releases the read lock before executing the given callable `f` and then
     /// re-acquires the read lock.
     #[inline]

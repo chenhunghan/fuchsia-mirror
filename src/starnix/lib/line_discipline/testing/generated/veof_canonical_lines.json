@@ -1,0 +1,152 @@
+{
+    "name": "veof_canonical_lines",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "abc"
+        },
+        {
+            "type": "check_readable_size",
+            "side": "replica",
+            "size": 0
+        },
+        {
+            "type": "read_once_from_slave_blocked",
+            "size": 4096
+        },
+        {
+            "type": "write_to_master",
+            "data": "\u0004"
+        },
+        {
+            "type": "check_readable_size",
+            "side": "replica",
+            "size": 3
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "abc"
+        },
+        {
+            "type": "read_once_from_slave_blocked",
+            "size": 4096
+        },
+        {
+            "type": "write_to_master",
+            "data": "\u0004"
+        },
+        {
+            "type": "check_readable_size",
+            "side": "replica",
+            "size": 0
+        },
+        {
+            "type": "check_poll",
+            "side": "replica",
+            "events": [
+                "POLLIN",
+                "POLLOUT"
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 0,
+            "data": ""
+        },
+        {
+            "type": "check_poll",
+            "side": "replica",
+            "events": [
+                "POLLIN",
+                "POLLOUT"
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": ""
+        },
+        {
+            "type": "read_once_from_slave_blocked",
+            "size": 4096
+        },
+        {
+            "type": "write_to_master",
+            "data": "first\u0004second\n\u0004third\n"
+        },
+        {
+            "type": "check_readable_size",
+            "side": "replica",
+            "size": 18
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "first"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "second\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": ""
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "third\n"
+        },
+        {
+            "type": "read_once_from_slave_blocked",
+            "size": 4096
+        },
+        {
+            "type": "read_from_master",
+            "data": "abcfirstsecond\r\nthird\r\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    }
+}

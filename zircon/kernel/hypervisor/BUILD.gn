@@ -16,6 +16,7 @@ source_set("hypervisor") {
     "guest_ffi.cc",
     "ktrace.cc",
     "trap_map.cc",
+    "vcpu_ffi.cc",
   ]
   deps = [
     "//zircon/kernel/arch/$zircon_cpu/hypervisor",

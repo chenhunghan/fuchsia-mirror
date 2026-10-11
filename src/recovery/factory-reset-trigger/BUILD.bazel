@@ -31,10 +31,6 @@ rustc_binary(
     edition = "2024",
     tags = ["manual"],
     deps = [
-        # The dynamically linked Rust standard library has an implicit link
-        # attribute on libfdio.so. GN adds this to every Rust target via
-        # //src/lib/fdio/rust:fdio_for_rust_stdlib in BUILDCONFIG.gn.
-        "//sdk/lib/fdio",
         "//src/lib/fuchsia",
         "//src/sys/pkg/lib/forced-fdr",
         "//third_party/rust_crates/vendor:anyhow",

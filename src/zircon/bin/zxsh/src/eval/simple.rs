@@ -5,32 +5,30 @@
 use super::execution_context::ExecutionContext;
 use super::expand::{
     ExpandedCommand, expand_alias, expand_argument, expand_assignment_value,
-    get_literal_command_name, needs_subshell_process,
+    get_literal_command_name,
 };
-use super::spawn::{spawn_command_with_redirection, spawn_subshell_vmo, wait_for_process_to_exit};
+use super::spawn::{SpawnedProcess, spawn_external_command, wait_for_process_to_exit};
 use super::state::{Frame, ShellState, StateBackupGuard};
 use super::{EvalOutcome, eval_command};
-use crate::builtins::is_builtin;
+use crate::builtins::{is_builtin, is_special_builtin};
 use crate::collections::{FlatMap, FlatSet};
 use crate::parser::ast::{ASTBuilder, Command, WordPart, WordPartTag};
 use crate::relative;
-use crate::subshell::SubshellScriptArgs;
 use bstr::{BStr, BString, ByteSlice};
 
-pub fn parse_simple_command_args<'a>(
-    builder: &'a ASTBuilder,
-    cmd_ptr: relative::Ptr<Command>,
+pub fn split_simple_command_args(
+    cmd: &Command,
+    buf: &relative::Buffer,
 ) -> (Vec<relative::Slice<WordPart>>, Vec<relative::Slice<WordPart>>) {
     let mut assignments_refs = Vec::new();
     let mut cmd_args_refs = Vec::new();
     let mut parsing_assignments = true;
-    let cmd = builder.get_ref(cmd_ptr);
-    for &arg_slice in cmd.simple_args.as_slice(builder) {
-        let parts = arg_slice.as_slice(builder);
+    for &arg_slice in cmd.simple_args.as_slice(buf) {
+        let parts = arg_slice.as_slice(buf);
         if parts.is_empty() {
             cmd_args_refs.push(relative::Slice::empty());
             parsing_assignments = false;
-        } else if parsing_assignments && is_assignment_flat(parts, builder) {
+        } else if parsing_assignments && is_assignment_flat(parts, buf) {
             assignments_refs.push(arg_slice);
         } else {
             parsing_assignments = false;
@@ -40,13 +38,20 @@ pub fn parse_simple_command_args<'a>(
     (assignments_refs, cmd_args_refs)
 }
 
+pub fn parse_simple_command_args<'a>(
+    builder: &'a ASTBuilder,
+    cmd_ptr: relative::Ptr<Command>,
+) -> (Vec<relative::Slice<WordPart>>, Vec<relative::Slice<WordPart>>) {
+    split_simple_command_args(builder.get_ref(cmd_ptr), builder)
+}
+
 pub fn apply_assignments<'a>(
     builder: &ASTBuilder,
     assignments_refs: &[relative::Slice<WordPart>],
     state: &'a mut ShellState,
     ctx: &ExecutionContext,
 ) -> Result<StateBackupGuard<'a>, String> {
-    let mut guard = StateBackupGuard { state, backups: Vec::new() };
+    let mut guard = StateBackupGuard::new(state);
     for &arg_slice in assignments_refs {
         let assoc = builder.get_slice(arg_slice);
         let (name, val_start, remaining) = split_assignment_flat(assoc, builder);
@@ -55,9 +60,8 @@ pub fn apply_assignments<'a>(
         if guard.state.is_readonly(name) {
             return Err(format!("{}: is read only", name));
         }
-        let old_val = guard.state.get_var(name);
-        guard.backups.push((BString::from(name), old_val));
-        guard.state.set_var(name, &expanded_val);
+        guard.backup_var(name);
+        guard.state.set_and_export_var(name, &expanded_val);
     }
     Ok(guard)
 }
@@ -131,8 +135,12 @@ fn eval_function_call(
     };
 
     if let Ok(code) = &final_res {
-        if guard.state.opt_errexit && code.exit_code() != 0 && guard.state.ignore_err_depth == 0 {
-            return Ok(EvalOutcome::Exit(code.exit_code()));
+        let exit_code = code.exit_code();
+        if matches!(code, EvalOutcome::Code(_)) {
+            guard.state.set_last_status(exit_code);
+        }
+        if guard.state.opt_errexit && exit_code != 0 && guard.state.ignore_err_depth == 0 {
+            return Ok(EvalOutcome::Exit(exit_code));
         }
     }
 
@@ -148,16 +156,10 @@ pub fn eval_simple(
     let (assignments_refs, cmd_args_refs) = parse_simple_command_args(builder, cmd_ptr);
 
     if cmd_args_refs.is_empty() {
-        for &arg_slice in &assignments_refs {
-            let assoc = builder.get_slice(arg_slice);
-            let (name, val_start, remaining) = split_assignment_flat(assoc, builder);
-            let expanded_val = expand_assignment_value(val_start, remaining, state, ctx, builder)?;
-            if state.is_readonly(name) {
-                return Err(format!("{}: is read only", name));
-            }
-            state.set_var(name, &expanded_val);
-        }
-        return Ok(EvalOutcome::Code(0));
+        apply_assignments(builder, &assignments_refs, state, ctx)?.commit();
+        let code = state.take_cmd_sub_status().unwrap_or(0);
+        state.set_last_status(code);
+        return Ok(state.handle_outcome(EvalOutcome::Code(code)));
     }
 
     let cmd_args = match resolve_alias_loop(builder, cmd_args_refs, state, ctx)? {
@@ -167,38 +169,57 @@ pub fn eval_simple(
                 let arg0 = builder.get_slice(cmd_args_refs[0]);
                 get_literal_command_name(arg0, builder)
             };
+            let guard = apply_assignments(builder, &assignments_refs, state, ctx)?;
+            guard.state.take_cmd_sub_status();
             if let Some(name) = name_opt {
                 ctx.active_aliases.insert(name.clone());
-                let res = eval_command(builder, new_cmd_ptr, state, ctx);
+                let res = eval_command(builder, new_cmd_ptr, &mut *guard.state, ctx);
                 ctx.active_aliases.remove(&name);
                 return res;
             } else {
-                return eval_command(builder, new_cmd_ptr, state, ctx);
+                return eval_command(builder, new_cmd_ptr, &mut *guard.state, ctx);
             }
         }
         ResolvedAlias::Words(words) => words,
     };
 
-    let (guard, expanded_args) =
+    let (mut guard, expanded_args) =
         expand_command_and_env(builder, &assignments_refs, &cmd_args, state, ctx)?;
 
     if expanded_args.is_empty() {
-        return Ok(EvalOutcome::Code(0));
+        guard.commit();
+        let code = guard.state.take_cmd_sub_status().unwrap_or(0);
+        guard.state.set_last_status(code);
+        return Ok(guard.state.handle_outcome(EvalOutcome::Code(code)));
     }
+
+    guard.state.take_cmd_sub_status();
 
     let cmd_name = &expanded_args[0];
     if is_builtin(cmd_name.as_bstr()) {
+        let is_special = is_special_builtin(cmd_name.as_bstr());
+        let needs_exported_env_during_builtin =
+            cmd_name.as_bytes() == b"exec" && expanded_args.len() > 1;
+        if is_special && !needs_exported_env_during_builtin {
+            guard.commit();
+        }
         let res = crate::builtins::run_builtin(
             cmd_name.as_bstr(),
             &expanded_args[1..],
             &mut *guard.state,
             ctx,
         );
+        if is_special && needs_exported_env_during_builtin {
+            guard.commit();
+        }
         if let Ok(code) = &res {
-            if guard.state.opt_errexit && code.exit_code() != 0 && guard.state.ignore_err_depth == 0
-            {
+            let exit_code = code.exit_code();
+            if matches!(code, EvalOutcome::Code(_)) {
+                guard.state.set_last_status(exit_code);
+            }
+            if guard.state.opt_errexit && exit_code != 0 && guard.state.ignore_err_depth == 0 {
                 drop(guard);
-                return Ok(EvalOutcome::Exit(code.exit_code()));
+                return Ok(EvalOutcome::Exit(exit_code));
             }
         }
         return res.map(|outcome| guard.state.handle_outcome(outcome));
@@ -208,36 +229,14 @@ pub fn eval_simple(
         return eval_function_call(&func_bytes, cmd_name, &expanded_args[1..], guard, ctx);
     }
 
-    let is_subshell = {
-        let cmd = builder.get_ref(cmd_ptr);
-        needs_subshell_process(cmd, guard.state, builder)
-    };
-    let proc = if is_subshell {
-        let cmd = builder.get_ref(cmd_ptr);
-        spawn_subshell_vmo(
-            cmd,
-            guard.state,
-            ctx,
-            None,
-            None,
-            None,
-            SubshellScriptArgs::Pass,
-            builder,
-        )?
-    } else {
-        spawn_command_with_redirection(
-            builder,
-            cmd_ptr,
-            &mut *guard.state,
-            ctx,
-            ctx.stdin(),
-            ctx.stdout(),
-            ctx.stderr(),
-        )?
-    };
+    let spawned = spawn_external_command(expanded_args, &mut *guard.state, ctx);
     drop(guard);
 
-    let exit_code = wait_for_process_to_exit(&proc, ctx)?;
+    let exit_code = match spawned {
+        SpawnedProcess::Running(proc) => wait_for_process_to_exit(&proc, ctx)?,
+        SpawnedProcess::Failed(code) => code,
+    };
+    state.set_last_status(exit_code);
     Ok(state.handle_outcome(EvalOutcome::Code(exit_code)))
 }
 

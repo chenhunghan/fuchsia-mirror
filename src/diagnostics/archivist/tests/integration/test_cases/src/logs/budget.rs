@@ -28,10 +28,6 @@ const SPAM_COUNT: usize = 1001;
     test_case(LogFormat::Rust(fdiagnostics::Format::Fxt))
 )]
 #[cfg_attr(fuchsia_api_level_at_least = "HEAD", test_case(LogFormat::Ffi))]
-#[cfg_attr(
-    fuchsia_api_level_at_least = "HEAD",
-    test_case(LogFormat::Rust(fdiagnostics::Format::LegacyFxt))
-)]
 #[test_case(LogFormat::Rust(fdiagnostics::Format::Json))]
 #[fuchsia::test]
 async fn test_budget(reader_format: LogFormat) {

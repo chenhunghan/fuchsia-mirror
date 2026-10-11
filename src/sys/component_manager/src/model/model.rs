@@ -16,6 +16,16 @@ use log::warn;
 use routing::bedrock::structured_dict::ComponentInput;
 use std::sync::Arc;
 
+#[cfg(feature = "tracing")]
+use {
+    cm_config::TraceProvider,
+    fidl::endpoints::{self, DiscoverableProtocolMarker},
+    fidl_fuchsia_io as fio, fidl_fuchsia_tracing_provider as ftp,
+    log::info,
+    vfs::ToObjectRequest,
+    vfs::directory::entry::OpenRequest,
+};
+
 /// Parameters for initializing a component model, particularly the root of the component
 /// instance tree.
 pub struct ModelParams {
@@ -109,7 +119,20 @@ impl Model {
                 protocol to start the root component."
             );
         } else {
-            if let Err(e) = self.root.ensure_started(&StartReason::Root).await {
+            let start_res = async {
+                // Connect to tracing before starting the root component. This ensures we can
+                // capture trace data from the startup of the root component's eager children.
+                // As a side effect, and most importantly, this means that the component manager will open the exposed directory of the
+                // root component before starting it.
+                #[cfg(feature = "tracing")]
+                if self.context.runtime_config().trace_provider == TraceProvider::RootExposed {
+                    self.root.resolve().await?;
+                    self.connect_to_tracing_from_exposed().await;
+                }
+                self.root.ensure_started(&StartReason::Root).await
+            }
+            .await;
+            if let Err(e) = start_res {
                 // Starting root may take a long time as it will be resolving and starting
                 // eager children. If graceful shutdown is initiated, that will cause those
                 // children to fail to resolve or fail to start, and for `start` to fail.
@@ -126,6 +149,31 @@ impl Model {
                     }
                 }
             }
+        }
+    }
+
+    /// Obtains a connection to tracing, and initializes tracing
+    #[cfg(feature = "tracing")]
+    async fn connect_to_tracing_from_exposed(&self) {
+        let (client_end, server) = endpoints::create_endpoints::<ftp::RegistryMarker>();
+        const FLAGS: fio::Flags = fio::Flags::PROTOCOL_SERVICE;
+        let mut object_request = FLAGS.to_object_request(server);
+        match self
+            .root
+            .open_exposed(OpenRequest::new(
+                self.root.execution_scope.clone(),
+                FLAGS,
+                ftp::RegistryMarker::PROTOCOL_NAME.try_into().unwrap(),
+                &mut object_request,
+            ))
+            .await
+        {
+            Ok(()) => {
+                fuchsia_trace_provider::trace_provider_create_with_service(
+                    client_end.into_channel().into_raw(),
+                );
+            }
+            Err(e) => info!("Unable to open Registry server for tracing: {}", e),
         }
     }
 }

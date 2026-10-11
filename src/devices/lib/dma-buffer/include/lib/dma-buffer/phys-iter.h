@@ -19,7 +19,7 @@ namespace dma_buffer {
 // consume a physical address and length of bytes. The buffer need not be backed by physically
 // contiguous chunks (more below), or be chunk-aligned. The iterator will ensure chunk boundaries
 // are not crossed in given (addr, size) pairs unless the origin VMO was pinned with
-// ZX_BTI_CONTIGUOUS in effect.
+// ZX_BTI_CONTIGUOUS in effect, or contiguous chunk merging is enabled.
 //
 // The chunk list is given as a list of zx_paddr_t values, which is chunk-count in size. These
 // values are typically taken from the result of zx_bti_pin().
@@ -44,26 +44,28 @@ class PhysIter {
   PhysIter() = delete;
 
   PhysIter(const zx_paddr_t* chunk_list, uint64_t chunk_count, size_t chunk_size,
-           zx_off_t vmo_offset, size_t buf_length, size_t max_length)
+           zx_off_t vmo_offset, size_t buf_length, size_t max_length, bool merge = false)
       : chunk_list_{chunk_list},
         chunk_count_{chunk_count},
         vmo_offset_{vmo_offset},
         buf_length_{buf_length},
         max_length_{max_length == 0 ? UINT64_MAX : max_length},
-        chunk_size_{chunk_size} {
+        chunk_size_{chunk_size},
+        merge_{merge} {
     ZX_ASSERT(chunk_list_ != nullptr);
     ZX_ASSERT(chunk_count_ > 0);
     ZX_ASSERT(buf_length_ > 0);
+    ZX_ASSERT(chunk_size_ > 0);
 
     // Chunk size must be a power-of-2 to support the chunk mask calculation.
-    ZX_ASSERT(!(chunk_size_ & (chunk_size - 1)));
+    ZX_ASSERT(!(chunk_size_ & (chunk_size_ - 1)));
   }
 
   // This overload defaults to page-sized chunks.
   PhysIter(const zx_paddr_t* chunk_list, uint64_t chunk_count, zx_off_t vmo_offset,
-           size_t buf_length, size_t max_length = UINT64_MAX)
+           size_t buf_length, size_t max_length = UINT64_MAX, bool merge = false)
       : PhysIter(chunk_list, chunk_count, zx_system_get_page_size(), vmo_offset, buf_length,
-                 max_length) {}
+                 max_length, merge) {}
 
   using iterator = iterator_impl;
 
@@ -95,26 +97,37 @@ class PhysIter {
 
     // Prefix.
     iterator_impl& operator++() {
-      if (current_.first == 0) {  // Terminal criteria.
+      auto& [cur_addr, cur_size] = current_;
+
+      if (cur_addr == 0) {  // Terminal criteria.
         return *this;
       }
 
-      iterated_bytes_ += current_.second;
+      iterated_bytes_ += cur_size;
       if (iterated_bytes_ == iter_->buf_length_) {
         current_ = {0, 0};
         return *this;
       }
 
-      zx_paddr_t cur_chunk{current_.first & iter_->chunk_mask_};
-      zx_paddr_t next_chunk{(current_.first + current_.second) & iter_->chunk_mask_};
-
-      if (cur_chunk != next_chunk) {
-        current_.first = iter_->chunk_list_[++chunk_index_];
+      if (iter_->chunk_count_ == 1) {
+        cur_addr += cur_size;
       } else {
-        current_.first += current_.second;
+        zx_paddr_t cur_chunk{ChunkBase(cur_addr)};
+        // Consider that end_addr may not be chunk-aligned. It may end short of
+        // the current chunk, or extend into the next contiguous chunk (if
+        // applicable).
+        zx_paddr_t end_addr{cur_addr + cur_size};
+        zx_paddr_t next_chunk{ChunkBase(end_addr)};
+
+        if (cur_chunk != next_chunk) {
+          chunk_index_ += (next_chunk - cur_chunk) / iter_->chunk_size_;
+          cur_addr = ChunkBase(iter_->chunk_list_[chunk_index_]) + (end_addr & ~iter_->chunk_mask_);
+        } else {
+          cur_addr += cur_size;
+        }
       }
 
-      current_.second = BoundaryTruncate(current_.first);
+      cur_size = BoundaryTruncate(cur_addr);
       return *this;
     }
 
@@ -126,11 +139,14 @@ class PhysIter {
     }
 
    private:
+    // Returns start-address of the chunk containing addr.
+    zx_paddr_t ChunkBase(zx_paddr_t addr) const { return addr & iter_->chunk_mask_; }
+
     // This function returns the count of bytes from the given address to the next applicable
     // boundary. The definition of a boundary is one of:
     //   1. The requested maximum length (i.e. iter_->max_length_).
-    //   2. The distance to the end of the current chunk if the pinned chunks are not guaranteed
-    //      contiguous.
+    //   2. The distance to the end of the current chunk (or contiguous sequence of chunks when
+    //      iter_->merge_ is true) if the pinned chunks are not guaranteed contiguous.
     //   3. The distance to the end of the overall buffer.
     // For any given address, the nearest applicable boundary will be returned.
     size_t BoundaryTruncate(zx_paddr_t addr) {
@@ -145,14 +161,24 @@ class PhysIter {
         return std::min(iter_->max_length_, end_of_buffer);
       }
 
-      // If the chunk count was not equal to one, we must concern ourselves with chunk transitions.
-      // It's possible this sequence is contiguous by happenstance, which gives the potential for a
-      // coalesce operation. At present, this implementation doesn't do that. We will break at the
-      // next applicable transition even in the case of coincidental contiguity.
-      zx_paddr_t next_chunk{(addr & iter_->chunk_mask_) + iter_->chunk_size_};
+      // If the chunk count is not equal to one, we must concern ourselves with chunk transitions.
+      // When merge_ is enabled, coalesce consecutive chunks that are physically contiguous up to
+      // max_length_ and end_of_buffer.
+      zx_paddr_t next_chunk{ChunkBase(addr) + iter_->chunk_size_};
 
       // Distance to end of current chunk, which may overrun the buffer's length.
       size_t end_of_chunk{next_chunk - addr};
+
+      if (iter_->merge_) {
+        uint64_t idx = chunk_index_;
+        while (end_of_chunk < iter_->max_length_ && end_of_chunk < end_of_buffer &&
+               idx + 1 < iter_->chunk_count_ &&
+               ChunkBase(iter_->chunk_list_[idx]) + iter_->chunk_size_ ==
+                   iter_->chunk_list_[idx + 1]) {
+          end_of_chunk += iter_->chunk_size_;
+          idx++;
+        }
+      }
 
       return std::min(iter_->max_length_, std::min(end_of_chunk, end_of_buffer));
     }
@@ -173,6 +199,7 @@ class PhysIter {
   // The chunk size represents the number of contiguous bytes pointed at by each entry in the chunk
   // list. This implementation can only account for chunk sizes that are a power of 2.
   const size_t chunk_size_;
+  const bool merge_;
 
   // The chunk mask, when applied, yields the address of the chunk a given address resides in.
   const zx_paddr_t chunk_mask_{UINT64_MAX ^ (chunk_size_ - 1)};

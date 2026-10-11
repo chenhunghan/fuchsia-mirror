@@ -204,6 +204,7 @@ template("rustc_test_internal") {
                              "exclude_toolchain_tags",
                              "features",
                              "inputs",
+                             "link_deps",
                              "lint_config",
                              "output_dir",
                              "proc_macro_deps",
@@ -350,6 +351,11 @@ template("rustc_test_internal") {
 #   non_rust_deps (optional)
 #     List of non-rust_library GN targets on which this crate depends.
 #     OBSOLETE! Please use deps or data_deps instead.
+#
+#   link_deps (optional)
+#     Native (e.g. C/C++) libraries to link against, has the same semantics
+#     as deps in GN. Used by Bazel-converted targets, see
+#     //build/tools/bazel2gn/README.md.
 #
 #   data_deps (optional)
 #     List of GN targets that are only needed at runtime.  Use this for any

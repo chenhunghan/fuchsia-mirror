@@ -26,6 +26,7 @@ from honeydew.transports.ffx.types import (
 )
 from honeydew.typing import custom_types
 from honeydew.utils import host_shell
+from mobly import signals
 from parameterized import param, parameterized
 
 # pylint: disable=protected-access
@@ -1137,7 +1138,7 @@ class FfxTests(unittest.TestCase):
         mock_host_shell.side_effect = errors.HostCmdError("Command failed")
 
         with self.assertRaises(ffx_errors.FfxCommandError):
-            self.ffx_obj_wo_ip.run(cmd=["test", "cmd"])
+            self.ffx_obj_with_ip.run(cmd=["test", "cmd"])
 
         mock_triage.assert_called_once()
 
@@ -1176,15 +1177,81 @@ class FfxTests(unittest.TestCase):
         )
 
     @mock.patch.object(
-        ffx.FFX, "run", side_effect=RuntimeError("Arbitrary failure")
+        ffx.FFX,
+        "run",
+        side_effect=ffx_errors.FfxCommandError("Arbitrary failure"),
     )
     def test_notify_intentional_disconnect_exception(
         self, mock_run: mock.Mock
     ) -> None:
-        """Test case for ffx.notify_intentional_disconnect() when run() raises Exception"""
+        """Test case for ffx.notify_intentional_disconnect() when run() raises FfxCommandError"""
         # Should catch and not raise exception
         self.ffx_obj_with_ip_and_monitor.notify_intentional_disconnect()
         mock_run.assert_called_once()
+
+    @mock.patch.object(
+        ffx.FFX, "run", side_effect=signals.TestAbortAll("abort")
+    )
+    def test_notify_intentional_disconnect_propagates_unexpected_exceptions(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Test notify_intentional_disconnect propagates non-Honeydew exceptions (e.g. Mobly signals)."""
+        with self.assertRaises(signals.TestAbortAll):
+            self.ffx_obj_with_ip_and_monitor.notify_intentional_disconnect()
+        mock_run.assert_called_once()
+
+    @mock.patch.object(
+        ffx.FFX,
+        "get_ffx_target_status",
+        side_effect=signals.TestAbortAll("abort"),
+    )
+    @mock.patch(
+        "honeydew.utils.host_shell.run",
+        side_effect=errors.HostCmdError("Command failed"),
+    )
+    def test_run_propagates_unexpected_exceptions_from_target_status(
+        self, mock_host_shell: mock.Mock, mock_triage: mock.Mock
+    ) -> None:
+        """Test run propagates non-Honeydew exceptions raised by `ffx target status`."""
+        with self.assertRaises(signals.TestAbortAll):
+            self.ffx_obj_with_ip.run(cmd=["test", "cmd"])
+
+        mock_triage.assert_called_once()
+
+    @mock.patch.object(
+        ffx.FFX,
+        "get_ffx_target_status",
+        side_effect=ffx_errors.FfxTargetStatusError("status failed"),
+    )
+    @mock.patch(
+        "honeydew.utils.host_shell.run",
+        side_effect=errors.HostCmdError("Command failed"),
+    )
+    def test_run_ignores_target_status_failure(
+        self, mock_host_shell: mock.Mock, mock_triage: mock.Mock
+    ) -> None:
+        """Test run still raises the original error when `ffx target status` fails."""
+        with self.assertRaises(ffx_errors.FfxCommandError):
+            self.ffx_obj_with_ip.run(cmd=["test", "cmd"])
+
+        mock_triage.assert_called_once()
+
+    @mock.patch(
+        "honeydew.utils.host_shell.run",
+        side_effect=errors.HostCmdError("Command failed"),
+    )
+    def test_get_target_address_does_not_recurse_on_failure(
+        self, mock_host_shell: mock.Mock
+    ) -> None:
+        """Test resolving the target address fails with FfxCommandError without
+        recursing through `ffx target status`, which needs the target address.
+        """
+        self.ffx_obj_wo_ip._target_addr = None
+
+        with self.assertRaises(ffx_errors.FfxCommandError):
+            self.ffx_obj_wo_ip.get_target_address()
+
+        mock_host_shell.assert_called_once()
 
     @parameterized.expand(
         [

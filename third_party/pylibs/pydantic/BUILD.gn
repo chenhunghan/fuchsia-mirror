@@ -91,6 +91,7 @@ if (is_host) {
       # experimental
       "experimental/__init__.py",
       "experimental/arguments_schema.py",
+      "experimental/missing_sentinel.py",
       "experimental/pipeline.py",
 
       # plugin

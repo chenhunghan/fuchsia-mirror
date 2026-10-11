@@ -4,6 +4,7 @@
 """ABC with methods for Host-(Fuchsia)Target interactions via Serial port."""
 
 import abc
+from collections.abc import Sequence
 
 
 class Serial(abc.ABC):
@@ -40,6 +41,36 @@ class Serial(abc.ABC):
 
         Args:
             cmd: Command to run over serial port.
+
+        Raises:
+            SerialError: In case of failure.
+        """
+
+    @abc.abstractmethod
+    def send_and_recv(
+        self,
+        cmd: str,
+        stop_tokens: Sequence[str] = (),
+        timeout_sec: float = 5.0,
+        recv_size: int = 4096,
+        log_output: bool = True,
+    ) -> str:
+        """Send command over serial port and read output on the same connection.
+
+        Args:
+            cmd: Command to run over serial port.
+            stop_tokens: Optional tokens that terminate reading once any token
+                appears in the accumulated output. Callers should choose tokens
+                that do not appear in `cmd` itself, as the serial console echoes
+                the command upon entry.
+            timeout_sec: Maximum duration in seconds to wait for command output.
+            recv_size: Maximum number of bytes to read per recv call.
+            log_output: When True, logs the output in DEBUG level. Callers
+                may set this to False when expecting particularly large
+                or spammy output.
+
+        Returns:
+            The accumulated output read from the serial port.
 
         Raises:
             SerialError: In case of failure.

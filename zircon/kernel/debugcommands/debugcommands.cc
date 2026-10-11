@@ -674,6 +674,7 @@ static int cmd_crash(int argc, const cmd_args* argv, uint32_t flags) {
     printf("%s user_execute        : intentionally execute user memory\n", argv[0].str);
     printf("%s pmm_use_after_free  : intentionally corrupt the pmm free list\n", argv[0].str);
     printf("%s assert              : intentionally crash by failing an assert\n", argv[0].str);
+    printf("%s rust_panic          : intentionally crash by panicking in Rust\n", argv[0].str);
     printf("%s stack_guard         : attempt to crash by overwriting the stack guard\n",
            argv[0].str);
     printf("%s illegal_instruction : attempt to crash by running an illegal instruction\n",
@@ -709,6 +710,8 @@ static int cmd_crash(int argc, const cmd_args* argv, uint32_t flags) {
     return crash_pmm_use_after_free();
   } else if (!strcmp(argv[1].str, "assert")) {
     return crash_assert();
+  } else if (!strcmp(argv[1].str, "rust_panic")) {
+    rust_debug_crash_panic();
   } else if (!strcmp(argv[1].str, "stack_guard")) {
     return crash_stack_guard();
   } else if (!strcmp(argv[1].str, "illegal_instruction")) {

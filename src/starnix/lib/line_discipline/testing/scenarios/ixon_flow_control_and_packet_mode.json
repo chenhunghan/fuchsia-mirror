@@ -1,0 +1,163 @@
+{
+    "name": "ixon_flow_control_and_packet_mode",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "action": "set_packet_mode",
+            "enabled": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0011",
+            "expect_no_change": true
+        },
+        {
+            "action": "read_once_from_master",
+            "expect_block": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0013"
+        },
+        {
+            "action": "check_poll",
+            "side": "main"
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0013",
+            "expect_no_change": true
+        },
+        {
+            "action": "read_once_from_master",
+            "expect_block": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "buffered\n"
+        },
+        {
+            "action": "read_once_from_master",
+            "expect_block": true
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ISIG",
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IXON"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ISIG",
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IXON"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ISIG",
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ],
+                "c_cc": {
+                    "VSTOP": 0,
+                    "VSTART": 0
+                }
+            }
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0000\n"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

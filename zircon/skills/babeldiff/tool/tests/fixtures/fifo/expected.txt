@@ -7,7 +7,7 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   Rust  zircon/kernel/object/fifo_dispatcher.rs:13-29
   via   C++ now calls FFI shim rust_fifo_dispatcher_write_from_user  zircon/kernel/object/fifo_dispatcher_ffi.rs:11-30
   note  C++ lines marked * are the declaration's comment in zircon/kernel/object/include/object/fifo_dispatcher.h
-  similarity 0.94, 1 issue, 0 notes
+  similarity 0.95, 1 issue, 0 notes
 
    17* // Writes |count| elements of |elem_size| bytes from |ptr| into the pee… =     13 /// Writes `count` elements of `elem_size` bytes from `ptr` into the pe…
    19* // Returns ZX_ERR_OUT_OF_RANGE if |elem_size| does not match the fifo.   =     15 /// Returns ZX_ERR_OUT_OF_RANGE if `elem_size` does not match the fifo.

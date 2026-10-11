@@ -8,14 +8,14 @@ import logging
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib import hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
-from antlion.utils import rand_ascii_str, rand_hex_str
+from antlion.utils import rand_hex_str
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
+)
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib import hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
 )
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib.access_point_config import (
@@ -137,9 +137,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_open_network_with_password(self) -> None:
         """Save an open network with a password and verify that it fails to save."""
-        ssid = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
         security_type = f_wlan_policy.SecurityType.NONE
-        password = rand_ascii_str(8)
+        password = AccessPointConfig.random_string(8)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -168,7 +168,7 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_open_network(self) -> None:
         """Save an open network and verify presence."""
-        ssid = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
         security_type = f_wlan_policy.SecurityType.NONE
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
@@ -191,7 +191,7 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
         PSK are translated from hex to bytes when saved.
         """
-        ssid = rand_ascii_str(11)
+        ssid = AccessPointConfig.random_string(11)
         security_type = f_wlan_policy.SecurityType.WPA2
         psk = rand_hex_str(PSK_LEN).lower()
         test_network = f_wlan_policy.NetworkConfig(
@@ -212,9 +212,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_wep_network(self) -> None:
         """Save a wep network and verify presence."""
-        ssid = rand_ascii_str(12)
+        ssid = AccessPointConfig.random_string(12)
         security_type = f_wlan_policy.SecurityType.WEP
-        password = rand_ascii_str(13)
+        password = AccessPointConfig.random_string(13)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -235,9 +235,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_wpa2_network(self) -> None:
         """Save a wpa2 network and verify presence."""
-        ssid = rand_ascii_str(9)
+        ssid = AccessPointConfig.random_string(9)
         security_type = f_wlan_policy.SecurityType.WPA2
-        password = rand_ascii_str(15)
+        password = AccessPointConfig.random_string(15)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -258,9 +258,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_wpa_network(self) -> None:
         """Save a wpa network and verify presence."""
-        ssid = rand_ascii_str(16)
+        ssid = AccessPointConfig.random_string(16)
         security_type = f_wlan_policy.SecurityType.WPA
-        password = rand_ascii_str(9)
+        password = AccessPointConfig.random_string(9)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -281,9 +281,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_wpa3_network(self) -> None:
         """Save a wpa3 network and verify presence."""
-        ssid = rand_ascii_str(9)
+        ssid = AccessPointConfig.random_string(9)
         security_type = f_wlan_policy.SecurityType.WPA3
-        password = rand_ascii_str(15)
+        password = AccessPointConfig.random_string(15)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -304,9 +304,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
     async def test_save_network_persists(self) -> None:
         """Save a network and verify after reboot network is present."""
-        ssid = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
         security_type = f_wlan_policy.SecurityType.WPA2
-        password = rand_ascii_str(10)
+        password = AccessPointConfig.random_string(10)
         test_network = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -337,8 +337,8 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Both networks should be saved and present in network state since they have
         different security types and therefore different network identifiers.
         """
-        ssid = rand_ascii_str(19)
-        password_wpa2 = rand_ascii_str(12)
+        ssid = AccessPointConfig.random_string(19)
+        password_wpa2 = AccessPointConfig.random_string(12)
         test_network_wpa2 = f_wlan_policy.NetworkConfig(
             id_=f_wlan_policy.NetworkIdentifier(
                 ssid=list(ssid.encode("utf-8")),
@@ -380,9 +380,9 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         This test requires a wpa2 network. Remove all other networks first so that we
         don't auto connect to them.
         """
-        ssid = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
         security_type = f_wlan_policy.SecurityType.WPA2
-        password = rand_ascii_str(10)
+        password = AccessPointConfig.random_string(10)
 
         self._start_ap(ssid, SecurityWpa2(), password)
 
@@ -418,7 +418,7 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Start up AP with an open network and verify that the client auto connects to
         that network after we save it.
         """
-        ssid = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
         security_type = f_wlan_policy.SecurityType.NONE
 
         self._start_ap(ssid, SecurityOpen(), CREDENTIAL_VALUE_NONE)
@@ -447,8 +447,8 @@ class SavedNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Start up AP with a wpa3 network and verify that the client auto connects to
         that network after we save it.
         """
-        ssid = rand_ascii_str(10)
-        password = rand_ascii_str(10)
+        ssid = AccessPointConfig.random_string(10)
+        password = AccessPointConfig.random_string(10)
 
         self._start_ap(ssid, SecurityWpa3(), password)
 

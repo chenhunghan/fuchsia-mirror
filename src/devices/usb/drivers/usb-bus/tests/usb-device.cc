@@ -102,6 +102,7 @@ class DeviceTest : public zxtest::Test {
   bool get_device_reset() { return hci_->device_reset(); }
   uint8_t get_reset_endpoint() { return hci_->reset_endpoint(); }
   void SetEmptyState(bool should_return_empty) { hci_->SetEmptyState(should_return_empty); }
+  void SetErrorState(zx_status_t error) { hci_->SetErrorState(error); }
 
  protected:
   std::shared_ptr<MockDevice> root_{MockDevice::FakeRootParent()};
@@ -462,6 +463,23 @@ TEST_F(DeviceTest, UsbGetStringDescriptor_BufferTooSmall) {
 
   EXPECT_EQ(status, ZX_ERR_BUFFER_TOO_SMALL);
   EXPECT_GT(actual, small);
+}
+
+TEST_F(DeviceTest, UsbGetStringDescriptor_ErrorHandling) {
+  auto& device = get_device();
+  uint16_t lang_id[2] = {};
+  uint8_t desc[512] = {};
+  size_t actual = 0;
+
+  SetErrorState(ZX_ERR_TIMED_OUT);
+  zx_status_t status = device.UsbGetStringDescriptor(0, 0, lang_id, desc, sizeof(desc), &actual);
+  EXPECT_EQ(status, ZX_ERR_TIMED_OUT);
+  EXPECT_EQ(actual, 0u);
+
+  SetErrorState(ZX_OK);
+  status = device.UsbGetStringDescriptor(0, 0, lang_id, desc, sizeof(desc), &actual);
+  EXPECT_OK(status);
+  EXPECT_EQ(actual, 4u);
 }
 
 TEST_F(DeviceTest, FidlSetInterface) {

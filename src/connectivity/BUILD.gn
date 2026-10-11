@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
+
 group("connectivity") {
   testonly = true
   deps = [ ":connectivity_no_e2e" ]
@@ -27,6 +29,7 @@ group("tests_no_e2e") {
   assert_no_deps = e2e_test_libs
 
   deps = [
+    ":bazel_tests",
     "bluetooth:tests",
     "ethernet:tests",
     "lib:tests",
@@ -41,6 +44,11 @@ group("tests_no_e2e") {
     "weave:tests",
     "wlan:tests",
   ]
+}
+
+bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/connectivity:host_tests" ]
+  target_tests = [ "//src/connectivity:target_tests" ]
 }
 
 group("tests") {

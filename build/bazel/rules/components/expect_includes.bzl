@@ -6,7 +6,7 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-def expect_includes(name, includes, **kwargs):
+def expect_includes(name, includes, enforce = True, **kwargs):
     """A Bazel stub for GN's expect_includes() template.
 
     In GN, expect_includes() requires every component that transitively depends
@@ -20,10 +20,13 @@ def expect_includes(name, includes, **kwargs):
         name: The target name.
         includes: Unused by Bazel; exists so that bazel2gn can emit the real
             GN expect_includes() target.
+        enforce: Unused by Bazel. If False, GN only adds `includes` to the test
+            manifests it generates, without requiring them elsewhere.
         **kwargs: Forwarded to the underlying target, e.g. visibility.
     """
 
     _ = includes  # @unused
+    _ = enforce  # @unused
 
     cc_library(
         name = name,

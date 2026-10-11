@@ -15,12 +15,20 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-import tablefmt
+# Ensure the fuchsia root is in sys.path so we can use absolute imports from build.
+_FUCHSIA_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_FUCHSIA_DIR) not in sys.path:
+    sys.path.insert(0, str(_FUCHSIA_DIR))
 
-# Rather than depend on the proto (from reclient source),
-import textpb
+from build.rbe import tablefmt, textpb
 
-_SCRIPT = Path(__file__)
+_SCRIPT = Path(__file__).resolve()
+
+RBE_METRICS_TXT = "rbe_metrics.txt"
+
+_JSONPrimitive = str | int | float | bool | None
+JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
+JSONObject = dict[str, JSONValue]
 
 
 def _main_arg_parser() -> argparse.ArgumentParser:
@@ -286,7 +294,7 @@ def prepare_summary_table(
     return joint_table
 
 
-def arrange_metrics_json(rbe_metrics: RbeMetrics) -> dict[str, Any]:
+def arrange_metrics_json(rbe_metrics: RbeMetrics) -> JSONObject:
     return {
         "execution_statuses": rbe_metrics.status_metrics["CompletionStatus"],
         "data_sizes_bytes": {
@@ -296,10 +304,59 @@ def arrange_metrics_json(rbe_metrics: RbeMetrics) -> dict[str, Any]:
     }
 
 
+def summarize_rbe_metrics_from_logdir(
+    reproxy_logdir: Path,
+) -> JSONObject | None:
+    """Parses rbe_metrics.txt from the given reproxy logdir into a metrics dictionary.
+
+    Args:
+        reproxy_logdir: Path to the directory containing reproxy log files.
+
+    Returns:
+        A dictionary containing 'execution_statuses' and 'data_sizes_bytes',
+        or None if rbe_metrics.txt does not exist or cannot be parsed.
+    """
+    rbe_metrics_txt = reproxy_logdir / RBE_METRICS_TXT
+    if not rbe_metrics_txt.is_file():
+        return None
+
+    try:
+        with open(rbe_metrics_txt) as f:
+            data = textpb.parse(f)
+    except OSError as e:
+        print(
+            f"[{_SCRIPT.name}] Warning: Failed to read {rbe_metrics_txt}: {e}",
+            file=sys.stderr,
+        )
+        return None
+    except textpb.ParseError as e:
+        print(
+            f"[{_SCRIPT.name}] Warning: Failed to parse text proto from {rbe_metrics_txt}: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        rbe_data = load_rbe_metrics(data)
+        return arrange_metrics_json(rbe_data)
+    except KeyError as e:
+        print(
+            f"[{_SCRIPT.name}] Warning: Missing expected metric key in {rbe_metrics_txt}: {e}",
+            file=sys.stderr,
+        )
+        return None
+    except (ValueError, TypeError) as e:
+        print(
+            f"[{_SCRIPT.name}] Warning: Invalid metric value in {rbe_metrics_txt}: {e}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def main(argv: Sequence[str]) -> int:
     args = _MAIN_ARG_PARSER.parse_args(argv)
 
-    rbe_metrics_txt = args.reproxy_logdir / "rbe_metrics.txt"
+    rbe_metrics_txt = args.reproxy_logdir / RBE_METRICS_TXT
     if not rbe_metrics_txt.exists():
         print("No RBE metrics found.")
         return 0

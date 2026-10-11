@@ -29,6 +29,8 @@ def confusing_characters(ctx):
                         filepath = path,
                         line = num,
                         col = match.offset + 1,
-                        end_col = match.offset + 2,
+                        # Columns are byte offsets, and all the misleading
+                        # characters are multibyte in UTF-8.
+                        end_col = match.offset + 1 + len(c),
                         replacements = [replacement],
                     )

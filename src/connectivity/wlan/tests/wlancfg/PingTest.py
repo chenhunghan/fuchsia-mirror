@@ -18,11 +18,11 @@ from typing import Callable, NamedTuple
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
 from antlion import utils
-from antlion.controllers.access_point import setup_ap
 from honeydew.affordances.connectivity.netstack.types import (
     PingResult,
     PortClass,
 )
+from legacy_access_point.access_point import setup_ap
 from mobly import asserts, signals, test_runner
 from openwrt_access_point import AddrType as OpenWrtAddrType
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName

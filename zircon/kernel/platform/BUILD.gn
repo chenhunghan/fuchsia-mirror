@@ -13,6 +13,7 @@ source_set("platform") {
   public_deps = [ ":headers" ]
 
   sources = [
+    "crashlog_ffi.cc",
     "debug.cc",
     "debug_ffi.cc",
     "efi.cc",

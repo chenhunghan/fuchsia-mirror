@@ -54,7 +54,11 @@
         // Production non-package delivery components.
         {
             name: "netstack",
-            url: "#meta/netstack.cm",
+            url: "#meta/netstack3.cm",
+        },
+        {
+            name: "http-client",
+            url: "#meta/http-client.cm",
         },
 
         // Production package delivery components.
@@ -131,6 +135,7 @@
             from: "#system-updater",
             dependency: "weak",
         },
+        { protocol: "fuchsia.diagnostics.ArchiveAccessor" },
     ],
     offer: [
         {
@@ -143,17 +148,12 @@
             to: "#pkg-cache",
         },
         {
-            config: "fuchsia.zircon.system.pkgfs.cmd",
-            from: "void",
-            to: "#pkg-cache",
-            availability: "optional",
-        },
-        {
             config: [
                 "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 "fuchsia.pkgcache.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgcache.BlobNetworkHeaderTimeoutSeconds",
+                "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",
             to: "#pkg-cache",
@@ -163,9 +163,19 @@
             config: [
                 "fuchsia.pkgresolver.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgresolver.BlobNetworkHeaderTimeoutSeconds",
+                "fuchsia.pkgresolver.TufNetworkHeaderTimeoutSeconds",
             ],
             from: "void",
             to: "#pkg-resolver",
+            availability: "optional",
+        },
+        {
+            config: [
+                "fuchsia.http-client.StopOnIdleTimeoutMillis",
+                "fuchsia.http-client.TcpReceiveBufferSizeBytes",
+            ],
+            from: "void",
+            to: "#http-client",
             availability: "optional",
         },
         {
@@ -191,6 +201,14 @@
             to: "#pkg_server",
         },
         {
+            service: [
+                "fuchsia.hardware.block.volume.Service",
+                "fuchsia.hardware.ramdisk.Service",
+            ],
+            from: "#storage_driver_test_realm",
+            to: "#fshost",
+        },
+        {
             storage: "tmp",
             from: "parent",
             to: "#pkg_server",
@@ -201,7 +219,10 @@
             to: "#pkg-cache",
         },
         {
-            directory: [ "blob" ],
+            protocol: [
+                "fuchsia.fxfs.BlobCreator",
+                "fuchsia.fxfs.BlobReader",
+            ],
             from: "#fshost",
             to: "#pkg-cache",
         },
@@ -212,7 +233,7 @@
             ],
             from: "parent",
             to: [
-                "#fshost",
+                "#pkg-cache",
                 "#pkg_server",
             ],
         },
@@ -230,21 +251,29 @@
             to: [ "#netstack" ],
         },
         {
-            directory: "pkgfs",
-            from: "#fshost",
-            as: "config-data",
-            to: "#system-update-committer",
-            subdir: "packages/config-data/0/meta/data/system-update-committer",
+            directory: "system",
+            from: "#pkg-cache",
+            to: "#system-updater",
         },
         {
-            directory: "pkgfs",
-            from: "#fshost",
-            as: "root-ssl-certificates",
+            directory: "config-data",
+            from: "#pkg-cache",
+            to: "#pkg-resolver",
+            subdir: "pkg-resolver",
+        },
+        {
+            directory: "config-data",
+            from: "#pkg-cache",
+            to: "#system-update-committer",
+            subdir: "system-update-committer",
+        },
+        {
+            directory: "root-ssl-certificates",
+            from: "#pkg-cache",
             to: [
-                "#pkg-resolver",
+                "#http-client",
                 "#pkg_server",
             ],
-            subdir: "packages/root_ssl_certificates/0/data",
         },
         {
             storage: "data",
@@ -258,7 +287,7 @@
             protocol: "fuchsia.net.name.Lookup",
             from: "#dns_resolver",
             to: [
-                "#pkg-resolver",
+                "#http-client",
                 "#pkg_server",
             ],
         },
@@ -266,7 +295,7 @@
             protocol: "fuchsia.posix.socket.Provider",
             from: "#netstack",
             to: [
-                "#pkg-resolver",
+                "#http-client",
                 "#pkg_server",
             ],
         },
@@ -279,9 +308,18 @@
             ],
         },
         {
+            protocol: [
+                "fuchsia.net.http.Loader",
+                "fuchsia.pkg.http.Client",
+            ],
+            from: "#http-client",
+            to: "#pkg-resolver",
+        },
+        {
             protocol: "fuchsia.tracing.provider.Registry",
             from: "parent",
             to: [
+                "#fshost",
                 "#pkg-cache",
                 "#pkg-resolver",
                 "#pkg_server",
@@ -324,16 +362,20 @@
             ],
         },
         {
-            directory: "pkgfs",
-            from: "#fshost",
-            as: "build-info",
+            directory: "build-info",
+            from: "#pkg-cache",
             to: "#system-updater",
-            subdir: "packages/build-info/0/data",
         },
         {
             protocol: "fuchsia.update.CommitStatusProvider",
             from: "#system-update-committer",
             to: "#pkg-cache",
+
+            // system-update-committer depends on pkg-cache for config-data, which forms a cycle.
+            // pkg-cache does not need fuchsia.update.CommitStatusProvider to provide config-data,
+            // so this edge is marked weak to break the cycle. This mirrors the production
+            // configuration in bootstrap.cml
+            dependency: "weak",
         },
         {
             protocol: [ "fuchsia.hardware.power.statecontrol.Admin" ],
@@ -342,6 +384,11 @@
                 "#system-update-committer",
                 "#system-updater",
             ],
+        },
+        {
+            config: "fuchsia.zircon.system.pkgfs.cmd",
+            from: "#fake_boot_arguments/boot_args",
+            to: "#pkg-cache",
         },
 
         // Lets fshost write to debuglog for better debugging purposes.

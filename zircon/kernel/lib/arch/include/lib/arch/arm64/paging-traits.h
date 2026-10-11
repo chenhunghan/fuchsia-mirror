@@ -148,13 +148,14 @@ enum class ArmVirtualAddressRange {
 };
 
 struct ArmSystemPagingState {
-  template <class CurrentEl>
+  template <class CurrentEl, class HcrEl2 = ArmHcrEl2>
   static ArmSystemPagingState Create(ArmMemoryAttrIndirectionRegister mair,
                                      ArmShareabilityAttribute sh) {
+    const uint64_t el = CurrentEl::Read().el();
     return {
         .mair = mair,
         .shareability = sh,
-        .el1 = CurrentEl::Read().el() == 1,
+        .el1 = el == 1 || (el == 2 && HcrEl2::Read().e2h()),
     };
   }
 

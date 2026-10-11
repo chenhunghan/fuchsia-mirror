@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Other
+#### PREBUILTS=${PREBUILT_JQ}
 ### Release platform artifacts to local CIPD instances.
 ## This is used for cross repository validation in emac repository.
 ## This release include:

@@ -32,6 +32,26 @@ FFI_ALWAYS_INLINE VmObjectPaged* cpp_vm_object_paged_create_contiguous(uint32_t 
   return fbl::ExportToRawPtr(&vmo);
 }
 
+FFI_ALWAYS_INLINE VmObjectPaged* cpp_vm_object_paged_create_external(PageSource* src,
+                                                                     uint32_t options,
+                                                                     uint64_t size,
+                                                                     zx_status_t* out_status) {
+  fbl::RefPtr<VmObjectPaged> vmo;
+  *out_status = VmObjectPaged::CreateExternal(fbl::ImportFromRawPtr(src), options, size, &vmo);
+  return fbl::ExportToRawPtr(&vmo);
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_object_paged_reset_pager_vmo_stats(VmObjectPaged* vmo) {
+  vmo->ResetPagerVmoStats();
+}
+
+FFI_ALWAYS_INLINE VmObjectPaged* cpp_vm_object_paged_create_from_wired_pages(
+    const void* data, size_t size, bool exclusive, zx_status_t* out_status) {
+  fbl::RefPtr<VmObjectPaged> vmo;
+  *out_status = VmObjectPaged::CreateFromWiredPages(data, size, exclusive, &vmo);
+  return fbl::ExportToRawPtr(&vmo);
+}
+
 FFI_ALWAYS_INLINE VmObject* cpp_vm_object_paged_as_vm_object(VmObjectPaged* vmo) {
   return static_cast<VmObject*>(vmo);
 }

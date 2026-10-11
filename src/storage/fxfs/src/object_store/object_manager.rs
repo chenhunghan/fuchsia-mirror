@@ -450,30 +450,37 @@ impl ObjectManager {
         }
         debug!("END TXN");
 
-        Ok(if let MetadataReservation::Borrowed = transaction.metadata_reservation {
-            // If this transaction is borrowing metadata, figure out what has changed and return a
-            // mutation with the updated value for borrowed.  The transaction might have allocated
-            // or deallocated some data from the metadata reservation, or it might have made a
-            // change that means we need to reserve more or less space (e.g. we compacted).
-            let new_amount = self.metadata_reservation().amount();
-            let mut inner = self.inner.write();
-            let new_required = inner.required_reservation();
-            let add = old_amount + new_required;
-            let sub = new_amount + old_required;
-            if add >= sub {
-                inner.borrowed_metadata_space += add - sub;
+        Ok(
+            if matches!(
+                transaction.metadata_reservation,
+                MetadataReservation::BorrowedMetadata
+                    | MetadataReservation::BorrowedMetadataAndData
+            ) {
+                // If this transaction is borrowing metadata, figure out what has changed and
+                // return a mutation with the updated value for borrowed.  The transaction might
+                // have allocated or deallocated some data from the metadata reservation, or it
+                // might have made a change that means we need to reserve more or less space
+                // (e.g. we compacted).
+                let new_amount = self.metadata_reservation().amount();
+                let mut inner = self.inner.write();
+                let new_required = inner.required_reservation();
+                let add = old_amount + new_required;
+                let sub = new_amount + old_required;
+                if add >= sub {
+                    inner.borrowed_metadata_space += add - sub;
+                } else {
+                    inner.borrowed_metadata_space =
+                        inner.borrowed_metadata_space.saturating_sub(sub - add);
+                }
+                Some(Mutation::UpdateBorrowed(inner.borrowed_metadata_space))
             } else {
-                inner.borrowed_metadata_space =
-                    inner.borrowed_metadata_space.saturating_sub(sub - add);
-            }
-            Some(Mutation::UpdateBorrowed(inner.borrowed_metadata_space))
-        } else {
-            // This transaction should have had no impact on the metadata reservation or the amount
-            // we need to reserve.
-            debug_assert_eq!(self.metadata_reservation().amount(), old_amount);
-            debug_assert_eq!(self.inner.read().required_reservation(), old_required);
-            None
-        })
+                // This transaction should have had no impact on the metadata reservation or the
+                // amount we need to reserve.
+                debug_assert_eq!(self.metadata_reservation().amount(), old_amount);
+                debug_assert_eq!(self.inner.read().required_reservation(), old_required);
+                None
+            },
+        )
     }
 
     /// Called by the journaling system after a transaction has been written providing the end
@@ -495,8 +502,8 @@ impl ObjectManager {
 
         let txn_space = reserved_space_from_journal_usage(journal_usage);
         match &mut transaction.metadata_reservation {
-            MetadataReservation::None => unreachable!(),
-            MetadataReservation::Borrowed => {
+            MetadataReservation::BorrowedMetadata
+            | MetadataReservation::BorrowedMetadataAndData => {
                 // Account for the amount we need to borrow for the transaction itself now that we
                 // know the transaction size.
                 inner.borrowed_metadata_space += txn_space;
@@ -509,12 +516,12 @@ impl ObjectManager {
                     reservation.give_back(to_give_back);
                 }
             }
-            MetadataReservation::Hold(hold_amount) => {
+            MetadataReservation::Hold(hold) => {
                 // Transfer reserved space into the metadata reservation.
-                let txn_reservation = transaction.allocator_reservation.unwrap();
+                let txn_reservation = *hold.owner();
                 assert_ne!(
                     txn_reservation as *const _, reservation as *const _,
-                    "MetadataReservation::Borrowed should be used."
+                    "MetadataReservation::BorrowedMetadataAndData should be used."
                 );
                 txn_reservation.commit(txn_space);
                 if txn_reservation.owner_object_id() != reservation.owner_object_id() {
@@ -529,11 +536,11 @@ impl ObjectManager {
                         .unwrap()
                         .disown_reservation(txn_reservation.owner_object_id(), txn_space);
                 }
-                if let Some(amount) = hold_amount.checked_sub(txn_space) {
-                    *hold_amount = amount;
-                } else {
-                    panic!("Transaction was larger than metadata reservation");
-                }
+                assert!(
+                    hold.amount() >= txn_space,
+                    "Transaction was larger than metadata reservation"
+                );
+                hold.forget_some(txn_space);
                 reservation.add(txn_space);
             }
             MetadataReservation::Reservation(txn_reservation) => {

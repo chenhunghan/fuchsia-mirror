@@ -24,7 +24,7 @@ impl ChildName {
     pub fn new(name: LongName, collection: Option<Name>) -> Self {
         match collection {
             Some(collection) => Self { rep: format!("{collection}:{name}").into() },
-            None => Self { rep: format!("{name}").into() },
+            None => Self { rep: name.into() },
         }
     }
 
@@ -97,6 +97,16 @@ impl From<&BorrowedChildName> for ChildName {
 impl From<ChildName> for cm_rust::ChildRef {
     fn from(child_name: ChildName) -> Self {
         Self { name: child_name.name().into(), collection: child_name.collection().map(Into::into) }
+    }
+}
+
+impl From<ChildName> for cm_rust::GenericRef {
+    fn from(child_name: ChildName) -> Self {
+        if let Some(collection_name) = child_name.collection() {
+            Self::ChildInCollection(child_name.name().into(), collection_name.into())
+        } else {
+            Self::Child(Name::new(child_name.name()).unwrap())
+        }
     }
 }
 

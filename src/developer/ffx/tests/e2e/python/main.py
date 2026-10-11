@@ -99,11 +99,11 @@ class FfxTest(ffxtestcase.FfxTestCase):
         asserts.assert_equal(
             output_json["message"],
             (
-                'non-fatal error encountered: Target specification "this-should-not-exist" was not found. '
+                'Target specification "this-should-not-exist" was not found. '
                 "Use `ffx target list` to list known targets, and use a different target query."
             ),
         )
-        asserts.assert_equal(output_json["code"], 1)
+        asserts.assert_equal(output_json["code"], 2)
 
     def test_machine_user_error(self) -> None:
         """Test machine formattable errors for a user error kind."""

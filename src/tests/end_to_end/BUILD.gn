@@ -63,6 +63,7 @@ group_with_no_dir_target_deps("workbench_x64_unstable_tests") {
   testonly = true
   public_deps = [
     "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
+    "//src/performance/memory/attribution/monitor/tests/e2e:memory_monitor2_traces_e2e_test($host_toolchain)",
     "//src/power/bench:tests",
     "//src/storage/blackout/host:blackout_emulator_unstable",
   ]
@@ -97,6 +98,7 @@ group_with_no_dir_target_deps("workbench_vim3_unstable_tests") {
     "//scripts/memory:components_sql_test($host_toolchain)",
     "//src/developer/fuchsia-controller/end_to_end_tests/mobly:fuchsia_controller_tests_staging",
     "//src/firmware/tests/lacewing:lacewing($host_toolchain)",
+    "//src/performance/memory/attribution/monitor/tests/e2e:memory_monitor2_traces_e2e_test($host_toolchain)",
     "//src/power/bench:tests",
     "//src/storage/blackout/host:blackout_workbench_vim3_unstable",
 

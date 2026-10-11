@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "vigil",
+    srcs = [
+        "src/dropped.rs",
+        "src/lib.rs",
+        "src/vigil.rs",
+    ],
+    edition = "2024",
+    rustc_flags = ["-Dunused_results"],
+    # @bazel2gn:skip
+    test_deps = [
+        "//src/lib/async-utils",
+        "//third_party/rust_crates/vendor:futures-test",
+    ],
+    visibility = [
+        "//src/connectivity/bluetooth/lib:__subpackages__",
+        "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:__pkg__",
+        "//src/connectivity/bluetooth/profiles/bt-hfp-hands-free:__pkg__",
+    ],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "vigil_test_packaged_bin",
+    testonly = True,
+    binary = ":vigil_test",
+    binary_name = "vigil_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "vigil-tests-manifest",
+    testonly = True,
+    component_name = "vigil-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/vigil_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "vigil-tests-component",
+    compiled_manifest = ":vigil-tests-manifest",
+    component_name = "vigil-tests",
+    deps = [":vigil_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "vigil-tests-package",
+    package_name = "vigil-tests",
+    test_components = [":vigil-tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "vigil-tests",
+    package = ":vigil-tests-package",
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)

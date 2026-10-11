@@ -274,7 +274,9 @@ impl CpuDeviceHandler {
         self.init_done.wait().await;
 
         let result = self.set_minimum_operating_point_limit(opp).await;
-        log_if_err!(result, "Failed to set minimum operating point limit");
+        if !matches!(result, Err(CpuManagerError::Unsupported)) {
+            log_if_err!(result, "Failed to set minimum operating point limit");
+        }
         fuchsia_trace::instant!(
             c"cpu_manager",
             c"CpuDeviceHandler::set_minimum_operating_point_limit_result",
@@ -283,10 +285,7 @@ impl CpuDeviceHandler {
             "result" => format!("{:?}", result).as_str()
         );
 
-        match result {
-            Ok(_) => Ok(MessageReturn::SetMinimumOperatingPointLimit),
-            Err(e) => Err(CpuManagerError::GenericError(e)),
-        }
+        result.map(|()| MessageReturn::SetMinimumOperatingPointLimit)
     }
 
     async fn set_operating_point(&self, in_opp: u32) -> Result<(), Error> {
@@ -335,24 +334,30 @@ impl CpuDeviceHandler {
         Ok(())
     }
 
-    async fn set_minimum_operating_point_limit(&self, opp: u32) -> Result<(), Error> {
+    async fn set_minimum_operating_point_limit(&self, opp: u32) -> Result<(), CpuManagerError> {
         let proxy = &self.mutable_inner.borrow().cpu_ctrl_proxy;
 
         proxy
             .as_ref()
             .ok_or_else(|| format_err!("Missing driver_proxy"))
-            .or_debug_panic()?
+            .or_debug_panic()
+            .map_err(CpuManagerError::GenericError)?
             .set_minimum_operating_point_limit(opp)
             .await
             .map_err(|e| {
-                format_err!("{}: set_minimum_operating_point_limit IPC failed: {}", self.name(), e)
+                CpuManagerError::GenericError(format_err!(
+                    "{}: set_minimum_operating_point_limit IPC failed: {}",
+                    self.name(),
+                    e
+                ))
             })?
-            .map_err(|e| {
-                format_err!(
+            .map_err(|e| match zx::Status::err_from_raw(e) {
+                zx::Status::NOT_SUPPORTED => CpuManagerError::Unsupported,
+                status => CpuManagerError::GenericError(format_err!(
                     "{}: set_minimum_operating_point_limit driver returned error: {}",
                     self.name(),
-                    zx::Status::err_from_raw(e)
-                )
+                    status
+                )),
             })?;
         Ok(())
     }
@@ -557,6 +562,15 @@ mod tests {
 
     /// Creates a fake fuchsia.hardware.cpu_ctrl.Device proxy
     fn setup_fake_cpu_ctrl_proxy(opps: Vec<OperatingPoint>) -> fcpu_ctrl::DeviceProxy {
+        setup_fake_cpu_ctrl_proxy_with_limits(opps, true)
+    }
+
+    /// Creates a fake fuchsia.hardware.cpu_ctrl.Device proxy. If `supports_limits` is false, the
+    /// fake responds to SetMinimumOperatingPointLimit with ZX_ERR_NOT_SUPPORTED.
+    fn setup_fake_cpu_ctrl_proxy_with_limits(
+        opps: Vec<OperatingPoint>,
+        supports_limits: bool,
+    ) -> fcpu_ctrl::DeviceProxy {
         let operating_point = Rc::new(Cell::new(0));
         let operating_point_clone_1 = operating_point.clone();
         let operating_point_clone_2 = operating_point.clone();
@@ -596,6 +610,19 @@ mod tests {
                         set_operating_point(requested_opp as u32);
                         let _ = responder.send(Ok(requested_opp));
                     }
+                    Some(fcpu_ctrl::DeviceRequest::SetMinimumOperatingPointLimit {
+                        minimum_opp,
+                        responder,
+                    }) => {
+                        let result = if !supports_limits {
+                            Err(zx::Status::NOT_SUPPORTED.into_raw())
+                        } else if (minimum_opp as usize) < opps.len() {
+                            Ok(())
+                        } else {
+                            Err(zx::Status::OUT_OF_RANGE.into_raw())
+                        };
+                        let _ = responder.send(result);
+                    }
                     Some(other) => panic!("Unexpected request: {:?}", other),
                     None => break, // Stream terminates when client is dropped
                 }
@@ -618,6 +645,46 @@ mod tests {
         let opps = vec![OperatingPoint { frequency: Hertz(1e9), voltage: Volts(1.0) }];
         let node = setup_simple_test_node(opps).await;
         match node.handle_message(&Message::GetCpuLoads).await {
+            Err(CpuManagerError::Unsupported) => {}
+            e => panic!("Unexpected return value: {:?}", e),
+        }
+    }
+
+    /// Tests that SetMinimumOperatingPointLimit succeeds for a valid OPP and returns a generic
+    /// error for an out-of-range OPP.
+    #[fuchsia::test]
+    async fn test_set_minimum_operating_point_limit() {
+        let opps = vec![
+            OperatingPoint { frequency: Hertz(1.2e9), voltage: Volts(1.0) },
+            OperatingPoint { frequency: Hertz(1.0e9), voltage: Volts(0.9) },
+        ];
+        let node = setup_simple_test_node(opps).await;
+
+        match node.handle_message(&Message::SetMinimumOperatingPointLimit(1)).await {
+            Ok(MessageReturn::SetMinimumOperatingPointLimit) => {}
+            e => panic!("Unexpected return value: {:?}", e),
+        }
+
+        match node.handle_message(&Message::SetMinimumOperatingPointLimit(99)).await {
+            Err(CpuManagerError::GenericError(_)) => {}
+            e => panic!("Unexpected return value: {:?}", e),
+        }
+    }
+
+    /// Tests that ZX_ERR_NOT_SUPPORTED from SetMinimumOperatingPointLimit is mapped to
+    /// CpuManagerError::Unsupported.
+    #[fuchsia::test]
+    async fn test_set_minimum_operating_point_limit_unsupported() {
+        let opps = vec![OperatingPoint { frequency: Hertz(1e9), voltage: Volts(1.0) }];
+        let node = CpuDeviceHandlerBuilder::new_with_proxies(
+            1,
+            0,
+            setup_fake_cpu_ctrl_proxy_with_limits(opps, false),
+        )
+        .build_and_init()
+        .await;
+
+        match node.handle_message(&Message::SetMinimumOperatingPointLimit(0)).await {
             Err(CpuManagerError::Unsupported) => {}
             e => panic!("Unexpected return value: {:?}", e),
         }

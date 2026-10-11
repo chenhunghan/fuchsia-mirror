@@ -21,6 +21,10 @@ emboss_rust_library("pw_bluetooth_hci_commands_emb") {
   deps = [ ":pw_bluetooth_hci_common_emb" ]
 }
 
+emboss_rust_library("pw_bluetooth_hci_data_emb") {
+  source = "emboss/pw_bluetooth/hci_data.emb"
+}
+
 emboss_rust_library("pw_bluetooth_hci_h4_emb") {
   source = "emboss/pw_bluetooth/hci_h4.emb"
 }
@@ -37,6 +41,7 @@ rustc_library("sapphire-emboss") {
     ":pw_bluetooth_att_emb",
     ":pw_bluetooth_hci_commands_emb",
     ":pw_bluetooth_hci_common_emb",
+    ":pw_bluetooth_hci_data_emb",
     ":pw_bluetooth_hci_h4_emb",
     ":pw_bluetooth_l2cap_frames_emb",
     "//third_party/github.com/google/experimental-emboss-rust:emboss_runtime",

@@ -10,6 +10,7 @@
 #include <lib/zx/vmo.h>
 #include <zircon/rights.h>
 #include <zircon/status.h>
+#include <zircon/syscalls/resource.h>
 
 #include <cassert>
 #include <cstring>
@@ -57,8 +58,16 @@ zx::result<std::unique_ptr<PciAllocation>> PciRootAllocator::Allocate(
     return zx::error(status);
   }
 
-  auto allocation = std::unique_ptr<PciAllocation>(
-      new PciRootAllocation(pciroot_, type(), std::move(res), std::move(ep), out_base, size));
+  zx_info_resource_t resource_info;
+  status = res.get_info(ZX_INFO_RESOURCE, &resource_info, sizeof(resource_info), nullptr, nullptr);
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  pci_address_space_t elevation_type =
+      (resource_info.kind == ZX_RSRC_KIND_MMIO) ? PCI_ADDRESS_SPACE_MEMORY : PCI_ADDRESS_SPACE_IO;
+
+  auto allocation = std::unique_ptr<PciAllocation>(new PciRootAllocation(
+      pciroot_, elevation_type, std::move(res), std::move(ep), out_base, size));
   return zx::ok(std::move(allocation));
 }
 

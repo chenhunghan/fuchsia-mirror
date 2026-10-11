@@ -31,6 +31,8 @@ unsafe extern "C" {
     ) -> i32;
     fn cpp_dlog_serial_write(ptr: *const c_char, len: usize);
     fn cpp_dlog_sync();
+    fn cpp_dlog_panic_start();
+    fn cpp_dlog_bluescreen_init();
 }
 
 /// Shutdown the debuglog subsystem.
@@ -60,6 +62,18 @@ pub fn dlog_serial_write(bytes: &[u8]) {
 pub fn dlog_sync() {
     // SAFETY: FFI call to dlog_sync which is thread-safe and safely handles uninitialized or shutdown states.
     unsafe { cpp_dlog_sync() }
+}
+
+/// Informs the debuglog that a panic is in progress, so it stops depending on other threads.
+pub fn dlog_panic_start() {
+    // SAFETY: takes no arguments; the debuglog owns all the state it changes.
+    unsafe { cpp_dlog_panic_start() }
+}
+
+/// Switches the debuglog to bluescreen mode for the panic message that follows.
+pub fn dlog_bluescreen_init() {
+    // SAFETY: takes no arguments; the debuglog owns all the state it changes.
+    unsafe { cpp_dlog_bluescreen_init() }
 }
 
 #[repr(C, align(8))]

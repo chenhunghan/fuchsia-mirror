@@ -23,6 +23,24 @@
             constraints: { channel: 2 },
         },
         {
+            from: "#self",
+            to: "#adc-buttons",
+            driver_config: "fuchsia.buttons.AdcButtonsMetadata",
+            polling_rate_usec: 20000,
+            buttons: [
+                {
+                    types: [ "FUNCTION" ],
+                    button_config: {
+                        adc: {
+                            channel_idx: 2,
+                            release_threshold: 1000,
+                            press_threshold: 70,
+                        },
+                    },
+                },
+            ],
+        },
+        {
             name: "power",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",

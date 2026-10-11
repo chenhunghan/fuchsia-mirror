@@ -101,13 +101,9 @@ class BuildFileTargetsCache:
         if cached is not None:
             return cached
 
-        targets: set[str] = set()
         assert build_file.exists(), f"Missing build file: {build_file}"
         content = build_file.read_text()
-        try:
-            targets = get_build_flags_targets_from_ast(content, build_file)
-        except Exception:
-            pass
+        targets = get_build_flags_targets_from_ast(content, build_file)
 
         self._cache[build_file] = targets
         return targets
@@ -121,10 +117,9 @@ _BUILD_FILE_TARGETS_CACHE = BuildFileTargetsCache()
 def _check_build_flags_target_exists(fuchsia_dir: Path, label: str) -> bool:
     """Check if a build_flags() target corresponding to the given GN label exists in the Bazel workspace.
 
-    The implementation will first try to parse the BUILD.bazel as a Python AST,
-    and if this fails, will use regular expressions. This is fast but fragile,
-    in particular it requires that name values for build_flags() targets are
-    string literals, and not computed (e.g. `name = something + ".build_flags"`)
+    The implementation parses the BUILD.bazel as a Python AST. This is fast but
+    fragile, in particular it requires that name values for build_flags() targets
+    are string literals, and not computed (e.g. `name = something + ".build_flags"`)
     as these definitions will be ignored.
 
     A better way would be to process the result of `bazel query --output=build`
@@ -264,16 +259,17 @@ load("@@//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 """
 
         def format_labels(labels: list[str]) -> str:
+            if not labels:
+                return "[]"
             # Since this BUILD.bazel file is generated inside an external
             # repository (@fuchsia_build_info), prepend "@@" to labels starting
             # with "//" so Bazel resolves them relative to the main workspace root.
-            # Use json.dumps() to use double-quote formatting.
-            return json.dumps(
-                [
-                    f"@@{label}" if label.startswith("//") else label
-                    for label in labels
-                ]
-            )
+            lines = ["["]
+            for label in labels:
+                resolved = f"@@{label}" if label.startswith("//") else label
+                lines.append(f'        "{resolved}",')
+            lines.append("    ]")
+            return "\n".join(lines)
 
         for name, info in self.items():
             content += """

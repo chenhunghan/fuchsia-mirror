@@ -420,6 +420,25 @@ const_assert_eq!(MappingFlags::WIPEONFORK.bits(), MappingOptions::WIPEONFORK.bit
 const_assert_eq!(MappingFlags::DONT_SPLIT.bits(), MappingOptions::DONT_SPLIT.bits() << 3);
 const_assert_eq!(MappingFlags::DONT_EXPAND.bits(), MappingOptions::DONT_EXPAND.bits() << 3);
 
+/// `MappingOptions` that only affect how a mapping is created. They have no corresponding
+/// `MappingFlags` bit and are dropped when converting between the two.
+const CREATION_ONLY_OPTIONS: MappingOptions = MappingOptions::POPULATE;
+
+// Every other `MappingOptions` bit must land exactly on one of the `MappingFlags` bits asserted
+// above. Otherwise shifting the options up would silently set an unrelated flag.
+const_assert_eq!(
+    MappingOptions::all().difference(CREATION_ONLY_OPTIONS).bits() << 3,
+    MappingFlags::SHARED.bits()
+        | MappingFlags::ANONYMOUS.bits()
+        | MappingFlags::LOWER_32BIT.bits()
+        | MappingFlags::GROWSDOWN.bits()
+        | MappingFlags::ELF_BINARY.bits()
+        | MappingFlags::DONTFORK.bits()
+        | MappingFlags::WIPEONFORK.bits()
+        | MappingFlags::DONT_SPLIT.bits()
+        | MappingFlags::DONT_EXPAND.bits()
+);
+
 impl MappingFlags {
     pub fn access_flags(&self) -> ProtectionFlags {
         ProtectionFlags::from_bits_truncate(
@@ -434,7 +453,7 @@ impl MappingFlags {
     }
 
     pub fn options(&self) -> MappingOptions {
-        MappingOptions::from_bits_truncate(self.bits() >> 3)
+        MappingOptions::from_bits_truncate(self.bits() >> 3).difference(CREATION_ONLY_OPTIONS)
     }
 
     pub fn from_access_flags_and_options(
@@ -442,7 +461,7 @@ impl MappingFlags {
         options: MappingOptions,
     ) -> Self {
         Self::from_bits_truncate(prot_flags.access_flags().bits() as u16)
-            | Self::from_bits_truncate(options.bits() << 3)
+            | Self::from_bits_truncate(options.difference(CREATION_ONLY_OPTIONS).bits() << 3)
     }
 }
 

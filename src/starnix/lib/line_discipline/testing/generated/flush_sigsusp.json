@@ -19,11 +19,15 @@
     "events": [
         {
             "type": "write_to_master",
-            "data": "foo\u001a"
+            "data": "foo\u001a",
+            "signals": [
+                "SIGTSTP"
+            ]
         },
         {
             "type": "write_to_master",
-            "data": "\n"
+            "data": "\n",
+            "signals": []
         },
         {
             "type": "read_from_master",

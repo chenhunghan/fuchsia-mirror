@@ -1,0 +1,53 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "elf",
+        binary: "bin/devscreen",
+    },
+    use: [
+        {
+            protocol: [
+                "fuchsia.sysmem.Allocator",
+                "fuchsia.sysmem2.Allocator",
+            ],
+        },
+        {
+            protocol: [
+                "fuchsia.buildinfo.Provider",
+                "fuchsia.device.NameProvider",
+                "fuchsia.feedback.DataProvider",
+                "fuchsia.feedback.LastRebootInfoProvider",
+                "fuchsia.hardware.power.statecontrol.Admin",
+                "fuchsia.hwinfo.Device",
+                "fuchsia.kernel.Stats",
+                "fuchsia.net.interfaces.State",
+                "fuchsia.wlan.device.service.DeviceMonitor",
+                "fuchsia.wlan.policy.ClientProvider",
+            ],
+            availability: "optional",
+        },
+        { service: "fuchsia.hardware.display.Service" },
+        { service: "fuchsia.input.report.Service" },
+        {
+            service: [
+                "fuchsia.hardware.cpu.ctrl.Service",
+                "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.charger.Service",
+                "fuchsia.hardware.temperature.Service",
+            ],
+            availability: "optional",
+        },
+        {
+            // Saved snapshots (SAVE SNAPSHOT button).
+            storage: "data",
+            path: "/data",
+            availability: "optional",
+        },
+    ],
+}

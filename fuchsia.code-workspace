@@ -73,9 +73,6 @@
       // Adds JSON5 syntax highlighting (including *.cml files).
       "mrmlnc.vscode-json5",
 
-      // Linkifies Fuchsia URLs (components, bugs, etc.)
-      "RichKadel.fuchsiaware",
-
       // Adds coverage gutters for `fx coverage`.
       "ryanluker.vscode-coverage-gutters",
     ],
@@ -92,6 +89,9 @@
 
       // Superseded by vscode-fuchsia, which provides zxdb support.
       "fuchsia-authors.zxdb",
+
+      // Archived upstream and broken on current Fuchsia checkouts.
+      "RichKadel.fuchsiaware",
     ]
   },
 
@@ -352,7 +352,6 @@
       "third_party/intel/**": true,
       "third_party/iperf/**": true,
       "third_party/jellyfish/**": true,
-      "third_party/jinja2/**": true,
       "third_party/json5.vim/**": true,
       "third_party/libc-tests/**": true,
       "third_party/libffi/**": true,

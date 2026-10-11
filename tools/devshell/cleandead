@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_NINJA}
 ### Delete stale generated files in the build output directory.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/vars.sh || exit $?

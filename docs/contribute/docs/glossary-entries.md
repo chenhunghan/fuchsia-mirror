@@ -164,7 +164,7 @@ To add a glossary definition, you need to edit the
   see_also: ['{% htmlescape %}<a href="/docs/glossary#ABI">ABI</a>',
              '<a href="/docs/glossary#storage-capability">Storage capability</a>{% endhtmlescape %}']
   related_guides: ['{% htmlescape %}<a href="/docs/development/tracing/tutorial/registering-a-trace-provider.md">Registering a trace provider</a>',
-                   '<a href="/docs/development/hardware/paving.md">Installing Fuchsia on a device</a>{% endhtmlescape %}']
+                   '<a href="/docs/development/hardware/README.md">Installing Fuchsia on a device</a>{% endhtmlescape %}']
   area: ['System', 'General']
 </pre>
   </section>

@@ -136,12 +136,12 @@ async fn new_host_harness(realm: Arc<HostRealm>) -> Result<(HostHarness, Emulato
     let dev_dir = realm.dev().context("failed to open dev directory")?;
     let emulator =
         Emulator::create(dev_dir).await.context("Error creating emulator root device")?;
-    let device_path = emulator
-        .publish_and_wait_for_device_path(Emulator::default_settings())
+    emulator
+        .publish(Emulator::default_settings())
         .await
         .context("Error publishing emulator hci device")?;
 
-    let host = HostRealm::create_bt_host_in_collection(&realm, &device_path).await?.into_proxy();
+    let host = HostRealm::create_bt_host_in_collection(&realm).await?.into_proxy();
     let host_info = host
         .watch_state()
         .await

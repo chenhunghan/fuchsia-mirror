@@ -14,7 +14,7 @@ use {
     std::{borrow::Borrow, io::Write},
 };
 
-use crate::draw::MappedImage;
+use crate::draw::{ByteCounts, MappedImage};
 use crate::fps::{Counter, RenderTimes};
 
 // ANSI X3.64 (ECMA-48) escape code for clearing the terminal screen.
@@ -133,17 +133,22 @@ impl<'a, S: MultiLayerScene> MultiLayerFenceLoop<'a, S> {
 
         let mut counter = Counter::new();
         let mut render_times = RenderTimes::new();
+        // Bytes written and cleaned while rendering the previous frame.
+        let mut frame_bytes = ByteCounts::default();
         loop {
             // Log the frame rate.
             counter.add(zx::MonotonicInstant::get());
             let stats = counter.stats();
             print!(
-                "{}Display {:.2} fps ({:.5} ms) render {:.3} ms clean {:.3} ms",
+                "{}Display {:.2} fps ({:.5} ms) render {:.3} ms clean {:.3} ms \
+                 written {:.2} MB cleaned {:.2} MB",
                 CLEAR,
                 stats.sample_rate_hz,
                 stats.sample_time_delta_ms,
                 render_times.render_ms(),
-                render_times.clean_ms()
+                render_times.clean_ms(),
+                frame_bytes.written as f64 / 1e6,
+                frame_bytes.cleaned as f64 / 1e6
             );
             std::io::stdout().flush()?;
 
@@ -173,6 +178,8 @@ impl<'a, S: MultiLayerScene> MultiLayerFenceLoop<'a, S> {
                             sum + image.take_clean_time()
                         });
                     render_times.add(render_and_clean, clean);
+                    frame_bytes =
+                        current_presentation.images.iter().map(MappedImage::take_byte_counts).sum();
                 }
 
                 // Request the swap.

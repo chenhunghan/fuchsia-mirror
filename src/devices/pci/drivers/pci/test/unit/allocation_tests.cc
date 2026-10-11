@@ -141,6 +141,28 @@ TEST(PciAllocationTest, MmioType) {
   EXPECT_NO_FATAL_FAILURE(AllocationTypeHelper(PCI_ADDRESS_SPACE_MEMORY));
 }
 
+TEST(PciAllocationTest, MmioBackedIoType) {
+  FakePciroot pciroot;
+  pciroot.set_io_type(PCI_ADDRESS_SPACE_MEMORY);
+  ddk::PcirootProtocolClient client(pciroot.proto());
+
+  PciRootAllocator root_allocator(client, PCI_ADDRESS_SPACE_IO, false);
+  EXPECT_EQ(root_allocator.type(), PCI_ADDRESS_SPACE_IO);
+
+  size_t page_size = zx_system_get_page_size();
+  auto root_result = root_allocator.Allocate(std::nullopt, page_size * 4);
+  ASSERT_OK(root_result.status_value());
+  ASSERT_EQ(root_result->type(), PCI_ADDRESS_SPACE_MEMORY);
+
+  PciRegionAllocator region_allocator;
+  ASSERT_OK(region_allocator.SetParentAllocation(std::move(root_result.value())));
+  ASSERT_EQ(region_allocator.type(), PCI_ADDRESS_SPACE_MEMORY);
+
+  auto region_allocator_result = region_allocator.Allocate(std::nullopt, page_size);
+  ASSERT_OK(region_allocator_result.status_value());
+  ASSERT_EQ(region_allocator_result->type(), PCI_ADDRESS_SPACE_MEMORY);
+}
+
 // A PciRegionAllocator has no type until it is given a backing allocation and should assert.
 TEST(PciAllocationTest, RegionTypeNone) {
   PciRegionAllocator allocator;

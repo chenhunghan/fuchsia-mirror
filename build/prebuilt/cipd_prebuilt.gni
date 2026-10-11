@@ -1,0 +1,129 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/info/info.gni")
+
+# Root generated directory in `default_toolchain` where `cipd_prebuilt()`
+# stages fetched `//prebuilt/...` paths (`${cipd_prebuilt_root}/prebuilt/...`).
+cipd_prebuilt_root =
+    get_label_info("//:default($default_toolchain)", "root_gen_dir")
+
+# Template for declaring on-demand CIPD prebuilt dependencies in GN.
+#
+# Invokes `.jiri_root/bin/jiri fetch-package <paths>...` to ensure the CIPD
+# package(s) backing the given `//prebuilt/...` paths are downloaded into
+# `//prebuilt/`, and stages them to `${cipd_prebuilt_root}/prebuilt/...` in
+# `default_toolchain`. In non-default toolchains, this template generates a
+# `group()` that redirects to `:$target_name($default_toolchain)` via
+# `public_deps` so each prebuilt target is fetched and staged at most once per
+# build.
+#
+# Because GN forbids declaring outputs outside `root_build_dir` and Ninja
+# requires any file listed in `inputs`/`sources` that may not exist prior to the
+# build to have a producer rule in the build graph, downstream GN targets (in
+# any `BUILD.gn` file or toolchain) should both depend on this target
+# (`deps = [ "//path/to:target" ]`) and reference its mirrored staged output
+# path(s) `${cipd_prebuilt_root}/prebuilt/...` in their `inputs` and `args`
+# instead of referencing raw `//prebuilt/...` paths directly.
+#
+# When `on-demand-packages=false` (the current default), `jiri fetch-package`
+# validates its arguments and exits 0 immediately as a no-op before the outputs
+# are staged.
+#
+# Parameters
+#
+#   paths (required; list of strings)
+#     One or more paths under `//prebuilt/` (e.g.,
+#     `[ "//prebuilt/third_party/jq/${host_platform}/bin/jq" ]`).
+#
+#   applicable_licenses (optional)
+#   deps (optional)
+#   metadata (optional)
+#   testonly (optional)
+#   visibility (optional)
+#     Standard GN meaning.
+#
+template("cipd_prebuilt") {
+  if (current_toolchain == default_toolchain) {
+    assert(defined(invoker.paths),
+           "paths must be specified for cipd_prebuilt()")
+    assert(invoker.paths != [], "paths must not be empty for cipd_prebuilt()")
+
+    _rebased_paths = []
+    _output_paths = []
+    foreach(_path, invoker.paths) {
+      _rebased_path = rebase_path(_path, "//")
+      assert(string_replace("##${_rebased_path}", "##prebuilt/", "") !=
+                 "##${_rebased_path}",
+             "cipd_prebuilt path must be under //prebuilt/ (got ${_path})")
+      assert(
+          get_path_info(_path, "file") != "",
+          "cipd_prebuilt path must not end with a trailing slash (got ${_path})")
+      _rebased_paths += [ _rebased_path ]
+      _output_paths += [ "${cipd_prebuilt_root}/${_rebased_path}" ]
+    }
+
+    _jiri_bin = "//.jiri_root/bin/jiri"
+    _jiri_snapshot = build_info_files.jiri_snapshot
+
+    action(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "applicable_licenses",
+                               "deps",
+                               "testonly",
+                               "visibility",
+                             ])
+
+      script = "//build/prebuilt/fetch_cipd_prebuilt.sh"
+      mnemonic = "FETCH"
+
+      # Skip scanning the prebuilt binary/archive for output directory leaks
+      # (which would otherwise open and regex-scan multi-MB prebuilts), and skip
+      # repeatability re-execution.
+      check_for_output_dir_leaks = false
+      repeatable = false
+
+      inputs = [
+        _jiri_bin,
+        _jiri_snapshot,
+      ]
+      outputs = _output_paths
+
+      args = [
+               rebase_path(_jiri_bin, root_build_dir),
+               rebase_path("//", root_build_dir),
+               rebase_path(cipd_prebuilt_root, root_build_dir),
+             ] + _rebased_paths
+
+      metadata = {
+        if (defined(invoker.metadata)) {
+          forward_variables_from(invoker.metadata, "*")
+        }
+        cipd_prebuilts = [
+          {
+            label = get_label_info(":$target_name", "label_with_toolchain")
+            paths = _rebased_paths
+          },
+        ]
+      }
+    }
+  } else {
+    group(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "applicable_licenses",
+                               "testonly",
+                               "visibility",
+                             ])
+      public_deps = [ ":$target_name($default_toolchain)" ]
+      not_needed(invoker,
+                 [
+                   "deps",
+                   "metadata",
+                   "paths",
+                 ])
+    }
+  }
+}

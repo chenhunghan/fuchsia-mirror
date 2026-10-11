@@ -6,7 +6,7 @@ use crate::fuchsia::RemoteCrypt;
 use crate::fuchsia::component::map_to_raw_status;
 use crate::fuchsia::directory::FxDirectory;
 use crate::fuchsia::errors::map_to_status;
-use crate::fuchsia::fxblob::BlobDirectory;
+use crate::fuchsia::fxblob::{BlobDirectory, Identifier};
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
 use crate::fuchsia::profile::new_profile_state;
 use crate::fuchsia::volume::{FxVolume, FxVolumeAndRoot, MemoryPressureConfig, RootDir};
@@ -26,7 +26,7 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::FxFilesystem;
 use fxfs::fsck;
 use fxfs::log::*;
-use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+use fxfs::object_store::transaction::{LockKey, Options, ReservationOptions, lock_keys};
 use fxfs::object_store::volume::RootVolume;
 use fxfs::object_store::{
     Directory, NewChildStoreOptions, ObjectDescriptor, ObjectStore, StoreOptions,
@@ -289,7 +289,12 @@ impl MountedVolumesGuard<'_> {
         let (object_id, transaction) = self
             .volumes_directory
             .root_volume
-            .acquire_transaction_for_remove_volume(name, [], false)
+            .acquire_transaction_for_remove_volume(
+                name,
+                [],
+                false,
+                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
+            )
             .await?;
 
         // Cowardly refuse to delete a mounted volume.
@@ -550,20 +555,51 @@ impl VolumesDirectory {
     pub async fn replay_xor_record_profile(
         self: &Arc<Self>,
         volume_name: String,
-        profile_name: String,
+        identifier: fidl_fuchsia_fxfs::ProfileIdentifier,
         duration_secs: u32,
     ) -> Result<(), zx::Status> {
-        // Volumes lock is taken first to provide consistent lock ordering with mounting a volume.
         let volumes = self.lock().await;
         let mut state = self.profiling_state.lock().await;
         if state.is_some() {
             return Err(zx::Status::SHOULD_WAIT);
         }
         let (volume, is_blob) = volumes.get_unlocked_volume_by_name(&volume_name).await?;
-        if let Err(error) = volume
-            .volume()
-            .replay_xor_record_profile(new_profile_state(is_blob), &profile_name)
-            .await
+
+        let (opened_node, profile_name) = match identifier {
+            fidl_fuchsia_fxfs::ProfileIdentifier::BlobHash(hash) => {
+                if !is_blob {
+                    warn!("Attempted to use a blob hash identifier on a non-blob volume");
+                    return Err(zx::Status::INVALID_ARGS);
+                }
+                let id = Identifier::from(fuchsia_hash::Hash::from(hash));
+                let blob_dir = volume
+                    .root()
+                    .clone()
+                    .into_any()
+                    .downcast::<BlobDirectory>()
+                    .map_err(|_| zx::Status::IO_DATA_INTEGRITY)?;
+                let opened = blob_dir.open_blob(&id).await.map_err(|_| zx::Status::INTERNAL)?;
+                let Some(node) = opened else {
+                    return Err(zx::Status::NOT_FOUND);
+                };
+                (node.into_dyn(), fuchsia_hash::Hash::from(hash).to_string())
+            }
+            fidl_fuchsia_fxfs::ProfileIdentifier::ObjectId(oid) => {
+                if is_blob {
+                    warn!("Attempted to use an object ID identifier on a blob volume");
+                    return Err(zx::Status::INVALID_ARGS);
+                }
+
+                let opened_node =
+                    volume.volume().open_file_by_id(oid).await.map_err(map_to_status)?;
+
+                (opened_node.into_dyn(), oid.to_string())
+            }
+            _ => return Err(zx::Status::INVALID_ARGS),
+        };
+
+        if let Err(error) =
+            volume.volume().replay_xor_record_profile(new_profile_state(is_blob), opened_node).await
         {
             error!(
                 error:?,
@@ -1191,9 +1227,12 @@ mod tests {
     use fidl::endpoints::{DiscoverableProtocolMarker, create_proxy, create_request_stream};
     use fidl_fuchsia_fs::AdminMarker;
     use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions, VolumeProxy};
-    use fidl_fuchsia_fxfs::{CryptRequest, DebugMarker, FxfsKey, KeyPurpose, WrappedKey};
+    use fidl_fuchsia_fxfs::{
+        CryptRequest, DebugMarker, FxfsKey, KeyPurpose, ProfileIdentifier, WrappedKey,
+    };
     use fidl_fuchsia_io as fio;
     use fuchsia_async as fasync;
+    use fuchsia_async::TimeoutExt;
     use fuchsia_component_client::connect_to_protocol_at_dir_svc;
     use fuchsia_fs::file;
     use futures::{TryStreamExt, join};
@@ -1205,6 +1244,7 @@ mod tests {
     use fxfs::object_store::allocator::Allocator;
     use fxfs::object_store::transaction::{LockKey, Options};
     use fxfs::object_store::volume::root_volume;
+    use fxfs::object_store::{AttributeId, AttributeKey, ObjectDescriptor, ObjectKey, ObjectValue};
     use fxfs_crypto::Crypt;
     use fxfs_insecure_crypto::new_insecure_crypt;
     use refaults_vmo::PageRefaultCounter;
@@ -2767,6 +2807,469 @@ mod tests {
                 assert!(profile_dir.lookup(TEST_RECORDING).await.unwrap().is_none());
             }
         }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_blob() {
+        use crate::fuchsia::fxblob::testing::{BlobFixture, new_blob_fixture, open_blob_fixture};
+        use crate::fuchsia::pager::PagerBacked;
+        use delivery_blob::CompressionMode;
+
+        let fixture = new_blob_fixture().await;
+        let hash = {
+            let data = vec![88u8; 1024];
+            fixture.write_blob(&data, CompressionMode::Never).await
+        };
+
+        // Close and reopen to clear all caches so that subsequent reads trigger page faults.
+        let device = fixture.close().await;
+        device.ensure_unique();
+
+        device.reopen(false);
+        let fixture = open_blob_fixture(device).await;
+        let hash = {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::BlobHash(*hash);
+
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("blob".to_owned(), identifier, 600)
+                .await
+                .expect("Starting replay_xor_record_profile recording");
+
+            // Trigger page faults by reading the VMO.
+            let vmo = fixture.get_blob_vmo(hash).await;
+            let mut read_buf = vec![0u8; 1024];
+            vmo.read(&mut read_buf, 0).expect("VMO read failed");
+
+            volumes_directory.stop_profile_tasks().await;
+            hash
+        };
+
+        // Close and reopen again to clear caches and persist the profile.
+        let device = fixture.close().await;
+        device.ensure_unique();
+
+        device.reopen(false);
+        let fixture = open_blob_fixture(device).await;
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::BlobHash(*hash);
+
+            // Verify that initially nothing is paged in.
+            let blob = fixture.get_blob(hash).await.expect("Opening blob");
+            assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
+
+            // Since the profile exists, it will replay it.
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("blob".to_owned(), identifier, 600)
+                .await
+                .expect("Starting replay_xor_record_profile replay");
+
+            // Await all data being played back by checking that things have paged in.
+            async {
+                while blob.vmo().info().unwrap().populated_bytes == 0 {
+                    fasync::Timer::new(Duration::from_millis(25)).await;
+                }
+            }
+            .on_timeout(Duration::from_secs(60), || panic!("Replay did not page in for all VMOs"))
+            .await;
+
+            volumes_directory.stop_profile_tasks().await;
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_file() {
+        use crate::fuchsia::file::FxFile;
+        use crate::fuchsia::pager::PagerBacked;
+
+        let fixture = TestFixture::new_unencrypted().await;
+        let object_id = {
+            // 1. Create a file.
+            let file_proxy = open_file_checked(
+                fixture.root(),
+                "foo",
+                fio::Flags::FLAG_MAYBE_CREATE
+                    | fio::PERM_READABLE
+                    | fio::PERM_WRITABLE
+                    | fio::Flags::PROTOCOL_FILE,
+                &Default::default(),
+            )
+            .await;
+
+            let data = vec![88u8; 1024];
+            file::write(&file_proxy, &data).await.expect("Write failed");
+            file_proxy
+                .get_attributes(fio::NodeAttributesQuery::ID)
+                .await
+                .unwrap()
+                .expect("get_id")
+                .1
+                .id
+                .expect("Missing id")
+        };
+
+        let device = fixture.close().await;
+        device.ensure_unique();
+
+        device.reopen(false);
+        let fixture = TestFixture::open(
+            device,
+            TestFixtureOptions { encrypted: false, format: false, ..Default::default() },
+        )
+        .await;
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            // New profile, should record.
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect("Starting replay_xor_record_profile recording");
+
+            // Trigger page faults by reading the VMO.
+            let file_proxy = open_file_checked(
+                fixture.root(),
+                "foo",
+                fio::PERM_READABLE | fio::Flags::PROTOCOL_FILE,
+                &Default::default(),
+            )
+            .await;
+            let vmo = file_proxy
+                .get_backing_memory(fio::VmoFlags::READ)
+                .await
+                .unwrap()
+                .expect("Getting vmo");
+            let mut buf = vec![0u8; 1024];
+            vmo.read(&mut buf, 0).unwrap();
+
+            volumes_directory.stop_profile_tasks().await;
+        }
+
+        let device = fixture.close().await;
+        device.ensure_unique();
+
+        device.reopen(false);
+        let fixture = TestFixture::open(
+            device,
+            TestFixtureOptions { encrypted: false, format: false, ..Default::default() },
+        )
+        .await;
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            // Verify initially nothing is paged in.
+            let file_node = fixture
+                .volume()
+                .volume()
+                .get_or_load_node(
+                    object_id,
+                    ObjectDescriptor::File,
+                    Some(fixture.volume().root_dir()),
+                )
+                .await
+                .expect("get_or_load_node failed")
+                .into_any()
+                .downcast::<FxFile>()
+                .expect("Expected FxFile");
+            assert_eq!(file_node.vmo().info().unwrap().populated_bytes, 0);
+
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect("Starting replay_xor_record_profile replay");
+
+            // Await all data being played back.
+            async {
+                while file_node.vmo().info().unwrap().populated_bytes == 0 {
+                    fasync::Timer::new(Duration::from_millis(25)).await;
+                }
+            }
+            .on_timeout(Duration::from_secs(60), || panic!("Replay did not page in for all VMOs"))
+            .await;
+
+            volumes_directory.stop_profile_tasks().await;
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_unsupported_for_directory() {
+        use crate::fuchsia::node::FxNode;
+
+        let fixture = TestFixture::new_unencrypted().await;
+        {
+            let dir_object_id = fixture.volume().root_dir().object_id();
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(dir_object_id);
+
+            let err = volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect_err("Expected NOT_SUPPORTED for directory");
+            assert_eq!(err, zx::Status::NOT_SUPPORTED);
+        }
+
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_fails_if_unlinked() {
+        let fixture = TestFixture::new_unencrypted().await;
+        let (file_proxy, object_id) = {
+            let file_proxy = open_file_checked(
+                fixture.root(),
+                "foo",
+                fio::Flags::FLAG_MAYBE_CREATE
+                    | fio::PERM_READABLE
+                    | fio::PERM_WRITABLE
+                    | fio::Flags::PROTOCOL_FILE,
+                &Default::default(),
+            )
+            .await;
+            let object_id = file_proxy
+                .get_attributes(fio::NodeAttributesQuery::ID)
+                .await
+                .unwrap()
+                .expect("get_id")
+                .1
+                .id
+                .expect("Missing id");
+            (file_proxy, object_id)
+        };
+
+        // Unlink and close the file so it is purged.
+        fixture
+            .root()
+            .unlink("foo", &fio::UnlinkOptions::default())
+            .await
+            .unwrap()
+            .expect("unlink failed");
+        file_proxy.close().await.expect("FIDL call failed").expect("close failed");
+
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            let err = volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect_err("Expected NOT_FOUND for unlinked file");
+            assert_eq!(err, zx::Status::NOT_FOUND);
+        }
+
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_fails_if_unlinked_while_open() {
+        let fixture = TestFixture::new_unencrypted().await;
+        let (file_proxy, object_id) = {
+            let file_proxy = open_file_checked(
+                fixture.root(),
+                "foo",
+                fio::Flags::FLAG_MAYBE_CREATE
+                    | fio::PERM_READABLE
+                    | fio::PERM_WRITABLE
+                    | fio::Flags::PROTOCOL_FILE,
+                &Default::default(),
+            )
+            .await;
+            let object_id = file_proxy
+                .get_attributes(fio::NodeAttributesQuery::ID)
+                .await
+                .unwrap()
+                .expect("get_id")
+                .1
+                .id
+                .expect("Missing id");
+            (file_proxy, object_id)
+        };
+
+        // Unlink the file while it is still open by file_proxy.
+        fixture
+            .root()
+            .unlink("foo", &fio::UnlinkOptions::default())
+            .await
+            .unwrap()
+            .expect("unlink failed");
+
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            // The file is still open, but it is in the graveyard, so any profile we recorded would
+            // be purged along with the file once the last handle closes. Reject it.
+            let err = volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect_err("Expected NOT_FOUND for unlinked file that is still open");
+            assert_eq!(err, zx::Status::NOT_FOUND);
+        }
+
+        drop(file_proxy);
+        fixture.close().await;
+    }
+
+    // A file that has been truncated may have a `Trim` graveyard entry while remaining perfectly
+    // live. That must not be confused with the `Some` entry that marks an object for purging.
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_succeeds_after_truncate() {
+        let fixture = TestFixture::new_unencrypted().await;
+        let file_proxy = open_file_checked(
+            fixture.root(),
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+        let object_id = file_proxy
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .unwrap()
+            .expect("get_id")
+            .1
+            .id
+            .expect("Missing id");
+
+        // Grow the file and then truncate it back down, which may leave a `Trim` graveyard entry.
+        file_proxy.resize(1_048_576).await.expect("FIDL call failed").expect("resize failed");
+        file_proxy.resize(0).await.expect("FIDL call failed").expect("resize failed");
+
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect("Profiling a live, recently truncated file should succeed");
+
+            volumes_directory.stop_profile_tasks().await;
+        }
+
+        file_proxy.close().await.expect("FIDL call failed").expect("close failed");
+        fixture.close().await;
+    }
+
+    // Unlinking while a recording is in progress must not purge the file, because the recording
+    // handle holds an open count. The purge should happen once the recording finishes.
+    #[fuchsia::test(threads = 10)]
+    async fn test_replay_xor_record_profile_unlink_during_recording() {
+        let fixture = TestFixture::new_unencrypted().await;
+        let file_proxy = open_file_checked(
+            fixture.root(),
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+        let object_id = file_proxy
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .unwrap()
+            .expect("get_id")
+            .1
+            .id
+            .expect("Missing id");
+
+        // Borrow rather than clone: an extra `Arc<ObjectStore>` alive at `fixture.close()` would
+        // trip the fixture's check for dangling device references.
+        let store = fixture.volume().volume().store();
+        let graveyard_id = store.graveyard_directory_object_id();
+
+        {
+            let volumes_directory = fixture.volumes_directory().clone();
+            let identifier = ProfileIdentifier::ObjectId(object_id);
+
+            volumes_directory
+                .clone()
+                .replay_xor_record_profile("vol".to_owned(), identifier, 600)
+                .await
+                .expect("Starting replay_xor_record_profile recording");
+
+            // Unlink and close while the recording is active. The recording handle holds an open
+            // count, so the tombstone must be deferred rather than run now.
+            fixture
+                .root()
+                .unlink("foo", &fio::UnlinkOptions::default())
+                .await
+                .unwrap()
+                .expect("unlink failed");
+            file_proxy.close().await.expect("FIDL call failed").expect("close failed");
+
+            // Drain the graveyard queue. Anything that was going to purge the object has now had
+            // its chance, so the assertions below distinguish "deferred" from "merely slow".
+            fixture.fs().graveyard().flush().await;
+
+            assert!(
+                store.tree().find(&ObjectKey::object(object_id)).await.unwrap().is_some(),
+                "Object must not be purged while a recording holds it open",
+            );
+            assert!(
+                matches!(
+                    store
+                        .tree()
+                        .find_value(&ObjectKey::graveyard_entry(graveyard_id, object_id))
+                        .await
+                        .unwrap(),
+                    Some(ObjectValue::Some)
+                ),
+                "Object should be in the graveyard awaiting purge",
+            );
+
+            // Completes the recording and drops the handle, releasing the open count.
+            volumes_directory.stop_profile_tasks().await;
+        }
+
+        // The deferred purge must now actually run, rather than leaking the object.
+        fixture.fs().graveyard().flush().await;
+
+        assert!(
+            store.tree().find(&ObjectKey::object(object_id)).await.unwrap().is_none(),
+            "Object should be purged once the recording handle is dropped",
+        );
+        assert!(
+            store
+                .tree()
+                .find_value(&ObjectKey::graveyard_entry(graveyard_id, object_id))
+                .await
+                .unwrap()
+                .is_none(),
+            "Graveyard entry should be removed once the object is purged",
+        );
+        assert!(
+            store
+                .tree()
+                .find(&ObjectKey::attribute(
+                    object_id,
+                    AttributeId::PROFILE_RECORDING,
+                    AttributeKey::Attribute,
+                ))
+                .await
+                .unwrap()
+                .is_none(),
+            "Profile recording attribute should not outlive the object",
+        );
+
         fixture.close().await;
     }
 

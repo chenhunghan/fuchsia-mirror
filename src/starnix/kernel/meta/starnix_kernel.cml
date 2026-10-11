@@ -108,6 +108,7 @@
         },
         {
             service: [
+                "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.power.suspend.SuspendService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
                 "fuchsia.hardware.qualcomm.router.ClientService",

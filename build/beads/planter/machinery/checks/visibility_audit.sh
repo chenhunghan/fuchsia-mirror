@@ -16,6 +16,9 @@ set -euo pipefail
 # 8. Cross-area depth-2 wildcards ('//src/<area>:__subpackages__') on non-global targets outside //src/<area>
 # 9. Overbroad depth >= 3 ':__subpackages__' wildcards wider than the Lowest Common Ancestor (LCA) of actual callers on non-global targets
 # 10. False-positive rdeps from visibility allowlists (visibility.gni / visibility = [...]) or GN-only targets (:verify_bazel2gn, :tests, :benchmarks)
+# 11. Uncovered callers: a package whose BUILD.gn/BUILD.bazel depends on the target, or on a generated
+#     '<target>_<suffix>' sub-target (e.g. fidl_library bindings '<fidl>_rust', '<fidl>_cpp'), that no
+#     visibility entry covers. References to generated sub-targets count as rdeps of the owning target.
 
 export PATH="${PATH:-}:${HOME:-}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -278,7 +281,22 @@ for fpath in sorted(matched_files):
     except Exception:
         pass
 
-def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map, fidl_targets=None):
+def owning_bazel_target(sub, bazel_targets):
+    """Maps a referenced label name to the Bazel target that defines or generates it.
+
+    Rules such as fidl_library emit GN sub-targets named '<name>_<suffix>' (e.g.
+    '<fidl>_rust', '<fidl>_cpp', '<fidl>_hlcpp') that callers depend on and that share the
+    visibility of '<name>'; attribute them to the longest matching Bazel target name.
+    """
+    if sub in bazel_targets:
+        return sub
+    best = None
+    for t in bazel_targets:
+        if sub.startswith(t + "_") and (best is None or len(t) > len(best)):
+            best = t
+    return best
+
+def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map):
     default_target = os.path.basename(pkg_path)
     gn_file = os.path.join(workdir, pkg_path, "BUILD.gn")
     gn_only_targets = {"verify_bazel2gn", "tests", "benchmarks"}
@@ -299,6 +317,7 @@ def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map, f
     visibility_only_packages = set()
     gn_only_ref_packages = set()
     per_target_rdeps = {t: set() for t in bazel_targets}
+    per_target_direct_rdeps = {t: {} for t in bazel_targets}
     has_macro_injected_rdeps = False
 
     for fpath, (no_comments, stripped) in file_cache.items():
@@ -356,16 +375,16 @@ def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map, f
             if caller_pkg.startswith("build/") and (rel.endswith(".bzl") or rel.endswith(".gni")) and "verification" not in os.path.basename(rel):
                 has_macro_injected_rdeps = True
             true_rdep_packages.add(norm_caller)
-            if sub in per_target_rdeps:
-                per_target_rdeps[sub].add(norm_caller)
-            elif sub == default_target and len(bazel_targets) == 1:
-                per_target_rdeps[bazel_targets[0]].add(norm_caller)
-            else:
-                # GN fidl() callers depend on generated binding sub-targets
-                # (<name>_rust, <name>_cpp, <name>_hlcpp, ...) of the fidl_library.
-                owners = [t for t in (fidl_targets or ()) if sub.startswith(t + "_")]
-                if owners:
-                    per_target_rdeps[max(owners, key=len)].add(norm_caller)
+            owner = owning_bazel_target(sub, bazel_targets)
+            if owner is None and sub == default_target and len(bazel_targets) == 1:
+                owner = bazel_targets[0]
+            if owner is not None:
+                per_target_rdeps[owner].add(norm_caller)
+                # GN and Bazel enforce visibility in the package whose BUILD file names the
+                # label (not in the .gni/.bzl that a template reference comes from).
+                if os.path.basename(rel) in ("BUILD.gn", "BUILD.bazel"):
+                    kind_bs = "gn" if rel.endswith(".gn") else "bazel"
+                    per_target_direct_rdeps[owner].setdefault(caller_pkg, set()).add(kind_bs)
 
     for alias_name, actual_name in alias_map.items():
         if alias_name in per_target_rdeps and actual_name in per_target_rdeps:
@@ -375,7 +394,7 @@ def compute_package_rdeps(pkg_path, bazel_targets, package_targets, alias_map, f
 
     visibility_only_packages -= true_rdep_packages
     gn_only_ref_packages -= true_rdep_packages
-    return true_rdep_packages, per_target_rdeps, visibility_only_packages, gn_only_ref_packages, has_macro_injected_rdeps
+    return true_rdep_packages, per_target_rdeps, per_target_direct_rdeps, visibility_only_packages, gn_only_ref_packages, has_macro_injected_rdeps
 
 def extract_list_entries(expr, var_table, default_lineno):
     if isinstance(expr, ast.List):
@@ -413,7 +432,6 @@ for rel_path in sorted(candidate_files):
     var_table = {}
     bazel_targets = []
     package_targets = set()
-    fidl_targets = set()
     alias_map = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -439,13 +457,11 @@ for rel_path in sorted(candidate_files):
                 bazel_targets.append(tname)
                 if func in ("fx_package", "fuchsia_package"):
                     package_targets.add(tname)
-                if func == "fidl_library":
-                    fidl_targets.add(tname)
                 if func == "alias" and actual and actual.startswith(":"):
                     alias_map[tname] = actual[1:]
 
-    true_rdeps, per_target_rdeps, vis_only_pkgs, gn_only_pkgs, has_macro_injected_rdeps = compute_package_rdeps(
-        pkg_path, bazel_targets, package_targets, alias_map, fidl_targets
+    true_rdeps, per_target_rdeps, per_target_direct_rdeps, vis_only_pkgs, gn_only_pkgs, has_macro_injected_rdeps = compute_package_rdeps(
+        pkg_path, bazel_targets, package_targets, alias_map
     )
 
     has_pkg_default_vis = False
@@ -522,6 +538,83 @@ for rel_path in sorted(candidate_files):
         if entries is None:
             continue
 
+        vis_vals = [val for (val, _) in entries]
+        vis_scopes = []
+        only_scope_entries = True
+        for val in vis_vals:
+            if val == "//visibility:private":
+                continue
+            if val == "//visibility:public":
+                only_scope_entries = False
+                break
+            m_scope = re.match(r"^(?://([^:]*))?:__(pkg|subpackages)__$", val)
+            if not m_scope:
+                # package_group or other label: coverage cannot be decided statically.
+                only_scope_entries = False
+                break
+            scope_pkg = pkg_path if m_scope.group(1) is None else m_scope.group(1).strip("/")
+            vis_scopes.append((scope_pkg, m_scope.group(2)))
+        # bazel2gn emits the Bazel list as GN visibility unless the closing line carries
+        # '# @bazel2gn:raw_overwrite:[ ... ]' (GN patterns '//*', '//a/*', '//a:*').
+        gn_scopes = vis_scopes
+        end_line = getattr(vis_kw.value, "end_lineno", None)
+        src_lines = src.splitlines()
+        if end_line and end_line <= len(src_lines):
+            m_raw = re.search(r"#\s*@bazel2gn:raw_overwrite:\s*(\[.*\])", src_lines[end_line - 1])
+            if m_raw:
+                try:
+                    gn_scopes = []
+                    for pat in json.loads(m_raw.group(1)):
+                        m_gn = re.match(r"^//([^:*]*?)/?(\*|:.*)$", pat)
+                        if not m_gn:
+                            gn_scopes = None
+                            break
+                        gn_pkg = m_gn.group(1).strip("/")
+                        gn_scopes.append((gn_pkg, "subpackages" if m_gn.group(2) == "*" else "pkg"))
+                except Exception:
+                    gn_scopes = None
+        if only_scope_entries:
+            uncovered = set()
+            for caller, kinds in per_target_direct_rdeps.get(target_name, {}).items():
+                for kind_bs in kinds:
+                    scopes = gn_scopes if kind_bs == "gn" else vis_scopes
+                    if scopes is None:
+                        continue
+                    covered = any(
+                        caller == sp or (kind == "subpackages" and (sp == "" or caller.startswith(sp + "/")))
+                        for sp, kind in scopes
+                    )
+                    if not covered:
+                        uncovered.add(caller)
+            if uncovered:
+                shown = sorted(
+                    {
+                        f"//{VG_ROOT}" if (c == VG_ROOT or c.startswith(VG_ROOT + "/")) else f"//{c}"
+                        for c in uncovered
+                    }
+                )
+                add_entries = recommend_narrow_visibility(uncovered, pkg_path)
+                findings.append({
+                    "source": "visibility_audit",
+                    "category": "uncovered_rdep_visibility",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": vis_kw.lineno,
+                    "message": (
+                        f"Target '{target_name}' has visibility that does not cover {len(shown)} package(s) whose "
+                        f"BUILD.gn/BUILD.bazel depend on it or on a sub-target it generates "
+                        f"(e.g. '{target_name}_rust', '{target_name}_cpp'): {', '.join(shown)}. GN enforces the "
+                        f"converted visibility on every generated sub-target, and callers outside the locally "
+                        f"built product graph (other products, the internal tree) only fail in CQ with "
+                        f"'Dependency not allowed'."
+                    ),
+                    "remediation": (
+                        f"Add {json.dumps(add_entries)} to the visibility of '{target_name}' (or use the "
+                        f"find_rdeps per_target_recommended_visibility {json.dumps(rec_target_vis)}) and re-run "
+                        f"fx bazel2gn."
+                    ),
+                })
+
         new_entries = [(val, lineno) for (val, lineno) in entries if val not in preexisting_vis]
         if len(new_entries) > 15 and (is_globally_used or len(area_rollup_vis) < len(entries)):
             if is_globally_used:
@@ -566,8 +659,11 @@ for rel_path in sorted(candidate_files):
             if val in preexisting_vis:
                 continue
             if val == "//visibility:public":
+                rule_id = node.func.id if isinstance(node.func, ast.Name) else ""
                 if (
                     not is_globally_used
+                    and rule_id != "fx_test"
+                    and not rule_id.startswith("wrap_host_")
                     and len(target_rdeps) > 0
                     and len(distinct_areas) <= 3
                     and len(narrow_vis) <= 10

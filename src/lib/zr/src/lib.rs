@@ -5,6 +5,7 @@
 #![no_std]
 
 mod defer;
+mod inline_fn;
 mod lossy_utf8;
 mod opaque;
 mod opaque_bytes;
@@ -14,6 +15,11 @@ mod static_assert;
 mod string;
 
 pub use defer::{Deferred, defer};
+pub use inline_fn::{
+    DEFAULT_INLINE_FN_SIZE, FnMutWithSig, FnOnceWithSig, FnSig, FnWithSig, InlineFn, InlineFnMut,
+    InlineFnOnce, Local, SendInlineFn, SendInlineFnMut, SendInlineFnOnce, SendOnly, SendSync,
+    SendSyncInlineFn, SendSyncInlineFnMut, SendSyncInlineFnOnce, ThreadSafety,
+};
 pub use lossy_utf8::from_utf8_lossy;
 pub use opaque::{Opaque, OpaqueFacade};
 pub use opaque_bytes::OpaqueBytes;

@@ -51,7 +51,8 @@ use crate::object_store::journal::{JournalCheckpoint, JournalCheckpointV32, Jour
 use crate::object_store::key_manager::KeyManager;
 use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, LockKeys, MutationV59, ObjectMutationIterator,
-    ObjectStoreMutation, Operation, Options, Transaction, WriteGuard, lock_keys,
+    ObjectStoreMutation, Operation, Options, ReservationOptions, Transaction, WriteGuard,
+    lock_keys,
 };
 use crate::serialized_types::{
     AES_JOURNAL_ENCRYPTION_VERSION, DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Version, Versioned,
@@ -1341,7 +1342,7 @@ impl ObjectStore {
         fscrypt_info: Option<FscryptDirInfo>,
     ) -> Result<DataObjectHandle<S>, Error> {
         let store = owner.as_ref().as_ref();
-        let object_id = store.get_next_object_id().await?;
+        let object_id = store.get_next_object_id(transaction).await?;
         let crypt = store.crypt();
         let encryption_options = if let Some(crypt) = crypt {
             let key_id = if fscrypt_info.is_some() { FSCRYPT_KEY_ID } else { VOLUME_DATA_KEY_ID };
@@ -1510,7 +1511,7 @@ impl ObjectStore {
         self.trim_or_tombstone(
             object_id,
             false,
-            Options { borrow_metadata_space: true, ..Default::default() },
+            Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
             truncate_guard,
         )
         .await
@@ -2451,8 +2452,11 @@ impl ObjectStore {
     /// Returns a new object ID that can be used.  This will create an object ID cipher if needed.
     ///
     /// If the object ID key needs to be rolled, a new transaction will be created and committed.
-    pub(super) async fn get_next_object_id(&self) -> Result<ReservedId<'_>, Error> {
-        {
+    pub(super) async fn get_next_object_id(
+        &self,
+        parent_transaction: &Transaction<'_>,
+    ) -> Result<ReservedId<'_>, Error> {
+        let low_32_bit = {
             let mut last_object_id = self.last_object_id.lock();
             if let Some(id) = last_object_id.try_get_next() {
                 return Ok(ReservedId::new(self, id));
@@ -2461,53 +2465,18 @@ impl ObjectStore {
                 !matches!(&*last_object_id, LastObjectId::Unencrypted { .. }),
                 FxfsError::Inconsistent
             );
-        }
-
-        let parent_store = self.parent_store().unwrap();
-
-        // Create a transaction (which has a lock) and then check again.
-        //
-        // NOTE: Since this can be a nested transaction, we must take care to avoid deadlocks; no
-        // more locks should be taken whilst we hold this lock.
-        let mut transaction = parent_store
-            .new_transaction(
-                lock_keys![LockKey::object(parent_store.store_object_id, self.store_object_id)],
-                Options {
-                    // We must skip journal checks because this transaction might be needed to
-                    // compact.
-                    skip_journal_checks: true,
-                    borrow_metadata_space: true,
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        let mut next_id_hi = 0;
-
-        let is_low_32_bit = {
-            let mut last_object_id = self.last_object_id.lock();
-            if let Some(id) = last_object_id.try_get_next() {
-                // Something else raced and created/rolled the cipher.
-                return Ok(ReservedId::new(self, id));
-            }
-
-            match &*last_object_id {
-                LastObjectId::Encrypted { id, .. } => {
-                    // It shouldn't be possible for last_object_id to wrap within our lifetime, so
-                    // if this happens, it's most likely due to corruption.
-                    next_id_hi =
-                        id.checked_add(1 << 32).ok_or(FxfsError::Inconsistent)? & OBJECT_ID_HI_MASK;
-
-                    info!(store_id = self.store_object_id; "Rolling object ID key");
-
-                    false
-                }
-                LastObjectId::Low32Bit { .. } => true,
-                _ => unreachable!(),
-            }
+            matches!(&*last_object_id, LastObjectId::Low32Bit { .. })
         };
 
-        if is_low_32_bit {
+        let parent_store = self.parent_store().unwrap();
+        let lock_keys =
+            lock_keys![LockKey::object(parent_store.store_object_id, self.store_object_id)];
+        if low_32_bit {
+            // NOTE: Since `parent_transaction` may already hold locks, we must take care to avoid
+            // deadlocks; no more locks should be taken whilst we hold this lock.
+            let fs = self.filesystem();
+            let _guard = fs.lock_manager().txn_lock(lock_keys).await;
+
             // Keep picking an object ID at random until we find one free.
 
             // To avoid races, this must be before we capture the layer set.
@@ -2528,6 +2497,36 @@ impl ObjectStore {
                 }
             }
         } else {
+            // Create a transaction (which has a lock) and then check again.
+            //
+            // NOTE: Since this is a nested transaction, we must take care to avoid deadlocks; no
+            // more locks should be taken whilst we hold this lock.
+            let mut transaction = parent_store
+                .new_transaction(
+                    lock_keys,
+                    Options { parent_transaction: Some(parent_transaction), ..Default::default() },
+                )
+                .await?;
+
+            let next_id_hi = {
+                let mut last_object_id = self.last_object_id.lock();
+                if let Some(id) = last_object_id.try_get_next() {
+                    // Something else raced and created/rolled the cipher.
+                    return Ok(ReservedId::new(self, id));
+                }
+
+                match &*last_object_id {
+                    LastObjectId::Encrypted { id, .. } => {
+                        // It shouldn't be possible for last_object_id to wrap within our lifetime,
+                        // so if this happens, it's most likely due to corruption.
+                        info!(store_id = self.store_object_id; "Rolling object ID key");
+
+                        id.checked_add(1 << 32).ok_or(FxfsError::Inconsistent)? & OBJECT_ID_HI_MASK
+                    }
+                    _ => unreachable!(),
+                }
+            };
+
             // Create a key.
             let (object_id_wrapped, object_id_unwrapped) = self
                 .crypt()
@@ -2900,7 +2899,10 @@ impl ObjectStore {
             let mut transaction = self
                 .new_transaction(
                     lock_keys![LockKey::object(self.store_object_id, object_id,)],
-                    Options { borrow_metadata_space: true, ..Default::default() },
+                    Options {
+                        reservation: ReservationOptions::BorrowedMetadata,
+                        ..Default::default()
+                    },
                 )
                 .await?;
             if precondition() {
@@ -3421,7 +3423,8 @@ mod tests {
     };
     use crate::errors::FxfsError;
     use crate::filesystem::{
-        FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem,
+        FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, MAX_IN_FLIGHT_TRANSACTIONS,
+        OpenFxFilesystem,
     };
     use crate::fsck::{fsck, fsck_volume};
     use crate::hooks::{Hooks, HooksHandle};
@@ -4179,6 +4182,235 @@ mod tests {
 
         fsck(fs.clone()).await.expect("fsck failed");
         fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck_volume failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_object_id_cipher_roll_no_space() {
+        let fs = test_filesystem().await;
+        let crypt = Arc::new(new_insecure_crypt());
+
+        {
+            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store = root_volume
+                .new_volume(
+                    "test",
+                    NewChildStoreOptions {
+                        options: StoreOptions {
+                            crypt: Some(crypt.clone()),
+                            ..StoreOptions::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("new_volume failed");
+
+            let root_directory = Directory::open(&store, store.root_directory_object_id())
+                .await
+                .expect("open failed");
+
+            // Force the next object ID allocation to roll the object ID cipher.
+            match &mut *store.last_object_id.lock() {
+                LastObjectId::Encrypted { id, .. } => {
+                    *id |= 0xffffffff;
+                }
+                _ => unreachable!(),
+            }
+
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        store.store_object_id(),
+                        store.root_directory_object_id()
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+
+            // Reserve all remaining free space in the allocator so that rolling the object ID
+            // cipher fails with NoSpace rather than borrowing metadata space.
+            let reservation = fs.allocator().reserve_with(None, |limit| limit);
+            let err = root_directory
+                .create_child_file(&mut transaction, "test")
+                .await
+                .err()
+                .expect("create_child_file should fail with NoSpace");
+            assert!(FxfsError::NoSpace.matches(&err), "unexpected error: {err:?}");
+
+            std::mem::drop(reservation);
+
+            let object = root_directory
+                .create_child_file(&mut transaction, "test")
+                .await
+                .expect("create_child_file failed");
+            transaction.commit().await.expect("commit failed");
+
+            assert_eq!(object.object_id() & OBJECT_ID_HI_MASK, 1u64 << 32);
+        }
+
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_object_id_cipher_roll_checks_journal_space() {
+        let reclaim_size = 65536;
+        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fs = FxFilesystemBuilder::new()
+            .hooks(fs_hooks)
+            .journal_options(JournalOptions { reclaim_size, ..Default::default() })
+            .format(true)
+            .open(device)
+            .await
+            .expect("open failed");
+
+        {
+            let crypt = Arc::new(new_insecure_crypt());
+            let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+            let store = root_volume
+                .new_volume(
+                    "test",
+                    NewChildStoreOptions {
+                        options: StoreOptions { crypt: Some(crypt), ..StoreOptions::default() },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("new_volume failed");
+            let root_directory = Directory::open(&store, store.root_directory_object_id())
+                .await
+                .expect("open failed");
+
+            let write_xattrs = || async {
+                for _ in 0..4 {
+                    let mut t = store
+                        .new_transaction(
+                            lock_keys![LockKey::object(store.store_object_id(), 1000)],
+                            Options::default(),
+                        )
+                        .await
+                        .expect("new_transaction failed");
+                    for i in 0..18 {
+                        t.add(
+                            store.store_object_id(),
+                            Mutation::replace_or_insert_object(
+                                ObjectKey::extended_attribute(
+                                    1000,
+                                    format!("attr_{i}").into_bytes(),
+                                ),
+                                ObjectValue::inline_extended_attribute(vec![0u8; 1024]),
+                            ),
+                        );
+                    }
+                    t.commit().await.expect("commit failed");
+                }
+            };
+
+            // Warm up the store and journal so initial borrowed metadata space is paid down.
+            write_xattrs().await;
+            fs.journal().force_compact().await.expect("force_compact failed");
+            fs.journal().force_compact().await.expect("force_compact failed");
+            fs.journal().pause_compactions().await;
+
+            // Start the outer transaction before the journal fills up.
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        store.store_object_id(),
+                        store.root_directory_object_id()
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+
+            // Fill the journal past `reclaim_size` while compactions are paused so that space is
+            // tied up in the metadata reservation for uncompacted journal mutations.
+            write_xattrs().await;
+
+            let journal_clone = fs.journal().clone();
+            hooks.set_waiting_for_journal_space(move || {
+                journal_clone.resume_compactions();
+            });
+
+            // Reserve all remaining free space in the allocator so that rolling the object ID
+            // cipher can only succeed if the nested transaction waits for journal compaction to
+            // reclaim space.
+            let _reservation = fs.allocator().reserve_with(None, |limit| limit);
+
+            // Force the next object ID allocation to roll the object ID cipher.
+            match &mut *store.last_object_id.lock() {
+                LastObjectId::Encrypted { id, .. } => *id |= 0xffffffff,
+                _ => unreachable!(),
+            }
+
+            let object = root_directory
+                .create_child_file(&mut transaction, "test")
+                .await
+                .expect("create_child_file failed");
+            transaction.commit().await.expect("commit failed");
+
+            assert_eq!(object.object_id() & OBJECT_ID_HI_MASK, 1u64 << 32);
+        }
+
+        fsck(fs.clone()).await.expect("fsck failed");
+        fs.close().await.expect("Close failed");
+    }
+
+    #[test_case(false; "cipher_roll")]
+    #[test_case(true; "low_32_bit")]
+    #[fuchsia::test]
+    async fn test_get_next_object_id_with_max_in_flight_transactions(low_32_bit_object_ids: bool) {
+        let fs = test_filesystem().await;
+        let crypt = Arc::new(new_insecure_crypt());
+
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume(
+                "test",
+                NewChildStoreOptions {
+                    options: StoreOptions { crypt: Some(crypt), ..StoreOptions::default() },
+                    low_32_bit_object_ids,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("new_volume failed");
+
+        if !low_32_bit_object_ids {
+            // Force the next object ID allocation to roll the object ID cipher.
+            match &mut *store.last_object_id.lock() {
+                LastObjectId::Encrypted { id, .. } => *id |= 0xffffffff,
+                _ => unreachable!(),
+            }
+        }
+
+        let mut transactions = Vec::new();
+        for _ in 0..MAX_IN_FLIGHT_TRANSACTIONS {
+            transactions.push(
+                store
+                    .new_transaction(lock_keys![], Options::default())
+                    .await
+                    .expect("new_transaction failed"),
+            );
+        }
+
+        ObjectStore::create_object(
+            &store,
+            transactions.last_mut().unwrap(),
+            HandleOptions::default(),
+            None,
+        )
+        .await
+        .expect("create_object failed");
+
+        for transaction in transactions {
+            transaction.commit().await.expect("commit failed");
+        }
+
+        fs.close().await.expect("Close failed");
     }
 
     #[fuchsia::test(threads = 2)]
@@ -6005,7 +6237,8 @@ mod tests {
                 .await
                 .expect("new_transaction failed");
 
-            let reserved_id = store.get_next_object_id().await.expect("get_next_object_id failed");
+            let reserved_id =
+                store.get_next_object_id(&transaction).await.expect("get_next_object_id failed");
             let object_id = reserved_id.get();
 
             let (fxfs_key, unwrapped_key) =

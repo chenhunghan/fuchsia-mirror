@@ -475,8 +475,9 @@ pub fn inotify_init(kernel: &Kernel) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use starnix_core::testing::spawn_kernel_and_run_with_pkgfs;
+    use starnix_core::testing::{spawn_kernel_and_run, spawn_kernel_and_run_with_pkgfs};
     use starnix_core::vfs::buffers::VecOutputBuffer;
+    use starnix_core::vfs::{DirectoryMode, UnlinkKind};
 
     #[::fuchsia::test]
     fn inotify_event() {
@@ -737,6 +738,53 @@ mod tests {
                 assert_eq!(state.events.queue.len(), 1);
                 assert_eq!(state.events.queue.get(0).unwrap().mask, InotifyMask::IGNORED);
             }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn vfs_unlink_directory_emits_delete_self_and_ignored() {
+        // The root must be writable, so this cannot use the pkgfs helper.
+        spawn_kernel_and_run(async |current_task| {
+            inotify_init(current_task.kernel());
+            let file = InotifyFileObject::new_file(&current_task, true);
+            let inotify =
+                file.downcast_file::<InotifyFileObject>().expect("failed to downcast to inotify");
+
+            let root = current_task.fs().root();
+            let subdir = root
+                .create_node(
+                    &current_task,
+                    "watched_dir".into(),
+                    FileMode::IFDIR | FileMode::from_bits(0o755),
+                    starnix_uapi::device_id::DeviceId::NONE,
+                )
+                .expect("create_node");
+
+            assert!(
+                inotify
+                    .add_watch(
+                        subdir.entry.clone(),
+                        InotifyMask::CREATE | InotifyMask::DELETE_SELF,
+                        &file
+                    )
+                    .is_ok()
+            );
+
+            root.unlink(
+                &current_task,
+                "watched_dir".into(),
+                UnlinkKind::Directory,
+                DirectoryMode::MustBeDirectory,
+            )
+            .expect("unlink dir");
+
+            assert_eq!(subdir.entry.node.ensure_watchers().watchers.lock().len(), 0);
+            let state = inotify.state.lock();
+            assert_eq!(state.watches.len(), 0);
+            assert_eq!(state.events.queue.len(), 2);
+            assert_eq!(state.events.queue.get(0).unwrap().mask, InotifyMask::DELETE_SELF);
+            assert_eq!(state.events.queue.get(1).unwrap().mask, InotifyMask::IGNORED);
         })
         .await;
     }

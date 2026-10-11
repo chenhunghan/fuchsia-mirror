@@ -103,7 +103,13 @@ pub trait ToolSuite: Sized {
 
     /// Prints out a list of the commands this suite has available
     async fn print_command_list(&self, w: &mut impl Write) -> Result<(), std::fmt::Error> {
-        print_command_list(w, &self.command_list().await)
+        print_command_list(w, &self.command_list().await, None)
+    }
+
+    /// Prints out a list of all commands and their subcommands this suite has available
+    async fn print_all_commands(&self, w: &mut impl Write) -> Result<(), std::fmt::Error> {
+        let args_info = self.get_args_info().await.unwrap_or_default();
+        print_command_list(w, &self.command_list().await, Some(&args_info))
     }
 
     /// Finds the given tool by name in the available command list
@@ -115,7 +121,11 @@ pub trait ToolSuite: Sized {
     async fn get_args_info(&self) -> Result<CliArgsInfo, Error>;
 }
 
-fn print_command_list(w: &mut impl Write, commands: &[FfxToolInfo]) -> Result<(), std::fmt::Error> {
+fn print_command_list(
+    w: &mut impl Write,
+    commands: &[FfxToolInfo],
+    args_info: Option<&CliArgsInfo>,
+) -> Result<(), std::fmt::Error> {
     let mut found = HashSet::new();
     let mut built_in = None;
     let mut workspace = None;
@@ -136,6 +146,11 @@ fn print_command_list(w: &mut impl Write, commands: &[FfxToolInfo]) -> Result<()
                 Sdk => sdk.get_or_insert_with(String::new),
             };
             cmd.write_description(kind);
+            if let Some(sub_info) =
+                args_info.and_then(|info| info.commands.iter().find(|s| s.name == cmd.name))
+            {
+                write_subcommands_recursive(kind, &sub_info.command.commands, 1);
+            }
         }
     }
 
@@ -149,4 +164,27 @@ fn print_command_list(w: &mut impl Write, commands: &[FfxToolInfo]) -> Result<()
         writeln!(w, "SDK Commands:\n{sdk}\n")?;
     }
     Ok(())
+}
+
+fn write_subcommands_recursive(
+    out: &mut String,
+    subcommands: &[crate::args_info::SubCommandInfo],
+    depth: usize,
+) {
+    let mut seen = HashSet::<&str>::new();
+    let mut sorted_subcommands: Vec<_> = subcommands.iter().collect();
+    sorted_subcommands.sort_by(|a, b| a.name.cmp(&b.name));
+    for subcommand in sorted_subcommands {
+        if seen.insert(&subcommand.name) {
+            crate::describe::write_description_with_indent(
+                out,
+                &subcommand.name,
+                &subcommand.command.description,
+                depth,
+            );
+            if !subcommand.command.commands.is_empty() {
+                write_subcommands_recursive(out, &subcommand.command.commands, depth + 1);
+            }
+        }
+    }
 }

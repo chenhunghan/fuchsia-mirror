@@ -31,8 +31,8 @@ use range_check::get_intersect_offset_len;
 use zx_status::Status;
 use zx_types::{ZX_RSRC_KIND_MMIO, ZX_RSRC_KIND_SYSTEM, zx_rsrc_kind_t, zx_rsrc_system_base_t};
 
-use super::Dispatcher;
 use super::handle::HandleValue;
+use super::process_dispatcher::ProcessDispatcher;
 use super::resource_dispatcher::ResourceDispatcher;
 use crate::root_resource_filter::root_resource_filter_can_access_region;
 
@@ -57,7 +57,9 @@ pub fn validate_resource_kind_base(
     kind: zx_rsrc_kind_t,
     base: zx_rsrc_system_base_t,
 ) -> Result<(), Status> {
-    let resource = Dispatcher::get::<ResourceDispatcher>(handle)?;
+    let resource = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher::<ResourceDispatcher>(up, handle)
+    })?;
     if resource.get_kind() == kind && resource.get_base() == base {
         Ok(())
     } else {
@@ -181,7 +183,9 @@ pub fn validate_ranged_resource_with_strict(
     size: usize,
     strict_validation: StrictValidation,
 ) -> Result<(), Status> {
-    let resource = Dispatcher::get::<ResourceDispatcher>(handle)?;
+    let resource = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher::<ResourceDispatcher>(up, handle)
+    })?;
     validate_ranged_resource_dispatcher(&resource, kind, base, size, strict_validation)
 }
 

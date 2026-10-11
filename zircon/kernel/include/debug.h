@@ -52,6 +52,9 @@ uintptr_t choose_stack_guard(void);
 /* spin the cpu for a period of (short) time */
 void spin(uint32_t usecs);
 
+/* deliberately panic through the Rust panic handler; defined in top/debug.rs */
+void rust_debug_crash_panic(void) __NO_RETURN;
+
 // A printf-like macro which prepend's the user's message with the special
 // "ZIRCON KERNEL OOPS" tag.  zbi_test bots look for tags like this and consider
 // their presence to indicate test failures, even if the higher level test

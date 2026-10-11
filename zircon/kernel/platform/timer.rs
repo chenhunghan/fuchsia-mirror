@@ -268,6 +268,7 @@ unsafe extern "C" {
     fn cpp_current_mono_time() -> InstantMono;
     fn cpp_current_boot_time() -> InstantBoot;
     fn cpp_timer_get_ticks_to_time_ratio() -> Ratio;
+    fn cpp_timer_get_mono_ticks_offset() -> i64;
 }
 
 /// Returns the current monotonic time in ticks.
@@ -308,6 +309,13 @@ pub fn timer_get_ticks_to_time_ratio() -> Ratio {
     // SAFETY: Calling this FFI function has no preconditions and returns the globally configured
     // timer ticks to time ratio.
     unsafe { cpp_timer_get_ticks_to_time_ratio() }
+}
+
+/// The offset added to raw platform ticks to put them on the monotonic ticks timeline.
+#[inline]
+pub fn timer_get_mono_ticks_offset() -> i64 {
+    // SAFETY: Calling this FFI function has no preconditions and safely returns the offset.
+    unsafe { cpp_timer_get_mono_ticks_offset() }
 }
 
 /// Platform timer tests.

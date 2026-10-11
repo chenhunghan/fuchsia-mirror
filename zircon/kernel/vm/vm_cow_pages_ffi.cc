@@ -69,6 +69,10 @@ FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_empty(const VmCowPages* cow, ui
   return cow->DebugIsEmpty(offset);
 }
 
+FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_page(const VmCowPages* cow, uint64_t offset) {
+  return cow->DebugIsPage(offset);
+}
+
 FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_debug_is_high_memory_priority(const VmCowPages* cow) {
   return cow->DebugIsHighMemoryPriority();
 }

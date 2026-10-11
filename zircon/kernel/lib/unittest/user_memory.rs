@@ -110,7 +110,7 @@ impl UserMemory {
             vmo.clone(),
             /* vmo_offset= */ 0,
             arch_mmu_flags,
-            c"unittest",
+            b"unittest",
         );
 
         match mapping_result {

@@ -239,7 +239,7 @@ func (c *InstallerConfig) Shutdown(ctx context.Context) {
 	select {
 	case err := <-ch:
 		if err != nil {
-			log.Printf("caught an error: %w", err)
+			log.Printf("caught an error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		log.Printf("took longer than 5 seconds to shut down the installer")

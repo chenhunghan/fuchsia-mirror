@@ -8,6 +8,7 @@
 
 use debug::dprintf;
 use zx_status::Status;
+use zx_types::zx_ticks_t;
 
 use super::arch::{
     RISCV64_CSR_SIE, RISCV64_CSR_SIE_STIE, RISCV64_CSR_STIMECMP, RISCV64_CSR_TIME,
@@ -23,18 +24,18 @@ const _: () = assert!(core::mem::align_of::<DcfgRiscvGenericTimerDriver>() == 4)
 
 unsafe extern "C" {
     fn cpp_timer_tick();
-    fn cpp_timer_set_conversion_and_register(freq_hz: u32, initial_ticks: u64);
+    fn cpp_timer_set_conversion(freq_hz: u32, initial_ticks: u64);
 }
 
 /// Read the current architectural timer ticks from the `time` CSR.
 #[inline(always)]
-pub fn riscv_sbi_current_ticks() -> i64 {
+pub extern "C" fn riscv_sbi_current_ticks() -> zx_ticks_t {
     // SAFETY: Reading the time CSR has no side effects and returns the hardware timebase counter.
-    (unsafe { riscv64_csr_read::<RISCV64_CSR_TIME>() }) as i64
+    (unsafe { riscv64_csr_read::<RISCV64_CSR_TIME>() }) as zx_ticks_t
 }
 
 /// Program the next oneshot timer deadline in ticks.
-pub fn riscv_sbi_set_oneshot_timer(mut deadline: i64) -> Result<(), Status> {
+pub extern "C" fn riscv_sbi_set_oneshot_timer(mut deadline: zx_ticks_t) -> Result<(), Status> {
     debug_assert!(arch_ints_disabled());
 
     if deadline < 0 {
@@ -58,14 +59,14 @@ pub fn riscv_sbi_set_oneshot_timer(mut deadline: i64) -> Result<(), Status> {
 }
 
 /// Stop the hardware timer interrupt on the current CPU.
-pub fn riscv_sbi_timer_stop() -> Result<(), Status> {
+pub extern "C" fn riscv_sbi_timer_stop() -> Result<(), Status> {
     // SAFETY: Disabling supervisor timer interrupt in SIE CSR.
     unsafe { riscv64_csr_clear::<RISCV64_CSR_SIE>(RISCV64_CSR_SIE_STIE) };
     Ok(())
 }
 
 /// Shutdown the hardware timer on the current CPU.
-pub fn riscv_sbi_timer_shutdown() -> Result<(), Status> {
+pub extern "C" fn riscv_sbi_timer_shutdown() -> Result<(), Status> {
     debug_assert!(arch_ints_disabled());
     // SAFETY: Disabling supervisor timer interrupt in SIE CSR.
     unsafe { riscv64_csr_clear::<RISCV64_CSR_SIE>(RISCV64_CSR_SIE_STIE) };
@@ -84,51 +85,33 @@ pub extern "C" fn riscv64_timer_exception() {
 static TIMER_INITIALIZED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Returns true if the timer driver has completed early initialization.
+/// Returns true once the timer driver has completed early initialization: the
+/// ticks-to-time ratio and the initial ticks are set, so a raw ticks read can be
+/// placed on the timelines.
 #[inline(always)]
 pub fn timer_is_initialized() -> bool {
     TIMER_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Early initialization of the RISC-V generic timer driver.
-///
-/// # Safety
-/// `config` must point at a live `DcfgRiscvGenericTimerDriver` for the duration
-/// of the call. It comes from the driver configuration handed over by physboot.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn riscv_generic_timer_init_early(
-    config: *const DcfgRiscvGenericTimerDriver,
-) {
-    // SAFETY: the caller guarantees `config` points at a live driver config.
-    let config = unsafe { &*config };
+static RISCV_SBI_TIMER_OPS: crate::pdev_timer::PdevTimerOps = crate::pdev_timer::PdevTimerOps {
+    current_ticks: Some(riscv_sbi_current_ticks),
+    set_oneshot_timer: Some(riscv_sbi_set_oneshot_timer),
+    stop: Some(riscv_sbi_timer_stop),
+    shutdown: Some(riscv_sbi_timer_shutdown),
+};
+
+/// Early initialization of the RISC-V generic timer driver from the driver
+/// configuration physboot handed off.
+pub fn riscv_generic_timer_init_early(config: &DcfgRiscvGenericTimerDriver) {
     let initial_ticks = riscv_sbi_current_ticks() as u64;
     dprintf!(INFO, "TIMER: registering SBI timer\n");
-    TIMER_INITIALIZED.store(true, core::sync::atomic::Ordering::Release);
-    // SAFETY: both arguments are plain integers; the callee registers the tick
-    // conversion ratio and takes no pointers from this side.
+    // SAFETY: both arguments are plain integers; the callee sets the tick
+    // conversion ratio and initial ticks and takes no pointers from this side.
     unsafe {
-        cpp_timer_set_conversion_and_register(config.freq_hz, initial_ticks);
+        cpp_timer_set_conversion(config.freq_hz, initial_ticks);
     }
-}
-
-// C FFI exports
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_riscv_sbi_current_ticks() -> i64 {
-    riscv_sbi_current_ticks()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_riscv_sbi_set_oneshot_timer(deadline: i64) -> Result<(), Status> {
-    riscv_sbi_set_oneshot_timer(deadline)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_riscv_sbi_timer_stop() -> Result<(), Status> {
-    riscv_sbi_timer_stop()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_riscv_sbi_timer_shutdown() -> Result<(), Status> {
-    riscv_sbi_timer_shutdown()
+    crate::pdev_timer::pdev_register_timer(&RISCV_SBI_TIMER_OPS);
+    // Only now is the timer initialized: the ratio and initial ticks are set,
+    // so raw ticks may be reported instead of zero.
+    TIMER_INITIALIZED.store(true, core::sync::atomic::Ordering::Release);
 }

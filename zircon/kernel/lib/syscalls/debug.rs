@@ -97,6 +97,16 @@ pub fn sys_debug_write(ptr: UserInPtr<u8>, mut len: usize) -> Result<(), Status>
 }
 
 #[syscall]
+pub fn sys_debug_suspend(_resource: HandleValue) -> Result<(), Status> {
+    Err(Status::NOT_SUPPORTED)
+}
+
+#[syscall]
+pub fn sys_debug_resume(_resource: HandleValue) -> Result<(), Status> {
+    Err(Status::NOT_SUPPORTED)
+}
+
+#[syscall]
 pub fn sys_debug_send_command(
     resource: HandleValue,
     ptr: UserInPtr<u8>,
@@ -142,7 +152,7 @@ pub fn sys_ktrace_read(
 ) -> Result<(), Status> {
     validate_system_resource(handle, ZX_RSRC_SYSTEM_TRACING_BASE)?;
 
-    let actual = KTrace::get_instance().read_user(data, offset, len)?;
+    let actual = KTrace::read_user(data, offset, len)?;
     out_actual.copy_to_user(&actual)?;
     Ok(())
 }
@@ -156,5 +166,5 @@ pub fn sys_ktrace_control(
 ) -> Result<(), Status> {
     validate_system_resource(handle, ZX_RSRC_SYSTEM_TRACING_BASE)?;
 
-    KTrace::get_instance().control(action, options)
+    KTrace::control(action, options)
 }

@@ -80,3 +80,20 @@ class TestConfig(unittest.TestCase):
                 (SystemExit, argparse.ArgumentError),
                 lambda: config.load_config(config_path),
             )
+
+    def test_load_config_preserves_quoted_arguments_with_spaces(self) -> None:
+        """Test that config loading preserves quoted arguments containing spaces and inline comments."""
+        with tempfile.TemporaryDirectory() as td:
+            config_path = os.path.join(td, "testrc")
+            with open(config_path, "w") as f:
+                f.write('--test-filter "foo bar" # inline comment\n')
+                f.write("--parallel 4\n")
+            config_file = config.load_config(config_path)
+            self.assertTrue(config_file.is_loaded())
+            self.assertEqual(
+                config_file.command_line,
+                ["--test-filter", "foo bar", "--parallel", "4"],
+            )
+            assert config_file.default_flags is not None
+            self.assertEqual(config_file.default_flags.test_filter, ["foo bar"])
+            self.assertEqual(config_file.default_flags.parallel, 4)

@@ -6,7 +6,7 @@
 
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
-#include <fidl/fuchsia.ui.composition.internal/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input.internal/cpp/fidl.h>
 #include <lib/async/default.h>
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
@@ -16,6 +16,8 @@
 namespace display {
 
 namespace {
+
+using fuchsia_ui_input_internal::InputOwnershipSignal;
 
 std::optional<size_t> PickFirstDisplayModeSatisfyingConstraints(
     std::span<const WireDisplayMode> modes, const DisplayModeConstraints& constraints) {
@@ -140,7 +142,7 @@ void DisplayManager::OnDisplaysChanged(fidl::VectorView<WireDisplayInfo> added,
       default_display_ = std::make_unique<Display>(
           display_info.id, mode, display_info.horizontal_size_mm, display_info.vertical_size_mm,
           display_info.max_layer_count, std::move(pixel_formats));
-      OnClientOwnershipChange(owns_display_coordinator_);
+      UpdateDisplayOwnershipEvent();
 
       if (display_available_cb_) {
         display_available_cb_();
@@ -171,16 +173,21 @@ void DisplayManager::SetDisplayAddedCallback(
 
 void DisplayManager::OnClientOwnershipChange(bool has_ownership) {
   owns_display_coordinator_ = has_ownership;
-  if (default_display_) {
-    if (has_ownership) {
-      default_display_->ownership_event().signal(
-          fuchsia_ui_composition_internal::kSignalDisplayNotOwned,
-          fuchsia_ui_composition_internal::kSignalDisplayOwned);
-    } else {
-      default_display_->ownership_event().signal(
-          fuchsia_ui_composition_internal::kSignalDisplayOwned,
-          fuchsia_ui_composition_internal::kSignalDisplayNotOwned);
-    }
+  UpdateDisplayOwnershipEvent();
+}
+
+void DisplayManager::UpdateDisplayOwnershipEvent() {
+  if (!default_display_) {
+    return;
+  }
+  if (owns_display_coordinator_) {
+    default_display_->ownership_event().signal(
+        static_cast<uint32_t>(InputOwnershipSignal::kDisplayUnowned),
+        static_cast<uint32_t>(InputOwnershipSignal::kDisplayPlatformOwned));
+  } else {
+    default_display_->ownership_event().signal(
+        static_cast<uint32_t>(InputOwnershipSignal::kDisplayPlatformOwned),
+        static_cast<uint32_t>(InputOwnershipSignal::kDisplayUnowned));
   }
 }
 

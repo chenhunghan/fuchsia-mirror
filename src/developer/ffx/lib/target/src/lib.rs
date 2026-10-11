@@ -55,9 +55,6 @@ pub use target_connector::{
     FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError, TargetConnector,
 };
 
-/// Re-export of [`fidl_fuchsia_developer_ffx::TargetProxy`] for ease of use
-pub use fidl_fuchsia_developer_ffx::TargetProxy;
-
 pub use target_errors::{UNKNOWN_TARGET_NAME, UNSPECIFIED_TARGET_NAME};
 
 pub fn is_discovery_enabled(ctx: &EnvironmentContext) -> bool {

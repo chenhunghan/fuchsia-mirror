@@ -6,12 +6,11 @@ import logging
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib import hostapd_constants, hostapd_security
-from antlion.utils import rand_ascii_str
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanRequestRejectedError,
 )
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib import hostapd_constants, hostapd_security
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib.access_point_config import (
     DEFAULT_2G_CHANNEL,
@@ -41,8 +40,10 @@ class StartStopClientConnectionsTest(
         if not self.openwrt_aps and not self.access_points:
             raise signals.TestAbortClass("Requires at least one access point.")
 
-        self.ssid = rand_ascii_str(hostapd_constants.AP_SSID_LENGTH_2G)
-        self.password = rand_ascii_str(
+        self.ssid = AccessPointConfig.random_string(
+            hostapd_constants.AP_SSID_LENGTH_2G
+        )
+        self.password = AccessPointConfig.random_string(
             hostapd_constants.AP_PASSPHRASE_LENGTH_2G
         )
         self.security_type = f_wlan_policy.SecurityType.WPA2

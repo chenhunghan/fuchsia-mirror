@@ -184,34 +184,31 @@ pub mod ioctl {
         let header_ref = UserRef::<uapi::fsverity_digest>::new(arg);
         let digest_addr = header_ref.next()?.addr();
         let header = task.read_object(header_ref.clone())?;
-        match &*file.node().fsverity.lock() {
-            FsVerityState::FsVerity => {
-                let block_size = file.name.entry.node.fs().statfs(task)?.f_bsize as u32;
-                if !block_size.is_power_of_two() {
-                    return error!(EINVAL);
-                }
-                let descriptor =
-                    file.node().ops().get_fsverity_descriptor(block_size.ilog2() as u8)?;
-                let digest_algorithm = HashAlgorithm::from_u8(descriptor.hash_algorithm)
-                    .ok_or_else(|| errno!(EINVAL))?;
-                let required_size = match digest_algorithm {
-                    HashAlgorithm::SHA256 => 32,
-                    HashAlgorithm::SHA512 => 64,
-                };
-                if (header.digest_size as usize) < required_size {
-                    return error!(EOVERFLOW);
-                }
-                let output_header = uapi::fsverity_digest {
-                    digest_algorithm: descriptor.hash_algorithm as u16,
-                    digest_size: required_size as u16,
-                    ..Default::default()
-                };
-                task.write_object(header_ref, &output_header)?;
-                task.write_memory(digest_addr, &fsverity_measurement(&descriptor)?)?;
-                Ok(SUCCESS)
-            }
-            _ => error!(ENODATA),
+        if !matches!(*file.node().fsverity.lock(), FsVerityState::FsVerity) {
+            return error!(ENODATA);
         }
+        let block_size = file.name.entry.node.fs().statfs(task)?.f_bsize as u32;
+        if !block_size.is_power_of_two() {
+            return error!(EINVAL);
+        }
+        let descriptor = file.node().ops().get_fsverity_descriptor(block_size.ilog2() as u8)?;
+        let digest_algorithm =
+            HashAlgorithm::from_u8(descriptor.hash_algorithm).ok_or_else(|| errno!(EINVAL))?;
+        let required_size = match digest_algorithm {
+            HashAlgorithm::SHA256 => 32,
+            HashAlgorithm::SHA512 => 64,
+        };
+        if (header.digest_size as usize) < required_size {
+            return error!(EOVERFLOW);
+        }
+        let output_header = uapi::fsverity_digest {
+            digest_algorithm: descriptor.hash_algorithm as u16,
+            digest_size: required_size as u16,
+            ..Default::default()
+        };
+        task.write_object(header_ref, &output_header)?;
+        task.write_memory(digest_addr, &fsverity_measurement(&descriptor)?)?;
+        Ok(SUCCESS)
     }
 
     /// ioctl handler for FS_IOC_READ_VERITY_METADATA.
@@ -221,28 +218,21 @@ pub mod ioctl {
         file: &FileObject,
     ) -> Result<SyscallResult, Errno> {
         let arg: fsverity_read_metadata_arg = task.read_object(arg.into())?;
-        match &*file.node().fsverity.lock() {
-            FsVerityState::FsVerity => {
-                match MetadataType::from_u64(arg.metadata_type).ok_or_else(|| errno!(EINVAL))? {
-                    MetadataType::MerkleTree => {
-                        error!(EOPNOTSUPP)
-                    }
-                    MetadataType::Descriptor => {
-                        // TODO(b/314182708): Remove hardcoding of blocksize
-                        let descriptor = file.node().ops().get_fsverity_descriptor(12)?;
-                        task.write_memory(
-                            UserAddress::from(arg.buf_ptr).into(),
-                            &descriptor.as_bytes()
-                                [arg.offset as usize..(arg.offset + arg.length) as usize],
-                        )?;
-                        Ok(SUCCESS)
-                    }
-                    MetadataType::Signature => {
-                        error!(EOPNOTSUPP)
-                    }
-                }
+        if !matches!(*file.node().fsverity.lock(), FsVerityState::FsVerity) {
+            return error!(ENODATA);
+        }
+        match MetadataType::from_u64(arg.metadata_type).ok_or_else(|| errno!(EINVAL))? {
+            MetadataType::MerkleTree => error!(EOPNOTSUPP),
+            MetadataType::Descriptor => {
+                // TODO(b/314182708): Remove hardcoding of blocksize
+                let descriptor = file.node().ops().get_fsverity_descriptor(12)?;
+                task.write_memory(
+                    UserAddress::from(arg.buf_ptr).into(),
+                    &descriptor.as_bytes()[arg.offset as usize..(arg.offset + arg.length) as usize],
+                )?;
+                Ok(SUCCESS)
             }
-            _ => error!(ENODATA),
+            MetadataType::Signature => error!(EOPNOTSUPP),
         }
     }
 }

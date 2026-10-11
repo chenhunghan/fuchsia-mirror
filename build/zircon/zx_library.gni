@@ -202,6 +202,19 @@ template("zx_library") {
       public_deps += [ ":$_headers_target" ]
     }
 
+    _target_headers = []
+    if (defined(invoker.public)) {
+      _target_headers += invoker.public
+    }
+    if (defined(invoker.sdk_headers)) {
+      foreach(header, invoker.sdk_headers) {
+        _target_headers += [ "include/$header" ]
+      }
+    }
+    if (defined(invoker.sdk_headers_for_internal_use)) {
+      _target_headers += invoker.sdk_headers_for_internal_use
+    }
+
     group(_headers_target) {
       # Used to represent header dependencies.
       # Direct use of public_configs should be rare but is sometimes needed.
@@ -220,6 +233,24 @@ template("zx_library") {
         public_deps = []
       }
       public_deps += [ "//zircon/system/public" ]
+
+      if (define_ninja_implicit_inputs && _target_headers != []) {
+        metadata = {
+          if (defined(invoker.metadata)) {
+            forward_variables_from(invoker.metadata, "*")
+          }
+          if (!defined(ninja_implicit_cxx_headers)) {
+            _target_label =
+                get_label_info(":$target_name", "label_with_toolchain")
+            ninja_implicit_cxx_headers = [
+              {
+                gn_label = _target_label
+                files = rebase_path(_target_headers, root_build_dir)
+              },
+            ]
+          }
+        }
+      }
     }
 
     config(_headers_config_target) {

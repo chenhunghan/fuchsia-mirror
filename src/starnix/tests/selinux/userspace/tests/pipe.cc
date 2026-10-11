@@ -53,6 +53,38 @@ TEST(PipeTest, BeforePolicyReceivesKernelContext) {
               SyscallResultIsOk("system_u:unconfined_r:unconfined_t:s0"));
 }
 
+// Creating a pipe does not check fifo_file permissions at creation time, so a domain without
+// `self:fifo_file { read write }` can create a pipe, but subsequent reads and writes are denied.
+TEST(PipeTest, ReadWriteDeniedWithoutSelfPermissions) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:pipe_test_t:s0", []() {
+    int pipe_fds[2];
+    ASSERT_THAT(pipe2(pipe_fds, O_NONBLOCK), SyscallSucceeds());
+    fbl::unique_fd read_fd(pipe_fds[0]);
+    fbl::unique_fd write_fd(pipe_fds[1]);
+
+    char buf = 'a';
+    EXPECT_THAT(write(write_fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(read(read_fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+// Reading from the write-only end of a pipe or writing to the read-only end must fail with EBADF
+// before consulting SELinux `fifo_file { read write }` permissions.
+TEST(PipeTest, WrongDirectionReturnsEbadfBeforePermissionCheck) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:pipe_test_t:s0", []() {
+    int pipe_fds[2];
+    ASSERT_THAT(pipe(pipe_fds), SyscallSucceeds());
+    fbl::unique_fd read_fd(pipe_fds[0]);
+    fbl::unique_fd write_fd(pipe_fds[1]);
+
+    char buf = 'a';
+    EXPECT_THAT(read(write_fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+    EXPECT_THAT(write(read_fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EBADF));
+  }));
+}
+
 }  // namespace
 
 extern std::string DoPrePolicyLoadWork() {

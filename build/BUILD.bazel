@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("//build/bazel/rules/host_tests:host_shac_test.bzl", "host_shac_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":shac_test"],
+)
+
+host_shac_test(
+    name = "shac_test",
+    src = "shac_test.star",
+    data = [
+        "shac.star",
+        # Executed for real by some tests, rather than mocked.
+        "//:prebuilt/third_party/gn/%s/gn" % build_config.host_tag,
+        "//scripts/shac:starlark_files",
+    ],
+)

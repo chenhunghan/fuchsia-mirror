@@ -1178,6 +1178,10 @@ struct Thread : public ChainLockable {
   const SchedulerQueueState& scheduler_queue_state() const TA_REQ(scheduler_variable_lock_) {
     return scheduler_queue_state_;
   }
+#ifdef UNITTESTS_ENABLED
+  void* rust_ktrace_override() const { return rust_ktrace_override_; }
+  void set_rust_ktrace_override(void* ktrace) { rust_ktrace_override_ = ktrace; }
+#endif
 
   WaitQueueCollection::ThreadState& wait_queue_state() TA_REQ(get_lock()) {
     return wait_queue_state_;
@@ -1420,6 +1424,10 @@ struct Thread : public ChainLockable {
   // This can be null if this is a kernel thread.
   // See the comments near active_aspace() for more details.
   RelaxedAtomic<VmAspace*> aspace_{nullptr};
+
+#ifdef UNITTESTS_ENABLED
+  void* rust_ktrace_override_{nullptr};
+#endif
 
   // Saved by SignalPolicyException() to store the type of policy error, and
   // passed to exception disptach in ProcessPendingSignals().

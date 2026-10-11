@@ -449,7 +449,14 @@ impl BrokerSvc {
         let Some(lease_name) = payload.lease_name else {
             return Err(fpb::LeaseError::InvalidArgument);
         };
-        let dependencies = payload.dependencies.unwrap_or_default();
+        let Some(dependencies) = payload.dependencies else {
+            return Err(fpb::LeaseError::InvalidArgument);
+        };
+        // A lease with no dependencies would have no targets and no claims, so it would be
+        // trivially satisfied and invisible in Inspect.
+        if dependencies.is_empty() {
+            return Err(fpb::LeaseError::InvalidArgument);
+        }
         for dep in &dependencies {
             if dep.requires_level.is_none() && dep.requires_level_by_preference.is_none() {
                 return Err(fpb::LeaseError::InvalidLevel);
@@ -636,16 +643,16 @@ impl BrokerSvc {
                     TopologyRequest::Lease { payload, responder } => {
                         fuchsia_trace::duration!(c"power-broker", c"Topology::Lease");
                         log::debug!("Lease({:?})", payload);
-                        let Ok((
+                        let (
                             lease_token,
                             lease_name,
                             dependencies,
                             should_return_pending_lease,
-                        )) = Self::validate_and_unpack_lease_payload(payload)
-                        else {
-                            return responder
-                                .send(Err(fpb::LeaseError::Internal))
-                                .context("send failed");
+                        ) = match Self::validate_and_unpack_lease_payload(payload) {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                return responder.send(Err(err)).context("send failed");
+                            }
                         };
                         let res = self
                             .clone()

@@ -34,26 +34,40 @@ TEST_F(MemFdClassTest, MemFdPrePolicyLoadGetsTmpFsSid) {
 TEST_F(MemFdClassTest, MemFdTransition) {
   auto enforcing = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_memfd_transition_t:s0", []() {
-    int fd;
-    EXPECT_THAT((fd = test_helper::MemFdCreate("test", 0)), SyscallSucceeds());
-    EXPECT_THAT(GetLabel(fd), SyscallResultIsOk("test_u:object_r:test_memfd_transitioned_t:s0"));
+    fbl::unique_fd fd(test_helper::MemFdCreate("test", 0));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_THAT(GetLabel(fd.get()),
+                SyscallResultIsOk("test_u:object_r:test_memfd_transitioned_t:s0"));
   }));
 }
 
 TEST_F(MemFdClassTest, MemFdNoTransition) {
   auto enforcing = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_memfd_no_transition_t:s0", []() {
-    int fd;
-    EXPECT_THAT((fd = test_helper::MemFdCreate("test", 0)), SyscallSucceeds());
-    EXPECT_THAT(GetLabel(fd), SyscallResultIsOk("test_u:object_r:test_memfd_no_transition_t:s0"));
+    fbl::unique_fd fd(test_helper::MemFdCreate("test", 0));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_THAT(GetLabel(fd.get()),
+                SyscallResultIsOk("test_u:object_r:test_memfd_no_transition_t:s0"));
   }));
 }
 
 TEST_F(MemFdClassTest, MemFdNoPermissions) {
   auto enforcing = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_memfd_no_create_permission_t:s0", []() {
-    int fd;
-    EXPECT_THAT((fd = test_helper::MemFdCreate("test", 0)), SyscallFailsWithErrno(EACCES));
+    fbl::unique_fd fd(test_helper::MemFdCreate("test", 0));
+    EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+TEST_F(MemFdClassTest, MemFdReadWriteDeniedWithoutSelfPermissions) {
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_memfd_no_transition_t:s0", []() {
+    fbl::unique_fd fd(test_helper::MemFdCreate("test", 0));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+
+    char buf = 'a';
+    EXPECT_THAT(write(fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(read(fd.get(), &buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
   }));
 }
 

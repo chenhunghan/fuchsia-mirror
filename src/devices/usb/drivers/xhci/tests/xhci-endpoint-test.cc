@@ -4,10 +4,13 @@
 
 #include "src/devices/usb/drivers/xhci/xhci-endpoint.h"
 
+#include <fidl/fuchsia.hardware.usb.endpoint/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.usb.request/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/driver/fake-bti/cpp/fake-bti.h>
 
 #include <list>
+#include <vector>
 
 #include <fake-dma-buffer/fake-dma-buffer.h>
 
@@ -18,6 +21,9 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_xhci {
 
+namespace fendpoint = fuchsia_hardware_usb_endpoint;
+namespace frequest = fuchsia_hardware_usb_request;
+
 struct FakeTRB : TRB {
   std::vector<TRB> contig;
 };
@@ -25,6 +31,20 @@ struct FakeTRB : TRB {
 constexpr uint32_t kDeviceId = 0;
 constexpr uint32_t kSlot = kDeviceId + 1;
 constexpr uint32_t kPort = 0;
+
+class CompletionCatcher : public fidl::SyncEventHandler<fendpoint::Endpoint> {
+ public:
+  void OnCompletion(fidl::Event<fendpoint::Endpoint::OnCompletion>& event) override {
+    for (const auto& completion : event.completion()) {
+      statuses_.push_back(completion.status());
+    }
+  }
+
+  const std::vector<std::optional<zx_status_t>>& statuses() const { return statuses_; }
+
+ private:
+  std::vector<std::optional<zx_status_t>> statuses_;
+};
 
 class EndpointHarness : public ::testing::Test {
  public:
@@ -49,7 +69,7 @@ class EndpointHarness : public ::testing::Test {
     EXPECT_OK(ep_->Init(nullptr, nullptr));
 
     // Connect client
-    auto endpoints = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+    auto endpoints = fidl::Endpoints<fendpoint::Endpoint>::Create();
     ep_->Connect(loop_.dispatcher(), std::move(endpoints.server));
     client_.Bind(std::move(endpoints.client));
   }
@@ -69,6 +89,18 @@ class EndpointHarness : public ::testing::Test {
     EXPECT_TRUE(expected_disable_endpoint_.empty());
 
     ASSERT_TRUE(driver_test().StopDriver().is_ok());
+  }
+
+  // The deadline is generous because these tests also run on emulators without KVM and on
+  // sanitizer builds. Without it, a request the driver never completes would hang here rather
+  // than fail.
+  void ExpectOneCompletion(zx_status_t expected) {
+    ASSERT_OK(client_.client_end().channel().wait_one(ZX_CHANNEL_READABLE,
+                                                      zx::deadline_after(zx::sec(30)), nullptr));
+    CompletionCatcher catcher;
+    ASSERT_TRUE(client_.HandleOneEvent(catcher).ok());
+    ASSERT_EQ(catcher.statuses().size(), 1u);
+    EXPECT_EQ(catcher.statuses()[0], expected);
   }
 
   FakeTRB* CreateTRB() {
@@ -98,7 +130,7 @@ class EndpointHarness : public ::testing::Test {
 
  protected:
   std::unique_ptr<Endpoint> ep_;
-  fidl::SyncClient<fuchsia_hardware_usb_endpoint::Endpoint> client_;
+  fidl::SyncClient<fendpoint::Endpoint> client_;
 
  private:
   async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
@@ -241,7 +273,7 @@ TEST_F(EndpointHarness, Init) { Init(1); }
 TEST_F(EndpointHarness, GetInfo) {
   Init(1);
 
-  auto result = client_->GetInfo();
+  fidl::Result<fendpoint::Endpoint::GetInfo> result = client_->GetInfo();
   ASSERT_TRUE(result.is_ok());
   ASSERT_TRUE(result->info().bulk().has_value());
   EXPECT_TRUE(result->info().bulk()->supports_scatter_gather().value());
@@ -251,11 +283,11 @@ TEST_F(EndpointHarness, QueueControlRequest) {
   // ep_addr needs to be 0 to queue a control request.
   Init(0);
 
-  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
-  vmo_info.emplace_back(std::move(
-      fuchsia_hardware_usb_endpoint::VmoInfo().id(8).size(2 * zx_system_get_page_size())));
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(2 * zx_system_get_page_size())));
   {
-    auto result = client_->RegisterVmos({std::move(vmo_info)});
+    fidl::Result<fendpoint::Endpoint::RegisterVmos> result =
+        client_->RegisterVmos({std::move(vmo_info)});
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(result->vmos().size(), 1UL);
     EXPECT_EQ(result->vmos().at(0).id(), 8UL);
@@ -264,24 +296,23 @@ TEST_F(EndpointHarness, QueueControlRequest) {
   expected_ring_doorbell_.emplace(kSlot, 1);
   zx::vmo vmo;
   EXPECT_OK(zx::vmo::create(zx_system_get_page_size() * 2, 0, &vmo));
-  std::vector<fuchsia_hardware_usb_request::Request> requests;
+  std::vector<frequest::Request> requests;
   ASSERT_LE(zx_system_get_page_size() * 2, static_cast<uint32_t>(UINT16_MAX));
   requests.emplace_back()
       .defer_completion(false)
-      .information(fuchsia_hardware_usb_request::RequestInfo::WithControl(
-          fuchsia_hardware_usb_request::ControlRequestInfo().setup(
-              fdescriptor::UsbSetup()
-                  .bm_request_type(kStandardDeviceIn)
-                  .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
-                  .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
-                  .w_length(static_cast<uint16_t>(zx_system_get_page_size() * 2)))))
+      .information(frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+          fdescriptor::UsbSetup()
+              .bm_request_type(kStandardDeviceIn)
+              .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+              .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
+              .w_length(static_cast<uint16_t>(zx_system_get_page_size() * 2)))))
       .data()
       .emplace()
       .emplace_back()
       .offset(0)
       .size(zx_system_get_page_size() * 2)
-      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(8));
-  auto result = client_->QueueRequests(std::move(requests));
+      .buffer(frequest::Buffer::WithVmoId(8));
+  fit::result<fidl::OneWayError> result = client_->QueueRequests(std::move(requests));
   ASSERT_TRUE(result.is_ok());
 
   sync_completion_wait(&doorbell_, zx::time::infinite().get());
@@ -318,29 +349,28 @@ TEST_F(EndpointHarness, QueueNormalRequest) {
   // ep_addr needs to be non-0 to queue a normal request.
   Init(1);
 
-  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
-  vmo_info.emplace_back(std::move(
-      fuchsia_hardware_usb_endpoint::VmoInfo().id(8).size(2 * zx_system_get_page_size())));
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(2 * zx_system_get_page_size())));
   {
-    auto result = client_->RegisterVmos({std::move(vmo_info)});
+    fidl::Result<fendpoint::Endpoint::RegisterVmos> result =
+        client_->RegisterVmos({std::move(vmo_info)});
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(result->vmos().size(), 1UL);
     EXPECT_EQ(result->vmos().at(0).id(), 8UL);
   }
 
   expected_ring_doorbell_.emplace(kSlot, 2 + kDeviceId);
-  std::vector<fuchsia_hardware_usb_request::Request> requests;
+  std::vector<frequest::Request> requests;
   requests.emplace_back()
       .defer_completion(false)
-      .information(fuchsia_hardware_usb_request::RequestInfo::WithBulk(
-          fuchsia_hardware_usb_request::BulkRequestInfo()))
+      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
       .data()
       .emplace()
       .emplace_back()
       .offset(0)
       .size(zx_system_get_page_size() * 2)
-      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(8));
-  auto result = client_->QueueRequests(std::move(requests));
+      .buffer(frequest::Buffer::WithVmoId(8));
+  fit::result<fidl::OneWayError> result = client_->QueueRequests(std::move(requests));
   ASSERT_TRUE(result.is_ok());
 
   sync_completion_wait(&doorbell_, zx::time::infinite().get());
@@ -364,6 +394,42 @@ TEST_F(EndpointHarness, QueueNormalRequest) {
   EXPECT_EQ(data_trb->LENGTH(), zx_system_get_page_size());
   EXPECT_EQ(data_trb->SIZE(), 0UL);
   EXPECT_TRUE(data_trb->NO_SNOOP());
+}
+
+// Regression test: QueueRequests must not crash when DeviceState has been
+// torn down (e.g. during mid-stream unplug).  Previously, QueueRequest and
+// QueueRequests dereferenced GetDeviceState()[device_id_] without a null
+// check, causing a null-pointer dereference fault.
+TEST_F(EndpointHarness, QueueRequestWithNullDeviceState) {
+  Init(1);
+
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(zx_system_get_page_size())));
+  {
+    fidl::Result<fendpoint::Endpoint::RegisterVmos> result =
+        client_->RegisterVmos({std::move(vmo_info)});
+    ASSERT_TRUE(result.is_ok());
+  }
+
+  // Simulate device teardown racing with in-flight FIDL requests.
+  driver_test().driver()->GetDeviceState()[kDeviceId].reset();
+
+  // Queue a request - must complete gracefully, not crash.
+  // No doorbell should be rung since the request fails early.
+  std::vector<frequest::Request> requests;
+  requests.emplace_back()
+      .defer_completion(false)
+      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+      .data()
+      .emplace()
+      .emplace_back()
+      .offset(0)
+      .size(zx_system_get_page_size())
+      .buffer(frequest::Buffer::WithVmoId(8));
+  fit::result<fidl::OneWayError> result = client_->QueueRequests(std::move(requests));
+  ASSERT_TRUE(result.is_ok());
+
+  ASSERT_NO_FATAL_FAILURE(ExpectOneCompletion(ZX_ERR_IO_NOT_PRESENT));
 }
 
 }  // namespace usb_xhci

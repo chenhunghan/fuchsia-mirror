@@ -25,6 +25,29 @@
     ],
     offer: [
         {
+            from: "#self",
+            to: "#usb-phy-ffe09000",
+            driver_config: "fuchsia.hardware.usb.phy.Metadata",
+            phy_type: "G12_B",
+            usb_phy_modes: [
+                {
+                    protocol: "USB_2_0",
+                    dr_mode: "HOST",
+                    is_otg_capable: false,
+                },
+                {
+                    protocol: "USB_2_0",
+                    dr_mode: "PERIPHERAL",
+                    is_otg_capable: true,
+                },
+                {
+                    protocol: "USB_3_0",
+                    dr_mode: "HOST",
+                    is_otg_capable: false,
+                },
+            ],
+        },
+        {
             name: "pdev",
             service: "fuchsia.hardware.platform.device.Service",
             from: "parent",

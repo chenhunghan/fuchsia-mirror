@@ -7,6 +7,9 @@
 #include <lib/fit/defer.h>
 #include <zircon/syscalls.h>
 
+#include <atomic>
+#include <thread>
+
 #include <fbl/string_printf.h>
 #include <ffl/string.h>
 #include <gmock/gmock.h>
@@ -1327,6 +1330,146 @@ TEST_F(MixStageTest, RampingMixExceedsScaleArrLen) {
   // Without capping dest.frame_count to kScaleArrLen inside Mixer::Mix during a gain ramp,
   // processing 1920 requested frames in one mix step reads beyond our 960-float scale_arr buffer.
   EXPECT_EQ(buf->length(), kRequestedFrames);
+}
+
+// Verify that Trim releases temporary StreamHolder references upon returning, so RemoveInput
+// immediately drops MixStage's references to the input stream and mixer.
+TEST_F(MixStageTest, TrimReleasesRemovedInputStreamImmediately) {
+  auto stage = std::make_shared<MixStage>(
+      kDefaultFormat, kBlockSizeFrames,
+      fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(0, 0, 1, 1)),
+      context().clock_factory()->CreateClientFixed(
+          clock::testing::CreateCustomClock({.synthetic_offset_from_mono = zx::duration(0)})
+              .take_value()));
+
+  auto timeline_function = TimelineFunction(
+      TimelineRate(Fixed(kDefaultFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs()));
+
+  auto stream = std::make_shared<testing::FakeStream>(kDefaultFormat, context().clock_factory(),
+                                                      zx_system_get_page_size() * 10);
+  stream->timeline_function()->Update(timeline_function);
+
+  auto mixer = stage->AddInput(stream);
+  ASSERT_NE(mixer, nullptr);
+  EXPECT_GT(stream.use_count(), 1);
+  EXPECT_GT(mixer.use_count(), 1);
+
+  stage->Trim(Fixed(100));
+
+  stage->RemoveInput(*stream);
+  EXPECT_EQ(stream.use_count(), 1);
+  EXPECT_EQ(mixer.use_count(), 1);
+}
+
+// Verify that a mix thread can continuously call Trim while control threads concurrently update
+// presentation delay on the MixStage.
+TEST_F(MixStageTest, ConcurrentTrimAndSetPresentationDelay) {
+  constexpr uint32_t kNumStreams = 4;
+  constexpr uint32_t kNumControlThreads = 3;
+  constexpr uint32_t kIterations = 200;
+
+  auto stage = std::make_shared<MixStage>(
+      kDefaultFormat, kBlockSizeFrames,
+      fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(0, 0, 1, 1)),
+      context().clock_factory()->CreateClientFixed(
+          clock::testing::CreateCustomClock({.synthetic_offset_from_mono = zx::duration(0)})
+              .take_value()));
+
+  auto timeline_function = TimelineFunction(
+      TimelineRate(Fixed(kDefaultFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs()));
+
+  std::vector<std::shared_ptr<testing::FakeStream>> streams;
+  for (uint32_t i = 0; i < kNumStreams; ++i) {
+    auto stream = std::make_shared<testing::FakeStream>(kDefaultFormat, context().clock_factory(),
+                                                        zx_system_get_page_size() * 10);
+    stream->timeline_function()->Update(timeline_function);
+    stage->AddInput(stream);
+    streams.push_back(stream);
+  }
+
+  std::atomic<bool> done{false};
+  std::thread trim_thread([stage, &done]() {
+    int64_t frame = 1;
+    while (!done.load(std::memory_order_relaxed)) {
+      stage->Trim(Fixed(frame++));
+    }
+  });
+
+  std::vector<std::thread> control_threads;
+  control_threads.reserve(kNumControlThreads);
+  for (uint32_t t = 0; t < kNumControlThreads; ++t) {
+    control_threads.emplace_back([stage, t]() {
+      for (uint32_t i = 0; i < kIterations; ++i) {
+        stage->SetPresentationDelay(zx::nsec(static_cast<int64_t>(t * 1000 + i)));
+      }
+    });
+  }
+
+  for (auto& thread : control_threads) {
+    thread.join();
+  }
+  done.store(true, std::memory_order_relaxed);
+  trim_thread.join();
+}
+
+// Verify that a mix thread can continuously call Trim while control threads concurrently add and
+// remove disjoint input streams.
+TEST_F(MixStageTest, ConcurrentTrimAndDynamicInputs) {
+  constexpr uint32_t kNumControlThreads = 2;
+  constexpr uint32_t kStreamsPerThread = 2;
+  constexpr uint32_t kIterations = 200;
+
+  auto stage = std::make_shared<MixStage>(
+      kDefaultFormat, kBlockSizeFrames,
+      fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(0, 0, 1, 1)),
+      context().clock_factory()->CreateClientFixed(
+          clock::testing::CreateCustomClock({.synthetic_offset_from_mono = zx::duration(0)})
+              .take_value()));
+
+  auto timeline_function = TimelineFunction(
+      TimelineRate(Fixed(kDefaultFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs()));
+
+  std::vector<std::shared_ptr<testing::FakeStream>> dynamic_streams;
+  for (uint32_t i = 0; i < kNumControlThreads * kStreamsPerThread; ++i) {
+    auto stream = std::make_shared<testing::FakeStream>(kDefaultFormat, context().clock_factory(),
+                                                        zx_system_get_page_size() * 10);
+    stream->timeline_function()->Update(timeline_function);
+    dynamic_streams.push_back(stream);
+  }
+
+  std::atomic<bool> done{false};
+  std::thread trim_thread([stage, &done]() {
+    int64_t frame = 1;
+    while (!done.load(std::memory_order_relaxed)) {
+      stage->Trim(Fixed(frame++));
+    }
+  });
+
+  std::vector<std::thread> control_threads;
+  control_threads.reserve(kNumControlThreads);
+  for (uint32_t t = 0; t < kNumControlThreads; ++t) {
+    control_threads.emplace_back([stage, &dynamic_streams, t]() {
+      const uint32_t base = t * kStreamsPerThread;
+      for (uint32_t i = 0; i < kIterations; ++i) {
+        for (uint32_t s = 0; s < kStreamsPerThread; ++s) {
+          stage->AddInput(dynamic_streams[base + s]);
+        }
+        for (uint32_t s = 0; s < kStreamsPerThread; ++s) {
+          stage->RemoveInput(*dynamic_streams[base + s]);
+        }
+      }
+    });
+  }
+
+  for (auto& thread : control_threads) {
+    thread.join();
+  }
+  done.store(true, std::memory_order_relaxed);
+  trim_thread.join();
+
+  for (const auto& stream : dynamic_streams) {
+    EXPECT_EQ(stream.use_count(), 1);
+  }
 }
 
 }  // namespace media::audio

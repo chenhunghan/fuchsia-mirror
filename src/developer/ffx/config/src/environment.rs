@@ -288,23 +288,49 @@ impl Environment {
     fn display_build(&self) -> String {
         let mut current_build_dir = self.build_dir();
         let mut res = format!(" Build:");
+        let mut has_output = false;
+
+        if let Some(domain_build) = self.context.get_build_config_file() {
+            res.push_str("\n");
+            if let Some(dir) = current_build_dir.take() {
+                res.push_str(&format!(
+                    "  {} => {} (from fuchsia_env.toml)\n",
+                    dir.display(),
+                    domain_build
+                ));
+            } else {
+                res.push_str(&format!("  none => {} (from fuchsia_env.toml)\n", domain_build));
+            }
+            has_output = true;
+        }
+
         if let Some(m) = self.files.build.as_ref() {
             if !m.is_empty() {
-                res.push_str(&format!("\n"));
+                if !has_output {
+                    res.push_str("\n");
+                }
                 for (key, val) in m.iter() {
-                    // if we have an explicitly set path for the current build
-                    // dir then prevent displaying the default later by removing
-                    // it from the option.
                     if Some(key.as_ref()) == current_build_dir {
                         current_build_dir.take();
                     }
                     res.push_str(&format!("  {} => {}\n", key.display(), val.display()));
+                    has_output = true;
                 }
             }
         }
-        res.push_str(
-            self.display_build_default(current_build_dir).as_deref().unwrap_or("  none\n"),
-        );
+
+        if let Some(default_str) = self.display_build_default(current_build_dir) {
+            if !has_output {
+                res.push_str("\n");
+            }
+            res.push_str(&default_str);
+            has_output = true;
+        }
+
+        if !has_output {
+            res.push_str(" none\n");
+        }
+
         res
     }
 
@@ -435,6 +461,25 @@ mod test {
             },
             "global": "/tmp/global.json"
         }"#;
+
+    #[fuchsia::test]
+    fn display_build_config_domain() {
+        let domains_test_data_path = camino::Utf8Path::new(env!("DOMAINS_TEST_DATA_PATH"));
+        let domain_root = domains_test_data_path.join("basic_example");
+        let context = EnvironmentContext::config_domain_root(
+            ExecutableKind::Test,
+            domain_root,
+            Default::default(),
+            None,
+            false,
+        )
+        .unwrap();
+
+        let env = Environment::new_empty(context);
+        let display = env.display_build();
+        assert!(display.contains("bazel-out"));
+        assert!(display.contains(".fuchsia-build-config.json (from fuchsia_env.toml)"));
+    }
 
     #[fuchsia::test]
     fn test_loading_and_saving_environment() {

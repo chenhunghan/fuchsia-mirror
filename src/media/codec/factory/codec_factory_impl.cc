@@ -13,9 +13,12 @@
 #include <lib/fdio/directory.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>
+#include <unistd.h>
+#include <zircon/assert.h>
 #include <zircon/syscalls.h>
 
 #include <algorithm>
+#include <string_view>
 
 #include "lib/zx/eventpair.h"
 #include "src/lib/fxl/strings/string_printf.h"
@@ -36,6 +39,14 @@ const std::string kIsolateRelativeUrlCvsd = "#meta/codec_runner_sw_cvsd.cm";
 const std::string kIsolateRelativeUrlFfmpeg = "#meta/codec_runner_sw_ffmpeg.cm";
 const std::string kIsolateRelativeUrlLc3 = "#meta/codec_runner_sw_lc3.cm";
 
+bool IsIsolatePresentInPkg(std::string_view isolate_relative_url) {
+  constexpr std::string_view kMetaPrefix = "#meta/";
+  ZX_DEBUG_ASSERT(isolate_relative_url.starts_with(kMetaPrefix));
+  std::string pkg_path =
+      std::string("/pkg/meta/").append(isolate_relative_url.substr(kMetaPrefix.size()));
+  return access(pkg_path.c_str(), F_OK) == 0;
+}
+
 struct EncoderSupportsCodec {
   std::string mime_type;
   std::function<bool(const fuchsia::media::EncoderSettings&)> supports_settings;
@@ -44,9 +55,13 @@ struct EncoderSupportsCodec {
 
 struct EncoderSupportSpec {
   std::string isolate_url;
+  bool is_isolate_present = false;
   std::vector<EncoderSupportsCodec> codecs;
   bool supports(const std::string& mime_type, const fuchsia::media::EncoderSettings& settings,
                 const std::optional<std::string>& codec_specifier) const {
+    if (!is_isolate_present) {
+      return false;
+    }
     auto iter = std::ranges::find_if(codecs, [&](const EncoderSupportsCodec& to_check) -> bool {
       if (to_check.mime_type != mime_type) {
         return false;
@@ -63,61 +78,71 @@ struct EncoderSupportSpec {
   }
 };
 
-const EncoderSupportSpec kSbcEncoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlSbc,
-    .codecs =
-        {
-            {.mime_type = "audio/pcm",
-             .supports_settings =
-                 [](const fuchsia::media::EncoderSettings& settings) {
-                   return settings.is_sbc() || settings.is_msbc();
-                 },
-             .codec_specifier = CreateRandomCodecSpecifier()},
-        },
-};
-
-const EncoderSupportSpec kAacEncoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlAac,
-    .codecs =
-        {
-            {
-                .mime_type = "audio/pcm",
-                .supports_settings =
-                    [](const fuchsia::media::EncoderSettings& settings) {
-                      return settings.is_aac();
-                    },
-                .codec_specifier = CreateRandomCodecSpecifier(),
-            },
-        },
-};
-
-const EncoderSupportSpec kCvsdEncoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlCvsd,
-    .codecs = {{
-        .mime_type = "audio/pcm",
-        .supports_settings =
-            [](const fuchsia::media::EncoderSettings& settings) { return settings.is_cvsd(); },
-        .codec_specifier = CreateRandomCodecSpecifier(),
-    }},
-};
-
-const EncoderSupportSpec kLc3EncoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlLc3,
-    .codecs =
-        {
-            {
-                .mime_type = "audio/pcm",
-                .supports_settings =
-                    [](const fuchsia::media::EncoderSettings& settings) {
-                      return settings.is_lc3();
-                    },
-                .codec_specifier = CreateRandomCodecSpecifier(),
-            },
-        },
-};
-
-const EncoderSupportSpec supported_encoders[] = {kSbcEncoderSupportSpec, kAacEncoderSupportSpec,
-                                                 kCvsdEncoderSupportSpec, kLc3EncoderSupportSpec};
+const std::vector<EncoderSupportSpec>& GetSupportedEncoders() {
+  static const std::vector<EncoderSupportSpec> kSupportedEncoders = {
+      {
+          .isolate_url = kIsolateRelativeUrlSbc,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlSbc),
+          .codecs =
+              {
+                  {
+                      .mime_type = "audio/pcm",
+                      .supports_settings =
+                          [](const fuchsia::media::EncoderSettings& settings) {
+                            return settings.is_sbc() || settings.is_msbc();
+                          },
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlAac,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlAac),
+          .codecs =
+              {
+                  {
+                      .mime_type = "audio/pcm",
+                      .supports_settings =
+                          [](const fuchsia::media::EncoderSettings& settings) {
+                            return settings.is_aac();
+                          },
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlCvsd,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlCvsd),
+          .codecs =
+              {
+                  {
+                      .mime_type = "audio/pcm",
+                      .supports_settings =
+                          [](const fuchsia::media::EncoderSettings& settings) {
+                            return settings.is_cvsd();
+                          },
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlLc3,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlLc3),
+          .codecs =
+              {
+                  {
+                      .mime_type = "audio/pcm",
+                      .supports_settings =
+                          [](const fuchsia::media::EncoderSettings& settings) {
+                            return settings.is_lc3();
+                          },
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+  };
+  return kSupportedEncoders;
+}
 
 struct MimeTypeAndCodecSpecifier {
   std::string mime_type;
@@ -126,9 +151,13 @@ struct MimeTypeAndCodecSpecifier {
 
 struct DecoderSupportSpec {
   std::string isolate_url;
+  bool is_isolate_present = false;
   std::vector<MimeTypeAndCodecSpecifier> mime_types_and_codec_specifiers;
   bool supports(const std::string& mime_type,
                 const std::optional<std::string>& codec_specifier) const {
+    if (!is_isolate_present) {
+      return false;
+    }
     auto iter = std::ranges::find_if(
         mime_types_and_codec_specifiers, [&](const MimeTypeAndCodecSpecifier& to_check) -> bool {
           if (to_check.mime_type != mime_type) {
@@ -143,46 +172,64 @@ struct DecoderSupportSpec {
   }
 };
 
-const DecoderSupportSpec kFfmpegSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlFfmpeg,
-    .mime_types_and_codec_specifiers = {{.mime_type = "video/h264",
-                                         .codec_specifier = CreateRandomCodecSpecifier()}},
-};
-
-const DecoderSupportSpec kSbcDecoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlSbc,
-    .mime_types_and_codec_specifiers =
-        {
-            {.mime_type = "audio/sbc", .codec_specifier = CreateRandomCodecSpecifier()},
-            {.mime_type = "audio/msbc", .codec_specifier = CreateRandomCodecSpecifier()},
-        },
-};
-
-const DecoderSupportSpec kCvsdDecoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlCvsd,
-    .mime_types_and_codec_specifiers = {{.mime_type = "audio/cvsd",
-                                         .codec_specifier = CreateRandomCodecSpecifier()}},
-};
-
-const DecoderSupportSpec kLc3DecoderSupportSpec = {
-    .isolate_url = kIsolateRelativeUrlLc3,
-    .mime_types_and_codec_specifiers = {{.mime_type = "audio/lc3",
-                                         .codec_specifier = CreateRandomCodecSpecifier()}},
-};
-
-const DecoderSupportSpec supported_decoders[] = {kFfmpegSupportSpec, kSbcDecoderSupportSpec,
-                                                 kCvsdDecoderSupportSpec, kLc3DecoderSupportSpec};
+const std::vector<DecoderSupportSpec>& GetSupportedDecoders() {
+  static const std::vector<DecoderSupportSpec> kSupportedDecoders = {
+      {
+          .isolate_url = kIsolateRelativeUrlFfmpeg,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlFfmpeg),
+          .mime_types_and_codec_specifiers =
+              {
+                  {
+                      .mime_type = "video/h264",
+                      .codec_specifier = GetSwFfmpegH264CodecSpecifier(),
+                  },
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlSbc,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlSbc),
+          .mime_types_and_codec_specifiers =
+              {
+                  {.mime_type = "audio/sbc", .codec_specifier = CreateRandomCodecSpecifier()},
+                  {.mime_type = "audio/msbc", .codec_specifier = CreateRandomCodecSpecifier()},
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlCvsd,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlCvsd),
+          .mime_types_and_codec_specifiers =
+              {
+                  {
+                      .mime_type = "audio/cvsd",
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+      {
+          .isolate_url = kIsolateRelativeUrlLc3,
+          .is_isolate_present = IsIsolatePresentInPkg(kIsolateRelativeUrlLc3),
+          .mime_types_and_codec_specifiers =
+              {
+                  {
+                      .mime_type = "audio/lc3",
+                      .codec_specifier = CreateRandomCodecSpecifier(),
+                  },
+              },
+      },
+  };
+  return kSupportedDecoders;
+}
 
 std::optional<std::string> FindEncoder(const std::string& mime_type,
                                        const fuchsia::media::EncoderSettings& settings,
                                        const std::optional<std::string> codec_specifier) {
-  auto encoder =
-      std::find_if(std::begin(supported_encoders), std::end(supported_encoders),
-                   [&mime_type, &settings, &codec_specifier](const EncoderSupportSpec& encoder) {
-                     return encoder.supports(mime_type, settings, codec_specifier);
-                   });
+  const auto& supported_encoders = GetSupportedEncoders();
+  auto encoder = std::ranges::find_if(supported_encoders, [&mime_type, &settings, &codec_specifier](
+                                                              const EncoderSupportSpec& encoder) {
+    return encoder.supports(mime_type, settings, codec_specifier);
+  });
 
-  if (encoder == std::end(supported_encoders)) {
+  if (encoder == supported_encoders.end()) {
     return std::nullopt;
   }
 
@@ -191,12 +238,13 @@ std::optional<std::string> FindEncoder(const std::string& mime_type,
 
 std::optional<std::string> FindDecoder(const std::string& mime_type,
                                        std::optional<std::string> codec_specifier) {
-  auto decoder = std::find_if(std::begin(supported_decoders), std::end(supported_decoders),
-                              [&mime_type, &codec_specifier](const DecoderSupportSpec& decoder) {
-                                return decoder.supports(mime_type, codec_specifier);
-                              });
+  const auto& supported_decoders = GetSupportedDecoders();
+  auto decoder = std::ranges::find_if(
+      supported_decoders, [&mime_type, &codec_specifier](const DecoderSupportSpec& decoder) {
+        return decoder.supports(mime_type, codec_specifier);
+      });
 
-  if (decoder == std::end(supported_decoders)) {
+  if (decoder == supported_decoders.end()) {
     return std::nullopt;
   }
 

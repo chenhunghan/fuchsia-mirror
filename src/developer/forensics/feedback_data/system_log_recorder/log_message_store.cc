@@ -36,12 +36,14 @@ std::string FormatError(const std::string& error) {
 }  // namespace
 
 LogMessageStore::LogMessageStore(StorageSize max_block_capacity, StorageSize max_buffer_capacity,
-                                 RedactorBase* redactor, std::unique_ptr<Encoder> encoder)
+                                 RedactorBase* redactor, std::unique_ptr<Encoder> encoder,
+                                 std::optional<zx::time_boot> ignore_before_timestamp)
     : buffer_stats_(max_buffer_capacity),
       block_stats_(max_block_capacity),
       incremental_stats_(/*message_count=*/0, /*deduplicated_message_count=*/0,
                          /*first_timestamp=*/std::nullopt,
                          /*last_timestamp=*/std::nullopt),
+      ignore_before_timestamp_(ignore_before_timestamp),
       redactor_(redactor),
       encoder_(std::move(encoder)) {
   FX_CHECK(max_block_capacity >= max_buffer_capacity);
@@ -65,6 +67,10 @@ bool LogMessageStore::Add(LogSink::MessageOr message) {
   TRACE_DURATION("feedback:io", "LogMessageStore::Add");
 
   if (message.is_ok()) {
+    if (ignore_before_timestamp_.has_value() && message.value().time <= *ignore_before_timestamp_) {
+      return false;
+    }
+
     redactor_->Redact(message.value().msg);
     for (std::string& tag : message.value().tags) {
       redactor_->Redact(tag);
@@ -189,10 +195,22 @@ void LogMessageStore::Reset() {
   num_messages_dropped_ = 0;
   incremental_stats_ = LogStats(/*message_count=*/0, /*deduplicated_message_count=*/0,
                                 /*first_timestamp=*/std::nullopt, /*last_timestamp=*/std::nullopt);
+  ignore_before_timestamp_ = std::nullopt;
   to_append_ = std::nullopt;
 }
 
 void LogMessageStore::AppendToEnd(const std::string& str) { to_append_ = str; }
+
+void LogMessageStore::InsertRawMessage(const std::string& str) {
+  if (last_pushed_message_count_ > 1) {
+    AddToBuffer(MakeRepeatedWarning(last_pushed_message_count_));
+  }
+
+  AddToBuffer(str);
+
+  ResetLastPushedMessage();
+  repeat_buffer_count_ = 0;
+}
 
 }  // namespace system_log_recorder
 }  // namespace feedback_data

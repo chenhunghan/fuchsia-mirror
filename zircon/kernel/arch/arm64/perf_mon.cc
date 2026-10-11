@@ -15,6 +15,7 @@
 #include <assert.h>
 #include <lib/perfmon.h>
 #include <lib/zircon-internal/thread_annotations.h>
+#include <lib/zx/result.h>
 #include <platform.h>
 #include <string.h>
 #include <trace.h>

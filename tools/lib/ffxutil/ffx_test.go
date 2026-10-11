@@ -174,3 +174,28 @@ func TestFFXPBArtifacts(t *testing.T) {
 		})
 	}
 }
+
+func TestEmuStartConsoleDryRunError(t *testing.T) {
+	tmpDir := t.TempDir()
+	ffxPath := filepath.Join(tmpDir, "ffx")
+	script := "#!/bin/bash\nif [[ \"$*\" == *\"--dry-run\"* ]]; then\n  echo '{\"user_error\":{\"message\":\"There are no virtual devices configured for this product bundle\"}}' >&2\n  exit 1\nfi\necho \"$@\"\n"
+	if err := os.WriteFile(ffxPath, []byte(script), os.ModePerm); err != nil {
+		t.Fatalf("failed to write mock ffx tool: %s", err)
+	}
+	ctx := context.Background()
+	sshKeys := SSHInfo{
+		SshPriv: filepath.Join(tmpDir, "privKey"),
+		SshPub:  filepath.Join(tmpDir, "pubKey"),
+	}
+	ffx, err := NewFFXInstance(ctx, ffxPath, tmpDir, []string{}, "target", &sshKeys, filepath.Join(tmpDir, "out"), UseFFXLegacy)
+	if err != nil {
+		t.Fatalf("NewFFXInstance failed: %s", err)
+	}
+	cmd, err := ffx.EmuStartConsole(ctx, tmpDir, "fuchsia-emulator", EmuTools{}, EmuStartArgs{
+		Engine:        "qemu",
+		ProductBundle: filepath.Join(tmpDir, "pb"),
+	})
+	if err == nil {
+		t.Errorf("expected EmuStartConsole to fail when --dry-run fails, got nil error and cmd %v", cmd)
+	}
+}

@@ -7,7 +7,11 @@
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@fuchsia_build_info//:args.bzl", "target_cpu")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load(
     ":idk_transitions.bzl",
     "api_level_and_cpu_combinations_transition",
@@ -61,7 +65,7 @@ def _idk_molecule_common_impl(ctx, allowed_in_configurations):
             fail('This molecule is only to be built at the "PLATFORM" API level, not "%s".' %
                  api_level)
     if allowed_in_configurations == "once":
-        current_cpu = ctx.attr._current_platform[CurrentPlatformInfo].cpu
+        current_cpu = get_current_platform_info(ctx).cpu
         if current_cpu != target_cpu:
             fail('This molecule is only to be built for the target CPU architecture ("%s"), not "%s".' %
                  (target_cpu, current_cpu))
@@ -95,11 +99,7 @@ COMMON_MOLECULE_ATTRS = {
     "_current_api_level": attr.label(
         default = "@//build/bazel/versioning:api_level",
     ),
-    "_current_platform": attr.label(
-        providers = [CurrentPlatformInfo],
-        default = "@//build/bazel:current_platform",
-    ),
-}
+} | CURRENT_PLATFORM_INFO_ATTRS
 
 def _idk_molecule_impl(ctx):
     return _idk_molecule_common_impl(ctx, ctx.attr.allowed_in_configurations)

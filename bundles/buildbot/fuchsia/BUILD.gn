@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/assembly/product_bundle.gni")
 import("//build/assembly/product_bundle_test_group.gni")
 import("//build/testing/environments.gni")
 
@@ -33,6 +34,11 @@ group("fuchsia") {
       ":minimal.arm64",
       ":minimal.arm64-hermetic_examples",
     ]
+
+    # Lacewing tests are only run with the balanced compilation mode.
+    if (is_balanced) {
+      deps += [ ":workbench_eng.vim3-lacewing" ]
+    }
   }
   if (target_cpu == "x64") {
     deps += [
@@ -40,6 +46,14 @@ group("fuchsia") {
       ":minimal.x64-ui_tests",
       ":workbench_eng.x64",
     ]
+
+    # Lacewing tests are only run with the balanced compilation mode.
+    if (is_balanced) {
+      deps += [ ":workbench_eng.x64-lacewing" ]
+    }
+  }
+  if (target_cpu == "riscv64") {
+    deps += [ ":minimal.riscv64" ]
   }
 }
 
@@ -94,13 +108,12 @@ if (target_cpu == "arm64") {
   product_bundle_test_group("minimal.arm64") {
     product_bundle_name = "minimal.arm64"
 
-    # TODO(https://fxbug.dev/407825733): Re-enable running these tests on
-    # `c4a_env` in postsubmit (`is_postsubmit`). The host tests pulled in by
-    # `minimal_target_tests` inherit `c4a_env` and get scheduled onto arm64 C4A
-    # bots, where the x64 host binaries fail with "exec format error". Keep
-    # this group build-only until host tests are excluded from this group or
-    # given a Linux x64 host environment.
-    build_only = true
+    if (is_postsubmit) {
+      environments = [ c4a_env ]
+      override_test_environments = false
+    } else {
+      build_only = true
+    }
 
     target_tests = minimal_target_tests + [ "//src/ui:tests" ]
   }
@@ -115,12 +128,14 @@ if (target_cpu == "arm64") {
 if (target_cpu == "x64") {
   product_bundle_test_group("minimal.x64") {
     product_bundle_name = "minimal.x64"
+
     if (is_postsubmit) {
       environments = [ aemu_env ]
       override_test_environments = false
     } else {
       build_only = true
     }
+
     target_tests = minimal_target_tests
   }
 
@@ -134,13 +149,44 @@ if (target_cpu == "x64") {
     target_tests = [ "//src/ui:tests" ]
   }
 }
+if (target_cpu == "riscv64") {
+  product_bundle_test_group("minimal.riscv64") {
+    product_bundle_name = "minimal.riscv64"
 
-########
+    if (is_postsubmit) {
+      environments = [ qemu_env ]
+      override_test_environments = false
+    } else {
+      build_only = true
+    }
+
+    target_tests = minimal_target_tests - [ "//src/connectivity/network:tests" ]
+  }
+}
+
+########1
 # Workbench.
+
+if (target_cpu == "arm64") {
+  # Lacewing tests are only run with the balanced compilation mode.
+  if (is_balanced) {
+    product_bundle_test_group("workbench_eng.vim3-lacewing") {
+      product_bundle_name = "workbench_eng.vim3"
+
+      # TODO(https://fxbug.dev/513339198): Move back to running once fixed.
+      build_only = true
+      host_tests = [
+        "//src/testing/end_to_end:workbench_vim3_stable_tests",
+        "//src/tests/end_to_end:workbench_vim3_stable_tests",
+      ]
+    }
+  }
+}
 
 if (target_cpu == "x64") {
   product_bundle_test_group("workbench_eng.x64") {
     product_bundle_name = "workbench_eng.x64"
+
     if (is_postsubmit) {
       environments = [ aemu_env ]
       override_test_environments = false
@@ -150,5 +196,21 @@ if (target_cpu == "x64") {
 
     # No tests run on Workbench, but we want to always build the product bundle.
     target_tests = []
+  }
+
+  # Lacewing tests are only run with the balanced compilation mode.
+  if (is_balanced) {
+    product_bundle_test_group("workbench_eng.x64-lacewing") {
+      product_bundle_name = "workbench_eng.x64"
+      environments = [
+        aemu_env,
+        nuc11_env,
+      ]
+      override_test_environments = false
+      host_tests = [
+        "//src/testing/end_to_end:workbench_x64_stable_tests",
+        "//src/tests/end_to_end:workbench_x64_stable_tests",
+      ]
+    }
   }
 }

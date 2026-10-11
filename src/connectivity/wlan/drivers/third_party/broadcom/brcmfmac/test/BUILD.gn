@@ -81,6 +81,7 @@ cc_test_executable("channel_conversion_test") {
   testonly = true
   sources = [ "channel_conversion_test.cc" ]
   deps = [
+    "//sdk/lib/driver/testing/cpp:scoped_global_logger",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
     "//src/lib/fxl/test:gtest_main",
   ]
@@ -230,6 +231,11 @@ fuchsia_test_package("brcmfmac_test") {
   test_components = []
   foreach(test_name, _tests) {
     test_components += [ ":${test_name}_component" ]
+  }
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
   }
 }
 

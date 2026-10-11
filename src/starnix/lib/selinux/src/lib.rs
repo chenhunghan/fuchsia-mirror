@@ -4,28 +4,21 @@
 
 #![warn(variant_size_differences)]
 
-pub mod local_cache;
 pub mod permission_check;
 pub mod policy;
 pub mod security_server;
 
 mod new_policy;
 
-pub use access_vector_cache::{AccessQueryArgs, DEFAULT_SHARED_SIZE, QueryCacheCapacity};
-pub use concurrent_access_cache::{AccessCacheStorage, ConcurrentAccessCache};
 pub use security_server::{PolicySeqNo, SecurityServer};
 
-mod access_vector_cache;
-mod cache_stats;
-mod concurrent_access_cache;
-mod concurrent_cache;
 mod exceptions_config;
-mod kernel_permissions;
+mod kernel;
 mod sid_table;
 mod sync;
 
 /// Allow callers to use the kernel class & permission definitions.
-pub use kernel_permissions::*;
+pub use kernel::*;
 
 /// Numeric class Ids are provided to the userspace AVC surfaces (e.g. "create", "access", etc).
 pub use policy::ClassId;
@@ -33,28 +26,6 @@ pub use policy::ClassId;
 pub use starnix_uapi::selinux::{InitialSid, ReferenceInitialSid, SecurityId, TaskAttrs};
 
 use new_policy::FsUseType;
-
-/// Identifies a specific class by its policy-defined Id, or as a kernel object class enum Id.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum ObjectClass {
-    /// Refers to a well-known SELinux kernel object class (e.g. "process", "file", "capability").
-    Kernel(KernelClass),
-    /// Refers to a policy-defined class by its policy-defined numeric Id. This is most commonly
-    /// used when handling queries from userspace, which refer to classes by-Id.
-    ClassId(ClassId),
-}
-
-impl From<ClassId> for ObjectClass {
-    fn from(id: ClassId) -> Self {
-        Self::ClassId(id)
-    }
-}
-
-impl<T: Into<KernelClass>> From<T> for ObjectClass {
-    fn from(class: T) -> Self {
-        Self::Kernel(class.into())
-    }
-}
 
 /// A borrowed byte slice that contains no `NUL` characters by truncating the input slice at the
 /// first `NUL` (if any) upon construction.
@@ -151,17 +122,6 @@ pub use new_policy::PolicyCap;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn object_class_permissions() {
-        let test_class_id = ClassId::for_test(20);
-        assert_eq!(ObjectClass::ClassId(test_class_id), test_class_id.into());
-        for variant in ProcessPermission::PERMISSIONS {
-            assert_eq!(KernelClass::Process, variant.class());
-            assert_eq!("process", variant.class().name());
-            assert_eq!(ObjectClass::Kernel(KernelClass::Process), variant.class().into());
-        }
-    }
 
     #[test]
     fn nulless_byte_str_equivalence() {

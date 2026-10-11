@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::access_vector_cache::{AccessVectorCache, Query};
-use crate::policy::{AccessVector, KernelAccessDecision, SELINUX_AVD_FLAGS_PERMISSIVE, XpermsKind};
+use crate::kernel::{AccessVectorCache, KernelAccessDecision, Query};
+use crate::policy::{AccessVector, SELINUX_AVD_FLAGS_PERMISSIVE, XpermsKind};
 use crate::security_server::{PolicySeqNo, SecurityServer};
 use crate::{ClassPermission, FdPermission, KernelClass, KernelPermission, SecurityId};
 
 use std::num::NonZeroU32;
 
-pub use crate::local_cache::PerThreadCache;
+pub use crate::kernel::PerThreadCache;
 
-/// Describes the result of a permission lookup between two Security Contexts.
+/// Result of a permission lookup between two Security Contexts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PermissionCheckResult {
     /// True if the specified permissions are granted by policy.
@@ -27,8 +27,9 @@ pub struct PermissionCheckResult {
     /// permissive mode, or the subject domain is marked as permissive.
     pub permissive: bool,
 
-    /// If the `AccessDecision` indicates that permission denials should not be enforced then `permit`
-    /// will be true, and this field will hold the Id of the bug to reference in audit logging.
+    /// If the [`KernelAccessDecision`] indicates that permission denials should not be enforced then
+    /// [`PermissionCheckResult::permit`] will be true, and this field will hold the Id of the bug to
+    /// reference in audit logging.
     pub todo_bug: Option<NonZeroU32>,
 }
 
@@ -39,8 +40,8 @@ impl PermissionCheckResult {
     }
 }
 
-/// Implements the `has_permission()` API, based on supplied `SecurityServer` and
-/// `AccessVectorCache` implementations.
+/// Implements the [`PermissionCheck::has_permission`] API, based on supplied [`SecurityServer`] and
+/// [`AccessVectorCache`] implementations.
 // TODO: https://fxbug.dev/362699811 - Revise the traits to avoid direct dependencies on `SecurityServer`.
 pub struct PermissionCheck<'a> {
     security_server: &'a SecurityServer,
@@ -158,7 +159,7 @@ impl<'a> PermissionCheck<'a> {
         self.access_vector_cache.compute_create_sid(source_sid, target_sid, target_class, name)
     }
 
-    /// Returns the raw `AccessDecision` for a specified source, target and class.
+    /// Returns the raw [`KernelAccessDecision`] for a specified source, target and class.
     pub fn compute_access_decision(
         &self,
         source_sid: SecurityId,
@@ -181,7 +182,7 @@ impl<'a> PermissionCheck<'a> {
     }
 }
 
-/// Internal implementation of the `has_permission()` API, in terms of the `Query` trait.
+/// Internal implementation of the [`PermissionCheck::has_permission`] API, in terms of the [`Query`] trait.
 fn has_permission(
     local_cache: &PerThreadCache,
     query: &impl Query,
@@ -220,7 +221,7 @@ fn access_decision_to_permission_check_result(
     PermissionCheckResult { granted, audit, permissive, todo_bug: decision.todo_bug }
 }
 
-/// Internal implementation of the `has_extended_permission()` API, in terms of the `Query` trait.
+/// Internal implementation of the [`PermissionCheck::has_extended_permission`] API, in terms of the [`Query`] trait.
 fn has_extended_permission(
     query: &impl Query,
     xperms_kind: XpermsKind,
@@ -257,10 +258,8 @@ fn has_extended_permission(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_vector_cache::KernelXpermsAccessDecision;
-    use crate::policy::{
-        AccessDecision, AccessVector, AccessVectorComputer, KernelAccessDecision, XpermsBitmap,
-    };
+    use crate::kernel::KernelXpermsAccessDecision;
+    use crate::policy::{AccessVector, XpermsBitmap};
     use crate::{CommonFsNodePermission, FileClass, ForClass, KernelClass, ProcessPermission};
 
     use std::num::NonZeroU32;
@@ -270,27 +269,15 @@ mod tests {
     /// SID to use where any value will do.
     static A_TEST_SID: LazyLock<SecurityId> = LazyLock::new(unique_sid);
 
-    /// Returns a new `SecurityId` with unique id.
+    /// Returns a new [`SecurityId`] with unique id.
     fn unique_sid() -> SecurityId {
         static NEXT_ID: AtomicU32 = AtomicU32::new(1000);
         SecurityId(NonZeroU32::new(NEXT_ID.fetch_add(1, Ordering::AcqRel)).unwrap())
     }
 
-    // Assume permissions are mapped one to one.
-    fn access_decision_to_kernel_access_decision(
-        _class: KernelClass,
-        decision: AccessDecision,
-    ) -> KernelAccessDecision {
-        KernelAccessDecision {
-            allow: decision.allow,
-            audit: (decision.allow & decision.auditallow) | (!decision.allow & decision.auditdeny),
-            todo_bug: decision.todo_bug,
-            flags: decision.flags,
-        }
-    }
-
+    /// [`Query`] that denies all [`AccessVector`]s.
     #[derive(Default)]
-    pub struct DenyAllPermissions;
+    struct DenyAllPermissions;
 
     impl Query for DenyAllPermissions {
         fn compute_access_decision(
@@ -334,17 +321,7 @@ mod tests {
         }
     }
 
-    impl AccessVectorComputer for DenyAllPermissions {
-        fn access_decision_to_kernel_access_decision(
-            &self,
-            class: KernelClass,
-            av: AccessDecision,
-        ) -> KernelAccessDecision {
-            access_decision_to_kernel_access_decision(class, av)
-        }
-    }
-
-    /// A [`Query`] that permits all [`AccessVector`].
+    /// [`Query`] that permits all [`AccessVector`]s.
     #[derive(Default)]
     struct AllowAllPermissions;
 
@@ -387,16 +364,6 @@ mod tests {
                 permissive: false,
                 has_todo: false,
             }
-        }
-    }
-
-    impl AccessVectorComputer for AllowAllPermissions {
-        fn access_decision_to_kernel_access_decision(
-            &self,
-            class: KernelClass,
-            av: AccessDecision,
-        ) -> KernelAccessDecision {
-            access_decision_to_kernel_access_decision(class, av)
         }
     }
 

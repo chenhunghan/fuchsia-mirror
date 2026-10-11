@@ -7,39 +7,35 @@
 
 #include <fidl/fuchsia.hardware.serialimpl/cpp/driver/wire.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
+#include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/stdcompat/span.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zircon/types.h>
 
-#include <thread>
+#include <memory>
 #include <vector>
 
-#include <ddktl/device.h>
 #include <fbl/auto_lock.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
 #include <usb/usb.h>
 
-#include "sdk/lib/driver/outgoing/cpp/outgoing_directory.h"
-
 namespace usb_cdc_acm_serial {
 namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
-class UsbCdcAcmDevice;
-using DeviceType = ddk::Device<UsbCdcAcmDevice, ddk::Unbindable>;
-class UsbCdcAcmDevice : public DeviceType,
+class UsbCdcAcmDevice : public fdf::DriverBase2,
                         public fdf::WireServer<fuchsia_hardware_serialimpl::Device> {
  public:
-  explicit UsbCdcAcmDevice(zx_device_t* parent) : DeviceType(parent), usb_client_(parent) {}
-  ~UsbCdcAcmDevice() = default;
+  static constexpr char kDriverName[] = "usb-cdc-acm";
 
-  zx_status_t Bind();
+  UsbCdcAcmDevice() : fdf::DriverBase2(kDriverName) {}
+  ~UsbCdcAcmDevice() override = default;
 
-  // |ddk::Device| mix-in implementations.
-  void DdkRelease();
-  void DdkUnbind(ddk::UnbindTxn txn);
+  // |fdf::DriverBase2|
+  zx::result<> Start(fdf::DriverContext context) override;
+  void Stop(fdf::StopCompleter completer) override;
 
  private:
   struct WriteContext {
@@ -105,9 +101,6 @@ class UsbCdcAcmDevice : public DeviceType,
   // SerialImpl port info and callback.
   fuchsia_hardware_serial::wire::SerialPortInfo serial_port_info_ __TA_GUARDED(lock_);
 
-  // Thread to cancel requests if the device is unbound.
-  std::thread cancel_thread_;
-
   // USB callback functions.
   usb_request_complete_callback_t read_request_complete_ = {
       .callback =
@@ -130,7 +123,8 @@ class UsbCdcAcmDevice : public DeviceType,
   std::optional<WriteContext> write_context_ __TA_GUARDED(lock_);
 
   fdf::ServerBindingGroup<fuchsia_hardware_serialimpl::Device> bindings_;
-  fdf::OutgoingDirectory outgoing_;
+
+  fidl::ClientEnd<fuchsia_driver_framework::NodeController> controller_;
 };
 
 }  // namespace usb_cdc_acm_serial

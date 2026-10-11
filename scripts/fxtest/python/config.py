@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from dataclasses import field
 import os
 import re
+import shlex
 
 import args
 
@@ -63,11 +64,16 @@ def load_config(path: str | None = None) -> ConfigFile:
     line_num = 0
     for line in lines:
         line_num += 1
-        line = line.strip()
-        if line.startswith("#"):
-            # Skip comments
-            continue
-        command_line.extend(filter(bool, WHITESPACE_REGEX.split(line)))
+        try:
+            command_line.extend(shlex.split(line, comments=True))
+        except ValueError as e:
+            print(
+                f"Error occurred while parsing line {line_num} in config file {path}: {e}"
+            )
+            raise argparse.ArgumentError(
+                None,
+                f"Error occurred while parsing line {line_num} in config file {path}: {e}",
+            )
 
     try:
         defaults = args.parse_args(command_line)

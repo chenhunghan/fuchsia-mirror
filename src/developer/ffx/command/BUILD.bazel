@@ -36,12 +36,8 @@ rustc_library(
         "//src/developer/ffx/tools/uart_driver:__pkg__",
         "//src/developer/ffx/tools/usb_driver:__pkg__",
 
-        # TODO(b/386792198) Move ToolSuite to internal crate.
+        # fho uses ffx_command to run FfxTool / FfxCommandLine
         "//src/developer/ffx/lib/fho:__pkg__",
-
-        # TODO(b/287862487) TestEnv should be refactored
-        # to be more like FhoEnv
-        "//src/developer/ffx/lib/fho/testing:__pkg__",
 
         # Necessary for checking if enhanced analytics is enabled.
         "//src/developer/ffx/lib/diagnostics:__subpackages__",

@@ -122,7 +122,6 @@ func TestStartFFXMonitor(t *testing.T) {
 	defer os.Unsetenv(testrunnerconstants.TestOutDirEnvKey)
 
 	experiments := make(botanist.Experiments)
-	experiments[string(botanist.UseFFXMonitor)] = struct{}{}
 
 	const (
 		monitorName         = "ffx_monitor"

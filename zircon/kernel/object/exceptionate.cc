@@ -9,6 +9,7 @@
 #include <zircon/errors.h>
 #include <zircon/syscalls/exception.h>
 
+#include <kernel/ffi.h>
 #include <object/exception_dispatcher.h>
 #include <object/handle.h>
 #include <object/message_packet.h>
@@ -121,3 +122,15 @@ zx_status_t Exceptionate::SendException(const fbl::RefPtr<ExceptionDispatcher>& 
 
   return status;
 }
+
+extern "C" {
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_exceptionate_set_channel(Exceptionate* exceptionate,
+                                                           KernelHandle<ChannelDispatcher>* channel,
+                                                           zx_rights_t thread_rights,
+                                                           zx_rights_t process_rights) {
+  return exceptionate->SetChannel(ktl::move(*channel), thread_rights, process_rights);
+}
+
+}  // extern "C"

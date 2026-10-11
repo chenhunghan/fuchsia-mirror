@@ -11,7 +11,7 @@ use errors::ResultExt as _;
 use fdomain_fuchsia_diagnostics::{
     ClientSelectorConfiguration, DataType, SelectorArgument, StreamMode, StreamParameters,
 };
-use ffx_writer::{Format, MachineWriter, TestBuffers};
+use ffx_writer::{Format, TestBuffers, VerifiedMachineWriter};
 use iquery_fdomain::commands::SelectorsCommand;
 use std::rc::Rc;
 
@@ -25,7 +25,7 @@ async fn test_selectors_no_parameters() {
     };
     let expected_responses = Rc::new(vec![]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = SelectorsCommand { data: vec![], selectors: vec![], accessor: None };
     let client = fdomain_local::local_client_empty();
     let rcs_proxy = setup_fake_rcs(client.clone(), vec![]);
@@ -53,7 +53,7 @@ async fn test_selectors_with_unknown_component_search() {
     };
     let expected_responses = Rc::new(vec![]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = SelectorsCommand {
         selectors: vec!["some-bad-moniker".to_string()],
         accessor: None,
@@ -85,7 +85,7 @@ async fn test_selectors_with_unknown_manifest() {
     };
     let expected_responses = Rc::new(vec![]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = SelectorsCommand {
         selectors: vec!["some-bad-moniker".to_string()],
         accessor: None,
@@ -109,7 +109,7 @@ async fn test_selectors_with_unknown_manifest() {
 #[fuchsia::test]
 async fn test_selectors_with_succesful_component_search() {
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd =
         SelectorsCommand { selectors: vec!["moniker1".to_string()], accessor: None, data: vec![] };
     let lifecycle_data = inspect_accessor_data(
@@ -145,7 +145,7 @@ async fn test_selectors_with_succesful_component_search() {
 #[fuchsia::test]
 async fn test_selectors_with_manifest_that_exists() {
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd =
         SelectorsCommand { selectors: vec!["moniker1".to_string()], accessor: None, data: vec![] };
     let lifecycle_data = inspect_accessor_data(
@@ -181,7 +181,7 @@ async fn test_selectors_with_manifest_that_exists() {
 #[fuchsia::test]
 async fn test_selectors_with_selectors() {
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = SelectorsCommand {
         data: vec![],
         selectors: vec![String::from("test/moniker1:name:hello_3")],

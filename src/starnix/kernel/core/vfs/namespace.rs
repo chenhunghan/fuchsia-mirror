@@ -4,10 +4,11 @@
 
 use crate::security;
 use crate::task::{
-    CurrentTask, EventHandler, Kernel, MountsWriteToken, Pid, WaitCanceler, Waiter,
+    CurrentTask, EventHandler, Kernel, MountsWriteToken, TaskContainer, WaitCanceler, Waiter,
     register_delayed_call,
 };
 use crate::time::utc;
+use crate::vfs::fs_args::MountParams;
 use crate::vfs::fs_registry::FsRegistry;
 use crate::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
 use crate::vfs::pseudo::simple_file::SimpleFileNode;
@@ -28,7 +29,7 @@ use starnix_uapi::arc_key::{ArcKey, PtrKey, WeakKey};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::file_mode::FileMode;
+use starnix_uapi::file_mode::{Access, FileMode};
 use starnix_uapi::inotify_mask::InotifyMask;
 use starnix_uapi::mount_flags::{
     AtomicMountpointFlags, FileSystemFlags, MountFlags, MountpointFlags,
@@ -757,13 +758,14 @@ impl Mount {
         self.fs.name()
     }
 
-    /// Reconfigures the flags for the `FileSystem` backing this mount point.
+    /// Reconfigures the flags and mount parameters for the `FileSystem` backing this mount point.
     pub fn reconfigure_fs(
         &self,
         current_task: &CurrentTask,
         flags: FileSystemFlags,
+        params: &MountParams,
     ) -> Result<(), Errno> {
-        self.fs.update_flags(current_task, flags)
+        self.fs.reconfigure(current_task, flags, params)
     }
 
     /// Returns true if there is a submount on top of `dir_entry`.
@@ -1050,7 +1052,7 @@ impl CurrentTask {
 }
 
 struct ProcMountsFileSource {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl DynamicFileSource for ProcMountsFileSource {
@@ -1063,7 +1065,7 @@ impl DynamicFileSource for ProcMountsFileSource {
         // entire list in one go. Should we have a BTreeMap<u64, Weak<Mount>> in the Namespace?
         // Also has the benefit of correct (i.e. chronological) ordering. But then we have to do
         // extra work to maintain it.
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let task_fs = task.fs()?;
         let root = task_fs.root();
         let ns = task_fs.namespace();
@@ -1081,7 +1083,7 @@ impl DynamicFileSource for ProcMountsFileSource {
                 // Report the union of the FileSystem and Mount flags, as well as any FileSystem-
                 // or LSM-specific options.
                 mount.flags(),
-                security::sb_show_options(&task.kernel(), &mount.fs)?,
+                mount.fs.format_options(&task.kernel())?,
             )?;
             writeln!(sink, " 0 0")?;
             Ok(())
@@ -1095,9 +1097,11 @@ pub struct ProcMountsFile {
 }
 
 impl ProcMountsFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
         SimpleFileNode::new(move |_| {
-            Ok(Self { dynamic_file: DynamicFile::new(ProcMountsFileSource { tid: tid.clone() }) })
+            Ok(Self {
+                dynamic_file: DynamicFile::new(ProcMountsFileSource { target: target.clone() }),
+            })
         })
     }
 }
@@ -1130,11 +1134,11 @@ impl FileOps for ProcMountsFile {
 
 #[derive(Clone)]
 pub struct ProcMountinfoFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl ProcMountinfoFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for ProcMountinfoFile {
@@ -1163,7 +1167,7 @@ impl DynamicFileSource for ProcMountinfoFile {
         // entire list in one go. Should we have a BTreeMap<u64, Weak<Mount>> in the Namespace?
         // Also has the benefit of correct (i.e. chronological) ordering. But then we have to do
         // extra work to maintain it.
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let task_fs = task.fs()?;
         let root = task_fs.root();
         let ns = task_fs.namespace();
@@ -1196,8 +1200,9 @@ impl DynamicFileSource for ProcMountinfoFile {
                 mount.fs.name(),
                 mount.fs.options.source_for_display(),
                 mount.fs_flags(),
-                // LSM options are associated with the FileSystem rather than the Mount.
-                security::sb_show_options(&task.kernel(), &mount.fs)?
+                // Options (including LSM options) are associated with the FileSystem rather than
+                // the Mount.
+                mount.fs.format_options(&task.kernel())?,
             )?;
             Ok(())
         })?;
@@ -1631,11 +1636,19 @@ impl NamespaceNode {
             }
 
             let basename = basenames[0];
-            if basename.is_empty() || basename == "." {
+            if basename.is_empty() {
+                basenames = &basenames[1..];
+                continue;
+            }
+            if basename == "." {
+                current_namespace_node
+                    .check_access(current_task, AccessCheck::for_internal(Access::EXEC))?;
                 basenames = &basenames[1..];
                 continue;
             }
             if basename == ".." {
+                current_namespace_node
+                    .check_access(current_task, AccessCheck::for_internal(Access::EXEC))?;
                 let root = match &context.resolve_base {
                     ResolveBase::None => current_task.fs().root(),
                     ResolveBase::Beneath(node) => {

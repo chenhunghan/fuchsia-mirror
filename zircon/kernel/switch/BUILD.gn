@@ -12,6 +12,8 @@ import("//build/toolchain/variant.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 import("//zircon/kernel/lib/console/config.gni")
+import("//zircon/kernel/lib/crashlog/params.gni")
+import("//zircon/kernel/lib/persistent-debuglog/params.gni")
 import("//zircon/kernel/params.gni")
 
 assert(
@@ -80,10 +82,6 @@ compiler_config("static-pic-link") {
     "-include",
     rebase_path(inputs[0], root_build_dir),
   ]
-
-  if (is_gcc && current_os == "fuchsia") {
-    c_family_flags = [ "-fpie" ]
-  }
 
   rustflags = []
   if (toolchain_environment == "kernel") {
@@ -305,11 +303,31 @@ variant("kernel_config") {
     rustflags += [ "--cfg=channel_message_body_tracing_enabled" ]
   }
 
+  if (kernel_extra_defines + [
+        "ENABLE_ENTROPY_COLLECTOR_TEST=1",
+        "ENABLE_ENTROPY_COLLECTOR_TEST",
+      ] -
+      [
+        "ENABLE_ENTROPY_COLLECTOR_TEST=1",
+        "ENABLE_ENTROPY_COLLECTOR_TEST",
+      ] != kernel_extra_defines) {
+    rustflags += [ "--cfg=enable_entropy_collector_test" ]
+  }
+
   if (kernel_no_userabi) {
     defines += [ "KERNEL_NO_USERABI" ]
   }
 
-  rustenv += [ "SMP_MAX_CPUS=${smp_max_cpus}" ]
+  rustenv += [
+    "SMP_MAX_CPUS=${smp_max_cpus}",
+
+    # C++ gets these as MIN_CRASHLOG_SIZE and TARGET_PERSISTENT_DEBUGLOG_SIZE
+    # from the //zircon/kernel/lib/crashlog and
+    # //zircon/kernel/lib/persistent-debuglog header configs.  Rust reads them
+    # with env!().
+    "MIN_CRASHLOG_SIZE=${min_crashlog_size}",
+    "TARGET_PERSISTENT_DEBUGLOG_SIZE=${target_persistent_debuglog_size}",
+  ]
 }
 
 # Each switchset is expected to include one of these.
@@ -331,22 +349,10 @@ foreach(level,
 config("warnings") {
   cflags = [
     "-Wformat=2",
+    "-Wmissing-declarations",
+    "-Wshadow",
     "-Wvla",
   ]
-
-  # GCC supports `-Wformat-signedness` but Clang currently does not.
-  if (is_gcc) {
-    cflags += [ "-Wformat-signedness" ]
-  }
-
-  # TODO(https://fxbug.dev/42159114): Eventually enable -Wshadow for GCC.  It's currently
-  # disabled because GCC is more aggressive than Clang.
-  if (!is_gcc) {
-    cflags += [
-      "-Wmissing-declarations",
-      "-Wshadow",
-    ]
-  }
 
   cflags_c = [ "-Wmissing-prototypes" ]
 }
@@ -391,11 +397,16 @@ config("scheduler") {
     "SCHEDULER_LOCK_SPIN_TRACING_ENABLED=$scheduler_lock_spin_tracing_enabled",
     "WAIT_QUEUE_DEPTH_TRACING_ENABLED=$wait_queue_depth_tracing_enabled",
   ]
+  rustflags = []
+  if (scheduler_lock_spin_tracing_enabled) {
+    rustflags += [ "--cfg=scheduler_lock_spin_tracing_enabled" ]
+  }
 }
 
 config("persistent_ram_config") {
   visibility = [ ":*" ]
   defines = [ "PERSISTENT_RAM_ALLOCATION_GRANULARITY=$persistent_ram_allocation_granularity" ]
+  rustenv = [ "PERSISTENT_RAM_ALLOCATION_GRANULARITY=$persistent_ram_allocation_granularity" ]
 }
 
 # In architectures where it is necessary, determined the number of boot pages to
@@ -434,6 +445,7 @@ config("jtrace_config") {
 
   if (jtrace_enabled == false) {
     defines = [ "JTRACE_TARGET_BUFFER_SIZE=0" ]
+    rustenv = [ "JTRACE_TARGET_BUFFER_SIZE=0" ]
   } else {
     if (jtrace_target_buffer_size == "auto") {
       if (jtrace_enabled == "persistent") {
@@ -457,9 +469,11 @@ config("jtrace_config") {
       "JTRACE_USE_LARGE_ENTRIES=$jtrace_use_large_entries",
       "JTRACE_USE_MONO_TIMESTAMPS=$jtrace_use_mono_timestamps",
     ]
+    rustenv = [ "JTRACE_TARGET_BUFFER_SIZE=$jtrace_target_buffer_size" ]
 
     if (jtrace_enabled == "persistent") {
       defines += [ "JTRACE_IS_PERSISTENT=true" ]
+      rustflags = [ "--cfg=jtrace_persistent" ]
     } else {
       defines += [ "JTRACE_IS_PERSISTENT=false" ]
     }
@@ -505,16 +519,4 @@ variant("unit-tests-enabled") {
     "--cfg",
     "ktest",
   ]
-}
-
-# TODO(https://fxbug.dev/548748442): remove when all fixed in the code
-clippy_lints = [
-  "doc-lazy-continuation",
-  "new-without-default",
-  "too-many-arguments",
-]
-foreach(lint, clippy_lints) {
-  config("allow-$lint") {
-    rustflags = [ "--allow=clippy::$lint" ]
-  }
 }

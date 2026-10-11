@@ -3,8 +3,26 @@
 // found in the LICENSE file.
 
 use crate::builtins::run_builtin;
-use crate::builtins::times::builtin_times;
+use crate::builtins::times::{builtin_times, ticks_to_min_sec};
 use crate::eval::{EXIT_SUCCESS, EvalOutcome, ExecutionContext, ShellState};
+
+#[test]
+fn test_ticks_to_min_sec() {
+    assert_eq!(ticks_to_min_sec(0, 100.0), (0, 0.0));
+    let (m, s) = ticks_to_min_sec(4550, 100.0);
+    assert_eq!(m, 0);
+    assert!((s - 45.5).abs() < 1e-9);
+
+    // 90 seconds should be 1m30s, not 1m90s
+    let (m, s) = ticks_to_min_sec(9000, 100.0);
+    assert_eq!(m, 1);
+    assert!((s - 30.0).abs() < 1e-9);
+
+    // 125.25 seconds should be 2m5.25s
+    let (m, s) = ticks_to_min_sec(12525, 100.0);
+    assert_eq!(m, 2);
+    assert!((s - 5.25).abs() < 1e-9);
+}
 
 #[test]
 fn test_builtin_times() {

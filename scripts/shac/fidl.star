@@ -11,8 +11,6 @@ def _fidl_format(ctx):
     Args:
       ctx: A ctx instance.
     """
-    exe = compiled_tool_path(ctx, "fidl-format")
-
     fidl_files = [
         f
         for f in ctx.scm.affected_files(glob = [
@@ -23,6 +21,10 @@ def _fidl_format(ctx):
         # directories that end with ".fidl".
         if f.endswith(".fidl")
     ]
+    if not fidl_files:
+        return
+
+    exe = compiled_tool_path(ctx, "fidl-format")
 
     procs = []
     for f in fidl_files:
@@ -44,11 +46,15 @@ def _gidl_format(ctx):
     Args:
       ctx: A ctx instance.
     """
+    gidl_files = ctx.scm.affected_files(glob = "*.gidl")
+    if not gidl_files:
+        return
+
     exe = compiled_tool_path(ctx, "gidl-format")
 
     procs = [
         (f, os_exec(ctx, [exe, f]))
-        for f in ctx.scm.affected_files(glob = "*.gidl")
+        for f in gidl_files
     ]
     for f, proc in procs:
         formatted = proc.wait().stdout

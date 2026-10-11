@@ -2,14 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::error::{ComponentInstanceError, PrettyPrintRef, RouteVerb, RoutingError};
+use crate::error::{ComponentInstanceError, RouteVerb, RoutingError};
 use crate::rights::{Rights, validate_rights};
 use async_trait::async_trait;
 use capability_source::CapabilitySource;
-use cm_rust::{CapabilityTypeName, FidlIntoNative, NativeIntoFidl};
+use cm_rust::{CapabilityTypeName, FidlIntoNative, GenericRef, NativeIntoFidl};
 use cm_rust_derive::FidlDecl;
 use cm_types::RelativePath;
-use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_component_runtime as fruntime;
 use fidl_fuchsia_io as fio;
 use moniker::{ChildName, Moniker};
@@ -45,7 +44,7 @@ impl From<Weak<Router<Dictionary>>> for WeakDictionaryOrRouter {
 /// RoutingError::RouteSourceNotFound and construct it as needed.
 struct NotFoundErrorContext {
     verb: RouteVerb,
-    source: PrettyPrintRef,
+    source: GenericRef,
     type_name: CapabilityTypeName,
 }
 
@@ -55,15 +54,15 @@ impl NotFoundErrorContext {
             moniker: intermediate_router.moniker.clone(),
             verb: self.verb,
             counter_verb: match &self.source {
-                PrettyPrintRef::Parent => RouteVerb::Offer,
-                PrettyPrintRef::Child(_)
-                | PrettyPrintRef::ChildInCollection(_, _)
-                | PrettyPrintRef::Collection(_) => RouteVerb::Expose,
-                PrettyPrintRef::Self_ | PrettyPrintRef::Capability(_) => RouteVerb::Declare,
-                PrettyPrintRef::Framework
-                | PrettyPrintRef::Debug
-                | PrettyPrintRef::Void
-                | PrettyPrintRef::Environment => RouteVerb::Contain,
+                GenericRef::Parent => RouteVerb::Offer,
+                GenericRef::Child(_)
+                | GenericRef::ChildInCollection(_, _)
+                | GenericRef::Collection(_) => RouteVerb::Expose,
+                GenericRef::Self_ | GenericRef::Capability(_) => RouteVerb::Declare,
+                GenericRef::Framework
+                | GenericRef::Debug
+                | GenericRef::Void
+                | GenericRef::Environment => RouteVerb::Contain,
             },
             source: self.source.clone(),
             capability_type: self.type_name,
@@ -162,7 +161,7 @@ impl IntermediateRouter {
         default_token: Arc<WeakInstanceToken>,
         moniker: Moniker,
         route_verb: RouteVerb,
-        source: fdecl::Ref,
+        source: GenericRef,
     ) -> Capability {
         assert!(source_path.len() != 0);
         let type_name = default_request.build_type_name;
@@ -175,11 +174,7 @@ impl IntermediateRouter {
             default_request,
             default_token,
             moniker,
-            not_found_context: NotFoundErrorContext {
-                verb: route_verb,
-                source: source.into(),
-                type_name,
-            },
+            not_found_context: NotFoundErrorContext { verb: route_verb, source, type_name },
             enable_tracing,
         };
 
@@ -200,22 +195,22 @@ impl IntermediateRouter {
     /// Returns the moniker that owns the source dictionary.
     fn get_upgrade_failure_moniker(&self) -> Moniker {
         match &self.not_found_context.source {
-            PrettyPrintRef::Parent => self.moniker.parent().unwrap_or_else(|| Moniker::root()),
+            GenericRef::Parent => self.moniker.parent().unwrap_or_else(|| Moniker::root()),
 
-            PrettyPrintRef::Child(name) => {
+            GenericRef::Child(name) => {
                 self.moniker.child(ChildName::new(name.clone().into(), None))
             }
-            PrettyPrintRef::ChildInCollection(name, collection) => {
+            GenericRef::ChildInCollection(name, collection) => {
                 self.moniker.child(ChildName::new(name.clone(), Some(collection.clone())))
             }
 
-            PrettyPrintRef::Collection(_)
-            | PrettyPrintRef::Capability(_)
-            | PrettyPrintRef::Debug
-            | PrettyPrintRef::Environment
-            | PrettyPrintRef::Framework
-            | PrettyPrintRef::Self_
-            | PrettyPrintRef::Void => self.moniker.clone(),
+            GenericRef::Collection(_)
+            | GenericRef::Capability(_)
+            | GenericRef::Debug
+            | GenericRef::Environment
+            | GenericRef::Framework
+            | GenericRef::Self_
+            | GenericRef::Void => self.moniker.clone(),
         }
     }
 
@@ -480,17 +475,19 @@ where
         target: Arc<WeakInstanceToken>,
     ) -> Result<Option<Arc<C>>, RouterError> {
         #[cfg(target_os = "fuchsia")]
-        if self.enable_tracing {
-            trace::duration_begin!(
-                "component_manager", "route_capability",
+        let _trace_guard = self.enable_tracing.then(|| {
+            trace::async_enter!(
+                trace::Id::new(),
+                "component_manager",
+                "route_capability",
                 "target" => self.moniker.as_str(),
                 "type" => self.default_request.build_type_name.to_string().as_str(),
                 "capability" => self.source_path.iter_segments().join("/").as_str()
-            );
-        }
+            )
+        });
 
         self.handle_new_request(&mut request)?;
-        let result = match self.get_source_router(&request, false).await? {
+        match self.get_source_router(&request, false).await? {
             RouterCapabilityOrSource::Capability(c) => Ok(Some(c)),
             RouterCapabilityOrSource::Source(source) => {
                 match &*source {
@@ -505,19 +502,7 @@ where
                     .into())
             }
             RouterCapabilityOrSource::Router(router) => router.route(request, target).await,
-        };
-
-        #[cfg(target_os = "fuchsia")]
-        if self.enable_tracing {
-            trace::duration_end!(
-                "component_manager", "route_capability",
-                "target" => self.moniker.as_str(),
-                "type" => self.default_request.build_type_name.to_string().as_str(),
-                "capability" => self.source_path.iter_segments().join("/").as_str()
-            );
         }
-
-        result
     }
 
     async fn route_debug(
@@ -526,35 +511,25 @@ where
         target: Arc<WeakInstanceToken>,
     ) -> Result<CapabilitySource, RouterError> {
         #[cfg(target_os = "fuchsia")]
-        if self.enable_tracing {
-            trace::duration_begin!(
-                "component_manager", "route_capability_debug",
+        let _trace_guard = self.enable_tracing.then(|| {
+            trace::async_enter!(
+                trace::Id::new(),
+                "component_manager",
+                "route_capability_debug",
                 "target" => self.moniker.as_str(),
                 "type" => self.default_request.build_type_name.to_string().as_str(),
                 "capability" => self.source_path.iter_segments().join("/").as_str()
-            );
-        }
+            )
+        });
 
         self.handle_new_request(&mut request)?;
-        let result = match self.get_source_router(&request, true).await? {
+        match self.get_source_router(&request, true).await? {
             RouterCapabilityOrSource::Capability(_) => {
                 panic!("returned capability for debug operation")
             }
             RouterCapabilityOrSource::Source(source) => Ok(*source),
             RouterCapabilityOrSource::Router(router) => router.route_debug(request, target).await,
-        };
-
-        #[cfg(target_os = "fuchsia")]
-        if self.enable_tracing {
-            trace::duration_end!(
-                "component_manager", "route_capability_debug",
-                "target" => self.moniker.as_str(),
-                "type" => self.default_request.build_type_name.to_string().as_str(),
-                "capability" => self.source_path.iter_segments().join("/").as_str()
-            );
         }
-
-        result
     }
 
     fn error_info(&self) -> Option<RouterErrorInfo> {

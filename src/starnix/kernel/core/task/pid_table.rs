@@ -2,12 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::device::terminal::{Terminal, TerminalSide};
+use crate::ptrace::StopState;
+use crate::signals::SignalInfo;
 use crate::task::idr::{Idr, IdrGuard};
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
-use crate::task::{ProcessGroup, Task, ThreadGroup};
-use fuchsia_rcu::{RcuDroppable, RcuOptionBox, RcuReadScope, RcuWeak};
+use crate::task::{Task, ThreadGroup, ThreadGroupLinkAdapter, ThreadGroupLinkNode};
+use fuchsia_rcu::subtle::{RcuPtr, RcuPtrRef};
+use fuchsia_rcu::{RcuDroppable, RcuOptionBox, RcuReadScope, RcuWeak, rcu_drop};
+use fuchsia_rcu_collections::rcu_intrusive_list::RcuIntrusiveList;
 use starnix_sync::PidTableLock;
 use starnix_uapi::errors::Errno;
+use starnix_uapi::signals::Signal;
 use starnix_uapi::{errno, error, pid_t};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Weak};
@@ -15,7 +21,7 @@ use std::sync::{Arc, Weak};
 #[derive(Debug, RcuDroppable)]
 enum ProcessEntry {
     ThreadGroup(Weak<ThreadGroup>),
-    Zombie,
+    Zombie(Weak<Task>),
 }
 
 impl ProcessEntry {
@@ -33,12 +39,34 @@ pub struct PidEntry {
     pub id: pid_t,
     task: RcuWeak<Task>,
     process: RcuOptionBox<ProcessEntry>,
-    process_group: RcuWeak<ProcessGroup>,
+    pgid_thread_groups: RcuIntrusiveList<ThreadGroupLinkNode, ThreadGroupLinkAdapter>,
+    sid_thread_groups: RcuIntrusiveList<ThreadGroupLinkNode, ThreadGroupLinkAdapter>,
 }
 
 impl PidEntry {
     pub fn get_task(&self) -> Result<Arc<Task>, Errno> {
         self.task.upgrade().ok_or_else(|| errno!(ESRCH))
+    }
+
+    /// Returns a representative [`Task`] for this process, including when the thread-group
+    /// leader has exited or the process is an unreaped zombie.
+    pub fn get_process_task(&self) -> Option<Arc<Task>> {
+        if let Ok(task) = self.get_task() {
+            return Some(task);
+        }
+        let process = self.process.read()?;
+        match &*process {
+            ProcessEntry::ThreadGroup(thread_group) => {
+                if let Some(task) = thread_group.upgrade().and_then(|tg| tg.read().first_task()) {
+                    return Some(task);
+                }
+                match &*self.process.read()? {
+                    ProcessEntry::Zombie(task) => task.upgrade(),
+                    ProcessEntry::ThreadGroup(_) => None,
+                }
+            }
+            ProcessEntry::Zombie(task) => task.upgrade(),
+        }
     }
 
     pub fn get_process(&self) -> Option<ProcessEntryRef> {
@@ -53,7 +81,7 @@ impl PidEntry {
                     None => ProcessEntryRef::Zombie,
                 })
             }
-            ProcessEntry::Zombie => Some(ProcessEntryRef::Zombie),
+            ProcessEntry::Zombie(_) => Some(ProcessEntryRef::Zombie),
         }
     }
 
@@ -64,8 +92,224 @@ impl PidEntry {
         }
     }
 
-    pub fn get_process_group(&self) -> Result<Arc<ProcessGroup>, Errno> {
-        self.process_group.upgrade().ok_or_else(|| errno!(ESRCH))
+    /// Returns whether any member thread groups belong to this process group (PGID).
+    pub fn is_process_group(&self, scope: &RcuReadScope) -> bool {
+        !self.pgid_thread_groups.is_empty(scope)
+    }
+
+    /// Returns whether any member thread groups belong to this session (SID).
+    pub fn is_session(&self, scope: &RcuReadScope) -> bool {
+        !self.sid_thread_groups.is_empty(scope)
+    }
+
+    /// Returns an iterator over the member thread groups in this process group (PGID).
+    pub fn pgid_thread_groups<'a>(
+        &'a self,
+        scope: &'a RcuReadScope,
+    ) -> impl Iterator<Item = Arc<ThreadGroup>> + 'a {
+        self.pgid_thread_groups.iter(scope).filter_map(|n| n.thread_group.upgrade())
+    }
+
+    /// Returns an iterator over the member thread groups in this session (SID).
+    pub fn sid_thread_groups<'a>(
+        &'a self,
+        scope: &'a RcuReadScope,
+    ) -> impl Iterator<Item = Arc<ThreadGroup>> + 'a {
+        self.sid_thread_groups.iter(scope).filter_map(|n| n.thread_group.upgrade())
+    }
+
+    /// Returns whether this process group (PGID) is non-empty and belongs to `session` (SID).
+    pub fn is_process_group_in_session(&self, session: &PidEntry, scope: &RcuReadScope) -> bool {
+        self.pgid_thread_groups(scope).next().is_some_and(|member_tg| {
+            session.sid_thread_groups(scope).any(|tg| Arc::ptr_eq(&tg, &member_tg))
+        })
+    }
+
+    /// Clears the controlling terminal on all member thread groups in this session (SID).
+    ///
+    /// If `matching` is `Some((terminal, maybe_side))`, only clears `controlling_terminal`
+    /// if it refers to `terminal` (and matches `side` if specified).
+    pub fn clear_controlling_terminal(&self, matching: Option<(&Terminal, Option<TerminalSide>)>) {
+        let scope = RcuReadScope::new();
+        for tg in self.sid_thread_groups(&scope) {
+            let mut state = tg.write();
+            if *state.session != *self {
+                continue;
+            }
+            let should_clear = state.controlling_terminal.as_ref().is_some_and(|ct| {
+                let matches = match matching {
+                    Some((terminal, Some(side))) => ct.matches(terminal, side),
+                    Some((terminal, None)) => std::ptr::eq(terminal, Arc::as_ptr(&ct.terminal)),
+                    None => true,
+                };
+                matches && ct.terminal.read().controlling_session().map(Arc::as_ref) != Some(self)
+            });
+            if should_clear {
+                state.controlling_terminal = None;
+            }
+        }
+    }
+
+    /// Returns whether the process group represented by this PidEntry is orphaned.
+    ///
+    /// An orphaned process group is one where every member's parent is either in the
+    /// same process group or outside the group's session.
+    ///
+    /// If `ignored_tg` is supplied, that thread group is ignored during traversal.
+    pub fn will_become_orphaned_pgrp(
+        &self,
+        scope: &RcuReadScope,
+        ignored_tg: Option<&ThreadGroup>,
+    ) -> bool {
+        for tg in self.pgid_thread_groups(scope) {
+            if ignored_tg.is_some_and(|ignored| std::ptr::eq(tg.as_ref(), ignored)) {
+                continue;
+            }
+
+            let (parent_tg, my_sid) = {
+                let tg_state = tg.read();
+                if !tg_state.is_running() {
+                    continue;
+                }
+                (tg_state.parent.as_ref().map(|p| p.upgrade()), tg_state.session.id)
+            };
+
+            let Some(parent_tg) = parent_tg else {
+                continue;
+            };
+
+            // Skip the parent if it matches ignored_tg.
+            if ignored_tg.is_some_and(|ignored| std::ptr::eq(parent_tg.as_ref(), ignored)) {
+                continue;
+            }
+
+            // Init (PID 1) does not act as a job-controlling parent for reparented tasks.
+            if parent_tg.leader.id == 1 {
+                continue;
+            }
+
+            let (parent_pgid, parent_sid) = {
+                let parent_state = parent_tg.read();
+                if !parent_state.is_running() {
+                    continue;
+                }
+                (parent_state.process_group.id, parent_state.session.id)
+            };
+
+            // If a member has a parent in the same session but outside this process group,
+            // that parent handles job control. The group is NOT orphaned.
+            if parent_pgid != self.id && parent_sid == my_sid {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Returns whether any member in this process group is stopped by job control.
+    pub fn has_stopped_jobs(&self, scope: &RcuReadScope) -> bool {
+        for tg in self.pgid_thread_groups(scope) {
+            let stop_state = tg.load_stopped();
+            if matches!(stop_state, StopState::GroupStopping | StopState::GroupStopped)
+                && tg.read().is_running()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Dispatches signals to all member thread groups in this process group.
+    ///
+    /// Signals are delivered in order: each signal in `signals` is delivered to all
+    /// group members before the subsequent signal is dispatched.
+    pub fn send_signals_to_pgid(&self, signals: &[Signal]) {
+        let scope = RcuReadScope::new();
+        for &signal in signals {
+            for tg in self.pgid_thread_groups(&scope) {
+                let state = tg.write();
+                if !state.is_exited() {
+                    state.send_signal(SignalInfo::kernel(signal));
+                }
+            }
+        }
+    }
+
+    /// Attaches `thread_group` to `list` using `node_slot` to store the allocated link node.
+    ///
+    /// Allocates a fresh [`ThreadGroupLinkNode`] for this list attachment so moving a process
+    /// across process groups or sessions never mutates a node still visible to in-flight RCU
+    /// readers.
+    fn attach_thread_group_node(
+        _guard: &PidTableGuard<'_>,
+        list: &RcuIntrusiveList<ThreadGroupLinkNode, ThreadGroupLinkAdapter>,
+        node_slot: &RcuPtr<ThreadGroupLinkNode>,
+        thread_group: &Arc<ThreadGroup>,
+    ) {
+        let scope = RcuReadScope::new();
+        debug_assert!(node_slot.read(&scope).is_null());
+        let node_ptr =
+            Box::into_raw(Box::new(ThreadGroupLinkNode::new(Arc::downgrade(thread_group))));
+        node_slot.assign(node_ptr);
+        // SAFETY: Single-writer exclusion is guaranteed by `_guard`, and `node_ptr` is newly
+        // allocated for this list attachment and retired via `rcu_drop` upon detach.
+        unsafe {
+            list.push_back(&scope, RcuPtrRef::new(&scope, node_ptr));
+        }
+    }
+
+    /// Detaches the node stored in `node_slot` from `list`, returning whether `list` is now empty.
+    ///
+    /// Unlinks the node (leaving `link.next` intact for concurrent RCU readers) and schedules
+    /// deferred reclamation via [`rcu_drop`].
+    fn detach_thread_group_node(
+        _guard: &PidTableGuard<'_>,
+        list: &RcuIntrusiveList<ThreadGroupLinkNode, ThreadGroupLinkAdapter>,
+        node_slot: &RcuPtr<ThreadGroupLinkNode>,
+    ) -> bool {
+        let scope = RcuReadScope::new();
+        let node_ptr = node_slot.read(&scope);
+        if !node_ptr.is_null() {
+            node_slot.assign(std::ptr::null_mut());
+            // SAFETY: Single-writer exclusion is guaranteed by `_guard`. `remove` leaves
+            // `node.link.next` intact for concurrent RCU readers, and `node_ptr` is never reused.
+            unsafe {
+                list.remove(&scope, node_ptr);
+            }
+            // SAFETY: `node_ptr` was allocated via `Box::into_raw` in `attach_thread_group_node`
+            // and is detached at most once under `PidTableLock`.
+            rcu_drop(unsafe { Box::from_raw(node_ptr.as_mut_ptr()) });
+        }
+        list.is_empty(&scope)
+    }
+    /// Attaches a member thread group to this process group (PGID).
+    fn attach_pgid(&self, guard: &PidTableGuard<'_>, thread_group: &Arc<ThreadGroup>) {
+        Self::attach_thread_group_node(
+            guard,
+            &self.pgid_thread_groups,
+            &thread_group.pgrp_node,
+            thread_group,
+        );
+    }
+
+    /// Detaches a member thread group from this process group (PGID).
+    fn detach_pgid(&self, guard: &PidTableGuard<'_>, thread_group: &ThreadGroup) -> bool {
+        Self::detach_thread_group_node(guard, &self.pgid_thread_groups, &thread_group.pgrp_node)
+    }
+
+    /// Attaches a member thread group to this session (SID).
+    fn attach_sid(&self, guard: &PidTableGuard<'_>, thread_group: &Arc<ThreadGroup>) {
+        Self::attach_thread_group_node(
+            guard,
+            &self.sid_thread_groups,
+            &thread_group.session_node,
+            thread_group,
+        );
+    }
+
+    /// Detaches a member thread group from this session (SID).
+    fn detach_sid(&self, guard: &PidTableGuard<'_>, thread_group: &ThreadGroup) -> bool {
+        Self::detach_thread_group_node(guard, &self.sid_thread_groups, &thread_group.session_node)
     }
 
     #[cfg(test)]
@@ -78,14 +322,16 @@ impl PidEntry {
             id,
             task: Default::default(),
             process: Default::default(),
-            process_group: Default::default(),
+            pgid_thread_groups: Default::default(),
+            sid_thread_groups: Default::default(),
         }
     }
 
     fn is_empty(&self, scope: &RcuReadScope) -> bool {
         self.task.strong_count(scope) == 0
             && self.process.is_none(scope)
-            && self.process_group.strong_count(scope) == 0
+            && self.pgid_thread_groups.is_empty(scope)
+            && self.sid_thread_groups.is_empty(scope)
     }
 }
 
@@ -127,6 +373,44 @@ pub enum ProcessEntryRef {
 }
 
 pub type Pid = Arc<PidEntry>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TaskEntryScope {
+    Task,
+    ThreadGroup,
+}
+
+/// Identifies the target process or thread for a `/proc/<pid>` or `/proc/<pid>/task/<tid>` node.
+#[derive(Clone, Debug)]
+pub struct TaskContainer {
+    pub pid: Pid,
+    pub tid: Pid,
+    pub scope: TaskEntryScope,
+}
+
+impl TaskContainer {
+    pub fn from_task(task: &Task) -> Self {
+        Self { pid: task.pid.clone(), tid: task.tid.clone(), scope: TaskEntryScope::Task }
+    }
+
+    pub fn from_pid(pid: Pid) -> Self {
+        Self { tid: pid.clone(), pid, scope: TaskEntryScope::ThreadGroup }
+    }
+
+    pub fn from_thread_group(pid: Pid, tid: Pid) -> Self {
+        Self { pid, tid, scope: TaskEntryScope::ThreadGroup }
+    }
+
+    pub fn get_task(&self) -> Result<Arc<Task>, Errno> {
+        if let Ok(task) = self.tid.get_task() {
+            return Ok(task);
+        }
+        if self.scope == TaskEntryScope::ThreadGroup && self.tid == self.pid {
+            return self.pid.get_process_task().ok_or_else(|| errno!(ESRCH));
+        }
+        error!(ESRCH)
+    }
+}
 
 /// The number of reserved PIDs in Linux. When wrapping around, PID allocation restarts at this value.
 pub const RESERVED_PIDS: u32 = 300;
@@ -254,23 +538,19 @@ impl<'a> PidTableGuard<'a> {
     }
 
     /// Replace process with the specified `pid` with a zombie.
-    pub fn kill_process(&mut self, pid: &Pid) {
+    pub fn kill_process(&mut self, pid: &Pid, zombie_task: Weak<Task>) {
         let scope = RcuReadScope::new();
         debug_assert_eq!(self.idr.lookup(pid.id as u32, &scope).as_ref(), Some(pid));
         assert!(matches!(pid.process.read().as_deref(), Some(ProcessEntry::ThreadGroup(_))));
 
-        // All tasks from the process are expected to be cleared from the table before the process
-        // becomes a zombie. Cannot verify this for all tasks here, check it just for the leader.
-        assert_eq!(pid.task.strong_count(&scope), 0);
-
-        pid.process.update(Some(ProcessEntry::Zombie));
+        pid.process.update(Some(ProcessEntry::Zombie(zombie_task)));
     }
 
     pub fn remove_zombie(&mut self, pid: &Pid) {
         let scope = RcuReadScope::new();
 
         self.remove_item(pid, |entry| {
-            assert!(matches!(entry.process.read().as_deref(), Some(ProcessEntry::Zombie)));
+            assert!(matches!(entry.process.read().as_deref(), Some(ProcessEntry::Zombie(_))));
             entry.process.update(None);
         });
 
@@ -280,18 +560,30 @@ impl<'a> PidTableGuard<'a> {
         }
     }
 
-    pub fn add_process_group(&mut self, process_group: &Arc<ProcessGroup>) {
-        let scope = RcuReadScope::new();
-        assert_eq!(process_group.leader.process_group.strong_count(&scope), 0);
-        process_group.leader.process_group.update(Arc::downgrade(process_group));
+    pub fn attach_pgid(&self, pid: &PidEntry, thread_group: &Arc<ThreadGroup>) {
+        pid.attach_pgid(self, thread_group);
     }
 
-    pub fn remove_process_group(&mut self, leader: &Pid) {
-        self.remove_item(leader, |entry| {
-            let scope = RcuReadScope::new();
-            assert!(entry.process_group.strong_count(&scope) > 0);
-            entry.process_group.update(Weak::new());
-        });
+    pub fn detach_pgid(&mut self, pid: &Pid, thread_group: &ThreadGroup) -> bool {
+        let scope = RcuReadScope::new();
+        let is_empty = pid.detach_pgid(self, thread_group);
+        if pid.is_empty(&scope) && self.idr.lookup(pid.id as u32, &scope).as_ref() == Some(pid) {
+            self.idr.remove(pid.id as u32);
+        }
+        is_empty
+    }
+
+    pub fn attach_sid(&self, pid: &PidEntry, thread_group: &Arc<ThreadGroup>) {
+        pid.attach_sid(self, thread_group);
+    }
+
+    pub fn detach_sid(&mut self, pid: &Pid, thread_group: &ThreadGroup) -> bool {
+        let scope = RcuReadScope::new();
+        let is_empty = pid.detach_sid(self, thread_group);
+        if pid.is_empty(&scope) && self.idr.lookup(pid.id as u32, &scope).as_ref() == Some(pid) {
+            self.idr.remove(pid.id as u32);
+        }
+        is_empty
     }
 }
 
@@ -367,6 +659,9 @@ impl PidTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::spawn_kernel_and_run;
+    use starnix_uapi::signals::SIGCHLD;
+    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
 
     #[test]
     fn test_pid_table_allocation() {
@@ -474,10 +769,6 @@ mod tests {
 
     #[::fuchsia::test]
     async fn test_pid_table_last_pid_on_thread_group() {
-        use crate::testing::spawn_kernel_and_run;
-        use starnix_uapi::signals::SIGCHLD;
-        use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
-
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
             let initial_last_pid = kernel.pids.last_pid();

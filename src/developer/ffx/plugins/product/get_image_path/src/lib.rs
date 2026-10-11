@@ -12,7 +12,7 @@ use fho::{Error, FfxMain, FfxTool, Result, bug, return_user_error, user_error};
 use product_bundle::ProductBundle;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use utf8_path::path_relative_from;
+use utf8_path as _;
 
 mod args;
 pub use args::{GetImagePathCommand, ImageType, Slot};
@@ -95,8 +95,11 @@ impl PbGetImagePathTool {
 
     fn compute_path(&self, artifact_path: &Utf8Path) -> Result<Utf8PathBuf> {
         if self.cmd.relative_path {
-            path_relative_from(artifact_path, &self.cmd.product_bundle.as_ref().unwrap())
-                .map_err(Into::into)
+            product_bundle::relativize_bundle_path(
+                self.cmd.product_bundle.as_ref().unwrap(),
+                artifact_path,
+            )
+            .map_err(Into::into)
         } else {
             Ok(artifact_path.into())
         }
@@ -606,5 +609,48 @@ mod tests {
         let want =
             CommandStatus::Ok { path: pb_path.join("zbi/path").to_string_lossy().to_string() };
         assert_eq!(got, want);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_image_path_gcs_dir_and_zip() {
+        let env = ffx_config::test_init().expect("test env");
+        let make_pb = |zbi: &str| {
+            ProductBundle::V2(ProductBundleV2 {
+                product_name: "gcs-test".to_string(),
+                product_version: "1".to_string(),
+                partitions: PartitionsConfig::default(),
+                sdk_version: "1".to_string(),
+                system_a: Some(vec![Image::ZBI { path: Utf8PathBuf::from(zbi), signed: false }]),
+                system_b: None,
+                system_r: None,
+                platform_tools_a: vec![],
+                platform_tools_b: vec![],
+                platform_tools_r: vec![],
+                repositories: vec![],
+                update_package_hash: None,
+                virtual_devices_path: None,
+                release_info: None,
+            })
+        };
+        let dir_pb = make_pb("gs://my-bucket/pb/system_a/fuchsia.zbi");
+        let zip_pb = make_pb("system_a/fuchsia.zbi");
+        for (pb, pb_arg, rel, want) in [
+            (&dir_pb, "gs://my-bucket/pb", false, "gs://my-bucket/pb/system_a/fuchsia.zbi"),
+            (&dir_pb, "gs://my-bucket/pb", true, "system_a/fuchsia.zbi"),
+            (&dir_pb, "gs://my-bucket/pb/product_bundle.json", true, "system_a/fuchsia.zbi"),
+            (&zip_pb, "gs://my-bucket/pb.zip", true, "system_a/fuchsia.zbi"),
+        ] {
+            let tool = PbGetImagePathTool {
+                cmd: GetImagePathCommand {
+                    product_bundle: Some(Utf8PathBuf::from(pb_arg)),
+                    slot: Some(Slot::A),
+                    image_type: Some(ImageType::Zbi),
+                    relative_path: rel,
+                    bootloader: None,
+                },
+                env: env.context.clone(),
+            };
+            assert_eq!(tool.extract_image_path(pb.clone()).unwrap(), Some(Utf8PathBuf::from(want)));
+        }
     }
 }

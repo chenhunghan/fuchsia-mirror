@@ -168,6 +168,10 @@ import("//build/rust/rustc_test.gni")
 #        procedural macros run as compiler plugins on the build machine.
 #        Entries must not specify a toolchain.
 #
+#      link_deps (optional)
+#        Native (e.g. C/C++) libraries to link against, has the same semantics
+#        as deps in GN.
+#
 #
 # Example of usage:
 #
@@ -327,6 +331,7 @@ template("rustc_library") {
                              "enforce_source_listing",
                              "features",
                              "inputs",
+                             "link_deps",
                              "lint_config",
                              "output_dir",
                              "output_name",

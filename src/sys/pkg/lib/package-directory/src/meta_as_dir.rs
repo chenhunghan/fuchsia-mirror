@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::root_dir::RootDir;
+use crate::root_dir::AsRootDir;
 use crate::usize_to_u64_safe;
 use fidl_fuchsia_io as fio;
 use std::sync::Arc;
@@ -12,41 +12,42 @@ use vfs::directory::traversal_position::TraversalPosition;
 use vfs::execution_scope::ExecutionScope;
 use vfs::{ObjectRequestRef, immutable_attributes};
 
-pub(crate) struct MetaAsDir<S: crate::NonMetaStorage> {
-    root_dir: Arc<RootDir<S>>,
+pub(crate) struct MetaAsDir<R> {
+    root_dir: Arc<R>,
 }
 
-impl<S: crate::NonMetaStorage> MetaAsDir<S> {
-    pub(crate) fn new(root_dir: Arc<RootDir<S>>) -> Arc<Self> {
+impl<R: AsRootDir> MetaAsDir<R> {
+    pub(crate) fn new(root_dir: Arc<R>) -> Arc<Self> {
         Arc::new(MetaAsDir { root_dir })
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::directory::entry::GetEntryInfo for MetaAsDir<S> {
+impl<R: AsRootDir> vfs::directory::entry::GetEntryInfo for MetaAsDir<R> {
     fn entry_info(&self) -> EntryInfo {
         EntryInfo::new(fio::INO_UNKNOWN, fio::DirentType::Directory)
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::node::Node for MetaAsDir<S> {
+impl<R: AsRootDir> vfs::node::Node for MetaAsDir<R> {
     async fn get_attributes(
         &self,
         requested_attributes: fio::NodeAttributesQuery,
     ) -> Result<fio::NodeAttributes2, zx::Status> {
+        let size = usize_to_u64_safe(self.root_dir.as_root_dir().meta_files.element_len());
         Ok(immutable_attributes!(
             requested_attributes,
             Immutable {
                 protocols: fio::NodeProtocolKinds::DIRECTORY,
                 abilities: crate::DIRECTORY_ABILITIES,
-                content_size: usize_to_u64_safe(self.root_dir.meta_files.element_len()),
-                storage_size: usize_to_u64_safe(self.root_dir.meta_files.element_len()),
+                content_size: size,
+                storage_size: size,
                 id: 1,
             }
         ))
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for MetaAsDir<S> {
+impl<R: AsRootDir> vfs::directory::entry_container::Directory for MetaAsDir<R> {
     fn open(
         self: Arc<Self>,
         scope: ExecutionScope,
@@ -81,7 +82,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for Me
         let file_path =
             format!("meta/{}", path.as_ref().strip_suffix('/').unwrap_or_else(|| path.as_ref()));
 
-        if let Some(file) = self.root_dir.get_meta_file(&file_path)? {
+        if let Some(file) = self.root_dir.as_root_dir().get_meta_file(&file_path)? {
             if path.is_dir() {
                 return Err(zx::Status::NOT_DIR);
             }
@@ -104,7 +105,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for Me
         zx::Status,
     > {
         vfs::directory::read_dirents::read_dirents(
-            &crate::get_dir_children(self.root_dir.meta_files.keys(), "meta/"),
+            &crate::get_dir_children(self.root_dir.as_root_dir().meta_files.keys(), "meta/"),
             pos,
             sink,
         )
@@ -126,6 +127,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for Me
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::root_dir::RootDir;
     use assert_matches::assert_matches;
     use fuchsia_fs::directory::{DirEntry, DirentKind};
     use fuchsia_pkg_testing::PackageBuilder;

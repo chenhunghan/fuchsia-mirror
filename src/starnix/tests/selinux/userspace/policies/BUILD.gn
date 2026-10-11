@@ -67,6 +67,10 @@ userspace_policy("inherit_policy") {
   sources = [ "inherit_policy.conf" ]
 }
 
+userspace_policy("inotify_policy") {
+  sources = [ "inotify_policy.conf" ]
+}
+
 userspace_policy("invalidated_sid_initial_policy") {
   sources = [ "invalidated_sid_initial_policy.conf" ]
 }
@@ -194,6 +198,7 @@ group("policies") {
     ":fs_test_policy",
     ":genfscon_create_policy",
     ":inherit_policy",
+    ":inotify_policy",
     ":invalidated_sid_initial_policy",
     ":invalidated_sid_reloaded_policy",
     ":io_uring_policy",

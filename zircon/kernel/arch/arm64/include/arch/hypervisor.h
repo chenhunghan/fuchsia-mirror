@@ -63,7 +63,7 @@ class Guest {
   uint16_t vmid_;
   hypervisor::GuestPhysicalAspace gpa_;
   hypervisor::TrapMap traps_;
-  id_allocator::IdAllocator<uint16_t, kMaxGuestVcpus> vpid_allocator_;
+  id_allocator::IdAllocator<uint16_t, kMaxGuestVcpus, 0> vpid_allocator_;
 
   explicit Guest(uint16_t vmid);
 };
@@ -156,9 +156,7 @@ class Vcpu {
   // stage of our migration function callback.
   Thread* thread_ TA_GUARDED(Thread::get_list_lock());
   ktl::atomic<bool> kicked_ = false;
-  // We allocate El2State in its own page as it is passed between EL1 and EL2,
-  // which have different address space mappings. This ensures that El2State
-  // will not cross a page boundary and be incorrectly accessed in EL2.
+  // Allocate El2State in its own page-aligned page.
   hypervisor::PagePtr<El2State> el2_state_;
   GichState gich_state_;
   uint64_t hcr_;

@@ -516,10 +516,10 @@ TEST_F(Integration, NoMagmaOrMediaCodecService) {
   auto builder = RealmBuilder::Create();
   InitializeRoutes(builder, /*route_magma=*/false, /*route_mediacodec=*/false);
   auto realm = builder.Build(dispatcher());
-  auto cleanup = fit::defer([&]() {
+  auto cleanup = fit::defer([&] {
     bool complete = false;
     realm.Teardown([&](fit::result<fuchsia::component::Error> result) { complete = true; });
-    RunLoopUntil([&]() { return complete; });
+    RunLoopUntil([&] { return complete; });
   });
   auto factory = realm.component().Connect<fuchsia::mediacodec::CodecFactory>();
 
@@ -529,9 +529,11 @@ TEST_F(Integration, NoMagmaOrMediaCodecService) {
   factory->GetDetailedCodecDescriptions(
       [&](fuchsia::mediacodec::CodecFactoryGetDetailedCodecDescriptionsResponse response) {
         got_description = true;
+        ASSERT_TRUE(response.has_codecs());
+        EXPECT_TRUE(response.codecs().empty());
       });
 
-  RunLoopUntil([&]() { return got_description || HasFailure(); });
+  RunLoopUntil([&] { return got_description || HasFailure(); });
 }
 
 TEST_F(Integration, MediaCodecDevice) {

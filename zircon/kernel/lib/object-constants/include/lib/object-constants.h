@@ -8,6 +8,7 @@
 #define ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_
 
 #include <stddef.h>
+#include <stdint.h>
 
 // Size and alignment constants for Rust dispatcher states stored in C++ OpaqueStorage.
 // These values must match the exact size and alignment of their corresponding Rust structs,
@@ -58,6 +59,11 @@ constexpr size_t kEventPairDispatcherStateSize = 32;
 constexpr size_t kEventPairDispatcherStateAlign = 8;
 constexpr size_t kEventPairDispatcherStateOffset = 48;
 
+// Size, alignment, and offset for ExceptionDispatcherState.
+constexpr size_t kExceptionDispatcherStateSize = 160 + kLockClassIdSize;
+constexpr size_t kExceptionDispatcherStateAlign = 8;
+constexpr size_t kExceptionDispatcherStateOffset = 48;
+
 // Size, alignment, and offset for FifoDispatcherState.
 constexpr size_t kFifoDispatcherStateSize = 72;
 constexpr size_t kFifoDispatcherStateAlign = 8;
@@ -67,6 +73,11 @@ constexpr size_t kFifoDispatcherStateOffset = 48;
 constexpr size_t kGuestDispatcherStateSize = 48;
 constexpr size_t kGuestDispatcherStateAlign = 8;
 constexpr size_t kGuestDispatcherStateOffset = 48;
+
+// Size, alignment, and offset for VcpuDispatcherState.
+constexpr size_t kVcpuDispatcherStateSize = 56 + kLockClassIdSize;
+constexpr size_t kVcpuDispatcherStateAlign = 8;
+constexpr size_t kVcpuDispatcherStateOffset = 48;
 
 // Size, alignment, and offset for IoBufferDispatcherState.
 constexpr size_t kIoBufferDispatcherStateSize = 64;
@@ -96,6 +107,12 @@ constexpr size_t kLogDispatcherStateOffset = 48;
 // Size and alignment for DlogReaderStorage (DlogReader).
 constexpr size_t kDlogReaderStorageSize = 48;
 constexpr size_t kDlogReaderStorageAlign = 8;
+
+// Size, alignment, and offset for PagerDispatcherState.
+constexpr size_t kPagerDispatcherStateSize = 120 + (2 * kLockClassIdSize);
+constexpr size_t kPagerDispatcherStateAlign = 8;
+constexpr size_t kPagerDispatcherStateOffset = 48;
+constexpr uint32_t kPagerProxyTrapDirty = (1u << 0u);
 
 // Size, alignment, and offset for PinnedMemoryTokenDispatcherState.
 constexpr size_t kPinnedMemoryTokenDispatcherStateSize = 56 + kLockClassIdSize;
@@ -184,5 +201,19 @@ constexpr size_t kOwnedWaitQueueAlign = 8;
 constexpr size_t kResourceDispatcherStateSize = 128 + kLockClassIdSize;
 constexpr size_t kResourceDispatcherStateAlign = 8;
 constexpr size_t kResourceDispatcherStateOffset = 48;
+
+// Size, alignment, and offset for VmAddressRegionDispatcherState.
+constexpr size_t kVmAddressRegionDispatcherStateSize = 56 + kLockClassIdSize;
+constexpr size_t kVmAddressRegionDispatcherStateAlign = 8;
+constexpr size_t kVmAddressRegionDispatcherStateOffset = 48;
+
+// Size and alignment for MemoryWatchdogState.
+constexpr size_t kMemoryWatchdogStateSize = 304;
+constexpr size_t kMemoryWatchdogStateAlign = 8;
+
+// Size, alignment, and offset for VmObjectDispatcherState.
+constexpr size_t kVmObjectDispatcherStateSize = 64 + kLockClassIdSize;
+constexpr size_t kVmObjectDispatcherStateAlign = 8;
+constexpr size_t kVmObjectDispatcherStateOffset = 56;
 
 #endif  // ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_

@@ -122,8 +122,9 @@ unified_only = [
   "bad-syscall",
   "bti",
   "channel-call-mutex",
-  "default-exception-handler",  # needs job tree w/o exception handler.
+  "debug-suspend",
   "debuglog:unified-only",
+  "default-exception-handler",  # needs job tree w/o exception handler.
   "hotplug",
   "interrupt",
   "next-vdso",
@@ -136,6 +137,7 @@ unified_only = [
   "thread-sampler",
   "timer",
 ]
+
 assert(core_tests + core_tests_with_custom_manifests -
            core_tests_with_custom_manifests == core_tests,
        "core_tests and core_tests_with_custom_manifests must be disjoint")

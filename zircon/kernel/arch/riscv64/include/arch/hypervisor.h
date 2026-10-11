@@ -14,6 +14,7 @@
 
 #include <fbl/ref_ptr.h>
 #include <ktl/unique_ptr.h>
+#include <vm/vm_address_region.h>
 
 // Nulled out RISC-V implementation of Guest and Vcpu objects. There is currently
 // no support for this architecture, so this is the minimum to cleanly compile the
@@ -21,7 +22,6 @@
 
 typedef struct zx_port_packet zx_port_packet_t;
 class PortDispatcher;
-class VmAddressRegion;
 
 // Represents a guest within the hypervisor.
 class Guest {

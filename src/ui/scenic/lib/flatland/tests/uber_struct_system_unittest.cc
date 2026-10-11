@@ -567,6 +567,51 @@ TEST(UberStructSystemTest, NeedsViewTreeRecompute) {
   EXPECT_TRUE(system.MustRecomputeViewTree());
   // Verify that `MustRecomputeViewTree()` resets the value.
   EXPECT_FALSE(system.MustRecomputeViewTree());
+
+  // Removing a session also requests a new view tree.
+  system.RemoveSession(kSession1);
+  EXPECT_TRUE(system.MustRecomputeViewTree());
+  EXPECT_FALSE(system.MustRecomputeViewTree());
+}
+
+TEST(UberStructSystemTest, MustRecomputeSceneState) {
+  UberStructSystem system;
+
+  const scheduling::SessionId kSession = 1;
+
+  // A fresh system does not request a rebuild.
+  EXPECT_FALSE(system.MustRecomputeSceneState());
+
+  auto queue = system.AllocateQueueForSession(kSession);
+
+  // Updating to a present where `recompute_scene_state` is set. Every push leaves
+  // `recompute_view_tree` clear, so the two flags are seen to be independent.
+  queue->Push(1, std::make_unique<UberStruct>(), /*recompute_view_tree=*/false,
+              /*recompute_scene_state=*/true);
+  system.UpdateInstances({{kSession, 1}});
+  EXPECT_TRUE(system.MustRecomputeSceneState());
+  // Verify that `MustRecomputeSceneState()` resets the value.
+  EXPECT_FALSE(system.MustRecomputeSceneState());
+
+  // Updating to a present where `recompute_scene_state` is not set.
+  queue->Push(2, std::make_unique<UberStruct>(), /*recompute_view_tree=*/false,
+              /*recompute_scene_state=*/false);
+  system.UpdateInstances({{kSession, 2}});
+  EXPECT_FALSE(system.MustRecomputeSceneState());
+
+  // Updating to a present where `recompute_scene_state` is not set, but a previous present did set
+  // it (presents were squashed).
+  queue->Push(3, std::make_unique<UberStruct>(), /*recompute_view_tree=*/false,
+              /*recompute_scene_state=*/true);
+  queue->Push(4, std::make_unique<UberStruct>(), /*recompute_view_tree=*/false,
+              /*recompute_scene_state=*/false);
+  system.UpdateInstances({{kSession, 4}});
+  EXPECT_TRUE(system.MustRecomputeSceneState());
+  EXPECT_FALSE(system.MustRecomputeViewTree());
+
+  // Removing a session requests a rebuild.
+  system.RemoveSession(kSession);
+  EXPECT_TRUE(system.MustRecomputeSceneState());
 }
 
 TEST(UberStructSystemTest, LayerStacksSurviveSnapshot) {

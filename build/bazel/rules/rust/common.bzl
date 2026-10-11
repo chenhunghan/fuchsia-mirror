@@ -13,3 +13,14 @@ def with_fuchsia_rustc_flags(rustc_flags):
         # third-party rust-crates.
         "--cap-lints={}".format(rust_cap_lints),
     ]
+
+def with_fuchsia_rust_stdlib_link_deps(link_deps):
+    """Add native libraries needed by the Rust standard library to link_deps.
+
+    Must only be used for targets that are linked, i.e. executables, tests and
+    dylibs, see //build/bazel/rules/rust:fdio_for_rust_stdlib.
+    """
+    return (link_deps or []) + select({
+        "@platforms//os:fuchsia": ["//build/bazel/rules/rust:fdio_for_rust_stdlib"],
+        "//conditions:default": [],
+    })

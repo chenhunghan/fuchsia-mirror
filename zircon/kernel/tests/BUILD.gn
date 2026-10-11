@@ -153,10 +153,6 @@ if (toolchain_environment == "kernel") {
       "//zircon/system/ulib/affine",
       "//zircon/system/ulib/pretty",
     ]
-    if (!kernel_no_userabi) {
-      sources += [ "userboot_tests.cc" ]
-      deps += [ "//zircon/kernel/lib/userabi" ]
-    }
     public_deps = [ "//zircon/system/ulib/zx:headers" ]
   }
 

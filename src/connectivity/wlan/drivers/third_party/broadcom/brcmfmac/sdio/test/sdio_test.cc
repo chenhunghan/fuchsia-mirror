@@ -485,14 +485,14 @@ TEST_F(SdioTest, SdioTimeoutRecoveryVmos) {
 
   // The expected frame sequence: 4 frames with ZX_ERR_TIMED_OUT, 1 frame with ZX_OK, 5 frames with
   // ZX_ERR_TIMED_OUT.
-  for (size_t i = 0; i < 4; i++) {
+  for (uint32_t i = 0; i < 4; i++) {
     sdio_bus->ExpectDoRwTxn(sdio1, ZX_ERR_TIMED_OUT, i * 0x00001000, FakeSdioBus::kFrameSize, true,
                             true);
   }
 
   sdio_bus->ExpectDoRwTxn(sdio1, ZX_OK, 0x00000000, FakeSdioBus::kFrameSize, true, true);
 
-  for (size_t i = 0; i < 5; i++) {
+  for (uint32_t i = 0; i < 5; i++) {
     sdio_bus->ExpectDoRwTxn(sdio1, ZX_ERR_TIMED_OUT, i * 0x00001000, FakeSdioBus::kFrameSize, true,
                             true);
   }

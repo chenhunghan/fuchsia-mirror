@@ -49,8 +49,22 @@ pub(in crate::security) fn file_permission(
     mut permission_flags: PermissionFlags,
 ) -> Result<(), Errno> {
     let current_sid = current_task_state(current_task).current_sid;
+    if file.node().is_private() {
+        // `file_open()` is not called for private nodes, so `open_state` is never populated and
+        // no `FsNode` permissions apply. Only `fd { use }` is checked, which `has_file_permissions`
+        // fast-paths when `current_sid` matches the `FileObject`'s SID.
+        return has_file_permissions(
+            &build_permission_check(current_task, security_server),
+            current_task,
+            current_sid,
+            file,
+            NO_PERMISSIONS,
+            current_task.into(),
+        );
+    }
+
     let FsNodeSidAndClass { class: file_class, sid: node_sid } =
-        fs_node_effective_sid_and_class(&file.name.entry.node);
+        fs_node_effective_sid_and_class(file.node());
 
     // Fast-path: If the caller SID, `FsNode` SID, and policy sequence number all match the values
     // cached by `file_open()` then access checks can be skipped, because `file_open()` has already
@@ -86,6 +100,7 @@ pub(in crate::security) fn file_open(
     current_task: &CurrentTask,
     file: &FileObject,
 ) -> Result<(), Errno> {
+    debug_assert!(!file.node().is_private());
     if is_internal_operation(current_task) {
         return Ok(());
     }
@@ -145,7 +160,6 @@ pub(in crate::security) fn file_receive(
     file: &FileObject,
 ) -> Result<(), Errno> {
     let permission_check = build_permission_check(current_task, security_server);
-    let fs_node_class = fs_node_effective_sid_and_class(file.node()).class;
     let permission_flags = file.flags().into();
 
     // BPF resources are wrapped into file descriptors for interaction with userspace,
@@ -179,6 +193,18 @@ pub(in crate::security) fn file_receive(
         return Ok(());
     }
 
+    if file.node().is_private() {
+        return has_file_permissions(
+            &permission_check,
+            current_task,
+            receiving_sid,
+            file,
+            NO_PERMISSIONS,
+            current_task.into(),
+        );
+    }
+
+    let fs_node_class = fs_node_effective_sid_and_class(file.node()).class;
     has_file_permissions(
         &permission_check,
         current_task,
@@ -276,15 +302,15 @@ pub(in crate::security) fn check_file_fcntl_access(
             if file.flags().contains(OpenFlags::APPEND)
                 && !OpenFlags::from_bits_truncate(fcntl_arg as u32).contains(OpenFlags::APPEND) =>
         {
-            // If `O_APPEND` is being cleared then check the "write" permission.
-            // Although the flag only affects files opened with the writable bit
-            // set, the SELinux Test Suite validates that it is not possible to
-            // clear the `O_APPEND` bit from an `O_RDONLY` file.
-            has_fs_node_permissions(
-                &build_permission_check(current_task, security_server),
+            // If `O_APPEND` is being cleared then check the "write" permission in addition to
+            // "fd { use }". Although the flag only affects files opened with the writable bit
+            // set, the SELinux Test Suite validates that it is not possible to clear the
+            // `O_APPEND` bit from an `O_RDONLY` file.
+            has_file_permissions(
+                &permission_check,
                 current_task,
                 subject_sid,
-                file.node(),
+                file,
                 &[CommonFsNodePermission::Write],
                 current_task.into(),
             )
@@ -416,7 +442,9 @@ fn file_map_prot_check(
         }
     }
 
-    if let Some(fs_node) = fs_node {
+    if let Some(fs_node) = fs_node
+        && !fs_node.is_private()
+    {
         let node_class = fs_node_effective_sid_and_class(fs_node).class;
         let flags = {
             let mut flags: PermissionFlags = prot.into();

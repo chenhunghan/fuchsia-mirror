@@ -79,12 +79,12 @@ rust_library(
     }),
     version = "5.8.0",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/vendor/anyhow-1.0.104:anyhow",
         "//third_party/rust_crates/vendor/log-0.4.29:log",
         "//third_party/rust_crates/vendor/rust_icu_common-5.8.0:rust_icu_common",
         "//third_party/rust_crates/vendor/rust_icu_sys-5.8.0:rust_icu_sys",
         "//third_party/rust_crates/vendor/rust_icu_uenum-5.8.0:rust_icu_uenum",
-        "//third_party/rust_crates/vendor/rust_icu_uloc-5.8.0:build_script_build",
         "//third_party/rust_crates/vendor/rust_icu_ustring-5.8.0:rust_icu_ustring",
     ],
 )
@@ -127,6 +127,7 @@ cargo_build_script(
         ],
     ),
     edition = "2018",
+    emit_warnings = False,
     link_deps = [
         "//third_party/rust_crates/vendor/rust_icu_sys-5.8.0:rust_icu_sys",
     ],

@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_BAZEL} ${PREBUILT_JQ} ${PREBUILT_PYTHON3} ${PREBUILT_RECLIENT_DIR}
 ### check remote build configuration
 
 ## usage:
@@ -211,7 +212,6 @@ function setup_isolated_adc() {
     export GOOGLE_APPLICATION_CREDENTIALS="$local_adc"
   fi
 }
-
 function ensure_adc_file_exists() {
   # If this file doesn't already exist, generate it one time using gcloud auth.
   local -r adc_file="$HOME/.config/gcloud/application_default_credentials.json"
@@ -226,9 +226,9 @@ function test_bazel_rbe() {
   # Shutdown any bazel server each time to prevent it from caching
   # stale credentials, and force it to refresh.
   # Limit the number of upload retries to make this operation fail-fast.
-  local -r loas_cert_type="$(get_loas_cert_type_for_bazel)"
+  local -r auth_type="$(get_auth_type)"
   local -a auth_config_args=()
-  if [[ "$loas_cert_type" == "unrestricted" ]]
+  if [[ "$auth_type" == "loas" ]]
   then auth_config_args+=( --config=gcertauth )
   fi
   (
@@ -251,7 +251,7 @@ function test_bazel_rbe() {
 function check_credential_helper_latency() {
   # Defensive check that access to the bazel credential helper
   # on SrcFS is not unreasonably slow.
-  if [[ "$(get_loas_cert_type_for_bazel)" != "unrestricted" ]]; then
+  if [[ "$(get_auth_type)" != "loas" ]]; then
     # SrcFS is only accessible with unrestricted LOAS creds.
     # The credshelper is not used with restricted LOAS.
     return 0
@@ -329,24 +329,19 @@ function auth_subcommand() {
     style::echo --bold --green "You can now 'fx build' with RBE."
 }
 
-# Determine whether or not host environment can get unrestricted LOAS
-# credentials.
-# Applicable to Google corp. networks only.
-# Returns 0 (success) if LOAS credentials are unrestricted.
-# Returns non-zero if credentials are restricted or some other error occurred.
-function check_loas_restrictions() {
-  local -r check_loas_script="${FUCHSIA_DIR}/build/auth/check_loas_restrictions.sh"
-  [[ -r "$check_loas_script" ]] || {
-    fx-error "Script not found: $check_loas_script"
+function select_auth_method() {
+  local -r select_script="${FUCHSIA_DIR}/build/auth/select_auth_method.py"
+  [[ -r "$select_script" ]] || {
+    fx-error "Script not found: $select_script"
     return 1
   }
 
-  # Print only the last line, in case there was any interactive gcert.
-  "${subshell_trace[@]}" "$check_loas_script" | tail -n 1
+  # Print only the last line
+  "${subshell_trace[@]}" "$python" -S "$select_script" | tail -n 1
 }
 
-function get_loas_cert_type() {
-  # Prints "restricted" or "unrestricted" based on LOAS certificate type.
+function get_auth_type() {
+  # Prints "loas" or "oauth" based on automatically determined build authentication.
   # Also uses cache file.
   # This only needs to be computed once per development environment,
   # or whenever the network changes.
@@ -358,7 +353,7 @@ function get_loas_cert_type() {
   do
     case "$opt" in
       -f|--force) recache=1 ;;
-      *) fx-error "get_loas_cert_type: Unknown option $opt"; return 1 ;;
+      *) fx-error "get_auth_type: Unknown option $opt"; return 1 ;;
     esac
   done
 
@@ -373,34 +368,47 @@ function get_loas_cert_type() {
   if [[ -r "$auth_config" && "$recache" == 0 ]]
   then
     # Print the cached value
-    grep "loas_cert_type" "$auth_config" | cut -d"=" -f2
-    return
+    local cached_auth
+    cached_auth=$(grep "^auth_type=" "$auth_config" | cut -d"=" -f2)
+    if [[ -n "$cached_auth" ]]; then
+      echo "$cached_auth"
+      return
+    fi
+    # Fallback/migration for older cached build-auth files with "loas_cert_type"
+    cached_auth=$(grep "^loas_cert_type=" "$auth_config" | cut -d"=" -f2)
+    if [[ "$cached_auth" == "unrestricted" ]]; then
+      echo "loas"
+      return
+    elif [[ "$cached_auth" == "restricted" ]]; then
+      echo "oauth"
+      return
+    fi
   fi
 
-  # Re-run LOAS check.
-  local loas_cert_type=restricted  # safe default
+  # Re-run selection.
+  local auth_type=oauth  # safe default
   [[ "$recache" == 0 ]] || loas_destroy || :
   # if `loas_destroy` appears to be missing, it is because having a valid
   # gcert is required to access on gLinux laptops in the first place.
   # Since we want to be in an unauthenticated state in this case,
   # it is safe and correct to ignore.
-  loas_cert_type="$(check_loas_restrictions)" || {
-    fx-error "Error trying to check LOAS certificate type."
+  auth_type="$(select_auth_method)" || {
+    fx-error "Error trying to select build authentication method."
     return 1
   }
 
   # Cache result to file.
-  echo "loas_cert_type=$loas_cert_type" > "$auth_config"
-  echo "$loas_cert_type"
+  echo "auth_type=$auth_type" > "$auth_config"
+  echo "$auth_type"
 }
 
 
 function check_loas_subcommand() {
-  echo "Checking LOAS certificate type:"
-  local -r loas_cert_type="$(get_loas_cert_type "$@")" || {
+  echo "Checking build authentication method:"
+  local -r auth_type="$(get_auth_type "$@")" || {
     return 1
   }
-  style::echo --green "$loas_cert_type"
+  style::echo --green "$auth_type"
 }
 
 function gcert_auth() {
@@ -425,22 +433,22 @@ function ensure_oauth() {
 }
 
 function ensure_auth_for_reclient() {
-  local -r loas_cert_type="$(get_loas_cert_type)" || {
+  local -r auth_type="$(get_auth_type)" || {
     exit 1
   }
-  case "$loas_cert_type" in
-    unrestricted) ensure_loas ;;
-    restricted) ensure_oauth ;;
+  case "$auth_type" in
+    loas) ensure_loas ;;
+    oauth) ensure_oauth ;;
   esac
 }
 
 function ensure_auth_for_bazel() {
-  local -r loas_cert_type="$(get_loas_cert_type_for_bazel)" || {
+  local -r auth_type="$(get_auth_type)" || {
     exit 1
   }
-  case "$loas_cert_type" in
-    unrestricted) ensure_loas ;;
-    restricted) ensure_oauth ;;
+  case "$auth_type" in
+    loas) ensure_loas ;;
+    oauth) ensure_oauth ;;
   esac
 }
 
@@ -512,7 +520,7 @@ case "$action" in
 
   auth) auth_subcommand "${action_args[@]}" ;;
   check_loas) check_loas_subcommand "${action_args[@]}" ;;
-  _check_loas_type) get_loas_cert_type "${action_args[@]}" ;;
+  _check_loas_type) get_auth_type "${action_args[@]}" ;;
   cleanlogs) cleanlogs_subcommand "${action_args[@]}" ;;
   ensure_loas) ensure_loas "${action_args[@]}" ;;
   ensure_oauth) ensure_oauth "${action_args[@]}" ;;

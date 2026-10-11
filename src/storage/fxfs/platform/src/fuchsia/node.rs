@@ -397,6 +397,13 @@ impl<N: FxNode + ?Sized> OpenedNode<N> {
     }
 }
 
+impl<N: FxNode> OpenedNode<N> {
+    /// Converts this OpenedNode into a trait object OpenedNode<dyn FxNode>.
+    pub fn into_dyn(self) -> OpenedNode<dyn FxNode> {
+        OpenedNode(self.take())
+    }
+}
+
 impl<N: FxNode + ?Sized> Drop for OpenedNode<N> {
     fn drop(&mut self) {
         self.clone().open_count_sub_one();

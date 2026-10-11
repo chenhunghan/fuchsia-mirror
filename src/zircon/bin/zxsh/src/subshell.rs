@@ -32,6 +32,7 @@ use crate::relative;
 use crate::serialization::{Deserialize, Serialize};
 use crate::string::path_buf_to_bstring;
 use bstr::ByteSlice;
+use std::path::PathBuf;
 use zerocopy::{FromZeros, IntoBytes};
 
 /// Fixed-size layout header at the start of a serialized subshell VMO payload.
@@ -94,8 +95,7 @@ fn execute_subshell_data(subshell_data: &mut SubshellData) -> Result<i32, String
         EvalOutcome::Return(code) => code,
         EvalOutcome::Break(_) | EvalOutcome::Continue(_) => 0,
     };
-    run_exit_trap(&mut subshell_data.state, &mut execution_context);
-    Ok(result)
+    Ok(run_exit_trap(&mut subshell_data.state, &mut execution_context, result))
 }
 
 /// Deserializes and executes a subshell payload from command and environment byte slices.
@@ -159,6 +159,15 @@ pub enum SubshellScriptArgs {
     DoNotPass,
 }
 
+/// Resolves the path to the `zxsh` executable used when spawning a subshell process.
+fn resolve_self_executable_path() -> Result<PathBuf, String> {
+    if cfg!(test) {
+        Ok(PathBuf::from("/pkg/bin/zxsh"))
+    } else {
+        std::env::current_exe().map_err(|error| format!("std::env::current_exe failed: {error}"))
+    }
+}
+
 /// Serializes a command and shell state into a VMO and forks a new child subshell process
 /// (`--subshell-vmo`).
 pub fn spawn_subshell_process(
@@ -173,14 +182,13 @@ pub fn spawn_subshell_process(
         .map_err(|error| format!("Vmo::create failed: {}", zx_status_str(error)))?;
     vmo.write(&bytes, 0).map_err(|error| format!("Vmo::write failed: {}", zx_status_str(error)))?;
 
-    let self_path = std::env::current_exe()
-        .map_err(|error| format!("std::env::current_exe failed: {error}"))?;
+    let self_path = resolve_self_executable_path()?;
     let self_path_bstring = path_buf_to_bstring(self_path)
-        .ok_or_else(|| "Failed to convert current_exe path to BString".to_string())?;
+        .ok_or_else(|| "Failed to convert executable path to BString".to_string())?;
     let mut argv = vec![self_path_bstring];
     if script_args == SubshellScriptArgs::Pass {
         argv.push(state.script_name.clone());
-        argv.extend(state.args.clone());
+        argv.extend(state.get_args());
     }
 
     actions.push(fdio::SpawnAction::add_handle(

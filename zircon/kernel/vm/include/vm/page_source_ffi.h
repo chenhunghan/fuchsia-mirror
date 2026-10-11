@@ -28,8 +28,11 @@ uint64_t cpp_page_request_get_len(const PageRequest* request);
 void* cpp_page_request_provider_node(PageRequest* request);
 
 // PageSource failure & helper shims
+void cpp_page_source_free(PageSource* src);
+void* cpp_page_source_get_ref_counted(PageSource* src);
 void cpp_page_source_on_pages_failed(PageSource* page_source, uint64_t offset, uint64_t len,
                                      zx_status_t error_status);
+bool cpp_page_source_is_valid_external_failure_code(zx_status_t error_status);
 bool cpp_page_source_is_valid_internal_failure_code(zx_status_t status);
 // Returns whether the calling thread holds |page_source|'s paged VMO lock. Intended for debug
 // assertions in callers that are required to hold that lock.

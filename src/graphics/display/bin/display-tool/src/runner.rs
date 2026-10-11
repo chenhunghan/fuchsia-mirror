@@ -23,7 +23,7 @@ use std::io::Write;
 use std::num::NonZero;
 use std::time::Duration;
 
-use crate::draw::MappedImage;
+use crate::draw::{ByteCounts, MappedImage};
 use crate::fps::{Counter, RenderTimes};
 
 /// ANSI X3.64 (ECMA-48) escape code for clearing the current terminal line.
@@ -141,21 +141,27 @@ impl Default for PowerCycle {
     }
 }
 
+/// When a display power mode change happened during [`DoubleBufferedFenceLoop::run`].
+#[derive(Clone, Copy, Debug)]
+struct PowerTransition {
+    /// Number of the frame that triggered the change.
+    frame: u64,
+    /// Monotonic timestamp at which the `SetDisplayPowerMode` call completed.
+    timestamp: zx::MonotonicInstant,
+}
+
 /// Tracks the current display power phase during [`DoubleBufferedFenceLoop::run`].
 #[derive(Clone, Copy, Debug)]
 enum PowerPhase {
     /// The display is powered on.
     On {
-        /// Frame number and completion timestamp of the most recent power-on call, cleared after
-        /// the first post-power-on vsync arrives.
-        awaiting_first_vsync_since: Option<(u64, zx::MonotonicInstant)>,
+        /// The most recent power-on, cleared after the first post-power-on vsync arrives.
+        awaiting_first_vsync_since: Option<PowerTransition>,
     },
     /// The display is powered off.
     Off {
-        /// Frame number at which the display was powered off.
-        since_frame: u64,
-        /// Monotonic timestamp at which the power-off call completed.
-        since_timestamp: zx::MonotonicInstant,
+        /// The power-off.
+        since: PowerTransition,
         /// Number of committed frame configurations that received a vsync while powered off.
         vsyncs_received: u64,
     },
@@ -283,14 +289,14 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
     ///
     /// # Outcome
     ///
-    /// Sends a `SetDisplayPowerMode` FIDL call to the coordinator and returns the monotonic
-    /// timestamp recorded when the call completes. Returns an error if the FIDL transport fails or
-    /// the coordinator rejects the request.
+    /// Sends a `SetDisplayPowerMode` FIDL call to the coordinator and returns the transition,
+    /// timestamped when the call completes. Returns an error if the FIDL transport fails or the
+    /// coordinator rejects the request.
     async fn set_power_mode(
         &self,
         frame: u64,
         power_mode: fidl_display_types::PowerMode,
-    ) -> Result<zx::MonotonicInstant> {
+    ) -> Result<PowerTransition> {
         let start = zx::MonotonicInstant::get();
         let result = self
             .coordinator
@@ -311,7 +317,7 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
         result.context("SetDisplayPowerMode FIDL call failed")?.map_err(|status| {
             format_err!("SetDisplayPowerMode({:?}) failed: {}", power_mode, status)
         })?;
-        Ok(end)
+        Ok(PowerTransition { frame, timestamp: end })
     }
 
     /// Checks whether `frame` triggers a power mode transition and updates `phase`.
@@ -326,38 +332,33 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
                 if self.power_cycle.next_transition(frame, fidl_display_types::PowerMode::On, None)
                     == Some(fidl_display_types::PowerMode::Off)
                 {
-                    let off_timestamp =
+                    let power_off =
                         self.set_power_mode(frame, fidl_display_types::PowerMode::Off).await?;
-                    *phase = PowerPhase::Off {
-                        since_frame: frame,
-                        since_timestamp: off_timestamp,
-                        vsyncs_received: 0,
-                    };
+                    *phase = PowerPhase::Off { since: power_off, vsyncs_received: 0 };
                 }
             }
-            PowerPhase::Off { since_frame, since_timestamp, vsyncs_received } => {
+            PowerPhase::Off { since, vsyncs_received } => {
                 if self.power_cycle.next_transition(
                     frame,
                     fidl_display_types::PowerMode::Off,
-                    Some(since_frame),
+                    Some(since.frame),
                 ) == Some(fidl_display_types::PowerMode::On)
                 {
-                    let on_timestamp =
+                    let power_on =
                         self.set_power_mode(frame, fidl_display_types::PowerMode::On).await?;
                     println!(
                         "{}[power-cycle] t={:.3}ms frame={} display was off for {} frames \
                          ({:.3}ms); {} of them got a vsync for their config, the rest were \
                          paced by the {}ms timer",
                         CLEAR,
-                        instant_to_ms(on_timestamp),
+                        instant_to_ms(power_on.timestamp),
                         frame,
-                        frame - since_frame,
-                        duration_to_ms(on_timestamp - since_timestamp),
+                        frame - since.frame,
+                        duration_to_ms(power_on.timestamp - since.timestamp),
                         vsyncs_received,
                         POWER_OFF_FRAME_PERIOD.as_millis()
                     );
-                    *phase =
-                        PowerPhase::On { awaiting_first_vsync_since: Some((frame, on_timestamp)) };
+                    *phase = PowerPhase::On { awaiting_first_vsync_since: Some(power_on) };
                 }
             }
         }
@@ -409,15 +410,15 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
             PowerPhase::On { awaiting_first_vsync_since } => {
                 match wait_fut.on_timeout(self.vsync_timeout, || Ok(None)).await? {
                     Some(timestamp) => {
-                        if let Some((on_frame, on_timestamp)) = awaiting_first_vsync_since.take() {
+                        if let Some(power_on) = awaiting_first_vsync_since.take() {
                             println!(
                                 "{}[power-cycle] t={:.3}ms frame={} first vsync after power \
                                  on (power on at frame={}), {:.3}ms after power on",
                                 CLEAR,
                                 instant_to_ms(timestamp),
                                 frame,
-                                on_frame,
-                                duration_to_ms(timestamp - on_timestamp)
+                                power_on.frame,
+                                duration_to_ms(timestamp - power_on.timestamp)
                             );
                         }
                     }
@@ -467,6 +468,8 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
         let mut vsync_listener = self.coordinator.add_vsync_listener(None)?;
         let mut counter = Counter::new();
         let mut render_times = RenderTimes::new();
+        // Bytes written and cleaned while rendering the previous frame.
+        let mut frame_bytes = ByteCounts::default();
         let mut frame: u64 = 0;
         let mut power_phase = PowerPhase::On { awaiting_first_vsync_since: None };
 
@@ -475,12 +478,15 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
             counter.add(zx::MonotonicInstant::get());
             let stats = counter.stats();
             print!(
-                "{}Display {:.2} fps ({:.5} ms) render {:.3} ms clean {:.3} ms",
+                "{}Display {:.2} fps ({:.5} ms) render {:.3} ms clean {:.3} ms \
+                 written {:.2} MB cleaned {:.2} MB",
                 CLEAR,
                 stats.sample_rate_hz,
                 stats.sample_time_delta_ms,
                 render_times.render_ms(),
-                render_times.clean_ms()
+                render_times.clean_ms(),
+                frame_bytes.written as f64 / 1e6,
+                frame_bytes.cleaned as f64 / 1e6
             );
             std::io::stdout().flush()?;
 
@@ -509,6 +515,7 @@ impl<'a, S: Scene> DoubleBufferedFenceLoop<'a, S> {
                         zx::MonotonicInstant::get() - render_start,
                         current_presentation.image.take_clean_time(),
                     );
+                    frame_bytes = current_presentation.image.take_byte_counts();
                 }
 
                 // Request the swap.

@@ -109,6 +109,10 @@ impl DefineSubsystemConfiguration<DevelopmentSupportConfig> for DevelopmentConfi
             builder.platform_bundle("sl4f")?;
         }
 
+        if config.include_devscreen {
+            builder.platform_bundle("devscreen")?;
+        }
+
         let is_embeddable = matches!(context.feature_set_level, FeatureSetLevel::Embeddable);
         match (context.build_type, &config.include_bin_clock, is_embeddable) {
             (BuildType::User, true, _) => {

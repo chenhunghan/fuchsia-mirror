@@ -27,7 +27,8 @@ SimErrorInjector::SimErrorInjector() = default;
 SimErrorInjector::~SimErrorInjector() = default;
 
 void SimErrorInjector::AddErrInjCmd(uint32_t cmd, zx_status_t status, bcme_status_t fw_err,
-                                    std::optional<uint16_t> ifidx) {
+                                    std::optional<uint16_t> ifidx,
+                                    const std::vector<uint8_t>* alt_data) {
   for (auto& existing_cmd : cmds_) {
     if (existing_cmd.cmd == cmd) {
       // Entry already present, just replace with the new values
@@ -36,10 +37,11 @@ void SimErrorInjector::AddErrInjCmd(uint32_t cmd, zx_status_t status, bcme_statu
       existing_cmd.ifidx = ifidx;
       existing_cmd.ret_status = status;
       existing_cmd.ret_fw_err = fw_err;
+      existing_cmd.alt_data = alt_data;
       return;
     }
   }
-  ErrInjCmd err_inj_cmd(cmd, status, fw_err, ifidx);
+  ErrInjCmd err_inj_cmd(cmd, status, fw_err, ifidx, alt_data);
   cmds_.push_back(err_inj_cmd);
   BRCMF_DBG(SIMERRINJ, "Num entries in list: %lu\n", cmds_.size());
 }
@@ -57,7 +59,9 @@ void SimErrorInjector::DelErrInjCmd(uint32_t cmd) {
 }
 
 bool SimErrorInjector::CheckIfErrInjCmdEnabled(uint32_t cmd, zx_status_t* ret_status,
-                                               bcme_status_t* ret_fw_err, uint16_t ifidx) {
+                                               bcme_status_t* ret_fw_err,
+                                               const std::vector<uint8_t>** alt_value_out,
+                                               uint16_t ifidx) {
   for (auto& existing_cmd : cmds_) {
     if (existing_cmd.ifidx.has_value() && (existing_cmd.ifidx != ifidx)) {
       continue;
@@ -66,6 +70,9 @@ bool SimErrorInjector::CheckIfErrInjCmdEnabled(uint32_t cmd, zx_status_t* ret_st
     if (existing_cmd.cmd == cmd) {
       BRCMF_DBG(SIMERRINJ, "Err Inj entry found if:%d status:%d cmd:%d", ifidx,
                 existing_cmd.ret_status, cmd);
+      if (alt_value_out != nullptr) {
+        *alt_value_out = existing_cmd.alt_data;
+      }
       if (ret_status != nullptr) {
         *ret_status = existing_cmd.ret_status;
       }
@@ -91,6 +98,7 @@ void SimErrorInjector::AddErrInjIovar(const char* iovar, zx_status_t status, bcm
       existing_iovar.ifidx = ifidx;
       existing_iovar.ret_status = status;
       existing_iovar.ret_fw_err = fw_err;
+      existing_iovar.alt_data = alt_data;
       return;
     }
   }

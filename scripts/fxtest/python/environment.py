@@ -55,6 +55,7 @@ def _resolve_direct_ffx_path(
     """Return the path to the built ffx binary if it and any required subtool exist on disk."""
     if not out_dir:
         return None
+    out_dir = os.path.abspath(out_dir)
     ffx_path = os.path.join(out_dir, "host-tools", "ffx")
     if not (os.path.isfile(ffx_path) and os.access(ffx_path, os.X_OK)):
         return None
@@ -87,7 +88,7 @@ def _resolve_direct_host_tool_path(out_dir: str, tool_name: str) -> str | None:
     """Return the path to a built host tool in host-tools/ if it exists and is executable."""
     if not out_dir:
         return None
-    tool_path = os.path.join(out_dir, "host-tools", tool_name)
+    tool_path = os.path.join(os.path.abspath(out_dir), "host-tools", tool_name)
     if os.path.isfile(tool_path) and os.access(tool_path, os.X_OK):
         return tool_path
     return None
@@ -162,8 +163,8 @@ class ExecutionEnvironment:
         out_dir: str
         if dir_from_fx := os.getenv("FUCHSIA_BUILD_DIR_FROM_FX"):
             # We were passed a build directory path from fx itself, use
-            # that one.
-            out_dir = dir_from_fx
+            # that one. Resolve relative paths against FUCHSIA_DIR.
+            out_dir = os.path.join(os.path.abspath(fuchsia_dir), dir_from_fx)
         else:
             # Use the FUCHSIA_DIR to find the build directory.
             # We could use fx status, but it's slow to execute now. We
@@ -176,7 +177,9 @@ class ExecutionEnvironment:
                     f"Expected file .fx-build-dir at {build_dir_file}"
                 )
             with open(build_dir_file) as f:
-                out_dir = os.path.join(fuchsia_dir, f.readline().strip())
+                out_dir = os.path.join(
+                    os.path.abspath(fuchsia_dir), f.readline().strip()
+                )
         if not os.path.isdir(out_dir):
             raise EnvironmentError(
                 f"Expected directory at {out_dir}. Ensure you have set up your build directory correctly using 'fx set'."

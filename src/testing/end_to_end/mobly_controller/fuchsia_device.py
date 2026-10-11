@@ -13,7 +13,6 @@ import honeydew
 from honeydew.fuchsia_device.fuchsia_device import FuchsiaDevice
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.typing import custom_types
-from honeydew.utils import properties
 
 MOBLY_CONTROLLER_CONFIG_NAME = "FuchsiaDevice"
 
@@ -148,60 +147,17 @@ async def destroy(
     _FFX_CONFIG_OBJ.close()
 
 
-async def get_info(
-    fuchsia_devices: list[FuchsiaDevice],
-) -> list[dict[str, Any]]:
-    """Gets information from a list of FuchsiaDevice objects.
-
-    Optional for Mobly controller registration.
-
-    Args:
-        fuchsia_devices: A list of FuchsiaDevice objects.
-
-    Returns:
-        A list of dict, each representing info for an FuchsiaDevice objects.
-    """
-    return [
-        await _get_fuchsia_device_info(fuchsia_device)
-        for fuchsia_device in fuchsia_devices
-    ]
-
-
-async def _get_fuchsia_device_info(
-    fuchsia_device: FuchsiaDevice,
-) -> dict[str, Any]:
-    """Returns information of a specific fuchsia device object.
-
-    Args:
-        fuchsia_device: FuchsiaDevice object.
-
-    Returns:
-        dict containing information of a fuchsia device.
-    """
-    _LOGGER.debug("Getting the device info for %s", fuchsia_device.device_name)
-    device_info: dict[str, Any] = {
-        "device_class": fuchsia_device.__class__.__name__,
-        "persistent": {},
-        "dynamic": {},
-    }
-
-    for attr in dir(fuchsia_device):
-        if attr.startswith("_"):
-            continue
-
-        try:
-            attr_type: Any = getattr(type(fuchsia_device), attr, None)
-            if isinstance(attr_type, properties.DynamicProperty):
-                _LOGGER.debug("Reading dynamic device property: %s", attr)
-                device_info["dynamic"][attr] = getattr(fuchsia_device, attr)
-            elif isinstance(attr_type, properties.PersistentProperty):
-                _LOGGER.debug("Reading persistent device property: %s", attr)
-                device_info["persistent"][attr] = getattr(fuchsia_device, attr)
-        except NotImplementedError:
-            pass
-
-    _LOGGER.debug("Device info complete for %s", fuchsia_device.device_name)
-    return device_info
+# Note (b/567554777) - `get_info()` is intentionally not implemented here.
+# Mobly's `_clean_up()` calls `get_info()` before `unregister_controllers()`
+# (`destroy()`). When a test passes or fails while the device is in a good
+# state, `get_info()` succeeds as expected. However, when a test times out or
+# the device is unresponsive when `get_info()` is called, querying device
+# properties (including `DynamicProperty` or any `PersistentProperty` not yet
+# cached during the test) invokes FFX / Fuchsia Controller against the dead
+# target and hangs until interrupted by `SIGTERM`. This produces noisy
+# secondary `clean_up` failures that add confusion while debugging, and aborts
+# `_clean_up()` before `destroy()` can run. To keep things simple and since
+# `get_info()` is optional for a Mobly controller, it is omitted.
 
 
 # LINT.IfChange

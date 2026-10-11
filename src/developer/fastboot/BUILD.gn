@@ -61,6 +61,7 @@ if (is_host) {
     visibility = [
       ":*",
       "//src/developer/ffx:*",
+      "//src/developer/ffx/lib/discovery:*",
       "//src/developer/ffx/lib/fastboot:*",
       "//src/developer/ffx/lib/fastboot/interface:*",
       "//src/developer/ffx/lib/fastboot/transport/factory:*",

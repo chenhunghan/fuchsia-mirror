@@ -4,13 +4,13 @@
 
 use derivative::Derivative;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::signals::{SIGINT, SIGQUIT, SIGSTOP, Signal};
+use starnix_uapi::signals::{SIGINT, SIGQUIT, SIGTSTP, Signal};
 use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{
-    ECHO, ECHOCTL, ECHOE, ECHOK, ECHOKE, ECHONL, ECHOPRT, ICANON, ICRNL, IEXTEN, IGNCR, INLCR,
-    ISIG, IUCLC, IUTF8, IXANY, IXON, NOFLSH, OCRNL, OLCUC, ONLCR, ONLRET, ONOCR, OPOST, TABDLY,
-    VEOF, VEOL, VEOL2, VERASE, VINTR, VKILL, VLNEXT, VQUIT, VREPRINT, VSTART, VSTOP, VSUSP,
-    VWERASE, XTABS, cc_t, errno, error, tcflag_t, uapi,
+    CREAD, CS8, CSIZE, ECHO, ECHOCTL, ECHOE, ECHOK, ECHOKE, ECHONL, ECHOPRT, EXTPROC, ICANON,
+    ICRNL, IEXTEN, IGNCR, INLCR, ISIG, ISTRIP, IUCLC, IUTF8, IXANY, IXON, NOFLSH, OCRNL, OLCUC,
+    ONLCR, ONLRET, ONOCR, OPOST, PARENB, PARMRK, TABDLY, VEOF, VEOL, VEOL2, VERASE, VINTR, VKILL,
+    VLNEXT, VQUIT, VREPRINT, VSTART, VSTOP, VSUSP, VWERASE, XTABS, cc_t, error, tcflag_t, uapi,
 };
 use std::collections::VecDeque;
 
@@ -69,6 +69,12 @@ pub struct LineDiscipline {
     /// backspace.
     column: usize,
 
+    /// Column where the current canonical input line started.
+    canon_column: usize,
+
+    /// Echoes generated while processing input. Flushed when output is not stopped.
+    pending_echoes: Vec<EchoOp>,
+
     /// Packet mode state (TIOCPKT).
     #[derivative(Default(value = "false"))]
     packet_mode_enabled: bool,
@@ -101,6 +107,7 @@ pub trait InputBuffer {
 }
 
 pub trait OutputBuffer {
+    fn available(&self) -> usize;
     fn write(&mut self, data: &[u8]) -> Result<usize, Errno>;
 }
 
@@ -117,6 +124,7 @@ macro_rules! with_queue {
 }
 
 /// Keep track of the signals to send when handling terminal content.
+#[derive(Debug, PartialEq)]
 #[must_use]
 pub struct PendingSignals {
     signals: Vec<Signal>,
@@ -154,14 +162,44 @@ enum EraseType {
     Line,
 }
 
+/// Identifies one of the two ends of a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSide {
+    Main,
+    Replica,
+}
+
+impl From<bool> for TerminalSide {
+    fn from(is_main: bool) -> Self {
+        if is_main { Self::Main } else { Self::Replica }
+    }
+}
+
+/// Represents a deferred echo operation queued during input processing and executed in
+/// `commit_echoes` when output is not stopped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EchoOp {
+    /// Output a single raw echo byte through `do_output_char`.
+    Byte(RawByte),
+    /// Record the current cursor `column` as `canon_column` (start of canonical input line).
+    SetCanonColumn,
+    /// Erase a tab character (`ECHOE`), computing the number of backspaces from `num_chars` and
+    /// `canon_column` (if `!after_tab`).
+    EraseTab { num_chars: usize, after_tab: bool },
+}
+
 impl LineDiscipline {
     /// Returns the terminal configuration.
     pub fn termios(&self) -> &uapi::termios2 {
         &self.termios
     }
 
-    pub fn is_canon_enabled(&self) -> bool {
-        self.termios.has_local_flags(ICANON)
+    fn is_canon_enabled(&self) -> bool {
+        self.termios.has_local_flags(ICANON) && !self.is_extproc_enabled()
+    }
+
+    fn is_extproc_enabled(&self) -> bool {
+        self.termios.has_local_flags(EXTPROC)
     }
 
     pub fn is_packet_mode_enabled(&self) -> bool {
@@ -175,46 +213,81 @@ impl LineDiscipline {
         }
     }
 
-    pub fn has_packet_mode_pending_events(&self) -> bool {
-        self.packet_mode_enabled && self.packet_mode_pending_events != 0
-    }
-
-    /// Returns the number of available bytes to read from the side of the terminal described by
-    /// `is_main`.
-    pub fn get_available_read_size(&self, is_main: bool) -> usize {
-        let queue = if is_main { self.output_queue() } else { self.input_queue() };
+    /// Returns the number of available bytes to read from `side`.
+    pub fn get_available_read_size(&self, side: TerminalSide) -> usize {
+        let queue = match side {
+            TerminalSide::Main => self.output_queue(),
+            TerminalSide::Replica => self.input_queue(),
+        };
         queue.readable_size()
     }
 
+    /// Resets transient terminal input state (`erasing`, `lnext`, and `pending_echoes`).
+    fn reset_input_state(&mut self) {
+        self.erasing = false;
+        self.lnext = false;
+        self.pending_echoes.clear();
+    }
+
     /// Sets the terminal configuration.
-    pub fn set_termios(&mut self, termios: uapi::termios2) -> PendingSignals {
-        let old_canon_enabled = self.is_canon_enabled();
-        let old_ixon = self.termios.c_iflag & uapi::IXON != 0;
+    pub fn set_termios(&mut self, mut termios: uapi::termios2) -> PendingSignals {
+        // Pseudo-terminals always force CS8 | CREAD and clear PARENB.
+        termios.c_cflag &= !(CSIZE | PARENB);
+        termios.c_cflag |= CS8 | CREAD;
+
+        let old_ixon = self.termios.has_input_flags(IXON);
+        let new_ixon = termios.has_input_flags(IXON);
+        let old_flow = old_ixon
+            && self.termios.c_cc[VSTOP as usize] == get_control_character('S')
+            && self.termios.c_cc[VSTART as usize] == get_control_character('Q');
+        let new_flow = new_ixon
+            && termios.c_cc[VSTOP as usize] == get_control_character('S')
+            && termios.c_cc[VSTART as usize] == get_control_character('Q');
+        let extproc_active = ((self.termios.c_lflag | termios.c_lflag) & EXTPROC) != 0;
+        let canon_or_extproc_changed =
+            ((self.termios.c_lflag ^ termios.c_lflag) & (ICANON | EXTPROC)) != 0;
+
         self.termios = termios;
 
         if self.packet_mode_enabled {
-            let new_ixon = self.termios.c_iflag & uapi::IXON != 0;
-            if old_ixon != new_ixon {
-                let event = if new_ixon { uapi::TIOCPKT_DOSTOP } else { uapi::TIOCPKT_NOSTOP };
+            if old_flow != new_flow {
+                self.packet_mode_pending_events &=
+                    !((uapi::TIOCPKT_DOSTOP | uapi::TIOCPKT_NOSTOP) as u8);
+                let event = if new_flow { uapi::TIOCPKT_DOSTOP } else { uapi::TIOCPKT_NOSTOP };
                 self.packet_mode_pending_events |= event as u8;
+            }
+            if extproc_active {
+                self.packet_mode_pending_events |= uapi::TIOCPKT_IOCTL as u8;
             }
         }
 
-        if old_canon_enabled && !self.is_canon_enabled() {
-            with_queue!(self.input_queue.on_canon_disabled(self))
+        if old_ixon && !new_ixon {
+            self.start_tty();
+        }
+
+        if canon_or_extproc_changed {
+            self.erasing = false;
+            self.lnext = false;
+            with_queue!(self.input_queue.on_canon_mode_changed(self))
         } else {
             PendingSignals::new()
         }
     }
 
     /// Flushes queues according to `queue_selector` (TCIFLUSH, TCOFLUSH, TCIOFLUSH).
-    pub fn flush(&mut self, is_main: bool, queue_selector: u32) -> Result<(), Errno> {
+    pub fn flush(&mut self, side: TerminalSide, queue_selector: u32) -> Result<(), Errno> {
+        let flush_terminal_input = side == TerminalSide::Replica
+            && matches!(queue_selector, uapi::TCIFLUSH | uapi::TCIOFLUSH);
+
         // We can receive a flush request from either the main or the replica which switch what the
         // input and output queues are referring to.
-        let (input_queue, output_queue) = if is_main {
-            (self.output_queue.as_mut().unwrap(), self.input_queue.as_mut().unwrap())
-        } else {
-            (self.input_queue.as_mut().unwrap(), self.output_queue.as_mut().unwrap())
+        let (input_queue, output_queue) = match side {
+            TerminalSide::Main => {
+                (self.output_queue.as_mut().unwrap(), self.input_queue.as_mut().unwrap())
+            }
+            TerminalSide::Replica => {
+                (self.input_queue.as_mut().unwrap(), self.output_queue.as_mut().unwrap())
+            }
         };
 
         let event;
@@ -242,7 +315,11 @@ impl LineDiscipline {
             _ => return error!(EINVAL),
         };
 
-        if !is_main && self.packet_mode_enabled {
+        if flush_terminal_input {
+            self.reset_input_state();
+        }
+
+        if side == TerminalSide::Replica && self.packet_mode_enabled {
             self.packet_mode_pending_events |= event as u8;
         }
 
@@ -252,6 +329,10 @@ impl LineDiscipline {
     /// `close` implementation of the main side of the terminal.
     pub fn main_close(&mut self) {
         self.main_references = self.main_references.map(|v| v - 1);
+        if self.is_main_closed() {
+            let _ = self.flush(TerminalSide::Replica, uapi::TCIFLUSH);
+            let _ = self.flush(TerminalSide::Main, uapi::TCIFLUSH);
+        }
     }
 
     /// Called when a new reference to the main side of this terminal is made.
@@ -265,30 +346,39 @@ impl LineDiscipline {
 
     /// `query_events` implementation of the main side of the terminal.
     pub fn main_query_events(&self) -> FdEvents {
-        if self.is_replica_closed() && self.output_queue().readable_size() == 0 {
-            return FdEvents::POLLOUT | FdEvents::POLLHUP;
-        }
         let mut events =
             self.output_queue().read_readiness() | self.input_queue().write_readiness();
         if self.packet_mode_enabled && self.packet_mode_pending_events != 0 {
             events |= FdEvents::POLLIN | FdEvents::POLLPRI;
+        }
+        if self.is_replica_closed() {
+            events |= FdEvents::POLLHUP;
         }
         events
     }
 
     /// `read` implementation of the main side of the terminal.
     pub fn main_read(&mut self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
+        if self.packet_mode_enabled && self.packet_mode_pending_events != 0 {
+            if data.available() == 0 {
+                return Ok(0);
+            }
+            let event = self.packet_mode_pending_events;
+            let written = data.write(&[event])?;
+            if written > 0 {
+                self.packet_mode_pending_events = 0;
+            }
+            return Ok(written);
+        }
         if self.is_replica_closed() && self.output_queue().readable_size() == 0 {
             return error!(EIO);
         }
         if self.packet_mode_enabled {
-            if self.packet_mode_pending_events != 0 {
-                let event = self.packet_mode_pending_events;
-                self.packet_mode_pending_events = 0;
-                return data.write(&[event]);
-            }
             if self.output_queue().readable_size() == 0 {
                 return error!(EAGAIN);
+            }
+            if data.available() == 0 {
+                return Ok(0);
             }
             let written = data.write(&[0])?;
             if written == 0 {
@@ -296,15 +386,21 @@ impl LineDiscipline {
             }
             let res = with_queue!(self.output_queue.read(self, data));
             match res {
-                Ok(n) => return Ok(n + 1),
-                Err(e) if e == errno!(EAGAIN) => return Ok(1),
-                Err(e) => return Err(e),
+                Ok((n, signals)) => {
+                    assert!(signals.signals().is_empty());
+                    return Ok(n + 1);
+                }
+                Err(_) => return Ok(1),
             }
         }
-        with_queue!(self.output_queue.read(self, data))
+        let (n, signals) = with_queue!(self.output_queue.read(self, data))?;
+        assert!(signals.signals().is_empty());
+        Ok(n)
     }
 
     /// `write` implementation of the main side of the terminal.
+    ///
+    /// Returns the number of bytes written and any signals generated while processing the input.
     pub fn main_write(
         &mut self,
         data: &mut dyn InputBuffer,
@@ -331,13 +427,23 @@ impl LineDiscipline {
         if self.is_main_closed() {
             return FdEvents::POLLIN | FdEvents::POLLOUT | FdEvents::POLLERR | FdEvents::POLLHUP;
         }
-        self.input_queue().read_readiness() | self.output_queue().write_readiness()
+        let mut events = self.input_queue().read_readiness();
+        if !(self.stopped && self.termios.has_input_flags(IXON)) {
+            events |= self.output_queue().write_readiness();
+        }
+        events
     }
 
     /// `read` implementation of the replica side of the terminal.
-    pub fn replica_read(&mut self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
+    ///
+    /// Returns the number of bytes read and any signals generated while draining waiting input
+    /// buffers.
+    pub fn replica_read(
+        &mut self,
+        data: &mut dyn OutputBuffer,
+    ) -> Result<(usize, PendingSignals), Errno> {
         if self.is_main_closed() {
-            return Ok(0);
+            return Ok((0, PendingSignals::new()));
         }
         with_queue!(self.input_queue.read(self, data))
     }
@@ -374,14 +480,244 @@ impl LineDiscipline {
         self.termios.signal(byte)
     }
 
-    fn extend_echo_bytes(&self, target: &mut Vec<RawByte>, byte: RawByte) {
-        if self.termios.has_local_flags(ECHOCTL) {
-            if let Some(control_character_echo) = generate_control_character_echo(byte) {
-                target.extend(control_character_echo);
-                return;
+    fn stop_tty(&mut self) {
+        if !self.stopped {
+            self.stopped = true;
+            if self.packet_mode_enabled {
+                self.packet_mode_pending_events &= !(uapi::TIOCPKT_START as u8);
+                self.packet_mode_pending_events |= uapi::TIOCPKT_STOP as u8;
             }
         }
-        target.push(byte);
+    }
+
+    fn start_tty(&mut self) {
+        if self.stopped {
+            self.stopped = false;
+            if self.packet_mode_enabled {
+                self.packet_mode_pending_events &= !(uapi::TIOCPKT_STOP as u8);
+                self.packet_mode_pending_events |= uapi::TIOCPKT_START as u8;
+            }
+            self.commit_echoes();
+            let signals = with_queue!(self.output_queue.drain_waiting_buffer(self));
+            assert!(signals.signals().is_empty());
+        }
+    }
+
+    fn do_output_char(&mut self, mut c: RawByte, out: &mut Vec<RawByte>) {
+        if !self.termios.has_output_flags(OPOST) {
+            out.push(c);
+            return;
+        }
+        match c {
+            b'\n' => {
+                if self.termios.has_output_flags(ONLRET) {
+                    self.column = 0;
+                }
+                if self.termios.has_output_flags(ONLCR) {
+                    self.canon_column = 0;
+                    self.column = 0;
+                    out.extend_from_slice(b"\r\n");
+                    return;
+                }
+                self.canon_column = self.column;
+            }
+            b'\r' => {
+                if self.termios.has_output_flags(ONOCR) && self.column == 0 {
+                    return;
+                }
+                if self.termios.has_output_flags(OCRNL) {
+                    c = b'\n';
+                    if self.termios.has_output_flags(ONLRET) {
+                        self.canon_column = 0;
+                        self.column = 0;
+                    }
+                } else {
+                    self.canon_column = 0;
+                    self.column = 0;
+                }
+            }
+            b'\t' => {
+                let spaces = SPACES_PER_TAB - (self.column % SPACES_PER_TAB);
+                self.column += spaces;
+                if self.termios.c_oflag & TABDLY == XTABS {
+                    out.extend(std::iter::repeat_n(b' ', spaces));
+                    return;
+                }
+            }
+            BACKSPACE_CHAR => {
+                if self.column > 0 {
+                    self.column -= 1;
+                }
+            }
+            _ => {
+                if !is_cntrl(c) {
+                    if self.termios.has_output_flags(OLCUC) {
+                        c.make_ascii_uppercase();
+                    }
+                    if !is_utf8_continuation(c, &self.termios) {
+                        self.column += 1;
+                    }
+                }
+            }
+        }
+        out.push(c);
+    }
+
+    fn echo_raw_byte(&mut self, c: RawByte) {
+        self.pending_echoes.push(EchoOp::Byte(c));
+    }
+
+    fn echo_set_canon_col(&mut self) {
+        self.pending_echoes.push(EchoOp::SetCanonColumn);
+    }
+
+    fn echo_char(&mut self, c: RawByte) {
+        if self.termios.has_local_flags(ECHOCTL) && is_cntrl(c) && c != b'\t' {
+            self.echo_raw_byte(b'^');
+            self.echo_raw_byte(c ^ CONTROL_OFFSET);
+        } else {
+            self.echo_raw_byte(c);
+        }
+    }
+
+    fn finish_erasing(&mut self) {
+        if self.erasing {
+            self.echo_raw_byte(b'/');
+            self.erasing = false;
+        }
+    }
+
+    fn commit_echoes(&mut self) {
+        if self.stopped && self.termios.has_input_flags(IXON) {
+            return;
+        }
+        if !self.pending_echoes.is_empty() {
+            let ops = std::mem::take(&mut self.pending_echoes);
+            let mut echoes = Vec::with_capacity(ops.len());
+            for op in ops {
+                match op {
+                    EchoOp::Byte(c) => self.do_output_char(c, &mut echoes),
+                    EchoOp::SetCanonColumn => {
+                        self.canon_column = self.column;
+                    }
+                    EchoOp::EraseTab { mut num_chars, after_tab } => {
+                        if !after_tab {
+                            num_chars += self.canon_column;
+                        }
+                        let num_bs = SPACES_PER_TAB - (num_chars % SPACES_PER_TAB);
+                        for _ in 0..num_bs {
+                            self.do_output_char(BACKSPACE_CHAR, &mut echoes);
+                        }
+                    }
+                }
+            }
+            if !echoes.is_empty() {
+                if let Some(ref mut output_queue) = self.output_queue {
+                    output_queue.read_queue.push_back(ReadPacket { data: echoes, has_eof: false });
+                }
+            }
+        }
+    }
+
+    fn eraser(&mut self, queue: &mut Queue, c: RawByte) {
+        if queue.line_buffer.is_empty() {
+            return;
+        }
+
+        let erase_type = if self.termios.is_erase(c) {
+            EraseType::Character
+        } else if self.termios.is_werase(c) {
+            EraseType::Word
+        } else {
+            if !self.termios.has_local_flags(ECHO) {
+                queue.line_buffer.clear();
+                return;
+            }
+            if !self.termios.has_local_flags(ECHOK)
+                || !self.termios.has_local_flags(ECHOKE)
+                || !self.termios.has_local_flags(ECHOE)
+            {
+                queue.line_buffer.clear();
+                self.finish_erasing();
+                self.echo_char(c);
+                if self.termios.has_local_flags(ECHOK) {
+                    self.echo_raw_byte(b'\n');
+                }
+                return;
+            }
+            EraseType::Line
+        };
+
+        let mut seen_alnums = 0;
+        while !queue.line_buffer.is_empty() {
+            let mut pos = queue.line_buffer.len();
+            while pos > 0 {
+                pos -= 1;
+                if !is_utf8_continuation(queue.line_buffer[pos], &self.termios) {
+                    break;
+                }
+            }
+            let first_byte = queue.line_buffer[pos];
+            if is_utf8_continuation(first_byte, &self.termios) {
+                // Do not partially erase an incomplete/stray UTF-8 continuation sequence.
+                break;
+            }
+            if erase_type == EraseType::Word {
+                if is_linux_alnum_or_underscore(first_byte) {
+                    seen_alnums += 1;
+                } else if seen_alnums > 0 {
+                    break;
+                }
+            }
+            let erased_char: Vec<RawByte> = queue.line_buffer.drain(pos..).collect();
+            if self.termios.has_local_flags(ECHO) {
+                if self.termios.has_local_flags(ECHOPRT) {
+                    if !self.erasing {
+                        self.echo_raw_byte(b'\\');
+                        self.erasing = true;
+                    }
+                    for &b in &erased_char {
+                        self.echo_char(b);
+                    }
+                } else if erase_type == EraseType::Character && !self.termios.has_local_flags(ECHOE)
+                {
+                    self.echo_char(self.termios.c_cc[VERASE as usize]);
+                } else if first_byte == b'\t' {
+                    let mut num_chars = 0;
+                    let mut after_tab = false;
+                    for &b in queue.line_buffer.iter().rev() {
+                        if b == b'\t' {
+                            after_tab = true;
+                            break;
+                        } else if is_cntrl(b) {
+                            if self.termios.has_local_flags(ECHOCTL) {
+                                num_chars += 2;
+                            }
+                        } else if !is_utf8_continuation(b, &self.termios) {
+                            num_chars += 1;
+                        }
+                    }
+                    self.pending_echoes.push(EchoOp::EraseTab { num_chars, after_tab });
+                } else {
+                    if is_cntrl(first_byte) && self.termios.has_local_flags(ECHOCTL) {
+                        self.echo_raw_byte(BACKSPACE_CHAR);
+                        self.echo_raw_byte(b' ');
+                        self.echo_raw_byte(BACKSPACE_CHAR);
+                    }
+                    if !is_cntrl(first_byte) || self.termios.has_local_flags(ECHOCTL) {
+                        self.echo_raw_byte(BACKSPACE_CHAR);
+                        self.echo_raw_byte(b' ');
+                        self.echo_raw_byte(BACKSPACE_CHAR);
+                    }
+                }
+            }
+            if erase_type == EraseType::Character {
+                break;
+            }
+        }
+        if queue.line_buffer.is_empty() && self.termios.has_local_flags(ECHO) {
+            self.finish_erasing();
+        }
     }
 
     fn transform(
@@ -398,6 +734,9 @@ impl LineDiscipline {
     }
 
     fn transform_output(&mut self, queue: &mut Queue, original_buffer: &[RawByte]) -> usize {
+        if self.stopped && self.termios.has_input_flags(IXON) {
+            return 0;
+        }
         let mut buffer = original_buffer;
 
         // transform_output is effectively always in noncanonical mode, as the
@@ -409,7 +748,9 @@ impl LineDiscipline {
                 return 0;
             }
             let to_write = std::cmp::min(limit, buffer.len());
-            queue.read_queue.push_back(buffer[..to_write].to_vec());
+            queue
+                .read_queue
+                .push_back(ReadPacket { data: buffer[..to_write].to_vec(), has_eof: false });
             return to_write;
         }
 
@@ -417,56 +758,10 @@ impl LineDiscipline {
         while !buffer.is_empty()
             && queue.readable_size() + queue.line_buffer.len() < CANON_MAX_BYTES
         {
-            let size = compute_next_character_size(buffer, &self.termios);
-            let mut character_bytes = buffer[..size].to_vec();
-            return_value += size;
-            buffer = &buffer[size..];
-
-            if self.termios.has_output_flags(OLCUC) {
-                character_bytes[0].make_ascii_uppercase();
-            }
-            match character_bytes[0] {
-                b'\n' => {
-                    if self.termios.has_output_flags(ONLRET) {
-                        self.column = 0;
-                    }
-                    if self.termios.has_output_flags(ONLCR) {
-                        queue.line_buffer.extend_from_slice(&[b'\r', b'\n']);
-                        continue;
-                    }
-                }
-                b'\r' => {
-                    if self.termios.has_output_flags(ONOCR) && self.column == 0 {
-                        continue;
-                    }
-                    if self.termios.has_output_flags(OCRNL) {
-                        character_bytes[0] = b'\n';
-                        if self.termios.has_output_flags(ONLRET) {
-                            self.column = 0;
-                        }
-                    } else {
-                        self.column = 0;
-                    }
-                }
-                b'\t' => {
-                    let spaces = SPACES_PER_TAB - self.column % SPACES_PER_TAB;
-                    if self.termios.c_oflag & TABDLY == XTABS {
-                        self.column += spaces;
-                        queue.line_buffer.extend(std::iter::repeat(b' ').take(spaces));
-                        continue;
-                    }
-                    self.column += spaces;
-                }
-                BACKSPACE_CHAR => {
-                    if self.column > 0 {
-                        self.column -= 1;
-                    }
-                }
-                _ => {
-                    self.column += 1;
-                }
-            }
-            queue.line_buffer.append(&mut character_bytes);
+            let c = buffer[0];
+            return_value += 1;
+            buffer = &buffer[1..];
+            self.do_output_char(c, &mut queue.line_buffer);
         }
         if !queue.line_buffer.is_empty() {
             queue.flush_line_buffer();
@@ -481,274 +776,281 @@ impl LineDiscipline {
     ) -> (usize, PendingSignals) {
         let mut buffer = original_buffer;
 
-        let max_bytes = if self.termios.has_local_flags(ICANON) {
-            CANON_MAX_BYTES
-        } else {
-            NON_CANON_MAX_BYTES
-        };
-
         let mut return_value = 0;
         let mut signals = PendingSignals::new();
         while !buffer.is_empty()
-            && queue.readable_size() + queue.line_buffer.len() < CANON_MAX_BYTES
+            && queue.buffer_len()
+                < if self.is_canon_enabled() && queue.read_queue.is_empty() {
+                    CANON_MAX_BYTES
+                } else {
+                    NON_CANON_MAX_BYTES
+                }
         {
-            let size = compute_next_character_size(buffer, &self.termios);
-            let mut character_bytes = buffer[..size].to_vec();
-            // It is guaranteed that character_bytes has at least one element.
+            let mut c = buffer[0];
 
+            if self.termios.has_input_flags(ISTRIP) {
+                c &= 0x7f;
+            }
+            if self.termios.has_input_flags(IUCLC) && self.termios.has_local_flags(IEXTEN) {
+                c.make_ascii_lowercase();
+            }
+
+            // Step 1: Handle literal-next (VLNEXT) active from previous character.
             if self.lnext {
                 self.lnext = false;
-                if self.termios.has_local_flags(ECHO) {
-                    let mut echo_bytes = vec![];
-                    self.extend_echo_bytes(&mut echo_bytes, character_bytes[0]);
-                    signals.append(with_queue!(self.output_queue.write_bytes(self, &echo_bytes)));
+                if self.stopped
+                    && self.termios.has_input_flags(IXON)
+                    && self.termios.has_input_flags(IXANY)
+                {
+                    self.start_tty();
                 }
-
-                queue.line_buffer.extend_from_slice(&character_bytes);
-                buffer = &buffer[size..];
-                return_value += size;
+                let parmrk_double = c == 0xff && self.termios.has_input_flags(PARMRK);
+                let pushed_len = if parmrk_double { 2 } else { 1 };
+                if queue.buffer_len() + pushed_len > NON_CANON_MAX_BYTES {
+                    if self.is_canon_enabled() && queue.read_queue.is_empty() {
+                        buffer = &buffer[1..];
+                        return_value += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if self.termios.has_local_flags(ECHO) {
+                    self.finish_erasing();
+                    if queue.line_buffer.is_empty() {
+                        self.echo_set_canon_col();
+                    }
+                    self.echo_char(c);
+                }
+                // Note: Linux `n_tty` pushes both `0xff` bytes directly into `read_buf` when
+                // `PARMRK` is enabled (so canonical `eraser` and `VREPRINT` operate on each `0xff`
+                // byte in `line_buffer`).
+                if parmrk_double {
+                    queue.line_buffer.extend_from_slice(&[0xff, 0xff]);
+                } else {
+                    queue.line_buffer.push(c);
+                }
+                buffer = &buffer[1..];
+                return_value += 1;
                 continue;
             }
 
-            if self.termios.has_local_flags(IEXTEN) {
-                // VLNEXT
-                if character_bytes[0] == self.termios.c_cc[VLNEXT as usize]
-                    && self.termios.c_cc[VLNEXT as usize] != DISABLED_CHAR
+            // Step 2: EXTPROC bypasses all special character and echo processing.
+            if self.is_extproc_enabled() {
+                if queue.buffer_len() + 1 > NON_CANON_MAX_BYTES {
+                    break;
+                }
+                queue.line_buffer.push(c);
+                buffer = &buffer[1..];
+                return_value += 1;
+                continue;
+            }
+
+            // Step 3: IXON flow control (VSTART / VSTOP) takes precedence over ISIG and ICANON.
+            if self.termios.has_input_flags(IXON) {
+                if c == self.termios.c_cc[VSTART as usize]
+                    && self.termios.c_cc[VSTART as usize] != DISABLED_CHAR
                 {
-                    self.lnext = true;
-                    if self.termios.has_local_flags(ECHO) && self.termios.has_local_flags(ECHOCTL) {
-                        let echo_bytes = vec![b'^', BACKSPACE_CHAR];
-                        signals
-                            .append(with_queue!(self.output_queue.write_bytes(self, &echo_bytes)));
-                    }
-                    buffer = &buffer[size..];
-                    return_value += size;
+                    self.start_tty();
+                    buffer = &buffer[1..];
+                    return_value += 1;
                     continue;
                 }
-                // VREPRINT
-                if character_bytes[0] == self.termios.c_cc[VREPRINT as usize]
-                    && self.termios.c_cc[VREPRINT as usize] != DISABLED_CHAR
+                if c == self.termios.c_cc[VSTOP as usize]
+                    && self.termios.c_cc[VSTOP as usize] != DISABLED_CHAR
                 {
-                    if self.termios.has_local_flags(ECHO) {
-                        let mut echo_bytes = vec![];
-                        self.extend_echo_bytes(&mut echo_bytes, character_bytes[0]);
-                        echo_bytes.push(b'\n');
-                        for byte in &queue.line_buffer {
-                            self.extend_echo_bytes(&mut echo_bytes, *byte);
-                        }
-                        signals
-                            .append(with_queue!(self.output_queue.write_bytes(self, &echo_bytes)));
-                    }
-                    buffer = &buffer[size..];
-                    return_value += size;
+                    self.stop_tty();
+                    buffer = &buffer[1..];
+                    return_value += 1;
                     continue;
                 }
             }
 
-            if self.termios.has_input_flags(IUCLC) && self.termios.has_local_flags(IEXTEN) {
-                character_bytes[0].make_ascii_lowercase();
-            }
-
-            let mut signal_generated = false;
-            if let Some(signal) = self.handle_signals(character_bytes[0]) {
+            // Step 4: ISIG signal characters (VINTR, VQUIT, VSUSP).
+            if let Some(signal) = self.handle_signals(c) {
                 signals.add(signal);
-                signal_generated = true;
                 if !self.termios.has_local_flags(NOFLSH) {
-                    queue.flush();
+                    queue.flush_buffers();
+                    self.reset_input_state();
                     if let Some(ref mut output_queue) = self.output_queue {
                         output_queue.flush();
                     }
-                }
-            }
-
-            // Handle IXON/IXOFF (software flow control)
-            if self.termios.has_input_flags(IXON) {
-                if character_bytes[0] == self.termios.c_cc[VSTOP as usize] {
-                    self.stopped = true;
-                    buffer = &buffer[size..];
-                    return_value += size;
-                    continue;
-                }
-                // POSIX says:
-                // "If IXON is set, start/stop output control is enabled. A received STOP character
-                // suspends output and a received START character restarts output. The STOP and
-                // START characters are not read, but performing the flow control functions."
-                //
-                // "If IXANY is set, any input character restarts output that has been suspended."
-                if self.stopped
-                    && (character_bytes[0] == self.termios.c_cc[VSTART as usize]
-                        || self.termios.has_input_flags(IXANY))
-                {
-                    self.stopped = false;
-                    // If it was START, we consume it. If it was IXANY (and not START), we usually
-                    // process it?
-                    // "The START character is not read".
-                    // If IXANY is set and char != START, we should restart AND process the char.
-                    if character_bytes[0] == self.termios.c_cc[VSTART as usize] {
-                        buffer = &buffer[size..];
-                        return_value += size;
-                        continue;
+                    if self.packet_mode_enabled {
+                        self.packet_mode_pending_events |=
+                            (uapi::TIOCPKT_FLUSHREAD | uapi::TIOCPKT_FLUSHWRITE) as u8;
                     }
                 }
+                if self.termios.has_input_flags(IXON) {
+                    self.start_tty();
+                }
+                if self.termios.has_local_flags(ECHO) {
+                    self.echo_char(c);
+                    self.commit_echoes();
+                }
+                buffer = &buffer[1..];
+                return_value += 1;
+                continue;
             }
 
-            match character_bytes[0] {
+            // Step 5: IXANY restarts output on any character not consumed above.
+            if self.stopped
+                && self.termios.has_input_flags(IXON)
+                && self.termios.has_input_flags(IXANY)
+            {
+                self.start_tty();
+            }
+
+            // Step 6: CR/NL input translations (IGNCR, ICRNL, INLCR).
+            match c {
                 b'\r' => {
                     if self.termios.has_input_flags(IGNCR) {
-                        buffer = &buffer[size..];
-                        return_value += size;
+                        buffer = &buffer[1..];
+                        return_value += 1;
                         continue;
                     }
                     if self.termios.has_input_flags(ICRNL) {
-                        character_bytes[0] = b'\n';
+                        c = b'\n';
                     }
                 }
                 b'\n' => {
                     if self.termios.has_input_flags(INLCR) {
-                        character_bytes[0] = b'\r'
+                        c = b'\r';
                     }
                 }
                 _ => {}
             }
-            // In canonical mode, we discard non-terminating characters
-            // after the first 4095.
-            if self.termios.has_local_flags(ICANON)
-                && queue.line_buffer.len() + size >= max_bytes
-                && !self.termios.is_terminating(&character_bytes)
-            {
-                buffer = &buffer[size..];
-                return_value += size;
-                continue;
-            }
 
-            if queue.line_buffer.len() + size > max_bytes {
-                break;
-            }
-
-            buffer = &buffer[size..];
-            return_value += size;
-
-            let first_byte = character_bytes[0];
-
-            // If we get EOF, push whatever we have line_buffer to read_queue, then push an empty datagram.
-            if self.termios.has_local_flags(ICANON) && self.termios.is_eof(first_byte) {
-                if !queue.line_buffer.is_empty() {
-                    queue.flush_line_buffer();
-                }
-                queue.read_queue.push_back(vec![]);
-                break;
-            }
-
-            let mut maybe_erase_span = None;
-            let mut erase_type = None;
-            if self.termios.has_local_flags(ICANON) {
-                if self.termios.is_erase(first_byte) {
-                    maybe_erase_span =
-                        Some(compute_last_character_span(&queue.line_buffer[..], &self.termios));
-                    erase_type = Some(EraseType::Character);
-                } else if self.termios.is_werase(first_byte) {
-                    maybe_erase_span =
-                        Some(compute_last_word_span(&queue.line_buffer[..], &self.termios));
-                    erase_type = Some(EraseType::Word);
-                }
-                if self.termios.is_kill(first_byte) {
-                    maybe_erase_span =
-                        Some(compute_last_line_span(&queue.line_buffer[..], &self.termios));
-                    erase_type = Some(EraseType::Line);
-                }
-            }
-
-            let mut erased_bytes = Option::None;
-            if let Some(erase_span) = maybe_erase_span {
-                if erase_span.bytes == 0 {
+            // Step 7: Canonical mode special characters.
+            if self.is_canon_enabled() {
+                if self.termios.is_erase(c) || self.termios.is_kill(c) || self.termios.is_werase(c)
+                {
+                    self.eraser(queue, c);
+                    buffer = &buffer[1..];
+                    return_value += 1;
                     continue;
                 }
-                if self.termios.has_local_flags(ECHOPRT) {
-                    erased_bytes = Some(
-                        queue.line_buffer[queue.line_buffer.len() - erase_span.bytes..].to_vec(),
-                    );
+
+                if self.termios.has_local_flags(IEXTEN) {
+                    if c == self.termios.c_cc[VLNEXT as usize]
+                        && self.termios.c_cc[VLNEXT as usize] != DISABLED_CHAR
+                    {
+                        self.lnext = true;
+                        if self.termios.has_local_flags(ECHO) {
+                            self.finish_erasing();
+                            if self.termios.has_local_flags(ECHOCTL) {
+                                self.echo_raw_byte(b'^');
+                                self.echo_raw_byte(BACKSPACE_CHAR);
+                            }
+                        }
+                        buffer = &buffer[1..];
+                        return_value += 1;
+                        continue;
+                    }
+
+                    if c == self.termios.c_cc[VREPRINT as usize]
+                        && self.termios.c_cc[VREPRINT as usize] != DISABLED_CHAR
+                        && self.termios.has_local_flags(ECHO)
+                    {
+                        self.finish_erasing();
+                        self.echo_char(c);
+                        self.echo_raw_byte(b'\n');
+                        for &b in &queue.line_buffer {
+                            self.echo_char(b);
+                        }
+                        buffer = &buffer[1..];
+                        return_value += 1;
+                        continue;
+                    }
                 }
-                queue.line_buffer.truncate(queue.line_buffer.len() - erase_span.bytes);
-            } else if !signal_generated {
-                queue.line_buffer.extend_from_slice(&character_bytes);
+
+                if c == b'\n' {
+                    if self.termios.has_local_flags(ECHO) || self.termios.has_local_flags(ECHONL) {
+                        self.echo_raw_byte(b'\n');
+                    }
+                    queue.line_buffer.push(b'\n');
+                    queue.flush_line_buffer();
+                    buffer = &buffer[1..];
+                    return_value += 1;
+                    continue;
+                }
+
+                if self.termios.is_eof(c) {
+                    let data = std::mem::take(&mut queue.line_buffer);
+                    queue.read_queue.push_back(ReadPacket { data, has_eof: true });
+                    buffer = &buffer[1..];
+                    return_value += 1;
+                    continue;
+                }
+
+                if self.termios.is_eol(c) {
+                    let parmrk_double = c == 0xff && self.termios.has_input_flags(PARMRK);
+                    let pushed_len = if parmrk_double { 2 } else { 1 };
+                    let max_bytes = if queue.read_queue.is_empty() {
+                        CANON_MAX_BYTES
+                    } else {
+                        NON_CANON_MAX_BYTES
+                    };
+                    if queue.buffer_len() + pushed_len > max_bytes {
+                        if queue.read_queue.is_empty() {
+                            buffer = &buffer[1..];
+                            return_value += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    // Matches Linux `n_tty_receive_char_special`: `EOL_CHAR` / `EOL2_CHAR` (like
+                    // `\n`) does not call `finish_erasing()`; an open `ECHOPRT` `\.../` sequence is
+                    // closed by the next normal character (or `VLNEXT` / `VREPRINT`).
+                    if self.termios.has_local_flags(ECHO) {
+                        if queue.line_buffer.is_empty() {
+                            self.echo_set_canon_col();
+                        }
+                        self.echo_char(c);
+                    }
+                    if parmrk_double {
+                        queue.line_buffer.extend_from_slice(&[0xff, 0xff]);
+                    } else {
+                        queue.line_buffer.push(c);
+                    }
+                    queue.flush_line_buffer();
+                    buffer = &buffer[1..];
+                    return_value += 1;
+                    continue;
+                }
             }
 
-            // Anything written to the read buffer will have to be echoed.
-            let mut echo_bytes = vec![];
+            // Step 8: Normal character (or \n in non-canonical mode).
+            let parmrk_double = c == 0xff && self.termios.has_input_flags(PARMRK);
+            let pushed_len = if parmrk_double { 2 } else { 1 };
+            if queue.buffer_len() + pushed_len > NON_CANON_MAX_BYTES {
+                if self.is_canon_enabled() && queue.read_queue.is_empty() {
+                    buffer = &buffer[1..];
+                    return_value += 1;
+                    continue;
+                }
+                break;
+            }
+
             if self.termios.has_local_flags(ECHO) {
-                if let Some(erase_span) = maybe_erase_span {
-                    match erase_type {
-                        Some(EraseType::Character) | Some(EraseType::Word) => {
-                            if self.termios.has_local_flags(ECHOPRT) {
-                                if let Some(bytes) = erased_bytes {
-                                    if !self.erasing {
-                                        echo_bytes.push(b'\\');
-                                        self.erasing = true;
-                                    }
-                                    for byte in bytes.iter().rev() {
-                                        self.extend_echo_bytes(&mut echo_bytes, *byte);
-                                    }
-                                }
-                            } else if self.termios.has_local_flags(ECHOE) {
-                                echo_bytes = generate_erase_echo(&erase_span);
-                            }
-                        }
-                        Some(EraseType::Line) => {
-                            if self.termios.has_local_flags(ECHOKE) {
-                                echo_bytes = generate_erase_echo(&erase_span);
-                            } else if self.termios.has_local_flags(ECHOK) {
-                                self.extend_echo_bytes(&mut echo_bytes, first_byte);
-                                echo_bytes.push(b'\n');
-                            }
-                        }
-                        None => {
-                            unreachable!("Erase type should be Some when maybe_erase_span is Some")
-                        }
-                    }
-                    if self.erasing && queue.line_buffer.is_empty() {
-                        echo_bytes.push(b'/');
-                        self.erasing = false;
-                    }
-                } else {
-                    if self.erasing && first_byte != b'\n' {
-                        echo_bytes.push(b'/');
-                        self.erasing = false;
-                    }
+                self.finish_erasing();
+                if queue.line_buffer.is_empty() {
+                    self.echo_set_canon_col();
                 }
-
-                let needs_normal_echo =
-                    if maybe_erase_span.is_some() { echo_bytes.is_empty() } else { true };
-
-                if needs_normal_echo {
-                    let mut char_echo = vec![];
-                    if self.termios.has_local_flags(ECHOCTL) {
-                        if let Some(control_character_echo) =
-                            generate_control_character_echo(first_byte)
-                        {
-                            char_echo = control_character_echo;
-                        }
-                    }
-                    if char_echo.is_empty() {
-                        char_echo = character_bytes.clone();
-                    }
-                    echo_bytes.extend(char_echo);
-                }
-            } else if self.termios.has_local_flags(ECHONL) && first_byte == b'\n' {
-                echo_bytes.extend_from_slice(&character_bytes);
+                self.echo_char(c);
             }
 
-            if !echo_bytes.is_empty() {
-                signals.append(with_queue!(self.output_queue.write_bytes(self, &echo_bytes)));
+            if parmrk_double {
+                queue.line_buffer.extend_from_slice(&[0xff, 0xff]);
+            } else {
+                queue.line_buffer.push(c);
             }
-
-            // If we finish a line, make it available for reading.
-            if self.termios.has_local_flags(ICANON) && self.termios.is_terminating(&character_bytes)
-            {
-                queue.flush_line_buffer();
-            }
+            buffer = &buffer[1..];
+            return_value += 1;
         }
-        // In noncanonical mode, everything is readable.
-        if !self.termios.has_local_flags(ICANON) && !queue.line_buffer.is_empty() {
+
+        self.commit_echoes();
+
+        // In noncanonical mode (or EXTPROC), everything is immediately readable.
+        if !self.is_canon_enabled() && !queue.line_buffer.is_empty() {
             queue.flush_line_buffer();
         }
 
@@ -761,10 +1063,16 @@ impl LineDiscipline {
 type RawByte = u8;
 
 #[derive(Debug, Default)]
+struct ReadPacket {
+    data: Vec<u8>,
+    has_eof: bool,
+}
+
+#[derive(Debug, Default)]
 struct Queue {
     /// The queue of data ready to be read. Each element is a "datagram" (line or chunk).
     /// Empty byte vectors represent EOF markers (read returns 0).
-    read_queue: VecDeque<Vec<u8>>,
+    read_queue: VecDeque<ReadPacket>,
 
     /// The incomplete line/chunk being processed but not yet ready for the read_queue.
     /// In Canonical mode, this holds the current line being edited.
@@ -810,22 +1118,33 @@ impl Queue {
     fn readable_size(&self) -> usize {
         // We sum up everything in the read_queue.
         // NOTE: This might over-report if we only return one datagram at a time, but for poll/FIONREAD it's generally answering "how much is there".
-        self.read_queue.iter().map(|v| v.len()).sum()
+        self.read_queue.iter().map(|p| p.data.len()).sum()
     }
 
-    /// Read from the queue into `data`. Returns the number of bytes copied.
+    /// Returns the total buffer occupancy in `read_queue` (including 1 byte per `VEOF` marker,
+    /// matching `__DISABLED_CHAR` in Linux `n_tty`'s `read_buf`) plus `line_buffer`.
+    fn buffer_len(&self) -> usize {
+        self.read_queue.iter().map(|p| p.data.len() + usize::from(p.has_eof)).sum::<usize>()
+            + self.line_buffer.len()
+    }
+
+    /// Read from the queue into `data`. Returns the number of bytes copied and any pending signals
+    /// generated by draining the wait buffer.
     fn read(
         &mut self,
         terminal: &mut LineDiscipline,
         data: &mut dyn OutputBuffer,
-    ) -> Result<usize, Errno> {
+    ) -> Result<(usize, PendingSignals), Errno> {
         if self.read_queue.is_empty() {
             return error!(EAGAIN);
+        }
+        if data.available() == 0 {
+            return Ok((0, PendingSignals::new()));
         }
 
         let mut total_written = 0;
         while let Some(mut packet) = self.read_queue.pop_front() {
-            if packet.is_empty() {
+            if packet.data.is_empty() {
                 if total_written > 0 {
                     // We've already read some data. We need to complete the read with that data and
                     // leave the empty datagram in the queue to signal EOF on the next read.
@@ -834,19 +1153,21 @@ impl Queue {
                 break;
             }
 
-            match data.write(&packet) {
+            match data.write(&packet.data) {
                 Ok(written) => {
                     total_written += written;
-                    if written < packet.len() {
-                        // Put back the unread part.
-                        let remaining = packet.split_off(written);
-                        self.read_queue.push_front(remaining);
+                    if written < packet.data.len() {
+                        // Put back the unread part, preserving the EOF marker on the tail.
+                        let remaining = packet.data.split_off(written);
+                        self.read_queue
+                            .push_front(ReadPacket { data: remaining, has_eof: packet.has_eof });
                         // Destination full.
                         break;
                     }
 
-                    // If we are in canonical input mode, we stop after one packet (one line).
-                    if self.is_input && terminal.termios.has_local_flags(ICANON) {
+                    // If we are in canonical input mode (and not EXTPROC), or this packet was
+                    // terminated by VEOF, we stop after one packet (one line).
+                    if (self.is_input && terminal.is_canon_enabled()) || packet.has_eof {
                         break;
                     }
                 }
@@ -855,7 +1176,8 @@ impl Queue {
                     self.read_queue.push_front(packet);
                     if total_written > 0 {
                         // If we managed to write something before error, return success.
-                        return Ok(total_written);
+                        let signals = self.drain_waiting_buffer(terminal);
+                        return Ok((total_written, signals));
                     }
                     return Err(e);
                 }
@@ -863,8 +1185,7 @@ impl Queue {
         }
 
         let signals = self.drain_waiting_buffer(terminal);
-        assert!(signals.signals().is_empty());
-        Ok(total_written)
+        Ok((total_written, signals))
     }
 
     /// Writes to the queue from `data`. Returns the number of bytes copied.
@@ -882,11 +1203,6 @@ impl Queue {
         let read_from_userspace = buffer.len();
         let signals = self.push_to_waiting_buffer(terminal, buffer);
         Ok((read_from_userspace, signals))
-    }
-
-    /// Writes the given `buffer` to the queue.
-    fn write_bytes(&mut self, terminal: &mut LineDiscipline, buffer: &[RawByte]) -> PendingSignals {
-        self.push_to_waiting_buffer(terminal, buffer.to_vec())
     }
 
     /// Pushes the given buffer into the wait_buffers, and process the wait_buffers.
@@ -919,15 +1235,20 @@ impl Queue {
 
     /// Flushed the line buffer to the read queue.
     fn flush_line_buffer(&mut self) {
-        self.read_queue.push_back(std::mem::take(&mut self.line_buffer));
+        self.read_queue
+            .push_back(ReadPacket { data: std::mem::take(&mut self.line_buffer), has_eof: false });
     }
 
     /// Flush the content of the queue.
     fn flush(&mut self) {
+        self.flush_buffers();
+        self.flush_unprocessed();
+    }
+
+    /// Flush the processed read queue and in-progress line buffer.
+    fn flush_buffers(&mut self) {
         self.read_queue.clear();
         self.line_buffer.clear();
-        self.wait_buffers.clear();
-        self.total_wait_buffer_length = 0;
     }
 
     /// Flush only the part of the queue which has not yet been processed.
@@ -936,13 +1257,24 @@ impl Queue {
         self.total_wait_buffer_length = 0;
     }
 
-    /// Called when the queue is moved from canonical mode, to non canonical mode.
-    fn on_canon_disabled(&mut self, terminal: &mut LineDiscipline) -> PendingSignals {
-        let signals = self.drain_waiting_buffer(terminal);
-        if !self.line_buffer.is_empty() {
-            self.flush_line_buffer();
+    /// Called when canonical mode or EXTPROC changes on the input queue.
+    fn on_canon_mode_changed(&mut self, terminal: &mut LineDiscipline) -> PendingSignals {
+        let mut combined = Vec::new();
+        for packet in self.read_queue.drain(..) {
+            combined.extend(packet.data);
+            if packet.has_eof {
+                combined.push(DISABLED_CHAR);
+            }
         }
-        signals
+        combined.append(&mut self.line_buffer);
+        if !combined.is_empty() {
+            let has_eof = terminal.is_canon_enabled() && combined.last() == Some(&DISABLED_CHAR);
+            if has_eof {
+                combined.pop();
+            }
+            self.read_queue.push_back(ReadPacket { data: combined, has_eof });
+        }
+        self.drain_waiting_buffer(terminal)
     }
 }
 
@@ -1017,7 +1349,7 @@ trait TermIOS {
     fn is_erase(&self, c: RawByte) -> bool;
     fn is_werase(&self, c: RawByte) -> bool;
     fn is_kill(&self, c: RawByte) -> bool;
-    fn is_terminating(&self, character_bytes: &[RawByte]) -> bool;
+    fn is_eol(&self, c: RawByte) -> bool;
     fn signal(&self, c: RawByte) -> Option<Signal>;
 }
 
@@ -1045,22 +1377,11 @@ impl TermIOS for uapi::termios2 {
     fn is_kill(&self, c: RawByte) -> bool {
         c == self.c_cc[VKILL as usize] && self.c_cc[VKILL as usize] != DISABLED_CHAR
     }
-    fn is_terminating(&self, character_bytes: &[RawByte]) -> bool {
-        // All terminating characters are 1 byte.
-        if character_bytes.len() != 1 {
-            return false;
-        }
-        let c = character_bytes[0];
-
-        // Is this the user-set EOF character?
-        if self.is_eof(c) {
-            return true;
-        }
-
+    fn is_eol(&self, c: RawByte) -> bool {
         if c == DISABLED_CHAR {
             return false;
         }
-        if c == b'\n' || c == self.c_cc[VEOL as usize] {
+        if c == self.c_cc[VEOL as usize] {
             return true;
         }
         if c == self.c_cc[VEOL2 as usize] {
@@ -1079,145 +1400,22 @@ impl TermIOS for uapi::termios2 {
             return Some(SIGQUIT);
         }
         if c == self.c_cc[VSUSP as usize] {
-            return Some(SIGSTOP);
+            return Some(SIGTSTP);
         }
         None
     }
 }
 
-fn compute_next_character_size(buffer: &[RawByte], termios: &uapi::termios2) -> usize {
-    if !termios.has_input_flags(IUTF8) {
-        return 1;
-    }
-
-    #[derive(Default)]
-    struct Receiver {
-        done: Option<bool>,
-    }
-
-    impl utf8parse::Receiver for Receiver {
-        fn codepoint(&mut self, _c: char) {
-            self.done = Some(true);
-        }
-        fn invalid_sequence(&mut self) {
-            self.done = Some(false);
-        }
-    }
-
-    let mut byte_count = 0;
-    let mut receiver = Receiver::default();
-    let mut parser = utf8parse::Parser::new();
-    while receiver.done.is_none() && byte_count < buffer.len() {
-        parser.advance(&mut receiver, buffer[byte_count]);
-        byte_count += 1;
-    }
-    if receiver.done == Some(true) { byte_count } else { 1 }
+fn is_cntrl(c: RawByte) -> bool {
+    c <= 0x1f || c == 0x7f
 }
 
-fn is_ascii(c: RawByte) -> bool {
-    c & 0x80 == 0
+fn is_linux_alnum_or_underscore(c: RawByte) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || matches!(c, 0xc0..=0xd6 | 0xd8..=0xf6 | 0xf8..=0xff)
 }
 
-fn is_utf8_start(c: RawByte) -> bool {
-    c & 0xC0 == 0xC0
-}
-
-fn generate_erase_echo(erase_span: &BufferSpan) -> Vec<RawByte> {
-    let erase_echo = [BACKSPACE_CHAR, b' ', BACKSPACE_CHAR];
-    erase_echo.iter().cycle().take(erase_echo.len() * erase_span.characters).map(|c| *c).collect()
-}
-
-fn generate_control_character_echo(c: RawByte) -> Option<Vec<RawByte>> {
-    if matches!(c, 0..=0x8 | 0xB..=0xC | 0xE..=0x1F) {
-        Some(vec![b'^', c + CONTROL_OFFSET])
-    } else {
-        None
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-struct BufferSpan {
-    bytes: usize,
-    characters: usize,
-}
-
-impl std::ops::AddAssign<Self> for BufferSpan {
-    fn add_assign(&mut self, rhs: Self) {
-        self.bytes += rhs.bytes;
-        self.characters += rhs.characters;
-    }
-}
-
-fn compute_last_character_span(buffer: &[RawByte], termios: &uapi::termios2) -> BufferSpan {
-    if buffer.is_empty() {
-        return BufferSpan::default();
-    }
-    if termios.has_input_flags(IUTF8) {
-        let mut bytes = 0;
-        for c in buffer.iter().rev() {
-            bytes += 1;
-            if is_ascii(*c) || is_utf8_start(*c) {
-                return BufferSpan { bytes, characters: 1 };
-            }
-        }
-        BufferSpan::default()
-    } else {
-        BufferSpan { bytes: 1, characters: 1 }
-    }
-}
-
-fn compute_last_word_span(buffer: &[RawByte], termios: &uapi::termios2) -> BufferSpan {
-    fn is_whitespace(c: RawByte) -> bool {
-        c == b' ' || c == b'\t'
-    }
-
-    let mut in_word = false;
-    let mut word_span = BufferSpan::default();
-    let mut remaining = buffer.len();
-    loop {
-        let span = compute_last_character_span(&buffer[..remaining], termios);
-        if span.bytes == 0 {
-            break;
-        }
-        if span.bytes == 1 {
-            let c = buffer[remaining - 1];
-            if in_word {
-                if is_whitespace(c) {
-                    break;
-                }
-            } else {
-                if !is_whitespace(c) {
-                    in_word = true;
-                }
-            }
-        }
-        remaining -= span.bytes;
-        word_span += span;
-    }
-
-    word_span
-}
-
-fn compute_last_line_span(buffer: &[RawByte], termios: &uapi::termios2) -> BufferSpan {
-    let mut line_span = BufferSpan::default();
-    let mut remaining = buffer.len();
-
-    loop {
-        let span = compute_last_character_span(&buffer[..remaining], termios);
-        if span.bytes == 0 {
-            break;
-        }
-        if span.bytes == 1 {
-            let c = buffer[remaining - 1];
-            if c == b'\n' {
-                break;
-            }
-        }
-        remaining -= span.bytes;
-        line_span += span;
-    }
-
-    line_span
+fn is_utf8_continuation(c: RawByte, termios: &uapi::termios2) -> bool {
+    termios.has_input_flags(IUTF8) && (c & 0xc0) == 0x80
 }
 
 #[cfg(test)]
@@ -1235,31 +1433,12 @@ mod tests {
     }
 
     #[::fuchsia::test]
-    fn test_compute_next_character_size_non_utf8() {
-        let termios = get_default_termios();
-        for i in 0..=255 {
-            let array: &[u8] = &[i, 0xa9, 0];
-            assert_eq!(compute_next_character_size(array, &termios), 1);
-        }
-    }
-
-    #[::fuchsia::test]
-    fn test_compute_next_character_size_utf8() {
-        let mut termios = get_default_termios();
-        termios.c_iflag |= IUTF8;
-        for i in 0..128 {
-            let array: &[RawByte] = &[i, 0xa9, 0];
-            assert_eq!(compute_next_character_size(array, &termios), 1);
-        }
-        let array: &[RawByte] = &[0xc2, 0xa9, 0];
-        assert_eq!(compute_next_character_size(array, &termios), 2);
-        let array: &[RawByte] = &[0xc2, 255, 0];
-        assert_eq!(compute_next_character_size(array, &termios), 1);
-    }
-
-    #[::fuchsia::test]
     fn test_signal_handling_with_disabled_chars() {
         let mut termios = get_default_termios();
+        assert_eq!(termios.signal(3), Some(SIGINT));
+        assert_eq!(termios.signal(28), Some(SIGQUIT));
+        assert_eq!(termios.signal(26), Some(SIGTSTP));
+
         termios.c_cc[VINTR as usize] = DISABLED_CHAR;
         termios.c_cc[VQUIT as usize] = DISABLED_CHAR;
         termios.c_cc[VSUSP as usize] = DISABLED_CHAR;
@@ -1267,7 +1446,7 @@ mod tests {
         assert_eq!(termios.signal(0), None);
         assert_eq!(termios.signal(3), None); // Normally ^C (SIGINT)
         assert_eq!(termios.signal(28), None); // Normally ^\ (SIGQUIT)
-        assert_eq!(termios.signal(26), None); // Normally ^Z (SIGSTOP)
+        assert_eq!(termios.signal(26), None); // Normally ^Z (SIGTSTP)
     }
 
     struct TestBuffer {
@@ -1287,6 +1466,9 @@ mod tests {
     }
 
     impl OutputBuffer for TestBuffer {
+        fn available(&self) -> usize {
+            usize::MAX
+        }
         fn write(&mut self, data: &[u8]) -> Result<usize, Errno> {
             self.data.extend_from_slice(data);
             Ok(data.len())
@@ -1324,7 +1506,7 @@ mod tests {
 
         // A TCIFLUSH from the main side should flush only the main's input (output_queue)
         let mut ld = make_ld();
-        ld.flush(true, uapi::TCIFLUSH).unwrap();
+        ld.flush(TerminalSide::Main, uapi::TCIFLUSH).unwrap();
         read_buf.data.clear();
         assert_eq!(error!(EAGAIN), ld.main_read(&mut read_buf));
         assert!(read_buf.data.is_empty());
@@ -1334,7 +1516,7 @@ mod tests {
 
         // A TCIFLUSH from the replica side should flush only the replica's input (input_queue)
         let mut ld = make_ld();
-        ld.flush(false, uapi::TCIFLUSH).unwrap();
+        ld.flush(TerminalSide::Replica, uapi::TCIFLUSH).unwrap();
         read_buf.data.clear();
         assert!(ld.main_read(&mut read_buf).is_ok());
         assert_eq!(read_buf.data, b"pong\n");
@@ -1344,7 +1526,7 @@ mod tests {
 
         // A TCOFLUSH from the main side should do nothing (instantaneous transmission)
         let mut ld = make_ld();
-        ld.flush(true, uapi::TCOFLUSH).unwrap();
+        ld.flush(TerminalSide::Main, uapi::TCOFLUSH).unwrap();
         read_buf.data.clear();
         assert!(ld.main_read(&mut read_buf).is_ok());
         assert_eq!(read_buf.data, b"pong\n");
@@ -1354,7 +1536,7 @@ mod tests {
 
         // A TCOFLUSH from the replica side should do nothing
         let mut ld = make_ld();
-        ld.flush(false, uapi::TCOFLUSH).unwrap();
+        ld.flush(TerminalSide::Replica, uapi::TCOFLUSH).unwrap();
         read_buf.data.clear();
         assert!(ld.main_read(&mut read_buf).is_ok());
         assert_eq!(read_buf.data, b"pong\n");
@@ -1364,7 +1546,7 @@ mod tests {
 
         // A TCIOFLUSH from main should flush only main's input (output_queue)
         let mut ld = make_ld();
-        ld.flush(true, uapi::TCIOFLUSH).unwrap();
+        ld.flush(TerminalSide::Main, uapi::TCIOFLUSH).unwrap();
         read_buf.data.clear();
         assert_eq!(error!(EAGAIN), ld.main_read(&mut read_buf));
         read_buf.data.clear();
@@ -1373,12 +1555,299 @@ mod tests {
 
         // A TCIOFLUSH from replica should flush only replica's input (input_queue)
         let mut ld = make_ld();
-        ld.flush(false, uapi::TCIOFLUSH).unwrap();
+        ld.flush(TerminalSide::Replica, uapi::TCIOFLUSH).unwrap();
         read_buf.data.clear();
         assert!(ld.main_read(&mut read_buf).is_ok());
         assert_eq!(read_buf.data, b"pong\n");
         read_buf.data.clear();
         assert_eq!(error!(EAGAIN), ld.replica_read(&mut read_buf));
+
+        // A TCIFLUSH from replica while stopped via IXON should also clear pending_echoes.
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+        let mut stop_and_text = TestBuffer { data: b"\x13stale\n".to_vec() };
+        let _ = ld.main_write(&mut stop_and_text).unwrap();
+        ld.flush(TerminalSide::Replica, uapi::TCIFLUSH).unwrap();
+        let mut start_in = TestBuffer { data: b"\x11".to_vec() };
+        let _ = ld.main_write(&mut start_in).unwrap();
+        read_buf.data.clear();
+        assert_eq!(error!(EAGAIN), ld.main_read(&mut read_buf));
+    }
+
+    #[::fuchsia::test]
+    fn test_canonical_max_line_length_with_erase_and_eof() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        // Write 4096 'A's (only 4095 fit), then backspace (erases 4095th 'A'), then 'B', then '\n'.
+        let mut payload = vec![b'A'; 4096];
+        payload.extend_from_slice(b"\x7fB\n");
+        let mut input = TestBuffer { data: payload };
+        let (written, signals) = ld.main_write(&mut input).unwrap();
+        assert_eq!(written, 4099);
+        assert!(signals.signals().is_empty());
+
+        let mut replica_out = TestBuffer { data: vec![] };
+        let (n, signals) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4096);
+        assert!(signals.signals().is_empty());
+        assert_eq!(&replica_out.data[..4094], &[b'A'; 4094][..]);
+        assert_eq!(&replica_out.data[4094..], b"B\n");
+
+        let mut main_out = TestBuffer { data: vec![] };
+        let _ = ld.main_read(&mut main_out).unwrap();
+        assert_eq!(&main_out.data[..4095], &[b'A'; 4095][..]);
+        assert_eq!(&main_out.data[4095..], b"\x08 \x08B\r\n");
+
+        // Also test 4096 'C's terminated by VEOF (^D): replica should read 4095 'C's.
+        let mut payload_eof = vec![b'C'; 4096];
+        payload_eof.push(4);
+        let mut input_eof = TestBuffer { data: payload_eof };
+        let (written, _) = ld.main_write(&mut input_eof).unwrap();
+        assert_eq!(written, 4097);
+
+        replica_out.data.clear();
+        let (n, signals) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4095);
+        assert!(signals.signals().is_empty());
+        assert_eq!(replica_out.data, vec![b'C'; 4095]);
+        replica_out.data.clear();
+        assert_eq!(ld.replica_read(&mut replica_out), error!(EAGAIN));
+    }
+
+    #[::fuchsia::test]
+    fn test_pty_cflag_enforced() {
+        let mut ld = LineDiscipline::default();
+        let mut termios = get_default_termios();
+        termios.c_cflag = uapi::CS5 | uapi::PARENB;
+        let _ = ld.set_termios(termios);
+        assert_eq!(ld.termios().c_cflag & CSIZE, CS8);
+        assert_eq!(ld.termios().c_cflag & CREAD, CREAD);
+        assert_eq!(ld.termios().c_cflag & PARENB, 0);
+    }
+
+    #[::fuchsia::test]
+    fn test_close_events_and_eio() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        ld.replica_close();
+        assert!(ld.is_replica_closed());
+        assert_eq!(ld.main_query_events(), FdEvents::POLLOUT | FdEvents::POLLHUP);
+        let mut read_buf = TestBuffer { data: vec![] };
+        assert_eq!(ld.main_read(&mut read_buf), error!(EIO));
+
+        ld.replica_open();
+        let mut main_in = TestBuffer { data: b"unread\n".to_vec() };
+        let _ = ld.main_write(&mut main_in).unwrap();
+        assert_eq!(ld.get_available_read_size(TerminalSide::Replica), 7);
+
+        ld.main_close();
+        assert!(ld.is_main_closed());
+        assert_eq!(ld.get_available_read_size(TerminalSide::Replica), 0);
+        assert_eq!(ld.get_available_read_size(TerminalSide::Main), 0);
+        assert_eq!(
+            ld.replica_query_events(),
+            FdEvents::POLLIN | FdEvents::POLLOUT | FdEvents::POLLERR | FdEvents::POLLHUP
+        );
+        let (n, signals) = ld.replica_read(&mut read_buf).unwrap();
+        assert_eq!(n, 0);
+        assert!(signals.signals().is_empty());
+        let mut write_buf = TestBuffer { data: b"x".to_vec() };
+        assert_eq!(ld.replica_write(&mut write_buf), error!(EIO));
+    }
+
+    #[::fuchsia::test]
+    fn test_parmrk_capacity_limits() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        let mut termios = get_default_termios();
+        termios.c_iflag |= PARMRK;
+        termios.c_lflag &= !ECHO;
+        termios.c_cc[VEOL as usize] = b';';
+        let _ = ld.set_termios(termios);
+
+        // Canonical mode: 4094 'A's + 0xff (would require 2 bytes = 4096, leaving no room for EOL)
+        // must drop the 0xff so the subsequent '\n' still terminates a 4095-byte line.
+        let mut payload = vec![b'A'; 4094];
+        payload.extend_from_slice(&[0xff, b'\n']);
+        let mut input = TestBuffer { data: payload };
+        let (written, _) = ld.main_write(&mut input).unwrap();
+        assert_eq!(written, 4096);
+
+        let mut replica_out = TestBuffer { data: vec![] };
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4095);
+        assert_eq!(&replica_out.data[..4094], &[b'A'; 4094][..]);
+        assert_eq!(replica_out.data[4094], b'\n');
+
+        // Canonical mode with VEOL = 0xff: 4095 'A's + 0xff (2 bytes > 4096) must not exceed
+        // CANON_MAX_BYTES.
+        termios.c_cc[VEOL as usize] = 0xff;
+        let _ = ld.set_termios(termios);
+        let mut payload_veol = vec![b'A'; 4095];
+        payload_veol.extend_from_slice(&[0xff, b'\n']);
+        let mut input_veol = TestBuffer { data: payload_veol };
+        let _ = ld.main_write(&mut input_veol).unwrap();
+        replica_out.data.clear();
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4096);
+        assert_eq!(&replica_out.data[..4095], &[b'A'; 4095][..]);
+        assert_eq!(replica_out.data[4095], b'\n');
+
+        // Non-canonical mode: 4094 'A's + 0xff (2 bytes -> 4096 > NON_CANON_MAX_BYTES = 4095)
+        // must stop before the 0xff so the first chunk is 4094 bytes and the second is [0xff, 0xff].
+        termios.c_lflag &= !ICANON;
+        let _ = ld.set_termios(termios);
+        let mut payload_noncanon = vec![b'A'; 4094];
+        payload_noncanon.push(0xff);
+        let mut input_noncanon = TestBuffer { data: payload_noncanon };
+        let (written, _) = ld.main_write(&mut input_noncanon).unwrap();
+        assert_eq!(written, 4095);
+        assert_eq!(ld.get_available_read_size(TerminalSide::Replica), 4094);
+        replica_out.data.clear();
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4094);
+        replica_out.data.clear();
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(replica_out.data, vec![0xff, 0xff]);
+    }
+
+    #[::fuchsia::test]
+    fn test_stopped_output_wait_buffer_not_drained_until_start() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        // Write 5000 'A's from replica: 4096 are transformed into output_queue.read_queue and 904
+        // remain in output_queue.wait_buffers.
+        let mut replica_in = TestBuffer { data: vec![b'A'; 5000] };
+        let written = ld.replica_write(&mut replica_in).unwrap();
+        assert_eq!(written, 5000);
+        assert_eq!(ld.get_available_read_size(TerminalSide::Main), 4096);
+
+        // Send VSTOP (^S) from main to stop output.
+        let mut stop_in = TestBuffer { data: vec![0x13] };
+        let (written, signals) = ld.main_write(&mut stop_in).unwrap();
+        assert_eq!(written, 1);
+        assert!(signals.signals().is_empty());
+
+        // Reading from main consumes the 4096 already-transformed bytes, but must NOT drain the
+        // remaining 904 bytes from output_queue.wait_buffers while stopped.
+        let mut main_out = TestBuffer { data: vec![] };
+        let n = ld.main_read(&mut main_out).unwrap();
+        assert_eq!(n, 4096);
+        assert_eq!(main_out.data.len(), 4096);
+        assert_eq!(ld.get_available_read_size(TerminalSide::Main), 0);
+
+        main_out.data.clear();
+        assert_eq!(ld.main_read(&mut main_out), error!(EAGAIN));
+
+        // Send VSTART (^Q) from main to resume output, which drains output_queue.wait_buffers.
+        let mut start_in = TestBuffer { data: vec![0x11] };
+        let (written, signals) = ld.main_write(&mut start_in).unwrap();
+        assert_eq!(written, 1);
+        assert!(signals.signals().is_empty());
+        assert_eq!(ld.get_available_read_size(TerminalSide::Main), 904);
+
+        let n = ld.main_read(&mut main_out).unwrap();
+        assert_eq!(n, 904);
+        assert_eq!(main_out.data, vec![b'A'; 904]);
+    }
+
+    #[::fuchsia::test]
+    fn test_veof_and_unread_queue_buffer_capacity() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        // Each empty VEOF (^D) occupies 1 byte in `buffer_len()` (matching `__DISABLED_CHAR` in
+        // Linux `n_tty`), so at most `NON_CANON_MAX_BYTES` (4095) empty VEOF packets are drained
+        // into `read_queue` while the 4096th remains in `wait_buffers`.
+        let mut eofs = TestBuffer { data: vec![0x04; 4096] };
+        let (written, _) = ld.main_write(&mut eofs).unwrap();
+        assert_eq!(written, 4096);
+        assert_eq!(ld.input_queue().read_queue.len(), NON_CANON_MAX_BYTES);
+        assert_eq!(ld.input_queue().total_wait_buffer_length, 1);
+
+        // Reading 1 VEOF frees 1 slot and drains the 4096th VEOF from `wait_buffers`.
+        let mut replica_out = TestBuffer { data: vec![] };
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(ld.input_queue().read_queue.len(), NON_CANON_MAX_BYTES);
+        assert_eq!(ld.input_queue().total_wait_buffer_length, 0);
+    }
+
+    #[::fuchsia::test]
+    fn test_iutf8_multibyte_at_canon_boundary() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        let mut termios = get_default_termios();
+        termios.c_iflag |= IUTF8;
+        termios.c_lflag &= !ECHO;
+        let _ = ld.set_termios(termios);
+
+        // 4094 'A's + "\xc3\xa9\n": Linux `n_tty` accepts the first byte 0xc3 (reaching 4095
+        // non-EOL bytes), drops 0xa9, and accepts '\n' for a 4096-byte line.
+        let mut payload = vec![b'A'; 4094];
+        payload.extend_from_slice(b"\xc3\xa9\n");
+        let mut input = TestBuffer { data: payload };
+        let (written, _) = ld.main_write(&mut input).unwrap();
+        assert_eq!(written, 4097);
+
+        let mut replica_out = TestBuffer { data: vec![] };
+        let (n, _) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4096);
+        assert_eq!(&replica_out.data[..4094], &[b'A'; 4094][..]);
+        assert_eq!(&replica_out.data[4094..], b"\xc3\n");
+    }
+
+    #[::fuchsia::test]
+    fn test_signal_flush_preserves_subsequent_wait_buffers() {
+        let mut ld = LineDiscipline::default();
+        ld.main_open();
+        ld.replica_open();
+
+        // Fill `read_queue` to 4095 bytes (so `buffer_len() == NON_CANON_MAX_BYTES` and subsequent
+        // writes queue in `wait_buffers`).
+        let mut fill = vec![b'A'; 4094];
+        fill.push(b'\n');
+        let mut fill_in = TestBuffer { data: fill };
+        let (written, _) = ld.main_write(&mut fill_in).unwrap();
+        assert_eq!(written, 4095);
+
+        // Queue two separate `main_write` buffers while full: one with VINTR (^C) and one with
+        // "after\n".
+        let mut sig_in = TestBuffer { data: b"\x03".to_vec() };
+        let (written, signals) = ld.main_write(&mut sig_in).unwrap();
+        assert_eq!(written, 1);
+        assert!(signals.signals().is_empty());
+
+        let mut after_in = TestBuffer { data: b"after\n".to_vec() };
+        let (written, signals) = ld.main_write(&mut after_in).unwrap();
+        assert_eq!(written, 6);
+        assert!(signals.signals().is_empty());
+
+        // Reading the initial 4095-byte line drains `wait_buffers`: `^C` raises SIGINT and flushes
+        // any prior input, then `"after\n"` is processed into `read_queue`.
+        let mut replica_out = TestBuffer { data: vec![] };
+        let (n, signals) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 4095);
+        assert_eq!(signals.signals(), &[SIGINT]);
+
+        replica_out.data.clear();
+        let (n, signals) = ld.replica_read(&mut replica_out).unwrap();
+        assert_eq!(n, 6);
+        assert!(signals.signals().is_empty());
+        assert_eq!(replica_out.data, b"after\n");
     }
 }
 

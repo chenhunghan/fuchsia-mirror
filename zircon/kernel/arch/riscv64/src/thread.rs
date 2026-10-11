@@ -14,6 +14,8 @@ use super::arch::{
     RISCV64_CSR_SSTATUS_VS_SHIFT, riscv64_csr_read,
 };
 use super::vm::is_user_accessible;
+use crate::kernel::thread::ThreadLockGuard;
+use core::pin::Pin;
 use debug::{dprintf, ltracef};
 use zx_types::zx_restricted_state_t;
 
@@ -124,6 +126,27 @@ unsafe extern "C" {
 pub unsafe fn thread_arch(thread: *mut core::ffi::c_void) -> *mut ArchThread {
     // SAFETY: The caller guarantees `thread`; the facade only offsets the pointer.
     unsafe { crate::kernel::thread::get_arch(thread.cast()).cast() }
+}
+
+/// Returns the architectural state of the thread whose lock `guard` holds.
+///
+/// # Safety
+/// The thread must not run while the reference lives: it is suspended or stopped in an exception,
+/// as the debugger register accessors require of their callers. Its lock keeps out other code
+/// that takes it.
+pub unsafe fn locked_thread_arch(guard: &ThreadLockGuard) -> &ArchThread {
+    // SAFETY: the lock and the caller's guarantee leave no writer while the borrow lives.
+    unsafe { &*thread_arch(guard.thread().cast()) }
+}
+
+/// Mutable variant of [`locked_thread_arch`].
+///
+/// # Safety
+/// As for [`locked_thread_arch`].
+pub unsafe fn locked_thread_arch_mut(guard: Pin<&mut ThreadLockGuard>) -> &mut ArchThread {
+    // SAFETY: as for `locked_thread_arch`; borrowing the guard uniquely makes this the only
+    // reference handed out.
+    unsafe { &mut *thread_arch(guard.thread().cast()) }
 }
 
 /// Initialize the architecture state of a thread.
@@ -381,7 +404,7 @@ pub unsafe extern "C" fn arch_context_switch(
     let current_fpu_status = super::fpu::riscv64_fpu_status();
     let current_vector_status = super::vector::riscv64_vector_status();
     // SAFETY: `old_thread` is valid per this function's contract.
-    if !unsafe { crate::kernel::thread::is_user_state_saved(old_thread.cast()) } {
+    if !unsafe { crate::kernel::thread::is_user_state_saved_locked(old_thread.cast()) } {
         // Save the fpu and vector state for the old (current) thread, depending on
         // whether the fpu or vector hardware is currently in the initial state.
         debug_assert_eq!(old_thread, crate::kernel::thread::current_get().cast());
@@ -413,7 +436,7 @@ pub unsafe extern "C" fn arch_context_switch(
     // SAFETY: `new_thread` is valid per this function's contract, and
     // `cpp_arch_set_restricted_flag` only writes the per-CPU flag word.
     unsafe {
-        let in_restricted = crate::kernel::thread::is_in_restricted_mode(new_thread.cast());
+        let in_restricted = crate::kernel::thread::in_restricted(new_thread.cast());
         cpp_arch_set_restricted_flag(in_restricted);
     }
 

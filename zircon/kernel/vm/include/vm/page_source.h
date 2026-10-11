@@ -226,6 +226,8 @@ class PageRequestInterface : public fbl::RefCounted<PageRequestInterface> {
 // similar to what can happen with a normal PageProvider where pages can be read and then
 // decommitted before the caller queries the vm object again.
 
+extern "C" void cpp_page_source_free(PageSource* src);
+
 // Object which provides pages to a vm_object.
 class PageSource final : public PageRequestInterface {
  public:
@@ -364,6 +366,7 @@ class PageSource final : public PageRequestInterface {
   // destructor should only be invoked from RefPtr
   virtual ~PageSource();
   friend fbl::RefPtr<PageSource>;
+  friend void ::cpp_page_source_free(PageSource* src);
 
  private:
   fbl::Canary<fbl::magic("VMPS")> canary_;

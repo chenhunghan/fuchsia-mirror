@@ -54,6 +54,7 @@
 
 #include <arch.h>
 #include <lib/zbi-format/driver-config.h>
+#include <lib/zx/result.h>
 
 #include <arch/arm64/mp.h>
 #include <dev/power.h>
@@ -68,7 +69,7 @@
 void PsciInit(const zbi_dcfg_arm_psci_driver_t& config,
               ktl::span<const zbi_dcfg_arm_psci_cpu_suspend_state_t> psci_cpu_suspend_config);
 
-uint32_t psci_get_version();
+extern "C" uint32_t psci_get_version();
 uint32_t psci_get_feature(uint32_t psci_call);
 
 #include <zircon/compiler.h>

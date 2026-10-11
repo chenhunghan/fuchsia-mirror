@@ -209,6 +209,18 @@ template("golden_files") {
             if (defined(formatter.args)) {
               args += formatter.args
             }
+
+            if (define_ninja_implicit_inputs) {
+              metadata = {
+                ninja_implicit_file_inputs = [
+                  {
+                    gn_label =
+                        get_label_info(":$target_name", "label_with_toolchain")
+                    files = [ rebase_path(golden, root_build_dir, "//") ]
+                  },
+                ]
+              }
+            }
           }
           verify_deps += [ ":$format_golden_target" ]
         }
@@ -322,6 +334,31 @@ template("golden_files") {
           }
         },
       ]
+
+      if (define_ninja_implicit_inputs) {
+        if (defined(processed_comparisons)) {
+          _golden_inputs = []
+          foreach(c, processed_comparisons) {
+            _golden_inputs += [ c.golden ]
+          }
+          if (_golden_inputs != []) {
+            ninja_implicit_file_inputs = [
+              {
+                gn_label =
+                    get_label_info(":$target_name", "label_with_toolchain")
+                files = rebase_path(_golden_inputs, root_build_dir, "//")
+              },
+            ]
+          }
+        } else if (defined(invoker.dir)) {
+          ninja_implicit_directory_inputs = [
+            {
+              gn_label = get_label_info(":$target_name", "label_with_toolchain")
+              directories = rebase_path([ invoker.dir ], root_build_dir)
+            },
+          ]
+        }
+      }
     }
   }
 }

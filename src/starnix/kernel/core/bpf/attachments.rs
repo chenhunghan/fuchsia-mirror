@@ -5,11 +5,11 @@
 // TODO(https://github.com/rust-lang/rust/issues/39371): remove
 #![allow(non_upper_case_globals)]
 
+use crate::bpf::check_cap_or_sys_admin;
 use crate::bpf::context::EbpfRunContextImpl;
 use crate::bpf::fs::{BpfHandle, get_bpf_object};
 use crate::bpf::program::ProgramHandle;
 use crate::mm::PAGE_SIZE;
-use crate::security;
 use crate::task::CurrentTask;
 use crate::vfs::FdNumber;
 use crate::vfs::socket::{
@@ -28,7 +28,7 @@ use linux_uapi::{bpf_sockopt, uaddr};
 use starnix_logging::{log_error, log_warn, track_stub};
 use starnix_sync::{EbpfStateLock, LockDepRwLock};
 use starnix_syscalls::{SUCCESS, SyscallResult};
-use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_SYS_ADMIN, Capabilities};
+use starnix_uapi::auth::{CAP_NET_ADMIN, Capabilities};
 use starnix_uapi::errors::{Errno, ErrnoCode, is_error_return_value};
 use starnix_uapi::{
     CGROUP2_SUPER_MAGIC, bpf_attr__bindgen_ty_6, bpf_sock, bpf_sock_addr, errno, error, gid_t,
@@ -80,10 +80,8 @@ pub fn bpf_prog_attach(
     }
     let program = object.as_program()?.clone();
 
-    if !security::is_task_capable_noaudit(current_task, CAP_SYS_ADMIN) {
-        let required_caps = get_capability_for_program(program.info.program_type)?;
-        security::check_task_capable(current_task, required_caps)?;
-    }
+    let required_caps = get_capability_for_program(program.info.program_type)?;
+    check_cap_or_sys_admin(current_task, required_caps)?;
 
     let attach_type = AttachType::from(attr.attach_type);
     let program_type = program.info.program_type;

@@ -21,7 +21,6 @@
 #include <string.h>
 #include <trace.h>
 #include <zircon/errors.h>
-#include <zircon/types.h>
 
 #include <arch/arm64.h>
 #include <arch/arm64/feature.h>
@@ -33,12 +32,10 @@
 #include <arch/ops.h>
 #include <arch/regs.h>
 #include <arch/vm.h>
-#include <kernel/cpu.h>
 #include <kernel/mp.h>
 #include <kernel/thread.h>
 #include <ktl/atomic.h>
 #include <ktl/bit.h>
-#include <lk/init.h>
 #include <lk/main.h>
 #include <phys/handoff.h>
 
@@ -78,73 +75,6 @@ constexpr uint64_t PMUSERENR_EL0_CR_ENABLE = 1 << 2;  // Enable EL0 access to cy
 // their early init (the only time they will read this variable).  There should
 // be no real chance of a data race here.
 ktl::atomic<bool> allow_pct_in_el0{false};
-
-// one for each secondary CPU, indexed by (cpu_num - 1).
-Thread _init_thread[SMP_MAX_CPUS - 1];
-
-}  // anonymous namespace
-
-// Structure used to pass information to a newly booted secondary cpu.
-//
-// SP will be set to the bottom of this structure.
-struct arm64_sp_info {
-  uintptr_t* shadow_call_sp;  // SCS pointer points to array of addresses.
-  uint64_t pad;               // Pad so that its size is a multiple of 16.
-
-  // This part of the struct itself will serve temporarily as the
-  // fake arch_thread in the thread pointer, so that safe-stack
-  // and stack-protector code can work early.  The thread pointer
-  // (TPIDR_EL1) points just past arm64_sp_info_t.
-  uintptr_t stack_guard;
-  void* unsafe_sp = nullptr;  // Never actually used in the kernel.
-};
-
-static_assert(sizeof(arm64_sp_info) == 32, "check arm64_secondary_start assembly");
-static_assert(offsetof(arm64_sp_info, shadow_call_sp) == 0, "check arm64_secondary_start assembly");
-static_assert(sizeof(arm64_sp_info) % 16 == 0);
-
-#define TP_OFFSET(field) ((int)offsetof(arm64_sp_info, field) - (int)sizeof(arm64_sp_info))
-static_assert(TP_OFFSET(stack_guard) == ZX_TLS_STACK_GUARD_OFFSET);
-static_assert(TP_OFFSET(unsafe_sp) == ZX_TLS_UNSAFE_SP_OFFSET);
-#undef TP_OFFSET
-
-zx::result<uintptr_t> arm64_create_secondary_stack(cpu_num_t cpu_num) {
-  // Allocate a stack for the init thread of this particular secondary cpu.
-  DEBUG_ASSERT_MSG(cpu_num > 0 && cpu_num < SMP_MAX_CPUS, "cpu_num: %u", cpu_num);
-  KernelStack* stack = &_init_thread[cpu_num - 1].stack();
-  DEBUG_ASSERT(stack->base() == 0);
-  zx_status_t status = stack->Init();
-  if (status != ZX_OK) {
-    return zx::error(status);
-  }
-
-  // Get the stack pointers.
-  uintptr_t sp = static_cast<uintptr_t>(stack->top());
-  DEBUG_ASSERT(sp % 16 == 0);
-  uintptr_t* shadow_call_sp = nullptr;
-#if __has_feature(shadow_call_stack)
-  DEBUG_ASSERT(stack->shadow_call_base() != 0);
-  // The shadow call stack grows up.
-  shadow_call_sp = reinterpret_cast<uintptr_t*>(stack->shadow_call_base());
-#endif
-
-  // Place the secondary bootstrap structure at the top of the stack.
-  arm64_sp_info* cpu = reinterpret_cast<arm64_sp_info*>(sp);
-  cpu--;
-
-  // Store the necessary cpu boot info.
-  cpu->stack_guard = Thread::Current::Get()->arch().stack_guard;
-  cpu->shadow_call_sp = shadow_call_sp;
-
-  return zx::ok(reinterpret_cast<uintptr_t>(cpu));
-}
-
-zx_status_t arm64_free_secondary_stack(cpu_num_t cpu_num) {
-  DEBUG_ASSERT(cpu_num > 0 && cpu_num < SMP_MAX_CPUS);
-  return _init_thread[cpu_num - 1].stack().Teardown();
-}
-
-namespace {
 
 void SetupCntkctlEl1() {
   // If the process of clock reference selection has forced us to use the
@@ -264,6 +194,8 @@ void arm64_install_vbar(uintptr_t table) {
   __isb(ARM_MB_SY);
 }
 
+}  // anonymous namespace
+
 void arm64_cpu_early_init() {
   // Make sure the per cpu pointer is set up.
   arm64_init_percpu_early();
@@ -359,8 +291,6 @@ void arm64_cpu_early_init() {
   __arm_wsr64("mdscr_el1", MSDCR_EL1_INITIAL_VALUE);
   __isb(ARM_MB_SY);
 }
-
-}  // anonymous namespace
 
 void arch_early_init() {
   // Collect the setting that physboot determined.  arch_late_init_percpu()
@@ -479,25 +409,6 @@ void arch_enter_uspace(const iframe_t* iframe) {
 void arm64_allow_pct_in_el0() {
   allow_pct_in_el0.store(true, ktl::memory_order_relaxed);
   SetupCntkctlEl1();
-}
-
-// called from assembly.
-extern "C" void arm64_secondary_entry();
-
-extern "C" void arm64_secondary_entry() {
-  arm64_cpu_early_init();
-
-  cpu_num_t cpu = arch_curr_cpu_num();
-  _init_thread[cpu - 1].SecondaryCpuInitEarly();
-  // Run early secondary cpu init routines up to the threading level.
-  lk_init_level(LK_INIT_FLAG_SECONDARY_CPUS, LK_INIT_LEVEL_EARLIEST, LK_INIT_LEVEL_THREADING - 1);
-
-  arch_mp_init_percpu();
-
-  const bool full_dump = arm64_feature_current_is_first_in_cluster();
-  arm64_feature_debug(full_dump);
-
-  lk_secondary_cpu_entry();
 }
 
 namespace {

@@ -457,7 +457,7 @@ class IPerfServerOverSsh(IPerfServerBase):
         )
         self._ssh_settings = ssh_settings
         # Allow injecting a mock SSH session or reusing an existing connection for unit testing.
-        self._ssh_session: connection.SshConnection | None = (
+        self._ssh_session: connection.SshConnection = (
             ssh_session
             if ssh_session is not None
             else connection.SshConnection(ssh_settings)
@@ -534,7 +534,6 @@ class IPerfServerOverSsh(IPerfServerBase):
 
     def _cleanup_iperf_port(self) -> None:
         """Checks and kills zombie iperf servers occupying intended port."""
-        assert self._ssh_session is not None
         if not self._ss:
             if self._use_killall:
                 self._ssh_session.run("killall iperf3", ignore_status=True)
@@ -641,19 +640,6 @@ class IPerfServerOverSsh(IPerfServerBase):
         return log_file
 
     def _get_ssh(self) -> connection.SshConnection:
-        if self._ssh_session is None:
-            self._ssh_session = connection.SshConnection(self._ssh_settings)
-            # Re-instantiate command wrappers with the new SSH session when reconnecting.
-            self._journalctl = optional(
-                LinuxJournalctlCommand(self._ssh_session)
-            )
-            self._ss = optional(LinuxCommand(self._ssh_session, "ss"))
-
-            # Disable NetworkManager on the test interface
-            self._nmcli = optional(nmcli.LinuxNmcliCommand(self._ssh_session))
-            if self._nmcli:
-                self._nmcli.setup_device(self.test_interface)
-
         return self._ssh_session
 
     def close_ssh(self) -> None:
@@ -662,24 +648,14 @@ class IPerfServerOverSsh(IPerfServerBase):
         """
         if self.started:
             self.stop()
-        if self._ssh_session:
-            self._ssh_session.close()
-            self._ssh_session = None
+        self._ssh_session.close()
 
-    def get_systemd_journal(self) -> str:
+    def get_systemd_journal(self) -> str | None:
+        """Get systemd journal logs from this current boot, or None if unavailable."""
         if not self._journalctl:
-            return "journalctl not available"
+            return None
 
-        had_ssh = False if self._ssh_session is None else True
-
-        self._journalctl.set_runner(self._get_ssh())
-        logs = self._journalctl.logs()
-
-        if not had_ssh:
-            # Return to closed state
-            self.close_ssh()
-
-        return logs
+        return self._journalctl.logs()
 
     def download_logs(self, path: str) -> None:
         """Download all available logs to path.
@@ -692,16 +668,17 @@ class IPerfServerOverSsh(IPerfServerBase):
         )
 
         # OpenWrt does not use systemd/journalctl; skip downloading when journalctl is unavailable
-        # to avoid writing placeholder 'journalctl not available' files.
+        # to avoid writing placeholder empty or unavailable log files.
         systemd_journal = self.get_systemd_journal()
-        if systemd_journal and systemd_journal != "journalctl not available":
-            systemd_journal_path = os.path.join(
-                path, f"iperf_systemd_{timestamp}.log"
-            )
-            with open(systemd_journal_path, "a", encoding="utf-8") as f:
-                f.write(systemd_journal)
-            self.log.info(f"Wrote systemd journal to {systemd_journal_path}")
-        else:
+        if not systemd_journal:
             self.log.debug(
                 "Systemd journal not available on this device; skipping."
             )
+            return
+
+        systemd_journal_path = os.path.join(
+            path, f"iperf_systemd_{timestamp}.log"
+        )
+        with open(systemd_journal_path, "a", encoding="utf-8") as f:
+            f.write(systemd_journal)
+        self.log.info(f"Wrote systemd journal to {systemd_journal_path}")

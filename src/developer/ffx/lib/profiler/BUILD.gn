@@ -24,6 +24,7 @@ rustc_library("profiler") {
     "//third_party/rust_crates:prost",
     "//third_party/rust_crates:rayon",
     "//third_party/rust_crates:thiserror",
+    "//third_party/rust_crates:zerocopy",
   ]
 
   test_deps = [
@@ -32,6 +33,7 @@ rustc_library("profiler") {
   ]
 
   sources = [
+    "src/fxt_blob.rs",
     "src/fxt_parse.rs",
     "src/lib.rs",
     "src/parse.rs",

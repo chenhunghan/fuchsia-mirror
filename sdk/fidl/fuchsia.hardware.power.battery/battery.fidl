@@ -26,23 +26,6 @@ type Error = flexible enum {
     ALREADY_WATCHING = 5;
 };
 
-/// Describes the physical charging state of the battery pack.
-type ChargeStatus = flexible enum {
-    /// The battery is neither actively charging nor discharging (net current is near zero) and is
-    /// not yet full (e.g. system is running off an external source with charging suspended/idle,
-    /// thermal throttling, or battery protect mode).
-    NOT_CHARGING = 1;
-
-    /// The battery is actively receiving power from an external source (net current > 0).
-    CHARGING = 2;
-
-    /// The battery is actively supplying power to the system (net current < 0).
-    DISCHARGING = 3;
-
-    /// The battery has reached full charge termination and is no longer charging.
-    FULL = 4;
-};
-
 /// Battery health and safety status, including JEITA temperature regions and fault conditions.
 ///
 /// Each value describes whether the pack may be charged and whether it can still supply power to
@@ -169,29 +152,25 @@ type Status = table {
     /// Omitted if temperature sensing is unsupported or unavailable.
     5: temp_celsius float32;
 
-    /// High-level charging status.
-    /// Omitted if indeterminate or unsupported by hardware.
-    6: charge_status ChargeStatus;
-
     /// Estimated remaining usable capacity in microamp-hours.
     /// Omitted if indeterminate or unsupported by hardware.
-    7: remaining_capacity_uah uint32;
+    6: remaining_capacity_uah uint32;
 
     /// Estimated full charge capacity in microamp-hours, reflecting pack aging.
     /// Omitted if indeterminate or unsupported by hardware.
-    8: full_charge_capacity_uah uint32;
+    7: full_charge_capacity_uah uint32;
 
     /// Health condition or safety trip status.
     /// Omitted if health diagnostics are unsupported by hardware.
-    9: health HealthStatus;
+    8: health HealthStatus;
 
     /// Total charge-discharge cycle count.
     /// Omitted if cycle tracking is unsupported by hardware.
-    10: cycle_count uint32;
+    9: cycle_count uint32;
 
     /// Estimated duration remaining until fully empty (discharging) or fully charged (charging).
     /// Omitted if indeterminate, unsupported, or if the battery is idle.
-    11: time_remaining zx.Duration;
+    10: time_remaining zx.Duration;
 };
 
 /// Diagnostic and telemetry interface for battery hardware.

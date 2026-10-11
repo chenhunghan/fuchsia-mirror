@@ -36,7 +36,7 @@ RestrictedState* cpp_thread_current_restricted_state();
 void cpp_thread_current_set_restricted_state(RestrictedState* raw_rs);
 bool cpp_thread_current_is_signaled();
 bool cpp_thread_current_check_for_restricted_kick();
-bool cpp_thread_is_in_restricted_mode(Thread* thread);
+bool cpp_thread_in_restricted(Thread* thread);
 
 void rust_restricted_state_destroy(RestrictedState* ptr);
 bool rust_restricted_state_in_restricted(const RestrictedState* state);

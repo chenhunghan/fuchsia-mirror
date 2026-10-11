@@ -16,14 +16,12 @@ HardwareBatteryServer::HardwareBatteryServer(async_dispatcher_t* dispatcher)
   battery_spec_.design_capacity_uah(test_hardwarepowercontrol::kDefaultFullCapacityUah);
   fuchsia_hardware_power_battery::Status supported_interest;
   supported_interest.level_percent(0.0f);
-  supported_interest.charge_status(fuchsia_hardware_power_battery::ChargeStatus::kCharging);
   supported_interest.health(fuchsia_hardware_power_battery::HealthStatus::kGood);
   fuchsia_hardware_power_battery::WatchOptions supported_options;
   supported_options.interest(std::move(supported_interest));
   battery_spec_.supported_options(std::move(supported_options));
 
   battery_status_.present(true);
-  battery_status_.charge_status(fuchsia_hardware_power_battery::ChargeStatus::kCharging);
   battery_status_.voltage_uv(test_hardwarepowercontrol::kDefaultPresentVoltageMv * 1000);
   battery_status_.current_ua(test_hardwarepowercontrol::kDefaultChargingCurrentUa);
   battery_status_.level_percent(test_hardwarepowercontrol::kDefaultLevelPercent);
@@ -77,7 +75,6 @@ namespace {
   X(current_ua)                  \
   X(level_percent)               \
   X(temp_celsius)                \
-  X(charge_status)               \
   X(remaining_capacity_uah) X(full_charge_capacity_uah) X(health) X(cycle_count) X(time_remaining)
 
 // Only field presence is meaningful in a mask; the value each present field holds is ignored.

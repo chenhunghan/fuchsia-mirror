@@ -58,7 +58,9 @@ fn get_word_str(word: &relative::Slice<WordPart>, buf: &relative::Buffer) -> Str
 enum ExpectRedir {
     ToFile(i32, String, bool, bool),
     FromFile(i32, String),
+    ReadWrite(i32, String),
     DupFd(i32, i32),
+    DupFdWord(i32, String),
     CloseFd(i32),
     HereDoc(i32, String, bool),
 }
@@ -80,6 +82,7 @@ enum ExpectCmd {
     Or(Box<ExpectCmd>, Box<ExpectCmd>),
     Bg(Box<ExpectCmd>),
     Sequence(Vec<ExpectCmd>),
+    Not(Box<ExpectCmd>),
 }
 
 fn r_out(file: &str) -> ExpectRedir {
@@ -100,8 +103,14 @@ fn r_in(file: &str) -> ExpectRedir {
 fn r_in_fd(fd: i32, file: &str) -> ExpectRedir {
     ExpectRedir::FromFile(fd, file.to_string())
 }
+fn r_rw(fd: i32, file: &str) -> ExpectRedir {
+    ExpectRedir::ReadWrite(fd, file.to_string())
+}
 fn r_dup_in(src: i32, dest: i32) -> ExpectRedir {
     ExpectRedir::DupFd(src, dest)
+}
+fn r_dup_word(src: i32, target: &str) -> ExpectRedir {
+    ExpectRedir::DupFdWord(src, target.to_string())
 }
 fn r_close(src: i32) -> ExpectRedir {
     ExpectRedir::CloseFd(src)
@@ -159,6 +168,9 @@ fn bg(cmd: ExpectCmd) -> ExpectCmd {
 fn seq(cmds: Vec<ExpectCmd>) -> ExpectCmd {
     ExpectCmd::Sequence(cmds)
 }
+fn not(cmd: ExpectCmd) -> ExpectCmd {
+    ExpectCmd::Not(Box::new(cmd))
+}
 
 fn verify_redirs(
     actual: &[crate::parser::ast::Redirect],
@@ -186,10 +198,21 @@ fn verify_redirs(
                 assert_eq!(r.src_fd.raw(), *src_fd);
                 assert_eq!(get_word_str(&r.filename, buf), *filename);
             }
+            ExpectRedir::ReadWrite(src_fd, filename) => {
+                assert_eq!(r.tag, RedirectTag::READ_WRITE);
+                assert_eq!(r.src_fd.raw(), *src_fd);
+                assert_eq!(get_word_str(&r.filename, buf), *filename);
+            }
             ExpectRedir::DupFd(src_fd, dest_fd) => {
                 assert_eq!(r.tag, RedirectTag::DUP_FD);
                 assert_eq!(r.src_fd.raw(), *src_fd);
                 assert_eq!(r.dest_fd.raw(), *dest_fd);
+                assert!(r.filename.is_empty());
+            }
+            ExpectRedir::DupFdWord(src_fd, target) => {
+                assert_eq!(r.tag, RedirectTag::DUP_FD);
+                assert_eq!(r.src_fd.raw(), *src_fd);
+                assert_eq!(get_word_str(&r.filename, buf), *target);
             }
             ExpectRedir::CloseFd(src_fd) => {
                 assert_eq!(r.tag, RedirectTag::CLOSE_FD);
@@ -302,6 +325,10 @@ fn verify_cmd(cmd: &Command, expected: &ExpectCmd, buf: &relative::Buffer) {
             for (i, ptr) in seq.iter().enumerate() {
                 verify_cmd(ptr.as_ref(buf), &cmds[i], buf);
             }
+        }
+        ExpectCmd::Not(l) => {
+            assert_eq!(cmd.tag, CommandTag::NOT, "Expected NOT, got {:?}", cmd.tag);
+            verify_cmd(cmd.left.as_ref(buf), l, buf);
         }
     }
 }
@@ -621,12 +648,25 @@ fn test_parser_exhaustive_coverage() {
         ])],
     );
 
-    // 2. Redirect duplicate targets with quotes and invalid fds, plus various redirects
-    assert!(check_err(b"echo hi 2>&\"1\"", &mut builder).is_err());
-    assert!(check_err(b"echo hi 2>&'1'", &mut builder).is_err());
-    assert!(check_err(b"echo hi 2>&a$b", &mut builder).is_err());
+    // 2. Redirect duplicate targets with quotes/variables, <> read-write, bare subshell redirects, and invalid literal fds
+    check_ast(
+        b"echo hi 2>&\"1\" 2>&'1' 2>&a$b <&$fd <>file 3<>file",
+        &[redir(
+            simple(&["echo", "hi"]),
+            vec![
+                r_dup_word(2, "'1'"),
+                r_dup_word(2, "'1'"),
+                r_dup_word(2, "a$b"),
+                r_dup_word(0, "$fd"),
+                r_rw(0, "file"),
+                r_rw(3, "file"),
+            ],
+        )],
+    );
+    check_ast(b"(> file)", &[subshell(redir(simple(&[]), vec![r_out("file")]))]);
     assert!(check_err(b"echo hi 2>&abc", &mut builder).is_err());
     assert!(check_err(b"echo hi <&abc", &mut builder).is_err());
+    assert!(check_err(b"echo hi 2>&-1", &mut builder).is_err());
     check_ast(
         b"echo hi <file 0<file 2>file >&- 2>&- <&- 0<&-",
         &[redir(
@@ -714,4 +754,26 @@ fn test_parser_exhaustive_coverage() {
     );
     check_ast(b"> file echo hi", &[redir(simple(&["echo", "hi"]), vec![r_out("file")])]);
     check_ast(b"< file cat", &[redir(simple(&["cat"]), vec![r_in("file")])]);
+}
+
+#[test]
+fn test_parse_pipeline_negation() {
+    let mut builder = ASTBuilder::new();
+    check_ast(b"! true", &[not(simple(&["true"]))]);
+    check_ast(b"! ! true", &[not(not(simple(&["true"])))]);
+    check_ast(b"! true | false", &[not(pipe(simple(&["true"]), simple(&["false"])))]);
+    check_ast(b"! true && ! false", &[and(not(simple(&["true"])), not(simple(&["false"])))]);
+    check_ast(
+        b"if ! false; then echo ok; fi",
+        &[if_cmd(not(simple(&["false"])), simple(&["echo", "ok"]), None)],
+    );
+    // Quoted `!` is treated as a regular command word, not pipeline negation.
+    check_ast(b"'!' true", &[simple(&["'!'", "true"])]);
+    check_ast(b"\"!\" true", &[simple(&["'!'", "true"])]);
+    // Standalone `!` at EOF is an incomplete pipeline error.
+    let bang_tokens = tokenize(b"!").unwrap();
+    assert_eq!(
+        parse_script(&mut builder, &bang_tokens),
+        Err(ParseError::Incomplete(IncompleteReason::Pipeline))
+    );
 }

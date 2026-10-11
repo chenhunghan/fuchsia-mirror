@@ -10,9 +10,11 @@ use super::simple::parse_simple_command_args;
 use super::state::ShellState;
 use super::{EvalOutcome, eval_command};
 use crate::errors::io_err_str;
+use crate::fd::Fd;
 use crate::parser::ast::{ASTBuilder, Command, CommandTag, Redirect, RedirectTag, WordPart};
 use crate::process::make_pipe;
 use crate::relative;
+use crate::string::parse_non_negative_int;
 use bstr::{BStr, BString, ByteSlice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +95,10 @@ pub fn eval_redirect(
 
     let is_exec = is_exec_command(builder, sub_cmd_ptr);
     let mut new_context = ctx.try_clone()?;
-    apply_redirects(redirects, state, &mut new_context, builder)?;
-    let outcome = eval_command(builder, sub_cmd_ptr, state, &mut new_context)?;
+    let res = apply_redirects(redirects, state, &mut new_context, builder)
+        .and_then(|()| eval_command(builder, sub_cmd_ptr, state, &mut new_context));
+    state.take_cmd_sub_status();
+    let outcome = res?;
     if is_exec && matches!(outcome, EvalOutcome::Code(0)) {
         *ctx = new_context;
     }
@@ -134,9 +138,31 @@ pub fn apply_redirects(
                 let file = setup_from_file_redirection(word_parts, state, ctx, buf)?;
                 ctx.set_fd(redirect.src_fd, file);
             }
+            RedirectTag::READ_WRITE => {
+                let word_parts = redirect.filename.as_slice(buf);
+                let file = setup_read_write_redirection(word_parts, state, ctx, buf)?;
+                ctx.set_fd(redirect.src_fd, file);
+            }
             RedirectTag::DUP_FD => {
-                let dup = ctx.dup_fd(redirect.dest_fd)?;
-                ctx.set_fd(redirect.src_fd, dup);
+                if !redirect.filename.is_empty() {
+                    let word_parts = redirect.filename.as_slice(buf);
+                    let expanded = expand_argument(word_parts, state, ctx, buf)?;
+                    if expanded.len() != 1 {
+                        return Err(format!("ambiguous redirect: {:?}", word_parts));
+                    }
+                    let target = &expanded[0];
+                    if target == "-" {
+                        ctx.close_fd(redirect.src_fd);
+                    } else {
+                        let dest = parse_non_negative_int(target.as_bytes())
+                            .ok_or_else(|| format!("{}: bad file descriptor", target))?;
+                        let dup = ctx.dup_fd(Fd(dest))?;
+                        ctx.set_fd(redirect.src_fd, dup);
+                    }
+                } else {
+                    let dup = ctx.dup_fd(redirect.dest_fd)?;
+                    ctx.set_fd(redirect.src_fd, dup);
+                }
             }
             RedirectTag::CLOSE_FD => {
                 ctx.close_fd(redirect.src_fd);
@@ -226,5 +252,26 @@ fn setup_from_file_redirection(
     };
 
     std::fs::File::open(&target_path)
+        .map_err(|e| format!("Failed to open {}: {}", expanded_filename, io_err_str(e)))
+}
+
+fn setup_read_write_redirection(
+    filename: &[WordPart],
+    state: &mut ShellState,
+    ctx: &ExecutionContext,
+    buf: &relative::Buffer,
+) -> Result<std::fs::File, String> {
+    let (target_path, expanded_filename) = match expand_redirection_path(filename, state, ctx, buf)?
+    {
+        ExpandedPath::NullFd(file) => return Ok(file),
+        ExpandedPath::Path(path, name) => (path, name),
+    };
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o666 & !state.umask())
+        .open(&target_path)
         .map_err(|e| format!("Failed to open {}: {}", expanded_filename, io_err_str(e)))
 }

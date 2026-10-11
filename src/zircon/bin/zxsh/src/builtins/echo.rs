@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::args::{OptionItem, OptionParser};
 use crate::eval::{EXIT_SUCCESS, ShellState};
 use crate::string::process_escape_bytes;
 use bstr::{BString, ByteSlice};
@@ -15,14 +14,11 @@ pub fn builtin_echo(
     stdout: &mut dyn Write,
     _stderr: &mut dyn Write,
 ) -> i32 {
-    let mut parser = OptionParser::new(args);
-    let mut nonl = false;
-
-    if let Some(Ok(OptionItem::Flag { flag: b'n', enable: true })) = parser.next_option(|_| false) {
-        nonl = true;
-    }
-
-    let positional_args = parser.rest();
+    let (nonl, positional_args) = if args.first().map(|a| a.as_bytes()) == Some(b"-n") {
+        (true, &args[1..])
+    } else {
+        (false, args)
+    };
 
     for (i, arg) in positional_args.iter().enumerate() {
         if i > 0 {

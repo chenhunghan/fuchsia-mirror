@@ -19,6 +19,7 @@ rustc_binary("bin") {
     "//sdk/fidl/fuchsia.usb.policy:fuchsia.usb.policy_rust",
     "//sdk/rust/zx",
     "//src/lib/diagnostics/reader/rust:lib",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//third_party/rust_crates:anyhow",
@@ -31,6 +32,8 @@ rustc_binary("bin") {
 
   test_deps = [
     "//sdk/fidl/fuchsia.hardware.usb.policy:fuchsia.hardware.usb.policy_rust",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:futures",
   ]
 
   sources = [

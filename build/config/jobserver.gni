@@ -7,11 +7,12 @@ declare_args() {
   # to better coordinate parallel tasks, especially when sub-builds
   # are recursively invoked.
   #
-  # This allows launching all IDK sub-builds
-  # at the same time without risking overloading the current machine.
+  # When combined with RBE (`cxx_rbe_enable = true`), this allows launching all
+  # IDK sub-builds at the same time without risking overloading the current
+  # machine.
   #
   # IMPORTANT: This feature requires a version of Ninja that implements
-  # the `--jobserver` option. See https://fxbug.dev/XXXXX for details.
+  # the `--jobserver` option. See https://fxbug.dev/42163397 for details.
   #
   enable_jobserver = false
 }

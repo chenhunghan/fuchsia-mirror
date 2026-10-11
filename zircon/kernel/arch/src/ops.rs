@@ -6,8 +6,12 @@
 
 use crate::kernel::types::VAddr;
 
+/// VM feature bit indicating that execute-only memory (XOM) mappings are supported.
+pub const ZX_VM_FEATURE_CAN_MAP_XOM: u32 = 1 << 0;
+
 unsafe extern "C" {
     fn arch_zero_page(va: *mut core::ffi::c_void);
+    fn cpp_arch_vm_features() -> u32;
 }
 
 /// Arch optimized version of a page zero routine against a page aligned buffer.
@@ -21,4 +25,11 @@ pub unsafe fn zero_page(va: VAddr) {
     unsafe {
         arch_zero_page(core::ptr::with_exposed_provenance_mut(va.0));
     }
+}
+
+/// Returns the architecture-specific VM feature flags (`ZX_VM_FEATURE_*`).
+#[inline(always)]
+pub fn arch_vm_features() -> u32 {
+    // SAFETY: `cpp_arch_vm_features` is a pure query of architectural VM features.
+    unsafe { cpp_arch_vm_features() }
 }

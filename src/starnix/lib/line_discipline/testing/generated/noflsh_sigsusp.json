@@ -20,7 +20,10 @@
     "events": [
         {
             "type": "write_to_master",
-            "data": "foo\u001a\n"
+            "data": "foo\u001a\n",
+            "signals": [
+                "SIGTSTP"
+            ]
         },
         {
             "type": "read_from_master",

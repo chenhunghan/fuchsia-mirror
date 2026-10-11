@@ -6,7 +6,7 @@
 Generate tests.json.
 """
 
-import copy
+import dataclasses
 import json
 import pprint
 import sys
@@ -148,15 +148,76 @@ class Environment:
         }
 
 
+@dataclass
+class TestEntries:
+    """For each test (see `TestEntryKey`), the build-only and runnable entries, for deduplication."""
+
+    build_only_entry: dict[str, Any] | None = None
+    runnable_entries: list[dict[str, Any]] = dataclasses.field(
+        default_factory=list
+    )
+
+    def update_with(self, test: dict[str, Any]) -> None:
+        if test.get("build_only", False):
+            if not self.build_only_entry:
+                self.build_only_entry = test
+        else:
+            # If the same exact test is added via multiple paths, only
+            # include it once.  (This is likely to happen with host-only
+            # tests.)
+            if test not in self.runnable_entries:
+                self.runnable_entries.append(test)
+
+
+@dataclass(frozen=True)
+class TestEntryKey:
+    """The key that identifies which test a test entry is for: its name and cpu.
+
+    These are the same whether the test is found via the GN metadata walk,
+    Bazel, or a product_bundle_test_group.
+
+    The name alone is not enough: when the host and target CPUs differ,
+    `boot_test()` defines a test for each host CPU that it can be run from.
+    These all share the same name (and label), but each has its own `cpu` (and
+    with it, its own runner script `path` and `runtime_deps`), and each needs to
+    be built (and possibly run).
+    """
+
+    name: str
+    cpu: str
+
+    @classmethod
+    def from_test(cls, test: dict[str, Any]) -> "TestEntryKey":
+        """Return the key for a test entry.
+
+        Runnable tests in a product_bundle_test_group have the product bundle's
+        name appended to their name, so this must be called before that's done.
+        """
+        test_info = test["test"]
+        return cls(name=test_info["name"], cpu=test_info["cpu"])
+
+
 def partition_platforms(
     platforms: list[dict[str, Any]], target_cpu: str
 ) -> tuple[set[Dimensions], set[Dimensions]]:
     """Partition platform definitions into target_cpu platforms and other platforms."""
+    parsed_platforms = [instance_from_dict(Dimensions, p) for p in platforms]
+    target_cpu_device_types = {
+        p.device_type
+        for p in parsed_platforms
+        if p.cpu == target_cpu and p.device_type is not None
+    }
+
     target_platforms: set[Dimensions] = set()
     other_platforms: set[Dimensions] = set()
-    for p_dict in platforms:
-        p = instance_from_dict(Dimensions, p_dict)
-        if p.cpu is None or p.cpu == target_cpu:
+    for p in parsed_platforms:
+        if p.cpu == target_cpu or (
+            p.cpu is None
+            and (
+                p.device_type is None
+                or p.device_type in target_cpu_device_types
+            )
+        ):
             target_platforms.add(p)
         else:
             other_platforms.add(p)
@@ -195,99 +256,168 @@ def matches_target_platform(
     )
 
 
-def resolve_test_environments(
+def is_pure_host_test(test: dict[str, Any]) -> bool:
+    """Return True if the test spec describes a pure Linux host test (no target device)."""
+    test_info = test.get("test", {})
+    return test_info.get("os") == "linux" and not (
+        test.get("expects_ssh", True) or test.get("is_boot_test", False)
+    )
+
+
+def test_is_build_only(test: dict[str, Any]) -> bool:
+    """Return True if the test spec describes a build-only test."""
+    return test.get("build_only", False)
+
+
+def set_environments_for_test(
+    test: dict[str, Any], environments: list[Environment]
+) -> None:
+    """Deduplicate, sort, and write resolved environments to `test` (or mark it build_only)."""
+    # Use a set to deduplicate environments, then sort for a stable output order.
+    sorted_envs = sorted(set(environments))
+    if not sorted_envs:
+        test["build_only"] = True
+        test["environments"] = []
+    else:
+        test["environments"] = [e.to_dict() for e in sorted_envs]
+        if "build_only" in test:
+            test["build_only"] = False
+
+
+def resolve_host_test_environments(
+    test: dict[str, Any],
+    host_env: Environment,
+    target_platforms: set[Dimensions],
+    other_platforms: set[Dimensions],
+    build_only: bool = False,
+) -> None:
+    """Resolve environments for a pure host test against host_env and target_platforms."""
+
+    # If the test is build_only, or all tests being processed are to be build-only,
+    # set the test as build-only, with no environments, and return.
+    if build_only or test.get("build_only") is True:
+        test["build_only"] = True
+        set_environments_for_test(test, [])
+        return
+
+    raw_test_envs = test.get("environments")
+    if raw_test_envs:
+        candidate_envs = [
+            instance_from_dict(Environment, e) for e in raw_test_envs
+        ]
+    else:
+        test_cpu = test.get("test", {}).get("cpu")
+        if test_cpu and test_cpu != host_env.dimensions.cpu:
+            candidate_envs = [
+                Environment(dimensions=Dimensions(os="Linux", cpu=test_cpu))
+            ]
+        else:
+            candidate_envs = [host_env]
+
+    matched_envs = [
+        env
+        for env in candidate_envs
+        if matches_target_platform(env, target_platforms, other_platforms)
+    ]
+    set_environments_for_test(test, matched_envs)
+
+
+def resolve_general_test_environments(
     test: dict[str, Any],
     default_envs: list[Environment],
     allowed_device_types: set[str],
     allowed_host_device_types: set[str],
     target_platforms: set[Dimensions],
     other_platforms: set[Dimensions],
-    host_env: Environment | None = None,
-    restrict_to_default_envs: bool = False,
-    override_environments: bool = False,
 ) -> None:
-    """Resolve, validate, filter, and deduplicate environments for a single test spec.
+    """Resolve, validate, and filter environments for a general (non-product-bundle) test spec."""
 
-    Mutates `test["environments"]` and `test["build_only"]` in place.
-    Raises ValueError if any environment specification is invalid or unknown.
-    """
-    if test.get("build_only") is True:
-        test["environments"] = []
+    # Don't run purely host tests through this function
+    assert not is_pure_host_test(test)
+
+    # Mark build_only tests as having no environments.
+    if test_is_build_only(test):
+        set_environments_for_test(test, [])
         return
 
-    test_info = test.get("test", {})
-    test_specified_envs = test.get("environments")
-    candidate_envs: list[Environment] = []
-
-    # If not overriding environments, add the test-specified environments to the candidate list.
-    if test_specified_envs and not override_environments:
-        for e in test_specified_envs:
-            env = instance_from_dict(Environment, e)
-            candidate_envs.append(env)
-
-    # Otherwise, use the default environments.
+    raw_test_envs = test.get("environments")
+    if raw_test_envs:
+        candidate_envs = [
+            instance_from_dict(Environment, e) for e in raw_test_envs
+        ]
     else:
-        if (
-            not override_environments
-            and host_env is not None
-            and test_info.get("os") == "linux"
-            and not test.get("expects_ssh", True)
+        candidate_envs = default_envs
+
+    matched_envs = [
+        env
+        for env in candidate_envs
+        if matches_target_platform(env, target_platforms, other_platforms)
+        and (
+            env.dimensions.device_type is None
+            or env.dimensions.device_type in allowed_device_types
+        )
+        and (
+            env.dimensions.host_device_type is None
+            or env.dimensions.host_device_type in allowed_host_device_types
+        )
+    ]
+    set_environments_for_test(test, matched_envs)
+
+
+def override_product_bundle_test_environments(
+    test: dict[str, Any],
+    group_envs: list[Environment],
+) -> None:
+    """Resolve environments for a product_bundle_test_group with override_test_environments=True."""
+
+    # Don't run purely host tests through this function
+    assert not is_pure_host_test(test)
+
+    if test_is_build_only(test):
+        # If a test is marked build-only, let it stay that way.
+        set_environments_for_test(test, [])
+    else:
+        # Otherwise, forcibly set the environments for the test to the group's environments.
+        set_environments_for_test(test, group_envs)
+
+
+def resolve_product_bundle_test_environments(
+    test: dict[str, Any],
+    group_envs: list[Environment],
+    target_platforms: set[Dimensions],
+    other_platforms: set[Dimensions],
+) -> None:
+    """Resolve environments for a product_bundle_test_group with override_test_environments=False."""
+
+    # Don't run purely host tests through this function
+    assert not is_pure_host_test(test)
+
+    # Mark build_only tests as having no environments, or mark all tests as build_only if the
+    # group has no environments.
+    if test_is_build_only(test) or not group_envs:
+        set_environments_for_test(test, [])
+        return
+
+    # If the test does not specify any environments, use the group's environments.
+    raw_test_envs = test.get("environments")
+    if not raw_test_envs:
+        set_environments_for_test(test, group_envs)
+        return
+
+    # The environments specified by a test are a set of dimension requirements
+    # for a match, rather than an exact match on all Environment fields (such as
+    # tags or emulator configurations). A test environment matches if its
+    # dimensions are a subset of any of the group's environments' dimensions.
+    matched_envs: list[Environment] = []
+    for e in raw_test_envs:
+        env = instance_from_dict(Environment, e)
+        validate_known_platform(env, target_platforms, other_platforms)
+        if any(
+            env.dimensions.is_subset_of(group_env.dimensions)
+            for group_env in group_envs
         ):
-            test_cpu = test_info.get("cpu")
-            if test_cpu and test_cpu != host_env.dimensions.cpu:
-                candidate_envs = [
-                    Environment(dimensions=Dimensions(os="Linux", cpu=test_cpu))
-                ]
-            else:
-                candidate_envs = [host_env]
-        else:
-            candidate_envs = list(default_envs)
-
-    # If we're restricting to the default set of environments, then we need to filter
-    # them based on what matches.  If not, we use the test's environments that match
-    # the target platforms.
-
-    platform_matched_envs: list[Environment] = []
-    if restrict_to_default_envs:
-        # The environments specified by a test are a set of dimension requirements
-        # for a match, rather than an exact match on all Environment fields (such as
-        # tags or emulator configurations). A candidate environment matches if its
-        # dimensions are a subset of any of the default environments' dimensions.
-        for env in candidate_envs:
-            validate_known_platform(env, target_platforms, other_platforms)
-            if any(
-                env.dimensions.is_subset_of(default_env.dimensions)
-                for default_env in default_envs
-            ):
-                platform_matched_envs.append(env)
-    else:
-        for env in candidate_envs:
-            if matches_target_platform(env, target_platforms, other_platforms):
-                platform_matched_envs.append(env)
-
-    # Use a set comprehension (not a list) to deduplicate environments, then sort for a stable output order.
-    filtered_envs = sorted(
-        {
-            env
-            for env in platform_matched_envs
-            if (
-                env.dimensions.device_type is None
-                or env.dimensions.device_type in allowed_device_types
-            )
-            and (
-                env.dimensions.host_device_type is None
-                or env.dimensions.host_device_type in allowed_host_device_types
-            )
-        }
-    )
-
-    if not filtered_envs:
-        test["build_only"] = True
-        test["environments"] = []
-    else:
-        test["environments"] = [e.to_dict() for e in filtered_envs]
-        if "build_only" in test:
-            test["build_only"] = False
+            matched_envs.append(env)
+    set_environments_for_test(test, matched_envs)
 
 
 def build_tests_json(
@@ -373,13 +503,18 @@ def build_tests_json(
     )
 
     validation_errors: list[str] = []
-    build_only_test_names: set[str] = set()
 
+    # Placeholder for tests from Bazel, needed for type checking clarity.
     bazel_tests = bazel_tests_utils.BazelTestsJson(
         tests=[], grouped_tests={}, inputs=set()
     )
+
     if with_bazel_tests:
         bazel_paths = build_utils.BazelPaths.new(build_dir=build_dir)
+        # Collect the files listing Bazel device test suites for each
+        # product_bundle_test_group so `generate_tests_json` can query them in a
+        # single pass and return their test specs in `bazel_tests.grouped_tests`
+        # keyed by suite file path.
         group_suite_files = [
             build_dir / test_group["bazel_target_test_suites"]
             for test_group in test_groups
@@ -391,13 +526,24 @@ def build_tests_json(
             quiet=quiet,
             extra_device_suite_files=group_suite_files,
         )
+
+        # Add the non-product-bundle-specific tests to the overall set
+        # of non-product-bundle-specific tests.  The grouped tests are
+        # added later.
+        tests.extend(bazel_tests.tests)
+
     else:
         # `//build/images/updates:all_package_manifests.list` unconditionally
         # reads `bazel_test_packages.list`, and its GN action is `no_op.sh`
         # (`touch`), which would otherwise create an empty non-JSON file.
         bazel_tests_utils.write_bazel_test_packages_list(build_dir, [])
 
-    tests.extend(bazel_tests.tests)
+    # Test entries for deduplication.
+    #
+    # This is a map of tests (by name and cpu, see `TestEntryKey`), to a list
+    # of runnable test specs for the test.  If there are no runnable test specs
+    # (the list is empty), then it's a build-only test.
+    test_entries_by_key: dict[TestEntryKey, TestEntries] = {}
 
     # Resolve, validate, and filter environments for tests from metadata and
     # Bazel.
@@ -408,21 +554,29 @@ def build_tests_json(
         test_id = f"{test_name} ({test_label})" if test_label else test_name
 
         try:
-            resolve_test_environments(
-                test,
-                default_envs=default_envs,
-                allowed_device_types=allowed_device_types_set,
-                allowed_host_device_types=allowed_host_device_types_set,
-                target_platforms=target_platforms,
-                other_platforms=other_platforms,
-                host_env=host_env,
-                restrict_to_default_envs=False,
-            )
+            if is_pure_host_test(test):
+                resolve_host_test_environments(
+                    test,
+                    host_env,
+                    target_platforms,
+                    other_platforms,
+                )
+            else:
+                resolve_general_test_environments(
+                    test,
+                    default_envs=default_envs,
+                    allowed_device_types=allowed_device_types_set,
+                    allowed_host_device_types=allowed_host_device_types_set,
+                    target_platforms=target_platforms,
+                    other_platforms=other_platforms,
+                )
         except ValueError as err:
             validation_errors.append(f"{test_id}: {err}")
 
-        if test.get("build_only", False):
-            build_only_test_names.add(test_name)
+        # Add the test to the set of test entries for deduplication.
+        test_entries_by_key.setdefault(
+            TestEntryKey.from_test(test), TestEntries()
+        ).update_with(test)
 
     # For every group of tests that are supposed to target a specific product
     # bundle, we parse the tests, add `product_bundle: <name>` and add the test
@@ -443,7 +597,7 @@ def build_tests_json(
             sys.exit(1)
 
         group_build_only = test_group.get("build_only", False)
-        raw_group_envs = (
+        raw_group_envs: list[dict[str, JSONValue]] = (
             [] if group_build_only else test_group.get("environments", [])
         )
         override_test_environments = test_group.get(
@@ -461,25 +615,17 @@ def build_tests_json(
             )
             continue
 
-        group_allowed_device_types = {
-            e.dimensions.device_type
-            for e in group_environments
-            if e.dimensions.device_type is not None
-        }
-        group_allowed_host_device_types = {
-            e.dimensions.host_device_type
-            for e in group_environments
-            if e.dimensions.host_device_type is not None
-        }
-
         # Read the tests.json that is assigned to this specific product bundle.
         product_bundle_tests_file = build_dir / test_group["tests_json"]
         product_bundle_tests = json.loads(product_bundle_tests_file.read_text())
-        if with_bazel_tests and "bazel_target_test_suites" in test_group:
+
+        # Add any tests from Bazel that were found in this test group.
+        if (
+            bazel_tests.grouped_tests
+            and "bazel_target_test_suites" in test_group
+        ):
             suite_file = build_dir / test_group["bazel_target_test_suites"]
-            product_bundle_tests.extend(
-                copy.deepcopy(bazel_tests.grouped_tests[suite_file])
-            )
+            product_bundle_tests.extend(bazel_tests.grouped_tests[suite_file])
 
         # Update the test spec to include the product bundle target and
         # environments.
@@ -490,40 +636,45 @@ def build_tests_json(
             test_label = test_info.get("label")
             test_id = f"{name} ({test_label})" if test_label else name
 
+            # Get the key before the test's name is changed below.
+            test_entry_key = TestEntryKey.from_test(test)
+
             try:
-                resolve_test_environments(
-                    test,
-                    default_envs=group_environments,
-                    allowed_device_types=group_allowed_device_types,
-                    allowed_host_device_types=group_allowed_host_device_types,
-                    target_platforms=target_platforms,
-                    other_platforms=other_platforms,
-                    restrict_to_default_envs=True,
-                    override_environments=override_test_environments,
-                )
+                if is_pure_host_test(test):
+                    resolve_host_test_environments(
+                        test,
+                        host_env,
+                        target_platforms,
+                        other_platforms,
+                        group_build_only,
+                    )
+                else:
+                    if override_test_environments:
+                        override_product_bundle_test_environments(
+                            test,
+                            group_environments,
+                        )
+                    else:
+                        resolve_product_bundle_test_environments(
+                            test,
+                            group_environments,
+                            target_platforms,
+                            other_platforms,
+                        )
+
+                    # If it's not a build-only test, mark the runnable test as
+                    # targeting this specific product bundle.
+                    if not test_is_build_only(test):
+                        test_info["name"] = name
+                        test["product_bundle"] = product_bundle_name
+
+                test_entries_by_key.setdefault(
+                    test_entry_key,
+                    TestEntries(),
+                ).update_with(test)
+
             except ValueError as err:
                 validation_errors.append(f"{test_id}: {err}")
-
-            # Check `build_only` after `resolve_test_environments()`, because
-            # environment resolution validates the test's environment specs and
-            # sets `build_only = True` if all of the test's environments are
-            # filtered out (or if the product_bundle_test_group itself has no
-            # runnable environments / is build_only).
-            #
-            # If the resolved test is build-only, do not mark it with a
-            # product_bundle or append the product_bundle_name to its name, and
-            # deduplicate it against other build-only tests: build-only tests
-            # are never flashed or run against the product bundle, and the
-            # underlying test target to build is identical.
-            if test.get("build_only", False):
-                if original_name in build_only_test_names:
-                    continue
-                build_only_test_names.add(original_name)
-            else:
-                test_info["name"] = name
-                test["product_bundle"] = product_bundle_name
-
-            tests.append(test)
 
     if validation_errors:
         raise ValueError(
@@ -531,14 +682,28 @@ def build_tests_json(
             + "\n".join(f"  - {err}" for err in validation_errors)
         )
 
+    # For each test in test_entries, we add the runnable test entries, and if it only
+    # has build_only entries remaining, we add that as a placeholder.  If it has neither,
+    # we raise an error, because that shouldn't happen.
+    all_tests: list[dict[str, Any]] = []
+    for test_entries in test_entries_by_key.values():
+        if test_entries.runnable_entries:
+            all_tests.extend(test_entries.runnable_entries)
+        elif test_entries.build_only_entry:
+            all_tests.append(test_entries.build_only_entry)
+        else:
+            raise ValueError(
+                "Test has no runnable entries and no build-only entry."
+            )
+
     # Write the final list of tests to tests.json if the contents changed.
     contents_changed = True
     if tests_json_path.exists():
         previous_tests = json.loads(tests_json_path.read_text())
-        if previous_tests == tests:
+        if previous_tests == all_tests:
             contents_changed = False
     if contents_changed:
-        tests_json_path.write_text(json.dumps(tests, indent=2))
+        tests_json_path.write_text(json.dumps(all_tests, indent=2))
 
     return {
         tests_from_metadata_path,

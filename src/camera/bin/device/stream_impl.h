@@ -175,7 +175,8 @@ class StreamImpl {
   const fuchsia::camera3::StreamProperties2& properties_;
   const fuchsia::camera2::hal::StreamConfig& legacy_config_;
   fuchsia::camera2::StreamPtr legacy_stream_;
-  uint32_t legacy_stream_format_index_ = 0;
+  std::map<uint64_t, fuchsia::sysmem2::BufferCollectionTokenPtr> pending_tokens_;
+  uint64_t pending_token_id_next_ = 1;  uint32_t legacy_stream_format_index_ = 0;
   std::map<uint64_t, std::unique_ptr<Client>> clients_;
   uint64_t client_id_next_ = 1;
   StreamRequestedCallback on_stream_requested_;

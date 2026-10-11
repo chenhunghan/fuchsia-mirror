@@ -6,8 +6,6 @@ package bazel2gn_test
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,12 +19,7 @@ import (
 func toSyntaxFile(t *testing.T, s string) *syntax.File {
 	t.Helper()
 
-	p := filepath.Join(t.TempDir(), "BUILD.bazel.test")
-	if err := os.WriteFile(p, []byte(s), 0600); err != nil {
-		t.Fatalf("Failed to write test Bazel file: %v", err)
-	}
-
-	f, err := bazel2gn.Parse(p)
+	f, err := bazel2gn.ParseBytes("BUILD.bazel.test", []byte(s))
 	if err != nil {
 		t.Fatalf("Failed to parse test Bazel build file: %v, file content:\n%s", err, s)
 	}
@@ -277,6 +270,21 @@ fx_package(
 fx_test(
 	name = "foo-test",
 	package = ":foo-package",
+)`,
+			wantGN: "",
+		},
+		{
+			name: "Ignored unittest targets",
+			bazel: `fx_unittest_component(
+	name = "foo-test-component",
+	component_name = "foo-test",
+	binary = ":foo_bin",
+)
+
+fx_unittest_package(
+	name = "foo-test",
+	package_name = "foo-test",
+	unit_tests = [":foo_bin"],
 )`,
 			wantGN: "",
 		},
@@ -659,6 +667,35 @@ rustc_dylib(
 			"//third_party/rust_crates:anyhow",
 		]
 	}
+}`,
+		}, {
+			name: "rustc_library link_deps",
+			bazel: `
+rustc_library(
+	name = "foo",
+	link_deps = [
+		"//zircon/system/ulib/sync",
+		"//sdk/lib/zxio",  # @bazel2gn:path_overwrite://sdk/lib/zxio:zxio_static
+	] + select({
+		"@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+		"//conditions:default": [],
+	}),
+	deps = ["//third_party/rust_crates/vendor:anyhow"],
+)`,
+			wantGN: `rustc_library("foo") {
+	link_deps = []
+	link_deps += [
+		"//zircon/system/ulib/sync",
+		"//sdk/lib/zxio:zxio_static",
+	]
+	if (is_fuchsia) {
+		link_deps += [
+			"//sdk/lib/fdio",
+		]
+	}
+	deps = [
+		"//third_party/rust_crates:anyhow",
+	]
 }`,
 		},
 	} {
@@ -1133,6 +1170,60 @@ func TestCCConversion(t *testing.T) {
 )
 `,
 			wantGN: `static_library("foo") {
+}`,
+		},
+		{
+			name: "fx_cc_binary with build_flags and instrumentation disabled",
+			bazel: `fx_cc_binary(
+	name = "foo",
+	srcs = ["foo.cc"],
+	build_flags = [
+		"//build/config/fuchsia:no_cpp_standard_library",
+		":config",
+	],
+	disable_build_flags = ["//build/config/linux:implicit-host-libs"],
+	disable_instrumentation = True,
+	disable_syslog_backend = True,
+)
+`,
+			wantGN: `executable("foo") {
+	sources = [
+		"foo.cc",
+	]
+	configs += [
+		"//build/config/fuchsia:no_cpp_standard_library",
+		":config",
+	]
+	configs -= [
+		"//build/config/linux:implicit-host-libs",
+	]
+	exclude_toolchain_tags = [ "instrumented" ]
+	disable_syslog_backend = true
+}`,
+		},
+		{
+			name: "fx_cc_binary disable_instrumentation = False is dropped",
+			bazel: `fx_cc_binary(
+	name = "foo",
+	disable_instrumentation = False,
+)
+`,
+			wantGN: `executable("foo") {
+}`,
+		},
+		{
+			name: "fx_cc_library build_flags with path_overwrite",
+			bazel: `fx_cc_library(
+	name = "foo",
+	build_flags = [
+		"//build/config:foo",  # @bazel2gn:path_overwrite://build/config:gn_foo
+	],
+)
+`,
+			wantGN: `static_library("foo") {
+	configs += [
+		"//build/config:gn_foo",
+	]
 }`,
 		},
 	} {

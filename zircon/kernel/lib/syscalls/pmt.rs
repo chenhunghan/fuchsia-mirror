@@ -22,7 +22,8 @@ pub fn sys_pmt_unpin(handle: HandleValue) -> Result<(), Status> {
     ltracef!("handle {:#x}\n", handle.raw_value());
 
     let handle_owner =
-        ProcessDispatcher::with_current(|up| up.remove_handle(handle)).ok_or(Status::BAD_HANDLE)?;
+        ProcessDispatcher::with_current(|up| up.handle_table().remove_handle(up, handle))
+            .ok_or(Status::BAD_HANDLE)?;
 
     let dispatcher = handle_owner.dispatcher();
     let pmt_dispatcher =

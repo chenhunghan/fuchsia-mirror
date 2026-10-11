@@ -204,7 +204,9 @@ pub enum PropPhy {
     FemLnaGain,
     ChanMaxPower,
     RegionCode,
+    RadioCaps,
     RadioCoexMetrics,
+    RadioCoexEnable,
     Unknown(u32),
 }
 impl_sub_enum!(Prop::Phy, PropPhy);
@@ -379,6 +381,7 @@ impl From<u32> for MeshcopJoinerState {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum PropRcp {
+    ApiVersion,
     MacKey,
     MacFrameCounter,
     Timestamp,
@@ -467,7 +470,9 @@ impl From<Prop> for u32 {
             Phy(PropPhy::FemLnaGain) => 0x2a,
             Phy(PropPhy::ChanMaxPower) => 0x2b,
             Phy(PropPhy::RegionCode) => 0x2c,
+            Phy(PropPhy::RadioCaps) => 0x120b,
             Phy(PropPhy::RadioCoexMetrics) => 0x120c,
+            Phy(PropPhy::RadioCoexEnable) => 0x120d,
             Phy(PropPhy::Unknown(x)) => x,
 
             Mac(PropMac::ScanState) => 0x30,
@@ -563,6 +568,7 @@ impl From<Prop> for u32 {
             Meshcop(PropMeshcop::JoinerState) => 0x80,
             Meshcop(PropMeshcop::JoinerCommissioning) => 0x81,
 
+            Rcp(PropRcp::ApiVersion) => 0xB0,
             Rcp(PropRcp::MacKey) => 0x800,
             Rcp(PropRcp::MacFrameCounter) => 0x801,
             Rcp(PropRcp::Timestamp) => 0x802,
@@ -615,7 +621,9 @@ impl From<u32> for Prop {
             0x2a => Phy(PropPhy::FemLnaGain),
             0x2b => Phy(PropPhy::ChanMaxPower),
             0x2c => Phy(PropPhy::RegionCode),
+            0x120b => Phy(PropPhy::RadioCaps),
             0x120c => Phy(PropPhy::RadioCoexMetrics),
+            0x120d => Phy(PropPhy::RadioCoexEnable),
             x if (0x20..0x30).contains(&x) || (0x1200..0x1300).contains(&x) => {
                 Phy(PropPhy::Unknown(x))
             }
@@ -730,6 +738,7 @@ impl From<u32> for Prop {
             0x3BC2 => NestLegacy(PropNestLegacy::LastNodeJoined),
             x if (0x3BC0..0x3C00).contains(&x) => NestLegacy(PropNestLegacy::Unknown(x)),
 
+            0xB0 => Rcp(PropRcp::ApiVersion),
             0x800 => Rcp(PropRcp::MacKey),
             0x801 => Rcp(PropRcp::MacFrameCounter),
             0x802 => Rcp(PropRcp::Timestamp),

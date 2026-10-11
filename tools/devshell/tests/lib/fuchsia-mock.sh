@@ -57,6 +57,13 @@ btf::setup_fx() {
 }
 EOF
 
+  # main_build.py imports build/rbe/build_summary.py, which isn't part of the mock checkout.
+  mkdir -p "${_FUCHSIA_DIR}/build/rbe"
+  cat > "${_FUCHSIA_DIR}/build/rbe/build_summary.py" <<EOF
+def summarize_rbe_metrics_from_logdir(reproxy_logdir):
+    return None
+EOF
+
   # Mock credentials.sh to avoid executing real credentials isolation in unit tests
   btf::make_mock "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh"
   cat > "${_FUCHSIA_DIR}/tools/devshell/lib/credentials.sh.mock_side_effects" <<EOF

@@ -433,6 +433,11 @@ impl VmCowPages {
         unsafe { bindings::cpp_vm_cow_pages_debug_is_empty(self.as_raw(), offset) }
     }
 
+    pub fn debug_is_page(&self, offset: u64) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.
+        unsafe { bindings::cpp_vm_cow_pages_debug_is_page(self.as_raw(), offset) }
+    }
+
     /// Returns whether this VmCowPages is marked high memory priority.
     pub fn debug_is_high_memory_priority(&self) -> bool {
         // SAFETY: `self.as_raw()` returns a valid `VmCowPages` pointer.

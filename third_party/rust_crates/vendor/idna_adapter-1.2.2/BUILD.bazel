@@ -77,7 +77,7 @@ rust_library(
     }),
     version = "1.2.2",
     deps = [
-        "//third_party/rust_crates/vendor/icu_normalizer-2.2.0:icu_normalizer",
-        "//third_party/rust_crates/vendor/icu_properties-2.2.0:icu_properties",
+        "//third_party/rust_crates/vendor/icu_normalizer-2.3.0:icu_normalizer",
+        "//third_party/rust_crates/vendor/icu_properties-2.3.0:icu_properties",
     ],
 )

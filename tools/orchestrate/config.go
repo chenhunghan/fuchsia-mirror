@@ -76,6 +76,8 @@ type EmulatorRunInput struct {
 	Engine string `json:"engine"`
 	// Virtual device spec to use for emulator (passed as "--device <spec>").
 	Device string `json:"device"`
+	// GPU acceleration mode for emulator (passed as "--gpu <mode>").
+	Gpu string `json:"gpu"`
 }
 
 // HostRunInput is the struct that defines how to run a test without device provisioning.

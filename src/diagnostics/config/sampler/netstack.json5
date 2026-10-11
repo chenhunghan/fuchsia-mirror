@@ -71,7 +71,7 @@
                 },
                 {
                     event_codes: [
-                        0,
+                        "no_configuration",
                     ],
                     metric_name: "dhcp_v6_configuration",
                     metric_type: "Occurrence",
@@ -79,7 +79,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "managed_address",
                     ],
                     metric_name: "dhcp_v6_configuration",
                     metric_type: "Occurrence",
@@ -87,7 +87,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "other_configurations",
                     ],
                     metric_name: "dhcp_v6_configuration",
                     metric_type: "Occurrence",
@@ -95,7 +95,7 @@
                 },
                 {
                     event_codes: [
-                        0,
+                        "no_global_slaac_or_dhcpv6_managed_address",
                     ],
                     metric_name: "available_dynamic_ipv6_address_config",
                     metric_type: "Occurrence",
@@ -103,7 +103,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "global_slaac_only",
                     ],
                     metric_name: "available_dynamic_ipv6_address_config",
                     metric_type: "Occurrence",
@@ -111,7 +111,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "dhcpv6_managed_address_only",
                     ],
                     metric_name: "available_dynamic_ipv6_address_config",
                     metric_type: "Occurrence",
@@ -119,7 +119,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "global_slaac_and_dhcpv6_managed_address",
                     ],
                     metric_name: "available_dynamic_ipv6_address_config",
                     metric_type: "Occurrence",
@@ -127,8 +127,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "get",
+                        "accept_conn",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -136,8 +136,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        2,
+                        "set",
+                        "add_ip_membership",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -145,8 +145,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        3,
+                        "set",
+                        "add_ipv6membership",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -154,8 +154,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        4,
+                        "get",
+                        "bind_to_device",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -163,8 +163,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        4,
+                        "set",
+                        "bind_to_device",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -172,8 +172,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        5,
+                        "get",
+                        "broadcast",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -181,8 +181,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        5,
+                        "set",
+                        "broadcast",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -190,8 +190,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        6,
+                        "set",
+                        "drop_ip_membership",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -199,8 +199,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        7,
+                        "set",
+                        "drop_ipv6_membership",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -208,8 +208,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        8,
+                        "get",
+                        "error",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -217,8 +217,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        9,
+                        "get",
+                        "ip_multicast_interface",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -226,8 +226,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        9,
+                        "set",
+                        "ip_multicast_interface",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -235,8 +235,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        10,
+                        "get",
+                        "ip_multicast_loopback",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -244,8 +244,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        10,
+                        "set",
+                        "ip_multicast_loopback",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -253,8 +253,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        11,
+                        "get",
+                        "ip_multicast_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -262,8 +262,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        11,
+                        "set",
+                        "ip_multicast_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -271,8 +271,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        12,
+                        "get",
+                        "ip_packet_info",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -280,8 +280,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        12,
+                        "set",
+                        "ip_packet_info",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -289,8 +289,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        13,
+                        "get",
+                        "ip_receive_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -298,8 +298,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        13,
+                        "set",
+                        "ip_receive_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -307,8 +307,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        14,
+                        "get",
+                        "ip_receive_type_of_service",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -316,8 +316,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        14,
+                        "set",
+                        "ip_receive_type_of_service",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -325,8 +325,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        15,
+                        "get",
+                        "ip_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -334,8 +334,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        15,
+                        "set",
+                        "ip_ttl",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -343,8 +343,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        16,
+                        "get",
+                        "ip_type_of_service",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -352,8 +352,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        16,
+                        "set",
+                        "ip_type_of_service",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -361,8 +361,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        17,
+                        "get",
+                        "ipv6_multicast_hops",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -370,8 +370,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        17,
+                        "set",
+                        "ipv6_multicast_hops",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -379,8 +379,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        18,
+                        "get",
+                        "ipv6_multicast_interface",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -388,8 +388,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        18,
+                        "set",
+                        "ipv6_multicast_interface",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -397,8 +397,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        19,
+                        "get",
+                        "ipv6_multicast_loopback",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -406,8 +406,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        19,
+                        "set",
+                        "ipv6_multicast_loopback",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -415,8 +415,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        20,
+                        "get",
+                        "ipv6_only",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -424,8 +424,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        20,
+                        "set",
+                        "ipv6_only",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -433,8 +433,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        21,
+                        "get",
+                        "ipv6_receive_hop_limit",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -442,8 +442,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        21,
+                        "set",
+                        "ipv6_receive_hop_limit",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -451,8 +451,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        22,
+                        "get",
+                        "ipv6_receive_packet_info",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -460,8 +460,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        22,
+                        "set",
+                        "ipv6_receive_packet_info",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -469,8 +469,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        23,
+                        "get",
+                        "ipv6_receive_traffic_class",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -478,8 +478,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        23,
+                        "set",
+                        "ipv6_receive_traffic_class",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -487,8 +487,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        24,
+                        "get",
+                        "ipv6_traffic_class",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -496,8 +496,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        24,
+                        "set",
+                        "ipv6_traffic_class",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -505,8 +505,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        25,
+                        "get",
+                        "ipv6_unicast_hops",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -514,8 +514,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        25,
+                        "set",
+                        "ipv6_unicast_hops",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -523,8 +523,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        26,
+                        "get",
+                        "keep_alive",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -532,8 +532,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        26,
+                        "set",
+                        "keep_alive",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -541,8 +541,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        27,
+                        "get",
+                        "linger",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -550,8 +550,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        27,
+                        "set",
+                        "linger",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -559,8 +559,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        28,
+                        "get",
+                        "no_check",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -568,8 +568,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        28,
+                        "set",
+                        "no_check",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -577,8 +577,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        29,
+                        "get",
+                        "out_of_band_inline",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -586,8 +586,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        29,
+                        "set",
+                        "out_of_band_inline",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -595,8 +595,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        30,
+                        "get",
+                        "receive_buffer",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -604,8 +604,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        30,
+                        "set",
+                        "receive_buffer",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -613,8 +613,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        31,
+                        "get",
+                        "reuse_address",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -622,8 +622,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        31,
+                        "set",
+                        "reuse_address",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -631,8 +631,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        32,
+                        "get",
+                        "reuse_port",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -640,8 +640,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        32,
+                        "set",
+                        "reuse_port",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -649,8 +649,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        33,
+                        "get",
+                        "send_buffer",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -658,8 +658,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        33,
+                        "set",
+                        "send_buffer",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -667,8 +667,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        34,
+                        "get",
+                        "tcp_congestion",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -676,8 +676,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        34,
+                        "set",
+                        "tcp_congestion",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -685,8 +685,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        35,
+                        "get",
+                        "tcp_cork",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -694,8 +694,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        35,
+                        "set",
+                        "tcp_cork",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -703,8 +703,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        36,
+                        "get",
+                        "tcp_defer_accept",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -712,8 +712,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        36,
+                        "set",
+                        "tcp_defer_accept",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -721,8 +721,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        37,
+                        "get",
+                        "tcp_info",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -730,8 +730,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        38,
+                        "get",
+                        "tcp_keep_alive_count",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -739,8 +739,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        38,
+                        "set",
+                        "tcp_keep_alive_count",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -748,8 +748,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        39,
+                        "get",
+                        "tcp_keep_alive_idle",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -757,8 +757,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        39,
+                        "set",
+                        "tcp_keep_alive_idle",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -766,8 +766,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        40,
+                        "get",
+                        "tcp_keep_alive_interval",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -775,8 +775,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        40,
+                        "set",
+                        "tcp_keep_alive_interval",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -784,8 +784,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        41,
+                        "get",
+                        "tcp_linger",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -793,8 +793,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        41,
+                        "set",
+                        "tcp_linger",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -802,8 +802,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        42,
+                        "get",
+                        "tcp_max_segment",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -811,8 +811,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        42,
+                        "set",
+                        "tcp_max_segment",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -820,8 +820,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        43,
+                        "get",
+                        "tcp_no_delay",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -829,8 +829,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        43,
+                        "set",
+                        "tcp_no_delay",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -838,8 +838,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        44,
+                        "get",
+                        "tcp_quick_ack",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -847,8 +847,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        44,
+                        "set",
+                        "tcp_quick_ack",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -856,8 +856,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        45,
+                        "get",
+                        "tcp_syn_count",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -865,8 +865,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        45,
+                        "set",
+                        "tcp_syn_count",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -874,8 +874,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        46,
+                        "get",
+                        "tcp_user_timeout",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -883,8 +883,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        46,
+                        "set",
+                        "tcp_user_timeout",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -892,8 +892,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        47,
+                        "get",
+                        "tcp_window_clamp",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -901,8 +901,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        47,
+                        "set",
+                        "tcp_window_clamp",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -910,8 +910,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        48,
+                        "get",
+                        "timestamp",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",
@@ -919,8 +919,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        48,
+                        "set",
+                        "timestamp",
                     ],
                     metric_name: "socket_option_operation_max",
                     metric_type: "Integer",

@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{Dispatcher, HandleValue, StreamDispatcher, VmObjectDispatcher};
+use crate::object::{HandleValue, ProcessDispatcher, StreamDispatcher, VmObjectDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr, make_user_in_iovec, make_user_out_iovec};
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -30,10 +30,13 @@ pub fn sys_stream_create(
     let (mut stream_options, desired_vmo_rights) =
         StreamDispatcher::parse_create_syscall_flags(options)?;
 
-    let (vmo_disp, actual_vmo_rights) = Dispatcher::get_with_rights_and_actual::<VmObjectDispatcher>(
-        vmo_handle,
-        desired_vmo_rights,
-    )?;
+    let (vmo_disp, actual_vmo_rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights_and_actual::<VmObjectDispatcher>(
+            up,
+            vmo_handle,
+            desired_vmo_rights,
+        )
+    })?;
 
     // Cannot create a stream from a physical or contiguous VMO.
     if !vmo_disp.vmo().is_paged() || vmo_disp.vmo().is_contiguous() {
@@ -72,7 +75,9 @@ pub fn sys_stream_writev(
         return Err(Status::INVALID_ARGS);
     }
 
-    let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let stream = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<StreamDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     let user_data = make_user_in_iovec(vector, vector_count);
     let (status, actual) = if (options & ZX_STREAM_APPEND) != 0 {
         stream.append_vector(user_data)
@@ -105,7 +110,9 @@ pub fn sys_stream_writev_at(
         return Err(Status::INVALID_ARGS);
     }
 
-    let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let stream = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<StreamDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     let (status, actual) = stream.write_vector_at(make_user_in_iovec(vector, vector_count), offset);
     status?;
 
@@ -132,7 +139,9 @@ pub fn sys_stream_readv(
         return Err(Status::INVALID_ARGS);
     }
 
-    let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_READ)?;
+    let stream = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<StreamDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     let (status, actual) = stream.read_vector(make_user_out_iovec(vector, vector_count));
     status?;
 
@@ -160,7 +169,9 @@ pub fn sys_stream_readv_at(
         return Err(Status::INVALID_ARGS);
     }
 
-    let stream = Dispatcher::get_with_rights::<StreamDispatcher>(handle, ZX_RIGHT_READ)?;
+    let stream = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<StreamDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     let (status, actual) = stream.read_vector_at(make_user_out_iovec(vector, vector_count), offset);
     status?;
 
@@ -179,7 +190,9 @@ pub fn sys_stream_seek(
 ) -> Result<(), Status> {
     ltracef!("handle {:#x}\n", handle.raw_value());
 
-    let (stream, rights) = Dispatcher::get_and_rights::<StreamDispatcher>(handle)?;
+    let (stream, rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_and_rights::<StreamDispatcher>(up, handle)
+    })?;
     if (rights & (ZX_RIGHT_READ | ZX_RIGHT_WRITE)) == 0 {
         return Err(Status::ACCESS_DENIED);
     }

@@ -1619,6 +1619,7 @@ func TestTestCaseToResultSink_StructuredTestID_TargetTest(t *testing.T) {
 					SuiteName:   "FrobnicatedSuite",
 					CaseName:    "VerifyOutput",
 					Status:      runtests.TestSuccess,
+					Format:      "GoogleTest",
 				},
 			},
 		},
@@ -1656,6 +1657,7 @@ func TestTestCaseToResultSink_StructuredTestID_HostTest(t *testing.T) {
 					SuiteName:   "AbseilHardeningTest",
 					CaseName:    "TestFeatureA",
 					Status:      runtests.TestSuccess,
+					Format:      "GoogleTest",
 				},
 			},
 		},
@@ -1680,6 +1682,259 @@ func TestTestCaseToResultSink_StructuredTestID_HostTest(t *testing.T) {
 	}
 }
 
+func TestTestCaseToResultSink_StructuredTestID_RustEmptySuiteName(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:      "host_x64/structured_config_repackaging_test",
+		Status:    runtests.TestSuccess,
+		StartTime: time.Now(),
+		TestResult: runtests.TestResult{
+			Cases: []runtests.TestCaseResult{
+				{
+					DisplayName: "config_requires_values",
+					SuiteName:   "",
+					CaseName:    "config_requires_values",
+					Status:      runtests.TestSuccess,
+					Format:      "Rust",
+				},
+			},
+		},
+	}
+	results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	res := results[0]
+	if res.TestIdStructured == nil {
+		t.Fatalf("expected TestIdStructured to be set")
+	}
+	want := &sinkpb.TestIdentifier{
+		FineName:           "crate",
+		CaseNameComponents: []string{"config_requires_values"},
+	}
+	if !proto.Equal(res.TestIdStructured, want) {
+		t.Errorf("TestIdStructured diff: got %+v, want %+v", res.TestIdStructured, want)
+	}
+	if wantID := "host_x64/structured_config_repackaging_test/:config_requires_values"; res.TestId != wantID {
+		t.Errorf("TestId diff: got %q, want %q", res.TestId, wantID)
+	}
+}
+
+func TestGoPackageName(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail runtests.TestDetails
+		want   string
+	}{
+		{
+			name: "from source_label GN with toolchain",
+			detail: runtests.TestDetails{
+				SourceLabel: "//tools/testing/resultdb:resultdb_lib_tests(//build/toolchain:host_x64)",
+			},
+			want: "tools/testing/resultdb",
+		},
+		{
+			name: "from gn_label without toolchain",
+			detail: runtests.TestDetails{
+				GNLabel: "//src/sys/pkg/lib/fuchsia-repo:tests",
+			},
+			want: "src/sys/pkg/lib/fuchsia-repo",
+		},
+		{
+			name: "from source_label Bazel with @@// prefix",
+			detail: runtests.TestDetails{
+				SourceLabel: "@@//tools/go_test_parser:go_test_parser_lib_tests",
+			},
+			want: "tools/go_test_parser",
+		},
+		{
+			name: "from source_label Bazel with @// prefix",
+			detail: runtests.TestDetails{
+				SourceLabel: "@//src/connectivity/network:tests",
+			},
+			want: "src/connectivity/network",
+		},
+		{
+			name: "deeply nested directory path",
+			detail: runtests.TestDetails{
+				SourceLabel: "//src/developer/debug/shared:tests",
+			},
+			want: "src/developer/debug/shared",
+		},
+		{
+			name: "root target falls back to Name",
+			detail: runtests.TestDetails{
+				Name:        "host_x64/root_target",
+				SourceLabel: "//:root_target",
+			},
+			want: "host_x64/root_target",
+		},
+		{
+			name: "missing labels falls back to host test Name without suffix stripping",
+			detail: runtests.TestDetails{
+				Name: "host_x64/resultdb_lib_tests",
+			},
+			want: "host_x64/resultdb_lib_tests",
+		},
+		{
+			name: "missing labels falls back to fuchsia-pkg Name without URL parsing",
+			detail: runtests.TestDetails{
+				Name: "fuchsia-pkg://fuchsia.com/my-test-package#meta/my-test.cm",
+			},
+			want: "fuchsia-pkg://fuchsia.com/my-test-package#meta/my-test.cm",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := tc.detail
+			detail.Status = runtests.TestSuccess
+			detail.Cases = []runtests.TestCaseResult{
+				{
+					CaseName: "TestFoo",
+					Format:   "Go",
+					Status:   runtests.TestSuccess,
+				},
+			}
+			results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, &detail, "")
+			if len(results) == 0 || results[0].TestIdStructured == nil {
+				t.Fatalf("expected structured test result")
+			}
+			if got := results[0].TestIdStructured.FineName; got != tc.want {
+				t.Errorf("fine_name = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTestCaseToResultSink_StructuredTestID_Go(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:        "host_x64/resultdb_lib_tests",
+		SourceLabel: "//tools/testing/resultdb:resultdb_lib_tests",
+		Status:      runtests.TestSuccess,
+		StartTime:   time.Now(),
+		TestResult: runtests.TestResult{
+			Cases: []runtests.TestCaseResult{
+				{
+					DisplayName: "TestTopLevel",
+					SuiteName:   "",
+					CaseName:    "TestTopLevel",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					DisplayName: "TestParent/subtest_1",
+					SuiteName:   "TestParent",
+					CaseName:    "subtest_1",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					DisplayName: "TestParent/subtest_2/nested",
+					SuiteName:   "TestParent",
+					CaseName:    "subtest_2/nested",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					DisplayName: "TestSSHRmDir//some/dir",
+					SuiteName:   "TestSSHRmDir",
+					CaseName:    "/some/dir",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					DisplayName: "TestParse/trailing/\\s+.../",
+					SuiteName:   "TestParse",
+					CaseName:    "trailing/\\s+.../",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					DisplayName: " #1/!2",
+					SuiteName:   "TestPunctuation",
+					CaseName:    " #1/!2",
+					Status:      runtests.TestSuccess,
+					Format:      "Go",
+				},
+				{
+					SuiteName: "TestFallback",
+					CaseName:  "FallbackCase",
+					Status:    runtests.TestSuccess,
+					Format:    "Go",
+				},
+			},
+		},
+	}
+	results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(results) != 7 {
+		t.Fatalf("expected 7 results, got %d", len(results))
+	}
+
+	// 1. Top-level test: package fine_name, test function as single case component.
+	want0 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"TestTopLevel"},
+	}
+	if !proto.Equal(results[0].TestIdStructured, want0) {
+		t.Errorf("results[0].TestIdStructured diff: got %+v, want %+v", results[0].TestIdStructured, want0)
+	}
+
+	// 2. Subtest: package fine_name, full DisplayName as single case component without splitting.
+	want1 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"TestParent/subtest_1"},
+	}
+	if !proto.Equal(results[1].TestIdStructured, want1) {
+		t.Errorf("results[1].TestIdStructured diff: got %+v, want %+v", results[1].TestIdStructured, want1)
+	}
+
+	// 3. Nested subtest: package fine_name, full DisplayName preserved verbatim.
+	want2 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"TestParent/subtest_2/nested"},
+	}
+	if !proto.Equal(results[2].TestIdStructured, want2) {
+		t.Errorf("results[2].TestIdStructured diff: got %+v, want %+v", results[2].TestIdStructured, want2)
+	}
+
+	// 4. Leading / consecutive slashes in subtest name (e.g. t.Run("/some/dir")): slashes preserved verbatim.
+	want3 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"TestSSHRmDir//some/dir"},
+	}
+	if !proto.Equal(results[3].TestIdStructured, want3) {
+		t.Errorf("results[3].TestIdStructured diff: got %+v, want %+v", results[3].TestIdStructured, want3)
+	}
+
+	// 5. Trailing slash subtest (e.g. t.Run(".../\\s+.../")): slashes preserved verbatim.
+	want4 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"TestParse/trailing/\\s+.../"},
+	}
+	if !proto.Equal(results[4].TestIdStructured, want4) {
+		t.Errorf("results[4].TestIdStructured diff: got %+v, want %+v", results[4].TestIdStructured, want4)
+	}
+
+	// 6. Leading reserved character: reserved char <= ',' wrapped in brackets, slashes preserved verbatim.
+	want5 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"[ #1/!2]"},
+	}
+	if !proto.Equal(results[5].TestIdStructured, want5) {
+		t.Errorf("results[5].TestIdStructured diff: got %+v, want %+v", results[5].TestIdStructured, want5)
+	}
+
+	// 7. Fallback to CaseName when DisplayName is empty.
+	want6 := &sinkpb.TestIdentifier{
+		FineName:           "tools/testing/resultdb",
+		CaseNameComponents: []string{"FallbackCase"},
+	}
+	if !proto.Equal(results[6].TestIdStructured, want6) {
+		t.Errorf("results[6].TestIdStructured diff: got %+v, want %+v", results[6].TestIdStructured, want6)
+	}
+}
+
 func TestTestCaseToResultSink_StructuredTestID_Exoneration(t *testing.T) {
 	outputRoot := t.TempDir()
 	detail := &runtests.TestDetails{
@@ -1693,6 +1948,7 @@ func TestTestCaseToResultSink_StructuredTestID_Exoneration(t *testing.T) {
 					SuiteName:   "Suite",
 					CaseName:    "ExoneratedCase",
 					Status:      runtests.TestExonerated,
+					Format:      "GoogleTest",
 				},
 			},
 		},
@@ -1731,8 +1987,7 @@ func TestTestDetailsToResultSink_StructuredTestID(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := &sinkpb.TestIdentifier{
-			FineName:           "test",
-			CaseNameComponents: []string{"case"},
+			CaseNameComponents: []string{"*fixture"},
 		}
 		if !proto.Equal(res.TestIdStructured, want) {
 			t.Errorf("TestIdStructured diff: got %+v, want %+v", res.TestIdStructured, want)
@@ -1756,8 +2011,7 @@ func TestTestDetailsToResultSink_StructuredTestID(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		want := &sinkpb.TestIdentifier{
-			FineName:           "test",
-			CaseNameComponents: []string{"case"},
+			CaseNameComponents: []string{"*fixture"},
 		}
 		if !proto.Equal(res.TestIdStructured, want) {
 			t.Errorf("TestIdStructured diff: got %+v, want %+v", res.TestIdStructured, want)
@@ -1881,6 +2135,7 @@ func TestTestCaseToResultSink_StructuredTestID_LeadingDisallowedChars(t *testing
 							SuiteName: tc.suiteName,
 							CaseName:  tc.caseName,
 							Status:    runtests.TestSuccess,
+							Format:    "GoogleTest",
 						},
 					},
 				},
@@ -1902,6 +2157,195 @@ func TestTestCaseToResultSink_StructuredTestID_LeadingDisallowedChars(t *testing
 			}
 			if res.TestId != tc.wantLegacyID {
 				t.Errorf("legacy TestId diff: got %q, want %q", res.TestId, tc.wantLegacyID)
+			}
+		})
+	}
+}
+
+func TestTestCaseToResultSink_StructuredTestID_FlatScheme(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:      "//scripts/shac/tests:cml_test",
+		Status:    runtests.TestSuccess,
+		StartTime: time.Now(),
+		TestResult: runtests.TestResult{
+			Cases: []runtests.TestCaseResult{
+				{
+					DisplayName: "test_cml_format",
+					SuiteName:   ":shac",
+					CaseName:    "test_cml_format",
+					Status:      runtests.TestSuccess,
+					Format:      "shac",
+				},
+				{
+					DisplayName: "InlineDirTest.InlineDirPino",
+					SuiteName:   "",
+					CaseName:    "InlineDirTest.InlineDirPino",
+					Status:      runtests.TestSuccess,
+					Format:      "FTF",
+				},
+				{
+					SuiteName: "some_suite",
+					CaseName:  "some_case",
+					Status:    runtests.TestSuccess,
+					Format:    "flat",
+				},
+			},
+		},
+	}
+	results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	// ResultDB scheme "flat" defines only the case level; fine_name must be empty.
+	want0 := &sinkpb.TestIdentifier{
+		FineName:           "",
+		CaseNameComponents: []string{"test_cml_format"},
+	}
+	if !proto.Equal(results[0].TestIdStructured, want0) {
+		t.Errorf("results[0].TestIdStructured diff: got %+v, want %+v", results[0].TestIdStructured, want0)
+	}
+
+	want1 := &sinkpb.TestIdentifier{
+		FineName:           "",
+		CaseNameComponents: []string{"InlineDirTest.InlineDirPino"},
+	}
+	if !proto.Equal(results[1].TestIdStructured, want1) {
+		t.Errorf("results[1].TestIdStructured diff: got %+v, want %+v", results[1].TestIdStructured, want1)
+	}
+
+	want2 := &sinkpb.TestIdentifier{
+		FineName:           "",
+		CaseNameComponents: []string{"some_case"},
+	}
+	if !proto.Equal(results[2].TestIdStructured, want2) {
+		t.Errorf("results[2].TestIdStructured diff: got %+v, want %+v", results[2].TestIdStructured, want2)
+	}
+}
+
+func TestDetermineScheme(t *testing.T) {
+	testCases := []struct {
+		name       string
+		detail     *runtests.TestDetails
+		wantScheme string
+	}{
+		{
+			name:       "empty cases defaults to single",
+			detail:     &runtests.TestDetails{},
+			wantScheme: "single",
+		},
+		{
+			name: "cases present with empty format defaults to flat",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{CaseName: "test_something"},
+					},
+				},
+			},
+			wantScheme: "flat",
+		},
+		{
+			name: "googletest format maps to gtest",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "GoogleTest"}},
+				},
+			},
+			wantScheme: "gtest",
+		},
+		{
+			name: "gtest format maps to gtest",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "gtest"}},
+				},
+			},
+			wantScheme: "gtest",
+		},
+		{
+			name: "rust format maps to rust",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "Rust"}},
+				},
+			},
+			wantScheme: "rust",
+		},
+		{
+			name: "go format maps to go",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "Go"}},
+				},
+			},
+			wantScheme: "go",
+		},
+		{
+			name: "mobly format maps to mobly",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "Mobly"}},
+				},
+			},
+			wantScheme: "mobly",
+		},
+		{
+			name: "junit format maps to junit",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "JUnit"}},
+				},
+			},
+			wantScheme: "junit",
+		},
+		{
+			name: "ftf format maps to flat",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "FTF"}},
+				},
+			},
+			wantScheme: "flat",
+		},
+		{
+			name: "shac format maps to flat",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "shac"}},
+				},
+			},
+			wantScheme: "flat",
+		},
+		{
+			name: "unknown format defaults to flat",
+			detail: &runtests.TestDetails{
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{{Format: "Unknown"}},
+				},
+			},
+			wantScheme: "flat",
+		},
+		{
+			name: "cases with conflicting formats falls back to flat",
+			detail: &runtests.TestDetails{
+				Name: "conflicting-test",
+				TestResult: runtests.TestResult{
+					Cases: []runtests.TestCaseResult{
+						{Format: "FTF"},
+						{Format: "GoogleTest"},
+					},
+				},
+			},
+			wantScheme: "flat",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := determineScheme(tc.detail)
+			if got != tc.wantScheme {
+				t.Errorf("determineScheme() = %q, want %q", got, tc.wantScheme)
 			}
 		})
 	}

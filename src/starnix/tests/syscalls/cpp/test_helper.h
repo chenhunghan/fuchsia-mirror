@@ -14,6 +14,7 @@
 
 #include <optional>
 #include <set>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -206,6 +207,22 @@ class ScopedTempSymlink {
 
  private:
   std::string path_;
+};
+
+inline constexpr char kPerfEventParanoidPath[] = "/proc/sys/kernel/perf_event_paranoid";
+
+// Sets `perf_event_paranoid` to `value` while in scope, then restores the previous value.
+class ScopedPerfEventParanoid {
+ public:
+  explicit ScopedPerfEventParanoid(int value);
+  ~ScopedPerfEventParanoid();
+
+  ScopedPerfEventParanoid(const ScopedPerfEventParanoid &) = delete;
+  ScopedPerfEventParanoid &operator=(const ScopedPerfEventParanoid &) = delete;
+
+ private:
+  bool restore_ = false;
+  std::string previous_value_;
 };
 
 #define HANDLE_EINTR(x)                                     \
@@ -666,13 +683,48 @@ std::optional<MountInfo> ReadMountInfoLine(const std::string &path);
 // If `dir` does not exist or cannot be opened, returns an error (e.g. ENOENT).
 fit::result<int, std::set<std::string>> ListDirectory(const char *dir);
 
-// Polls `/dev/input` for up to 5 seconds until new device entries appear that were
+// Polls `/dev/input` for up to 10 seconds until new device entries appear that were
 // not present in `ls_before`.
 //
 // Returns a vector of newly appeared device names. If the poll times out and no
 // new devices appeared, the returned vector will be empty. Note that more than one
 // device name may be returned if multiple devices appeared.
 std::vector<std::string> WaitForDevice(const std::set<std::string> &ls_before);
+
+// Polls `/dev/input` for up to 10 seconds until it only contains entries that are in
+// `baseline`, i.e. until every device created after `baseline` was taken has been removed.
+// Pre-existing devices (e.g. real input hardware) in `baseline` are allowed to remain.
+//
+// Returns true if all such devices were removed (or `/dev/input` does not exist), and false
+// on timeout or error.
+bool WaitForDevicesRemoved(const std::set<std::string> &baseline);
+
+// RAII container for a dynamically created uinput device and its associated /dev/input event node.
+// Automatically destroys the uinput device and waits for its event node to be removed on
+// destruction.
+struct ScopedUinputDevice {
+  fbl::unique_fd uinput_fd;
+  fbl::unique_fd event_fd;
+  std::string event_node;
+  std::set<std::string> ls_before;
+
+  ScopedUinputDevice() = default;
+  ScopedUinputDevice(fbl::unique_fd uinput_fd, fbl::unique_fd event_fd, std::string event_node,
+                     std::set<std::string> ls_before)
+      : uinput_fd(std::move(uinput_fd)),
+        event_fd(std::move(event_fd)),
+        event_node(std::move(event_node)),
+        ls_before(std::move(ls_before)) {}
+  ~ScopedUinputDevice();
+
+  ScopedUinputDevice(ScopedUinputDevice &&) noexcept = default;
+  ScopedUinputDevice &operator=(ScopedUinputDevice &&) = delete;
+  ScopedUinputDevice(const ScopedUinputDevice &) = delete;
+  ScopedUinputDevice &operator=(const ScopedUinputDevice &) = delete;
+
+  static std::optional<ScopedUinputDevice> Create(const char *name, uint16_t product = 2,
+                                                  std::optional<int> evbit = std::nullopt);
+};
 
 }  // namespace test_helper
 

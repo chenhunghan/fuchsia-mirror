@@ -4,10 +4,12 @@
 
 //! Serialization.
 
-use std::cmp;
-use std::fmt::{self, Debug, Formatter};
-use std::marker::PhantomData;
-use std::ops::{Range, RangeBounds};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp;
+use core::fmt::{self, Debug, Formatter};
+use core::marker::PhantomData;
+use core::ops::{Range, RangeBounds};
 
 use arrayvec::ArrayVec;
 use zerocopy::SplitByteSlice;
@@ -2608,7 +2610,7 @@ mod tests {
     use super::*;
     use crate::BufferMut;
     use assert_matches::assert_matches;
-    use std::fmt::Debug;
+    use core::fmt::Debug;
     use test_case::test_case;
     use test_util::{assert_geq, assert_leq};
 

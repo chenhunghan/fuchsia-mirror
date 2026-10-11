@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
 #include <fidl/fuchsia.images2/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input.internal/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
 #include <zircon/syscalls.h>
@@ -14,6 +15,29 @@
 #include "src/ui/scenic/lib/utils/logging.h"
 
 namespace display {
+
+namespace {
+
+// These constants are defined as raw hex in the FIDL file, so we confirm here that they are the
+// same values as the expected constants in the ZX headers.
+static_assert(
+    static_cast<uint32_t>(fuchsia_ui_input_internal::InputOwnershipSignal::kDisplayUnowned) ==
+        ZX_USER_SIGNAL_0,
+    "Bad constant");
+static_assert(
+    static_cast<uint32_t>(fuchsia_ui_input_internal::InputOwnershipSignal::kDisplayPlatformOwned) ==
+        ZX_USER_SIGNAL_1,
+    "Bad constant");
+static_assert(
+    static_cast<uint32_t>(fuchsia_ui_input_internal::InputOwnershipSignal::kInputClientOwned) ==
+        ZX_USER_SIGNAL_3,
+    "Bad constant");
+static_assert(
+    static_cast<uint32_t>(fuchsia_ui_input_internal::InputOwnershipSignal::kInputPlatformOwned) ==
+        ZX_USER_SIGNAL_4,
+    "Bad constant");
+
+}  // namespace
 
 Display::Display(WireDisplayId id, const WireDisplayMode& mode, uint32_t width_in_mm,
                  uint32_t height_in_mm, uint32_t max_layer_count,
@@ -25,7 +49,15 @@ Display::Display(WireDisplayId id, const WireDisplayMode& mode, uint32_t width_i
       height_in_mm_(height_in_mm),
       max_layer_count_(max_layer_count),
       pixel_formats_(std::move(pixel_formats)) {
-  zx::event::create(0, &ownership_event_);
+  zx_status_t status = zx::event::create(0, &ownership_event_);
+  FX_DCHECK(status == ZX_OK);
+  // Seed the ownership event with initial default signals: the display starts unowned by Scenic
+  // (`kDisplayUnowned`), and input ownership defaults to the platform (`kInputPlatformOwned`)
+  // before DisplayManager and ViewTree updates run.
+  ownership_event_.signal(
+      0,
+      static_cast<uint32_t>(fuchsia_ui_input_internal::InputOwnershipSignal::kDisplayUnowned |
+                            fuchsia_ui_input_internal::InputOwnershipSignal::kInputPlatformOwned));
   device_pixel_ratio_.store({1.f, 1.f});
 
   // Most displays will have a longer interval.  If so, `OnVsync()` will adjust.

@@ -28,6 +28,10 @@ pub struct FeedbackConfig {
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub disk_size: DiskSize,
 
+    /// The disk endurance tier of the device. This affects how frequently Feedback writes to disk.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub disk_endurance: DiskEndurance,
+
     /// The URL of the component, if any, that exposes the fuchsia.feedback.DeviceIdProvider
     /// protocol and should be added to the core realm.
     ///
@@ -117,3 +121,13 @@ pub enum DiskSize {
     Medium,
     Large,
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
+// LINT.IfChange
+#[serde(rename_all = "lowercase")]
+pub enum DiskEndurance {
+    #[default]
+    High,
+    Low,
+}
+// LINT.ThenChange(//src/developer/forensics/feedback/config.cc)

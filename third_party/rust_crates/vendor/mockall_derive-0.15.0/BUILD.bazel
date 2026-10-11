@@ -75,8 +75,8 @@ rust_proc_macro(
     }),
     version = "0.15.0",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/vendor/cfg-if-1.0.4:cfg_if",
-        "//third_party/rust_crates/vendor/mockall_derive-0.15.0:build_script_build",
         "//third_party/rust_crates/vendor/proc-macro2-1.0.107:proc_macro2",
         "//third_party/rust_crates/vendor/quote-1.0.47:quote",
         "//third_party/rust_crates/vendor/syn-2.0.119:syn",
@@ -117,6 +117,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "mockall_derive",
     rustc_flags = [
         "--cap-lints=allow",

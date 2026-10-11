@@ -23,7 +23,6 @@ if (is_fuchsia) {
       "format.cc",
       "fsck.cc",
       "fvm.cc",
-      "fvm_internal.h",
       "mkfs.cc",
       "mount.cc",
       "options.cc",
@@ -72,10 +71,7 @@ if (is_fuchsia) {
 }
 
 test("fs-management-unittest") {
-  sources = [
-    "fvm_test.cc",
-    "options_test.cc",
-  ]
+  sources = [ "options_test.cc" ]
   deps = [
     ":fs-management",
     "//sdk/fidl/fuchsia.device:fuchsia.device_cpp_testing",

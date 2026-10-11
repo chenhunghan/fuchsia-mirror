@@ -13,7 +13,6 @@
 #include <lib/boot-options/boot-options.h>
 #include <lib/counters.h>
 #include <lib/fit/defer.h>
-#include <lib/fixed_point.h>
 #include <lib/zbi-format/driver-config.h>
 #include <platform.h>
 #include <pow2.h>
@@ -43,6 +42,9 @@
 #define TIMER_REG_CNTP_CTL "cntp_ctl_el0"
 #define TIMER_REG_CNTP_CVAL "cntp_cval_el0"
 #define TIMER_REG_CNTP_TVAL "cntp_tval_el0"
+#define TIMER_REG_CNTP_CTL_EL02 "S3_5_C14_C2_1"
+#define TIMER_REG_CNTP_CVAL_EL02 "S3_5_C14_C2_2"
+#define TIMER_REG_CNTP_TVAL_EL02 "S3_5_C14_C2_0"
 #define TIMER_REG_CNTPCT "cntpct_el0"
 
 // CNTPS "AArch64" registers
@@ -54,6 +56,9 @@
 #define TIMER_REG_CNTV_CTL "cntv_ctl_el0"
 #define TIMER_REG_CNTV_CVAL "cntv_cval_el0"
 #define TIMER_REG_CNTV_TVAL "cntv_tval_el0"
+#define TIMER_REG_CNTV_CTL_EL02 "S3_5_C14_C3_1"
+#define TIMER_REG_CNTV_CVAL_EL02 "S3_5_C14_C3_2"
+#define TIMER_REG_CNTV_TVAL_EL02 "S3_5_C14_C3_0"
 #define TIMER_REG_CNTVCT "cntvct_el0"
 
 KCOUNTER(platform_timer_set_counter, "platform.timer.set")
@@ -87,19 +92,37 @@ using ReadArmCounterFunc = uint64_t();
 
 }  // anonymous namespace
 
-static uint32_t read_cntp_ctl() { return __arm_rsr(TIMER_REG_CNTP_CTL); }
-static uint32_t read_cntv_ctl() { return __arm_rsr(TIMER_REG_CNTV_CTL); }
+static uint32_t read_cntp_ctl() {
+  if (arm64_get_boot_el() == 2) {
+    return __arm_rsr(TIMER_REG_CNTP_CTL_EL02);
+  }
+  return __arm_rsr(TIMER_REG_CNTP_CTL);
+}
+static uint32_t read_cntv_ctl() {
+  if (arm64_get_boot_el() == 2) {
+    return __arm_rsr(TIMER_REG_CNTV_CTL_EL02);
+  }
+  return __arm_rsr(TIMER_REG_CNTV_CTL);
+}
 static uint32_t read_cntps_ctl() { return __arm_rsr(TIMER_REG_CNTPS_CTL); }
 
 static void write_cntp_ctl(uint32_t val) {
   LTRACEF_LEVEL(3, "cntp_ctl: 0x%x %x\n", val, read_cntp_ctl());
-  __arm_wsr(TIMER_REG_CNTP_CTL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr(TIMER_REG_CNTP_CTL_EL02, val);
+  } else {
+    __arm_wsr(TIMER_REG_CNTP_CTL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
 static void write_cntv_ctl(uint32_t val) {
   LTRACEF_LEVEL(3, "cntv_ctl: 0x%x %x\n", val, read_cntv_ctl());
-  __arm_wsr(TIMER_REG_CNTV_CTL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr(TIMER_REG_CNTV_CTL_EL02, val);
+  } else {
+    __arm_wsr(TIMER_REG_CNTV_CTL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
@@ -111,13 +134,21 @@ static void write_cntps_ctl(uint32_t val) {
 
 static void write_cntp_cval(uint64_t val) {
   LTRACEF_LEVEL(3, "cntp_cval: 0x%016" PRIx64 ", %" PRIu64 "\n", val, val);
-  __arm_wsr64(TIMER_REG_CNTP_CVAL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr64(TIMER_REG_CNTP_CVAL_EL02, val);
+  } else {
+    __arm_wsr64(TIMER_REG_CNTP_CVAL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
 static void write_cntv_cval(uint64_t val) {
   LTRACEF_LEVEL(3, "cntv_cval: 0x%016" PRIx64 ", %" PRIu64 "\n", val, val);
-  __arm_wsr64(TIMER_REG_CNTV_CVAL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr64(TIMER_REG_CNTV_CVAL_EL02, val);
+  } else {
+    __arm_wsr64(TIMER_REG_CNTV_CVAL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
@@ -129,13 +160,21 @@ static void write_cntps_cval(uint64_t val) {
 
 static void write_cntp_tval(int32_t val) {
   LTRACEF_LEVEL(3, "cntp_tval: %d\n", val);
-  __arm_wsr(TIMER_REG_CNTP_TVAL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr(TIMER_REG_CNTP_TVAL_EL02, val);
+  } else {
+    __arm_wsr(TIMER_REG_CNTP_TVAL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
 static void write_cntv_tval(int32_t val) {
   LTRACEF_LEVEL(3, "cntv_tval: %d\n", val);
-  __arm_wsr(TIMER_REG_CNTV_TVAL, val);
+  if (arm64_get_boot_el() == 2) {
+    __arm_wsr(TIMER_REG_CNTV_TVAL_EL02, val);
+  } else {
+    __arm_wsr(TIMER_REG_CNTV_TVAL, val);
+  }
   __isb(ARM_MB_SY);
 }
 
@@ -531,7 +570,7 @@ void ArmGenericTimerInit(const zbi_dcfg_arm_generic_timer_driver_t& config) {
   // nature take its course.  If we don't have an interrupt configured for using
   // the physical timer hardware (either PHYS or SPHYS), we are going to end up
   // panicking.
-  if (BootOptions::Get()->arm64_force_pct) {
+  if (BootOptions::Get()->arm64_force_pct || (arm64_get_boot_el() == 2 && irq_phys != 0)) {
     dprintf(INFO,
             "arm generic timer forcing use of PCT.  IRQs provided were "
             "(virt %u, phys %u, sphys %u)\n",

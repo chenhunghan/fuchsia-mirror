@@ -119,9 +119,12 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
         events_->onCoreCodecMidStreamOutputConstraintsChange(
             /*output_re_config_required=*/true);
       } else if (item.is_end_of_stream()) {
-        if (ProcessEndOfStream(&item) == kShouldTerminate) {
-          // A failure was reported through `events_` or the stream was stopped.
-          return;
+        ZX_DEBUG_ASSERT(codec_params_.has_value() == chunk_input_stream_.has_value());
+        if (codec_params_ && chunk_input_stream_) {
+          if (ProcessEndOfStream(&item) == kShouldTerminate) {
+            // A failure was reported through `events_` or the stream was stopped.
+            return;
+          }
         }
         events_->onCoreCodecOutputEndOfStream(false);
       } else {
@@ -138,6 +141,10 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
   }
 
   void InitChunkInputStream(const fuchsia::media::FormatDetails& format_details) {
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      min_output_buffer_size_ = safemath::checked_cast<uint32_t>(MinOutputBufferSize());
+    }
     chunk_input_stream_.emplace(
         InputChunkSize(), CreateTimestampExtrapolator(format_details),
         [this](const ChunkInputStream::InputBlock input_block) {
@@ -248,12 +255,15 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
       output_item_ = std::nullopt;
     }
     ResetCodecParams();
+    chunk_input_stream_ = std::nullopt;
     input_packet_seen_ = false;
   }
 
   // Processes format details and initializes appropriate internal configurations based
   // on it.
-  // `codec_params_` should be initialized in this method.
+  // `codec_params_` should be initialized in this method, followed by calling
+  // `InitChunkInputStream()` so that `chunk_input_stream_` and `min_output_buffer_size_` are
+  // initialized.
   virtual InputLoopStatus ProcessFormatDetails(
       const fuchsia::media::FormatDetails& format_details) = 0;
 
@@ -270,15 +280,26 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
 
   // Returns the minimum number of bytes required to hold output data that is produced from
   // processing a single input chunk.
+  //
+  // `codec_params_` is guaranteed to be populated when `CodecAdapterSWImpl` calls this method.
+  // Implementations of `BufferCollectionConstraints(kOutputPort)` should read
+  // `min_output_buffer_size_` rather than calling this method if the size depends on
+  // `codec_params_`.
   virtual size_t MinOutputBufferSize() = 0;
 
-  // Returns the constraints to use for `CodecAdapter::CoreCodecGetBufferCollectionConstraints`
+  // Returns the constraints to use for `CodecAdapter::CoreCodecGetBufferCollectionConstraints2`
   // depending on the port. The fields used are:
   // - fuchsia::sysmem::BufferCollectionConstraints.min_buffer_count_for_camping
-  // - fuchsia::sysmem::BufferCollectionConstraintsbuffer_memory_constraints.min_size_bytes
-  // - fuchsia::sysmem::BufferCollectionConstraintsbuffer_memory_constraints.max_size_bytes
-  virtual fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(
-      const CodecPort port) = 0;
+  // - fuchsia::sysmem::BufferCollectionConstraints.buffer_memory_constraints.min_size_bytes
+  // - fuchsia::sysmem::BufferCollectionConstraints.buffer_memory_constraints.max_size_bytes
+  //
+  // For `kOutputPort`, once `ProcessFormatDetails()` has succeeded at least once, this method may
+  // be called even after `CleanUpAfterStream()` (where `ResetCodecParams()` has reset
+  // `codec_params_`) before a subsequent stream runs `ProcessFormatDetails()`. Implementations
+  // must not assume `codec_params_.has_value()` here and should use `min_output_buffer_size_` if
+  // the minimum output buffer size depends on stream format details.
+  virtual fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+      __TA_REQUIRES(lock_) = 0;
 
   virtual TimestampExtrapolator CreateTimestampExtrapolator(
       const fuchsia::media::FormatDetails& format_details) = 0;
@@ -288,6 +309,12 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
 
   // Parameters required for actual codec work.
   std::optional<CodecParams> codec_params_;
+
+  // Minimum output buffer size from the most recent `InitChunkInputStream()` call (during
+  // `ProcessFormatDetails()`), retained across `CleanUpAfterStream()` so
+  // `CoreCodecGetBufferCollectionConstraints2(kOutputPort)` can succeed after a stream stops
+  // before the next stream processes its format details.
+  std::optional<uint32_t> min_output_buffer_size_ __TA_GUARDED(lock_);
 
  private:
   void PostSerial(async_dispatcher_t* dispatcher, fit::closure to_run) {

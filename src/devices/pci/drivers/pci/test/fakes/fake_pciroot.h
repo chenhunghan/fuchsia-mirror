@@ -213,8 +213,9 @@ class FakePciroot : public ddk::PcirootProtocol<FakePciroot> {
       return ZX_ERR_NOT_SUPPORTED;
     }
 
-    zx_rsrc_kind_t kind =
-        (type == PCI_ADDRESS_SPACE_MEMORY) ? ZX_RSRC_KIND_MMIO : ZX_RSRC_KIND_IOPORT;
+    zx_rsrc_kind_t kind = (type == PCI_ADDRESS_SPACE_MEMORY || io_type_ == PCI_ADDRESS_SPACE_MEMORY)
+                              ? ZX_RSRC_KIND_MMIO
+                              : ZX_RSRC_KIND_IOPORT;
     if (in_base) {
       *out_base = in_base;
     } else {
@@ -239,6 +240,7 @@ class FakePciroot : public ddk::PcirootProtocol<FakePciroot> {
     return ZX_OK;
   }
 
+  void set_io_type(pci_address_space_t io_type) { io_type_ = io_type; }
   void enable_get_bti(bool enable) { enable_get_bti_ = enable; }
   void enable_connect_sysmem(bool enable) { enable_connect_sysmem_ = enable; }
   void enable_get_pci_platform_info(bool enable) { enable_get_pci_platform_info_ = enable; }
@@ -259,6 +261,7 @@ class FakePciroot : public ddk::PcirootProtocol<FakePciroot> {
   zx::bti bti_;
   zx::resource mmio_resource_;
   zx::resource ioport_resource_;
+  pci_address_space_t io_type_ = PCI_ADDRESS_SPACE_IO;
   std::vector<pci_legacy_irq_t> legacy_irqs_;
   std::vector<pci_irq_routing_entry_t> routing_entries_;
   std::vector<pci_bdf_t> acpi_devices_;

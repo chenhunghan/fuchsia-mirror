@@ -71,7 +71,8 @@ impl Command for SelectorsCommand {
     }
 }
 
-pub struct SelectorsResult(Vec<fdiagnostics::Selector>);
+#[derive(schemars::JsonSchema)]
+pub struct SelectorsResult(#[schemars(with = "Vec<String>")] Vec<fdiagnostics::Selector>);
 
 impl Serialize for SelectorsResult {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {

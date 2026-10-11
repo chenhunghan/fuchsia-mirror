@@ -107,6 +107,8 @@ class MixStage : public ReadableStream {
 
   // This is used by ForEachSource to snapshot `streams_`. It should be safe to store here because
   // ForEachSource is always called by the same thread. This avoids an allocation in ForEachSource.
+  // ForEachSource calls `clear()` upon return to release stream references while preserving
+  // capacity.
   std::vector<StreamHolder> for_each_source_;
 };
 

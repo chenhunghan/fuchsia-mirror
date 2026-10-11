@@ -359,6 +359,7 @@ multiconst!(u32, [
 multiconst!(u64, [
     ZX_SYSTEM_SUSPEND_OPTION_DISCARD     = 1 << 0;
     ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY = 1 << 1;
+    ZX_SYSTEM_SUSPEND_OPTION_DEEP        = 1 << 2;
 ]);
 
 // LINT.IfChange(zx_status_t)
@@ -802,6 +803,7 @@ multiconst!(u32, [
     ZX_ARM64_FEATURE_ISA_I8MM             = 1 << 19;
     ZX_ARM64_FEATURE_ISA_SVE              = 1 << 20;
     ZX_ARM64_FEATURE_ISA_ARM32            = 1 << 21;
+    ZX_ARM64_FEATURE_ISA_MOPS             = 1 << 22;
     ZX_ARM64_FEATURE_ISA_SHA2             = 1 << 6;
     ZX_ARM64_FEATURE_ADDRESS_TAGGING_TBI  = 1 << 0;
 ]);
@@ -1316,15 +1318,16 @@ pub struct zx_packet_guest_io_t {
 pub struct zx_packet_guest_vcpu_interrupt_t {
     pub mask: u64,
     pub vector: u8,
-    padding1: [PadByte; 7],
+    padding1: [PadByte; 15],
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
 pub struct zx_packet_guest_vcpu_startup_t {
-    pub id: u64,
+    pub target: u64,
     pub entry: zx_gpaddr_t,
+    pub context: u64,
 }
 
 #[repr(C)]
@@ -1348,7 +1351,6 @@ pub struct zx_packet_guest_vcpu_t {
     pub r#type: zx_packet_guest_vcpu_type_t,
     padding1: [PadByte; 4],
     pub union: zx_packet_guest_vcpu_union_t,
-    padding2: [PadByte; 8],
 }
 
 impl PartialEq for zx_packet_guest_vcpu_t {
@@ -1415,6 +1417,22 @@ pub const ZX_PAGER_VMO_STATS_MODIFIED: u32 = 1;
 
 // Options for zx_pager_query_vmo_stats().
 pub const ZX_PAGER_RESET_VMO_STATS: u32 = 1;
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_pager_vmo_stats_t {
+    pub modified: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_vmo_dirty_range_t {
+    pub offset: u64,
+    pub length: u64,
+    pub options: u64,
+}
 
 pub type zx_excp_type_t = u32;
 

@@ -27,6 +27,16 @@ pub fn socket_to_async(s: Socket) -> AsyncSocket {
     AsyncSocket::from_socket(s)
 }
 
+#[cfg(feature = "fdomain")]
+pub fn channel_to_async(s: AsyncChannel) -> AsyncChannel {
+    s
+}
+
+#[cfg(not(feature = "fdomain"))]
+pub fn channel_to_async(s: Channel) -> AsyncChannel {
+    AsyncChannel::from_channel(s)
+}
+
 #[cfg(not(feature = "fdomain"))]
 pub use ::fidl::endpoints::ProxyHasDomain;
 
@@ -37,12 +47,7 @@ pub use fdomain_client::fidl::Proxy as ProxyHasDomain;
 pub use ::fidl::*;
 
 #[cfg(not(feature = "fdomain"))]
-#[cfg(target_os = "fuchsia")]
 pub use zx::MessageBuf;
-
-#[cfg(not(feature = "fdomain"))]
-#[cfg(not(target_os = "fuchsia"))]
-pub use fuchsia_emulated_handle::MessageBuf;
 
 #[cfg(feature = "fdomain")]
 pub type NullableHandle = fdomain_client::Handle;

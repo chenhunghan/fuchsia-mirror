@@ -123,7 +123,7 @@ impl<T: RegisterStorage> ThreadState<T> {
     pub fn replace_registers<O: RegisterStorage>(&mut self, other: &ThreadState<O>) {
         let self_arch = self.arch_width();
         let other_arch = other.arch_width();
-        self.registers.load(*other.registers);
+        self.registers.copy_from(&other.registers);
         // If we're switching between 32 and 64 bit mode, re-initialize the extended processor state.
         self.extended_pstate = if self_arch == other_arch {
             other.extended_pstate.clone()

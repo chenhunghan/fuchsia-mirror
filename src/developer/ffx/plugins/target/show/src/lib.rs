@@ -29,22 +29,22 @@ pub struct ShowTool {
     cmd: args::TargetShow,
     fho_env: FhoEnvironment,
     rcs_proxy: RemoteControlProxyHolder,
-    #[with(moniker("/core/system-update"))]
-    channel_provider_proxy: fupdate_channel::ProviderProxy,
-    #[with(moniker("/core/system-update"))]
-    channel_control_proxy: ChannelControlProxy,
-    #[with(moniker("/core/hwinfo"))]
-    board_proxy: BoardProxy,
-    #[with(moniker("/core/hwinfo"))]
-    device_proxy: DeviceProxy,
-    #[with(moniker("/core/hwinfo"))]
-    product_proxy: ProductProxy,
-    #[with(moniker("/core/build-info"))]
-    build_info_proxy: ProviderProxy,
+    #[with(deferred(moniker("/core/system-update")))]
+    channel_provider_proxy: Deferred<fupdate_channel::ProviderProxy>,
+    #[with(deferred(moniker("/core/system-update")))]
+    channel_control_proxy: Deferred<ChannelControlProxy>,
+    #[with(deferred(moniker("/core/hwinfo")))]
+    board_proxy: Deferred<BoardProxy>,
+    #[with(deferred(moniker("/core/hwinfo")))]
+    device_proxy: Deferred<DeviceProxy>,
+    #[with(deferred(moniker("/core/hwinfo")))]
+    product_proxy: Deferred<ProductProxy>,
+    #[with(deferred(moniker("/core/build-info")))]
+    build_info_proxy: Deferred<ProviderProxy>,
     #[with(deferred(moniker("/core/feedback_id")))]
     device_id_proxy: Deferred<DeviceIdProviderProxy>,
-    #[with(moniker("/core/feedback"))]
-    last_reboot_info_proxy: LastRebootInfoProviderProxy,
+    #[with(deferred(moniker("/core/feedback")))]
+    last_reboot_info_proxy: Deferred<LastRebootInfoProviderProxy>,
 }
 
 use fho::FfxError;
@@ -154,12 +154,11 @@ async fn gather_target_info_direct(
     Ok(ad)
 }
 
-/// Determine target information.
 async fn gather_target_show(
     rcs_proxy: RemoteControlProxyHolder,
     fho_env: &FhoEnvironment,
     connector: DirectConnector,
-    last_reboot_info_proxy: LastRebootInfoProviderProxy,
+    last_reboot_info_proxy: Deferred<LastRebootInfoProviderProxy>,
 ) -> Result<TargetData, ShowError> {
     let host = rcs_proxy.identify_host().await?.map_err(ShowError::RcsHostIdentification)?;
     let name = host.nodename;
@@ -174,7 +173,16 @@ async fn gather_target_show(
     )
     .await?;
 
-    let info = last_reboot_info_proxy.get().await?;
+    let info = match last_reboot_info_proxy.await {
+        Ok(proxy) => proxy.get().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get last reboot info: {e}");
+            Default::default()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to last reboot info service: {e}");
+            Default::default()
+        }
+    };
 
     Ok(TargetData {
         name: name.unwrap_or_else(|| "".into()),
@@ -185,9 +193,17 @@ async fn gather_target_show(
     })
 }
 
-/// Determine the build info for the target.
-async fn gather_build_info_show(build: ProviderProxy) -> Result<BuildData, ShowError> {
-    let info = build.get_build_info().await?;
+async fn gather_build_info_show(build: Deferred<ProviderProxy>) -> Result<BuildData, ShowError> {
+    let info = match build.await {
+        Ok(proxy) => proxy.get_build_info().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get build info: {e}");
+            Default::default()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to build info service: {e}");
+            Default::default()
+        }
+    };
 
     Ok(BuildData {
         version: info.version,
@@ -205,9 +221,17 @@ fn arch_to_string(arch: Option<Architecture>) -> Option<String> {
     }
 }
 
-/// Determine the device info for the device.
-async fn gather_board_show(board: BoardProxy) -> Result<BoardData, ShowError> {
-    let info = board.get_info().await?;
+async fn gather_board_show(board: Deferred<BoardProxy>) -> Result<BoardData, ShowError> {
+    let info = match board.await {
+        Ok(proxy) => proxy.get_info().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get board info: {e}");
+            Default::default()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to board service: {e}");
+            Default::default()
+        }
+    };
     Ok(BoardData {
         name: info.name,
         revision: info.revision,
@@ -215,12 +239,20 @@ async fn gather_board_show(board: BoardProxy) -> Result<BoardData, ShowError> {
     })
 }
 
-/// Determine the device info for the device.
 async fn gather_device_show(
-    device: DeviceProxy,
+    device: Deferred<DeviceProxy>,
     device_id_proxy: Deferred<DeviceIdProviderProxy>,
 ) -> Result<DeviceData, ShowError> {
-    let info = device.get_info().await?;
+    let info = match device.await {
+        Ok(proxy) => proxy.get_info().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get device info: {e}");
+            Default::default()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to device service: {e}");
+            Default::default()
+        }
+    };
     let mut device = DeviceData {
         serial_number: info.serial_number,
         retail_sku: info.retail_sku,
@@ -229,7 +261,10 @@ async fn gather_device_show(
     };
     match device_id_proxy.await {
         Ok(device_id) => {
-            let id_info = device_id.get_id().await?;
+            let id_info = device_id.get_id().await.unwrap_or_else(|e| {
+                log::warn!("Failed to get device id info: {e}");
+                "".to_string()
+            });
             device.device_id = Some(id_info)
         }
         Err(e) => {
@@ -240,9 +275,17 @@ async fn gather_device_show(
     Ok(device)
 }
 
-/// Determine the product info for the device.
-async fn gather_product_show(product: ProductProxy) -> Result<ProductData, ShowError> {
-    let info = product.get_info().await?;
+async fn gather_product_show(product: Deferred<ProductProxy>) -> Result<ProductData, ShowError> {
+    let info = match product.await {
+        Ok(proxy) => proxy.get_info().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get product info: {e}");
+            Default::default()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to product service: {e}");
+            Default::default()
+        }
+    };
 
     Ok(ProductData {
         audio_amplifier: info.audio_amplifier,
@@ -267,20 +310,32 @@ async fn gather_product_show(product: ProductProxy) -> Result<ProductData, ShowE
     })
 }
 
-/// Determine the update show of the device, including update channels.
 async fn gather_update_show(
-    channel_provider: fupdate_channel::ProviderProxy,
-    channel_control: ChannelControlProxy,
+    channel_provider: Deferred<fupdate_channel::ProviderProxy>,
+    channel_control: Deferred<ChannelControlProxy>,
 ) -> Result<UpdateData, ShowError> {
-    let current_channel = channel_provider.get_current().await?;
-    let next_channel = match channel_control.get_target().await {
-        Ok(channel) => Some(channel),
-        Err(fidl::Error::ClientChannelClosed { epitaph, .. })
-            if epitaph == zx_status::Status::NOT_FOUND =>
-        {
+    let current_channel = match channel_provider.await {
+        Ok(proxy) => proxy.get_current().await.unwrap_or_else(|e| {
+            log::warn!("Failed to get current channel: {e}");
+            String::new()
+        }),
+        Err(e) => {
+            log::warn!("Failed to connect to channel provider service: {e}");
+            String::new()
+        }
+    };
+    let next_channel = match channel_control.await {
+        Ok(proxy) => match proxy.get_target().await {
+            Ok(channel) => Some(channel),
+            Err(e) => {
+                log::warn!("Failed to get next channel: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("Failed to connect to channel control service: {e}");
             None
         }
-        Err(e) => Err(e)?,
     };
 
     Ok(UpdateData { current_channel, next_channel })
@@ -421,16 +476,26 @@ mod tests {
                 testing_lib::FakeRcsConfig::default(),
             )
             .into(),
-            channel_provider_proxy: setup_fake_channel_provider_server(Arc::clone(&client)),
-            channel_control_proxy: setup_fake_channel_control_server(Arc::clone(&client)),
-            board_proxy: setup_fake_board_server(Arc::clone(&client)),
-            device_proxy: setup_fake_device_server(Arc::clone(&client)),
-            product_proxy: setup_fake_product_server(Arc::clone(&client)),
-            build_info_proxy: setup_fake_build_info_server(Arc::clone(&client)),
+            channel_provider_proxy: Deferred::from_output(Ok(setup_fake_channel_provider_server(
+                Arc::clone(&client),
+            ))),
+            channel_control_proxy: Deferred::from_output(Ok(setup_fake_channel_control_server(
+                Arc::clone(&client),
+            ))),
+            board_proxy: Deferred::from_output(Ok(setup_fake_board_server(Arc::clone(&client)))),
+            device_proxy: Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client)))),
+            product_proxy: Deferred::from_output(Ok(setup_fake_product_server(Arc::clone(
+                &client,
+            )))),
+            build_info_proxy: Deferred::from_output(Ok(setup_fake_build_info_server(Arc::clone(
+                &client,
+            )))),
             device_id_proxy: Deferred::from_output(Ok(setup_fake_device_id_server(Arc::clone(
                 &client,
             )))),
-            last_reboot_info_proxy: setup_fake_last_reboot_info_server(Arc::clone(&client)),
+            last_reboot_info_proxy: Deferred::from_output(Ok(setup_fake_last_reboot_info_server(
+                Arc::clone(&client),
+            ))),
         };
         tool.main(output).await.expect("show tool main");
         // Convert to a readable string instead of using a byte string and comparing that. Unless
@@ -455,7 +520,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_gather_board_show() {
         let client = fdomain_local::local_client_empty();
-        let test_proxy = setup_fake_board_server(client);
+        let test_proxy = Deferred::from_output(Ok(setup_fake_board_server(client)));
         let result = gather_board_show(test_proxy).await.expect("gather board show");
         assert_eq!(result.name, Some("fake_name".to_string()));
         assert_eq!(result.revision, Some("fake_revision".to_string()));
@@ -479,7 +544,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_gather_device_show() {
         let client = fdomain_local::local_client_empty();
-        let test_proxy = setup_fake_device_server(Arc::clone(&client));
+        let test_proxy = Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client))));
         let device_id_proxy = Deferred::from_output(Ok(setup_fake_device_id_server(client)));
         let result =
             gather_device_show(test_proxy, device_id_proxy).await.expect("gather device show");
@@ -522,7 +587,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_gather_product_show() {
         let client = fdomain_local::local_client_empty();
-        let test_proxy = setup_fake_product_server(client);
+        let test_proxy = Deferred::from_output(Ok(setup_fake_product_server(client)));
         let result = gather_product_show(test_proxy).await.expect("gather product show");
         assert_eq!(result.audio_amplifier, Some("fake_audio_amplifier".to_string()));
         assert_eq!(result.build_date, Some("fake_build_date".to_string()));
@@ -555,8 +620,9 @@ mod tests {
     #[fuchsia::test]
     async fn test_gather_update_show() {
         let client = fdomain_local::local_client_empty();
-        let provider_proxy = setup_fake_channel_provider_server(client.clone());
-        let control_proxy = setup_fake_channel_control_server(client);
+        let provider_proxy =
+            Deferred::from_output(Ok(setup_fake_channel_provider_server(client.clone())));
+        let control_proxy = Deferred::from_output(Ok(setup_fake_channel_control_server(client)));
         let result =
             gather_update_show(provider_proxy, control_proxy).await.expect("gather update show");
         assert_eq!(result.current_channel, "fake_channel".to_string());
@@ -589,16 +655,26 @@ mod tests {
                 testing_lib::FakeRcsConfig::default(),
             )
             .into(),
-            channel_provider_proxy: setup_fake_channel_provider_server(Arc::clone(&client)),
-            channel_control_proxy: setup_fake_channel_control_server(Arc::clone(&client)),
-            board_proxy: setup_fake_board_server(Arc::clone(&client)),
-            device_proxy: setup_fake_device_server(Arc::clone(&client)),
-            product_proxy: setup_fake_product_server(Arc::clone(&client)),
-            build_info_proxy: setup_fake_build_info_server(Arc::clone(&client)),
+            channel_provider_proxy: Deferred::from_output(Ok(setup_fake_channel_provider_server(
+                Arc::clone(&client),
+            ))),
+            channel_control_proxy: Deferred::from_output(Ok(setup_fake_channel_control_server(
+                Arc::clone(&client),
+            ))),
+            board_proxy: Deferred::from_output(Ok(setup_fake_board_server(Arc::clone(&client)))),
+            device_proxy: Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client)))),
+            product_proxy: Deferred::from_output(Ok(setup_fake_product_server(Arc::clone(
+                &client,
+            )))),
+            build_info_proxy: Deferred::from_output(Ok(setup_fake_build_info_server(Arc::clone(
+                &client,
+            )))),
             device_id_proxy: Deferred::from_output(Ok(setup_fake_device_id_server(Arc::clone(
                 &client,
             )))),
-            last_reboot_info_proxy: setup_fake_last_reboot_info_server(Arc::clone(&client)),
+            last_reboot_info_proxy: Deferred::from_output(Ok(setup_fake_last_reboot_info_server(
+                Arc::clone(&client),
+            ))),
         };
         tool.show_cmd(&mut output).await.expect("main");
         let (stdout, _stderr) = buffers.into_strings();
@@ -630,16 +706,26 @@ mod tests {
                 testing_lib::FakeRcsConfig::default(),
             )
             .into(),
-            channel_provider_proxy: setup_fake_channel_provider_server(Arc::clone(&client)),
-            channel_control_proxy: setup_fake_channel_control_server(Arc::clone(&client)),
-            board_proxy: setup_fake_board_server(Arc::clone(&client)),
-            device_proxy: setup_fake_device_server(Arc::clone(&client)),
-            product_proxy: setup_fake_product_server(Arc::clone(&client)),
-            build_info_proxy: setup_fake_build_info_server(Arc::clone(&client)),
+            channel_provider_proxy: Deferred::from_output(Ok(setup_fake_channel_provider_server(
+                Arc::clone(&client),
+            ))),
+            channel_control_proxy: Deferred::from_output(Ok(setup_fake_channel_control_server(
+                Arc::clone(&client),
+            ))),
+            board_proxy: Deferred::from_output(Ok(setup_fake_board_server(Arc::clone(&client)))),
+            device_proxy: Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client)))),
+            product_proxy: Deferred::from_output(Ok(setup_fake_product_server(Arc::clone(
+                &client,
+            )))),
+            build_info_proxy: Deferred::from_output(Ok(setup_fake_build_info_server(Arc::clone(
+                &client,
+            )))),
             device_id_proxy: Deferred::from_output(Ok(setup_fake_device_id_server(Arc::clone(
                 &client,
             )))),
-            last_reboot_info_proxy: setup_fake_last_reboot_info_server(Arc::clone(&client)),
+            last_reboot_info_proxy: Deferred::from_output(Ok(setup_fake_last_reboot_info_server(
+                Arc::clone(&client),
+            ))),
         };
         tool.main(output).await.expect("show tool main");
         // Convert to a readable string instead of using a byte string and comparing that. Unless
@@ -691,16 +777,26 @@ mod tests {
             cmd: args::TargetShow { ..Default::default() },
             fho_env,
             rcs_proxy,
-            channel_provider_proxy: setup_fake_channel_provider_server(Arc::clone(&client)),
-            channel_control_proxy: setup_fake_channel_control_server(Arc::clone(&client)),
-            board_proxy: setup_fake_board_server(Arc::clone(&client)),
-            device_proxy: setup_fake_device_server(Arc::clone(&client)),
-            product_proxy: setup_fake_product_server(Arc::clone(&client)),
-            build_info_proxy: setup_fake_build_info_server(Arc::clone(&client)),
+            channel_provider_proxy: Deferred::from_output(Ok(setup_fake_channel_provider_server(
+                Arc::clone(&client),
+            ))),
+            channel_control_proxy: Deferred::from_output(Ok(setup_fake_channel_control_server(
+                Arc::clone(&client),
+            ))),
+            board_proxy: Deferred::from_output(Ok(setup_fake_board_server(Arc::clone(&client)))),
+            device_proxy: Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client)))),
+            product_proxy: Deferred::from_output(Ok(setup_fake_product_server(Arc::clone(
+                &client,
+            )))),
+            build_info_proxy: Deferred::from_output(Ok(setup_fake_build_info_server(Arc::clone(
+                &client,
+            )))),
             device_id_proxy: Deferred::from_output(Ok(setup_fake_device_id_server(Arc::clone(
                 &client,
             )))),
-            last_reboot_info_proxy: setup_fake_last_reboot_info_server(Arc::clone(&client)),
+            last_reboot_info_proxy: Deferred::from_output(Ok(setup_fake_last_reboot_info_server(
+                Arc::clone(&client),
+            ))),
         };
         let res = tool.main(output).await;
         assert!(res.is_err());
@@ -710,5 +806,81 @@ mod tests {
                 fdomain_fuchsia_developer_remotecontrol::IdentifyHostError::ListInterfacesFailed
             )
         ));
+    }
+
+    #[fuchsia::test]
+    async fn test_show_cmd_impl_fidl_error() {
+        let client = fdomain_local::local_client_empty();
+        let buffers = TestBuffers::default();
+        let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
+        let fho_env = FhoEnvironment::default();
+        let target_env = target_behavior::target_interface(&fho_env);
+        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+            target_behavior::setup_fake_resolution(None).await,
+        ));
+        let tool = ShowTool {
+            cmd: args::TargetShow::default(),
+            fho_env,
+            rcs_proxy: testing_lib::setup_fake_rcs(
+                client.clone(),
+                testing_lib::FakeRcsConfig::default(),
+            )
+            .into(),
+            channel_provider_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            channel_control_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |req| {
+                if let ChannelControlRequest::GetTarget { .. } = req {
+                } else {
+                    panic!()
+                }
+            }))),
+            board_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            device_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            product_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            build_info_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            device_id_proxy: Deferred::from_output(Ok(fake_proxy(client.clone(), |_| {}))),
+            last_reboot_info_proxy: Deferred::from_output(Ok(fake_proxy(client, |_| {}))),
+        };
+        tool.main(output).await.expect("show tool main");
+        assert!(buffers.into_strings().0.contains("Target:"));
+    }
+
+    fn failing_proxy<T: 'static>() -> Deferred<T> {
+        Deferred::from_output(Err(fho::Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Not Found",
+        ))))
+    }
+
+    #[fuchsia::test]
+    async fn test_show_cmd_impl_missing_services() {
+        let client = fdomain_local::local_client_empty();
+        let buffers = TestBuffers::default();
+        let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
+        let fho_env = FhoEnvironment::default();
+        let target_env = target_behavior::target_interface(&fho_env);
+        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+            target_behavior::setup_fake_resolution(None).await,
+        ));
+        let tool = ShowTool {
+            cmd: args::TargetShow::default(),
+            fho_env,
+            rcs_proxy: testing_lib::setup_fake_rcs(
+                client.clone(),
+                testing_lib::FakeRcsConfig::default(),
+            )
+            .into(),
+            channel_provider_proxy: failing_proxy(),
+            channel_control_proxy: failing_proxy(),
+            board_proxy: failing_proxy(),
+            device_proxy: failing_proxy(),
+            product_proxy: failing_proxy(),
+            build_info_proxy: failing_proxy(),
+            device_id_proxy: failing_proxy(),
+            last_reboot_info_proxy: failing_proxy(),
+        };
+        tool.main(output).await.expect("show tool main");
+        let (stdout, _stderr) = buffers.into_strings();
+        assert!(stdout.contains("Target:"));
+        assert!(stdout.contains("Name: \u{1b}[38;5;2m\"fake_fuchsia_device\"\u{1b}[m"));
     }
 }

@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, HandleValue, IoBufferDispatcher, IoBufferSharedRegionDispatcher, ProcessDispatcher,
+    HandleValue, IoBufferDispatcher, IoBufferSharedRegionDispatcher, ProcessDispatcher,
 };
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
@@ -70,7 +70,13 @@ pub fn sys_iob_allocate_id(
         return Err(Status::INVALID_ARGS);
     }
 
-    let iob = Dispatcher::get_with_rights::<IoBufferDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let iob = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<IoBufferDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
     let allocated_id = iob.allocate_id(region_index, blob, blob_size)?;
     id.write(allocated_id)?;
     Ok(())
@@ -92,7 +98,13 @@ pub fn sys_iob_writev(
         return Err(Status::INVALID_ARGS);
     }
 
-    let iob = Dispatcher::get_with_rights::<IoBufferDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let iob = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<IoBufferDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
     iob.write(region_index, vector, vector_count)?;
     Ok(())
 }

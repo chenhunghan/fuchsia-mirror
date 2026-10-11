@@ -298,13 +298,15 @@ static ZirconBootResult LoadAbr(ZirconBootOps* ops, uint32_t boot_flags, void** 
   do {
     // If we're doing a slotted boot, find the next slot to attempt.
     if (slot != NULL) {
+      AbrSlotIndex peek_slot = kAbrSlotIndexR;
       if (ops->firmware_can_boot_kernel_slot) {
         // Make sure the firmware can boot the slot we're going to try. We have
         // use AbrPeekSlot() here because we don't want to modify any data (e.g.
         // boot attempt counters) since we might have to reboot first to get
         // into the matching firmware slot.
-        *slot =
+        peek_slot =
             boot_flags & kZirconBootFlagsForceRecovery ? kAbrSlotIndexR : AbrPeekBootSlot(&abr_ops);
+        *slot = peek_slot;
         bool supported = false;
         if (!ZIRCON_BOOT_OPS_CALL(ops, firmware_can_boot_kernel_slot, *slot, &supported)) {
           zircon_boot_dlog("Fail to check slot supported\n");
@@ -327,6 +329,15 @@ static ZirconBootResult LoadAbr(ZirconBootOps* ops, uint32_t boot_flags, void** 
         // This is the one place we call AbrGetBootSlot() which may modify the
         // data to update retry counts, mark failed, etc.
         *slot = AbrGetBootSlot(&abr_ops, true, NULL);
+      }
+
+      if (ops->firmware_can_boot_kernel_slot && *slot != peek_slot) {
+        zircon_boot_dlog(
+            "Target kernel slot changed between peek (%s) and get (%s). Rebooting...\n",
+            AbrGetSlotSuffix(peek_slot), AbrGetSlotSuffix(*slot));
+        ZIRCON_BOOT_OPS_CALL(ops, reboot, boot_flags & kZirconBootFlagsForceRecovery);
+        zircon_boot_dlog("Should not reach here. Reboot handoff failed\n");
+        return kBootResultRebootReturn;
       }
     }
 

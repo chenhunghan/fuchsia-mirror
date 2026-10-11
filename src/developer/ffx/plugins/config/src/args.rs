@@ -32,7 +32,7 @@ pub enum SubCommand {
     Analytics(AnalyticsCommand),
 }
 
-#[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
+#[derive(ArgsInfo, Debug, PartialEq)]
 #[argh(subcommand, name = "set", description = "set config settings")]
 pub struct SetCommand {
     #[argh(positional)]
@@ -42,6 +42,46 @@ pub struct SetCommand {
     #[argh(positional, from_str_fn(parse_set_value))]
     /// value to associate with name
     pub value: serde_json::Value,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set", description = "set config settings")]
+struct RawSetCommand {
+    #[argh(positional)]
+    /// name of the property to set
+    name: String,
+
+    #[argh(positional, from_str_fn(parse_set_value))]
+    /// value to associate with name
+    value: serde_json::Value,
+}
+
+impl FromArgs for SetCommand {
+    fn from_args(command_name: &[&str], args: &[&str]) -> Result<Self, argh::EarlyExit> {
+        let raw = match args {
+            &[name, value] if name != "help" && value.starts_with('-') && value != "--help" => {
+                RawSetCommand::from_args(command_name, &[name, "--", value])?
+            }
+            _ => RawSetCommand::from_args(command_name, args)?,
+        };
+        Ok(Self { name: raw.name, value: raw.value })
+    }
+
+    fn redact_arg_values(
+        command_name: &[&str],
+        args: &[&str],
+    ) -> Result<Vec<String>, argh::EarlyExit> {
+        match args {
+            &[name, value] if name != "help" && value.starts_with('-') && value != "--help" => {
+                RawSetCommand::redact_arg_values(command_name, &[name, "--", value])
+            }
+            _ => RawSetCommand::redact_arg_values(command_name, args),
+        }
+    }
+}
+
+impl argh::SubCommand for SetCommand {
+    const COMMAND: &'static argh::CommandInfo = <RawSetCommand as argh::SubCommand>::COMMAND;
 }
 
 impl SetCommand {
@@ -377,6 +417,55 @@ mod tests {
         let value_json = serde_json::json!({"test": "test-value"});
 
         check(&["set", key, value], key, &value_json);
+    }
+
+    #[test]
+    fn test_set_with_dash() {
+        fn check(args: &[&str], expected_key: &str, expected_value: &serde_json::Value) {
+            assert_eq!(
+                ConfigCommand::from_args(CMD_NAME, args),
+                Ok(ConfigCommand {
+                    sub: SubCommand::Set(SetCommand {
+                        name: expected_key.to_string(),
+                        value: expected_value.clone(),
+                    })
+                })
+            )
+        }
+
+        let key = "test-key";
+        for (raw, expected) in [
+            ("-s foo", serde_json::Value::String("-s foo".to_string())),
+            ("--flag=val", serde_json::Value::String("--flag=val".to_string())),
+            ("-", serde_json::Value::String("-".to_string())),
+            ("-42", serde_json::json!(-42)),
+        ] {
+            check(&["set", key, raw], key, &expected);
+        }
+
+        // First positional argument starting with `-` is still rejected as an unrecognized flag.
+        assert!(ConfigCommand::from_args(CMD_NAME, &["set", "-s", "foo"]).is_err());
+
+        // Extra trailing arguments after value are still rejected.
+        assert!(ConfigCommand::from_args(CMD_NAME, &["set", key, "-s foo", "-extra"]).is_err());
+
+        // `--help` and `help` are still recognized as help requests rather than values.
+        for help_args in [&["set", key, "--help"][..], &["set", "--help"][..], &["set", "help"][..]]
+        {
+            let help_res = ConfigCommand::from_args(CMD_NAME, help_args);
+            assert!(matches!(help_res, Err(argh::EarlyExit { status: Ok(()), .. })));
+        }
+
+        // Analytics argument redaction also works with leading `-` values.
+        assert_eq!(
+            ConfigCommand::redact_arg_values(CMD_NAME, &["set", key, "-s foo"]),
+            Ok(vec![
+                "config".to_string(),
+                "set".to_string(),
+                "name".to_string(),
+                "value".to_string()
+            ])
+        );
     }
 
     #[test]

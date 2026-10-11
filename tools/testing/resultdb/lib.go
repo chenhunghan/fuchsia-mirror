@@ -82,33 +82,88 @@ func SummaryToResultSink(s *runtests.TestSummary, tags []*resultpb.StringPair, o
 	var exonerations []*sinkpb.TestExoneration
 	var ts []string
 	for _, test := range s.Tests {
-		if len(test.Cases) > 0 {
-			testCases, testExonerations, testsSkipped := testCaseToResultSink(test.Cases, tags, &test, rootPath)
-			r = append(r, testCases...)
-			exonerations = append(exonerations, testExonerations...)
-			ts = append(ts, testsSkipped...)
+		testResults, testExonerations, testsSkipped := testToResultSink(&test, tags, rootPath)
+		r = append(r, testResults...)
+		exonerations = append(exonerations, testExonerations...)
+		ts = append(ts, testsSkipped...)
+	}
+	return r, exonerations, ts
+}
+
+// testToResultSink converts a single runtests.TestDetails and its test cases into an array of
+// result_sink TestResult and TestExoneration.
+func testToResultSink(test *runtests.TestDetails, tags []*resultpb.StringPair, rootPath string) ([]*sinkpb.TestResult, []*sinkpb.TestExoneration, []string) {
+	var r []*sinkpb.TestResult
+	var exonerations []*sinkpb.TestExoneration
+	var ts []string
+
+	if len(test.Cases) > 0 {
+		r, exonerations, ts = testCaseToResultSink(test.Cases, tags, test, rootPath)
+	}
+	// TODO(b/502613208): If a top-level test passes but has a nested test case that
+	// is exonerated, it currently reports both a "PASS" status and an exoneration.
+	// This is redundant since ResultDB generally ignores exonerations for passing tests.
+	if testResult, testExoneration, testSkipped, err := testDetailsToResultSink(tags, test, rootPath); err == nil {
+		if testResult == nil {
+			panic("testResult shouldn't be nil when err is nil")
 		}
-		// TODO(b/502613208): If a top-level test passes but has a nested test case that
-		// is exonerated, it currently reports both a "PASS" status and an exoneration.
-		// This is redundant since ResultDB generally ignores exonerations for passing tests.
-		if testResult, testExoneration, testSkipped, err := testDetailsToResultSink(tags, &test, rootPath); err == nil {
-			if testResult == nil {
-				panic("testResult shouldn't be nil when err is nil")
-			}
-			r = append(r, testResult)
-			if testExoneration != nil {
-				exonerations = append(exonerations, testExoneration)
-			}
-			if testSkipped != "" {
-				panic(fmt.Sprintf("testSkipped should be empty when err is nil, got: %q", testSkipped))
-			}
-		} else {
-			if testSkipped != "" {
-				ts = append(ts, testSkipped)
-			}
+		r = append(r, testResult)
+		if testExoneration != nil {
+			exonerations = append(exonerations, testExoneration)
+		}
+		if testSkipped != "" {
+			panic(fmt.Sprintf("testSkipped should be empty when err is nil, got: %q", testSkipped))
+		}
+	} else {
+		if testSkipped != "" {
+			ts = append(ts, testSkipped)
 		}
 	}
 	return r, exonerations, ts
+}
+
+// determineScheme inspects a test's test cases to determine the appropriate
+// ResultDB module scheme (e.g. "rust", "go", "mobly", "gtest", "flat", or "single").
+// Returns "single" if the test has no cases (indicating a standalone script/binary test).
+// If a test has cases with conflicting formats, it logs a warning and falls back to "flat".
+func determineScheme(test *runtests.TestDetails) string {
+	if len(test.Cases) == 0 {
+		return "single"
+	}
+
+	var format string
+	for _, tc := range test.Cases {
+		if tc.Format == "" {
+			continue
+		}
+		if format == "" {
+			format = tc.Format
+		} else if !strings.EqualFold(tc.Format, format) {
+			log.Printf("[Warn] Test %q has cases with conflicting formats (%q vs %q); falling back to default 'flat' scheme", test.Name, format, tc.Format)
+			return "flat"
+		}
+	}
+
+	switch strings.ToLower(format) {
+	case "ftf", "flat", "shac":
+		return "flat"
+	case "googletest", "gtest":
+		return "gtest"
+	case "rust":
+		return "rust"
+	case "go":
+		return "go"
+	case "mobly":
+		return "mobly"
+	case "junit":
+		return "junit"
+	case "":
+		log.Printf("[Info] Falling back to default 'flat' scheme for test %q with %d cases", test.Name, len(test.Cases))
+		return "flat"
+	default:
+		log.Printf("[Info] Unknown format %q for test %q, falling back to 'flat' scheme", format, test.Name)
+		return "flat"
+	}
 }
 
 // InvocationLevelArtifacts creates resultdb artifacts for invocation-level files to be sent to ResultDB.
@@ -327,6 +382,44 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 	// to see if it passed, which would mean that a failed result for a test case is
 	// expected and thus should be reported as a passed result.
 	testStatus, _, _ := resultDBStatus(testDetail.Status)
+	scheme := determineScheme(testDetail)
+
+	// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
+	// '!', '"', '#', etc.) as leading characters for fine_name and case_name
+	// components, rejecting them with 400 Bad Request. Wrapping any component
+	// starting with a reserved character in brackets preserves the original name
+	// verbatim while satisfying ResultDB constraints.
+	sanitizeIdentifier := func(s string) string {
+		if len(s) > 0 && s[0] <= ',' {
+			return fmt.Sprintf("[%s]", s)
+		}
+		return s
+	}
+
+	testIdentifier := testIdentifierFromCase
+	switch scheme {
+	case "flat":
+		testIdentifier = testIdentifierFromFlat
+	case "go":
+		label := testDetail.SourceLabel
+		if label == "" {
+			label = testDetail.GNLabel
+		}
+		if idx := strings.Index(label, "("); idx != -1 {
+			label = label[:idx]
+		}
+		label = strings.TrimLeft(label, "@/")
+		dir, _, _ := strings.Cut(label, ":")
+		goPkg := testDetail.Name
+		if dir != "" && dir != "." {
+			goPkg = dir
+		}
+		testIdentifier = func(testCase *runtests.TestCaseResult) (string, string) {
+			return testIdentifierFromGo(testCase, goPkg)
+		}
+	case "rust":
+		testIdentifier = testIdentifierFromRust
+	}
 
 	for _, testCase := range testCases {
 		testID := fmt.Sprintf("%s/%s:%s", testDetail.Name, testCase.SuiteName, testCase.CaseName)
@@ -337,7 +430,11 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 		}
 
 		properties, testCaseTags := testCaseProperties(testCase, testDetail, tags)
-		testIDStructured := testIdentifierFromCase(&testCase)
+		fineName, caseName := testIdentifier(&testCase)
+		testIDStructured := &sinkpb.TestIdentifier{
+			FineName:           sanitizeIdentifier(fineName),
+			CaseNameComponents: []string{sanitizeIdentifier(caseName)},
+		}
 		r := sinkpb.TestResult{
 			TestId:           testID,
 			TestIdStructured: testIDStructured,
@@ -387,22 +484,42 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 	return testResults, testExonerations, testsSkipped
 }
 
-// testIdentifierFromCase constructs a sinkpb.TestIdentifier for an individual test case.
-func testIdentifierFromCase(testCase *runtests.TestCaseResult) *sinkpb.TestIdentifier {
-	caseName := testCase.CaseName
-	// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
-	// '!', '"', '#', etc.) as leading characters for case names and rejects
-	// results starting with them. Wrap any case name starting with a reserved
-	// character in brackets to preserve the original name while satisfying
-	// ResultDB constraints.
-	if len(caseName) > 0 && caseName[0] <= ',' {
-		caseName = fmt.Sprintf("[%s]", caseName)
+// testIdentifierFromGo returns the fineName and caseName for Go tests.
+// In Go, ResultDB scheme "go" requires fine_name to be the Go package name.
+// Go tests are package-level functions with optional dynamic subtest arguments,
+// not a static directory hierarchy. Using DisplayName (e.g. "TestParent/subtest"
+// or "TestFoo") as a single opaque case component avoids artificial splitting on "/",
+// preserving subtest paths, regexes, and URLs verbatim.
+func testIdentifierFromGo(testCase *runtests.TestCaseResult, goPkg string) (string, string) {
+	caseName := testCase.DisplayName
+	if caseName == "" {
+		caseName = testCase.CaseName
 	}
+	return goPkg, caseName
+}
 
-	return &sinkpb.TestIdentifier{
-		FineName:           testCase.SuiteName,
-		CaseNameComponents: []string{caseName},
+// testIdentifierFromRust returns the fineName and caseName for Rust tests.
+// In Rust, test functions defined at the crate root outside of a submodule have an empty
+// SuiteName. ResultDB scheme "rust" requires a fine_name (Rust Module).
+// Use "crate", the official Rust keyword for the crate root module.
+func testIdentifierFromRust(testCase *runtests.TestCaseResult) (string, string) {
+	fineName := testCase.SuiteName
+	if fineName == "" {
+		fineName = "crate"
 	}
+	return fineName, testCase.CaseName
+}
+
+// testIdentifierFromCase returns the fineName and caseName using the default mapping.
+func testIdentifierFromCase(testCase *runtests.TestCaseResult) (string, string) {
+	return testCase.SuiteName, testCase.CaseName
+}
+
+// testIdentifierFromFlat returns the fineName and caseName for tests under the "flat" scheme.
+// In ResultDB, scheme "flat" defines only the test case level; coarse_name and
+// fine_name must be empty.
+func testIdentifierFromFlat(testCase *runtests.TestCaseResult) (string, string) {
+	return "", testCase.CaseName
 }
 
 // testDetailsToResultSink converts TestDetail defined in /tools/testing/runtests/runtests.go
@@ -417,13 +534,21 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 	properties, testTags := testDetailProperties(testDetail, tags)
 	var testIDStructured *sinkpb.TestIdentifier
 	if len(testDetail.Cases) == 0 {
-		// If a test has no individual test cases, the top-level test itself is the
-		// test case. Populate FineName and CaseNameComponents with default values
-		// so that ResultSink validation succeeds. When test cases exist,
-		// test_id_structured is reported only on those cases and left nil here.
-		testIDStructured = &sinkpb.TestIdentifier{
-			FineName:           "test",
-			CaseNameComponents: []string{"case"},
+		scheme := determineScheme(testDetail)
+		switch scheme {
+		case "single":
+			testIDStructured = &sinkpb.TestIdentifier{
+				CaseNameComponents: []string{"*fixture"},
+			}
+		case "flat":
+			testIDStructured = &sinkpb.TestIdentifier{
+				CaseNameComponents: []string{"case"},
+			}
+		default:
+			testIDStructured = &sinkpb.TestIdentifier{
+				FineName:           "test",
+				CaseNameComponents: []string{"case"},
+			}
 		}
 	}
 	r := sinkpb.TestResult{

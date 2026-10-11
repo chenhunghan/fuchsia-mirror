@@ -136,12 +136,14 @@ void Sdhci::EnableInterrupts() {
       .FromValue(0)
       .EnableErrorInterrupts()
       .EnableNormalInterrupts()
+      .set_cqhci_interrupt(supports_inline_crypto_ ? 1 : 0)
       .set_card_interrupt(interrupt_cb_.is_valid() ? 1 : 0)
       .WriteTo(&*regs_mmio_buffer_);
   InterruptStatusEnable::Get()
       .FromValue(0)
       .EnableErrorInterrupts()
       .EnableNormalInterrupts()
+      .set_cqhci_interrupt(supports_inline_crypto_ ? 1 : 0)
       .set_card_interrupt((interrupt_cb_.is_valid() && !card_interrupt_masked_) ? 1 : 0)
       .WriteTo(&*regs_mmio_buffer_);
 }
@@ -315,8 +317,12 @@ void Sdhci::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_st
              InterruptSignalEnable::Get().ReadFrom(&*regs_mmio_buffer_).reg_value());
 
   std::lock_guard<std::mutex> lock(mtx_);
+  auto crypto_interrupt_status = CryptoNonQueueInterruptStatus::Get().FromValue(0);
+  if (interrupt_status.cqhci_interrupt() && supports_inline_crypto_) {
+    crypto_interrupt_status.ReadFrom(&*regs_cqhci_mmio_buffer_).WriteTo(&*regs_cqhci_mmio_buffer_);
+  }
   if (pending_request_ && !pending_request_->request_complete) {
-    HandleTransferInterrupt(interrupt_status);
+    HandleTransferInterrupt(interrupt_status, crypto_interrupt_status);
   }
 
   if (interrupt_status.card_interrupt()) {
@@ -347,10 +353,12 @@ void Sdhci::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_st
   zx::unowned_interrupt(irq->object())->ack();
 }
 
-void Sdhci::HandleTransferInterrupt(const InterruptStatus status) {
-  if (status.ErrorInterrupt()) {
+void Sdhci::HandleTransferInterrupt(const InterruptStatus status,
+                                    const CryptoNonQueueInterruptStatus crypto_status) {
+  if (status.ErrorInterrupt() || crypto_status.ErrorInterrupt()) {
     pending_request_->status = status;
     pending_request_->status.set_error(1);
+    pending_request_->crypto_status = crypto_status;
     ErrorRecovery();
     return;
   }
@@ -925,7 +933,8 @@ zx::result<fidl::Array<uint32_t, 4>> Sdhci::FinishRequest(
   }
 
   const InterruptStatus interrupt_status = pending_request.status;
-  if (!interrupt_status.error()) {
+  const CryptoNonQueueInterruptStatus crypto_interrupt_status = pending_request.crypto_status;
+  if (!interrupt_status.error() && !crypto_interrupt_status.ErrorInterrupt()) {
     return zx::ok(out_response);
   }
 
@@ -974,8 +983,15 @@ zx::result<fidl::Array<uint32_t, 4>> Sdhci::FinishRequest(
       fdf::error("Command timeout error cmd{}", request.cmd_idx);
     }
   }
+  if (crypto_interrupt_status.general_crypto_error()) {
+    fdf::error("General crypto error cmd{}", request.cmd_idx);
+  }
+  if (crypto_interrupt_status.invalid_crypto_config_error()) {
+    fdf::error("Invalid crypto config error cmd{}", request.cmd_idx);
+  }
   if (interrupt_status.reg_value() ==
-      InterruptStatusEnable::Get().FromValue(0).set_error(1).reg_value()) {
+          InterruptStatusEnable::Get().FromValue(0).set_error(1).reg_value() &&
+      !crypto_interrupt_status.ErrorInterrupt()) {
     // Log an unknown error only if no other bits were set.
     fdf::error("Unknown error cmd{}", request.cmd_idx);
   }
@@ -1606,6 +1622,8 @@ zx_status_t Sdhci::Init() {
         .ReadFrom(&*regs_cqhci_mmio_buffer_)
         .set_crypto_enable(true)
         .WriteTo(&*regs_cqhci_mmio_buffer_);
+    CryptoNonQueueInterruptEnable::Get().FromValue(0).EnableErrorInterrupts().WriteTo(
+        &*regs_cqhci_mmio_buffer_);
   }
 
   if (zx::result result = metadata_server_.Serve(*outgoing(), dispatcher(), metadata);

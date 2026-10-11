@@ -2,9 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::eval::testing::{WordChar, expand_glob, match_glob, match_segment_glob};
-use bstr::{BStr, BString};
+use crate::eval::testing::{WordChar, expand_glob, match_segment_glob};
+use crate::eval::{EvalOutcome, ExecutionContext, ShellState, eval_string};
+use bstr::{BStr, BString, ByteSlice};
 use std::fs;
+
+fn expand_glob_in_current_dir(word: &[WordChar]) -> Vec<BString> {
+    expand_glob(word, std::path::Path::new("."))
+}
+
+fn match_glob(pattern: &BStr, text: &BStr) -> bool {
+    let chars: Vec<WordChar> = pattern.as_bytes().iter().map(|&b| WordChar::Unquoted(b)).collect();
+    match_segment_glob(&chars, text)
+}
 
 #[test]
 fn test_match_glob() {
@@ -197,31 +207,31 @@ fn test_expand_glob_filesystem() {
     let to_word = |s: &str| -> Vec<WordChar> { s.bytes().map(|b| WordChar::Unquoted(b)).collect() };
 
     // Match *.txt
-    let res = expand_glob(&to_word(&format!("{}/*.txt", test_dir)));
+    let res = expand_glob_in_current_dir(&to_word(&format!("{}/*.txt", test_dir)));
     assert_eq!(res.len(), 2);
     assert_eq!(res[0], format!("{}/file1.txt", test_dir));
     assert_eq!(res[1], format!("{}/file2.txt", test_dir));
 
     // Match .* (dotfiles)
-    let res_dot = expand_glob(&to_word(&format!("{}/.*", test_dir)));
+    let res_dot = expand_glob_in_current_dir(&to_word(&format!("{}/.*", test_dir)));
     assert!(res_dot.contains(&BString::from(format!("{}/.hidden", test_dir))));
 
     // Match with double slash (empty segment)
-    let res_dbl = expand_glob(&to_word(&format!("{}//*.txt", test_dir)));
+    let res_dbl = expand_glob_in_current_dir(&to_word(&format!("{}//*.txt", test_dir)));
     assert_eq!(res_dbl.len(), 2);
 
     // Match nested
-    let res_nest = expand_glob(&to_word(&format!("{}/*/*.txt", test_dir)));
+    let res_nest = expand_glob_in_current_dir(&to_word(&format!("{}/*/*.txt", test_dir)));
     assert_eq!(res_nest.len(), 1);
     assert_eq!(res_nest[0], format!("{}/sub/nested.txt", test_dir));
 
     // No match returns literal
     let no_match_str = format!("{}/nomatch*", test_dir);
-    let res_nomatch = expand_glob(&to_word(&no_match_str));
+    let res_nomatch = expand_glob_in_current_dir(&to_word(&no_match_str));
     assert_eq!(res_nomatch, vec![BString::from(no_match_str)]);
 
     // Relative path (if relative expansion works or no wildcards)
-    let literal = expand_glob(&to_word("literal_word"));
+    let literal = expand_glob_in_current_dir(&to_word("literal_word"));
     assert_eq!(literal, vec![BString::from("literal_word")]);
 
     let _ = fs::remove_dir_all(test_dir);
@@ -232,7 +242,7 @@ fn test_expand_glob_root_and_relative() {
     let to_word = |s: &str| -> Vec<WordChar> { s.bytes().map(|b| WordChar::Unquoted(b)).collect() };
 
     // Absolute path starting with / to hit p == "/" branches
-    let res_root = expand_glob(&to_word("/*"));
+    let res_root = expand_glob_in_current_dir(&to_word("/*"));
     assert!(!res_root.is_empty());
 
     // Also unclosed bracket class like [[:upper]
@@ -245,9 +255,9 @@ fn test_expand_glob_root_and_relative() {
     fs::write(format!("{}/rel1.txt", rel_dir), "rel").unwrap();
     if let Ok(orig_dir) = std::env::current_dir() {
         if std::env::set_current_dir(rel_dir).is_ok() {
-            let res_rel = expand_glob(&to_word("*.txt"));
+            let res_rel = expand_glob_in_current_dir(&to_word("*.txt"));
             assert!(res_rel.contains(&BString::from("rel1.txt")));
-            let res_sub = expand_glob(&to_word("sub/*"));
+            let res_sub = expand_glob_in_current_dir(&to_word("sub/*"));
             assert!(res_sub.is_empty() || !res_sub.is_empty());
             let _ = std::env::set_current_dir(orig_dir);
         }
@@ -296,4 +306,75 @@ fn test_glob_uncovered_brackets() {
         ],
         BStr::new(b"A"),
     );
+}
+
+#[test]
+fn test_glob_caret_negation_and_literal_rbracket() {
+    // 1. [^...] bracket negation
+    assert!(match_glob(BStr::new(b"foo[^abc]bar"), BStr::new(b"foodbar")));
+    assert!(!match_glob(BStr::new(b"foo[^abc]bar"), BStr::new(b"fooabar")));
+    assert!(match_glob(BStr::new(b"foo[^a-z]bar"), BStr::new(b"fooAbar")));
+    assert!(!match_glob(BStr::new(b"foo[^a-z]bar"), BStr::new(b"fooabar")));
+
+    // 2. Literal `]` as first character in `[...]`, `[!...]`, `[^...]`
+    assert!(match_glob(BStr::new(b"[]a]"), BStr::new(b"]")));
+    assert!(match_glob(BStr::new(b"[]a]"), BStr::new(b"a")));
+    assert!(!match_glob(BStr::new(b"[]a]"), BStr::new(b"b")));
+
+    assert!(!match_glob(BStr::new(b"[!]a]"), BStr::new(b"]")));
+    assert!(!match_glob(BStr::new(b"[!]a]"), BStr::new(b"a")));
+    assert!(match_glob(BStr::new(b"[!]a]"), BStr::new(b"b")));
+
+    assert!(!match_glob(BStr::new(b"[^]a]"), BStr::new(b"]")));
+    assert!(!match_glob(BStr::new(b"[^]a]"), BStr::new(b"a")));
+    assert!(match_glob(BStr::new(b"[^]a]"), BStr::new(b"b")));
+
+    // 3. Unclosed `[]`, `[!]`, `[^]` treat `[` as literal
+    assert!(match_glob(BStr::new(b"[]"), BStr::new(b"[]")));
+    assert!(match_glob(BStr::new(b"[!]"), BStr::new(b"[!]")));
+    assert!(match_glob(BStr::new(b"[^]"), BStr::new(b"[^]")));
+}
+
+#[test]
+fn test_glob_trailing_slash_and_cwd() {
+    let to_word = |s: &str| -> Vec<WordChar> { s.bytes().map(WordChar::Unquoted).collect() };
+
+    let test_dir = "/tmp/zxsh_test_glob_slash_cwd";
+    let _ = fs::remove_dir_all(test_dir);
+    fs::create_dir_all(format!("{}/dir_a", test_dir)).unwrap();
+    fs::create_dir_all(format!("{}/dir_b", test_dir)).unwrap();
+    fs::write(format!("{}/file1.txt", test_dir), "data").unwrap();
+
+    // 1. Absolute glob with trailing `/` matches only directories and preserves trailing `/`
+    let abs_dirs = expand_glob_in_current_dir(&to_word(&format!("{}/*/", test_dir)));
+    assert_eq!(
+        abs_dirs,
+        vec![
+            BString::from(format!("{}/dir_a/", test_dir)),
+            BString::from(format!("{}/dir_b/", test_dir)),
+        ]
+    );
+
+    // 2. Relative glob via `expand_glob` with trailing `/` and `*.txt`
+    let cwd_path = std::path::Path::new(test_dir);
+    let rel_dirs = expand_glob(&to_word("*/"), cwd_path);
+    assert_eq!(rel_dirs, vec![BString::from("dir_a/"), BString::from("dir_b/")]);
+
+    let rel_files = expand_glob(&to_word("*.txt"), cwd_path);
+    assert_eq!(rel_files, vec![BString::from("file1.txt")]);
+
+    // 3. Shell evaluation resolves relative globs against `state.cwd()`
+    let mut state = ShellState::new();
+    let mut ctx = ExecutionContext::initial().unwrap();
+    state.set_cwd(BStr::new(test_dir.as_bytes()));
+    let outcome = eval_string(
+        BStr::new(b"for d in */; do RESULT=\"$RESULT$d,\"; done"),
+        &mut state,
+        &mut ctx,
+    )
+    .unwrap();
+    assert_eq!(outcome, EvalOutcome::Code(0));
+    assert_eq!(state.get_var(BStr::new("RESULT")), Some(BString::from("dir_a/,dir_b/,")));
+
+    let _ = fs::remove_dir_all(test_dir);
 }

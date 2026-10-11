@@ -73,12 +73,13 @@ In interactive mode (`src/repl/mod.rs`):
 `zxsh` implements standard POSIX shell grammar and execution semantics:
 
 *   **Commands & Pipelines**: Simple commands (`cmd arg1 arg2`), pipelines
-    (`cmd1 | cmd2 | cmd3`), and command blocks (`{ cmd; }`).
+    (`cmd1 | cmd2 | cmd3`) with optional status negation (`! cmd1 | cmd2`), and
+    command blocks (`{ cmd; }`).
 *   **Control Flow**:
     *   Conditionals: `if ...; then ...; elif ...; then ...; else ...; fi`
     *   Loops: `while ...; do ...; done`, `until ...; do ...; done`,
         `for var in ...; do ...; done`
-    *   Pattern Matching: `case word in pattern) ... ;; esac`
+    *   Pattern Matching: `case word in [(] pattern) ... ;; esac`
     *   Chaining: `&&` (logical AND), `||` (logical OR), `;` and newline
         (sequence), `&` (asynchronous background execution)
     *   Loop Control: `break [n]`, `continue [n]`
@@ -96,17 +97,19 @@ In interactive mode (`src/repl/mod.rs`):
     *   **Command Substitution**: `$(command)` and legacy backticks
         `` `command` ``.
     *   **Arithmetic Expansion**: `$(( expression ))` supporting arithmetic
-        (`+`, `-`, `*`, `/`, `%`), bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`),
-        comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), logical (`&&`, `||`,
-        `!`), ternary (`? :`), assignment (`=`, `+=`, `-=`, etc.), variables,
-        and grouping.
+        (`+`, `-`, `*`, `/`, `%`), pre/post-increment and decrement (`++`,
+        `--`), bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`), comparisons (`<`,
+        `<=`, `>`, `>=`, `==`, `!=`), logical (`&&`, `||`, `!`), ternary
+        (`? :`), assignment (`=`, `+=`, `-=`, etc.), comma (`,`), decimal,
+        octal (`0...`), and hexadecimal (`0x...`) constants, variables, and
+        grouping.
     *   **Pathname Expansion (Globbing)**: `*`, `?`, and character classes
         `[...]` (including ranges `[a-z]` and negations `[!...]` / `[^...]`).
     *   **Word Splitting & Quote Removal**: Field splitting using `$IFS`, single
         quotes `'...'`, double quotes `"..."`, and backslash escapes `\`.
 *   **Redirections & Here-Documents**:
-    *   File input `< file` and output `> file` (truncation) / `>> file`
-        (append)
+    *   File input `< file`, output `> file` (truncation) / `>> file` (append),
+        and read-write `<> file`
     *   Clobber control `>| file` (overriding `noclobber` / `set -C`)
     *   File descriptor duplication `>&fd`, `<&fd` and closing `>&-`, `<&-`
     *   Here-documents `<< EOF` and `<<- EOF` (with or without parameter
@@ -155,7 +158,7 @@ Implemented in `src/builtins/file_utils.rs` to allow filesystem operations
 without the overhead of spawning external processes:
 
 *   `ls` (directory and file listing; supports `-l` long format)
-*   `cp` (copy files and directories; supports `-r`/`-R`, `-f`, `-p`)
+*   `cp` (copy files; supports `-f`)
 *   `mv` (move/rename files; supports `-f`)
 *   `rm` (remove files and directories; supports `-r`/`-R`, `-f`)
 *   `mkdir` (create directories; supports `-p`)
@@ -166,8 +169,9 @@ without the overhead of spawning external processes:
     processing (`\n`, `\t`, `\c`, octal escapes) and `-n` flag support.
 *   `printf` (`src/builtins/printf.rs`): POSIX standard formatted output
     supporting format specifiers (`%s`, `%c`, `%d`, `%i`, `%o`, `%u`, `%x`,
-    `%X`, `%b`, `%q`, `%%`), width and precision modifiers (including `*`), and
-    formatting flags (`-`, `+`, space, `#`, `0`).
+    `%X`, `%f`, `%F`, `%e`, `%E`, `%g`, `%G`, `%a`, `%A`, `%b`, `%%`), width
+    and precision modifiers (including `*`), and formatting flags (`-`, `+`,
+    space, `#`, `0`).
 
 ### 4. Condition Evaluation
 

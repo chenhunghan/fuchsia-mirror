@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef SRC_UI_TESTS_INTEGRATION_INPUT_TESTS_STARNIX_INPUT_STARNIX_INPUT_TEST_BASE_H_
+#define SRC_UI_TESTS_INTEGRATION_INPUT_TESTS_STARNIX_INPUT_STARNIX_INPUT_TEST_BASE_H_
+
 #include <fidl/fuchsia.component.decl/cpp/fidl.h>
 #include <fidl/fuchsia.component/cpp/fidl.h>
 #include <fidl/fuchsia.element/cpp/fidl.h>
@@ -9,6 +12,7 @@
 #include <fidl/fuchsia.process/cpp/fidl.h>
 #include <fidl/fuchsia.tracing.provider/cpp/fidl.h>
 #include <fidl/fuchsia.ui.display.singleton/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input/cpp/fidl.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
 #include <lib/zx/socket.h>
 #include <lib/zx/time.h>
@@ -194,7 +198,8 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
         {.capabilities = {Proto<fuchsia_ui_composition::Allocator>(),
                           Proto<fuchsia_ui_composition::Flatland>(),
                           Proto<fuchsia_ui_display_singleton::Info>(),
-                          Proto<fuchsia_element::GraphicalPresenter>()},
+                          Proto<fuchsia_element::GraphicalPresenter>(),
+                          Proto<fuchsia_ui_input::DeviceListenerRegistry>()},
          .source = ui_testing::PortableUITest::kTestUIStackRef,
          .targets = {ChildRef{kDebianRealm}}},
 
@@ -250,3 +255,5 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
 };
 
 }  // namespace starnix_input_test
+
+#endif  // SRC_UI_TESTS_INTEGRATION_INPUT_TESTS_STARNIX_INPUT_STARNIX_INPUT_TEST_BASE_H_

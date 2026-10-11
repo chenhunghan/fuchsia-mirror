@@ -5,7 +5,6 @@
 import asyncio
 import logging
 
-import fidl_fuchsia_wlan_internal as f_wlan_internal
 import fidl_fuchsia_wlan_sme as f_wlan_sme
 import fuchsia_base_test
 import openwrt_access_point
@@ -21,7 +20,6 @@ from openwrt_access_point.lib.access_point_config import (
     SecurityOpen,
     SecurityWpa2,
     SecurityWpa2Wpa3Mixed,
-    SecurityWpa3,
 )
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -70,23 +68,7 @@ class OpenWrtAPScanConnectTest(fuchsia_base_test.FuchsiaBaseTest):
         phy = await self.dut.wlan_core.ensure_single_phy()
         iface = await phy.create_client_iface()
 
-        # TODO: https://fxbug.dev/487800358 - Create and use to_fidl() function.
-        if isinstance(bss_settings.security, SecurityWpa2):
-            if not bss_settings.password:
-                raise signals.TestFailure(
-                    "Password must be provided for WPA2 security"
-                )
-            security_protocol = f_wlan_internal.Protocol.WPA2_PERSONAL
-        elif isinstance(
-            bss_settings.security, (SecurityWpa3, SecurityWpa2Wpa3Mixed)
-        ):
-            if not bss_settings.password:
-                raise signals.TestFailure(
-                    "Password must be provided for WPA3 security"
-                )
-            security_protocol = f_wlan_internal.Protocol.WPA3_PERSONAL
-        else:
-            security_protocol = f_wlan_internal.Protocol.OPEN
+        security_protocol = bss_settings.security.to_fidl_wlan_internal()
 
         self.log.info(
             "Starting scan and connect for SSID: %s", bss_settings.ssid

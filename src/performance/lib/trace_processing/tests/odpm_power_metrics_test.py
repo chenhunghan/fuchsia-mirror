@@ -4,11 +4,7 @@
 # found in the LICENSE file.
 """Unit tests for ../metrics/odpm_power.py."""
 
-import json
-import pathlib
-import tempfile
 import unittest
-from unittest import mock
 
 from reporting import metrics
 from trace_processing import trace_model
@@ -154,69 +150,21 @@ class OdpmPowerMetricsTest(unittest.TestCase):
         self.assertEqual(all_rails_processor.event_patterns, {r".*_odpm_rail"})
         self.assertEqual(all_rails_processor.category_names, set())
 
-    def test_get_available_rails(self) -> None:
-        """Verifies discovering available ODPM rails in a model."""
-        model = self.construct_trace_model()
-        self.assertEqual(
-            odpm_power.get_available_rails(model),
-            ["cpu_big", "gpu", "wlan_bt"],
+        predicate_sum_processor = odpm_power.OdpmPowerMetricsProcessor(
+            sum_rails={"all_rails_except_battery": lambda r: r != "battery"},
         )
+        self.assertEqual(
+            predicate_sum_processor.event_patterns, {r".*_odpm_rail"}
+        )
+        self.assertEqual(predicate_sum_processor.category_names, set())
 
     def test_list_rails(self) -> None:
-        """Verifies OdpmPowerMetricsProcessor.list_rails on JSON and FXT trace files."""
-        trace_data = {
-            "displayTimeUnit": "ns",
-            "traceEvents": [
-                {
-                    "cat": "power",
-                    "name": "gpu_odpm_rail",
-                    "ph": "C",
-                    "pid": 100,
-                    "tid": 101,
-                    "ts": 1000,
-                    "args": {"mW": 500.0},
-                },
-                {
-                    "cat": "power",
-                    "name": "battery_odpm_rail",
-                    "ph": "C",
-                    "pid": 100,
-                    "tid": 101,
-                    "ts": 1000,
-                    "args": {"mW": 0.0},
-                },
-                {
-                    "cat": "power",
-                    "name": "cpu_big_odpm_rail",
-                    "ph": "C",
-                    "pid": 100,
-                    "tid": 101,
-                    "ts": 1000,
-                    "args": {"mW": 1000.0},
-                },
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            json_path = pathlib.Path(tmpdir) / "trace.json"
-            json_path.write_text(json.dumps(trace_data))
-            self.assertEqual(
-                odpm_power.OdpmPowerMetricsProcessor.list_rails(json_path),
-                ["battery", "cpu_big", "gpu"],
-            )
-
-            fxt_path = pathlib.Path(tmpdir) / "trace.fxt"
-            with mock.patch(
-                "trace_processing.trace_importing.convert_trace_file_to_json",
-                return_value=str(json_path),
-            ) as mock_convert:
-                self.assertEqual(
-                    odpm_power.OdpmPowerMetricsProcessor.list_rails(fxt_path),
-                    ["battery", "cpu_big", "gpu"],
-                )
-                mock_convert.assert_called_once_with(
-                    trace_path=fxt_path,
-                    patterns={r".*_odpm_rail"},
-                )
+        """Verifies OdpmPowerMetricsProcessor.list_rails discovers available ODPM rails in a model."""
+        model = self.construct_trace_model()
+        self.assertEqual(
+            odpm_power.OdpmPowerMetricsProcessor.list_rails(model),
+            ["cpu_big", "gpu", "wlan_bt"],
+        )
 
     def test_process_metrics_selected_rails(self) -> None:
         """Verifies metrics calculation only for selected rails in order."""
@@ -348,6 +296,79 @@ class OdpmPowerMetricsTest(unittest.TestCase):
         ]
         self.assertEqual(results, expected)
 
+    def test_process_metrics_sum_rails_callable_predicate(self) -> None:
+        """Verifies sum_rails accepts a callable predicate to filter rails in a single pass."""
+        model = self.construct_trace_model()
+        thread = model.processes[0].threads[0]
+        for ts, mw in ((1000, 9000.0), (2000, 9000.0)):
+            thread.events.append(
+                trace_model.CounterEvent.consume_dict(
+                    {
+                        "cat": "power",
+                        "name": "battery_odpm_rail",
+                        "ts": ts,
+                        "pid": 100,
+                        "tid": 101,
+                        "args": {"mW": mw},
+                    }
+                )
+            )
+
+        processor = odpm_power.OdpmPowerMetricsProcessor(
+            all_rails=True,
+            sum_rails={"all_rails_except_battery": lambda r: r != "battery"},
+        )
+        results = processor.process_metrics(model)
+
+        # cpu_big (1.0, 3.0) + gpu (0.5, 1.5) + wlan_bt (0.25, 0.75) = (1.75, 5.25)
+        expected = [
+            TestCaseResult(
+                label="Power_rail_battery",
+                unit=U.watts,
+                values=[9.0, 9.0],
+                doc="ODPM power usage samples for rail battery",
+            ),
+            TestCaseResult(
+                label="Power_rail_cpu_big",
+                unit=U.watts,
+                values=[1.0, 3.0],
+                doc="ODPM power usage samples for rail cpu_big",
+            ),
+            TestCaseResult(
+                label="Power_rail_gpu",
+                unit=U.watts,
+                values=[0.5, 1.5],
+                doc="ODPM power usage samples for rail gpu",
+            ),
+            TestCaseResult(
+                label="Power_rail_wlan_bt",
+                unit=U.watts,
+                values=[0.25, 0.75],
+                doc="ODPM power usage samples for rail wlan_bt",
+            ),
+            TestCaseResult(
+                label="Power_all_rails_except_battery",
+                unit=U.watts,
+                values=[1.75, 5.25],
+                doc="ODPM power usage samples for rails cpu_big, gpu, wlan_bt",
+            ),
+        ]
+        self.assertEqual(results, expected)
+
+    def test_sum_rails_callable_predicate_no_match_raises_value_error(
+        self,
+    ) -> None:
+        """Verifies that a callable predicate in sum_rails matching no rails raises ValueError."""
+        model = self.construct_trace_model()
+        processor = odpm_power.OdpmPowerMetricsProcessor(
+            sum_rails={"nonexistent_group": lambda r: r == "nonexistent"}
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"No ODPM power samples matched filter for sum_rails group 'nonexistent_group'\.",
+        ):
+            processor.process_metrics(model)
+
     def test_sum_rails_missing_rail_raises_value_error(self) -> None:
         """Verifies that a missing rail in sum_rails raises ValueError."""
         model = self.construct_trace_model()
@@ -364,3 +385,92 @@ class OdpmPowerMetricsTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             processor_all_missing.process_metrics(model)
+
+    def test_process_metrics_rails_callable_predicate(self) -> None:
+        """Verifies a rails predicate filters the rails in sorted order."""
+        model = self.construct_trace_model()
+        # Reverse the order of the rails in the trace, keeping sample order.
+        model.processes[0].threads[0].events.sort(
+            key=lambda event: event.name, reverse=True
+        )
+        processor = odpm_power.OdpmPowerMetricsProcessor(
+            rails=lambda r: r != "gpu"
+        )
+        results = processor.process_metrics(model)
+
+        expected = [
+            TestCaseResult(
+                label="Power_rail_cpu_big",
+                unit=U.watts,
+                values=[1.0, 3.0],
+                doc="ODPM power usage samples for rail cpu_big",
+            ),
+            TestCaseResult(
+                label="Power_rail_wlan_bt",
+                unit=U.watts,
+                values=[0.25, 0.75],
+                doc="ODPM power usage samples for rail wlan_bt",
+            ),
+        ]
+        self.assertEqual(results, expected)
+
+    def test_process_metrics_rails_and_sum_rails_callable_predicate(
+        self,
+    ) -> None:
+        """Verifies one predicate can select the individual and summed rails."""
+        model = self.construct_trace_model()
+        thread = model.processes[0].threads[0]
+        for ts in (1000, 2000):
+            thread.events.append(
+                trace_model.CounterEvent.consume_dict(
+                    {
+                        "cat": "power",
+                        "name": "battery_odpm_rail",
+                        "ts": ts,
+                        "pid": 100,
+                        "tid": 101,
+                        "args": {"mW": 9000.0},
+                    }
+                )
+            )
+
+        non_battery_rails = lambda r: r != "battery"
+        processor = odpm_power.OdpmPowerMetricsProcessor(
+            rails=non_battery_rails,
+            sum_rails={"all_rails_except_battery": non_battery_rails},
+        )
+        results = processor.process_metrics(model)
+
+        self.assertEqual(
+            [result.label for result in results],
+            [
+                "Power_rail_cpu_big",
+                "Power_rail_gpu",
+                "Power_rail_wlan_bt",
+                "Power_all_rails_except_battery",
+            ],
+        )
+
+    def test_trace_import_filter_rails_callable_predicate(self) -> None:
+        """Verifies a callable rails predicate imports all _odpm_rail events."""
+        processor = odpm_power.OdpmPowerMetricsProcessor(
+            rails=lambda r: r != "battery"
+        )
+        self.assertEqual(processor.event_patterns, {r".*_odpm_rail"})
+        self.assertEqual(processor.category_names, set())
+
+    def test_rails_callable_predicate_and_all_rails_raises_value_error(
+        self,
+    ) -> None:
+        """Verifies a rails predicate with all_rails=True raises ValueError."""
+        with self.assertRaises(ValueError):
+            odpm_power.OdpmPowerMetricsProcessor(
+                rails=lambda r: r != "battery", all_rails=True
+            )
+
+    def test_bare_str_rails_raises_value_error(self) -> None:
+        """Verifies a bare str in rails or sum_rails raises ValueError."""
+        with self.assertRaises(ValueError):
+            odpm_power.OdpmPowerMetricsProcessor(rails="gpu")
+        with self.assertRaises(ValueError):
+            odpm_power.OdpmPowerMetricsProcessor(sum_rails={"total": "cpu"})

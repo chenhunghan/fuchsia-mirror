@@ -90,7 +90,7 @@ rust_library(
     }),
     version = "1.0.229",
     deps = [
-        "//third_party/rust_crates/vendor/serde-1.0.229:build_script_build",
+        ":build_script_build",
         "//third_party/rust_crates/vendor/serde_core-1.0.229:serde_core",
     ],
 )
@@ -136,6 +136,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "serde",
     rustc_flags = [
         "--cap-lints=allow",

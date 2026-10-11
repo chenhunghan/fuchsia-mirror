@@ -157,6 +157,7 @@ impl SocketOps for VsockSocket {
             bytes_read,
             message_length: bytes_read,
             address,
+            credentials: None,
             ancillary_data: vec![],
         })
     }

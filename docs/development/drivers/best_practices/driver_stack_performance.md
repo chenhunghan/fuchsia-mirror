@@ -6,9 +6,6 @@
 
 # Driver stack performance
 
-Caution: This page may contain information that is specific to the legacy
-version of the driver framework (DFv1).
-
 The purpose of this document is to provide an overview into good and bad practices in regards to
 performance for authoring new drivers or interacting with existing ones in Fuchsia.
 
@@ -25,10 +22,10 @@ consideration. Driver stack APIs fall into the application or driver category.
 Application APIs are used to give regular non-driver components access to hardware resources, while
 driver APIs are used to allow drivers to communicate among themselves. For example,
 [`fuchsia.hardware.network`][netdevice-fidl] is an application API to interact with network drivers,
-and [`fuchsia.hardware.network.driver`][netdevice-banjo] defines the lower level driver API for network
-devices.
+and [`fuchsia.hardware.network.driver`][netdevice-driver-fidl] defines the lower level driver API for network
+devices which use driver transport to enable more efficient inter-driver calls through colocation.
 
-Device driver APIs are typically `fuchsia.hardware.*` banjo and `fuchsia.hardware.*` FIDL APIs.
+Device driver APIs are typically `fuchsia.hardware.*` FIDL APIs.
 
 #### Avoid synchronous operations
 
@@ -64,10 +61,6 @@ Avoiding data copies is especially important in high-bandwidth or low-latency ap
 networking, audio, or video. Large payloads should cross API boundaries in a VMO whenever possible.
 A common strategy is to negotiate a limited number of VMOs on setup and exchange references to
 regions in those VMOs during operation.
-
-Note: When defining a `banjo` API, it's technically feasible to share virtual memory pointers over
-the API boundary. API authors should always be aware that doing so restricts users of the API to
-**always** be in the same process, which is undesirable from a system architecture standpoint.
 
 #### Clarify flow control
 
@@ -130,4 +123,4 @@ device driver implementations, part of the fast path is often in interrupt threa
 
 
 [netdevice-fidl]: /sdk/fidl/fuchsia.hardware.network/device.fidl
-[netdevice-banjo]: /sdk/fidl/fuchsia.hardware.network.driver/network-device.fidl
+[netdevice-driver-fidl]: /sdk/fidl/fuchsia.hardware.network.driver/network-device.fidl

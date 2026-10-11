@@ -32,7 +32,7 @@ pub fn kgsl_device_init(kernel: &Kernel) {
     log_info!("kgsl: kgsl_device_init");
 
     let registry = &kernel.device_registry;
-    let class = registry.objects.get_or_create_class("kgsl".into(), registry.objects.virtual_bus());
+    let class = registry.objects.get_or_create_class("kgsl".into());
     let builder = KgslDeviceBuilder {};
 
     registry

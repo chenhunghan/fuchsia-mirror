@@ -202,6 +202,22 @@ TEST(FcntlOrderingTest, SetLeaseChecksMacBeforeArgs) {
   }));
 }
 
+/// Verifies that clearing `O_APPEND` via `F_SETFL` checks `fd { use }` on the file descriptor even
+/// when the caller holds `write` permission to the underlying file node.
+TEST(FcntlOrderingTest, ClearAppendChecksFdUse) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_fcntl_parent_t:s0", [&] {
+    auto fd(CreateTestFileFd());
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    ASSERT_THAT(fcntl(fd.get(), F_SETFL, O_APPEND), SyscallSucceeds());
+
+    ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_fcntl_child_no_use_fd_t:s0", [&] {
+      EXPECT_THAT(fcntl(fd.get(), F_SETFL, 0), SyscallFailsWithErrno(EACCES));
+    }));
+  }));
+}
+
 TEST(FlockSelinuxTest, FlockWithFdUse) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_fcntl_parent_t:s0", [&] {

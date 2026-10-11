@@ -2,6 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import asyncio
+import os
+import signal
+import threading
 import unittest
 from typing import Any
 
@@ -387,6 +391,45 @@ class FuchsiaAsyncExtensionTest(unittest.TestCase):
 
         with self.assertRaises(signals.ControllerError):
             test_obj.setup_class()  # type: ignore[unused-coroutine]
+
+    def test_abort_all_cancels_running_async_task(self) -> None:
+        task_cancelled = False
+        background_continued = False
+
+        def handle_sigusr1(signum: int, frame: Any) -> None:
+            raise signals.TestAbortAll("SIGTERM received")
+
+        old_handler = signal.signal(signal.SIGUSR1, handle_sigusr1)
+        try:
+
+            class AbortableAsyncTest(StubTest):
+                async def test_interrupted(self) -> None:
+                    nonlocal task_cancelled, background_continued
+                    timer = threading.Timer(
+                        0.01, lambda: os.kill(os.getpid(), signal.SIGUSR1)
+                    )
+                    timer.start()
+                    try:
+                        await asyncio.sleep(0.05)
+                        background_continued = True
+                    except asyncio.CancelledError:
+                        task_cancelled = True
+                        raise
+                    finally:
+                        timer.cancel()
+
+                async def teardown_test(self) -> None:
+                    await asyncio.sleep(0.06)
+
+            test_obj = AbortableAsyncTest()
+            with self.assertRaises(signals.TestAbortAll):
+                test_obj.test_interrupted()  # type: ignore[unused-coroutine]
+
+            test_obj.teardown_test()  # type: ignore[unused-coroutine]
+            self.assertTrue(task_cancelled)
+            self.assertFalse(background_continued)
+        finally:
+            signal.signal(signal.SIGUSR1, old_handler)
 
 
 if __name__ == "__main__":

@@ -278,54 +278,6 @@ impl From<ManualTargetEvent> for TargetEvent {
     }
 }
 
-impl From<fastboot_file_discovery::FastbootEvent> for TargetEvent {
-    fn from(fastboot_event: fastboot_file_discovery::FastbootEvent) -> Self {
-        match fastboot_event {
-            fastboot_file_discovery::FastbootEvent::Discovered(device) => {
-                let address: TargetIpAddr = device.socket_addr().into();
-                let connection_state = match device.mode() {
-                    fastboot_file_discovery::FastbootMode::UDP => {
-                        FastbootConnectionState::Udp(vec![address])
-                    }
-                    fastboot_file_discovery::FastbootMode::TCP => {
-                        FastbootConnectionState::Tcp(vec![address])
-                    }
-                };
-
-                let handle = TargetHandle {
-                    node_name: None,
-                    state: TargetState::Fastboot(FastbootTargetState {
-                        serial_number: "".to_string(),
-                        connection_state,
-                    }),
-                    manual: false,
-                };
-                TargetEvent::Added(handle)
-            }
-            fastboot_file_discovery::FastbootEvent::Lost(device) => {
-                let address: TargetIpAddr = device.socket_addr().into();
-                let connection_state = match device.mode() {
-                    fastboot_file_discovery::FastbootMode::UDP => {
-                        FastbootConnectionState::Udp(vec![address])
-                    }
-                    fastboot_file_discovery::FastbootMode::TCP => {
-                        FastbootConnectionState::Tcp(vec![address])
-                    }
-                };
-                let handle = TargetHandle {
-                    node_name: Some("".to_string()),
-                    state: TargetState::Fastboot(FastbootTargetState {
-                        serial_number: "".to_string(),
-                        connection_state,
-                    }),
-                    manual: false,
-                };
-                TargetEvent::Removed(handle)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;

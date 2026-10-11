@@ -14,9 +14,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Deref;
 
-#[derive(Derivative, Serialize, PartialEq)]
+#[derive(Derivative, Serialize, PartialEq, schemars::JsonSchema)]
 #[derivative(Eq)]
-pub struct ShowResultItem(InspectData);
+pub struct ShowResultItem(#[schemars(with = "serde_json::Value")] InspectData);
 
 impl Deref for ShowResultItem {
     type Target = InspectData;
@@ -42,7 +42,7 @@ impl Ord for ShowResultItem {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ShowResult(Vec<ShowResultItem>);
 
 impl fmt::Display for ShowResult {

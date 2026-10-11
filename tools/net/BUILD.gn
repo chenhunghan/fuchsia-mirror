@@ -5,10 +5,7 @@
 group("tools") {
   testonly = true
 
-  public_deps = [
-    "//tools/net/device-finder",
-    "//tools/net/mdnstool",
-  ]
+  public_deps = [ "//tools/net/device-finder" ]
 }
 
 group("tests") {
@@ -16,7 +13,6 @@ group("tests") {
 
   deps = [
     "//tools/net/device-finder:dev_finder_tests",
-    "//tools/net/digest:digest_tests",
     "//tools/net/mdns:mdns_tests",
     "//tools/net/netboot:netboot_tests",
     "//tools/net/sshutil:sshutil_tests",

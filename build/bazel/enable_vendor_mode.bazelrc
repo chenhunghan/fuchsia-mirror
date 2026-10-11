@@ -23,7 +23,7 @@ common --downloader_config=build/bazel/config/no_downloads_allowed.config
 # LINT.IfChange(bazel_vendor_dir)
 common --vendor_dir=third_party/bazel_vendor
 # LINT.ThenChange(
-#     //build/bazel_sdk/tests/scripts/bazel_test.py:bazel_vendor_dir,
+#     //build/bazel_sdk/tests/scripts/generate_bazel_launcher.py:bazel_vendor_dir,
 #     //build/bazel/bazel_fuchsia_sdk.gni:bazel_vendor_dir,
 #     //tools/devshell/contrib/update-bazel-vendor-dir:bazel_vendor_dir
 # )
@@ -34,7 +34,7 @@ common --vendor_dir=third_party/bazel_vendor
 # LINT.IfChange(bazel_registry_dir)
 common --registry=file://%workspace%/third_party/bazel_registries/bcr.bazel.build
 # LINT.ThenChange(
-#     //build/bazel_sdk/tests/scripts/bazel_test.py:bazel_registry_dir,
+#     //build/bazel_sdk/tests/scripts/generate_bazel_launcher.py:bazel_registry_dir,
 #     //build/bazel/bazel_fuchsia_sdk.gni:bazel_registry_dir,
 #     //tools/devshell/contrib/update-bazel-vendor-dir:bazel_registry_dir
 # )

@@ -288,19 +288,21 @@ impl TaskMutableState {
     }
 
     pub fn take_captured_state(&mut self) -> Option<Box<CapturedThreadState>> {
-        if self.captured_thread_state.is_some() {
-            let mut state = None;
-            std::mem::swap(&mut state, &mut self.captured_thread_state);
-            return state;
-        }
-        None
+        self.captured_thread_state.take()
     }
 
-    pub fn copy_state_from(&mut self, current_task: &CurrentTask) {
-        self.captured_thread_state = Some(Box::new(CapturedThreadState {
-            thread_state: current_task.thread_state.extended_snapshot::<HeapRegs>(),
-            dirty: false,
-        }));
+    /// Captures the thread's register state if not already captured.
+    ///
+    /// If a snapshot is already present, this is a no-op to preserve any tracer
+    /// modifications (dirty register state) across consecutive stop events prior
+    /// to resumption and write-back.
+    fn copy_state_from(&mut self, current_task: &CurrentTask) {
+        if self.captured_thread_state.is_none() {
+            self.captured_thread_state = Some(Box::new(CapturedThreadState {
+                thread_state: current_task.thread_state.extended_snapshot::<HeapRegs>(),
+                dirty: false,
+            }));
+        }
     }
 
     /// Returns the task's currently active signal mask.
@@ -318,12 +320,6 @@ impl TaskMutableState {
     /// Note that the current signal mask may still not be blocking the signal.
     pub fn is_signal_masked_by_saved_mask(&self, signal: Signal) -> bool {
         self.signals.saved_mask().is_some_and(|mask| mask.has_signal(signal))
-    }
-
-    /// Removes the currently active, temporary, signal mask and restores the
-    /// previously active signal mask.
-    pub fn restore_signal_mask(&mut self) {
-        self.signals.restore_mask();
     }
 
     /// Returns true if the task's current `RunState` is blocked.
@@ -456,7 +452,24 @@ impl TaskMutableState<Base = Task> {
     /// This mask should be removed by a matching call to `restore_signal_mask`.
     pub fn set_temporary_signal_mask(&mut self, mask: SigSet) {
         self.signals.set_temporary_mask(mask);
-        self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
+        let (signals_clear, signals_set) = if self.signals.is_any_pending() {
+            (TaskFlags::empty(), TaskFlags::SIGNALS_AVAILABLE)
+        } else {
+            (TaskFlags::SIGNALS_AVAILABLE, TaskFlags::empty())
+        };
+        self.update_flags(signals_clear, signals_set | TaskFlags::TEMPORARY_SIGNAL_MASK);
+    }
+
+    /// Removes the currently active, temporary, signal mask and restores the
+    /// previously active signal mask.
+    pub fn restore_signal_mask(&mut self) {
+        self.signals.restore_mask();
+        let (signals_clear, signals_set) = if self.signals.is_any_pending() {
+            (TaskFlags::empty(), TaskFlags::SIGNALS_AVAILABLE)
+        } else {
+            (TaskFlags::SIGNALS_AVAILABLE, TaskFlags::empty())
+        };
+        self.update_flags(signals_clear | TaskFlags::TEMPORARY_SIGNAL_MASK, signals_set);
     }
 
     /// Returns the number of pending signals for this task, without considering the signal mask.
@@ -977,8 +990,10 @@ impl Task {
             return;
         }
 
-        let pgid = self.thread_group().read().process_group.leader.clone();
-        let exit_signal = self.thread_group().read().exit_signal.clone();
+        let (pgid, exit_signal) = {
+            let tg = self.thread_group().read();
+            (tg.process_group.clone(), tg.exit_signal.clone())
+        };
         let mut state = self.write();
         state.set_stopped(StopState::ForceAwake, None, None, None);
         if let Some(ptrace) = &mut state.ptrace {
@@ -1498,15 +1513,8 @@ impl Task {
         let status = self.read();
         if status.exit_status.is_some() {
             TaskStateCode::Zombie
-        } else if status.run_state.is_blocked() {
-            let stop_state = self.load_stopped();
-            if stop_state.ptrace_only() && stop_state.is_stopped() {
-                TaskStateCode::TracingStop
-            } else {
-                TaskStateCode::Sleeping
-            }
         } else {
-            TaskStateCode::Running
+            status.run_state.state_code()
         }
     }
 
@@ -1577,7 +1585,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to read memory generally indicates that the memory
         // is being read from a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_read_memory(addr, bytes)
     }
 
@@ -1589,7 +1597,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to read memory generally indicates that the memory
         // is being read from a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_read_memory_partial_until_null_byte(addr, bytes)
     }
 
@@ -1601,7 +1609,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to read memory generally indicates that the memory
         // is being read from a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_read_memory_partial(addr, bytes)
     }
 
@@ -1609,7 +1617,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to write memory generally indicates that the memory
         // is being written to a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_write_memory(addr, bytes)
     }
 
@@ -1617,7 +1625,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to write memory generally indicates that the memory
         // is being written to a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_write_memory_partial(addr, bytes)
     }
 
@@ -1625,7 +1633,7 @@ impl MemoryAccessor for Task {
         // Using a `Task` to zero memory generally indicates that the memory
         // is being zeroed from a task different than the `CurrentTask`. When
         // this `Task` is not current, its address space is not mapped
-        // so we need to go through the VMO.
+        // so access must go through the VMO.
         self.mm()?.syscall_zero(addr, length)
     }
 }
@@ -1659,7 +1667,7 @@ mod test {
     use crate::testing::*;
     use starnix_uapi::auth::{CAP_SYS_ADMIN, Capabilities};
     use starnix_uapi::resource_limits::Resource;
-    use starnix_uapi::signals::SIGCHLD;
+    use starnix_uapi::signals::{SIGCHLD, SIGUSR1};
     use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, rlimit};
 
     #[::fuchsia::test]
@@ -1812,6 +1820,80 @@ mod test {
 
             let renamed_role = scheduler.role_name(&child).unwrap();
             assert_ne!(renamed_role, "test-role");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_copy_state_from_preserves_dirty_snapshot() {
+        spawn_kernel_and_run(async |current_task| {
+            let mut state = current_task.write();
+            assert!(state.captured_thread_state.is_none());
+
+            state.copy_state_from(current_task);
+            assert!(state.captured_thread_state.is_some());
+            assert!(!state.captured_thread_state.as_ref().unwrap().dirty);
+
+            // Mark the captured state as dirty to simulate a tracer poking a register.
+            state.captured_thread_state.as_mut().unwrap().dirty = true;
+
+            // Consecutive calls to copy_state_from must preserve the existing snapshot.
+            state.copy_state_from(current_task);
+            assert!(state.captured_thread_state.as_ref().unwrap().dirty);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_temporary_signal_mask_without_pending_signals() {
+        spawn_kernel_and_run(async |current_task| {
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+
+            current_task.write().set_temporary_signal_mask(SigSet::from(SIGUSR1));
+            assert!(current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+
+            current_task.write().restore_signal_mask();
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_temporary_signal_mask_masks_pending_signal() {
+        spawn_kernel_and_run(async |current_task| {
+            current_task.write().enqueue_signal(SignalInfo::kernel(SIGUSR1));
+            assert!(current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+
+            current_task.write().set_temporary_signal_mask(SigSet::from(SIGUSR1));
+            assert!(current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+
+            current_task.write().restore_signal_mask();
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_temporary_signal_mask_unmasks_pending_signal() {
+        spawn_kernel_and_run(async |current_task| {
+            current_task.write().set_signal_mask(SigSet::from(SIGUSR1));
+            current_task.write().enqueue_signal(SignalInfo::kernel(SIGUSR1));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+
+            current_task.write().set_temporary_signal_mask(SigSet::default());
+            assert!(current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
+
+            current_task.write().restore_signal_mask();
+            assert!(!current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK));
+            assert!(!current_task.flags().contains(TaskFlags::SIGNALS_AVAILABLE));
         })
         .await;
     }

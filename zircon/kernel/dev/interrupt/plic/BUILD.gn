@@ -4,13 +4,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
-
-library_headers("headers") {
-  headers = [ "dev/interrupt/plic.h" ]
-  public_deps = [ "//zircon/kernel/phys:handoff" ]
-}
 
 kernel_rust_mod("plic-rs") {
   output_name = "plic"
@@ -27,7 +21,6 @@ kernel_rust_mod("plic-rs") {
 
 source_set("plic") {
   sources = []
-  public_deps = [ ":headers" ]
   deps = [
     ":plic-rs",
     "//zircon/kernel/dev/pdev/interrupt",

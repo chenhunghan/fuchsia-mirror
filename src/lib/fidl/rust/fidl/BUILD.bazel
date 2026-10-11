@@ -42,7 +42,6 @@ rustc_library(
         "//sdk/rust/zx-status",
         "//sdk/rust/zx-types",
         "//src/lib/fidl/rust_constants",
-        "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:bitflags",
         "//third_party/rust_crates/vendor:futures",
@@ -50,7 +49,10 @@ rustc_library(
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:thiserror",
     ] + select({
-        "@platforms//os:fuchsia": ["//sdk/rust/zx"],
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/fuchsia-async",
+        ],
         "//conditions:default": ["//src/lib/fuchsia-emulated-handle"],
     }),
 )
@@ -63,7 +65,6 @@ rustc_test(
         "//sdk/rust/zx-status",
         "//sdk/rust/zx-types",
         "//src/lib/fidl/rust_constants",
-        "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:assert_matches",
         "//third_party/rust_crates/vendor:bitflags",
@@ -74,6 +75,7 @@ rustc_test(
     ] + select({
         "@platforms//os:fuchsia": [
             "//sdk/rust/zx",
+            "//src/lib/fuchsia-async",
             "//third_party/rust_crates/vendor:anyhow",
             "//third_party/rust_crates/vendor:futures-test",
         ],

@@ -24,6 +24,7 @@ rustc_library(
     ],
     version = "0.1.0",
     visibility = [
+        "//src/developer/ffx/lib/discovery:__pkg__",
         "//src/developer/ffx/lib/fastboot:__pkg__",
         "//src/developer/ffx/lib/fastboot/connection_factory:__pkg__",
         "//src/developer/ffx/lib/fastboot/transport/factory:__pkg__",

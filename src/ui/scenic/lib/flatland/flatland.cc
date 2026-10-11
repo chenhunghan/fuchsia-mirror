@@ -632,6 +632,8 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
   // - "leaf node" applications typically don't have child views
   const bool recompute_view_tree = !links_to_children_.empty() || view_tree_dirty_;
   view_tree_dirty_ = false;
+  const bool recompute_scene_state = scene_state_dirty_;
+  scene_state_dirty_ = false;
 
   // Move release fences of released bindings into the Present release fences and counters.
   for (auto& fence : unbound_release_fences_) {
@@ -648,7 +650,7 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
        uber_struct = std::move(uber_struct), link_operations = std::move(pending_link_operations_),
        release_fences = std::move(release_fences), release_counters = std::move(release_counters),
        present_fences = std::move(present_fences), trace_enabled, kLoadBearingTraceNonce,
-       recompute_view_tree]() mutable {
+       recompute_view_tree, recompute_scene_state]() mutable {
         // NOTE: this name is important for benchmarking.  Do not remove or modify it
         // without also updating the "process_gfx_trace.go" script.
         TRACE_DURATION("gfx", "scenic_impl::Session::ScheduleNextPresent", "session_id",
@@ -666,7 +668,8 @@ void Flatland::Present(fuchsia_ui_composition::wire::PresentArgs& args) {
 
         // Push the UberStruct, then schedule the associated Present that will eventually publish
         // it to the InstanceMap used for rendering.
-        uber_struct_queue_->Push(present_id, std::move(uber_struct), recompute_view_tree);
+        uber_struct_queue_->Push(present_id, std::move(uber_struct), recompute_view_tree,
+                                 recompute_scene_state);
         flatland_presenter_->ScheduleUpdateForSession(
             zx::time(requested_presentation_time), {session_id_, present_id}, unsquashable,
             std::move(release_fences), std::move(release_counters), std::move(present_fences),
@@ -813,6 +816,7 @@ void Flatland::CreateViewHelper(
   link_to_parent_ = std::move(new_link_to_parent);
 
   view_tree_dirty_ = true;
+  scene_state_dirty_ = true;
 }
 
 bool Flatland::RegisterViewBoundProtocols(
@@ -892,16 +896,21 @@ void Flatland::ReleaseView() {
 
   // Delay the actual destruction of the Link until the next Present().
   pending_link_operations_.push_back([old_link_to_parent = std::move(old_link_to_parent)]() {});
+  scene_state_dirty_ = true;
 }
 
 void Flatland::Clear(ClearCompleter::Sync& completer) { Clear(); }
 
 void Flatland::Clear() {
-  // Clear user-defined mappings and local matrices.
+  // Clear user-defined mappings and local per-transform state.
   transforms_.clear();
   content_handles_.clear();
   ClearFlatland2State();
   matrices_.clear();
+  opacity_values_.clear();
+  clip_regions_.clear();
+  hit_regions_.clear();
+  root_transform_ = TransformHandle(0, 0);
 
   // We always preserve the link origin when clearing the graph. This call will place all other
   // TransformHandles in the dead_transforms set in the next Present(), which will trigger cleanup
@@ -925,6 +934,7 @@ void Flatland::Clear() {
       [local_links = std::move(local_links)]() mutable { local_links.clear(); });
 
   debug_name_.clear();
+  scene_state_dirty_ = true;
 }
 
 void Flatland::CreateTransform(CreateTransformRequestView request,
@@ -978,6 +988,7 @@ void Flatland::SetTranslation(TransformId transform_id, fuchsia_math::wire::Vec 
   }
 
   matrices_[transform_kv->second].SetTranslation(translation);
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetOrientation(SetOrientationRequestView request,
@@ -1006,6 +1017,7 @@ void Flatland::SetOrientation(TransformId transform_id,
   }
 
   matrices_[transform_kv->second].SetOrientation(orientation);
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetScale(SetScaleRequestView request, SetScaleCompleter::Sync& completer) {
@@ -1049,6 +1061,7 @@ void Flatland::SetScale(TransformId transform_id, fuchsia_math::wire::VecF scale
   }
 
   matrices_[transform_kv->second].SetScale(scale);
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetOpacity(SetOpacityRequestView request, SetOpacityCompleter::Sync& completer) {
@@ -1091,6 +1104,7 @@ void Flatland::SetOpacity(TransformId transform_id, float opacity) {
   } else {
     opacity_values_[transform_kv->second] = opacity;
   }
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetClipBoundary(SetClipBoundaryRequestView request,
@@ -1122,6 +1136,7 @@ void Flatland::SetClipBoundary(TransformId transform_id,
     FLATLAND_VERBOSE_LOG << "Flatland::SetClipBoundary() session_id=" << session_id_
                          << "  transform_id=" << transform_id << "  ... clearing clip region";
     clip_regions_.erase(transform_kv->second);
+    scene_state_dirty_ = true;
     return;
   }
 
@@ -1148,6 +1163,7 @@ void Flatland::SetClipBoundaryInternal(TransformHandle handle, TransformClipRegi
   }
 
   clip_regions_[handle] = bounds;
+  scene_state_dirty_ = true;
 }
 
 void Flatland::ClearFlatland2State() {
@@ -1166,7 +1182,12 @@ void Flatland::ClearFlatland2State() {
 
 void Flatland::ProcessDeadTransforms(const TransformGraph::TopologyData& data) {
   for (const auto& dead_handle : data.dead_transforms) {
+    // No `scene_state_dirty_` here: a dead transform is unreachable, so the transform stage never
+    // read these entries, and whatever made it unreachable set the flag when it happened.
     matrices_.erase(dead_handle);
+    opacity_values_.erase(dead_handle);
+    clip_regions_.erase(dead_handle);
+    hit_regions_.erase(dead_handle);
 
     auto it = layer_stacks_.find(dead_handle);
     if (it != layer_stacks_.end()) {
@@ -1215,6 +1236,7 @@ void Flatland::AddChild(TransformId parent_transform_id, TransformId child_trans
     CloseConnection(FlatlandError::kBadOperation);
     return;
   }
+  scene_state_dirty_ = true;
 }
 
 void Flatland::RemoveChild(RemoveChildRequestView request, RemoveChildCompleter::Sync& completer) {
@@ -1256,6 +1278,7 @@ void Flatland::RemoveChild(TransformId parent_transform_id, TransformId child_tr
     CloseConnection(FlatlandError::kBadOperation);
     return;
   }
+  scene_state_dirty_ = true;
 }
 
 void Flatland::ReplaceChildren(ReplaceChildrenRequestView request,
@@ -1331,6 +1354,7 @@ void Flatland::ReplaceChildren(TransformId parent_transform_id,
     CloseConnection(FlatlandError::kBadOperation);
     return;
   }
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetRootTransform(SetRootTransformRequestView request,
@@ -1342,6 +1366,8 @@ void Flatland::SetRootTransform(TransformId transform_id) {
   // SetRootTransform(0) is special -- it only clears the existing root transform.
   if (transform_id == kInvalidTransformId) {
     transform_graph_.ClearChildren(local_root_);
+    root_transform_ = TransformHandle(0, 0);
+    scene_state_dirty_ = true;
     return;
   }
 
@@ -1363,6 +1389,7 @@ void Flatland::SetRootTransform(TransformId transform_id) {
   FX_DCHECK(added);
 
   root_transform_ = global_kv->second;
+  scene_state_dirty_ = true;
 }
 
 void Flatland::CreateViewport(CreateViewportRequestView request,
@@ -1484,6 +1511,7 @@ void Flatland::CreateViewport(
       << "Integer overflow.  width=" << width << ", height=" << height;
   SetClipBoundaryInternal(parent_transform_handle,
                           TransformClipRegion({.x = 0, .y = 0, .width = width, .height = height}));
+  scene_state_dirty_ = true;
 }
 
 LayerObject* Flatland::GetFacadeLayerObject(TransformHandle content_handle) {
@@ -2234,6 +2262,7 @@ void Flatland::SetContent(TransformId transform_id, ContentId content_id) {
 
   if (content_id == kInvalidContentId) {
     transform_graph_.ClearPriorityChild(transform_kv->second);
+    scene_state_dirty_ = true;
     FLATLAND_VERBOSE_LOG << "Flatland::SetContent() session_id=" << session_id_
                          << "  client_transform_id=" << transform_id
                          << "  transform=" << transform_kv->second << "  ... cleared content.";
@@ -2255,6 +2284,7 @@ void Flatland::SetContent(TransformId transform_id, ContentId content_id) {
                        << "  content=" << content_kv->second;
 
   transform_graph_.SetPriorityChild(transform_kv->second, content_kv->second);
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetTransformContent(SetTransformContentRequestView request,
@@ -2329,6 +2359,10 @@ void Flatland::SetTransformContent(TransformId transform_id, LayerStackId layer_
                        << "  content=" << stack_it->second;
 
   transform_graph_.SetPriorityChild(transform_kv->second, stack_it->second);
+  // Attaching, detaching, or swapping a stack changes the topology and rebuilds the global
+  // transform state; swapping the image on a stable layer (`SetLayerImage()`) does not. Clients
+  // that change content every frame should do the latter.
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetTransformContent(TransformId transform_id, ViewportId viewport_id) {
@@ -2384,6 +2418,7 @@ void Flatland::ClearTransformContent(TransformId transform_id) {
   }
 
   transform_graph_.ClearPriorityChild(transform_kv->second);
+  scene_state_dirty_ = true;
   FLATLAND_VERBOSE_LOG << "Flatland::SetTransformContent() session_id=" << session_id_
                        << "  client_transform_id=" << transform_id << " ... cleared content.";
 }
@@ -2465,6 +2500,7 @@ void Flatland::SetViewportProperties(
                           TransformClipRegion({.x = 0, .y = 0, .width = width, .height = height}));
 
   link_system_->UpdateViewportPropertiesFor(viewport_handle, link_data.properties);
+  scene_state_dirty_ = true;
 }
 
 void Flatland::SetViewportProperties2(SetViewportProperties2RequestView request,
@@ -2587,6 +2623,7 @@ void Flatland::ReleaseViewport(
 
         completer(std::move(return_token));
       });
+  scene_state_dirty_ = true;
 }
 
 void Flatland::ReleaseViewport2(ReleaseViewport2RequestView request,
@@ -3621,6 +3658,7 @@ void Flatland::SetPriorityChildForTest(TransformId parent, TransformHandle child
   auto it = transforms_.find(parent);
   if (it != transforms_.end()) {
     transform_graph_.SetPriorityChild(it->second, child);
+    scene_state_dirty_ = true;
   }
 }
 

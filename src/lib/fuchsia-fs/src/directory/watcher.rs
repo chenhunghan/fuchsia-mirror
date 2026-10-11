@@ -6,7 +6,7 @@
 
 #![deny(missing_docs)]
 
-use flex_client::{MessageBuf, ProxyHasDomain};
+use flex_client::{MessageBuf, ProxyHasDomain, channel_to_async};
 use flex_fuchsia_io as fio;
 use futures::stream::{FusedStream, Stream};
 use std::ffi::OsStr;
@@ -15,9 +15,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
-
-#[cfg(not(feature = "fdomain"))]
-use fuchsia_async as fasync;
 
 #[derive(Debug, Error, Clone)]
 #[allow(missing_docs)]
@@ -145,10 +142,7 @@ impl Watcher {
         let mut buf = MessageBuf::new();
         buf.ensure_capacity_bytes(fio::MAX_BUF as usize);
         Ok(Watcher {
-            #[cfg(not(feature = "fdomain"))]
-            ch: fasync::Channel::from_channel(client_end.into_channel()),
-            #[cfg(feature = "fdomain")]
-            ch: client_end.into_channel(),
+            ch: channel_to_async(client_end.into_channel()),
             buf,
             idx: 0,
             state: WatcherState::Watching,

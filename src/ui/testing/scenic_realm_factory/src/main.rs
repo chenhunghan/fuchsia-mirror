@@ -14,6 +14,7 @@ use fidl_fuchsia_ui_composition_internal::{
 };
 use fidl_fuchsia_ui_display_singleton::{InfoMarker as DisplayInfoMarker, VsyncSourceMarker};
 use fidl_fuchsia_ui_focus::FocusChainListenerRegistryMarker;
+use fidl_fuchsia_ui_input_internal::InputOwnershipMarker;
 use fidl_fuchsia_ui_observation_scope::RegistryMarker as ScopedObservationRegistryMarker;
 use fidl_fuchsia_ui_observation_test::RegistryMarker as ObservationRegistryMarker;
 use fidl_fuchsia_ui_pointer_augment::LocalHitMarker;
@@ -242,6 +243,7 @@ async fn assemble_realm(
                 .capability(Capability::protocol::<ScreenCaptureMarker>())
                 .capability(Capability::protocol::<ScreenCaptureMarker2>())
                 .capability(Capability::protocol::<DisplayOwnershipMarker>())
+                .capability(Capability::protocol::<InputOwnershipMarker>())
                 .capability(Capability::protocol::<DisplayInfoMarker>())
                 .capability(Capability::protocol::<VsyncSourceMarker>())
                 .capability(Capability::protocol::<ObservationRegistryMarker>())

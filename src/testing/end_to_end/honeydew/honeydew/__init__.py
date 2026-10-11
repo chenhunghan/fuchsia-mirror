@@ -4,22 +4,55 @@
 """Honeydew python module."""
 
 import logging
+import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from honeydew import errors
+from honeydew import affordances_capable, errors
+from honeydew.device_classes import (
+    android_device,
+    smart_display,
+)
 from honeydew.fuchsia_device import fuchsia_device
+from honeydew.transports.ffx import ffx as ffx_transport
+from honeydew.transports.ffx import types as ffx_types
 from honeydew.transports.ffx.config import FfxConfigData
 from honeydew.typing import custom_types
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-_CUSTOM_FUCHSIA_DEVICE_CLASS: type[
-    fuchsia_device.FuchsiaDevice
-] = fuchsia_device.FuchsiaDevice
+# Any new concrete device class added under honeydew/device_classes/ must be
+# added to this dict so create_device() can resolve target products to that
+# device class:
+# - Key: Regex pattern matching the target's `build.product` from
+#   `ffx target show --json` output (returned by `FFX.get_target_product()`).
+# - Value: Device class to instantiate and return for matching products.
+# LINT.IfChange
+_DEFAULT_PRODUCT_TO_DEVICE_CLASS_DICT: dict[
+    str, type[fuchsia_device.FuchsiaDevice]
+] = {
+    r"^(?!.*recovery).*(sorrel|iris|starnix)": android_device.AndroidDevice,
+    r"^(?!.*recovery).*smart_display": smart_display.SmartDisplay,
+}
+# LINT.ThenChange(//src/testing/end_to_end/honeydew/BUILD.gn)
+_REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT: dict[
+    str, type[fuchsia_device.FuchsiaDevice]
+] = {}
 
 
-# The return type of this function can change at runtime with register_custom_fuchsia_device which
-# modifies _CUSTOM_FUCHSIA_DEVICE_CLASS.
+class _NoOpDeviceIpChange(affordances_capable.FuchsiaDeviceIpChange):
+    """No-op FuchsiaDeviceIpChange used for short-lived FFX queries prior to device creation."""
+
+    def register_for_on_device_ip_change(
+        self,
+        fn: Callable[[custom_types.IpPort], None]
+        | Callable[[custom_types.IpPort], Awaitable[None]],
+    ) -> None:
+        pass
+
+
+# The return type of this function can change at runtime based on target product
+# and device classes registered via register_device_classes.
 def create_device(
     device_info: custom_types.DeviceInfo,
     ffx_config_data: FfxConfigData,
@@ -67,8 +100,7 @@ def create_device(
                 }
 
     Returns:
-        Either a FuchsiaDevice or an instance of the class configured
-        with register_custom_fuchsia_device.
+        FuchsiaDevice or a subclass device object matching the target's product type.
 
     Raises:
         errors.FuchsiaDeviceError: Failed to create Fuchsia device object.
@@ -85,7 +117,10 @@ def create_device(
                 device_info.ip_port,
             )
 
-        device_class = get_custom_fuchsia_device()
+        device_class: type[fuchsia_device.FuchsiaDevice] = _get_device_class(
+            device_info=device_info,
+            ffx_config_data=ffx_config_data,
+        )
         return device_class(
             device_info=device_info,
             ffx_config_data=ffx_config_data,
@@ -97,26 +132,109 @@ def create_device(
         ) from err
 
 
-def register_custom_fuchsia_device(
-    fuchsia_device_class: type[fuchsia_device.FuchsiaDevice],
+def register_device_classes(
+    product_to_device_class_dict: dict[str, type[fuchsia_device.FuchsiaDevice]],
 ) -> None:
-    """Registers a custom fuchsia device class implementation.
+    """Registers custom product-to-device-class mappings with Honeydew.
 
     Args:
-        fuchsia_device_class: custom fuchsia device class implementation.
+        product_to_device_class_dict: Dict mapping product regex pattern to
+            device class.
     """
     _LOGGER.info(
-        "Registering custom FuchsiaDevice class '%s' with Honeydew",
-        fuchsia_device_class,
+        "Registering product to device class dict '%s' with Honeydew",
+        product_to_device_class_dict,
     )
-    global _CUSTOM_FUCHSIA_DEVICE_CLASS
-    _CUSTOM_FUCHSIA_DEVICE_CLASS = fuchsia_device_class
+    _REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT.update(
+        product_to_device_class_dict
+    )
 
 
-def get_custom_fuchsia_device() -> type:
-    """Returns if any custom fuchsia device class implementation is available. Otherwise, None.
+# List all the private methods in alphabetical order
+def _get_device_class(
+    device_info: custom_types.DeviceInfo,
+    ffx_config_data: FfxConfigData,
+) -> type[fuchsia_device.FuchsiaDevice]:
+    """Returns device class associated with the device based on its product type.
+
+    Device class resolution follows this priority order:
+    1. Regex pattern match (`re.search`) against `_REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT`.
+    2. Regex pattern match (`re.search`) against `_DEFAULT_PRODUCT_TO_DEVICE_CLASS_DICT`.
+    3. Fallback to the base `FuchsiaDevice` class if no match is found.
+
+    Args:
+        device_info: Fuchsia device information.
+        ffx_config_data: Ffx configuration that need to be used while running ffx
+            commands.
 
     Returns:
-        Custom fuchsia device class
+        Device class type.
     """
-    return _CUSTOM_FUCHSIA_DEVICE_CLASS
+    query: str = (
+        str(device_info.ip_port) if device_info.ip_port else device_info.name
+    )
+    ffx_obj: ffx_transport.FFX = ffx_transport.FFX(
+        args=ffx_types.FfxArgs(
+            query=query,
+            name=device_info.name,
+            config_data=ffx_config_data,
+            use_monitor_state=False,
+            device_ip_change=(
+                _NoOpDeviceIpChange() if device_info.ip_port else None
+            ),
+        )
+    )
+    product_type: str = ffx_obj.get_target_product()
+
+    # Priority 1: Regex pattern match against custom registered mappings.
+    if _REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT:
+        _LOGGER.info(
+            "Checking registered product to device class dict '%s' for '%s' (product: '%s')",
+            _REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT,
+            device_info.name,
+            product_type,
+        )
+        for (
+            pattern,
+            device_class,
+        ) in _REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT.items():
+            if re.search(pattern, product_type, re.IGNORECASE):
+                _LOGGER.info(
+                    "Found matching registered device class implementation for '%s' (product: '%s') using pattern '%s' as '%s'",
+                    device_info.name,
+                    product_type,
+                    pattern,
+                    device_class.__name__,
+                )
+                return device_class
+
+    # Priority 2: Regex pattern match against Honeydew's default mappings.
+    _LOGGER.info(
+        "Checking default product to device class dict '%s' for '%s' (product: '%s')",
+        _DEFAULT_PRODUCT_TO_DEVICE_CLASS_DICT,
+        device_info.name,
+        product_type,
+    )
+    for (
+        pattern,
+        device_class,
+    ) in _DEFAULT_PRODUCT_TO_DEVICE_CLASS_DICT.items():
+        if re.search(pattern, product_type, re.IGNORECASE):
+            _LOGGER.info(
+                "Found matching default device class implementation for '%s' (product: '%s') using pattern '%s' as '%s'",
+                device_info.name,
+                product_type,
+                pattern,
+                device_class.__name__,
+            )
+            return device_class
+
+    # Priority 3: Fallback to default FuchsiaDevice.
+    _LOGGER.info(
+        "Didn't find any matching device class implementation for '%s' (product: '%s'). "
+        "Returning default '%s'",
+        device_info.name,
+        product_type,
+        fuchsia_device.FuchsiaDevice.__name__,
+    )
+    return fuchsia_device.FuchsiaDevice

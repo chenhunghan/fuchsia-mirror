@@ -14,6 +14,7 @@
                     "prebuilt/tools/gsutil",
                     "prebuilt/tools/lkg",
                     "prebuilt/tools/logdog",
+                    "prebuilt/tools/luci-auth",
                     "prebuilt/tools/resultdb",
                     "prebuilt/tools/shac",
                     "prebuilt/tools/zedmon"

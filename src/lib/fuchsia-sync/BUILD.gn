@@ -75,14 +75,20 @@ FUCHSIA_SYNC_DEPS_COMMON = [ "//third_party/rust_crates:lock_api" ]
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "FUCHSIA_SYNC_DEPS_COMMON" ])
 
-FUCHSIA_SYNC_DEPS_FUCHSIA = [
-  "//sdk/rust/zx",
-  "//zircon/system/ulib/sync",
-]
+FUCHSIA_SYNC_DEPS_FUCHSIA = [ "//sdk/rust/zx" ]
 
 # To avoid "Assignment had no effect" from GN.
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "FUCHSIA_SYNC_DEPS_FUCHSIA" ])
+
+FUCHSIA_SYNC_LINK_DEPS = []
+if (is_fuchsia) {
+  FUCHSIA_SYNC_LINK_DEPS += [ "//zircon/system/ulib/sync" ]
+}
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "FUCHSIA_SYNC_LINK_DEPS" ])
 
 FUCHSIA_SYNC_DEPS_HOST = [
   "//third_party/rust_crates:parking_lot",
@@ -105,7 +111,7 @@ DETECT_LOCK_CYCLE_FLAGS = [ "--cfg=detect_lock_cycles" ]
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "DETECT_LOCK_CYCLE_FLAGS" ])
 
-DETECT_LOCK_CYCLE_DEPS = [ "//third_party/rust_crates:tracing-mutex-0.3.2" ]
+DETECT_LOCK_CYCLE_DEPS = [ "//third_party/rust_crates:tracing-mutex-0.3.3" ]
 
 # To avoid "Assignment had no effect" from GN.
 # It's possible this variable is only used in if conditions (e.g. is_host).
@@ -114,6 +120,7 @@ not_needed([ "DETECT_LOCK_CYCLE_DEPS" ])
 rustc_library("fuchsia-sync") {
   sources = FUCHSIA_SYNC_SRCS
   edition = "2024"
+  link_deps = FUCHSIA_SYNC_LINK_DEPS
   if (fuchsia_sync_detect_lock_cycles) {
     rustflags = DETECT_LOCK_CYCLE_FLAGS
   } else {
@@ -136,6 +143,7 @@ rustc_library("fuchsia-sync") {
 rustc_test("fuchsia-sync-tests-detect-cycles") {
   sources = FUCHSIA_SYNC_SRCS
   edition = "2024"
+  link_deps = FUCHSIA_SYNC_LINK_DEPS
   rustflags = DETECT_LOCK_CYCLE_FLAGS
   deps = []
   deps += FUCHSIA_SYNC_DEPS_COMMON
@@ -150,6 +158,7 @@ rustc_test("fuchsia-sync-tests-detect-cycles") {
 rustc_test("fuchsia-sync-tests-no-detect-cycles") {
   sources = FUCHSIA_SYNC_SRCS
   edition = "2024"
+  link_deps = FUCHSIA_SYNC_LINK_DEPS
   deps = []
   deps += FUCHSIA_SYNC_DEPS_COMMON
   deps += FUCHSIA_SYNC_TEST_DEPS

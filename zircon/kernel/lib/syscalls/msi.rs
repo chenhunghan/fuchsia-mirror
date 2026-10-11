@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, HandleValue, MsiAllocation, MsiDispatcher, MsiInterruptDispatcher,
+    HandleValue, MsiAllocation, MsiDispatcher, MsiInterruptDispatcher, ProcessDispatcher,
     VmObjectDispatcher, validate_resource_kind_base,
 };
 use debug::ltracef;
@@ -45,8 +45,13 @@ pub fn sys_msi_create(
         vmo_offset
     );
 
-    let msi_alloc_disp = Dispatcher::get::<MsiDispatcher>(msi_alloc)?;
-    let vmo_disp = Dispatcher::get_with_rights::<VmObjectDispatcher>(vmo, ZX_RIGHT_MAP)?;
+    let up = ProcessDispatcher::get_current();
+    let msi_alloc_disp = up.handle_table().get_dispatcher::<MsiDispatcher>(&up, msi_alloc)?;
+    let vmo_disp = up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+        &up,
+        vmo,
+        ZX_RIGHT_MAP,
+    )?;
 
     let (kernel_handle, rights) = MsiInterruptDispatcher::create(
         msi_alloc_disp.msi_allocation(),

@@ -50,7 +50,7 @@ resume_context          .req x24
   // garbage and run afoul of EL1 sp alignment checks if blindly installed.
   mov tmp, xzr
   mov sp, tmp
-  bl ArmDropToEl1WithoutEl2Monitor
+  bl ArmDropToEl1
 
   // Make sure no old exception handlers are installed.
   msr vbar_el1, xzr
@@ -74,7 +74,14 @@ resume_context          .req x24
   // Set up the mmu
 
   // Invalidate the entire TLB
+  mrs tmp, CurrentEL
+  cmp tmp, #(2 << 2)
+  beq .Ltlbi_el2_1
   tlbi vmalle1is
+  b .Ltlbi_done_1
+.Ltlbi_el2_1:
+  tlbi alle2is
+.Ltlbi_done_1:
   dsb sy
   isb
 
@@ -120,7 +127,14 @@ resume_context          .req x24
   isb
 
   // Invalidate the entire TLB
+  mrs tmp, CurrentEL
+  cmp tmp, #(2 << 2)
+  beq .Ltlbi_el2_2
   tlbi vmalle1
+  b .Ltlbi_done_2
+.Ltlbi_el2_2:
+  tlbi alle2
+.Ltlbi_done_2:
   dsb sy
   isb
 
@@ -137,7 +151,7 @@ resume_context          .req x24
 #if __has_feature(shadow_call_stack)
   ldr shadow_call_sp, [x0] // arm64_sp_info.shadow_call_sp
 #endif
-  add x1, x0, #32 // compute the top of the structure for TPIDR (see arch.cc)
+  add x1, x0, #32 // compute the top of the structure for TPIDR (see secondary.cc)
   msr tpidr_el1, x1
 
   // SP will start at the bottom of this structure growing down.

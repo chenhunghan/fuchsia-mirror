@@ -127,13 +127,22 @@ def line_of(code, offset):
 def gn_types(text):
     """Maps each GN target name to the set of templates defining it (several under if/else) and a line."""
     code = blank_comments(text)
+    local_tmpls = {}
+    for m in re.finditer(r'\btemplate\(\s*"([^"$]+)"\s*\)\s*\{', code):
+        body = code[m.end() : call_end(code, m.end() - 1) - 1]
+        tvars = {"target_name"} | {
+            vm.group(1) for vm in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*target_name\b", body)
+        }
+        for im in re.finditer(r"\b([A-Za-z_]\w*)\(\s*([A-Za-z_]\w*|\$\{?target_name\}?)\s*\)\s*\{", body):
+            if im.group(1) not in NOT_TARGETS and (im.group(2) in tvars or "target_name" in im.group(2)):
+                local_tmpls.setdefault(m.group(1), set()).add(im.group(1))
     out = {}
     for m in GN_TARGET.finditer(code):
         tmpl, name = m.group(1), m.group(2)
         if tmpl in NOT_TARGETS:
             continue
         types, line = out.get(name, (set(), line_of(code, m.start())))
-        types.add(tmpl)
+        types.update(local_tmpls.get(tmpl, {tmpl}))
         out[name] = (types, line)
     return out
 

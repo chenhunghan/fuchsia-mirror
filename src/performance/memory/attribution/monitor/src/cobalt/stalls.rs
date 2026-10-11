@@ -4,20 +4,23 @@
 
 use anyhow::Result;
 use cobalt_client::traits::AsEventCode;
+use fidl_fuchsia_metrics as fmetrics;
 use futures::StreamExt;
 use memory_metrics_registry::cobalt_registry;
+use stalls::refaults::RefaultProvider;
 use stalls::{MemoryStallMetrics, StallProvider};
 use zx::MonotonicInstant;
-use {anyhow, fidl_fuchsia_metrics as fmetrics};
 
 use crate::error_from_metrics_error;
 
-/// Collect and publish to Cobalt memory stall increase rate, every hour.
+/// Collect and publish to Cobalt memory stall and page refault increase rates, every hour.
 pub async fn collect_stalls_forever(
     stalls_provider: impl StallProvider,
+    refault_provider: impl RefaultProvider,
     metric_event_logger: fmetrics::MetricEventLoggerProxy,
 ) -> Result<()> {
     let mut last_stall = MemoryStallMetrics::default();
+    let mut last_refaults = 0;
 
     // Wait for one hour after device start to get the first stall value. We don't use the one-hour
     // timer as we may have been started later than at boot exactly.
@@ -26,6 +29,7 @@ pub async fn collect_stalls_forever(
     let mut timer = fuchsia_async::Interval::new(zx::Duration::from_hours(1));
     loop {
         let new_stall = stalls_provider.get_stall_info()?;
+        let new_refaults = refault_provider.get_count();
 
         // The Cobalt metrics for stalls expect milliseconds, as defined in the Cobalt registry.
         let stall_some_event = fmetrics::MetricEvent {
@@ -46,10 +50,20 @@ pub async fn collect_stalls_forever(
                 cobalt_registry::MemoryMetricDimensionStallType::Full.as_event_code(),
             ],
         };
+        // The counter is monotonic, but let's saturate to 0 if it
+        // ever gets reset to avoid unsigned underflow.
+        let refaults_event = fmetrics::MetricEvent {
+            metric_id: cobalt_registry::MEMORY_PAGE_REFAULTS_PER_HOUR_METRIC_ID,
+            payload: fmetrics::MetricEventPayload::IntegerValue(
+                new_refaults.saturating_sub(last_refaults).try_into().unwrap_or(i64::MAX),
+            ),
+            event_codes: vec![],
+        };
 
         last_stall = new_stall;
+        last_refaults = new_refaults;
 
-        let events = vec![stall_some_event, stall_full_event];
+        let events = vec![stall_some_event, stall_full_event, refaults_event];
         metric_event_logger.log_metric_events(&events).await?.map_err(error_from_metrics_error)?;
         timer.next().await;
     }
@@ -62,7 +76,7 @@ mod tests {
     use fuchsia_async as fasync;
     use futures::task::Poll;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::time::Duration;
 
     fn get_stall_provider() -> impl StallProvider {
@@ -78,7 +92,7 @@ mod tests {
         }
 
         impl StallProvider for FakeStallProvider {
-            fn get_stall_info(&self) -> Result<MemoryStallMetrics, anyhow::Error> {
+            fn get_stall_info(&self) -> Result<MemoryStallMetrics> {
                 let count = self.count.fetch_add(1, Ordering::Relaxed);
                 let memory_stall = MemoryStallMetrics {
                     some: Duration::from_millis((count * 10).into()),
@@ -91,13 +105,34 @@ mod tests {
         FakeStallProvider::default()
     }
 
+    fn get_refault_provider() -> impl RefaultProvider {
+        #[derive(Clone, Default)]
+        struct FakeRefaultProvider {
+            calls: Arc<AtomicU64>,
+        }
+
+        impl RefaultProvider for FakeRefaultProvider {
+            fn get_count(&self) -> u64 {
+                // Return 100 at hour 1 (delta = 100) and 350 at hour 2 (delta = 250) so that
+                // the two intervals produce distinct deltas.
+                match self.calls.fetch_add(1, Ordering::Relaxed) {
+                    0 => 100,
+                    _ => 350,
+                }
+            }
+        }
+
+        FakeRefaultProvider::default()
+    }
+
     #[test]
-    fn test_periodic_stalls_collection() -> anyhow::Result<()> {
+    fn test_periodic_stalls_collection() -> Result<()> {
         // Setup executor.
         let mut exec = fasync::TestExecutor::new_with_fake_time();
 
         // Setup mock data providers.
         let data_provider = get_stall_provider();
+        let refault_provider = get_refault_provider();
 
         // Setup test proxy to observe emitted events from the service.
         let (metric_event_logger, metric_event_request_stream) =
@@ -109,7 +144,7 @@ mod tests {
         );
         // Service under test.
         let mut stalls_collector = fuchsia_async::Task::spawn(async move {
-            collect_stalls_forever(data_provider, metric_event_logger).await
+            collect_stalls_forever(data_provider, refault_provider, metric_event_logger).await
         });
 
         // Give the service the opportunity to run.
@@ -143,7 +178,7 @@ mod tests {
         let event = event.ok_or_else(|| anyhow!("Metrics stream unexpectedly closed"))??;
         match event {
             fmetrics::MetricEventLoggerRequest::LogMetricEvents { events, responder, .. } => {
-                assert_eq!(events.len(), 2);
+                assert_eq!(events.len(), 3);
                 // Kernel metrics
                 assert_eq!(
                     events[0],
@@ -163,6 +198,14 @@ mod tests {
                             cobalt_registry::MemoryMetricDimensionStallType::Full.as_event_code()
                         ],
                         payload: fmetrics::MetricEventPayload::IntegerValue(20)
+                    }
+                );
+                assert_eq!(
+                    events[2],
+                    fmetrics::MetricEvent {
+                        metric_id: cobalt_registry::MEMORY_PAGE_REFAULTS_PER_HOUR_METRIC_ID,
+                        event_codes: vec![],
+                        payload: fmetrics::MetricEventPayload::IntegerValue(100)
                     }
                 );
                 responder.send(Ok(()))?;
@@ -192,7 +235,7 @@ mod tests {
         let event = event.ok_or_else(|| anyhow!("Metrics stream unexpectedly closed"))??;
         match event {
             fmetrics::MetricEventLoggerRequest::LogMetricEvents { events, responder, .. } => {
-                assert_eq!(events.len(), 2);
+                assert_eq!(events.len(), 3);
                 // Kernel metrics
                 assert_eq!(
                     events[0],
@@ -212,6 +255,14 @@ mod tests {
                             cobalt_registry::MemoryMetricDimensionStallType::Full.as_event_code()
                         ],
                         payload: fmetrics::MetricEventPayload::IntegerValue(20)
+                    }
+                );
+                assert_eq!(
+                    events[2],
+                    fmetrics::MetricEvent {
+                        metric_id: cobalt_registry::MEMORY_PAGE_REFAULTS_PER_HOUR_METRIC_ID,
+                        event_codes: vec![],
+                        payload: fmetrics::MetricEventPayload::IntegerValue(250)
                     }
                 );
                 responder.send(Ok(()))?;

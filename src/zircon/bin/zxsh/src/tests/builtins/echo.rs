@@ -105,3 +105,25 @@ fn test_echo_unknown_escape_and_trailing_backslash() {
     assert_eq!(code, 0);
     assert_eq!(stdout, &[b'\\', b'z', b' ', b'e', b'n', b'd', b'\\', b'\n']);
 }
+
+#[test]
+fn test_echo_dash_like_arguments() {
+    let run = |args: &[&str]| -> Vec<u8> {
+        let mut state = ShellState::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let bargs: Vec<BString> = args.iter().map(|&s| BString::from(s)).collect();
+        let code =
+            builtin_echo(&bargs, &mut state, &mut std::io::empty(), &mut stdout, &mut stderr);
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        stdout
+    };
+
+    assert_eq!(run(&["--", "hello"]), b"-- hello\n");
+    assert_eq!(run(&["-x", "hello"]), b"-x hello\n");
+    assert_eq!(run(&["-e", "hello"]), b"-e hello\n");
+    assert_eq!(run(&["-nfoo"]), b"-nfoo\n");
+    assert_eq!(run(&["-"]), b"-\n");
+    assert_eq!(run(&["-n", "-n", "hello"]), b"-n hello");
+}

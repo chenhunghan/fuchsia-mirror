@@ -104,9 +104,6 @@ rustc_library("unittest-rs") {
 
   if (is_kernel) {
     features = [ "kernel" ]
-
-    # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
-    configs += [ "//zircon/kernel/switch:allow-too-many-arguments" ]
   }
 
   with_unit_tests = true

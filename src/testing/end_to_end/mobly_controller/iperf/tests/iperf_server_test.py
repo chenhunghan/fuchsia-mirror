@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -17,6 +18,7 @@ from iperf.iperf_server import (
 )
 from libs.ssh import connection, settings
 from libs.types import ControllerConfig
+from mobly import logger
 
 MOCK_LOGFILE_PATH = "/tmp/mock_iperf_log.log"
 
@@ -289,9 +291,7 @@ class IPerfServerOverSshTest(unittest.TestCase):
             )
             self.assertIsNone(server._nmcli)
             self.assertIsNone(server._journalctl)
-            self.assertEqual(
-                server.get_systemd_journal(), "journalctl not available"
-            )
+            self.assertIsNone(server.get_systemd_journal())
 
     @mock.patch("builtins.open")
     def test_openwrt_one_start_stop_with_killall(
@@ -406,8 +406,8 @@ class IPerfServerOverSshTest(unittest.TestCase):
             server.start()
             self.assertIsNone(server._iperf_pid)
 
-    def test_get_ssh_refreshes_runners(self) -> None:
-        """Verifies _get_ssh refreshes _journalctl and _ss when _ssh_session was closed."""
+    def test_close_ssh_preserves_session_and_runners(self) -> None:
+        """Verifies close_ssh closes the session without resetting _ssh_session or runners."""
         ssh_cfg = self._create_ssh_settings(user="root")
         mock_ssh = mock.create_autospec(connection.SshConnection)
 
@@ -415,13 +415,7 @@ class IPerfServerOverSshTest(unittest.TestCase):
             "libs.commands.command.LinuxCommand.available", return_value=True
         ), mock.patch(
             "antlion.utils.get_interface_based_on_ip", return_value="eth1"
-        ), mock.patch(
-            "libs.ssh.connection.SshConnection"
-        ) as mock_ssh_cls:
-            mock_new_ssh = mock.Mock()
-            mock_new_ssh.run.return_value.stdout = b""
-            mock_ssh_cls.return_value = mock_new_ssh
-
+        ):
             server = IPerfServerOverSsh(
                 ssh_settings=ssh_cfg,
                 port=5201,
@@ -432,14 +426,137 @@ class IPerfServerOverSshTest(unittest.TestCase):
             old_ss = server._ss
 
             server.close_ssh()
-            self.assertIsNone(server._ssh_session)
+            mock_ssh.close.assert_called_once()
+            self.assertIs(server._ssh_session, mock_ssh)
+            self.assertIs(server._get_ssh(), mock_ssh)
+            self.assertIs(server._journalctl, old_journal)
+            self.assertIs(server._ss, old_ss)
 
-            new_ssh = server._get_ssh()
-            self.assertEqual(new_ssh, mock_new_ssh)
-            self.assertIsNotNone(server._journalctl)
-            self.assertIsNotNone(server._ss)
-            self.assertIsNot(server._journalctl, old_journal)
-            self.assertIsNot(server._ss, old_ss)
+    def test_start_after_close_ssh_succeeds(self) -> None:
+        """Verifies start() succeeds without error after close_ssh()."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+        mock_job = mock.Mock()
+        mock_job.stdout = b"12345\n"
+        mock_ssh.run_async.return_value = mock_job
+        mock_ssh.run.return_value.stdout = b""
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            server.close_ssh()
+            mock_ssh.close.assert_called_once()
+
+            # Calling start() after close_ssh() must not raise AssertionError in _cleanup_iperf_port.
+            server.start()
+            self.assertTrue(server.started)
+            mock_ssh.run.assert_any_call("killall iperf3", ignore_status=True)
+            mock_ssh.run_async.assert_called_once()
+
+    def test_get_systemd_journal_preserves_journalctl(self) -> None:
+        """Verifies get_systemd_journal queries journalctl directly without resetting state."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=True
+        ), mock.patch(
+            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="eth0",
+                ssh_session=mock_ssh,
+            )
+            mock_journal = mock.Mock()
+            mock_journal.logs.return_value = "systemd journal log output"
+            server._journalctl = mock_journal
+
+            logs = server.get_systemd_journal()
+            self.assertEqual(logs, "systemd journal log output")
+            mock_journal.logs.assert_called_once()
+            self.assertIs(server._journalctl, mock_journal)
+
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    @mock.patch(
+        "iperf.iperf_server.utils.get_current_epoch_time",
+        return_value=1234567890000,
+    )
+    def test_download_logs_writes_file_when_journal_available(
+        self, _mock_time: mock.Mock, mock_open: mock.Mock
+    ) -> None:
+        """Verifies download_logs writes systemd journal to disk when journal is available."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=True
+        ), mock.patch(
+            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="eth0",
+                ssh_session=mock_ssh,
+            )
+            mock_journal = mock.Mock()
+            mock_journal.logs.return_value = "systemd journal log output"
+            server._journalctl = mock_journal
+
+            with mock.patch.object(server.log, "info") as mock_log_info:
+                server.download_logs("/tmp/logs")
+                expected_timestamp = logger.normalize_log_line_timestamp(
+                    logger.epoch_to_log_line_timestamp(1234567890000)
+                )
+                expected_path = os.path.join(
+                    "/tmp/logs", f"iperf_systemd_{expected_timestamp}.log"
+                )
+                mock_open.assert_called_once_with(
+                    expected_path, "a", encoding="utf-8"
+                )
+                handle = mock_open()
+                handle.write.assert_called_once_with(
+                    "systemd journal log output"
+                )
+                mock_log_info.assert_called_once_with(
+                    f"Wrote systemd journal to {expected_path}"
+                )
+
+    @mock.patch("builtins.open", new_callable=mock.mock_open)
+    def test_download_logs_skips_when_journal_unavailable(
+        self, mock_open: mock.Mock
+    ) -> None:
+        """Verifies download_logs skips writing to disk when journalctl is unavailable."""
+        ssh_cfg = self._create_ssh_settings(user="root")
+        mock_ssh = mock.create_autospec(connection.SshConnection)
+
+        with mock.patch(
+            "libs.commands.command.LinuxCommand.available", return_value=False
+        ):
+            server = IPerfServerOverSsh(
+                ssh_settings=ssh_cfg,
+                port=5201,
+                test_interface="lan",
+                use_killall=True,
+                ssh_session=mock_ssh,
+            )
+            self.assertIsNone(server.get_systemd_journal())
+
+            with mock.patch.object(server.log, "debug") as mock_log_debug:
+                server.download_logs("/tmp/logs")
+                mock_open.assert_not_called()
+                mock_log_debug.assert_called_once_with(
+                    "Systemd journal not available on this device; skipping."
+                )
 
 
 if __name__ == "__main__":

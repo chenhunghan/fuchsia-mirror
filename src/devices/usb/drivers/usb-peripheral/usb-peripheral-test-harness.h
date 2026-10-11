@@ -142,12 +142,17 @@ class FakeDevice : public fidl::WireServer<fdci::UsbDci> {
       completer.ReplyError(ZX_ERR_IO);
       return;
     }
+    std::function<void()> on_stop;
     libsync::Completion* stop_completion = nullptr;
     {
       std::lock_guard lock(lock_);
       controller_started_ = false;
       endpoints_.clear();
       stop_completion = stop_completion_;
+      on_stop = on_stop_controller_;
+    }
+    if (on_stop) {
+      on_stop();
     }
     completer.ReplySuccess();
     if (stop_completion) {
@@ -338,6 +343,11 @@ class FakeDevice : public fidl::WireServer<fdci::UsbDci> {
     stop_completion_ = stop_completion;
   }
 
+  void set_on_stop_controller(std::function<void()> on_stop_controller) {
+    std::lock_guard lock(lock_);
+    on_stop_controller_ = std::move(on_stop_controller);
+  }
+
   fidl::ServerEnd<fendpoint::Endpoint> TakeEndpoint(uint8_t addr) {
     std::lock_guard lock(lock_);
     auto it = endpoints_.find(addr);
@@ -419,6 +429,7 @@ class FakeDevice : public fidl::WireServer<fdci::UsbDci> {
   bool controller_started_ = false;
   libsync::Completion set_interface_called_;
   libsync::Completion* stop_completion_ = nullptr;
+  std::function<void()> on_stop_controller_;
   fidl::ServerBindingGroup<fdci::UsbDci> bindings_;
   std::optional<fidl::ClientEnd<fdci::UsbDciInterface>> client_;
   std::map<uint8_t, fidl::ServerEnd<fendpoint::Endpoint>> endpoints_;
@@ -447,11 +458,16 @@ class FakeUsbFunction : public fidl::testing::WireTestBase<ffunction::UsbFunctio
 
   void Control(ControlRequestView req, ControlCompleter::Sync& completer) override {
     zx_status_t status;
+    std::function<void()> on_control;
     {
       std::lock_guard lock(lock_);
       control_called_ = true;
       control_req_ = req->setup.b_request;
       status = control_status_;
+      on_control = on_control_;
+    }
+    if (on_control) {
+      on_control();
     }
     if (status != ZX_OK) {
       completer.ReplyError(status);
@@ -578,6 +594,10 @@ class FakeUsbFunction : public fidl::testing::WireTestBase<ffunction::UsbFunctio
     return set_interface_called_;
   }
 
+  void set_on_control(std::function<void()> cb) {
+    std::lock_guard lock(lock_);
+    on_control_ = std::move(cb);
+  }
   void set_on_set_configured(std::function<void()> cb) {
     std::lock_guard lock(lock_);
     on_set_configured_ = std::move(cb);
@@ -621,6 +641,7 @@ class FakeUsbFunction : public fidl::testing::WireTestBase<ffunction::UsbFunctio
   bool control_called_ = false;
   uint8_t control_req_ = 0;
   zx_status_t control_status_ = ZX_OK;
+  std::function<void()> on_control_;
 
   bool set_configured_called_ = false;
   bool configured_ = false;
@@ -874,6 +895,27 @@ class UsbPeripheralHarness : public ::testing::Test {
       dut().RunInDriverContext(
           [&](UsbPeripheral& peripheral) { matched = (peripheral.SnapshotState() == state); });
       return matched;
+    });
+  }
+
+  void WaitForDisconnectEventCount(size_t expected_count) {
+    dut().runtime().RunUntil([&]() {
+      size_t count = 0;
+      dut().RunInDriverContext([&](UsbPeripheral& peripheral) {
+        auto hierarchy = usb_inspect::ReadHierarchyFromInspector(peripheral.inspector());
+        const auto* event_history =
+            hierarchy.GetByPath({"usb-peripheral", "dci_metrics", "event_history"});
+        if (event_history == nullptr) {
+          return;
+        }
+        for (const auto& child : event_history->children()) {
+          const auto* prop = child.node().get_property<inspect::StringPropertyValue>("event");
+          if (prop != nullptr && prop->value() == "host connection changed: disconnected") {
+            count++;
+          }
+        }
+      });
+      return count >= expected_count;
     });
   }
 

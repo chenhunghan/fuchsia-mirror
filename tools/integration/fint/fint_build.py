@@ -74,6 +74,7 @@ JSONArray = list[JSONValue]
 # Module-scope constants for file names
 BUILD_ARTIFACTS_JSON = "build_artifacts.json"
 NINJA_ERRORS_JSON = "ninja_errors.json"
+NINJA_ACTION_METRICS_JSON = "ninja_action_metrics.json"
 TOOL_PATHS_JSON = "tool_paths.json"
 GENERATED_SOURCES_JSON = "generated_sources.json"
 PREBUILT_BINARY_SETS_JSON = "prebuilt_binaries.json"
@@ -220,6 +221,81 @@ def load_json_list(path: pathlib.Path) -> JSONArray:
             f"Expected JSON list in file {path}, but got: {type(data).__name__}"
         )
     return data
+
+
+def load_json_dict(path: pathlib.Path) -> JSONObject | None:
+    """Reads and decodes a JSON object file.
+
+    Returns None and emits a warning if the file is unreadable, malformed, or
+    does not contain a JSON object (dictionary).
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        msg(f"Warning: Failed to read JSON from {path}: {e}", file=sys.stderr)
+        return None
+
+    if not isinstance(data, dict):
+        msg(
+            f"Warning: Expected JSON object in {path}, got: {type(data).__name__}",
+            file=sys.stderr,
+        )
+        return None
+
+    return data
+
+
+def _to_int(val: JSONValue, context: str) -> int | None:
+    """Converts a JSON value to an integer, warning on TypeError or ValueError."""
+    if val is None:
+        return None
+    if isinstance(val, (int, str, float)):
+        try:
+            return int(val)
+        except (TypeError, ValueError) as e:
+            msg(
+                f"Warning: Invalid integer value for {context} ({val!r}): {e}",
+                file=sys.stderr,
+            )
+            return None
+    msg(
+        f"Warning: Expected integer for {context}, got {type(val).__name__}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def parse_ninja_action_metrics(
+    data: JSONValue,
+) -> build_artifacts_pb2.NinjaActionMetrics:
+    """Parses a decoded JSON value into a NinjaActionMetrics protobuf."""
+    metrics = build_artifacts_pb2.NinjaActionMetrics()
+    if not isinstance(data, dict):
+        return metrics
+
+    if "initial_actions" in data:
+        initial = _to_int(data["initial_actions"], "initial_actions")
+        if initial is not None:
+            metrics.initial_actions = initial
+
+    if "final_actions" in data:
+        final = _to_int(data["final_actions"], "final_actions")
+        if final is not None:
+            metrics.final_actions = final
+
+    action_counts = data.get("action_counts")
+    if isinstance(action_counts, dict):
+        for mnemonic, count in action_counts.items():
+            val = _to_int(count, f"action_counts[{mnemonic}]")
+            if val is not None:
+                metrics.actions_by_type[str(mnemonic)] = val
+    elif action_counts is not None:
+        msg(
+            f"Warning: Expected dict for action_counts, got {type(action_counts).__name__}",
+            file=sys.stderr,
+        )
+
+    return metrics
 
 
 @dataclass(frozen=True)
@@ -620,6 +696,11 @@ class BuildContext:
         return self.build_dir / PREBUILT_BINARY_SETS_JSON
 
     @property
+    def default_ninja_action_metrics_path(self) -> pathlib.Path:
+        """Returns the default absolute path to the Ninja action metrics JSON file."""
+        return self.build_dir / NINJA_ACTION_METRICS_JSON
+
+    @property
     def artifact_dir(self) -> pathlib.Path | None:
         """Returns the path to the artifact directory if specified in the context spec."""
         return (
@@ -671,6 +752,25 @@ class BuildContext:
                 )
             paths.append(ToolPathSpec.from_dict(item))
         return paths
+
+    def resolve_tool_path(self, tool_name: str) -> pathlib.Path | None:
+        """Resolves a host tool from tool_paths.json relative to build_dir."""
+        try:
+            paths = self.tool_paths
+        except ValueError:
+            return None
+        rel_path = lookup_tool_path(paths, tool_name, self.host)
+        return (self.build_dir / rel_path) if rel_path else None
+
+    @functools.cached_property
+    def ninjatrace_tool_path(self) -> pathlib.Path | None:
+        """Returns the resolved path to ninjatrace_prebuilt, if configured."""
+        return self.resolve_tool_path("ninjatrace_prebuilt")
+
+    @functools.cached_property
+    def buildstats_tool_path(self) -> pathlib.Path | None:
+        """Returns the resolved path to buildstats_prebuilt, if configured."""
+        return self.resolve_tool_path("buildstats_prebuilt")
 
     @functools.cached_property
     def clippy_targets(self) -> list[ClippyTargetSpec]:
@@ -956,10 +1056,12 @@ class BuildContext:
                 f"export_last_build_debug_symbols failed with exit code {res.returncode}"
             )
 
-    def _run_buildstats(self, buildstats_tool: str) -> pathlib.Path | None:
+    def _run_buildstats(self) -> pathlib.Path | None:
         """Runs the buildstats prebuilt tool on the raw trace to generate buildstats.json.gz (Step 2)."""
+        if not self.buildstats_tool_path:
+            return None
         stats_cmd = [
-            str(self.checkout_dir / buildstats_tool),
+            str(self.buildstats_tool_path),
             "--ninjatrace",
             str(self.processed_trace_path),
             "--output",
@@ -972,7 +1074,7 @@ class BuildContext:
             return self.buildstats_json_path
         return None
 
-    def _merge_subbuild_traces(self, ninjatrace_tool: str) -> None:
+    def _merge_subbuild_traces(self) -> None:
         """Merges and interleaves nested sub-build traces into processed_trace_path in-place (Step 3)."""
         if not (
             (self.build_dir / "ninja_subbuilds.json").is_file()
@@ -988,7 +1090,7 @@ class BuildContext:
             "--ninja-path",
             str(self.checkout_dir / self.host.ninja_relative_path),
             "--ninjatrace-path",
-            str(self.checkout_dir / ninjatrace_tool),
+            str(self.ninjatrace_tool_path),
             "--subbuilds-in-place",
         ]
         if self.verbose:
@@ -1021,14 +1123,7 @@ class BuildContext:
             )
             return None, None
 
-        ninjatrace_tool = lookup_tool_path(
-            paths, "ninjatrace_prebuilt", self.host
-        )
-        buildstats_tool = lookup_tool_path(
-            paths, "buildstats_prebuilt", self.host
-        )
-
-        if not ninjatrace_tool:
+        if not self.ninjatrace_tool_path:
             msg(
                 "Warning: Skipping Ninja trace analysis: ninjatrace_prebuilt tool path not found in tool paths.",
                 file=sys.stderr,
@@ -1041,7 +1136,7 @@ class BuildContext:
         try:
             # Step 1: Run the raw ninjatrace prebuilt tool to generate a raw unmerged processed trace!
             cmd = [
-                str(self.checkout_dir / ninjatrace_tool),
+                str(self.ninjatrace_tool_path),
                 "-ninjabuildtrace",
                 str(self.raw_ninja_trace_path),
                 "-trace-json",
@@ -1055,13 +1150,12 @@ class BuildContext:
 
                 # Step 2: Run buildstats on this unmerged raw trace to generate buildstats.json.gz.
                 # This completely prevents any Go string-pid unmarshal crashes or subbuild double-counting!
-                if buildstats_tool:
-                    buildstats_out = self._run_buildstats(buildstats_tool)
+                buildstats_out = self._run_buildstats()
 
                 # Step 3: Run the in-tree ninjatrace2json.py script with --subbuilds-in-place.
                 # This chronologically merges and interleaves sub-build traces into processed_trace_path
                 # to produce the final, consolidated trace for Perfetto, with full safety guarantees!
-                self._merge_subbuild_traces(ninjatrace_tool)
+                self._merge_subbuild_traces()
         except OSError as e:
             msg(
                 f"Warning: Failed to execute Ninja trace post-processing: {e}",
@@ -1074,6 +1168,7 @@ class BuildContext:
         self,
         duration_seconds: int,
         failure_summary: str | None = None,
+        ninja_action_metrics_path: pathlib.Path | None = None,
     ) -> None:
         """Serializes and writes the build_artifacts.json manifest to the artifact directory."""
         if not self.artifact_dir:
@@ -1083,6 +1178,22 @@ class BuildContext:
         artifacts.ninja_duration_seconds = duration_seconds
         if failure_summary:
             artifacts.failure_summary = failure_summary
+
+        # Collect Ninja action metrics if present
+        action_metrics_file = (
+            ninja_action_metrics_path
+            if ninja_action_metrics_path is not None
+            else (
+                self.default_ninja_action_metrics_path
+                if self.context_spec.build_dir
+                else None
+            )
+        )
+        if action_metrics_file and action_metrics_file.is_file():
+            metrics_data = load_json_dict(action_metrics_file)
+            if metrics_data is not None:
+                parsed_metrics = parse_ninja_action_metrics(metrics_data)
+                artifacts.ninja_action_metrics.CopyFrom(parsed_metrics)
 
         # Generate and register the interactive Perfetto Ninja traces!
         ninjatrace_path, buildstats_path = self._generate_ninja_traces()
@@ -1150,20 +1261,66 @@ def lookup_tool_path(
     return None
 
 
+def resolve_fallback_build_dir(
+    build_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Resolves build directory when context spec is not provided.
+
+    Args:
+        build_dir: Optional explicit path to the build directory.
+
+    Returns:
+        The resolved absolute Path to the build directory.
+    """
+    if build_dir:
+        return build_dir.resolve()
+
+    fx_build_dir_file = fuchsia_root / ".fx-build-dir"
+    if fx_build_dir_file.is_file():
+        rel_dir = fx_build_dir_file.read_text().strip()
+        if rel_dir:
+            candidate = pathlib.Path(rel_dir)
+            if not candidate.is_absolute():
+                candidate = fuchsia_root / candidate
+            if candidate.is_dir():
+                return candidate.resolve()
+
+    default_out = fuchsia_root / "out" / "default"
+    if default_out.is_dir():
+        return default_out.resolve()
+
+    return pathlib.Path.cwd().resolve()
+
+
 def make_build_context(
     static_path: pathlib.Path,
     context_path: pathlib.Path | None,
     verbose: bool = False,
+    build_dir: pathlib.Path | None = None,
 ) -> BuildContext:
-    """Creates a BuildContext by loading and parsing specifications, auto-detecting host properties."""
+    """Creates a BuildContext by loading and parsing specifications, auto-detecting host properties.
+
+    Args:
+        static_path: Path to the static spec textproto.
+        context_path: Path to the context spec textproto, or None to generate
+            a fallback context spec.
+        verbose: Whether to enable verbose output logging.
+        build_dir: Path to the build directory. If omitted and context_path is
+            None, the build directory will be inferred from .fx-build-dir,
+            out/default, or the current working directory.
+
+    Returns:
+        The initialized BuildContext instance.
+    """
     static_spec = load_static_spec(static_path)
 
     if context_path:
         context_spec = load_context_spec(context_path)
     else:
+        resolved_build_dir = resolve_fallback_build_dir(build_dir=build_dir)
         context_spec = context_pb2.Context(
             checkout_dir=str(fuchsia_root.resolve()),
-            build_dir=str(pathlib.Path.cwd().resolve()),
+            build_dir=str(resolved_build_dir),
         )
 
     host = HostProperties.detect()
@@ -1195,6 +1352,13 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         help="Path to context spec. If omitted, it will be automatically generated.",
     )
     parser.add_argument(
+        "--build-dir",
+        required=False,
+        default=None,
+        type=pathlib.Path,
+        help="Path to build directory. If omitted, inferred from --context or active build config.",
+    )
+    parser.add_argument(
         "--print-artifact-dir",
         action="store_true",
         help="Print the resolved artifact directory from the context spec and exit.",
@@ -1222,6 +1386,13 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         default=None,
         help="Path where Ninja should write its error logs (ninja_errors.json).",
+    )
+    parser.add_argument(
+        "--ninja-action-metrics-output",
+        dest="ninja_action_metrics_output",
+        type=pathlib.Path,
+        default=None,
+        help="Path where Ninja should write its action metrics (ninja_action_metrics.json).",
     )
     parser.add_argument(
         "wrapped_cmd",
@@ -1284,6 +1455,7 @@ def main(argv: list[str]) -> int:
         static_path=args.static,
         context_path=args.context,
         verbose=args.verbose,
+        build_dir=args.build_dir,
     )
 
     # Select Build Strategy
@@ -1340,9 +1512,11 @@ def main(argv: list[str]) -> int:
                         f"Fuchsia build failed: delegated command "
                         f"'{shlex.join(run.command)}' exited with status {run.exit_code}"
                     )
+
             ctx.produce_build_artifacts(
                 duration_seconds,
                 failure_summary=failure_summary,
+                ninja_action_metrics_path=args.ninja_action_metrics_output,
             )
 
     return run.exit_code

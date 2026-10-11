@@ -74,16 +74,10 @@ _TARGET_STRIP_LEVEL = {
 }
 # LINT.ThenChange(//build/bazel/debug_symbols/README.md)
 
-_DEFAULT_COMMON_RUST_FLAGS = [
+_DEFAULT_COMMON_EXEC_RUST_FLAGS = [
     # GN: //build/config/rust:next_solver
     # TODO(https://fxbug.dev/556328773): Use next generation trait solver after compile time regression is addressed.
     "-Znext-solver=coherence",
-
-    # GN: //build/config/rust:2018_idioms
-    "-Wrust-2018-idioms",
-
-    # GN: //build/config:werror
-    "-Dwarnings",
 
     # GN: //build/config:stack-size-section
     "-Zemit-stack-sizes",
@@ -114,6 +108,17 @@ _DEFAULT_COMMON_RUST_FLAGS = [
     "-Cdefault-linker-libraries",
 ]
 
+# Lint flags are excluded from _DEFAULT_COMMON_EXEC_RUST_FLAGS because
+# @rules_rust builds internal exec tools (e.g. process_wrapper) without
+# --cap-lints=allow, which would fail under -Wrust-2018-idioms -Dwarnings.
+_DEFAULT_COMMON_RUST_FLAGS = _DEFAULT_COMMON_EXEC_RUST_FLAGS + [
+    # GN: //build/config/rust:2018_idioms
+    "-Wrust-2018-idioms",
+
+    # GN: //build/config:werror
+    "-Dwarnings",
+]
+
 # TODO(https://fxbug.dev/529296820): Currently, using the "common" subset of default
 # build flags from @fuchsia_rules_common//build_flags:toolchain_type is sufficient
 # because the GN default config lists for Rust are identical for all crate types
@@ -121,6 +126,7 @@ _DEFAULT_COMMON_RUST_FLAGS = [
 # necessary in the future, rust_toolchain_with_build_flags will need to populate
 # extra_rustc_flags_for_crate_types.
 _EXTRA_HOST_RUST_FLAGS = _DEFAULT_COMMON_RUST_FLAGS
+_EXTRA_HOST_EXEC_RUST_FLAGS = _DEFAULT_COMMON_EXEC_RUST_FLAGS
 
 _EXTRA_TARGET_RUST_FLAGS = _DEFAULT_COMMON_RUST_FLAGS + [
     # GN: //build/config:frame_pointers
@@ -204,6 +210,7 @@ rust_toolchain(
     debug_info = _HOST_DEBUG_INFO,
     dylib_ext = ".so",
     exec_triple = "x86_64-unknown-linux-gnu",
+    extra_exec_rustc_flags = _EXTRA_HOST_EXEC_RUST_FLAGS,
     extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
@@ -262,6 +269,7 @@ rust_toolchain(
     debug_info = _HOST_DEBUG_INFO,
     dylib_ext = ".so",
     exec_triple = "aarch64-unknown-linux-gnu",
+    extra_exec_rustc_flags = _EXTRA_HOST_EXEC_RUST_FLAGS,
     extra_rustc_flags = _EXTRA_HOST_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",

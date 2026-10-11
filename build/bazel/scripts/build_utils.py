@@ -50,6 +50,60 @@ def gn_arch_to_bazel(gn_arch: str) -> str:
         raise ValueError(f"Unexpected GN arch: {gn_arch}")
 
 
+def canonicalize_label(label: str) -> str:
+    """Return the Bzlmod canonical label, ensuring a leading '@@'.
+
+    For example:
+        '//pkg:target' -> '@@//pkg:target'
+        '@//pkg:target' -> '@@//pkg:target'
+        '@@//pkg:target' -> '@@//pkg:target'
+        '@@canonical//pkg:target' -> '@@canonical//pkg:target'
+
+    Raises:
+        ValueError: If label uses an apparent repository name (e.g. '@repo//...').
+            See https://fxbug.dev/569973533.
+    """
+    if label.startswith("@@"):
+        return label
+    if label.startswith("@//"):
+        return f"@{label}"
+    if label.startswith("//"):
+        return f"@@{label}"
+    if label.startswith("@"):
+        raise ValueError(
+            f"Cannot canonicalize apparent repository label '{label}' without repository mapping (see https://fxbug.dev/569973533)"
+        )
+    return f"@@//{label.lstrip('/')}"
+
+
+def normalize_label(label: str) -> str:
+    """Strip any leading '@@' or '@' repository prefix from a label.
+
+    For example:
+        '@@//pkg:target' -> '//pkg:target'
+        '@//pkg:target' -> '//pkg:target'
+        '//pkg:target' -> '//pkg:target'
+        '@@canonical//pkg:target' -> 'canonical//pkg:target'
+
+    Raises:
+        ValueError: If label uses an apparent repository name (e.g. '@repo//...').
+            See https://fxbug.dev/569973533.
+    """
+    if label.startswith("@@//"):
+        return label.removeprefix("@@")
+    if label.startswith("@//"):
+        return label.removeprefix("@")
+    if label.startswith("//"):
+        return label
+    if label.startswith("@@"):
+        return label.removeprefix("@@")
+    if label.startswith("@"):
+        raise ValueError(
+            f"Cannot normalize apparent repository label '{label}' without repository mapping (see https://fxbug.dev/569973533)"
+        )
+    return label
+
+
 def get_host_platform() -> str:
     """Return host platform name, following Fuchsia conventions."""
     if sys.platform == "linux":

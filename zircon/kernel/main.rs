@@ -25,6 +25,9 @@ extern crate ktrace_macro;
 #[path = "arch/src/mod.rs"]
 pub mod arch_rs;
 
+#[path = "dev/hw_rng/hw_rng.rs"]
+pub mod hw_rng;
+
 #[path = "dev/interrupt/interrupt.rs"]
 pub mod dev_interrupt;
 
@@ -68,6 +71,9 @@ pub mod persistent_debuglog_rs;
 #[path = "lib/root_resource_filter/src/mod.rs"]
 pub mod root_resource_filter;
 
+#[path = "lib/stall/src/mod.rs"]
+pub mod stall;
+
 #[path = "lib/syscalls/mod.rs"]
 pub mod syscalls_rs;
 
@@ -77,7 +83,7 @@ pub mod topology;
 #[path = "lib/user_copy/src/mod.rs"]
 pub mod user_copy;
 
-#[path = "lib/userabi/vdso.rs"]
+#[path = "lib/userabi/userabi.rs"]
 pub mod userabi;
 
 #[path = "object/object.rs"]
@@ -101,17 +107,29 @@ pub mod vm;
 #[path = "platform/pc/mod.rs"]
 pub mod platform_pc;
 
+#[cfg(target_arch = "riscv64")]
+#[path = "platform/generic-riscv64/src/mod.rs"]
+pub mod generic_riscv64;
+
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 #[path = "dev/pdev/interrupt/interrupt.rs"]
 pub mod pdev_interrupt;
 
-#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[cfg(target_arch = "aarch64")]
 #[path = "dev/hw_watchdog/generic32/generic32.rs"]
 pub mod generic32;
 
 #[cfg(target_arch = "riscv64")]
 #[path = "dev/interrupt/plic/plic.rs"]
 pub mod plic;
+
+#[cfg(target_arch = "riscv64")]
+#[path = "dev/pdev/timer/timer.rs"]
+pub mod pdev_timer;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "dev/pdev/clocks_and_pmic/clocks_and_pmic.rs"]
+pub mod pdev_clocks_and_pmic;
 
 #[cfg(target_arch = "aarch64")]
 #[path = "dev/power/iris/iris.rs"]
@@ -168,6 +186,9 @@ pub mod test_mod;
 pub mod unused_rust;
 
 // Force linking of extern crates that provide C entry points:
+// Only platform/pc depends on fixed_point today.
+#[cfg(target_arch = "x86_64")]
+use fixed_point as _;
 use flow_id as _;
 use init as _;
 use relaxed_atomic as _;

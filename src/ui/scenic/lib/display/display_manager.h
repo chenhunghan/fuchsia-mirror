@@ -67,9 +67,11 @@ class DisplayManager {
   // For testing.
   void SetDefaultDisplayForTests(std::shared_ptr<Display> display) {
     default_display_ = std::move(display);
+    UpdateDisplayOwnershipEvent();
   }
 
  private:
+  void UpdateDisplayOwnershipEvent();
   void OnDisplaysChanged(fidl::VectorView<WireDisplayInfo> added,
                          fidl::VectorView<WireDisplayId> removed);
   void OnClientOwnershipChange(bool has_ownership);

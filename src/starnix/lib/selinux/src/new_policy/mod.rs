@@ -7,6 +7,7 @@ pub(super) mod bitmap;
 pub(super) mod booleans;
 pub(super) mod classes;
 pub(super) mod common_symbols;
+pub(super) mod compute;
 pub(super) mod constraints;
 pub(super) mod context;
 pub(super) mod error;
@@ -22,6 +23,7 @@ pub(super) mod permissions;
 pub(super) mod policy_cap;
 pub(super) mod roles;
 pub(super) mod rules;
+pub(super) mod security_context;
 pub(super) mod traits;
 pub(super) mod types;
 pub(super) mod u24_index;
@@ -29,14 +31,12 @@ pub(super) mod users;
 
 use selinux_policy_derive::{Parse, Serialize, Validate};
 
+use crate::InitialSid;
 pub use access_vector::AccessVector;
 pub use bitmap::IdSpan;
 pub use booleans::{ConditionalBoolean, ConditionalBooleanId};
 pub use classes::{Class, ClassDefault, ClassDefaultRange, ClassId};
 pub use common_symbols::CommonSymbol;
-pub use constraints::{
-    ConstraintOperator, ConstraintSubject, ConstraintTerm, MlsOperands, MlsOperator, NameExpression,
-};
 pub use context::{Context, MlsLevel, MlsRange};
 use error::{ParseError, SerializeError, ValidateError};
 pub use filename_transitions::FilenameTransitions;
@@ -56,10 +56,14 @@ pub use rules::{
     AccessDecision, AccessVectorRules, ConditionalNode, IndexedAccessVectorRules,
     SELINUX_AVD_FLAGS_PERMISSIVE, XpermsBitmap,
 };
+pub use security_context::{SecurityContext, SecurityContextError};
 use traits::{Serialize, Validate};
 pub use types::*;
 pub use u24_index::U24Index;
 pub use users::User;
+
+/// Mandatory role name assigned to non-process/non-socket SELinux objects by default.
+pub(super) const OBJECT_R_ROLE_NAME: &[u8] = b"object_r";
 
 /// Tag type for type safety of policy user identifiers.
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
@@ -131,7 +135,26 @@ impl NewPolicy {
 
     /// Validates the parsed policy.
     pub fn validate(&self) -> Result<(), ValidateError> {
-        Validate::validate(self, self)
+        Validate::validate(self, self)?;
+
+        // Validate that all kernel-required initial SIDs are present in the policy.
+        let need_init_sid = self.has_policycap(PolicyCap::UserspaceInitialContext);
+        for initial_sid in InitialSid::all_variants() {
+            if *initial_sid == InitialSid::Init && !need_init_sid {
+                continue;
+            }
+            self.initial_sids()
+                .get_by_id(*initial_sid as u32)
+                .ok_or(ValidateError::MissingInitialSid { initial_sid: *initial_sid })?;
+        }
+
+        // Validate that the well-known "object_r" role is defined by the policy.
+        self.roles().get_by_name(OBJECT_R_ROLE_NAME).ok_or(ValidateError::MissingObjectRRole)?;
+
+        // TODO(https://fxbug.dev/356569876): Determine which "bounds" should be verified for
+        // correctness here.
+
+        Ok(())
     }
 
     /// Serializes the policy to binary representation.

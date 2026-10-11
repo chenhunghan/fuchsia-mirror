@@ -15,7 +15,7 @@ diff_test(
     name = "notice_test",
     failure_message = """
 To update the expected file, run:
-   ./build/bazel_sdk/tests/scripts/bazel_test.py \\
+   ./build/bazel_sdk/tests/scripts/run_tests.py \\
      --test_target //:licenses_tests \\
      --output_base /tmp/bazel_sdk_tests_output
    cp \\

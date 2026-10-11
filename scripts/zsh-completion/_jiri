@@ -7,7 +7,6 @@ _jiri() {
     'clean:Clean Jiri workspace (main tree or worktree)'
     'diff:Prints diff between two snapshots'
     'flags:describe all known top-level flags'
-    'grep:Search across projects'
     'help:describe subcommands and their syntax'
     'init:Create a new jiri root'
     'patch:Patch in the existing change'
@@ -41,9 +40,6 @@ _jiri() {
         ;;
       diff)
         _jiri_diff
-        ;;
-      grep)
-        _jiri_grep
         ;;
       init)
         _jiri_init
@@ -156,23 +152,6 @@ _jiri_diff() {
     '-max-cls[Max number of CLs returned per changed project]:number' \
     '1:snapshot 1:_files' \
     '2:snapshot 2:_files'
-}
-
-_jiri_grep() {
-  _arguments \
-    '-H[Does nothing]' \
-    '-L[Show only names of files that do not contain matches]' \
-    '-cwd-rel[Output paths relative to CWD]' \
-    '-e[Pattern starts with -]:pattern' \
-    '-files-with-matches[Show only names of files that contain matches]' \
-    '-files-without-match[Show only names of files that do not contain matches]' \
-    '-i[Ignore case]' \
-    '-l[Show only names of files that contain matches]' \
-    '-n[Prefix line number]' \
-    '-name-only[Show only names of files that contain matches]' \
-    '-w[Match word boundary]' \
-    '1:query:' \
-    '*:pathspec:_files'
 }
 
 _jiri_init() {

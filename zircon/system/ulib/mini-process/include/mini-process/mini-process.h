@@ -79,6 +79,9 @@ __BEGIN_CDECLS
 // The process queries the ZX_INFO_VMO topic on the passed in VMO |handle|. The address of an
 // optional destination user buffer can be specified via the |data| argument.
 #define MINIP_CMD_VMO_GET_INFO (1 << 23)
+// The process calls |zx_debug_read| in a loop, using the transferred debug resource |handle|, until
+// it fails.  The return value is the failing status.
+#define MINIP_CMD_DEBUG_READ (1 << 24)
 #define MINIP_THREAD_POINTER_CHECK_VALUE (0xdeadbeeffeedfaceUL)
 
 // Create and run a minimal process with one thread that blocks forever.

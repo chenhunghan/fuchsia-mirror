@@ -13,7 +13,7 @@
         },
         {
             name: "netstack",
-            url: "fuchsia-pkg://fuchsia.com/remote-control-lib-tests#meta/netstack.cm",
+            url: "fuchsia-pkg://fuchsia.com/remote-control-lib-tests#meta/netstack3.cm",
         },
     ],
     offer: [

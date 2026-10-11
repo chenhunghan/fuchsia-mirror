@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(config)
+# @bazel2gn:skip
+build_flags(
+    name = "config",
+    cflags = ["-fPIC"],
+)
+# LINT.ThenChange(BUILD.gn:config)
+
+# The init binary of Starnix containers. This is a Linux binary, and only
+# builds for Linux platforms.
+fx_cc_binary(
+    name = "default_init",
+    srcs = ["init.cc"],
+    build_flags = [
+        "//build/config/fuchsia:no_cpp_standard_library",
+        "//build/config/fuchsia:static-pie-config",
+        ":config",
+    ],
+    disable_build_flags = ["//build/config/linux:implicit-host-libs"],
+    disable_instrumentation = True,
+    disable_syslog_backend = True,
+    tags = ["manual"],
+    visibility = ["//src/starnix/containers:__pkg__"],
+)

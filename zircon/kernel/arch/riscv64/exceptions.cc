@@ -10,17 +10,14 @@
 #include <lib/thread-stack/abi.h>
 #include <platform.h>
 #include <stdio.h>
-#include <zircon/syscalls/exception.h>
 #include <zircon/types.h>
 
 #include <arch/arch_ops.h>
 #include <arch/crashlog.h>
-#include <arch/exception.h>
 #include <arch/regs.h>
 #include <arch/riscv64.h>
 #include <arch/thread.h>
 #include <kernel/ffi.h>
-#include <kernel/interrupt.h>
 #include <kernel/thread.h>
 #include <pretty/hexdump.h>
 #include <syscalls/syscalls.h>
@@ -39,10 +36,6 @@ void cpp_set_crashlog_regs(const iframe_t* iframe, int64_t cause, uint64_t tval)
   g_crashlog.regs.iframe = const_cast<iframe_t*>(iframe);
   g_crashlog.regs.cause = cause;
   g_crashlog.regs.tval = tval;
-}
-zx_status_t cpp_dispatch_user_exception(uint32_t exception_type,
-                                        const arch_exception_context_t* context) {
-  return dispatch_user_exception(static_cast<zx_excp_type_t>(exception_type), context);
 }
 
 }  // extern "C"

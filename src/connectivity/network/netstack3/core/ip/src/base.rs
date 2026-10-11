@@ -32,7 +32,7 @@ use netstack3_base::{
     HandleableTimer, InstantContext, InterfaceProperties, IpAddressId, IpDeviceAddr,
     IpDeviceAddressIdContext, IpExt, LocalFrameDestination, MarkDomain, Marks, Matcher as _,
     MatcherBindingsTypes, NestedIntoCoreTimerCtx, NetworkParsingContext,
-    NetworkSerializationContext, NotFoundError, ResourceCounterContext, RngContext,
+    NetworkSerializationContext, NotFoundError, PacketType, ResourceCounterContext, RngContext,
     SendFrameErrorReason, StrongDeviceIdentifier, TimerBindingsTypes, TimerContext, TimerHandler,
     TxMetadata as _, TxMetadataBindingsTypes, WeakIpAddressId, WrapBroadcastMarker,
 };
@@ -167,6 +167,9 @@ pub struct IpLayerPacketMetadata<
     /// fragmentation of reassembled packets.
     gso_info: Option<GsoInfo>,
 
+    /// Packet type.
+    packet_type: PacketType,
+
     #[cfg(debug_assertions)]
     drop_check: IpLayerPacketMetadataDropCheck,
 }
@@ -208,6 +211,10 @@ pub struct DeviceIpLayerMetadata<BT: TxMetadataBindingsTypes> {
     /// the receiver will be able to observe the marks set by the sender. This is
     /// consistent with Linux behavior.
     marks: Marks,
+    /// The packet type.
+    ///
+    /// For incoming packets set the value is based on the L2 destination.
+    packet_type: PacketType,
 }
 
 /// The result of splitting metadata for a packet sent as multiple frames via
@@ -220,7 +227,28 @@ pub(crate) struct SplitDeviceIpLayerMetadata<BT: TxMetadataBindingsTypes> {
 impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
     /// Creates a new instance with the specified `tx_metadata` and `marks`.
     pub fn from_tx_metadata_and_marks(tx_metadata: BT::TxMetadata, marks: Marks) -> Self {
-        Self { conntrack_entry: None, tx_metadata, marks }
+        Self { conntrack_entry: None, tx_metadata, marks, packet_type: PacketType::Outgoing }
+    }
+
+    /// Creates a new `DeviceIpLayerMetadata` with the specified `packet_type`.
+    pub fn new_for_rx_packet(packet_type: PacketType) -> Self {
+        Self {
+            conntrack_entry: None,
+            tx_metadata: Default::default(),
+            marks: Default::default(),
+            packet_type,
+        }
+    }
+
+    /// Creates an empty [`DeviceIpLayerMetadata`].
+    #[cfg(any(test, feature = "testutils"))]
+    pub fn empty() -> Self {
+        Self {
+            conntrack_entry: None,
+            tx_metadata: Default::default(),
+            marks: Default::default(),
+            packet_type: PacketType::Host,
+        }
     }
 
     /// Discards the remaining IP layer information and returns only the tx
@@ -229,15 +257,10 @@ impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
         self.tx_metadata
     }
 
-    /// Creates a new instance for a received packet.
-    pub fn new_for_rx_packet() -> Self {
-        Self { conntrack_entry: None, tx_metadata: Default::default(), marks: Default::default() }
-    }
-
-    /// Creates an empty [`DeviceIpLayerMetadata`].
+    /// Creates new IP layer metadata with the marks and packet type.
     #[cfg(any(test, feature = "testutils"))]
-    pub fn empty() -> Self {
-        Self { conntrack_entry: None, tx_metadata: Default::default(), marks: Default::default() }
+    pub fn with_marks_and_packet_type(marks: Marks, packet_type: PacketType) -> Self {
+        Self { conntrack_entry: None, tx_metadata: Default::default(), marks, packet_type }
     }
 
     /// Splits metadata for a packet that is sent as multiple frames (e.g. due
@@ -256,14 +279,19 @@ impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
             // `primary` instance retains the tx metadata.
             tx_metadata: Default::default(),
             marks: self.marks,
+            packet_type: self.packet_type,
         };
         SplitDeviceIpLayerMetadata { primary: self, secondary }
     }
 
-    /// Creates new IP layer metadata with the marks.
-    #[cfg(any(test, feature = "testutils"))]
-    pub fn with_marks(marks: Marks) -> Self {
-        Self { conntrack_entry: None, tx_metadata: Default::default(), marks }
+    /// Sets the packet type on this metadata.
+    pub fn set_packet_type(&mut self, packet_type: PacketType) {
+        self.packet_type = packet_type;
+    }
+
+    /// Returns the packet type of this metadata.
+    pub fn packet_type(&self) -> PacketType {
+        self.packet_type
     }
 }
 
@@ -273,15 +301,16 @@ impl<
     BT: FilterBindingsTypes + TxMetadataBindingsTypes,
 > IpLayerPacketMetadata<I, A, BT>
 {
-    fn from_device_ip_layer_metadata<CC, D>(
+    pub(crate) fn from_device_ip_layer_metadata<CC, D>(
         core_ctx: &mut CC,
         device: &D,
-        DeviceIpLayerMetadata { conntrack_entry, tx_metadata, marks }: DeviceIpLayerMetadata<BT>,
+        metadata: DeviceIpLayerMetadata<BT>,
         gso_info: Option<GsoInfo>,
     ) -> Self
     where
         CC: ResourceCounterContext<D, IpCounters<I>>,
     {
+        let DeviceIpLayerMetadata { conntrack_entry, tx_metadata, marks, packet_type } = metadata;
         let conntrack_connection_and_direction = match conntrack_entry
             .map(|(conn, dir)| conn.into_inner().map(|conn| (conn, dir)))
             .transpose()
@@ -309,6 +338,7 @@ impl<
             // only reflect the receiving socket (populated later by early demux).
             socket_info: None,
             gso_info,
+            packet_type,
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         }
@@ -343,6 +373,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
             marks: self.marks,
             socket_info: self.socket_info.clone(),
             gso_info: self.gso_info,
+            packet_type: self.packet_type,
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         };
@@ -361,6 +392,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
             marks,
             socket_info,
             gso_info,
+            packet_type: PacketType::Outgoing,
             #[cfg(debug_assertions)]
             drop_check: Default::default(),
         }
@@ -380,6 +412,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
         Marks,
         Option<SocketInfo>,
         Option<GsoInfo>,
+        PacketType,
     ) {
         let Self {
             tx_metadata,
@@ -387,6 +420,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
             conntrack_connection_and_direction,
             socket_info,
             gso_info,
+            packet_type,
             #[cfg(debug_assertions)]
             mut drop_check,
         } = self;
@@ -394,7 +428,7 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
         {
             drop_check.okay_to_drop = true;
         }
-        (conntrack_connection_and_direction, tx_metadata, marks, socket_info, gso_info)
+        (conntrack_connection_and_direction, tx_metadata, marks, socket_info, gso_info, packet_type)
     }
 
     /// Acknowledge that it's okay to drop this packet metadata.
@@ -417,6 +451,11 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
     /// Returns the marks attached to this packet.
     pub(crate) fn marks(&self) -> &Marks {
         &self.marks
+    }
+
+    /// Sets the packet type on this metadata.
+    pub fn set_packet_type(&mut self, packet_type: PacketType) {
+        self.packet_type = packet_type;
     }
 }
 
@@ -462,6 +501,10 @@ impl<I: packet_formats::ip::IpExt, A, BT: FilterBindingsTypes + TxMetadataBindin
 
     fn marks(&self) -> &Marks {
         &self.marks
+    }
+
+    fn packet_type(&self) -> PacketType {
+        self.packet_type
     }
 }
 
@@ -712,7 +755,7 @@ impl<
             // never modified by NAT. This means it can be used to recover the
             // destination before NAT was performed.
             let original = conn.original_tuple();
-            Some((original.dst_addr, original.dst_port_or_id))
+            Some((original.dst_addr, original.transport.dst_port_or_id()))
         })
     }
 }
@@ -2598,14 +2641,14 @@ struct EarlyDemuxResult<I: Ip, S> {
 impl<I: FilterIpExt, S> EarlyDemuxResult<I, S> {
     fn new<P: IpPacket<I>>(socket: S, packet: &P) -> Self {
         let src_port =
-            packet.maybe_transport_packet().transport_packet_data().map(|t| t.src_port());
+            packet.maybe_transport_packet().transport_packet_data().map(|t| t.src_port_or_id());
         Self { socket, src_addr: packet.src_addr(), src_port }
     }
 
     // Returns the socket if it's still the right socket to handle the packet.
     fn take_socket<P: IpPacket<I>>(self, packet: &P) -> Option<S> {
         let src_port =
-            packet.maybe_transport_packet().transport_packet_data().map(|t| t.src_port());
+            packet.maybe_transport_packet().transport_packet_data().map(|t| t.src_port_or_id());
         (self.src_addr == packet.src_addr() && self.src_port == src_port).then_some(self.socket)
     }
 
@@ -2719,6 +2762,7 @@ fn dispatch_receive_ipv4_packet<
     );
 
     let marks = packet_metadata.marks;
+    let packet_type = packet_metadata.packet_type;
     packet_metadata.acknowledge_drop();
 
     match filter_verdict {
@@ -2774,7 +2818,8 @@ fn dispatch_receive_ipv4_packet<
     let (prefix, options, body) = packet.parts_with_body_mut();
     let buffer = Buf::new(body, ..);
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
-    let mut receive_info = LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks };
+    let mut receive_info =
+        LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks, packet_type };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -2851,6 +2896,7 @@ fn dispatch_receive_ipv6_packet<
     );
 
     let marks = packet_metadata.marks;
+    let packet_type = packet_metadata.packet_type;
     packet_metadata.acknowledge_drop();
 
     match filter_verdict {
@@ -2907,7 +2953,7 @@ fn dispatch_receive_ipv6_packet<
     let (fixed, extension, body) = packet.parts_with_body_mut();
     let buffer = Buf::new(body, ..);
     let header_info = Ipv6HeaderInfo { fixed, extension };
-    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks };
+    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks, packet_type };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -3320,8 +3366,14 @@ where
     // If the packet is leaving through the loopback device, attempt to extract a
     // weak reference to the packet's conntrack entry to plumb that through the
     // device layer so it can be reused on ingress to the IP layer.
-    let (conntrack_connection_and_direction, tx_metadata, marks, _socket_cookie, gso_info) =
-        packet_metadata.into_parts();
+    let (
+        conntrack_connection_and_direction,
+        tx_metadata,
+        marks,
+        _socket_cookie,
+        gso_info,
+        packet_type,
+    ) = packet_metadata.into_parts();
     let conntrack_entry = if device.is_loopback() {
         conntrack_connection_and_direction
             .and_then(|(conn, dir)| WeakConntrackConnection::new(&conn).map(|conn| (conn, dir)))
@@ -3334,8 +3386,12 @@ where
         *device_layer_marks.get_mut(*mark) = *marks.get(*mark);
     }
 
-    let device_ip_layer_metadata =
-        DeviceIpLayerMetadata { conntrack_entry, tx_metadata, marks: device_layer_marks };
+    let device_ip_layer_metadata = DeviceIpLayerMetadata {
+        conntrack_entry,
+        tx_metadata,
+        marks: device_layer_marks,
+        packet_type,
+    };
 
     // The filtering layer may have changed our address. Perform a last moment
     // check to protect against sending loopback addresses on the wire for

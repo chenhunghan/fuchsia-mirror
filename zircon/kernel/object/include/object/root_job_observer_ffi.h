@@ -20,6 +20,7 @@ extern "C" {
 // C++ helpers callable from Rust.
 void cpp_root_job_signal_observer_init(void* storage, void* rust_ctx);
 void cpp_root_job_signal_observer_destroy(SignalObserver* observer);
+void cpp_start_root_job_observer();
 
 // Test state check helpers.
 bool cpp_test_process_is_dead(const ProcessDispatcher* process);

@@ -29,14 +29,13 @@ use crate::lsm_tree::types::LayerIterator;
 use crate::lsm_tree::{LSMTree, LayerSet, Query};
 use crate::metrics;
 use crate::object_handle::ObjectHandle as _;
-use crate::object_store::allocator::Reservation;
 use crate::object_store::data_object_handle::{FileExtent, OverwriteOptions};
 use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalCheckpointV32};
 use crate::object_store::object_record::{ObjectItem, ObjectItemV56, ObjectItemV59};
-use crate::object_store::transaction::{AssocObj, Options};
+use crate::object_store::transaction::{AssocObj, Options, ReservationOptions};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
     DataObjectHandle, HandleOptions, HandleOwner, Mutation, ObjectKey, ObjectStore, ObjectValue,
@@ -303,16 +302,13 @@ async fn write<S: HandleOwner>(
     items: LayerSet<ObjectKey, ObjectValue>,
     handle: DataObjectHandle<S>,
 ) -> Result<(), Error> {
-    let object_manager = handle.store().filesystem().object_manager().clone();
     // TODO(https://fxbug.dev/42177407): Don't use the same code here for Journal and SuperBlock. They
     // aren't the same things and it is already getting convoluted. e.g of diff stream content:
     //   Superblock:  (Magic, Ver, Header(Ver), Extent(Ver)*, SuperBlockRecord(Ver)*, ...)
     //   Journal:     (Ver, JournalRecord(Ver)*, RESET, Ver2, JournalRecord(Ver2)*, ...)
     // We should abstract away the checksum code and implement these separately.
 
-    let mut writer =
-        SuperBlockWriter::new(handle, super_block_header, object_manager.metadata_reservation())
-            .await?;
+    let mut writer = SuperBlockWriter::new(handle, super_block_header).await?;
     let mut merger = items.merger();
     let mut iter = LSMTree::major_iter(merger.query(Query::FullScan).await?).await?;
     while let Some(item) = iter.get() {
@@ -549,21 +545,19 @@ impl SuperBlockHeader {
     }
 }
 
-struct SuperBlockWriter<'a, S: HandleOwner> {
+struct SuperBlockWriter<S: HandleOwner> {
     handle: DataObjectHandle<S>,
     writer: JournalWriter,
     existing_extents: VecDeque<FileExtent>,
     size: u64,
-    reservation: &'a Reservation,
 }
 
-impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
+impl<S: HandleOwner> SuperBlockWriter<S> {
     /// Create a new writer, outputs FXFS magic, version and SuperBlockHeader.
     /// On success, the writer is ready to accept root parent store mutations.
     pub async fn new(
         handle: DataObjectHandle<S>,
         super_block_header: &SuperBlockHeader,
-        reservation: &'a Reservation,
     ) -> Result<Self, Error> {
         let existing_extents = handle.device_extents().await?;
         let mut this = Self {
@@ -571,7 +565,6 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
             writer: JournalWriter::new(BLOCK_SIZE, 0),
             existing_extents: existing_extents.into_iter().collect(),
             size: 0,
-            reservation,
         };
         this.writer.write_all(SUPER_BLOCK_MAGIC)?;
         super_block_header.serialize_with_version(&mut this.writer)?;
@@ -606,8 +599,7 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
                 .handle
                 .new_transaction_with_options(Options {
                     skip_journal_checks: true,
-                    borrow_metadata_space: true,
-                    allocator_reservation: Some(self.reservation),
+                    reservation: ReservationOptions::BorrowedMetadataAndData,
                     ..Default::default()
                 })
                 .await?;
@@ -643,7 +635,7 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
             .truncate_with_options(
                 Options {
                     skip_journal_checks: true,
-                    borrow_metadata_space: true,
+                    reservation: ReservationOptions::BorrowedMetadata,
                     ..Default::default()
                 },
                 len,

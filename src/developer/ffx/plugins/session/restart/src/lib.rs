@@ -6,7 +6,7 @@ use anyhow::{Result, format_err};
 use async_trait::async_trait;
 use fdomain_fuchsia_session::RestarterProxy;
 use ffx_session_restart_args::SessionRestartCommand;
-use ffx_writer::{MachineWriter, ToolIO};
+use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool};
 use std::io::Write;
 use target_holders::moniker;
@@ -22,7 +22,7 @@ fho::embedded_plugin!(RestartTool);
 
 #[async_trait(?Send)]
 impl FfxMain for RestartTool {
-    type Writer = MachineWriter<()>;
+    type Writer = VerifiedMachineWriter<()>;
 
     type Error = ::fho::Error;
 
@@ -38,7 +38,7 @@ impl FfxMain for RestartTool {
 pub async fn restart_impl(
     restarter_proxy: RestarterProxy,
     _cmd: SessionRestartCommand,
-    writer: &mut MachineWriter<()>,
+    writer: &mut VerifiedMachineWriter<()>,
 ) -> Result<()> {
     if !writer.is_machine() {
         writeln!(writer, "Restarting the current session")?;
@@ -63,7 +63,7 @@ mod test {
 
         let restart_cmd = SessionRestartCommand {};
         let test_buffers = ffx_writer::TestBuffers::default();
-        let mut writer = MachineWriter::new_test(None, &test_buffers);
+        let mut writer = VerifiedMachineWriter::new_test(None, &test_buffers);
         let result = restart_impl(proxy, restart_cmd, &mut writer).await;
         assert!(result.is_ok());
         let output = test_buffers.into_stdout_str();
@@ -81,7 +81,7 @@ mod test {
 
         let restart_cmd = SessionRestartCommand {};
         let test_buffers = ffx_writer::TestBuffers::default();
-        let writer = MachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
+        let writer = VerifiedMachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
 
         let tool = RestartTool { cmd: restart_cmd, restarter_proxy: proxy };
 
@@ -90,5 +90,10 @@ mod test {
 
         let output = test_buffers.into_stdout_str();
         assert_eq!(output, "null\n");
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_schema() {
+        VerifiedMachineWriter::<()>::verify_schema(&serde_json::json!(null)).unwrap();
     }
 }

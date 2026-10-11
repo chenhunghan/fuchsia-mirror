@@ -11,6 +11,15 @@ library_headers("headers") {
 
   headers = []
   public_deps = []
+
+  metadata = {
+    ninja_implicit_directory_inputs = [
+      {
+        gn_label = get_label_info(":$target_name", "label_with_toolchain")
+        directories = rebase_path([ "include" ], root_build_dir)
+      },
+    ]
+  }
 }
 
 static_library("riscv64") {

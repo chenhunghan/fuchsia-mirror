@@ -28,7 +28,6 @@ driver_bind_rules("cdc_acm_bind") {
 }
 
 fuchsia_cc_driver("usb-cdc-acm-driver") {
-  legacy = true
   output_name = "usb-cdc-acm"
   configs += [
     "//build/config:all_source",
@@ -41,14 +40,13 @@ fuchsia_cc_driver("usb-cdc-acm-driver") {
     "//sdk/banjo/fuchsia.hardware.usb.composite:fuchsia.hardware.usb.composite_banjo_cpp",
     "//sdk/fidl/fuchsia.hardware.serialimpl:fuchsia.hardware.serialimpl_cpp",
     "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp",
-    "//sdk/lib/driver/outgoing/cpp",
+    "//sdk/lib/driver/compat/cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//sdk/lib/driver/logging/cpp",
     "//sdk/lib/stdcompat",
-    "//src/devices/lib/driver",
     "//src/devices/lib/driver:driver_runtime",
-    "//src/devices/usb/lib/usb",
     "//src/devices/usb/lib/usb:cdc",
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
+    "//src/devices/usb/lib/usb:usb-dfv2-compat-logging",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/sync",
     "//zircon/system/ulib/zx",
@@ -128,11 +126,11 @@ test("usb-cdc-acm-integration") {
     "//src/devices/usb/lib/usb",
     "//src/devices/usb/lib/usb:cdc",
     "//src/devices/usb/testing/usb-virtual-bus-launcher",
-    "//src/lib/ddk",
-    "//src/ui/input/lib/hid",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/predicates",
+    "//third_party/googletest:gtest",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zx",
-    "//zircon/system/ulib/zxtest",
   ]
 }
 
@@ -149,13 +147,6 @@ fuchsia_unittest_package("usb-cdc-acm-integration-test") {
     "//src/devices/usb/drivers/usb-peripheral",
     "//src/devices/usb/drivers/usb-virtual-bus",
   ]
-
-  # For 'Failed to get banjo protocol' from the compat shim.
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
 }
 
 group("tests") {

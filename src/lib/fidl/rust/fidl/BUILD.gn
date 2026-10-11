@@ -77,7 +77,6 @@ rustc_library("fidl") {
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
     "//src/lib/fidl/rust_constants",
-    "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:bitflags",
     "//third_party/rust_crates:futures",
@@ -86,7 +85,10 @@ rustc_library("fidl") {
     "//third_party/rust_crates:thiserror",
   ]
   if (is_fuchsia) {
-    deps += [ "//sdk/rust/zx" ]
+    deps += [
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia-async",
+    ]
   } else {
     deps += [ "//src/lib/fuchsia-emulated-handle" ]
   }
@@ -99,7 +101,6 @@ rustc_test("fidl_rust_lib_tests_bin") {
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
     "//src/lib/fidl/rust_constants",
-    "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:bitflags",
@@ -111,6 +112,7 @@ rustc_test("fidl_rust_lib_tests_bin") {
   if (is_fuchsia) {
     deps += [
       "//sdk/rust/zx",
+      "//src/lib/fuchsia-async",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:futures-test",
     ]

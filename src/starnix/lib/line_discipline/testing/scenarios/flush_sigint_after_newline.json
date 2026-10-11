@@ -1,5 +1,6 @@
 {
     "name": "flush_sigint_after_newline",
+    "capture_signals": true,
     "initial_termios": {
         "c_iflag": [
             "ICRNL"
@@ -19,7 +20,8 @@
     "events": [
         {
             "action": "write_to_master",
-            "data": "foo\nbar\u0003"
+            "data": "foo\nbar\u0003",
+            "expect_signal": true
         },
         {
             "action": "write_to_master",

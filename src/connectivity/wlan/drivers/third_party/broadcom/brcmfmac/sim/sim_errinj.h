@@ -42,10 +42,11 @@ class SimErrorInjector {
 
   // Iovar int command specific
   void AddErrInjCmd(uint32_t cmd, zx_status_t ret_status, bcme_status_t ret_fw_err,
-                    std::optional<uint16_t> ifidx = {});
+                    std::optional<uint16_t> ifidx = {},
+                    const std::vector<uint8_t>* alt_data = nullptr);
   void DelErrInjCmd(uint32_t cmd);
   bool CheckIfErrInjCmdEnabled(uint32_t cmd, zx_status_t* ret_status, bcme_status_t* ret_fw_err,
-                               uint16_t ifidx);
+                               const std::vector<uint8_t>** alt_value_out, uint16_t ifidx);
 
   // Iovar string command specific
   void AddErrInjIovar(const char* iovar, zx_status_t ret_status, bcme_status_t ret_fw_err,
@@ -80,8 +81,12 @@ class SimErrorInjector {
     zx_status_t ret_status;
     bcme_status_t ret_fw_err;
 
-    ErrInjCmd(uint32_t cmd, zx_status_t status, bcme_status_t fw_err, std::optional<uint16_t> ifidx)
-        : cmd(cmd), ifidx(ifidx), ret_status(status), ret_fw_err(fw_err) {}
+    // If set, specifies bytes to be used to override the payload
+    const std::vector<uint8_t>* alt_data;
+
+    ErrInjCmd(uint32_t cmd, zx_status_t status, bcme_status_t fw_err, std::optional<uint16_t> ifidx,
+              const std::vector<uint8_t>* alt_data = nullptr)
+        : cmd(cmd), ifidx(ifidx), ret_status(status), ret_fw_err(fw_err), alt_data(alt_data) {}
   };
 
   struct ErrInjIovar {

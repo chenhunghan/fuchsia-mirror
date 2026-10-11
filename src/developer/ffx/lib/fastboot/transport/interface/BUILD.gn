@@ -65,6 +65,7 @@ if (is_host) {
     version = "0.1.0"
     visibility = [
       ":*",
+      "//src/developer/ffx/lib/discovery:*",
       "//src/developer/ffx/lib/fastboot:*",
       "//src/developer/ffx/lib/fastboot/connection_factory:*",
       "//src/developer/ffx/lib/fastboot/transport/factory:*",

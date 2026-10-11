@@ -16,9 +16,7 @@ use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsNode, FsStr, XattrOp};
 use linux_uapi::XATTR_NAME_CAPS;
-use starnix_uapi::auth::{
-    CAP_SETFCAP, CAP_SYS_PTRACE, Capabilities, Credentials, PtraceAccessMode, SecureBits,
-};
+use starnix_uapi::auth::{CAP_SETFCAP, Capabilities, Credentials, PtraceAccessMode, SecureBits};
 use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 
@@ -99,7 +97,7 @@ fn check_ptrace_access(
         tracer_caps.contains(tracee.real_creds().cap_permitted)
     };
     if !tracer_has_at_least_tracee_caps {
-        security::check_creds_capable(current_task, &tracer_creds, CAP_SYS_PTRACE)?;
+        security::check_creds_ptrace_capable(current_task, &tracer_creds, mode)?;
     }
     Ok(())
 }

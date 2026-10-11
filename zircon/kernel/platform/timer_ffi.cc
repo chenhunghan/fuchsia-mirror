@@ -33,4 +33,9 @@ FFI_ALWAYS_INLINE CppRatio cpp_timer_get_ticks_to_time_ratio() {
   return {r.numerator(), r.denominator()};
 }
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_ticks_t cpp_timer_get_mono_ticks_offset() {
+  return timer_get_mono_ticks_offset();
+}
+
 }  // extern "C"

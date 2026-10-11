@@ -11,24 +11,30 @@ to verify the Starnix line discipline implementation.
 """
 
 import argparse
+import errno
 import fcntl
 import json
 import logging
 import os
 import select
+import signal
 import struct
 import termios
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-# Patch termios.IUTF8 if missing (e.g. in prebuilt python environments)
+# Patch termios flags if missing (e.g. in prebuilt python environments)
 if not hasattr(termios, "IUTF8"):
     # Start bit for IUTF8 in Linux is 0o40000 (16384)
     termios.IUTF8 = 0o40000
+if not hasattr(termios, "XTABS"):
+    termios.XTABS = 0o14000
+if not hasattr(termios, "EXTPROC"):
+    termios.EXTPROC = 0o200000
 
 # LFLAGS naming is a bit inconsistent (ICANON, ISIG, ECHO...).
 # Let's just list common ones we care about to avoid noise.
@@ -59,6 +65,7 @@ INTERESTING_OFLAGS = [
     "ONLRET",
     "OFILL",
     "OFDEL",
+    "XTABS",
 ]
 INTERESTING_LFLAGS = [
     "ISIG",
@@ -77,6 +84,7 @@ INTERESTING_LFLAGS = [
     "TOSTOP",
     "PENDIN",
     "IEXTEN",
+    "EXTPROC",
 ]
 
 
@@ -169,6 +177,9 @@ class ScenarioRunner:
         self.scenario = scenario
         self.master_fd: Optional[int] = None
         self.slave_fd: Optional[int] = None
+        self.signal_child_pid: Optional[int] = None
+        self.signal_pipe_r: Optional[int] = None
+        self.last_termios: Dict[str, Any] = {}
         self.recorded_events: List[Dict[str, Any]] = []
 
     def run(self) -> Dict[str, Any]:
@@ -177,8 +188,25 @@ class ScenarioRunner:
         try:
             self._setup_pty()
             self._run_events()
-            final_termios = get_termios_dict(self.slave_fd)
+            if self.slave_fd is not None:
+                try:
+                    final_termios = get_termios_dict(self.slave_fd)
+                except termios.error:
+                    final_termios = self.last_termios
+            else:
+                final_termios = self.last_termios
         finally:
+            if self.signal_child_pid is not None:
+                try:
+                    os.kill(self.signal_child_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    os.waitpid(self.signal_child_pid, 0)
+                except OSError:
+                    pass
+            if self.signal_pipe_r is not None:
+                os.close(self.signal_pipe_r)
             if self.master_fd is not None:
                 os.close(self.master_fd)
             if self.slave_fd is not None:
@@ -190,6 +218,62 @@ class ScenarioRunner:
             "events": self.recorded_events,
             "final_termios": final_termios,
         }
+
+    def _get_fionread(self, fd: Optional[int]) -> int:
+        if fd is None:
+            return -1
+        try:
+            buf = fcntl.ioctl(fd, termios.FIONREAD, struct.pack("i", 0))
+            return struct.unpack("i", buf)[0]
+        except OSError:
+            return -1
+
+    def _get_poll_mask(self, fd: Optional[int]) -> int:
+        if fd is None:
+            return 0
+        poller = select.poll()
+        poller.register(
+            fd,
+            select.POLLIN
+            | select.POLLOUT
+            | select.POLLPRI
+            | select.POLLERR
+            | select.POLLHUP,
+        )
+        res = poller.poll(0)
+        return res[0][1] if res else 0
+
+    def _get_pty_state(self) -> Tuple[int, int, int, int]:
+        return (
+            self._get_fionread(self.master_fd),
+            self._get_poll_mask(self.master_fd),
+            self._get_fionread(self.slave_fd),
+            self._get_poll_mask(self.slave_fd),
+        )
+
+    def _wait_for_condition(
+        self,
+        predicate: Callable[[], bool],
+        description: str,
+        timeout: float = 2.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for {description} in scenario '{self.scenario['name']}'"
+                )
+            os.sched_yield()
+        # Ensure any in-flight kernel workqueue chunks have settled.
+        while True:
+            state_before = self._get_pty_state()
+            os.sched_yield()
+            if self._get_pty_state() == state_before:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for PTY state to stabilize after {description} in scenario '{self.scenario['name']}'"
+                )
 
     def _setup_pty(self) -> None:
         # Set non-blocking
@@ -207,11 +291,89 @@ class ScenarioRunner:
             )
             fcntl.ioctl(self.slave_fd, termios.TIOCSWINSZ, winsize)
 
+        if self.scenario.get("capture_signals", False):
+            r_pipe, w_pipe = os.pipe()
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(self.master_fd)
+                    os.close(r_pipe)
+                    os.setsid()
+                    fcntl.ioctl(self.slave_fd, termios.TIOCSCTTY, 0)
+                    os.close(self.slave_fd)
+
+                    def _sig_handler(sig_num: int, _frame: Any) -> None:
+                        os.write(w_pipe, bytes([sig_num]))
+
+                    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                    for sig_num in (
+                        signal.SIGINT,
+                        signal.SIGQUIT,
+                        signal.SIGTSTP,
+                    ):
+                        signal.signal(sig_num, _sig_handler)
+                    os.write(w_pipe, b"R")
+                    while True:
+                        signal.pause()
+                finally:
+                    os._exit(1)
+            self.signal_child_pid = pid
+            self.signal_pipe_r = r_pipe
+            os.close(w_pipe)
+            # Wait for child to become session leader & set controlling tty
+            ready, _, _ = select.select([r_pipe], [], [], 2.0)
+            if not ready:
+                raise TimeoutError(
+                    f"Timed out waiting for signal child process in scenario '{self.scenario['name']}'"
+                )
+            if os.read(r_pipe, 1) != b"R":
+                raise RuntimeError(
+                    f"Signal child process failed to initialize in scenario '{self.scenario['name']}'"
+                )
+            fl = fcntl.fcntl(r_pipe, fcntl.F_GETFL)
+            fcntl.fcntl(r_pipe, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+    def _drain_signals(self, expect_signal: bool) -> List[str]:
+        if self.signal_pipe_r is None:
+            return []
+        if expect_signal:
+            ready, _, _ = select.select([self.signal_pipe_r], [], [], 2.0)
+            if not ready:
+                raise TimeoutError(
+                    f"Timed out waiting for expected signal in scenario '{self.scenario['name']}'"
+                )
+        caught = []
+        while True:
+            try:
+                sig_bytes = os.read(self.signal_pipe_r, 64)
+                if not sig_bytes:
+                    break
+                for b in sig_bytes:
+                    caught.append(signal.Signals(b).name)
+            except BlockingIOError:
+                break
+        return caught
+
     def _run_events(self) -> None:
         events = self.scenario.get("events", [])
-        for evt in events:
+        i = 0
+        while i < len(events):
+            evt = events[i]
             action = evt["action"]
-            if action == "write_to_master":
+            if action == "write_to_master" and not evt.get(
+                "expect_block", False
+            ):
+                batch = [evt]
+                while (
+                    not batch[-1].get("expect_signal", False)
+                    and i + 1 < len(events)
+                    and events[i + 1]["action"] == "write_to_master"
+                    and not events[i + 1].get("expect_block", False)
+                ):
+                    i += 1
+                    batch.append(events[i])
+                self._handle_write_to_master_batch(batch)
+            elif action == "write_to_master":
                 self._handle_write(self.master_fd, evt, "write_to_master")
             elif action == "write_to_slave":
                 self._handle_write(self.slave_fd, evt, "write_to_slave")
@@ -219,6 +381,14 @@ class ScenarioRunner:
                 self._handle_read(self.master_fd, evt, "read_from_master")
             elif action == "read_from_slave":
                 self._handle_read(self.slave_fd, evt, "read_from_slave")
+            elif action == "read_once_from_master":
+                self._handle_read_once(
+                    self.master_fd, evt, "read_once_from_master"
+                )
+            elif action == "read_once_from_slave":
+                self._handle_read_once(
+                    self.slave_fd, evt, "read_once_from_slave"
+                )
             elif action == "set_packet_mode":
                 self._handle_set_packet_mode(
                     self.master_fd, evt, "set_packet_mode"
@@ -229,8 +399,50 @@ class ScenarioRunner:
                 self._handle_flush(evt, "flush")
             elif action == "wait_until_readable":
                 self._handle_wait_until_readable(evt, "wait_until_readable")
-            elif action == "sleep":
-                time.sleep(evt.get("duration", 0.05))
+            elif action == "check_readable_size":
+                self._handle_check_readable_size(evt, "check_readable_size")
+            elif action == "check_poll":
+                self._handle_check_poll(evt, "check_poll")
+            elif action == "close":
+                self._handle_close(evt, "close")
+            else:
+                raise ValueError(f"Unknown action: {action}")
+            i += 1
+
+    def _handle_close(self, evt: Dict[str, Any], event_type: str) -> None:
+        side = evt["side"]
+        if self.slave_fd is not None:
+            try:
+                self.last_termios = get_termios_dict(self.slave_fd)
+            except termios.error:
+                pass
+        if side == "main":
+            if self.master_fd is not None:
+                os.close(self.master_fd)
+                self.master_fd = None
+            if self.slave_fd is not None:
+                self._wait_for_condition(
+                    lambda: (
+                        self._get_poll_mask(self.slave_fd) & select.POLLHUP
+                    )
+                    != 0,
+                    "POLLHUP on replica after closing main",
+                )
+        elif side == "replica":
+            if self.slave_fd is not None:
+                os.close(self.slave_fd)
+                self.slave_fd = None
+            if self.master_fd is not None:
+                self._wait_for_condition(
+                    lambda: (
+                        self._get_poll_mask(self.master_fd) & select.POLLHUP
+                    )
+                    != 0,
+                    "POLLHUP on main after closing replica",
+                )
+        else:
+            raise ValueError(f"Unknown side: {side}")
+        self.recorded_events.append({"type": event_type, "side": side})
 
     def _handle_set_packet_mode(
         self, fd: int, evt: Dict[str, Any], event_type: str
@@ -245,10 +457,17 @@ class ScenarioRunner:
     def _handle_set_termios(
         self, fd: int, evt: Dict[str, Any], event_type: str
     ) -> None:
+        expect_signal = evt.get("expect_signal", False)
         set_termios(fd, evt["termios"])
-        self.recorded_events.append(
-            {"type": event_type, "termios": evt["termios"]}
-        )
+        recorded: Dict[str, Any] = {
+            "type": event_type,
+            "termios": evt["termios"],
+        }
+        if self.signal_pipe_r is not None:
+            caught = self._drain_signals(expect_signal)
+            if caught or expect_signal:
+                recorded["signals"] = caught
+        self.recorded_events.append(recorded)
 
     def _handle_flush(self, evt: Dict[str, Any], event_type: str) -> None:
         side = evt["side"]
@@ -290,12 +509,117 @@ class ScenarioRunner:
         else:
             raise ValueError(f"Unknown side: {side}")
 
-        # Wait up to 2 seconds for the file descriptor to become readable.
-        select.select([fd], [], [], 2.0)
+        ready, _, _ = select.select([fd], [], [], 2.0)
+        if not ready:
+            raise TimeoutError(
+                f"Timed out waiting for {side} to become readable in scenario '{self.scenario['name']}'"
+            )
         self.recorded_events.append({"type": event_type, "side": side})
 
+    def _handle_check_readable_size(
+        self, evt: Dict[str, Any], event_type: str
+    ) -> None:
+        side = evt["side"]
+        if side == "main":
+            fd = self.master_fd
+        elif side == "replica":
+            fd = self.slave_fd
+        else:
+            raise ValueError(f"Unknown side: {side}")
+
+        buf = fcntl.ioctl(fd, termios.FIONREAD, struct.pack("i", 0))
+        size = struct.unpack("i", buf)[0]
+        self.recorded_events.append(
+            {"type": event_type, "side": side, "size": size}
+        )
+
+    def _handle_check_poll(self, evt: Dict[str, Any], event_type: str) -> None:
+        side = evt["side"]
+        if side == "main":
+            fd = self.master_fd
+        elif side == "replica":
+            fd = self.slave_fd
+        else:
+            raise ValueError(f"Unknown side: {side}")
+
+        mask = self._get_poll_mask(fd)
+        events = []
+        if mask & select.POLLIN:
+            events.append("POLLIN")
+        if mask & select.POLLOUT:
+            events.append("POLLOUT")
+        if mask & select.POLLPRI:
+            events.append("POLLPRI")
+        if mask & select.POLLERR:
+            events.append("POLLERR")
+        if mask & select.POLLHUP:
+            events.append("POLLHUP")
+        self.recorded_events.append(
+            {"type": event_type, "side": side, "events": events}
+        )
+
+    def _handle_write_to_master_batch(
+        self, batch: List[Dict[str, Any]]
+    ) -> None:
+        # Pre-encode payloads and issue consecutive write_to_master syscalls
+        # back-to-back before allocating recorded_events dictionaries. This
+        # avoids intermediate Python allocations (and Copy-on-Write page faults
+        # after os.fork() when capture_signals is enabled) that could otherwise
+        # allow Linux's unbound flush_to_ldisc workqueue to race between
+        # consecutive writes before a subsequent write triggers
+        # pty_flush_buffer (tty_buffer_flush).
+        prepared: List[Tuple[Dict[str, Any], bytes, Union[str, List[int]]]] = []
+        for evt in batch:
+            data_in = evt["data"]
+            data_bytes = (
+                data_in.encode("utf-8")
+                if isinstance(data_in, str)
+                else bytes(data_in)
+            )
+            prepared.append((evt, data_bytes, encode_data(data_bytes)))
+
+        state_before = self._get_pty_state()
+        fd = self.master_fd
+        assert fd is not None
+
+        for _, data_bytes, _ in prepared:
+            while True:
+                try:
+                    os.write(fd, data_bytes)
+                    break
+                except BlockingIOError:
+                    _, writable, _ = select.select([], [fd], [], 2.0)
+                    if not writable:
+                        raise TimeoutError(
+                            f"Timed out waiting for write_to_master to become writable in scenario '{self.scenario['name']}'"
+                        )
+
+        last_evt = prepared[-1][0]
+        expect_no_change = last_evt.get("expect_no_change", False)
+        expect_signal = last_evt.get("expect_signal", False)
+        if not expect_no_change:
+            self._wait_for_condition(
+                lambda: self._get_pty_state() != state_before,
+                "write_to_master state change",
+            )
+
+        for idx, (_, _, encoded_data) in enumerate(prepared):
+            recorded: Dict[str, Any] = {
+                "type": "write_to_master",
+                "data": encoded_data,
+            }
+            if self.signal_pipe_r is not None:
+                if idx < len(prepared) - 1:
+                    recorded["signals"] = []
+                else:
+                    recorded["signals"] = self._drain_signals(expect_signal)
+            self.recorded_events.append(recorded)
+
     def _handle_write(
-        self, fd: int, evt: Dict[str, Any], event_type: str
+        self,
+        fd: int,
+        evt: Dict[str, Any],
+        event_type: str,
     ) -> None:
         data_in = evt["data"]
         data_bytes = (
@@ -304,49 +628,82 @@ class ScenarioRunner:
             else bytes(data_in)
         )
         expect_block = evt.get("expect_block", False)
-
-        start_time = time.time()
-        written = False
-        while True:
-            try:
-                os.write(fd, data_bytes)
-                written = True
-                break
-            except BlockingIOError:
-                if expect_block:
-                    break
-                if time.time() - start_time > 1.0:
-                    break  # Timeout
-                time.sleep(0.01)
+        expect_no_change = evt.get("expect_no_change", False)
+        expect_signal = evt.get("expect_signal", False)
 
         if expect_block:
-            if written:
-                self.recorded_events.append(
-                    {
-                        "type": f"{event_type}_unexpected_success",
-                        "data": encode_data(data_bytes),
-                    }
+            self._wait_for_condition(
+                lambda: (self._get_poll_mask(fd) & select.POLLOUT) == 0,
+                f"{event_type} to become non-writable",
+            )
+            try:
+                os.write(fd, data_bytes)
+                raise RuntimeError(
+                    f"Expected {event_type} to block in scenario '{self.scenario['name']}', but write succeeded"
                 )
-            else:
+            except BlockingIOError:
                 self.recorded_events.append(
                     {
                         "type": f"{event_type}_blocked",
                         "data": encode_data(data_bytes),
                     }
                 )
-        else:
-            if not written:
-                # Master write shouldn't usually block
-                raise BlockingIOError(f"{event_type} blocked unexpectedly")
-            self.recorded_events.append(
-                {"type": event_type, "data": encode_data(data_bytes)}
-            )
+                return
+
+        state_before = self._get_pty_state()
+
+        while True:
+            try:
+                os.write(fd, data_bytes)
+                break
+            except BlockingIOError:
+                _, writable, _ = select.select([], [fd], [], 2.0)
+                if not writable:
+                    raise TimeoutError(
+                        f"Timed out waiting for {event_type} to become writable in scenario '{self.scenario['name']}'"
+                    )
+            except OSError as e:
+                if e.errno == errno.EIO and event_type == "write_to_slave":
+                    self.recorded_events.append(
+                        {
+                            "type": "write_to_slave_eio",
+                            "data": encode_data(data_bytes),
+                        }
+                    )
+                    return
+                raise
+
+        if event_type == "write_to_slave":
+            if self.master_fd is not None:
+                self._wait_for_condition(
+                    lambda: self._get_fionread(self.master_fd)
+                    > state_before[0],
+                    "write_to_slave output to arrive at master",
+                )
+        elif event_type == "write_to_master":
+            if not expect_no_change:
+                self._wait_for_condition(
+                    lambda: self._get_pty_state() != state_before,
+                    "write_to_master state change",
+                )
+
+        recorded: Dict[str, Any] = {
+            "type": event_type,
+            "data": encode_data(data_bytes),
+        }
+        if self.signal_pipe_r is not None and event_type == "write_to_master":
+            recorded["signals"] = self._drain_signals(expect_signal)
+        self.recorded_events.append(recorded)
 
     def _handle_read(
         self, fd: int, evt: Dict[str, Any], event_type: str
     ) -> None:
-        # Wait for data to be available
-        select.select([fd], [], [], 0.1)
+        expect_signal = evt.get("expect_signal", False)
+        ready, _, _ = select.select([fd], [], [], 2.0)
+        if not ready:
+            raise TimeoutError(
+                f"Timed out waiting for {event_type} in scenario '{self.scenario['name']}'"
+            )
 
         total_data = b""
         while True:
@@ -358,16 +715,75 @@ class ScenarioRunner:
             except BlockingIOError:
                 break
 
-        # If we expected data but got none, check if we should have waited longer?
-        # The original code just passed.
-
-        if total_data:
-            self.recorded_events.append(
-                {
-                    "type": event_type,
-                    "data": encode_data(total_data),
-                }
+        if not total_data:
+            raise RuntimeError(
+                f"{event_type} returned no data in scenario '{self.scenario['name']}'"
             )
+        recorded: Dict[str, Any] = {
+            "type": event_type,
+            "data": encode_data(total_data),
+        }
+        if self.signal_pipe_r is not None and event_type == "read_from_slave":
+            caught = self._drain_signals(expect_signal)
+            if caught or expect_signal:
+                recorded["signals"] = caught
+        self.recorded_events.append(recorded)
+
+    def _handle_read_once(
+        self, fd: int, evt: Dict[str, Any], event_type: str
+    ) -> None:
+        size = evt.get("size", 4096)
+        expect_block = evt.get("expect_block", False)
+        expect_signal = evt.get("expect_signal", False)
+        if expect_block:
+            try:
+                os.read(fd, size)
+                raise RuntimeError(
+                    f"Expected {event_type} to block in scenario '{self.scenario['name']}', but read succeeded"
+                )
+            except BlockingIOError:
+                self.recorded_events.append(
+                    {
+                        "type": f"{event_type}_blocked",
+                        "size": size,
+                    }
+                )
+                return
+
+        ready, _, exc = select.select([fd], [], [fd], 2.0)
+        if not ready and not exc:
+            raise TimeoutError(
+                f"Timed out waiting for {event_type} in scenario '{self.scenario['name']}'"
+            )
+        try:
+            chunk = os.read(fd, size)
+            recorded: Dict[str, Any] = {
+                "type": event_type,
+                "size": size,
+                "data": encode_data(chunk),
+            }
+            if (
+                self.signal_pipe_r is not None
+                and event_type == "read_once_from_slave"
+            ):
+                caught = self._drain_signals(expect_signal)
+                if caught or expect_signal:
+                    recorded["signals"] = caught
+            self.recorded_events.append(recorded)
+        except BlockingIOError as e:
+            raise RuntimeError(
+                f"{event_type} blocked unexpectedly in scenario '{self.scenario['name']}'"
+            ) from e
+        except OSError as e:
+            if e.errno == errno.EIO and event_type == "read_once_from_master":
+                self.recorded_events.append(
+                    {
+                        "type": "read_once_from_master_eio",
+                        "size": size,
+                    }
+                )
+            else:
+                raise
 
 
 def main():

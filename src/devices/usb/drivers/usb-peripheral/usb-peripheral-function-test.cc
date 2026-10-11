@@ -2127,10 +2127,10 @@ TEST_F(UsbPeripheralFunctionTest, RejectConfigureWhileStopping) {
     return saved_completer.has_value();
   });
 
-  // The state is now kStopping (since unconfiguring is asynchronous).
-  WaitUntilState(UsbPeripheral::DeviceState::kStopping);
+  // The state is now kClearingFunctions (since unconfiguring is asynchronous).
+  WaitUntilState(UsbPeripheral::DeviceState::kClearingFunctions);
 
-  // While in kStopping, attempt to call Configure.
+  // While in kClearingFunctions, attempt to call Configure.
   // Note: we need new endpoints for a configure call.
   zx::result endpoints = fidl::CreateEndpoints<ffunction::UsbFunctionInterface>();
   ASSERT_OK(endpoints);

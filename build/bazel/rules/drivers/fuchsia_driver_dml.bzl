@@ -9,6 +9,7 @@ load("@rules_fuchsia//fuchsia:defs.bzl", "COMPATIBILITY")
 
 visibility([
     "//src/devices/...",
+    "//src/ui/...",
     "//vendor/...",
 ])
 

@@ -132,6 +132,15 @@ void AddressSpace::ArchInstall() const {
       return EnablePagingForEl<arch::ArmTcrEl1, arch::ArmSctlrEl1, arch::ArmTtbr0El1,
                                arch::ArmTtbr1El1, arch::ArmMairEl1>(*this);
     case 2:
+      if (arch::ArmHcrEl2::Read().e2h()) {
+        // When FEAT_VHE is enabled (HCR_EL2.E2H == 1), EL2 uses the EL2&0
+        // translation regime with the same dual-TTBR (TTBR0_EL2 and TTBR1_EL2)
+        // and TCR_EL2 layout as EL1&0, and hardware transparently redirects
+        // accesses to the EL1 paging registers (TCR_EL1, SCTLR_EL1, TTBR0_EL1,
+        // TTBR1_EL1, MAIR_EL1) to their EL2 counterparts.
+        return EnablePagingForEl<arch::ArmTcrEl1, arch::ArmSctlrEl1, arch::ArmTtbr0El1,
+                                 arch::ArmTtbr1El1, arch::ArmMairEl1>(*this);
+      }
       return EnablePagingForEl<arch::ArmTcrEl2, arch::ArmSctlrEl2, arch::ArmTtbr0El2,
                                /*Ttbr1Reg=*/void, arch::ArmMairEl2>(*this);
     default:

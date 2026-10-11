@@ -422,4 +422,161 @@ TEST_F(ProcTestBase, ProcSelfPagemapReadIntoLazyMapping) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
+TEST_F(ProcTestBase, ProcSelfPagemapMultiChunkBoundary) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  const size_t num_pages = 1024;
+
+  auto map = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, num_pages * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  const uintptr_t base = reinterpret_cast<uintptr_t>(map.mapping());
+  volatile char* pages = static_cast<volatile char*>(map.mapping());
+  for (size_t i = 0; i < num_pages; ++i) {
+    pages[i * page_size] = 1;
+  }
+
+  fbl::unique_fd fd(open("/proc/self/pagemap", O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << "open /proc/self/pagemap: " << std::strerror(errno);
+
+  const off64_t pagemap_offset = static_cast<off64_t>((base / page_size) * sizeof(uint64_t));
+  std::vector<uint64_t> entries(num_pages);
+  ssize_t bytes_read =
+      pread64(fd.get(), entries.data(), entries.size() * sizeof(uint64_t), pagemap_offset);
+  ASSERT_EQ(bytes_read, static_cast<ssize_t>(entries.size() * sizeof(uint64_t)))
+      << "pread64 1024 entries: " << std::strerror(errno);
+
+  const uint64_t kPresentBit = 1ULL << 63;
+  const uint64_t kPfnMask = (1ULL << 55) - 1;
+
+  for (size_t i = 0; i < num_pages; ++i) {
+    EXPECT_TRUE(entries[i] & kPresentBit) << "Entry " << i << " missing present bit";
+  }
+
+  // Verify that entries across the 512-page chunk boundary match individual single-entry reads.
+  uint64_t entry_511 = 0;
+  uint64_t entry_512 = 0;
+  ASSERT_EQ(pread64(fd.get(), &entry_511, sizeof(uint64_t),
+                    pagemap_offset + static_cast<off64_t>(511 * sizeof(uint64_t))),
+            static_cast<ssize_t>(sizeof(uint64_t)));
+  ASSERT_EQ(pread64(fd.get(), &entry_512, sizeof(uint64_t),
+                    pagemap_offset + static_cast<off64_t>(512 * sizeof(uint64_t))),
+            static_cast<ssize_t>(sizeof(uint64_t)));
+  EXPECT_EQ(entries[511], entry_511);
+  EXPECT_EQ(entries[512], entry_512);
+
+  if (test_helper::HasCapability(CAP_SYS_ADMIN)) {
+    for (size_t i = 0; i < num_pages; ++i) {
+      EXPECT_NE(entries[i] & kPfnMask, 0ULL) << "Entry " << i << " missing valid PFN";
+    }
+    if (test_helper::IsStarnix()) {
+      // Starnix synthesizes contiguous PFNs from the VMO koid hash and page offset.
+      // Verify PFN continuity across the 512-page boundary: entries[511] + 1 == entries[512].
+      EXPECT_EQ(entries[511] + 1, entries[512]);
+      EXPECT_EQ((entries[511] & kPfnMask) + 1, entries[512] & kPfnMask);
+      for (size_t i = 0; i < num_pages - 1; ++i) {
+        EXPECT_EQ(entries[i] + 1, entries[i + 1])
+            << "PFN discontinuity between page " << i << " and " << (i + 1);
+      }
+    }
+  }
+}
+
+TEST_F(ProcTestBase, ProcSelfPagemapFallbackBoundary) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  const uint64_t kPresentBit = 1ULL << 63;
+  const uint64_t kPfnMask = (1ULL << 55) - 1;
+
+  fbl::unique_fd fd(open("/proc/self/pagemap", O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << "open /proc/self/pagemap: " << std::strerror(errno);
+
+  // Test 1: Overshoot boundary:
+  // Map 4 pages anonymous memory, touch them.
+  // Read 5 entries starting at page 0.
+  // Verify 5 * sizeof(uint64_t) bytes read.
+  // Verify entries 0..3 have present bit set and valid PFNs.
+  // Verify entry 4 is 0 (unmapped hole).
+  {
+    auto map = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        nullptr, 5 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    const uintptr_t base = reinterpret_cast<uintptr_t>(map.mapping());
+    ASSERT_EQ(munmap(reinterpret_cast<void*>(base + (4 * page_size)), page_size), 0)
+        << "munmap 5th page: " << std::strerror(errno);
+
+    volatile char* pages = static_cast<volatile char*>(map.mapping());
+    for (size_t i = 0; i < 4; ++i) {
+      pages[i * page_size] = 1;
+    }
+
+    const off64_t pagemap_offset = static_cast<off64_t>((base / page_size) * sizeof(uint64_t));
+    std::vector<uint64_t> entries(5);
+    ssize_t bytes_read =
+        pread64(fd.get(), entries.data(), entries.size() * sizeof(uint64_t), pagemap_offset);
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(entries.size() * sizeof(uint64_t)))
+        << "pread64 overshoot: " << std::strerror(errno);
+
+    for (size_t i = 0; i < 4; ++i) {
+      EXPECT_TRUE(entries[i] & kPresentBit) << "Entry " << i << " missing present bit";
+      if (test_helper::HasCapability(CAP_SYS_ADMIN)) {
+        EXPECT_NE(entries[i] & kPfnMask, 0ULL) << "Entry " << i << " missing valid PFN";
+      }
+    }
+    EXPECT_EQ(entries[4], 0ULL) << "Entry 4 should be 0 (unmapped hole)";
+  }
+
+  // Test 2: Adjacent distinct mappings:
+  // Map mapping A of 2 pages (2 * page_size). Touch them.
+  // Map mapping B immediately adjacent at base + 2 * page_size with size 2 * page_size
+  // (pass target address with MAP_FIXED_NOREPLACE or assert adjacency). Touch them.
+  // Read 4 entries spanning both mappings.
+  // Assert bytes read == 4 * sizeof(uint64_t).
+  // Verify entries 0..1 have present bit from mapping A, and entries 2..3 have present bit from
+  // mapping B.
+  {
+    auto reservation = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        nullptr, 4 * page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    const uintptr_t base = reinterpret_cast<uintptr_t>(reservation.mapping());
+    reservation.Unmap();
+
+    auto map_a = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        reinterpret_cast<void*>(base), 2 * page_size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0));
+    auto map_b = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        reinterpret_cast<void*>(base + (2 * page_size)), 2 * page_size, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0));
+
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(map_a.mapping()), base);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(map_b.mapping()), base + (2 * page_size));
+
+    volatile char* pages_a = static_cast<volatile char*>(map_a.mapping());
+    pages_a[0] = 1;
+    pages_a[page_size] = 1;
+
+    volatile char* pages_b = static_cast<volatile char*>(map_b.mapping());
+    pages_b[0] = 1;
+    pages_b[page_size] = 1;
+
+    const off64_t pagemap_offset = static_cast<off64_t>((base / page_size) * sizeof(uint64_t));
+    std::vector<uint64_t> entries(4);
+    ssize_t bytes_read =
+        pread64(fd.get(), entries.data(), entries.size() * sizeof(uint64_t), pagemap_offset);
+    ASSERT_EQ(bytes_read, static_cast<ssize_t>(entries.size() * sizeof(uint64_t)))
+        << "pread64 adjacent mappings: " << std::strerror(errno);
+
+    EXPECT_TRUE(entries[0] & kPresentBit);
+    EXPECT_TRUE(entries[1] & kPresentBit);
+    EXPECT_TRUE(entries[2] & kPresentBit);
+    EXPECT_TRUE(entries[3] & kPresentBit);
+
+    if (test_helper::HasCapability(CAP_SYS_ADMIN)) {
+      EXPECT_NE(entries[0] & kPfnMask, 0ULL);
+      EXPECT_NE(entries[1] & kPfnMask, 0ULL);
+      EXPECT_NE(entries[2] & kPfnMask, 0ULL);
+      EXPECT_NE(entries[3] & kPfnMask, 0ULL);
+    }
+  }
+}
+
 }  // namespace

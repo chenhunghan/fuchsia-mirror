@@ -6,17 +6,17 @@
 
 import collections
 import logging
-import os
-import pathlib
-from collections.abc import Iterable, Mapping, MutableSequence, Sequence
+import typing
+from collections.abc import (
+    Callable,
+    Iterable,
+    Mapping,
+    MutableSequence,
+    Sequence,
+)
 
 from reporting import metrics
-from trace_processing import (
-    trace_importing,
-    trace_metrics,
-    trace_model,
-    trace_utils,
-)
+from trace_processing import trace_metrics, trace_model, trace_utils
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _RAIL_EVENT_SUFFIX: str = "_odpm_rail"
@@ -41,29 +41,6 @@ def _rail_to_event_name(rail: str) -> str:
     return f"{_normalize_rail_name(rail)}{_RAIL_EVENT_SUFFIX}"
 
 
-def get_available_rails(model: trace_model.Model) -> list[str]:
-    """Returns a sorted list of ODPM rail names present in the trace model.
-
-    Args:
-        model: In-memory representation of a trace.
-
-    Returns:
-        Sorted list of unique rail names that have ODPM power counter events.
-    """
-    counter_events = trace_utils.filter_events(
-        model.all_events(),
-        type=trace_model.CounterEvent,
-    )
-    rails = {
-        event.name.removesuffix(_RAIL_EVENT_SUFFIX)
-        for event in counter_events
-        if event.name.endswith(_RAIL_EVENT_SUFFIX)
-        and _POWER_ARG_KEY in event.args
-        and isinstance(event.args[_POWER_ARG_KEY], (int, float))
-    }
-    return sorted(rails)
-
-
 class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
     """Computes power consumption metrics from ODPM trace events.
 
@@ -77,8 +54,10 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
 
     def __init__(
         self,
-        rails: Iterable[str] = (),
-        sum_rails: Mapping[str, Iterable[str]] | None = None,
+        rails: Iterable[str] | Callable[[str], bool] = (),
+        sum_rails: (
+            Mapping[str, Iterable[str] | Callable[[str], bool]] | None
+        ) = None,
         all_rails: bool = False,
     ) -> None:
         """Constructor.
@@ -87,33 +66,55 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
             rails: Iterable of ODPM rail names to report metrics for (e.g.,
                 ["cpu_big", "cpu_mid", "cpu_little", "gpu"]). Can be empty if
                 `all_rails` or `sum_rails` is specified.
-            sum_rails: Optional mapping from metric suffix name to an iterable
-                of ODPM rail names to sum sample-by-sample across each poll
-                cycle (e.g., {"cpu_total": ["cpu_big", "cpu_mid",
-                "cpu_little"]}). Reports metrics with suffix `<group_name>`.
+                Alternatively, a callable filter predicate
+                `Callable[[str], bool]` selecting rails present in the trace,
+                reported in sorted order (e.g., lambda r: r != "battery").
+            sum_rails: Optional mapping from metric suffix name to either an
+                iterable of ODPM rail names or a callable filter predicate
+                `Callable[[str], bool]` selecting rail names to sum
+                sample-by-sample across each poll cycle (e.g., {"cpu_total":
+                ["cpu_big", "cpu_mid", "cpu_little"]} or
+                {"all_rails_except_battery": lambda r: r != "battery"}).
+                Reports metrics with suffix `<group_name>`.
             all_rails: When True, reports metrics for all ODPM rails present in
                 the trace in sorted order. Mutually exclusive with `rails`.
 
         Raises:
             ValueError: If none of `rails`, `all_rails`, or `sum_rails` are
-                specified, if a `sum_rails` entry has an empty rail list, or if
-                both `rails` and `all_rails` are specified.
+                specified, if a `sum_rails` entry has an empty rail list, if
+                `rails` or a `sum_rails` entry is a bare str, or if both
+                `rails` and `all_rails` are specified.
         """
-        # Preserve caller-specified order while deduplicating.
-        self._rails: tuple[str, ...] = tuple(
-            dict.fromkeys(_normalize_rail_name(r) for r in rails)
-        )
-        self._sum_rails: dict[str, tuple[str, ...]] = {
-            name: tuple(
-                dict.fromkeys(_normalize_rail_name(r) for r in rail_list)
+        if isinstance(rails, str):
+            raise ValueError(
+                "`rails` must be an iterable of ODPM rail names or a callable, "
+                f"not the str {rails!r}; did you mean [{rails!r}]?"
             )
-            for name, rail_list in (sum_rails or {}).items()
-        }
-        for name, rail_list in self._sum_rails.items():
-            if not rail_list:
+        # Preserve caller-specified order while deduplicating.
+        self._rails: tuple[str, ...] | Callable[[str], bool] = (
+            rails
+            if callable(rails)
+            else tuple(dict.fromkeys(_normalize_rail_name(r) for r in rails))
+        )
+        self._sum_rails: dict[str, tuple[str, ...] | Callable[[str], bool]] = {}
+        for name, rail_spec in (sum_rails or {}).items():
+            if callable(rail_spec):
+                self._sum_rails[name] = rail_spec
+            elif isinstance(rail_spec, str):
                 raise ValueError(
-                    f"sum_rails group '{name}' must specify at least one ODPM rail."
+                    f"sum_rails group '{name}' must be an iterable of ODPM "
+                    f"rail names or a callable, not the str {rail_spec!r}; "
+                    f"did you mean [{rail_spec!r}]?"
                 )
+            else:
+                normalized_rails = tuple(
+                    dict.fromkeys(_normalize_rail_name(r) for r in rail_spec)
+                )
+                if not normalized_rails:
+                    raise ValueError(
+                        f"sum_rails group '{name}' must specify at least one ODPM rail."
+                    )
+                self._sum_rails[name] = normalized_rails
         self._all_rails: bool = all_rails
         if self._rails and self._all_rails:
             raise ValueError("Cannot specify both `rails` and `all_rails`.")
@@ -123,42 +124,42 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
             )
 
     @staticmethod
-    def list_rails(trace_path: str | os.PathLike[str]) -> list[str]:
-        """Returns a sorted list of ODPM rail names present in a trace file.
-
-        Can be used before `process` runs to discover available rails in an
-        `.fxt` or `.json` trace file.
+    def list_rails(model: trace_model.Model) -> list[str]:
+        """Returns a sorted list of ODPM rail names present in the trace model.
 
         Args:
-            trace_path: Path to an `.fxt` or `.json` trace file.
+            model: In-memory representation of a trace.
 
         Returns:
             Sorted list of unique rail names that have ODPM power counter events.
         """
-        path = pathlib.Path(trace_path)
-        if path.suffix == ".json":
-            path_to_trace_json: str | os.PathLike[str] = path
-        elif path.suffix == ".fxt":
-            path_to_trace_json = trace_importing.convert_trace_file_to_json(
-                trace_path=path,
-                patterns={_ALL_RAIL_EVENTS_PATTERN},
-            )
-        else:
-            raise ValueError(
-                "Trace file must be in either .fxt or .json format"
-            )
-
-        model = trace_importing.create_model_from_file_path(path_to_trace_json)
-        return get_available_rails(model)
+        counter_events = trace_utils.filter_events(
+            model.all_events(),
+            type=trace_model.CounterEvent,
+        )
+        rails = {
+            event.name.removesuffix(_RAIL_EVENT_SUFFIX)
+            for event in counter_events
+            if event.name.endswith(_RAIL_EVENT_SUFFIX)
+            and _POWER_ARG_KEY in event.args
+            and isinstance(event.args[_POWER_ARG_KEY], (int, float))
+        }
+        return sorted(rails)
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         """Patterns describing the trace events needed to generate these metrics."""
-        if self._all_rails:
+        if (
+            self._all_rails
+            or callable(self._rails)
+            or any(callable(spec) for spec in self._sum_rails.values())
+        ):
             return {_ALL_RAIL_EVENTS_PATTERN}
         selected_rails = set(self._rails)
-        for rail_list in self._sum_rails.values():
-            selected_rails.update(rail_list)
+        for rail_spec in self._sum_rails.values():
+            if not callable(rail_spec):
+                selected_rails.update(rail_spec)
         return {_rail_to_event_name(rail) for rail in selected_rails}
 
     def _results_for_series(
@@ -216,6 +217,7 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
             )
         ]
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:
@@ -235,15 +237,21 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
         )
 
         samples_by_rail: dict[str, list[float]] = collections.defaultdict(list)
-        selected_rails_set = set(self._rails)
-        for rail_list in self._sum_rails.values():
-            selected_rails_set.update(rail_list)
+        collect_all_rails = (
+            self._all_rails
+            or callable(self._rails)
+            or any(callable(spec) for spec in self._sum_rails.values())
+        )
+        selected_rails_set = set(() if callable(self._rails) else self._rails)
+        for rail_spec in self._sum_rails.values():
+            if not callable(rail_spec):
+                selected_rails_set.update(rail_spec)
 
         for event in counter_events:
             if not event.name.endswith(_RAIL_EVENT_SUFFIX):
                 continue
             rail = event.name.removesuffix(_RAIL_EVENT_SUFFIX)
-            if not self._all_rails and rail not in selected_rails_set:
+            if not collect_all_rails and rail not in selected_rails_set:
                 continue
             mw_val = event.args.get(_POWER_ARG_KEY)
             if isinstance(mw_val, (int, float)):
@@ -252,19 +260,25 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
                 )
 
         if not samples_by_rail and not self._sum_rails:
-            available = [] if self._all_rails else get_available_rails(model)
+            available = [] if self._all_rails else self.list_rails(model)
             _LOGGER.warning(
                 "No ODPM power events found for selected rails %s (all_rails=%s). Available rails in trace: %s",
-                list(self._rails),
+                self._rails if callable(self._rails) else list(self._rails),
                 self._all_rails,
                 available,
             )
             return []
 
         results: list[metrics.TestCaseResult] = []
-        rails_to_report: Iterable[str] = (
-            sorted(samples_by_rail.keys()) if self._all_rails else self._rails
-        )
+        rails_to_report: Iterable[str]
+        if self._all_rails:
+            rails_to_report = sorted(samples_by_rail.keys())
+        elif callable(self._rails):
+            rails_to_report = [
+                r for r in sorted(samples_by_rail.keys()) if self._rails(r)
+            ]
+        else:
+            rails_to_report = self._rails
         for rail in rails_to_report:
             samples_w = samples_by_rail.get(rail)
             if not samples_w:
@@ -281,16 +295,28 @@ class OdpmPowerMetricsProcessor(trace_metrics.MetricsProcessor):
                 )
             )
 
-        for group_name, group_rails in self._sum_rails.items():
-            missing_rails = [
-                r for r in group_rails if not samples_by_rail.get(r)
-            ]
-            if missing_rails:
-                raise ValueError(
-                    f"Missing ODPM power samples for rail(s) {missing_rails} required by "
-                    f"sum_rails group '{group_name}'. Available rails in trace: "
-                    f"{get_available_rails(model)}"
-                )
+        for group_name, group_spec in self._sum_rails.items():
+            if callable(group_spec):
+                group_rails: Sequence[str] = [
+                    r for r in sorted(samples_by_rail.keys()) if group_spec(r)
+                ]
+                if not group_rails:
+                    raise ValueError(
+                        f"No ODPM power samples matched filter for sum_rails group "
+                        f"'{group_name}'. Available rails in trace: "
+                        f"{self.list_rails(model)}"
+                    )
+            else:
+                group_rails = group_spec
+                missing_rails = [
+                    r for r in group_rails if not samples_by_rail.get(r)
+                ]
+                if missing_rails:
+                    raise ValueError(
+                        f"Missing ODPM power samples for rail(s) {missing_rails} required by "
+                        f"sum_rails group '{group_name}'. Available rails in trace: "
+                        f"{self.list_rails(model)}"
+                    )
             summed_samples_w = self._sum_rail_samples(
                 metric_suffix=group_name,
                 rails_to_sum=group_rails,

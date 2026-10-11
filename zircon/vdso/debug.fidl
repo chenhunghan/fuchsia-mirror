@@ -58,14 +58,19 @@ closed protocol Debug {
     /// ## See also
     ///
     ///  - [kernel command line]
+    ///  - [`zx_debug_resume()`]
+    ///  - [`zx_debug_suspend()`]
     ///  - [`zx_debug_write()`]
     ///  - [`zx_debuglog_read()`]
     ///  - [`zx_debuglog_write()`]
     ///
     /// [kernel command line]: /docs/reference/kernel/kernel_cmdline.md
+    /// [`zx_debug_resume()`]: debug_resume.md
+    /// [`zx_debug_suspend()`]: debug_suspend.md
     /// [`zx_debug_write()`]: debug_write.md
     /// [`zx_debuglog_read()`]: debuglog_read.md
     /// [`zx_debuglog_write()`]: debuglog_write.md
+    @blocking
     strict Read(resource struct {
         handle Handle:RESOURCE;
     }) -> (struct {
@@ -98,6 +103,11 @@ closed protocol Debug {
     /// truncated, but the data from two different `zx_debug_write` calls will not be
     /// interleaved or reordered.
     ///
+    /// If access to the debug serial port has been suspended (see
+    /// [`zx_debug_suspend()`]), `zx_debug_write()` blocks until it has been
+    /// resumed.  A thread blocked in `zx_debug_write()` may be suspended or
+    /// killed.
+    ///
     /// ## Rights
     ///
     /// None.
@@ -117,15 +127,165 @@ closed protocol Debug {
     ///
     ///  - [kernel command line]
     ///  - [`zx_debug_read()`]
+    ///  - [`zx_debug_resume()`]
+    ///  - [`zx_debug_suspend()`]
     ///  - [`zx_debuglog_read()`]
     ///  - [`zx_debuglog_write()`]
     ///
     /// [kernel command line]: /docs/reference/kernel/kernel_cmdline.md
     /// [`zx_debug_read()`]: debug_read.md
+    /// [`zx_debug_resume()`]: debug_resume.md
+    /// [`zx_debug_suspend()`]: debug_suspend.md
     /// [`zx_debuglog_read()`]: debuglog_read.md
     /// [`zx_debuglog_write()`]: debuglog_write.md
+    @blocking
     strict Write(struct {
         buffer vector<uchar>:MAX;
+    }) -> () error Status;
+
+    /// ## Summary
+    ///
+    /// Suspend access to the debug serial port hardware.
+    ///
+    /// ## Declaration
+    ///
+    /// ```c
+    /// #include <zircon/syscalls-next.h>
+    ///
+    /// zx_status_t zx_debug_suspend(zx_handle_t resource);
+    /// ```
+    ///
+    /// ## Description
+    ///
+    /// `zx_debug_suspend()` prevents access to the debug serial port (UART)
+    /// hardware until a subsequent call to [`zx_debug_resume()`] is made.  Once
+    /// `zx_debug_suspend()` returns successfully, it is safe for the caller to
+    /// remove power and/or clocks from the debug serial port hardware if
+    /// desired.
+    ///
+    /// Before returning, `zx_debug_suspend()` waits for any in-progress
+    /// accesses of the debug serial port to complete and for any output queued
+    /// in the hardware to be transmitted, and performs any driver specific
+    /// preparation required before the hardware may be powered down.  If the
+    /// hardware is unable to make progress (e.g. transmission is stalled by
+    /// flow control), this may block indefinitely.  A thread blocked in
+    /// `zx_debug_suspend()` may be suspended or killed.
+    ///
+    /// While the debug serial port is suspended:
+    ///
+    ///  - Log messages continue to be recorded in the kernel debuglog.
+    ///    They will be emitted to the debug serial port after it has been
+    ///    resumed, subject to the capacity of the debuglog.
+    ///  - Calls to [`zx_debug_write()`] block until the port is resumed.  Threads
+    ///    blocked in [`zx_debug_write()`] may be suspended or killed.
+    ///  - Calls to [`zx_debug_read()`] return any data which was received prior
+    ///    to suspension, and otherwise block until data is available.
+    ///  - If the system panics, no output is written to the debug serial port.
+    ///    Instead, the system will reboot (even if `kernel.halt-on-panic=true`)
+    ///    and the crashlog will note that the debug serial port was suspended at
+    ///    the time of the panic.
+    ///
+    /// Unlike [`zx_debug_read()`] and [`zx_debug_write()`],
+    /// `zx_debug_suspend()` and [`zx_debug_resume()`] do not depend on the
+    /// `kernel.enable-serial-syscalls` kernel command line option.  They are
+    /// gated only by *resource*.
+    ///
+    /// ## Rights
+    ///
+    /// *resource* must have resource kind `ZX_RSRC_KIND_SYSTEM` with base
+    /// `ZX_RSRC_SYSTEM_DEBUG_BASE`.
+    ///
+    /// ## Return value
+    ///
+    /// Returns `ZX_OK` on success.
+    ///
+    /// ## Errors
+    ///
+    /// `ZX_ERR_BAD_HANDLE`  *resource* is not a valid handle.
+    ///
+    /// `ZX_ERR_WRONG_TYPE`  *resource* is not a resource handle.
+    ///
+    /// `ZX_ERR_OUT_OF_RANGE`  *resource* is not the debug system resource.
+    ///
+    /// `ZX_ERR_NOT_SUPPORTED`  The system has no debug serial port, or the
+    /// kernel has been configured to bypass the debuglog
+    /// (`kernel.bypass-debuglog=true`).
+    ///
+    /// `ZX_ERR_BAD_STATE`  The debug serial port is already suspended, or
+    /// another call to `zx_debug_suspend()` is in progress.
+    ///
+    /// ## See also
+    ///
+    ///  - [`zx_debug_read()`]
+    ///  - [`zx_debug_resume()`]
+    ///  - [`zx_debug_write()`]
+    ///
+    /// [`zx_debug_read()`]: debug_read.md
+    /// [`zx_debug_resume()`]: debug_resume.md
+    /// [`zx_debug_write()`]: debug_write.md
+    @blocking
+    @next
+    strict Suspend(resource struct {
+        resource Handle:RESOURCE;
+    }) -> () error Status;
+
+    /// ## Summary
+    ///
+    /// Allow access to the debug serial port hardware after a successful
+    /// [`zx_debug_suspend()`].
+    ///
+    /// ## Declaration
+    ///
+    /// ```c
+    /// #include <zircon/syscalls-next.h>
+    ///
+    /// zx_status_t zx_debug_resume(zx_handle_t resource);
+    /// ```
+    ///
+    /// ## Description
+    ///
+    /// `zx_debug_resume()` undoes the effects of a previous call to
+    /// [`zx_debug_suspend()`].  The caller must ensure that the debug serial
+    /// port hardware has been powered and clocked before calling
+    /// `zx_debug_resume()`.
+    ///
+    /// Once resumed, any blocked calls to [`zx_debug_write()`] will proceed, and
+    /// any log messages recorded while the port was suspended will be emitted.
+    ///
+    /// ## Rights
+    ///
+    /// *resource* must have resource kind `ZX_RSRC_KIND_SYSTEM` with base
+    /// `ZX_RSRC_SYSTEM_DEBUG_BASE`.
+    ///
+    /// ## Return value
+    ///
+    /// Returns `ZX_OK` on success.
+    ///
+    /// ## Errors
+    ///
+    /// `ZX_ERR_BAD_HANDLE`  *resource* is not a valid handle.
+    ///
+    /// `ZX_ERR_WRONG_TYPE`  *resource* is not a resource handle.
+    ///
+    /// `ZX_ERR_OUT_OF_RANGE`  *resource* is not the debug system resource.
+    ///
+    /// `ZX_ERR_NOT_SUPPORTED`  The system has no debug serial port, or the
+    /// kernel has been configured to bypass the debuglog
+    /// (`kernel.bypass-debuglog=true`).
+    ///
+    /// `ZX_ERR_BAD_STATE`  The debug serial port is not suspended (including
+    /// when a call to [`zx_debug_suspend()`] is still in progress).
+    ///
+    /// ## See also
+    ///
+    ///  - [`zx_debug_suspend()`]
+    ///  - [`zx_debug_write()`]
+    ///
+    /// [`zx_debug_suspend()`]: debug_suspend.md
+    /// [`zx_debug_write()`]: debug_write.md
+    @next
+    strict Resume(resource struct {
+        resource Handle:RESOURCE;
     }) -> () error Status;
 
     /// ## Summary

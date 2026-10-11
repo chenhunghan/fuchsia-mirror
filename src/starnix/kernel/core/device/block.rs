@@ -49,13 +49,14 @@ fn open_mmc_block_device(
 /// exports the typical sysfs layout for block devices, but cannot be read from or written to.
 pub fn add_mmc_block_device(kernel: &Kernel) -> Result<Arc<MmcBlockDevice>, Errno> {
     let name = FsString::from("mmcblk0");
-    let class = kernel.device_registry.objects.virtual_block_class();
+    let class = kernel.device_registry.objects.block_class();
     let device = Arc::new(MmcBlockDevice);
     let device_weak = Arc::downgrade(&device);
     kernel.device_registry.register_device_with_dir(
         kernel,
         name.as_ref(),
         DeviceMetadata::new(name.clone(), DeviceId::MMCBLK0, DeviceMode::Block),
+        /* parent = */ None,
         class,
         |device, dir| build_block_device_directory(device, device_weak, dir),
         open_mmc_block_device,
@@ -74,12 +75,12 @@ mod tests {
     async fn test_mmc_block_device() {
         spawn_kernel_and_run(async |current_task| {
             let _device = add_mmc_block_device(current_task.kernel()).unwrap();
-            let class = current_task.kernel().device_registry.objects.virtual_block_class();
+            let root = &current_task.kernel().device_registry.objects.root;
             // The device should have a typical sysfs layout for block devices.
-            assert!(class.dir.lookup(b"mmcblk0/holders".into()).is_some());
+            assert!(root.lookup(b"devices/virtual/block/mmcblk0/holders".into()).is_some());
             // We should be able to open the size node of the stub device, but reading it will fail
             // since right now it is just a stub implementation.
-            let size_node = class.dir.lookup(b"mmcblk0/size".into()).unwrap();
+            let size_node = root.lookup(b"devices/virtual/block/mmcblk0/size".into()).unwrap();
             let file_ops = size_node.create_file_ops(&current_task, OpenFlags::RDONLY).unwrap();
             let file = anon_test_file(&current_task, file_ops, OpenFlags::RDONLY);
             let mut buf = VecOutputBuffer::new(10);

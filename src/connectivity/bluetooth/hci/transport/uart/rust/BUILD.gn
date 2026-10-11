@@ -41,6 +41,8 @@ fuchsia_rust_driver("bt-transport-uart-rust-driver") {
 
   sources = [
     "src/lib.rs",
+    "src/packet.rs",
+    "src/queue.rs",
     "src/serial.rs",
     "src/tests/fake_serial.rs",
     "src/tests/mod.rs",
@@ -48,11 +50,13 @@ fuchsia_rust_driver("bt-transport-uart-rust-driver") {
 
   deps = [
     ":bt-transport-uart-rust-config",
+    "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust_next",
     "//sdk/fidl/fuchsia.hardware.serialimpl:fuchsia.hardware.serialimpl_rust_next",
     "//sdk/lib/driver/component/rust",
     "//sdk/lib/driver/runtime/rust/fidl",
     "//sdk/rust/zx",
+    "//src/connectivity/bluetooth/sunstone/sapphire-emboss",
     "//src/devices/bind/fuchsia:fuchsia_rust",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",

@@ -398,6 +398,7 @@ pub fn builtin_mkdir(
         return EXIT_FAILURE;
     }
 
+    let mut status = EXIT_SUCCESS;
     for dir_str in remaining {
         let dir_bytes = dir_str.as_bytes();
         if parents {
@@ -414,7 +415,7 @@ pub fn builtin_mkdir(
                                     "error: failed to make directory '{}'",
                                     sub_bstr
                                 );
-                                return EXIT_SUCCESS;
+                                return EXIT_FAILURE;
                             }
                         }
                     }
@@ -426,6 +427,7 @@ pub fn builtin_mkdir(
             Ok(p) => p,
             Err(_) => {
                 let _ = writeln!(stderr, "error: failed to make directory '{}'", dir_str);
+                status = EXIT_FAILURE;
                 continue;
             }
         };
@@ -435,11 +437,12 @@ pub fn builtin_mkdir(
             Err(e) if parents && e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(_) => {
                 let _ = writeln!(stderr, "error: failed to make directory '{}'", dir_str);
+                status = EXIT_FAILURE;
             }
         }
     }
 
-    EXIT_SUCCESS
+    status
 }
 
 fn rm_recursive(path: &std::path::Path, force: bool) -> i32 {

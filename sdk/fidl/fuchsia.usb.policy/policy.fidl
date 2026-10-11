@@ -135,4 +135,14 @@ open protocol Configuration {
         config_descriptors
                 vector<fuchsia.hardware.usb.peripheral.ConfigurationDescriptor>:fuchsia.hardware.usb.peripheral.MAX_CONFIG_DESCRIPTORS;
     }) -> () error zx.Status;
+
+    /// Disconnects the Type-C port CC lines via the USB power debug service
+    /// to simulate a physical cable unplug. If `duration` is positive,
+    /// schedules an automatic Type-C cable reconnect after `duration` using a
+    /// hardware wake alarm in the persistent usb-policy service so reconnect
+    /// still completes even if the calling CLI session is terminated when the
+    /// USB link drops.
+    flexible DisconnectCable(struct {
+        duration zx.Duration;
+    }) -> () error zx.Status;
 };

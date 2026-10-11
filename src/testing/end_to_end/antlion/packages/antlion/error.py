@@ -32,19 +32,3 @@ class ActsErrorCode:
 
     # This error code is used to implement unittests for this class.
     ActsError = 100
-    AndroidDeviceError = 101
-
-    # Controllers Errors 1000-3999
-
-    Sl4aStartError = 1001
-    Sl4aApiError = 1002
-    Sl4aConnectionError = 1003
-    Sl4aProtocolError = 1004
-    Sl4aNotInstalledError = 1005
-    Sl4aRpcTimeoutError = 1006
-
-    # Util Errors 4000-9999
-
-    FastbootError = 9000
-    AdbError = 9001
-    AdbCommandError = 9002

@@ -264,6 +264,16 @@ class CodecAdapter {
   // the CodecAdapter is expected to correctly handle it without dropping any
   // output frames specified by the bitstream.
   //
+  // Once output constraints have been established (either from the start when
+  // IsCoreCodecRequiringOutputConfigForFormatDetection() is true, or once
+  // onCoreCodecMidStreamOutputConstraintsChange() has been called at least
+  // once), this method may be called for kOutputPort even when no stream is
+  // currently active (after CoreCodecStopStream()) or after
+  // CoreCodecStartStream() before the new stream has processed
+  // CoreCodecQueueInputFormatDetails() or any input packets. In these cases,
+  // the CodecAdapter must still succeed and return valid output constraints
+  // (e.g. using the most recently established output format/constraints).
+  //
   // If an uncompressed video port is listing more than one
   // PixelFormatAndModifier, and has at least one linear pixel_format_modifier,
   // the most widely compatible pixel_format and pixel_format_modifier should be
@@ -428,6 +438,14 @@ class CodecAdapter {
   // if the client has configured adequate input buffers, and the basic type of
   // the input data hasn't changed.
   //
+  // CodecImpl only calls this method just before CoreCodecQueueInputPacket(),
+  // and intentionally does not call it when an otherwise-empty stream
+  // encounters input EOS. Calling this method on an empty stream at input EOS
+  // would cause CodecAdapter implementations that trigger output constraints
+  // changes on input format details to call
+  // onCoreCodecMidStreamOutputConstraintsChange(true), forcing an unnecessary
+  // output buffer reconfiguration for a stream that has no input packets.
+  //
   // TODO(dustingreen): Nail down the above sorta-vaguely-described rules
   // better.
   //
@@ -439,6 +457,21 @@ class CodecAdapter {
   virtual void CoreCodecQueueInputPacket(const CodecPacket* packet) = 0;
 
   // Only permitted between CoreCodecStartStream() and CoreCodecStopStream().
+  //
+  // Note that this method may be called on a stream for which no
+  // CoreCodecQueueInputFormatDetails() or CoreCodecQueueInputPacket() call has
+  // been made (an empty stream). The CodecAdapter must still handle this and
+  // call onCoreCodecOutputEndOfStream().
+  //
+  // We still call CoreCodecStartStream() and CoreCodecQueueInputEndOfStream()
+  // on an empty stream because it could potentially be reasonable for a
+  // CodecAdapter to emit an output packet from CoreCodecStartStream() just
+  // indicating that a stream is starting (though no current CodecAdapter is
+  // known to drive packet output directly from CoreCodecStartStream()). Under
+  // that regime, the CodecAdapter would likely want
+  // CoreCodecQueueInputEndOfStream() to be called despite lack of input format
+  // or input packets so that it can potentially emit a packet indicating output
+  // EOS before calling onCoreCodecOutputEndOfStream().
   virtual void CoreCodecQueueInputEndOfStream() = 0;
 
   // Stop the core codec from processing any more data for the stream that was

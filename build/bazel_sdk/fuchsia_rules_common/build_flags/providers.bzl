@@ -24,6 +24,11 @@ For the other rare cases where these are used in the GN graph, a Bazel-specific 
 required to implement the same feature.
 """
 
+def _check_list(value, name):
+    if type(value) != "list":
+        fail("{} value is not a list: {}".format(name, repr(value)))
+    return value
+
 def _build_flags_info_init(
         *,
         label,
@@ -45,14 +50,14 @@ def _build_flags_info_init(
     return {
         "label": label,
         "defines": defines,
-        "cflags": cflags,
-        "cflags_c": cflags_c,
-        "cflags_cc": cflags_cc,
-        "include_dirs": include_dirs,
-        "ldflags": ldflags,
-        "lib_dirs": lib_dirs,
+        "cflags": _check_list(cflags, "cflags"),
+        "cflags_c": _check_list(cflags_c, "cflags_c"),
+        "cflags_cc": _check_list(cflags_cc, "cflags_cc"),
+        "include_dirs": _check_list(include_dirs, "include_dirs"),
+        "ldflags": _check_list(ldflags, "ldflags"),
+        "lib_dirs": _check_list(lib_dirs, "lib_dirs"),
         "rustenv": rustenv,
-        "rustflags": rustflags,
+        "rustflags": _check_list(rustflags, "rustflags"),
     }
 
 BuildFlagsInfo, _ = provider(

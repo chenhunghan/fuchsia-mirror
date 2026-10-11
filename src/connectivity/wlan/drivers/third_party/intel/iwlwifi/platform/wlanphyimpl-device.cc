@@ -193,14 +193,6 @@ void WlanPhyDevice::Init(InitRequest& request, InitCompleter::Sync& completer) {
   completer.Reply(zx::ok(fuchsia_wlan_phy::WlanPhyInitResponse{}));
 }
 
-void WlanPhyDevice::PowerDown(PowerDownCompleter::Sync& completer) {
-  completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
-}
-
-void WlanPhyDevice::PowerUp(PowerUpCompleter::Sync& completer) {
-  completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
-}
-
 void WlanPhyDevice::Reset(ResetCompleter::Sync& completer) {
   completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
 }

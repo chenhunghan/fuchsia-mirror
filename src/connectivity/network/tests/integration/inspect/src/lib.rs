@@ -2640,6 +2640,12 @@ async fn inspect_counters(name: &str) {
                         AllCsumsOffloaded: 1u64,
                     },
                 },
+                "Gro": {
+                    Batches: 0u64,
+                    InputFrames: 0u64,
+                    OutputFrames: 0u64,
+                    FlowEvictions: 0u64,
+                },
             },
             "Arp": {
                 "Rx": {

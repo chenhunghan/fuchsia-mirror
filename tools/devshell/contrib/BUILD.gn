@@ -12,9 +12,20 @@ if (is_host) {
       "list_packages_test.py",
     ]
   }
+
+  python_host_test("min_owners_test") {
+    main_source = "min_owners_test.py"
+    sources = [
+      "min_owners.py",
+      "min_owners_test.py",
+    ]
+  }
 }
 
 group("tests") {
   testonly = true
-  deps = [ ":list_packages_test($host_toolchain)" ]
+  deps = [
+    ":list_packages_test($host_toolchain)",
+    ":min_owners_test($host_toolchain)",
+  ]
 }

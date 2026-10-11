@@ -440,8 +440,9 @@ constexpr uint32_t BandwidthForSpeed(fdescriptor::UsbSpeed speed) {
 
 class IrisExtension final : public PlatformExtension {
  public:
-  // Phase 1 Iris default speed is High-Speed (40 MB/s).
-  static constexpr fdescriptor::UsbSpeed kDefaultSpeed = fdescriptor::UsbSpeed::kHigh;
+  // Default to Undefined (0 bps) when disconnected; OnConnectStatusChanged votes provisional
+  // High-Speed (480 Mbps) upon connection before link speed negotiation completes.
+  static constexpr fdescriptor::UsbSpeed kDefaultSpeed = fdescriptor::UsbSpeed::kUndefined;
   static constexpr uint32_t kDefaultBandwidthBps = BandwidthForSpeed(kDefaultSpeed);
 
   static std::unique_ptr<IrisExtension> Create(Dwc3* parent) {
@@ -576,11 +577,6 @@ zx::result<> Dwc3::Start(fdf::DriverContext context) {
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   power_element_runner_ = context.take_power_element_runner();
 #endif
-
-  if (zx::result result = InitializeSuspend(dispatcher(), *incoming_, "dwc3"); result.is_error()) {
-    fdf::error("Failed to initialize suspend: {}", result.status_string());
-    return result.take_error();
-  }
 
   auto phy_result = incoming()->Connect<fphy::Service::Device>("dwc3-phy");
   if (phy_result.is_ok()) {
@@ -1128,8 +1124,26 @@ zx_status_t Dwc3::ResetHw() {
   // while the controller is unconfigured or stopped.
   GEVNTSIZ::Get(0).FromValue(0).set_EVNTINTRPTMASK(1).WriteTo(mmio);
 
-  // Fuchsia's dwc3.cc doesn't parse snps,incr-burst-type-adjustment yet.
-  GSBUSCFG0::Get().FromValue(0).set_INCR4BRSTENA(1).WriteTo(mmio);
+  ConfigureCoreRegisters();
+
+  ep0_.out.stale_starts_to_end = 0;
+  ep0_.in.stale_starts_to_end = 0;
+  for (UserEndpoint& uep : user_endpoints_) {
+    uep.ep.stale_starts_to_end = 0;
+    uep.ep.stale_cancels_to_ignore = 0;
+  }
+  CancelAllEndpointIdleCallbacks();
+
+  return ZX_OK;
+}
+
+void Dwc3::ConfigureCoreRegisters() {
+  auto* mmio = get_mmio();
+
+  // Clear burst bits [7:0] (including reset default INCRBRSTENA) before enabling fixed INCR4
+  // bursts, while preserving upper SoC AXI cache/endianness bits [31:8].
+  auto gsbuscfg0 = GSBUSCFG0::Get().ReadFrom(mmio);
+  gsbuscfg0.set_reg_value(gsbuscfg0.reg_value() & ~0xffu).set_INCR4BRSTENA(1).WriteTo(mmio);
 
   if (poll_end_xfer_) {
     GUCTL2::Get().ReadFrom(mmio).set_Rst_actbitlater(1).WriteTo(mmio);
@@ -1146,16 +1160,6 @@ zx_status_t Dwc3::ResetHw() {
     }
     gfladj.WriteTo(mmio);
   }
-
-  ep0_.out.stale_starts_to_end = 0;
-  ep0_.in.stale_starts_to_end = 0;
-  for (UserEndpoint& uep : user_endpoints_) {
-    uep.ep.stale_starts_to_end = 0;
-    uep.ep.stale_cancels_to_ignore = 0;
-  }
-  CancelAllEndpointIdleCallbacks();
-
-  return ZX_OK;
 }
 
 void Dwc3::SetDeviceAddress(uint32_t address) {
@@ -1174,6 +1178,8 @@ void Dwc3::SetDeviceAddress(uint32_t address) {
 void Dwc3::StartPeripheralMode() {
   TRACE_DURATION("dwc3", "Dwc3::StartPeripheralMode");
   auto* mmio = get_mmio();
+
+  ConfigureCoreRegisters();
 
   if (interrupt_moderation_ != 0) {
     // Enable interrupt moderation.
@@ -1217,10 +1223,7 @@ void Dwc3::StartPeripheralMode() {
 
 void Dwc3::ResetConfiguration() {
   TRACE_DURATION("dwc3", "Dwc3::ResetConfiguration");
-  CancelAllEndpointIdleCallbacks();
-  for (UserEndpoint& uep : user_endpoints_) {
-    UserEpReset(uep);
-  }
+  ResetUserEndpoints(false);
 
   if (dci_intf_.is_valid()) {
     fidl::Arena arena;
@@ -1248,7 +1251,6 @@ void Dwc3::HandleResetEvent() {
   TRACE_DURATION("dwc3", "Dwc3::HandleResetEvent");
   fdf::info("Dwc3::HandleResetEvent");
 
-  CancelAllEndpointIdleCallbacks();
   ResetEndpoints();
   SetDeviceAddress(0);
   connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
@@ -1373,7 +1375,6 @@ void Dwc3::HandleDisconnectedEvent() {
         });
   }
 
-  CancelAllEndpointIdleCallbacks();
   ResetEndpoints();
 
   connection_speed_ = fdescriptor::UsbSpeed::kUndefined;
@@ -1417,31 +1418,6 @@ void Dwc3::Stop(fdf::StopCompleter completer) {
   dci_bindings_.RemoveAll();
   policy_bindings_.RemoveAll();
   completer(zx::ok());
-}
-
-void Dwc3::Suspend(fdf_power::SuspendCompleter completer) {
-  TRACE_DURATION("dwc3", "Dwc3::Suspend");
-  if (platform_extension_) {
-    if (zx::result result = platform_extension_->Suspend(); result.is_error()) {
-      fdf::error("platform_extension_->Suspend() failed: {}", result.status_string());
-    }
-  }
-  completer();
-}
-
-void Dwc3::Resume(fdf_power::ResumeCompleter completer) {
-  TRACE_DURATION("dwc3", "Dwc3::Resume");
-  if (platform_extension_) {
-    if (zx::result result = platform_extension_->Resume(); result.is_error()) {
-      fdf::error("platform_extension_->Resume() failed: {}", result.status_string());
-    }
-  }
-  completer();
-}
-
-bool Dwc3::SuspendEnabled() {
-  TRACE_INSTANT("dwc3", "Dwc3::SuspendEnabled", TRACE_SCOPE_THREAD);
-  return false;
 }
 
 void Dwc3::ConnectToEndpoint(ConnectToEndpointRequest& request,
@@ -1811,6 +1787,7 @@ void Dwc3::UserEpReset(UserEndpoint& uep, bool force) {
 
 void Dwc3::Ep0Reset() {
   TRACE_DURATION("dwc3", "Dwc3::Ep0Reset");
+  ep0_.setup_generation++;
   if (is_active()) {
     for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
       if (ep->transfer_state == Endpoint::TransferState::kStartingSingle) {
@@ -1891,12 +1868,18 @@ void Dwc3::CancelAllEndpointIdleCallbacks() {
   }
 }
 
-void Dwc3::ResetEndpoints(bool force) {
-  TRACE_DURATION("dwc3", "Dwc3::ResetEndpoints");
-  Ep0Reset();
+void Dwc3::ResetUserEndpoints(bool force) {
+  TRACE_DURATION("dwc3", "Dwc3::ResetUserEndpoints");
+  CancelAllEndpointIdleCallbacks();
   for (UserEndpoint& uep : user_endpoints_) {
     UserEpReset(uep, force);
   }
+}
+
+void Dwc3::ResetEndpoints(bool force) {
+  TRACE_DURATION("dwc3", "Dwc3::ResetEndpoints");
+  Ep0Reset();
+  ResetUserEndpoints(force);
 }
 
 void Dwc3::OnConnectStatusChanged(
@@ -1936,11 +1919,13 @@ void Dwc3::OnConnectStatusChanged(
     return;
   }
 
+  link_connected_ = result->connected();
   if (result->connected()) {
     fdf::debug("OnConnectStatusChanged: now connected");
 
     if (platform_extension_) {
       if (zx::result result = platform_extension_->Resume(); result.is_error()) {
+        link_connected_ = false;
         return;
       }
       if (zx::result result = platform_extension_->SetConnectionSpeed(fdescriptor::UsbSpeed::kHigh);

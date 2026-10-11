@@ -939,6 +939,51 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
         # The command should only be called once for the test itself, as gemini analysis should be skipped.
         command_mock.assert_called_once()
 
+    @mock.patch("execution.run_command")
+    async def test_gemini_analysis_does_not_pass_api_key_in_command_line_args(
+        self, command_mock: mock.AsyncMock
+    ) -> None:
+        """Test that the Gemini API key is passed via environment variables,
+        not in CLI arguments or unredacted event logs."""
+        secret_key = "super_secret_gemini_key_12345"
+        exec_env = _make_exec_env(
+            "/fuchsia", "/out_dir", gemini_api_key=secret_key
+        )
+        flags = args.parse_args(
+            ["--gemini-analysis=2", "--env", f"GEMINI_API_KEY={secret_key}"]
+        )
+
+        test = execution.TestExecution(
+            test_list_file.Test(
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo", "//foo", "linux", path="ls"
+                    )
+                ),
+                test_list_file.TestListEntry("foo", [], execution=None),
+            ),
+            exec_env,
+            flags,
+        )
+
+        command_mock.return_value = self._make_command_output(
+            "some failure log", return_code=1
+        )
+
+        recorder = event.EventRecorder()
+        recorder.emit_init()
+
+        with self.assertRaises(execution.TestFailed):
+            await test.run(recorder, flags, event.GLOBAL_RUN_ID)
+
+        self.assertEqual(command_mock.call_count, 2)
+        gemini_call = command_mock.call_args_list[1]
+        self.assertNotIn(secret_key, gemini_call.args)
+        self.assertNotIn("--api-key", gemini_call.args)
+        self.assertEqual(
+            gemini_call.kwargs.get("env", {}).get("GEMINI_API_KEY"), secret_key
+        )
+
 
 class TestExecutionUtils(unittest.IsolatedAsyncioTestCase):
     def _make_command_output(
@@ -1247,3 +1292,162 @@ class TestExecutionUtils(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(dev_env.address, "[fe80::1%eth0]")
                 self.assertEqual(dev_env.port, "8022")
                 self.assertEqual(dev_env.private_key_path, tf.name)
+
+    async def test_get_device_ssh_address_parses_unbracketed_ipv6_and_default_port(
+        self,
+    ) -> None:
+        """Test that get_device_environment_from_exec_env parses unbracketed IPv6 addresses without mangling the address."""
+        exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
+        recorder = mock.MagicMock()
+
+        with tempfile.NamedTemporaryFile() as tf:
+
+            async def fake_run_command(
+                *args_list: str, **kwargs: typing.Any
+            ) -> command.CommandOutput:
+                cmd = " ".join(args_list)
+                if "wait" in cmd:
+                    return command.CommandOutput(
+                        stdout="",
+                        stderr="",
+                        return_code=0,
+                        runtime=0.1,
+                        wrapper_return_code=0,
+                    )
+                elif "default get" in cmd:
+                    return command.CommandOutput(
+                        stdout="my-target\n",
+                        stderr="",
+                        return_code=0,
+                        runtime=0.1,
+                        wrapper_return_code=0,
+                    )
+                elif "target list" in cmd:
+                    return command.CommandOutput(
+                        stdout="fe80::1\n",
+                        stderr="",
+                        return_code=0,
+                        runtime=0.1,
+                        wrapper_return_code=0,
+                    )
+                elif "ssh.priv" in cmd:
+                    return command.CommandOutput(
+                        stdout=f"{tf.name}\n",
+                        stderr="",
+                        return_code=0,
+                        runtime=0.1,
+                        wrapper_return_code=0,
+                    )
+                return command.CommandOutput(
+                    stdout="",
+                    stderr="",
+                    return_code=1,
+                    runtime=0.1,
+                    wrapper_return_code=1,
+                )
+
+            with mock.patch(
+                "execution.run_command", side_effect=fake_run_command
+            ):
+                dev_env = await execution.get_device_environment_from_exec_env(
+                    exec_env, recorder
+                )
+                self.assertEqual(dev_env.address, "fe80::1")
+                self.assertEqual(dev_env.port, "22")
+
+    @parameterized.expand(
+        [
+            (
+                "bracketed_ipv6_with_port",
+                "[fe80::1%eth0]:8022",
+                "[fe80::1%eth0]",
+                "8022",
+            ),
+            ("bracketed_ipv6_default_port", "[fe80::1]", "[fe80::1]", "22"),
+            (
+                "bracketed_ipv6_explicit_standard_port",
+                "[fe80::1]:22",
+                "[fe80::1]",
+                "22",
+            ),
+            ("bracketed_loopback_with_port", "[::1]:8022", "[::1]", "8022"),
+            ("bracketed_loopback_default_port", "[::1]", "[::1]", "22"),
+            (
+                "bracketed_global_unicast_with_port",
+                "[2001:db8::1]:53",
+                "[2001:db8::1]",
+                "53",
+            ),
+            (
+                "bracketed_full_ipv6_with_port",
+                "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8022",
+                "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]",
+                "8022",
+            ),
+            (
+                "bracketed_ipv4_mapped_ipv6",
+                "[::ffff:192.0.2.1]:8022",
+                "[::ffff:192.0.2.1]",
+                "8022",
+            ),
+            ("bracketed_unspecified_ipv6", "[::]:22", "[::]", "22"),
+            ("unbracketed_link_local", "fe80::1", "fe80::1", "22"),
+            (
+                "unbracketed_link_local_with_scope",
+                "fe80::1%eth0",
+                "fe80::1%eth0",
+                "22",
+            ),
+            ("unbracketed_loopback", "::1", "::1", "22"),
+            ("unbracketed_global_unicast", "2001:db8::1", "2001:db8::1", "22"),
+            (
+                "unbracketed_full_ipv6",
+                "2001:db8:85a3:8d3:1319:8a2e:370:7348",
+                "2001:db8:85a3:8d3:1319:8a2e:370:7348",
+                "22",
+            ),
+            ("ipv4_with_port", "192.168.1.1:8022", "192.168.1.1", "8022"),
+            ("ipv4_loopback_with_port", "127.0.0.1:22", "127.0.0.1", "22"),
+            ("hostname_with_port", "localhost:8022", "localhost", "8022"),
+        ]
+    )
+    def test_parse_device_address_valid(
+        self,
+        _name: str,
+        target_line: str,
+        expected_ip: str,
+        expected_port: str,
+    ) -> None:
+        """Test _parse_device_address parses various valid address formats correctly."""
+        ip, port = execution._parse_device_address(target_line)
+        self.assertEqual(ip, expected_ip)
+        self.assertEqual(port, expected_port)
+
+    @parameterized.expand(
+        [
+            ("missing_closing_bracket", "[fe80::1"),
+            ("empty_bracket", "[]:22"),
+            ("empty_port_after_colon", "[fe80::1]:"),
+            ("non_numeric_port", "[fe80::1]:abc"),
+            ("port_zero", "[fe80::1]:0"),
+            ("port_too_large", "[fe80::1]:65536"),
+            ("negative_port", "[fe80::1]:-1"),
+            ("junk_after_bracket", "[fe80::1]extra:22"),
+            ("invalid_ipv6_triple_colon", "[fe80:::1]:22"),
+            ("invalid_ipv6_hex_chars", "[fe80::xyz]:22"),
+            ("empty_scope_id_in_bracket", "[fe80::1%]:22"),
+            ("unbracketed_triple_colon", "fe80:::1"),
+            ("unbracketed_invalid_hex", "fe80::xyz"),
+            ("unbracketed_empty_scope_id", "fe80::1%"),
+            ("missing_host_before_colon", ":8022"),
+            ("no_colon_no_ipv6", "nohost"),
+        ]
+    )
+    def test_parse_device_address_invalid(
+        self,
+        _name: str,
+        target_line: str,
+    ) -> None:
+        """Test _parse_device_address rejects malformed addresses and invalid ports."""
+        with self.assertRaises(execution.DeviceConfigError):
+            execution._parse_device_address(target_line)

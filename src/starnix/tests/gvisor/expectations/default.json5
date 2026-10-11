@@ -141,9 +141,11 @@
                 "SocketTest.Permission",
                 "OpenModes/SocketOpenTest.Unix/0",
                 "OpenModes/SocketOpenTest.Unix/1",
+                "AllInetTests/SimpleTcpSocketTest.CleanupOnConnectionRefused/*",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/0",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/1",
-                "AllInetTests/UdpSocketTest.DisconnectAfterBindToUnspecAndConnect/0",
+                "AllInetTests/UdpSocketControlMessagesTest.SetAndReceivePktInfo/2",
+                "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastIPPacketInfo/*",
                 "IPv4UDPSockets/IPv4UDPUnboundSocketTest.SendWithProtNoneBufEfaults/*",
             ],
         },
@@ -155,9 +157,9 @@
                 "AffinityTest.NewThread",
                 "AffinityTest.Sanity",
 
-                // arch_prctl_test
-                // TODO(https://fxbug.dev/322874054): Implement ARCH_GET_FS.
-                "ArchPrctlTest.GetSetFS",
+                // aio_test
+                // TODO(https://fxbug.dev/568843829): Populate aio_ring header magic in AioContext::create.
+                "AIOTest.BasicWrite",
 
                 // cgroup_test
                 "CPUAcctCgroup.CPUAcctStat",
@@ -292,8 +294,10 @@
                 "Cases/ElfInterpreterStaticTest.Test/1",
                 "Cases/ElfInterpreterStaticTest.Test/2",
 
-                // TODO(https://fxbug.dev/564993581): Test checks IsRunningOnGvisor() and expects EINVAL rather than Linux's SIGSEGV.
-                "ElfTest.UnalignedOffset",
+                // TODO(https://fxbug.dev/568844231): Support overlapping, out-of-order, and execute-only ELF PT_LOAD segments.
+                "ElfTest.DirectlyOverlappingSegments",
+                "ElfTest.OutOfOrderSegments",
+                "ElfTest.NoRead",
 
                 // TODO(https://fxbug.dev/528339136): Starnix does not support ARM64 memory tagging.
                 "TaggedAddressesTest.MemoryFault",
@@ -344,9 +348,6 @@
                 "PrivateFutexTest.WakeOp0Xor",
 
                 // getdents_test
-                "GetdentsTest/0.TooLargeSize",
-                "GetdentsTest/1.TooLargeSize",
-
                 // Assumes structure of root directory.
                 "ReaddirTest.RootContainsBasicDirectories",
 
@@ -363,6 +364,9 @@
                 "Inotify.IncludeUnlinkedFile",
                 "Inotify.Exec",
                 "Inotify.OpenWithTruncGeneratesModify",
+
+                // TODO(https://fxbug.dev/568843853): Emit IN_ATTRIB inotify events on setxattr and removexattr.
+                "Inotify.Xattr",
 
                 // ioctl_test
                 "IoctlTest/IoctlTestSIOCGIFCONF.ValidateNoArrayGetsLength/*",
@@ -479,9 +483,7 @@
                 "MountTest.LockedMountFlagsAreInheritedByBind",
                 "MountTest.LockedMountStopsNonRecBind",
                 "MountTest.MaxRecursiveBind",
-                "MountTest.MountInfo",
                 "MountTest.MountNamespaceSlavesNewUserNamespace",
-                "MountTest.MountProc",
                 "MountTest.MountTmpfsMagicValIgnored",
                 "MountTest.MountWithStrictAtime",
                 "MountTest.OverlayfsDirectoryRenameInUserNamespace",
@@ -562,12 +564,18 @@
                 "AllInetTests/CookedPacketTest.BindDrop/*",
                 "AllInetTests/CookedPacketTest.ReceiveOutbound/*",
 
+                // TODO(https://fxbug.dev/568843130): Implement /proc/sys/net/ipv4/conf/*/accept_local.
+                "AllInetTests/CookedPacketTest.BindFail/*",
+                "AllInetTests/CookedPacketTest.BindReceive/*",
+                "AllInetTests/CookedPacketTest.DoubleBindSucceeds/*",
+                "AllInetTests/CookedPacketTest.Receive/*",
+                "AllInetTests/CookedPacketTest.Send/*",
+
                 // tcp_socket_test
                 "AllInetTests/TcpSocketTest.SetPMTUD/*",
                 "AllInetTests/SimpleTcpSocketTest.SetUnsupportedPMTUDISC/*",
 
                 // packet_socket_test
-                "AllPacketSocketTests/PacketSocketTest.GetSockName/*",
                 "PacketSocketNoCapTest.CreationFailsWithEPERM",
 
                 // ping_socket_test
@@ -580,8 +588,6 @@
                 "PingSockets/Fixture.Bind/ICMP_socket_V4MulticastAllHosts",
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6Multicast",
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastInterfaceLocalAllNodes",
-                "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastLinkLocalAllNodes",
-                "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastLinkLocalAllRouters",
 
                 // pivot_root_test
                 "PivotRootTest.LockedNewRootFails",
@@ -594,7 +600,6 @@
                 "PrctlTest.InvalidPrSetMM",
                 "PrctlTest.PDeathSig",
                 "PrctlTest.OrphansReparentedToSubreaper",
-                "PrctlTest.RootDumpability",
 
                 // processes_test
                 "Processes.SetPGIDOfZombie",
@@ -620,7 +625,6 @@
                 "ProcSysVmMmapMinAddr.HasNumericValue",
                 "ProcSysVmOvercommitMemory.HasNumericValue",
                 "ProcSysKernelKeysMax.*",
-                "Proc.GetdentsEnoent",
                 "Proc.PidReuse",
                 "Proc.PidTidIOAccounting",
 
@@ -654,6 +658,9 @@
                 "ProcNetSnmp.UdpIn",
                 "ProcNetSnmp.Stat",
                 "ProcNetSnmp.CheckNetStat",
+
+                // TODO(https://fxbug.dev/568843130): Implement /proc/net/snmp.
+                "ProcNetSnmp.CheckSnmp",
                 "ProcSysNetIpv4Recovery.Exists",
                 "ProcSysNetIpv4IpForward.DefaultValueEqZero",
                 "ProcSysNetIpv4Sack.CanReadAndWrite",
@@ -746,9 +753,6 @@
                 "SigaltstackTest.ResetByExecve",
 
                 // sigreturn_test
-                // TODO(https://fxbug.dev/563127415): Deliver SIGSEGV when handler RIP is non-canonical.
-                "SigIretTest.BadHandler",
-
                 // TODO(https://fxbug.dev/322874521): Requires setitimer(ITIMER_VIRTUAL).
                 "SigIretTest.CheckRcxR11",
 
@@ -756,10 +760,15 @@
                 "AbstractUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
                 "AbstractUnixSockets/AllSocketPairTest.GetSocketOutOfBandInlineOption/*",
                 "AbstractUnixSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
-                "AbstractUnixSockets/UnixSocketPairCmsgTest.SendNullCredsBeforeSoPassCredRecvEndAfterSendEnd/*",
-                "AbstractUnixSockets/UnixSocketPairCmsgTest.WriteBeforeSoPassCredRecvEndAfterSendEnd/*",
                 "AbstractUnixSockets/UnixSocketPairTest.InvalidGetSockOptLevel/*",
                 "AbstractUnixSockets/UnixSocketPairTest.InvalidSetSockOptLevel/*",
+
+                // TODO(https://fxbug.dev/568844036): Fix Unix socket SO_RCVBUF min, TIOCINQ/TIOCOUTQ ioctls, and null msg_control recvmsg.
+                "AbstractUnixSockets/AllSocketPairTest.GetSocketRcvbufOption/*",
+                "AbstractUnixSockets/UnixSocketPairCmsgTest.BasicFDPassNullControlMsgCtrunc/*",
+                "AbstractUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/[234589]",
+                "AbstractUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/1[01]",
+                "AbstractUnixSockets/UnixSocketPairTest.TIOCOUTQSucceeds/*",
 
                 // socket_bind_to_device_sequence_test
                 "BindToDeviceTest/BindToDeviceSequenceTest.BindTwiceWithDeviceFails/*",
@@ -791,14 +800,22 @@
                 "FilesystemUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
                 "FilesystemUnixSockets/AllSocketPairTest.GetSocketOutOfBandInlineOption/*",
                 "FilesystemUnixSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
-                "FilesystemUnixSockets/UnixSocketPairCmsgTest.SendNullCredsBeforeSoPassCredRecvEndAfterSendEnd/*",
-                "FilesystemUnixSockets/UnixSocketPairCmsgTest.WriteBeforeSoPassCredRecvEndAfterSendEnd/*",
                 "FilesystemUnixSockets/UnixSocketPairTest.InvalidGetSockOptLevel/*",
                 "FilesystemUnixSockets/UnixSocketPairTest.InvalidSetSockOptLevel/*",
+
+                // TODO(https://fxbug.dev/568844036): Fix Unix socket SO_RCVBUF min, TIOCINQ/TIOCOUTQ ioctls, and null msg_control recvmsg.
+                "FilesystemUnixSockets/AllSocketPairTest.GetSocketRcvbufOption/*",
+                "FilesystemUnixSockets/UnixSocketPairCmsgTest.BasicFDPassNullControlMsgCtrunc/*",
+                "FilesystemUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/[234589]",
+                "FilesystemUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/1[01]",
+                "FilesystemUnixSockets/UnixSocketPairTest.TIOCOUTQSucceeds/*",
 
                 // socket_inet_loopback_nogotsan_test
                 "AllFamilies/SocketMultiProtocolInetLoopbackTest.UDPBindMayBindOtherBoundPortsReuseAddr/UDP",
                 "AllFamilies/SocketMultiProtocolInetLoopbackTest.TCPBindAvoidsOtherBoundPortsReuseAddr/TCP",
+
+                // TODO(https://fxbug.dev/327486994): Connecting to port 0 returns ECONNREFUSED instead of EADDRNOTAVAIL.
+                "All/DualStackAfMismatchTest.V4ListenerV6Connect/TCP",
 
                 // socket_ip_tcp_loopback_test
                 "AllUnixDomainSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
@@ -844,10 +861,12 @@
                 "NetlinkRouteTest.LinkMulticastGroupNoSelfBroadcast",
                 "NetlinkRouteTest.LinkUp",
                 "NetlinkRouteTest.NonGetRequestsRequireCapNetAdmin",
-                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.AddAndRemoveRoute/*",
                 "_/NetlinkSetLinkTest.ChangeLinkName/*",
                 "_/NetlinkSetLinkTest.ChangeMACAddress/*",
                 "_/NetlinkSetLinkTest.ChangeMTU/*",
+
+                // TODO(https://fxbug.dev/569829387): Support RTM_SETLINK interface rename and ENOBUFS on netlink multicast overflow.
+                "NetlinkRouteTest.LinkMulticastGroupEnobufs",
 
                 // TODO(https://fxbug.dev/468074994): Support network namespaces.
                 "NetlinkRouteTest.ChangeNetnsAndOtherAttrsTogether",
@@ -870,28 +889,21 @@
                 "AllConnectedSockets/PersistentListenerConnectStressTest.ShutdownCloseSecond/*",
 
                 // socket_unix_pair_test - https://fxbug.dev/297464436
-                "AllUnixDomainSockets/UnixSocketPairCmsgTest.SendNullCredsBeforeSoPassCredRecvEndAfterSendEnd/*",
-                "AllUnixDomainSockets/UnixSocketPairCmsgTest.WriteBeforeSoPassCredRecvEndAfterSendEnd/*",
                 "AllUnixDomainSockets/UnixSocketPairTest.InvalidGetSockOptLevel/*",
                 "AllUnixDomainSockets/UnixSocketPairTest.InvalidSetSockOptLevel/*",
 
-                // socket_unix_seqpacket_local_test
-                "SeqpacketUnixSockets/SeqpacketUnixSocketPairTest.Sendto/*",
+                // TODO(https://fxbug.dev/568844036): Fix Unix socket SO_RCVBUF min, TIOCINQ/TIOCOUTQ ioctls, and null msg_control recvmsg.
+                "AllUnixDomainSockets/AllSocketPairTest.GetSocketRcvbufOption/*",
+                "AllUnixDomainSockets/UnixSocketPairCmsgTest.BasicFDPassNullControlMsgCtrunc/*",
+                "AllUnixDomainSockets/UnixSocketPairTest.TIOCINQSucceeds/[234589]",
+                "AllUnixDomainSockets/UnixSocketPairTest.TIOCINQSucceeds/1[01]",
+                "AllUnixDomainSockets/UnixSocketPairTest.TIOCOUTQSucceeds/*",
 
                 // socket_unix_non_stream_blocking_local_test
                 "UnixSeqpacketBlockingTest.RecvfromTruncPeekNullBufferRestarted",
 
                 // socket_unix_unbound_stream_test
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.CredPassPartialRead/*",
                 "AllUnixDomainSockets/UnixStreamSocketPairTest.SinglePeek/*",
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.CredsNotCoalescedUp/*",
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.CoalescedCredsNoPasscred/*",
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.CoalescedCreds2/*",
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.CoalescedDifferingCreds/*",
-                "AllUnixDomainSockets/UnixSocketPeerCredTest.AfterConnectServerPeerCred/0",
-                "AllUnixDomainSockets/UnixSocketPeerCredTest.AfterConnectServerPeerCred/6",
-                "AllUnixDomainSockets/UnixSocketPeerCredTest.PeerCredAfterListen/0",
-                "AllUnixDomainSockets/UnixSocketPeerCredTest.PeerCredAfterListen/6",
 
                 // stat_test
                 "StatTest.StatxMntId",
@@ -913,16 +925,12 @@
                 "SemaphoreTest.*",
                 "SempahoreTest.*",
 
-                // sync_file_range_test
-                // We actually pass this test, but the test expects ENOSYS because gVisor doesn't support
-                // one of the flags we do support.
-                "SyncFileRangeTest.CannotSyncFileRangeWithWaitBefore",
-
-                // sysret_test
-                "SysretTest.BadRip",
-
                 // tcp_socket_test
                 "AllInetTests/SimpleTcpSocketTest.SetSocketAttachDetachFilter/*",
+
+                // TODO(https://fxbug.dev/568843305): Support SO_ACCEPTCONN after shutdown and SO_DETACH_FILTER errno.
+                "AllInetTests/SimpleTcpSocketTest.GetSocketAcceptConnWithShutdown/*",
+                "AllInetTests/SimpleTcpSocketTest.SetSocketDetachFilterNoInstalledFilter/*",
 
                 // TODO(https://fxbug.dev/556076723): Enforce CAP_NET_ADMIN for SO_ATTACH_FILTER.
                 "AllInetTests/SimpleTcpSocketTest.SetSocketAttachFilterWithoutNetAdmin/*",
@@ -953,9 +961,23 @@
                 "AllInetTests/UdpSocketTest.SetSocketDetachFilter/*",
                 "AllInetTests/UdpSocketTest.SetPMTUD/*",
 
+                // TODO(https://fxbug.dev/568843305): Fix UDP SO_DETACH_FILTER, IP_TOS/IPV6_TCLASS cmsgs, and IPv6-connected sendto errno.
+                "AllInetTests/UdpSocketTest.SetSocketDetachFilterNoInstalledFilter/*",
+                "AllInetTests/UdpSocketControlMessagesTest.SendAndReceiveTOSorTClass/*",
+                "UdpBindTest/SendtoTest.Sendto/10",
+                "UdpBindTest/SendtoTest.Sendto/11",
+
                 // packet_socket_raw_test
                 "AllInetTests/RawPacketTest.SetSocketRecvBuf/0",
                 "AllInetTests/RawPacketTest.SetSocketRecvBuf/1",
+
+                // TODO(https://fxbug.dev/568843130): Implement /proc/sys/net/ipv4/conf/*/accept_local.
+                "AllInetTests/RawPacketTest.Receive/*",
+
+                // TODO(https://fxbug.dev/568843305): Fix packet socket SO_DETACH_FILTER and SO_RCVBUF clamping.
+                "AllInetTests/RawPacketTest.GetSocketDetachFilter/*",
+                "AllInetTests/RawPacketTest.SetSocketRecvBufAboveMax/*",
+                "AllInetTests/RawPacketTest.SetSocketRecvBufBelowMin/*",
 
                 // wait_test - https://fxbug.dev/297461294
                 "Waiters/WaitAnyChildTest.IgnoredChildRusage/*",
@@ -983,6 +1005,9 @@
                 "FuseTest.CloneDevice",
                 "FuseTest.CloneToConnectedDeviceFails",
                 "FuseTest.CloneFromUnconnectedDeviceFails",
+
+                // TODO(https://fxbug.dev/322875414): Implement FUSE fallocate.
+                "FuseTest.Fallocate",
 
                 // partial usercopy
                 "WriteTest.PartialWriteSIGSEGV",
@@ -1106,6 +1131,9 @@
                 // queries are not supported, and Netlink drops them without
                 // responding.
                 "NetlinkRouteTest.GetAddrRoot",
+                "NetlinkRouteTest.GetRouteOversizedDestination",
+                "NetlinkRouteTest.GetRouteFamilyMismatch",
+                "NetlinkRouteTest.GetRouteUnsupportedFamily",
                 "NetlinkRouteTest.GetRouteRoot",
                 "NetlinkRouteTest.GetRoutePrefSrc",
                 "NetlinkRouteTest.GetRouteUnreachable",
@@ -1173,6 +1201,10 @@
                 "FPSigTest.Fork",
                 "FPSigTest.ForkWithZeroMxcsr",
                 "ProcPidCmdline.SubprocessForkSameCmdline",
+
+                // TODO(https://fxbug.dev/570221669): Fix intermittent crash and re-enable.
+                "ProcTask.VerifyTaskChildrenNeverReportsZeroTID",
+                "ProcTask.ProcRootNeverListsZeroTID",
                 "SigaltstackTest.SetCurrentStack",
                 "Signalfd.KillStillKills",
                 "TimeTest.VsyscallTime_InvalidAddressSIGSEGV",
@@ -1342,6 +1374,9 @@
                 "PtyTest.TCSETSFFlushesOnlyReplicaInput",
                 "PtyTest.TCSETSFOnMasterFlushesReplicaInput",
                 "PtyTest.TCSETSF2FlushesReplicaInput",
+
+                // TODO(https://fxbug.dev/568844571): Preserve x0 on arm64 SECCOMP_RET_TRAP (passes on x64, fails on arm64).
+                "SeccompTest.RetTrapCausesSIGSYS",
             ],
         },
     ],

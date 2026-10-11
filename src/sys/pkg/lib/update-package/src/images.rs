@@ -6,21 +6,11 @@
 
 use crate::update_mode::UpdateMode;
 use camino::Utf8Path;
-use fidl_fuchsia_io as fio;
 use fuchsia_url::ParseError;
 use fuchsia_url::fuchsia_pkg::{AbsoluteComponentUrl, PinnedAbsolutePackageUrl};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
-use zx_status::Status;
-
-/// An error encountered while resolving images.
-#[derive(Debug, Error)]
-#[allow(missing_docs)]
-pub enum ResolveImagesError {
-    #[error("while listing files in the update package")]
-    ListCandidates(#[source] fuchsia_fs::directory::EnumerateError),
-}
 
 /// An error encountered while verifying an [`ImagePackagesSlots`].
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -50,12 +40,6 @@ pub enum ImageMetadataError {
 pub enum ImagePackagesError {
     #[error("`images.json` not present in update package")]
     NotFound,
-
-    #[error("while opening `images.json`")]
-    Open(#[source] fuchsia_fs::node::OpenError),
-
-    #[error("while reading `images.json`")]
-    Read(#[source] fuchsia_fs::file::ReadError),
 
     #[error("while parsing `images.json`")]
     Parse(#[source] serde_json::error::Error),
@@ -505,29 +489,6 @@ pub fn parse_image_packages_json(
     Ok(manifest)
 }
 
-pub(crate) async fn images_metadata(
-    proxy: &fio::DirectoryProxy,
-) -> Result<ImagesMetadata, ImagePackagesError> {
-    image_packages(proxy).await.map(Into::into)
-}
-
-async fn image_packages(
-    proxy: &fio::DirectoryProxy,
-) -> Result<ImagePackagesManifest, ImagePackagesError> {
-    let file = fuchsia_fs::directory::open_file(proxy, "images.json", fio::PERM_READABLE)
-        .await
-        .map_err(|e| match e {
-            fuchsia_fs::node::OpenError::OpenError(Status::NOT_FOUND) => {
-                ImagePackagesError::NotFound
-            }
-            e => ImagePackagesError::Open(e),
-        })?;
-
-    let contents = fuchsia_fs::file::read(&file).await.map_err(ImagePackagesError::Read)?;
-
-    parse_image_packages_json(&contents)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,8 +496,6 @@ mod tests {
     use serde_json::json;
     use std::fs::File;
     use std::io::Write;
-    use vfs::file::vmo::read_only;
-    use vfs::pseudo_directory;
 
     fn sha256(n: u8) -> fuchsia_hash::Sha256 {
         [n; 32].into()
@@ -986,46 +945,6 @@ mod tests {
             ImagesMetadata { fuchsia: None, recovery: None, firmware: BTreeMap::new() };
 
         assert_eq!(without_zbi.verify(UpdateMode::ForceRecovery), Ok(()));
-    }
-
-    #[fuchsia::test]
-    async fn image_packages_detects_missing_manifest() {
-        let proxy = vfs::directory::serve_read_only(
-            pseudo_directory! {},
-            vfs::execution_scope::ExecutionScope::new(),
-        );
-
-        assert_matches!(image_packages(&proxy).await, Err(ImagePackagesError::NotFound));
-    }
-
-    #[fuchsia::test]
-    async fn image_packages_detects_invalid_json() {
-        let proxy = vfs::directory::serve_read_only(
-            pseudo_directory! {
-                "images.json" => read_only("not json!"),
-            },
-            vfs::execution_scope::ExecutionScope::new(),
-        );
-
-        assert_matches!(image_packages(&proxy).await, Err(ImagePackagesError::Parse(_)));
-    }
-
-    #[fuchsia::test]
-    async fn image_packages_loads_valid_manifest() {
-        let proxy = vfs::directory::serve_read_only(
-            pseudo_directory! {
-                "images.json" => read_only(r#"{
-"version": "1",
-"contents": { "partitions" : [], "firmware" : [] }
-}"#),
-            },
-            vfs::execution_scope::ExecutionScope::new(),
-        );
-
-        assert_eq!(
-            image_packages(&proxy).await.unwrap(),
-            ImagePackagesManifest { assets: vec![], firmware: vec![] }
-        );
     }
 
     #[fuchsia::test]

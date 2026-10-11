@@ -1,0 +1,138 @@
+{
+    "name": "echoprt_utf8_and_kill",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IUTF8"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOKE",
+            "ECHOPRT",
+            "ECHOCTL",
+            "IEXTEN"
+        ],
+        "c_cc": {
+            "VEOL": 59
+        }
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "a\u00a9\u20ac\u007f\u007fb\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "a\u00a9\u20ac\\\u20ac\u00a9/b\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "ab\n"
+        },
+        {
+            "type": "write_to_master",
+            "data": [
+                128,
+                127,
+                10
+            ]
+        },
+        {
+            "type": "read_from_master",
+            "data": [
+                128,
+                13,
+                10
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": [
+                128,
+                10
+            ]
+        },
+        {
+            "type": "write_to_master",
+            "data": "hello\u0015world\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "hello\\olleh/world\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "world\n"
+        },
+        {
+            "type": "write_to_master",
+            "data": "ab\u007f;c\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "ab\\b;/c\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "a;"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "c\n"
+        },
+        {
+            "type": "write_to_master",
+            "data": "ab\u007f"
+        },
+        {
+            "type": "flush",
+            "side": "main",
+            "queue_selector": "TCOFLUSH"
+        },
+        {
+            "type": "write_to_master",
+            "data": "c\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "ab\\b/c\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "ac\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IUTF8"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOPRT",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    }
+}

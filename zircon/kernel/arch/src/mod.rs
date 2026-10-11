@@ -71,6 +71,7 @@ unsafe extern "C" {
         dst: *mut core::ffi::c_void,
         src: *const core::ffi::c_void,
         len: usize,
+        context: CopyContext,
         fault_va: *mut usize,
         fault_flags: *mut u32,
     ) -> i32;
@@ -78,6 +79,7 @@ unsafe extern "C" {
         dst: *mut core::ffi::c_void,
         src: *const core::ffi::c_void,
         len: usize,
+        context: CopyContext,
         fault_va: *mut usize,
         fault_flags: *mut u32,
     ) -> i32;
@@ -267,20 +269,42 @@ fn capture_faults_result(
     }
 }
 
+/// Stores the context in which the user copy is being invoked.
+#[repr(u8)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CopyContext {
+    /// The caller's context allows blocking. When this option is used, the fault handler that
+    /// runs during the copy may resolve access faults (on architectures that have explicit
+    /// access faults), which may acquire mutexes and therefore may block the calling thread.
+    ///
+    /// It is an error to use this option while holding a spinlock.
+    #[default]
+    BlockingAllowed = 0,
+
+    /// The caller's context does not allow blocking. When this option is used, the fault
+    /// handler that runs during the copy will not acquire any mutexes. As a side effect, this
+    /// means that any and all faults will be captured and returned to the calling thread.
+    ///
+    /// It is safe to use this option when holding a spinlock.
+    BlockingNotAllowed = 1,
+}
+
 /// Copies `len` bytes from user memory at `src` into kernel memory at `dst`, capturing any page
 /// faults.
 ///
 /// # Safety
-/// Caller must ensure `dst` points to at least `len` bytes of valid memory
-/// and `src` is a user pointer.
+/// Caller must ensure `dst` points to at least `len` bytes of valid memory, `src` is a user
+/// pointer, and `context` is not [`CopyContext::BlockingAllowed`] while holding a spinlock.
 #[inline(always)]
 pub unsafe fn arch_copy_from_user_capture_faults(
     dst: *mut core::ffi::c_void,
     src: *const core::ffi::c_void,
     len: usize,
+    context: CopyContext,
 ) -> Result<(), UserCopyCaptureFaultsError> {
     #[cfg(target_arch = "riscv64")]
     {
+        let _ = context;
         // SAFETY: Caller guarantees valid pointers and safety invariants.
         unsafe { riscv64::arch_copy_from_user_capture_faults(dst, src, len) }
     }
@@ -294,6 +318,7 @@ pub unsafe fn arch_copy_from_user_capture_faults(
                 dst,
                 src,
                 len,
+                context,
                 &raw mut fault_va,
                 &raw mut fault_flags,
             )
@@ -306,16 +331,18 @@ pub unsafe fn arch_copy_from_user_capture_faults(
 /// faults.
 ///
 /// # Safety
-/// Caller must ensure `src` points to at least `len` bytes of valid memory
-/// and `dst` is a user pointer.
+/// Caller must ensure `src` points to at least `len` bytes of valid memory, `dst` is a user
+/// pointer, and `context` is not [`CopyContext::BlockingAllowed`] while holding a spinlock.
 #[inline(always)]
 pub unsafe fn arch_copy_to_user_capture_faults(
     dst: *mut core::ffi::c_void,
     src: *const core::ffi::c_void,
     len: usize,
+    context: CopyContext,
 ) -> Result<(), UserCopyCaptureFaultsError> {
     #[cfg(target_arch = "riscv64")]
     {
+        let _ = context;
         // SAFETY: Caller guarantees valid pointers and safety invariants.
         unsafe { riscv64::arch_copy_to_user_capture_faults(dst, src, len) }
     }
@@ -329,6 +356,7 @@ pub unsafe fn arch_copy_to_user_capture_faults(
                 dst,
                 src,
                 len,
+                context,
                 &raw mut fault_va,
                 &raw mut fault_flags,
             )

@@ -13,7 +13,7 @@ use starnix_core::power::{create_proxy_for_wake_events_counter_zero, mark_proxy_
 use starnix_core::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, WaitQueue, Waiter};
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
-    CacheMode, DirectoryEntryType, FileObject, FileObjectState, FileOps, FileSystem,
+    CacheMode, DirEntry, DirectoryEntryType, FileObject, FileObjectState, FileOps, FileSystem,
     FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeInfo, FsNodeOps, FsStr,
     InputBuffer, OutputBuffer, fileops_impl_noop_sync, fileops_impl_seekless, fs_args,
     fs_node_impl_dir_readonly, fs_node_impl_not_dir,
@@ -207,6 +207,7 @@ async fn handle_adb(
     write_commands: async_channel::Receiver<WriteCommand>,
     state: Arc<LockDepMutex<FunctionFsState, FunctionFsStateLock>>,
     stats: Arc<FunctionFsStats>,
+    session_id: u64,
 ) {
     /// Handle all of the events coming from the ADB device.
     ///
@@ -215,10 +216,10 @@ async fn handle_adb(
     /// receive some of the adb events, it may behave unexpectedly. In particular, please reference
     /// the `StartMonitor` function in `UsbFfsConnection` of `adb/daemon/usb.cpp`.
     ///
-    /// This module sends a FUNCTIONFS_BIND event as soon as it is called because `handle_adb` is
-    /// called after we've successfully bound to the driver. When the driver is ready to take input
-    /// it will send an `OnStatusChanged{ ONLINE }` event, which is when this module sends the
-    /// FUNCTIONFS_ENABLE event to indicate that adbd should start processing data.
+    /// A FUNCTIONFS_BIND event is enqueued synchronously by `create_endpoints` as soon as
+    /// descriptors are written to ep0 and endpoints are established. When the driver is ready to
+    /// take input it will send an `OnStatusChanged{ ONLINE }` event, which is when this module
+    /// sends the FUNCTIONFS_ENABLE event to indicate that adbd should start processing data.
     ///
     /// When the driver sends an `OnStatusChanged{}` event, meaning that it's not online anymore.
     /// The module will send a FUNCTIONFS_DISABLE event to stop processing data. When the stream
@@ -227,29 +228,16 @@ async fn handle_adb(
         mut stream: fadb::UsbAdbImpl_EventStream,
         message_counter: &Option<zx::Counter>,
         state: Arc<LockDepMutex<FunctionFsState, FunctionFsStateLock>>,
+        session_id: u64,
     ) {
-        let queue_event = |event| {
-            let mut state_locked = state.lock();
-            state_locked
-                .event_queue
-                .push_back(usb_functionfs_event { type_: event as u8, ..Default::default() });
-            #[allow(non_upper_case_globals)]
-            let name = match event {
-                usb_functionfs_event_type_FUNCTIONFS_BIND => "BIND",
-                usb_functionfs_event_type_FUNCTIONFS_UNBIND => "UNBIND",
-                _ => "UNKNOWN",
-            };
-            state_locked.record_event(name);
-            state_locked.waiters.notify_fd_events(FdEvents::POLLIN);
-        };
-
-        queue_event(usb_functionfs_event_type_FUNCTIONFS_BIND);
-
         while let Some(Ok(fadb::UsbAdbImpl_Event::OnStatusChanged { status })) = stream.next().await
         {
             let is_online = status == fadb::StatusFlags::ONLINE;
             {
                 let mut state_locked = state.lock();
+                if state_locked.session_id != session_id {
+                    return;
+                }
                 state_locked.is_online = is_online;
                 state_locked.event_queue.push_back(usb_functionfs_event {
                     type_: if is_online {
@@ -270,7 +258,20 @@ async fn handle_adb(
             message_counter.as_ref().map(mark_proxy_message_handled);
         }
 
-        queue_event(usb_functionfs_event_type_FUNCTIONFS_UNBIND);
+        let mut state_locked = state.lock();
+        if state_locked.session_id == session_id {
+            state_locked.is_online = false;
+            state_locked.has_input_output_endpoints = false;
+            state_locked.adb_read_channel = None;
+            state_locked.adb_write_channel = None;
+            state_locked.event_queue.push_back(usb_functionfs_event {
+                type_: usb_functionfs_event_type_FUNCTIONFS_UNBIND as u8,
+                ..Default::default()
+            });
+            state_locked.record_event("UNBIND");
+            state_locked.waiters.notify_fd_events(FdEvents::POLLIN);
+            state_locked.waiters.notify_all();
+        }
     }
 
     /// Consumes a stream of instants and decrements `message_counter` after
@@ -412,7 +413,8 @@ async fn handle_adb(
     }
 
     let (timeouts_sender, timeouts_receiver) = async_channel::unbounded();
-    let event_future = handle_events(proxy.take_event_stream(), &message_counter, state);
+    let event_future =
+        handle_events(proxy.take_event_stream(), &message_counter, state, session_id);
     let write_commands_future =
         handle_write_commands(&proxy, timeouts_sender.clone(), write_commands, &stats);
     let read_commands_future = handle_read_commands(&proxy, timeouts_sender, read_commands, &stats);
@@ -482,6 +484,10 @@ struct FunctionFsState {
     // See https://docs.kernel.org/usb/functionfs.html.
     num_control_file_objects: usize,
 
+    // Monotonically increasing session ID to prevent stale async event streams from
+    // injecting FUNCTIONFS_UNBIND/DISABLE into a newly opened control session.
+    session_id: u64,
+
     // Whether the FunctionFS has input/output endpoints, which are /ep2 and /ep1
     // respectively. /ep0 is the control endpoint and is always available.
     has_input_output_endpoints: bool,
@@ -540,36 +546,40 @@ fn connect_to_device(
     (fadb::DeviceSynchronousProxy, fadb::UsbAdbImpl_SynchronousProxy, Option<zx::Counter>),
     Errno,
 > {
-    let mut dir = std::fs::read_dir(ADB_DIRECTORY).map_err(|_| errno!(EINVAL))?;
+    let dir = std::fs::read_dir(ADB_DIRECTORY).map_err(|_| errno!(EINVAL))?;
 
-    let Some(Ok(entry)) = dir.next() else {
-        return error!(EBUSY);
-    };
-    let path =
-        entry.path().join("adb").into_os_string().into_string().map_err(|_| errno!(EINVAL))?;
+    for entry in dir.flatten() {
+        let Ok(path) = entry.path().join("adb").into_os_string().into_string() else {
+            continue;
+        };
 
-    let (client_channel, server_channel) = zx::Channel::create();
-    fdio::service_connect(&path, server_channel).map_err(|_| errno!(EINVAL))?;
-    let device_proxy = fadb::DeviceSynchronousProxy::new(client_channel);
-
-    let (adb_proxy, server_end) = fidl::endpoints::create_sync_proxy::<fadb::UsbAdbImpl_Marker>();
-    let (adb_proxy, message_counter) = match proxy {
-        AdbProxyMode::None => (adb_proxy, None),
-        AdbProxyMode::WakeContainer => {
-            let (adb_proxy, message_counter) = create_proxy_for_wake_events_counter_zero(
-                adb_proxy.into_channel(),
-                "adb".to_string(),
-            );
-            let adb_proxy = fadb::UsbAdbImpl_SynchronousProxy::from_channel(adb_proxy);
-            (adb_proxy, Some(message_counter))
+        let (client_channel, server_channel) = zx::Channel::create();
+        if fdio::service_connect(&path, server_channel).is_err() {
+            continue;
         }
-    };
+        let device_proxy = fadb::DeviceSynchronousProxy::new(client_channel);
 
-    device_proxy
-        .start_adb(server_end, zx::MonotonicInstant::INFINITE)
-        .map_err(|_| errno!(EINVAL))?
-        .map_err(|_| errno!(EINVAL))?;
-    return Ok((device_proxy, adb_proxy, message_counter));
+        let (adb_proxy, server_end) =
+            fidl::endpoints::create_sync_proxy::<fadb::UsbAdbImpl_Marker>();
+        let (adb_proxy, message_counter) = match proxy {
+            AdbProxyMode::None => (adb_proxy, None),
+            AdbProxyMode::WakeContainer => {
+                let (adb_proxy, message_counter) = create_proxy_for_wake_events_counter_zero(
+                    adb_proxy.into_channel(),
+                    "adb".to_string(),
+                );
+                let adb_proxy = fadb::UsbAdbImpl_SynchronousProxy::from_channel(adb_proxy);
+                (adb_proxy, Some(message_counter))
+            }
+        };
+
+        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(5));
+        if let Ok(Ok(())) = device_proxy.start_adb(server_end, deadline) {
+            return Ok((device_proxy, adb_proxy, message_counter));
+        }
+    }
+
+    error!(EBUSY)
 }
 
 #[derive(Default)]
@@ -601,6 +611,8 @@ impl FunctionFsRootDir {
         let (device_proxy, adb_proxy, message_counter) =
             connect_to_device(AdbProxyMode::WakeContainer)?;
         state.device_proxy = Some(device_proxy);
+        state.session_id = state.session_id.wrapping_add(1);
+        let session_id = state.session_id;
 
         let (read_command_sender, read_command_receiver) = async_channel::unbounded();
         state.adb_read_channel = Some(read_command_sender);
@@ -609,6 +621,12 @@ impl FunctionFsRootDir {
         state.adb_write_channel = Some(write_command_sender);
 
         state.event_queue.clear();
+        state.event_queue.push_back(usb_functionfs_event {
+            type_: usb_functionfs_event_type_FUNCTIONFS_BIND as u8,
+            ..Default::default()
+        });
+        state.record_event("BIND");
+        state.waiters.notify_fd_events(FdEvents::POLLIN);
 
         let state_copy = Arc::clone(&self.state);
         let stats_copy = Arc::clone(&self.stats);
@@ -625,6 +643,7 @@ impl FunctionFsRootDir {
                     write_command_receiver,
                     state_copy,
                     stats_copy,
+                    session_id,
                 )
                 .await
             },
@@ -658,9 +677,14 @@ impl FunctionFsRootDir {
         state.num_control_file_objects -= 1;
         state.record_event("CONTROL_CLOSED");
         if state.num_control_file_objects == 0 {
+            state.session_id = state.session_id.wrapping_add(1);
             // When all control endpoints are closed, the filesystem resets to its initial state.
             if let Some(device_proxy) = state.device_proxy.as_ref() {
-                match device_proxy.stop_adb(zx::MonotonicInstant::INFINITE) {
+                // Use a bounded 5-second deadline to prevent close_control_file / adbd exit
+                // from hanging indefinitely if the ADB driver daemon or FIDL channel is hung
+                // or unbinding during a role switch.
+                let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(5));
+                match device_proxy.stop_adb(deadline) {
                     Ok(Ok(())) => {}
                     Ok(Err(status)) => {
                         log_warn!(
@@ -681,6 +705,7 @@ impl FunctionFsRootDir {
             state.event_queue.clear();
             state.control_resets += 1;
             state.record_event("CONTROL_RESET");
+            state.waiters.notify_all();
         }
     }
 
@@ -689,9 +714,13 @@ impl FunctionFsRootDir {
         current_task: &CurrentTask,
         file: &FileObject,
     ) -> Result<(), Errno> {
+        let initial_session_id = self.state.lock().session_id;
         loop {
             let waiter = {
                 let state = self.state.lock();
+                if !state.has_input_output_endpoints || state.session_id != initial_session_id {
+                    return error!(ESHUTDOWN);
+                }
                 if state.is_online {
                     return Ok(());
                 }
@@ -715,11 +744,10 @@ impl FunctionFsRootDir {
         &self,
         current_task: &CurrentTask,
         file: &FileObject,
-        bytes: &[u8],
+        data: Vec<u8>,
     ) -> Result<usize, Errno> {
         self.wait_until_online(current_task, file)?;
 
-        let data = Vec::from(bytes);
         let pending = Arc::<PendingResult<usize>>::default();
         let guard = pending.event.begin_wait();
 
@@ -739,7 +767,7 @@ impl FunctionFsRootDir {
                 "FunctionFsRootDir::write (ep2 bulk IN) called by task {} (pid {}) with {} bytes, but adb_write_channel is None (ENODEV)",
                 current_task.command(),
                 current_task.get_pid(),
-                bytes.len()
+                data.len()
             );
             return error!(ENODEV);
         }
@@ -815,24 +843,24 @@ impl FsNodeOps for FunctionFsRootDir {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<starnix_core::vfs::FsNodeHandle, Errno> {
         let name = std::str::from_utf8(name).map_err(|_| errno!(ENOENT))?;
-        let cred = node.info().cred();
+        let cred = entry.node.info().cred();
         match name {
-            CONTROL_ENDPOINT => Ok(node.fs().create_node(
+            CONTROL_ENDPOINT => Ok(entry.node.fs().create_node(
                 CONTROL_ENDPOINT_NODE_ID,
                 FunctionFsControlEndpoint,
                 FsNodeInfo::new(mode!(IFREG, 0o600), cred),
             )),
-            OUTPUT_ENDPOINT => Ok(node.fs().create_node(
+            OUTPUT_ENDPOINT => Ok(entry.node.fs().create_node(
                 OUTPUT_ENDPOINT_NODE_ID,
                 FunctionFsOutputEndpoint,
                 FsNodeInfo::new(mode!(IFREG, 0o600), cred),
             )),
-            INPUT_ENDPOINT => Ok(node.fs().create_node(
+            INPUT_ENDPOINT => Ok(entry.node.fs().create_node(
                 INPUT_ENDPOINT_NODE_ID,
                 FunctionFsInputEndpoint,
                 FsNodeInfo::new(mode!(IFREG, 0o600), cred),
@@ -990,7 +1018,7 @@ impl FileOps for FunctionFsInputEndpoint {
             err
         })?;
         let rootdir = FunctionFsRootDir::from_file(file);
-        rootdir.write(current_task, file, &bytes)
+        rootdir.write(current_task, file, bytes)
     }
 }
 
@@ -1249,6 +1277,17 @@ mod tests {
             let (read_sender, read_receiver) = async_channel::unbounded();
             let (write_sender, write_receiver) = async_channel::unbounded();
 
+            // Simulate the BIND event and endpoints established by create_endpoints().
+            {
+                let mut state = rootdir.state.lock();
+                state.has_input_output_endpoints = true;
+                state.event_queue.push_back(usb_functionfs_event {
+                    type_: usb_functionfs_event_type_FUNCTIONFS_BIND as u8,
+                    ..Default::default()
+                });
+                state.record_event("BIND");
+            }
+
             let adb_fut = handle_adb(
                 proxy,
                 None,
@@ -1256,6 +1295,7 @@ mod tests {
                 write_receiver,
                 Arc::clone(&rootdir.state),
                 Arc::clone(&rootdir.stats),
+                0,
             );
 
             let driver_fut = async move {
@@ -1433,6 +1473,197 @@ mod tests {
                     },
                 }
             });
+        });
+
+        while exec.run_until_stalled(&mut test_fut).is_pending() {
+            assert!(exec.wake_next_timer().is_some(), "Executor stalled with no pending timers");
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_stale_session_stream_closure_does_not_inject_unbind() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+
+        let mut test_fut = pin!(async {
+            let inspector = inspect::Inspector::default();
+            let rootdir = FunctionFsRootDir::new(inspector.root());
+
+            let (proxy1, stream1) =
+                fidl::endpoints::create_proxy_and_stream::<fadb::UsbAdbImpl_Marker>();
+            let (read_sender1, read_receiver1) = async_channel::unbounded();
+            let (write_sender1, write_receiver1) = async_channel::unbounded();
+
+            // Start session 1.
+            rootdir.state.lock().session_id = 1;
+            rootdir.state.lock().is_online = true;
+
+            let adb_fut1 = handle_adb(
+                proxy1,
+                None,
+                read_receiver1,
+                write_receiver1,
+                Arc::clone(&rootdir.state),
+                Arc::clone(&rootdir.stats),
+                1,
+            );
+
+            // Simulate opening session 2 while session 1's async task is still running.
+            // The session ID is incremented and active state is updated.
+            {
+                let mut state = rootdir.state.lock();
+                state.session_id = 2;
+                state.is_online = true;
+                state.event_queue.clear();
+            }
+
+            // Drop command senders and stream1 to allow adb_fut1 to complete.
+            drop(read_sender1);
+            drop(write_sender1);
+            drop(stream1);
+
+            // Run adb_fut1 to completion.
+            adb_fut1.await;
+
+            // Verify that the stale stream1 did NOT set is_online to false or push UNBIND
+            // into session 2's event queue.
+            let state = rootdir.state.lock();
+            assert!(state.is_online, "Stale session termination must not set is_online to false");
+            assert!(
+                state.event_queue.is_empty(),
+                "Stale session termination must not push UNBIND into the active session queue"
+            );
+        });
+
+        while exec.run_until_stalled(&mut test_fut).is_pending() {
+            assert!(exec.wake_next_timer().is_some(), "Executor stalled with no pending timers");
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_stale_session_status_changed_is_ignored() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+
+        let mut test_fut = pin!(async {
+            let inspector = inspect::Inspector::default();
+            let rootdir = FunctionFsRootDir::new(inspector.root());
+
+            let (proxy1, stream1) =
+                fidl::endpoints::create_proxy_and_stream::<fadb::UsbAdbImpl_Marker>();
+            let (read_sender1, read_receiver1) = async_channel::unbounded();
+            let (write_sender1, write_receiver1) = async_channel::unbounded();
+
+            rootdir.state.lock().session_id = 1;
+
+            let adb_fut1 = handle_adb(
+                proxy1,
+                None,
+                read_receiver1,
+                write_receiver1,
+                Arc::clone(&rootdir.state),
+                Arc::clone(&rootdir.stats),
+                1,
+            );
+
+            let driver_state = Arc::clone(&rootdir.state);
+            let driver_fut = async move {
+                // Advance session_id to 2 before sending event from stream1.
+                {
+                    let mut state = driver_state.lock();
+                    state.session_id = 2;
+                    state.is_online = true;
+                    state.event_queue.clear();
+                }
+
+                // Send OnStatusChanged on the stale stream1.
+                stream1
+                    .control_handle()
+                    .send_on_status_changed(fadb::StatusFlags::empty())
+                    .expect("send offline status");
+
+                drop(read_sender1);
+                drop(write_sender1);
+                drop(stream1);
+            };
+
+            futures::join!(adb_fut1, driver_fut);
+
+            let state = rootdir.state.lock();
+            assert!(state.is_online, "Stale status change must not overwrite is_online");
+            assert!(
+                state.event_queue.is_empty(),
+                "Stale status change must not push events to active session"
+            );
+        });
+
+        while exec.run_until_stalled(&mut test_fut).is_pending() {
+            assert!(exec.wake_next_timer().is_some(), "Executor stalled with no pending timers");
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_unbind_clears_endpoints_and_channels() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+
+        let mut test_fut = pin!(async {
+            let inspector = inspect::Inspector::default();
+            let rootdir = FunctionFsRootDir::new(inspector.root());
+
+            let (proxy, stream) =
+                fidl::endpoints::create_proxy_and_stream::<fadb::UsbAdbImpl_Marker>();
+            let (read_sender, read_receiver) = async_channel::unbounded();
+            let (write_sender, write_receiver) = async_channel::unbounded();
+
+            // Simulate state established by create_endpoints() for session 1.
+            {
+                let mut state = rootdir.state.lock();
+                state.session_id = 1;
+                state.has_input_output_endpoints = true;
+                state.adb_read_channel = Some(read_sender);
+                state.adb_write_channel = Some(write_sender);
+                state.event_queue.push_back(usb_functionfs_event {
+                    type_: usb_functionfs_event_type_FUNCTIONFS_BIND as u8,
+                    ..Default::default()
+                });
+                state.record_event("BIND");
+            }
+
+            // Drop the driver stream to simulate USB driver unbind (e.g. role switch to Host mode).
+            drop(stream);
+
+            handle_adb(
+                proxy,
+                None,
+                read_receiver,
+                write_receiver,
+                Arc::clone(&rootdir.state),
+                Arc::clone(&rootdir.stats),
+                1,
+            )
+            .await;
+
+            let state = rootdir.state.lock();
+            assert!(!state.is_online);
+            assert!(
+                !state.has_input_output_endpoints,
+                "UNBIND must clear has_input_output_endpoints so wait_until_online aborts"
+            );
+            assert!(
+                state.adb_read_channel.is_none(),
+                "UNBIND must clear adb_read_channel so ep1 reads do not block on dead session"
+            );
+            assert!(
+                state.adb_write_channel.is_none(),
+                "UNBIND must clear adb_write_channel so ep2 writes do not block on dead session"
+            );
+            let events: Vec<u8> = state.event_queue.iter().map(|e| e.type_).collect();
+            assert_eq!(
+                events,
+                vec![
+                    usb_functionfs_event_type_FUNCTIONFS_BIND as u8,
+                    usb_functionfs_event_type_FUNCTIONFS_UNBIND as u8,
+                ],
+                "Exactly one BIND and one UNBIND event should be queued"
+            );
         });
 
         while exec.run_until_stalled(&mut test_fut).is_pending() {

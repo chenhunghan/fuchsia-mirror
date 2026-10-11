@@ -20,6 +20,7 @@ use cml::types::expose::{Expose, ExposeFromRef};
 use cml::types::offer::{Offer, OfferFromRef, OfferToRef};
 use cml::types::right::{Right, Rights};
 use fuchsia_url::fuchsia_pkg::AbsoluteComponentUrl;
+use std::collections::btree_map::{BTreeMap, Entry};
 use std::io::Write as _;
 
 pub(crate) struct TeeConfig;
@@ -252,18 +253,48 @@ fn create_tee_clients(
         },
     ];
 
+    // Maps a protocol name (from `capabilities` or `sibling_capabilities`) to the
+    // child name of the TEE client component that provides it.
+    let mut capability_providers = BTreeMap::new();
+    let mut clients = BTreeMap::new();
     for tee_client in product_config {
         let component_url = AbsoluteComponentUrl::parse(&tee_client.component_url)?;
-        let component_name = create_name(
-            component_url
-                .resource()
-                .split('/')
-                .next_back()
-                .ok_or_else(|| anyhow!("no resource name: {}", component_url.resource()))?
-                .split('.')
-                .next()
-                .ok_or_else(|| anyhow!("no component name: {}", component_url.resource()))?,
-        )?;
+        let file_stem = component_url
+            .file_stem()
+            .ok_or_else(|| anyhow!("no component name: {}", component_url.resource()))?;
+        let component_name = create_name(file_stem)?;
+
+        match clients.entry(component_name.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert((tee_client, component_url));
+            }
+            Entry::Occupied(entry) => {
+                let (existing_client, _) = entry.get();
+                bail!(
+                    "Duplicate TEE client component name '{component_name}' derived from '{}' and '{}'",
+                    existing_client.component_url,
+                    tee_client.component_url
+                );
+            }
+        }
+
+        for capability in tee_client.capabilities.iter().chain(&tee_client.sibling_capabilities) {
+            let capability_name = create_name(capability)?;
+            match capability_providers.entry(capability_name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(component_name.clone());
+                }
+                Entry::Occupied(entry) => {
+                    bail!(
+                        "Duplicate capability '{capability}' provided by both '{}' and '{component_name}'",
+                        entry.get()
+                    );
+                }
+            }
+        }
+    }
+
+    for (component_name, (tee_client, component_url)) in clients {
         children.push(Child {
             name: component_name.clone(),
             url: cm_types::Url::new(component_url.to_string())?,
@@ -299,18 +330,30 @@ fn create_tee_clients(
 
         for protocol in &tee_client.additional_required_protocols {
             let protocol_name = create_name(protocol)?;
-            offer.push(Offer {
-                protocol: Some(protocol_name.into()),
-
-                // Most of these additional capabilities will come from
-                // tee_manager or factory_store_providers, and not all
-                // boards contain those components.
-                source_availability: Some(cml::SourceAvailability::Unknown),
-                ..Offer::empty(
-                    OfferFromRef::Parent.into(),
-                    OfferToRef::Named(component_name.clone()).into(),
-                )
-            });
+            let to = OfferToRef::Named(component_name.clone()).into();
+            let protocol_offer = match capability_providers.get(&protocol_name) {
+                Some(provider_name) if provider_name == &component_name => {
+                    bail!(
+                        "Component '{component_name}' cannot require capability '{protocol}' that it provides itself"
+                    );
+                }
+                Some(provider_name) => Offer {
+                    protocol: Some(protocol_name.into()),
+                    availability: Some(cml::Availability::SameAsTarget),
+                    ..Offer::empty(OfferFromRef::Named(provider_name.clone()).into(), to)
+                },
+                None => {
+                    // Most of these additional capabilities will come from
+                    // tee_manager or factory_store_providers, and not all
+                    // boards contain those components.
+                    Offer {
+                        protocol: Some(protocol_name.into()),
+                        source_availability: Some(cml::SourceAvailability::Unknown),
+                        ..Offer::empty(OfferFromRef::Parent.into(), to)
+                    }
+                }
+            };
+            offer.push(protocol_offer);
         }
 
         if let Some(config_data) = &tee_client.config_data {
@@ -457,7 +500,6 @@ mod tests {
     use assembly_config_schema::product_settings::{TeeClientConfigData, TeeClientFeatures};
     use assembly_images_config::BoardFilesystemConfig;
     use camino::{Utf8Path, Utf8PathBuf};
-    use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::LazyLock;
 
@@ -768,6 +810,7 @@ mod tests {
             guids: vec!["1234".to_string(), "5678".to_string()],
             additional_required_protocols: vec!["fuchsia.foo.bar".to_string()],
             capabilities: vec!["fuchsia.baz.bang".to_string()],
+            sibling_capabilities: vec![],
             config_data: Some(TeeClientConfigData {
                 files: BTreeMap::from([
                     ("foo".to_string(), "bar".into()),
@@ -919,6 +962,7 @@ mod tests {
             guids: vec!["1234".to_string(), "5678".to_string()],
             additional_required_protocols: vec!["fuchsia.foo.bar".to_string()],
             capabilities: vec!["fuchsia.baz.bang".to_string()],
+            sibling_capabilities: vec![],
             config_data: Some(TeeClientConfigData {
                 files: BTreeMap::from([
                     ("foo".to_string(), "bar".into()),
@@ -1043,6 +1087,255 @@ mod tests {
                 .iter()
                 .any(|path| path.as_str().contains("tee_manager.core_shard.cml"))
         );
+    }
+
+    #[test]
+    fn test_tee_clients_sibling_capability_routing() {
+        let resource_dir = tempfile::TempDir::new().unwrap();
+        let (context, _, _, mut builder) = setup_test(resource_dir.path());
+
+        let tee_clients = vec![
+            GlobalPlatformTeeClient {
+                component_url: "fuchsia-pkg://fuchsia.com/tee-clients/provider#meta/provider.cm"
+                    .to_string(),
+                guids: vec!["1111".to_string()],
+                capabilities: vec!["fuchsia.custom.PublicProtocol".to_string()],
+                sibling_capabilities: vec!["fuchsia.custom.SiblingOnlyProtocol".to_string()],
+                ..Default::default()
+            },
+            GlobalPlatformTeeClient {
+                component_url: "fuchsia-pkg://fuchsia.com/tee-clients/consumer#meta/consumer.cm"
+                    .to_string(),
+                guids: vec!["2222".to_string()],
+                additional_required_protocols: vec![
+                    "fuchsia.custom.PublicProtocol".to_string(),
+                    "fuchsia.custom.SiblingOnlyProtocol".to_string(),
+                    "fuchsia.parent.ExternalProtocol".to_string(),
+                ],
+                ..Default::default()
+            },
+        ];
+
+        create_tee_clients(&tee_clients, &context, &mut builder).expect("create_tee_clients");
+        let completed = builder.build();
+
+        let compiled_package = completed
+            .compiled_packages
+            .get(&CompiledPackageDestination::Blob(BlobfsCompiledPackageDestination::TeeClients))
+            .unwrap();
+
+        let shard = &compiled_package.components[0].shards[0];
+
+        let contents = std::fs::read_to_string(shard).unwrap();
+        let contents_json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parsing cml");
+
+        let expected_json = serde_json::json!({
+            "children": [
+                {
+                    "name": "consumer",
+                    "url": "fuchsia-pkg://fuchsia.com/tee-clients/consumer#meta/consumer.cm"
+                },
+                {
+                    "name": "provider",
+                    "url": "fuchsia-pkg://fuchsia.com/tee-clients/provider#meta/provider.cm"
+                }
+            ],
+            "capabilities": [
+                {
+                    "dictionary": "tee-client-capabilities"
+                }
+            ],
+            "expose": [
+                {
+                    "dictionary": "tee-client-capabilities",
+                    "from": "self"
+                }
+            ],
+            "offer": [
+                {
+                    "dictionary": "diagnostics",
+                    "from": "parent",
+                    "to": "all"
+                },
+                {
+                    "protocol": "fuchsia.tracing.provider.Registry",
+                    "from": "parent",
+                    "to": "all",
+                    "availability": "same_as_target"
+                },
+                {
+                    "protocol": "fuchsia.tee.Application.2222",
+                    "from": "parent",
+                    "to": "#consumer"
+                },
+                {
+                    "protocol": "fuchsia.custom.PublicProtocol",
+                    "from": "#provider",
+                    "to": "#consumer",
+                    "availability": "same_as_target"
+                },
+                {
+                    "protocol": "fuchsia.custom.SiblingOnlyProtocol",
+                    "from": "#provider",
+                    "to": "#consumer",
+                    "availability": "same_as_target"
+                },
+                {
+                    "protocol": "fuchsia.parent.ExternalProtocol",
+                    "from": "parent",
+                    "to": "#consumer",
+                    "source_availability": "unknown"
+                },
+                {
+                    "protocol": "fuchsia.custom.PublicProtocol",
+                    "from": "#provider",
+                    "to": "self/tee-client-capabilities",
+                    "availability": "same_as_target"
+                },
+                {
+                    "protocol": "fuchsia.tee.Application.1111",
+                    "from": "parent",
+                    "to": "#provider"
+                }
+            ]
+        });
+
+        assert_eq!(
+            expected_json, contents_json,
+            "cml mismatch: Expected: \n\n{expected_json:#?}\n\nActual:\n\n{contents_json:#?}"
+        );
+    }
+
+    #[test]
+    fn test_tee_clients_duplicate_capability_error() {
+        let resource_dir = tempfile::TempDir::new().unwrap();
+        let (context, _, _, mut builder) = setup_test(resource_dir.path());
+
+        let provider1_url = "fuchsia-pkg://fuchsia.com/tee-clients/provider1#meta/provider1.cm";
+        let provider2_url = "fuchsia-pkg://fuchsia.com/tee-clients/provider2#meta/provider2.cm";
+
+        for (tee_clients, expected_err) in [
+            (
+                vec![
+                    GlobalPlatformTeeClient {
+                        component_url: provider1_url.into(),
+                        capabilities: vec!["fuchsia.duplicate.Protocol".into()],
+                        ..Default::default()
+                    },
+                    GlobalPlatformTeeClient {
+                        component_url: provider2_url.into(),
+                        capabilities: vec!["fuchsia.duplicate.Protocol".into()],
+                        ..Default::default()
+                    },
+                ],
+                "Duplicate capability 'fuchsia.duplicate.Protocol'",
+            ),
+            (
+                vec![
+                    GlobalPlatformTeeClient {
+                        component_url: provider1_url.into(),
+                        sibling_capabilities: vec!["fuchsia.duplicate.SiblingProtocol".into()],
+                        ..Default::default()
+                    },
+                    GlobalPlatformTeeClient {
+                        component_url: provider2_url.into(),
+                        sibling_capabilities: vec!["fuchsia.duplicate.SiblingProtocol".into()],
+                        ..Default::default()
+                    },
+                ],
+                "Duplicate capability 'fuchsia.duplicate.SiblingProtocol'",
+            ),
+            (
+                vec![GlobalPlatformTeeClient {
+                    component_url: provider1_url.into(),
+                    capabilities: vec!["fuchsia.both.Protocol".into()],
+                    sibling_capabilities: vec!["fuchsia.both.Protocol".into()],
+                    ..Default::default()
+                }],
+                "Duplicate capability 'fuchsia.both.Protocol'",
+            ),
+            (
+                vec![GlobalPlatformTeeClient {
+                    component_url: provider1_url.into(),
+                    capabilities: vec![
+                        "fuchsia.dup.PublicProtocol".into(),
+                        "fuchsia.dup.PublicProtocol".into(),
+                    ],
+                    ..Default::default()
+                }],
+                "Duplicate capability 'fuchsia.dup.PublicProtocol'",
+            ),
+            (
+                vec![GlobalPlatformTeeClient {
+                    component_url: provider1_url.into(),
+                    sibling_capabilities: vec![
+                        "fuchsia.dup.SiblingProtocol".into(),
+                        "fuchsia.dup.SiblingProtocol".into(),
+                    ],
+                    ..Default::default()
+                }],
+                "Duplicate capability 'fuchsia.dup.SiblingProtocol'",
+            ),
+        ] {
+            let err = create_tee_clients(&tee_clients, &context, &mut builder)
+                .expect_err("duplicate capability should fail");
+            assert!(err.to_string().contains(expected_err));
+        }
+    }
+
+    #[test]
+    fn test_tee_clients_self_capability_requirement_error() {
+        let resource_dir = tempfile::TempDir::new().unwrap();
+        let (context, _, _, mut builder) = setup_test(resource_dir.path());
+        let app_url = "fuchsia-pkg://fuchsia.com/tee-clients/app#meta/app.cm";
+
+        for (tee_client, expected_err) in [
+            (
+                GlobalPlatformTeeClient {
+                    component_url: app_url.into(),
+                    additional_required_protocols: vec!["fuchsia.self.Protocol".into()],
+                    capabilities: vec!["fuchsia.self.Protocol".into()],
+                    ..Default::default()
+                },
+                "cannot require capability 'fuchsia.self.Protocol' that it provides itself",
+            ),
+            (
+                GlobalPlatformTeeClient {
+                    component_url: app_url.into(),
+                    additional_required_protocols: vec!["fuchsia.self.SiblingProtocol".into()],
+                    sibling_capabilities: vec!["fuchsia.self.SiblingProtocol".into()],
+                    ..Default::default()
+                },
+                "cannot require capability 'fuchsia.self.SiblingProtocol' that it provides itself",
+            ),
+        ] {
+            let err = create_tee_clients(&vec![tee_client], &context, &mut builder)
+                .expect_err("self capability requirement should fail");
+            assert!(err.to_string().contains(expected_err));
+        }
+    }
+
+    #[test]
+    fn test_tee_clients_duplicate_component_name_error() {
+        let resource_dir = tempfile::TempDir::new().unwrap();
+        let (context, _, _, mut builder) = setup_test(resource_dir.path());
+
+        let tee_clients = vec![
+            GlobalPlatformTeeClient {
+                component_url: "fuchsia-pkg://fuchsia.com/pkg-a#meta/client.cm".into(),
+                ..Default::default()
+            },
+            GlobalPlatformTeeClient {
+                component_url: "fuchsia-pkg://fuchsia.com/pkg-b#meta/client.cm".into(),
+                ..Default::default()
+            },
+        ];
+        let err = create_tee_clients(&tee_clients, &context, &mut builder)
+            .expect_err("duplicate component name should fail");
+        assert!(err.to_string().contains(
+            "Duplicate TEE client component name 'client' derived from 'fuchsia-pkg://fuchsia.com/pkg-a#meta/client.cm' and 'fuchsia-pkg://fuchsia.com/pkg-b#meta/client.cm'"
+        ));
     }
 
     fn populate_resource_dir(resource_dir: &Path) {

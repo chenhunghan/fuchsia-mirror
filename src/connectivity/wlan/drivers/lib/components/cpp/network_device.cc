@@ -295,6 +295,7 @@ void NetworkDevice::QueueTx(netdriver::wire::NetworkDeviceImplQueueTxRequest* re
   for (size_t i = 0; i < request->buffers.size(); ++i) {
     const netdriver::wire::TxBuffer& buffer = request->buffers[i];
     const netdriver::wire::BufferRegion& region = buffer.data[0];
+    ZX_ASSERT(region.vmo < std::size(vmo_addrs_));
     tx_frames_.emplace_back(nullptr, region.vmo, region.offset, buffer.id,
                             vmo_addrs_[region.vmo] + region.offset, region.length,
                             buffer.meta.port);
@@ -307,6 +308,9 @@ void NetworkDevice::QueueTx(netdriver::wire::NetworkDeviceImplQueueTxRequest* re
 
 void NetworkDevice::QueueRxSpace(netdriver::wire::NetworkDeviceImplQueueRxSpaceRequest* request,
                                  fdf::Arena& arena, QueueRxSpaceCompleter::Sync& completer) {
+  for (const auto& buffer : request->buffers) {
+    ZX_ASSERT(buffer.region.vmo < std::size(vmo_addrs_));
+  }
   callbacks_->NetDevQueueRxSpace(cpp20::span(request->buffers.begin(), request->buffers.end()),
                                  vmo_addrs_);
 }

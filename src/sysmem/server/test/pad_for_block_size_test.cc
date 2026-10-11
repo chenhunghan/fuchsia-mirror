@@ -1307,4 +1307,22 @@ TEST(PadForBlockSize, MiniStress2) {
   ASSERT_GT(result_counts.probe_success_count, 0u);
 }
 
+TEST(PadForBlockSize, CheckRoundUpLargeAlignedNoOverflow) {
+  fuchsia_sysmem2::ImageFormatConstraints image_constraints;
+  image_constraints.pixel_format() = fuchsia_images2::PixelFormat::kA2B10G10R10;
+  image_constraints.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  image_constraints.min_size() = {3287, 1};
+  image_constraints.max_size() = {1073741823, 4294967295};
+  image_constraints.bytes_per_row_divisor() = 344064;
+  image_constraints.size_alignment() = {1, 1};
+  image_constraints.max_bytes_per_row() = 0xFFFFFFFF;
+  image_constraints.pad_for_block_size() = fuchsia_math::SizeU{4, 4};
+
+  // Height = 1, width = 1073737728 gives row bytes 4294950912.
+  uint64_t buffer_settings_size_bytes = 4294950912ull;
+  auto with_blocks_bytes_result =
+      PaddedSizeFromBlockSize(image_constraints, buffer_settings_size_bytes, complain_to_stdout);
+  EXPECT_TRUE(with_blocks_bytes_result.is_ok());
+}
+
 }  // namespace

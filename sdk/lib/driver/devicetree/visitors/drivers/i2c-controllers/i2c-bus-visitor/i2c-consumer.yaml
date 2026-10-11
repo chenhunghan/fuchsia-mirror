@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/i2c-consumer.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: I2C consumer
+
+description: |
+  Lets any node use the I2C channels of child nodes of I2C bus nodes, similar
+  to `spmis` in spmi-consumer.yaml. Each `i2c-channels` entry references a
+  child node of an I2C bus node. The referenced child's channel stays in the
+  bus metadata under the child's node name, but the child gets no parent spec
+  of its own. Instead, the consumer node gets a composite parent that binds to
+  the channel, with the properties
+    fuchsia.Service = "fuchsia.hardware.i2c.Service"
+    fuchsia.NAME = <corresponding i2c-channel-names entry>
+  The consumer's I2C parents follow the order of `i2c-channels`, after the
+  parents for its own channels if it is itself an I2C bus child.
+
+  Constraints:
+  * A referenced node must be a direct child of an I2C bus node, must not have
+    a `compatible` property, and must have exactly one I2C address in its
+    `reg` property. No other child of the bus may use the same address.
+  * A node must not reference itself, and may reference each I2C child node at
+    most once. An I2C child node may be referenced by only one node.
+  * `i2c-channel-names` entries are used verbatim as `fuchsia.NAME`, like
+    `gpio-names`. Unlike `reg-names` on I2C bus children, no `i2c-` prefix is
+    added.
+  * Names must be unique among the node's I2C parents. If the consumer node is
+    itself an I2C bus child, this includes the names of the parents for its own
+    channels (`i2c`, or `i2c-<reg-names entry>`).
+
+maintainers:
+  - Puneetha Ramachandra (puneetha@google.com)
+  - Sarah Chan (spqchan@google.com)
+  - Braden Kell (bradenkell@google.com)
+
+select: true
+
+properties:
+  i2c-channels:
+    minItems: 1
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    items:
+      maxItems: 1
+      description: phandle of a child node of an I2C bus node. No specifier cells.
+
+  i2c-channel-names:
+    minItems: 1
+    $ref: /schemas/types.yaml#/definitions/string-array
+    description:
+      Names of the I2C channels, one per `i2c-channels` entry. Used verbatim as
+      the `fuchsia.NAME` property of the corresponding composite parent.
+
+dependencies:
+  i2c-channels: [i2c-channel-names]
+
+additionalProperties: true
+
+examples:
+  - |
+    i2c@ffffa000 {
+      compatible = "example,i2c-controller";
+      reg = <0xffffa000 0x1000>;
+      #address-cells = <1>;
+      #size-cells = <0>;
+
+      pmic: pmic@60 {
+        reg = <0x60>;
+      };
+    };
+
+    display@ffffb000 {
+      compatible = "example,display";
+      reg = <0xffffb000 0x1000>;
+      i2c-channels = <&pmic>;
+      i2c-channel-names = "panel-pmic";
+    };

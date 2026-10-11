@@ -5,7 +5,6 @@
 // TODO(https://fxbug.dev/42156465): Replace with GN config once available in an ffx_plugin.
 #![warn(unused_results)]
 
-use fdomain_fuchsia_net_test_realm as fntr;
 use fidl_fuchsia_net_ext as fnet_ext;
 
 #[ffx_core::ffx_command]
@@ -48,11 +47,7 @@ pub enum Subcommand {
 #[derive(argh::ArgsInfo, argh::FromArgs, Debug, PartialEq)]
 #[argh(subcommand, name = "start-hermetic-network-realm")]
 /// Starts a hermetic network realm.
-pub struct StartHermeticNetworkRealm {
-    #[argh(positional, from_str_fn(parse_netstack_type))]
-    /// the Netstack version to start.
-    pub netstack: fntr::Netstack,
-}
+pub struct StartHermeticNetworkRealm {}
 
 #[derive(argh::ArgsInfo, argh::FromArgs, Debug, PartialEq)]
 #[argh(subcommand, name = "stop-hermetic-network-realm")]
@@ -250,12 +245,4 @@ pub struct DhcpClientStop {
     #[argh(positional)]
     /// the interface to run the DHCP client on
     pub interface_id: u64,
-}
-
-fn parse_netstack_type(value: &str) -> Result<fntr::Netstack, String> {
-    match &value.to_lowercase()[..] {
-        "v2" => Ok(fntr::Netstack::V2),
-        "v3" => Ok(fntr::Netstack::V3),
-        _ => Err("invalid netstack type".to_string()),
-    }
 }

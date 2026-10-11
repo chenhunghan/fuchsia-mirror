@@ -10,17 +10,16 @@ from datetime import timedelta
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib import hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
-from antlion.controllers.ap_lib.hostapd_security import (
-    SecurityMode as DeprecatedSecurityMode,
-)
-from antlion.utils import rand_ascii_str
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
+)
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib import hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
+)
+from legacy_access_point.ap_lib.hostapd_security import (
+    SecurityMode as DeprecatedSecurityMode,
 )
 from mobly import signals, test_runner
 from openwrt_access_point.lib.access_point_config import (
@@ -79,10 +78,10 @@ class HiddenNetworksTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             self.openwrt_ap.configure_wifi(config)
 
         elif self.access_points:
-            self.hidden_ssid = rand_ascii_str(
+            self.hidden_ssid = AccessPointConfig.random_string(
                 hostapd_constants.AP_SSID_LENGTH_2G
             )
-            self.hidden_password = rand_ascii_str(
+            self.hidden_password = AccessPointConfig.random_string(
                 hostapd_constants.AP_PASSPHRASE_LENGTH_2G
             )
             self.access_point = self.access_points[0]

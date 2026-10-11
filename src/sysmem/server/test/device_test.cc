@@ -493,8 +493,10 @@ TEST_F(FakeDdkSysmem, RegisterHeap_SecureHeap_Denied) {
                         .Build();
 
   EXPECT_TRUE(fidl::WireSendEvent(server)->OnRegister(properties).ok());
+  EXPECT_EQ(server.channel().wait_one(ZX_CHANNEL_PEER_CLOSED, zx::time::infinite(), nullptr),
+            ZX_OK);
 
-  // Wait for the OnRegister event to be processed on loop_.
+  // Verify the OnRegister event was rejected on loop_.
   device_->RunSyncOnLoop([this, heap = std::move(heap)]() {
     std::lock_guard lock(*device_->loop_checker_);
     EXPECT_FALSE(device_->is_allocator_present_for_testing(heap));

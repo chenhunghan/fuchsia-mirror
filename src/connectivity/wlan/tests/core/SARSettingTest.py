@@ -7,16 +7,15 @@ import logging
 import fidl_fuchsia_wlan_internal as fidl_internal
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion import utils
-from antlion.controllers.access_point import AccessPoint, setup_ap
-from antlion.controllers.ap_lib.hostapd_constants import (
+from legacy_access_point.access_point import AccessPoint, setup_ap
+from legacy_access_point.ap_lib.hostapd_constants import (
     AP_DEFAULT_CHANNEL_2G,
     AP_SSID_LENGTH_2G,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     SecurityMode as DeprecatedSecurityMode,
 )
 from mobly import asserts, signals, test_runner
@@ -62,7 +61,7 @@ class SARSettingTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     ) -> None:
         iface = await self.phy.create_client_iface()
         # Setup AP
-        ssid: str = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+        ssid: str = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
         if not self.openwrt_ap and not self.access_point:
             raise signals.TestAbortClass(
                 "No access point configured for this test."

@@ -164,6 +164,7 @@ compiler_config("max-page-size") {
   }
 }
 
+# LINT.IfChange(shared_library_config)
 config("shared_library_config") {
   cflags = [ "-fPIC" ]
 
@@ -171,6 +172,8 @@ config("shared_library_config") {
   asmflags = cflags
   ldflags = cflags
 }
+
+# LINT.ThenChange(BUILD.bazel:shared_library_config)
 
 # LINT.IfChange(fdio_config)
 config("fdio_config") {
@@ -183,8 +186,11 @@ config("fdio_config") {
 
 # LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:fdio_config)
 
+# LINT.IfChange(executable_config)
 config("executable_config") {
 }
+
+# LINT.ThenChange(BUILD.bazel:executable_config)
 
 # LINT.IfChange(zircon_asserts)
 config("enable_zircon_asserts") {
@@ -199,9 +205,12 @@ config("zircon_asserts") {
 
 # LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:zircon_asserts)
 
+# LINT.IfChange(no_cpp_standard_library)
 config("no_cpp_standard_library") {
   ldflags = [ "-nostdlib++" ]
 }
+
+# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:no_cpp_standard_library)
 
 config("static_cpp_standard_library") {
   ldflags = [
@@ -280,6 +289,7 @@ if (is_fuchsia) {
 
 # NOTE: This config's label is hard-coded in //build/config/BUILDCONFIG.gn
 # so don't rename it without updating that file too!
+# LINT.IfChange(static-pie-config)
 compiler_config("static-pie-config") {
   cflags = [
     "-fno-sanitize=all",
@@ -291,6 +301,8 @@ compiler_config("static-pie-config") {
   ]
   linker_flags = [ "-no-dynamic-linker" ]
 }
+
+# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:static-pie-config)
 
 group("maybe_scudo_default_options") {
   if (scudo_default_options != "" && scudo_default_options != []) {

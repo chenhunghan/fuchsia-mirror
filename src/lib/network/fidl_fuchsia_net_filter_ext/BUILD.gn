@@ -93,6 +93,5 @@ group("tests") {
     ":fidl-fuchsia-net-filter-ext-fdomain-tests",
     ":fidl-fuchsia-net-filter-ext-tests",
     ":fidl_fuchsia_net_filter_ext_fdomain_test($host_toolchain)",
-    ":fidl_fuchsia_net_filter_ext_test($host_toolchain)",
   ]
 }

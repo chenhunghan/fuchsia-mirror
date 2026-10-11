@@ -32,10 +32,7 @@ pub(super) fn has_socket_permission(
     permission: impl ForClass<SocketClass>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
-    // Permissions are allowed for kernel sockets.
-    if socket_node.is_private() {
-        return Ok(());
-    }
+    debug_assert!(!socket_node.is_private());
 
     let FsNodeSidAndClass { sid: socket_sid, class: socket_class } =
         fs_node_effective_sid_and_class(socket_node);
@@ -142,20 +139,13 @@ fn compute_socket_security_class(
 
 /// Checks that `current_task` has permission to create a socket with `domain`, `socket_type` and
 /// `protocol`.
-
 pub(in crate::security) fn check_socket_create_access(
     security_server: &SecurityServer,
     current_task: &CurrentTask,
     domain: SocketDomain,
     socket_type: SocketType,
     protocol: SocketProtocol,
-    kernel_private: bool,
 ) -> Result<(), Errno> {
-    // Creating kernel sockets is allowed.
-    if kernel_private {
-        return Ok(());
-    }
-
     let sockfs = socket_fs(current_task.kernel());
     // Ensure sockfs gets labeled, in case it was mounted after the SELinux policy has been loaded.
     superblock::file_system_resolve_security(security_server, &current_task, &sockfs)
@@ -202,6 +192,7 @@ pub(in crate::security) fn socket_socketpair(
 /// Computes and sets the security class for `socket`.
 pub(in crate::security) fn socket_post_create(security_server: &SecurityServer, socket: &Socket) {
     let socket_node = socket.fs_node().expect("socket_post_create without FsNode");
+    debug_assert!(!socket_node.is_private());
     socket_node.security_state.0.update_class(
         compute_socket_security_class(
             security_server,
@@ -296,6 +287,9 @@ pub(in crate::security) fn socket_accept(
     listening_socket: DowncastedFile<'_, SocketFile>,
     accepted_socket: DowncastedFile<'_, SocketFile>,
 ) -> Result<(), Errno> {
+    debug_assert!(!listening_socket.file().node().is_private());
+    debug_assert!(!accepted_socket.file().node().is_private());
+
     let current_sid = current_task_state(current_task).current_sid;
     let listening_security_state =
         (*listening_socket.file().node().security_state.0.read()).clone();
@@ -472,6 +466,7 @@ pub(in crate::security) fn socket_getpeersec_stream(
     _current_task: &CurrentTask,
     socket: &Socket,
 ) -> Result<Vec<u8>, Errno> {
+    debug_assert!(socket.fs_node().is_none_or(|node| !node.is_private()));
     let peer_sid = socket.security.state.peer_sid.lock().unwrap_or(InitialSid::Unlabeled.into());
     // The SELinux Test Suite assumes that `SO_PEERSEC` will return a NUL terminated label.
     Ok(security_server.sid_to_security_context_with_nul(peer_sid).unwrap())

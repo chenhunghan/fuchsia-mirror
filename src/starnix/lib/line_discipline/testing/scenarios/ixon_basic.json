@@ -34,10 +34,6 @@
             "data": "\u0013"
         },
         {
-            "action": "sleep",
-            "duration": 0.1
-        },
-        {
             "action": "write_to_slave",
             "data": "World\n",
             "expect_block": true

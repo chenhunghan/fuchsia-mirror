@@ -76,7 +76,10 @@ void CodecAdapterFfmpegDecoder::ProcessInputLoop() {
       }
       avcodec_context_ = std::move(maybe_avcodec_context.value());
     } else if (input_item.is_end_of_stream()) {
-      ZX_ASSERT(avcodec_context_);
+      if (!avcodec_context_) {
+        events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
+        continue;
+      }
       avcodec_context_->EndStream();
       DecodeFrames();
     } else if (input_item.is_packet()) {

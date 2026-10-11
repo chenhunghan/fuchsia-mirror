@@ -11,7 +11,7 @@ use fho::{FfxMain, FfxTool, bug, user_error};
 use product_bundle::ProductBundle;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use utf8_path::path_relative_from;
+use utf8_path as _;
 
 mod args;
 pub use args::GetRepositoryCommand;
@@ -64,8 +64,8 @@ fn extract_repository_info(
         let blobs_dir = repository.blobs_path.clone();
         repository_infos.push(RepositoryInfo {
             name: repository.name.clone(),
-            target_json: path_relative_from(target_json, &cmd.product_bundle)?,
-            blobs_dir: path_relative_from(blobs_dir, &cmd.product_bundle)?,
+            target_json: product_bundle::relativize_bundle_path(&cmd.product_bundle, &target_json)?,
+            blobs_dir: product_bundle::relativize_bundle_path(&cmd.product_bundle, &blobs_dir)?,
             delivery_blob_type: repository.delivery_blob_type,
         })
     }
@@ -127,5 +127,51 @@ mod tests {
             delivery_blob_type: 1,
         }];
         assert_eq!(expected_info, info);
+    }
+
+    #[test]
+    fn test_get_repository_gcs_dir_and_zip() {
+        let make_pb = |meta: &str, blobs: &str| {
+            ProductBundle::V2(ProductBundleV2 {
+                product_name: "test".into(),
+                product_version: "1".into(),
+                partitions: PartitionsConfig::default(),
+                sdk_version: "1".into(),
+                system_a: None,
+                system_b: None,
+                system_r: None,
+                platform_tools_a: vec![],
+                platform_tools_b: vec![],
+                platform_tools_r: vec![],
+                repositories: vec![Repository {
+                    name: "fuchsia.com".into(),
+                    metadata_path: Utf8PathBuf::from(meta),
+                    blobs_path: Utf8PathBuf::from(blobs),
+                    delivery_blob_type: 1,
+                    root_private_key_path: None,
+                    targets_private_key_path: None,
+                    snapshot_private_key_path: None,
+                    timestamp_private_key_path: None,
+                    ota_manifest_signature_path: None,
+                    ota_manifest_path: None,
+                }],
+                update_package_hash: None,
+                virtual_devices_path: None,
+                release_info: None,
+            })
+        };
+        let expected = vec![RepositoryInfo {
+            name: "fuchsia.com".into(),
+            target_json: Utf8PathBuf::from("repository/targets.json"),
+            blobs_dir: Utf8PathBuf::from("blobs"),
+            delivery_blob_type: 1,
+        }];
+        let gcs_pb = make_pb("gs://my-bucket/pb/repository", "gs://my-bucket/pb/blobs");
+        for pb_arg in ["gs://my-bucket/pb", "gs://my-bucket/pb/product_bundle.json"] {
+            let cmd = GetRepositoryCommand { product_bundle: Utf8PathBuf::from(pb_arg) };
+            assert_eq!(expected, extract_repository_info(gcs_pb.clone(), cmd).unwrap());
+        }
+        let cmd = GetRepositoryCommand { product_bundle: Utf8PathBuf::from("gs://b/pb.zip") };
+        assert_eq!(expected, extract_repository_info(make_pb("repository", "blobs"), cmd).unwrap());
     }
 }

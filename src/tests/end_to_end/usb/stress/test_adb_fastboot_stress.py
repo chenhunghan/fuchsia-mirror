@@ -6,6 +6,8 @@
 import logging
 
 import fuchsia_base_test
+from honeydew.device_classes import android_device
+from honeydew.transports.fastboot import types as fastboot_types
 from mobly import test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -17,6 +19,8 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
     Required Mobly Test Params:
         num_iterations (int): Number of times to execute the transition.
     """
+
+    dut: android_device.AndroidDevice
 
     async def pre_run(self) -> None:
         test_arg_tuple_list: list[tuple[int]] = []
@@ -32,6 +36,7 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def setup_class(self) -> None:
         await super().setup_class()
+        assert isinstance(self.dut, android_device.AndroidDevice)
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         _ = self.dut.adb
@@ -50,16 +55,12 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
         self.dut.adb.run(["reboot-bootloader"])
 
         _LOGGER.info("Waiting for device to enter fastboot mode...")
-        await self.dut.fastboot.wait_for_fastboot_mode()
+        self.dut.fastboot.wait_for_fastboot_mode()
 
-        _LOGGER.info("Sending fastboot continue...")
-        # fastboot continue might not return output if it succeeds and boots
-        await self.dut.fastboot.run(["continue"])
-
-        _LOGGER.info("Waiting for device to boot back to Fuchsia...")
-        # We need to wait for Fuchsia mode (RCS) and online
-        await self.dut.fastboot.wait_for_fuchsia_mode()
-        await self.dut.wait_for_online()
+        _LOGGER.info("Booting back to Fuchsia via fastboot continue...")
+        await self.dut.fastboot.boot_to_fuchsia_mode(
+            method=fastboot_types.BootToFuchsiaMethod.CONTINUE
+        )
         self.dut.adb.wait_for_boot_complete()
 
         _LOGGER.info(

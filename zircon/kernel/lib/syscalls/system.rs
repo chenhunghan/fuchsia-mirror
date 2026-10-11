@@ -7,8 +7,7 @@
 use core::mem::MaybeUninit;
 
 use crate::object::{
-    Dispatcher, EventDispatcher, HandleValue, JobDispatcher, ProcessDispatcher,
-    validate_system_resource,
+    EventDispatcher, HandleValue, JobDispatcher, ProcessDispatcher, validate_system_resource,
 };
 use crate::platform_rs::HaltToken;
 use crate::user_copy::{UserInPtr, UserOutPtr};
@@ -17,8 +16,9 @@ use syscalls_macro::syscall;
 use zx_status::Status;
 use zx_types::*;
 
-const VALID_SUSPEND_FLAGS: u64 =
-    ZX_SYSTEM_SUSPEND_OPTION_DISCARD | ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY;
+const VALID_SUSPEND_FLAGS: u64 = ZX_SYSTEM_SUSPEND_OPTION_DISCARD
+    | ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY
+    | ZX_SYSTEM_SUSPEND_OPTION_DEEP;
 
 const HALT_ACTION_REBOOT: u32 = 1;
 const HALT_ACTION_REBOOT_BOOTLOADER: u32 = 2;
@@ -144,7 +144,9 @@ pub fn sys_system_get_event(
         // We check for the root job below. We should not need to enforce rights beyond that.
         ZX_RIGHT_NONE
     };
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(root_job, rights)?;
+    let job = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(up, root_job, rights)
+    })?;
 
     // Validate that the job is in fact the first usermode job (aka root job).
     if !job.is_root() {
@@ -395,6 +397,13 @@ pub fn sys_system_suspend_enter(
 
     // Make sure that any flags passed by the user are defined.
     if options & !VALID_SUSPEND_FLAGS != 0 {
+        return Err(Status::INVALID_ARGS);
+    }
+
+    // DEEP may not be combined with any other option.  Otherwise, it is
+    // currently ignored; requesting deep suspend on a system which does not
+    // support it behaves as if the option had not been specified.
+    if options & ZX_SYSTEM_SUSPEND_OPTION_DEEP != 0 && options != ZX_SYSTEM_SUSPEND_OPTION_DEEP {
         return Err(Status::INVALID_ARGS);
     }
 

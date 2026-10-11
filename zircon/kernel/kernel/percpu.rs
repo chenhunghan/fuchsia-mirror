@@ -6,6 +6,7 @@
 
 use crate::kernel::timer::Timer;
 use crate::kernel::types::cpu_num_t;
+use crate::stall::StallAccumulator;
 use crate::vm::page_state::VmPageCounts;
 use core::mem::offset_of;
 use core::sync::atomic::AtomicU64;
@@ -52,10 +53,6 @@ pub struct IdlePowerThread(pub bindings::IdlePowerThread);
 #[repr(transparent)]
 pub struct DpcRunner(pub bindings::DpcRunner);
 
-/// An opaque type representing the C++ `StallAccumulator` class.
-#[repr(transparent)]
-pub struct StallAccumulator(pub bindings::StallAccumulator);
-
 /// An opaque type representing the C++ `PlatformCpuResumeState` struct.
 #[repr(transparent)]
 pub struct PlatformCpuResumeState(pub bindings::PlatformCpuResumeState);
@@ -91,19 +88,20 @@ pub struct PerCpu {
     pub counters: *mut i64,
     /// Each cpu maintains a DpcRunner.
     pub dpc_runner: DpcRunner,
-    /// Page state counts are percpu because they change frequently and we don't want to pay for either
-    /// heavy synchronization, or transferring the counters between CPUs a lot. Using percpu relaxed
-    /// atomics we minimize the need for synchronization (no locks, interrupt or preemption disabling
-    /// needed), and avoid cache line bouncing the counters around different CPUs.
+    /// Page state counts are percpu because they change frequently and we don't want to pay for
+    /// either heavy synchronization, or transferring the counters between CPUs a lot. Using
+    /// percpu relaxed atomics we minimize the need for synchronization (no locks, interrupt or
+    /// preemption disabling needed), and avoid cache line bouncing the counters around
+    /// different CPUs.
     ///
     /// While it's OK for an observer to temporarily see incorrect values, the counts need to
     /// eventually quiesce. It's important that we don't "drop" changes and that the values don't
     /// drift over time.
     ///
     /// When modifying it is not necessary to disable preemption, and can just use
-    /// percpu::GetCurrent()| and then modify the counts. In the unlikely event a CPU migration happens
-    /// this does not effect correctness, and paying for the rare cache line transfer is preferable to
-    /// consistently paying to avoid migration.
+    /// percpu::GetCurrent()| and then modify the counts. In the unlikely event a CPU migration
+    /// happens this does not effect correctness, and paying for the rare cache line transfer
+    /// is preferable to consistently paying to avoid migration.
     ///
     /// When reading, use |ForEachPreemptDisable|. Although it is not possible to guarantee a
     /// consistent snapshot of these counters, it should be good enough for diagnostic uses.
@@ -111,16 +109,16 @@ pub struct PerCpu {
     /// lockup_detector state.
     ///
     /// Every active CPU wakes up periodically (even during periods of suspend-to-idle) to record a
-    /// heartbeat, as well as to check to see if any of its peers are showing signs of problems.  The
-    /// lockup detector timer is the timer used for this.
+    /// heartbeat, as well as to check to see if any of its peers are showing signs of problems.
+    /// The lockup detector timer is the timer used for this.
     ///
     /// This field is not a member of LockupDetectorState because Timer depends on
     /// SpinLock, which depends on lockup_detector.  By pulling it out of
     /// LockupDetectorState we can inline performance critical lockup_detector
     /// functions.  See also gLockupDetectorPerCpuState.
     pub lockup_detector_timer: Timer,
-    /// When thread sampling is enabled, we use this timer to periodically mark that the active thread
-    /// should be sampled when safe to do so.
+    /// When thread sampling is enabled, we use this timer to periodically mark that the active
+    /// thread should be sampled when safe to do so.
     pub sampling_timer: Timer,
     /// The accumulated memory stall timers for this CPU.
     pub memory_stall_accumulator: StallAccumulator,

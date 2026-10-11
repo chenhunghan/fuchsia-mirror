@@ -18,10 +18,8 @@ compiler_config("abi") {
     ":integer-register-abi",
     ":thread-pointer-abi",
     ":stack-pointer-abi",
+    ":safe-stack-abi",
   ]
-  if (!is_gcc) {
-    compiler_configs += [ ":safe-stack-abi" ]
-  }
 
   # These are not part of the ABI contract per se, but they're part of the
   # "expected resilience of generated code" contract that should be uniform
@@ -37,15 +35,13 @@ compiler_config("abi") {
 # hold the user-mode values while running in kernel mode.
 compiler_config("integer-register-abi") {
   cflags = [ "-msoft-float" ]
-  if (!is_gcc) {
-    cflags_c = [
-      "-Xclang",
-      "-target-feature",
-      "-Xclang",
-      "+soft-float",
-    ]
-    cflags_cc = cflags_c
-  }
+  cflags_c = [
+    "-Xclang",
+    "-target-feature",
+    "-Xclang",
+    "+soft-float",
+  ]
+  cflags_cc = cflags_c
   rust_target_features = [ "+soft-float" ]
   if (toolchain_environment == "kernel") {
     rust_target_edits = [
@@ -74,14 +70,6 @@ compiler_config("integer-register-abi") {
     rust_target_features += [ "-$feature" ]
   }
 
-  if (is_gcc) {
-    cflags += [
-      # Optimization: Since FPU is disabled, do not pass flag in %rax to
-      # varargs routines that floating point args are in use.
-      "-mskip-rax-setup",
-    ]
-  }
-
   # None of these actually matter in ldflags even for LTO, and the Clang driver
   # complains about some as unused at link time.
   asmflags = cflags
@@ -93,8 +81,8 @@ compiler_config("integer-register-abi") {
 compiler_config("thread-pointer-abi") {
   # Clang needs -mcmodel=kernel to tell it to use the right safe-stack ABI for
   # the kernel.  It doesn't have any other effects that matter when using -fPIE
-  # as we do; it's not useful to us at all in GCC and doesn't exist for x86-32.
-  if (toolchain_environment != "kernel.phys32" && !is_gcc) {
+  # as we do; it doesn't exist for x86-32.
+  if (toolchain_environment != "kernel.phys32") {
     c_family_flags = [ "-mcmodel=kernel" ]
   }
   if (toolchain_environment == "kernel") {
@@ -157,20 +145,13 @@ compiler_config("safe-stack-abi") {
 
 config("retpoline") {
   visibility = [ ":*" ]
-  if (is_gcc) {
-    cflags = [
-      "-mindirect-branch=thunk-inline",
-      "-mindirect-branch-register",
-    ]
-  } else {
-    cflags = [ "-mretpoline" ]
-    rustflags = [ "-Zretpoline" ]
-    if (toolchain_environment == "kernel") {
-      # The kernel proper uses its own optimized thunks, but phys and
-      # multiboot can just use the compiler's safe default thunks.
-      cflags += [ "-mretpoline-external-thunk" ]
-      rustflags += [ "-Zretpoline-external-thunk" ]
-    }
+  cflags = [ "-mretpoline" ]
+  rustflags = [ "-Zretpoline" ]
+  if (toolchain_environment == "kernel") {
+    # The kernel proper uses its own optimized thunks, but phys and
+    # multiboot can just use the compiler's safe default thunks.
+    cflags += [ "-mretpoline-external-thunk" ]
+    rustflags += [ "-Zretpoline-external-thunk" ]
   }
   defines = [ "KERNEL_RETPOLINE=1" ]
 }
@@ -372,6 +353,7 @@ kernel_rust_mod("arch-x86-rs") {
   source_root = "src/mod.rs"
   sources = [
     "src/apic.rs",
+    "src/cache.rs",
     "src/fake_msr_access.rs",
     "src/feature.rs",
     "src/interrupts.rs",

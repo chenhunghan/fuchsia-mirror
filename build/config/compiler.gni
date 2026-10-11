@@ -98,6 +98,7 @@ assert(_debuginfo_valid + [ debuginfo ] - [ debuginfo ] != _debuginfo_valid,
        "`debuginfo=\"...\"` must be one of $_debuginfo_valid")
 
 declare_args() {
+  # LINT.IfChange(dwarf_version)
   # Explicitly specify DWARF version used.
   dwarf_version = 5
 
@@ -106,6 +107,10 @@ declare_args() {
   if (is_kernel) {
     dwarf_version = 4
   }
+
+  # LINT.ThenChange(
+  #   //build/bazel/config/bazel_args.gni:dwarf_version,
+  #   //build/bazel/config/variables/BUILD.bazel:dwarf_version)
 }
 
 assert(dwarf_version >= 2 && dwarf_version <= 5,
@@ -119,8 +124,12 @@ if (is_gcc) {
 }
 
 declare_args() {
+  # LINT.IfChange(compress_debuginfo)
   # Enable compression of debug sections.
   compress_debuginfo = default_compress_debuginfo
+  # LINT.ThenChange(
+  #    //build/bazel/config/bazel_args:compress_debuginfo,
+  #    //build/bazel/config/variables/BUILD.bazel:compress_debuginfo.bzl)
 }
 
 _compress_debuginfo_valid = [

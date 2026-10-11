@@ -5,7 +5,7 @@
             metrics: [
                 {
                     event_codes: [
-                        1,
+                        "Accessibility",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -13,7 +13,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "Audio",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -21,7 +21,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "AudioPolicy",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -29,7 +29,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "Display",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -37,7 +37,7 @@
                 },
                 {
                     event_codes: [
-                        5,
+                        "DoNotDisturb",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -45,7 +45,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "FactoryReset",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -53,7 +53,7 @@
                 },
                 {
                     event_codes: [
-                        7,
+                        "Input",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -61,7 +61,7 @@
                 },
                 {
                     event_codes: [
-                        8,
+                        "Intl",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -69,7 +69,7 @@
                 },
                 {
                     event_codes: [
-                        9,
+                        "Light",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -77,7 +77,7 @@
                 },
                 {
                     event_codes: [
-                        10,
+                        "NightMode",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -85,7 +85,7 @@
                 },
                 {
                     event_codes: [
-                        11,
+                        "Privacy",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -93,7 +93,7 @@
                 },
                 {
                     event_codes: [
-                        12,
+                        "Setup",
                     ],
                     metric_name: "write_failures",
                     metric_type: "Occurrence",
@@ -101,8 +101,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Accessibility",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -110,8 +110,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        2,
+                        "Accessibility",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -119,8 +119,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        3,
+                        "Accessibility",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -128,8 +128,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        4,
+                        "Accessibility",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -137,8 +137,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        5,
+                        "Accessibility",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -146,8 +146,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        6,
+                        "Accessibility",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -155,8 +155,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        7,
+                        "Accessibility",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -164,8 +164,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        8,
+                        "Accessibility",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -173,8 +173,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        9,
+                        "Accessibility",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -182,8 +182,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        10,
+                        "Accessibility",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -191,8 +191,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        11,
+                        "Accessibility",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -200,8 +200,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        12,
+                        "Accessibility",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -209,8 +209,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        13,
+                        "Accessibility",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -218,8 +218,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        14,
+                        "Accessibility",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -227,8 +227,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        15,
+                        "Accessibility",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -236,8 +236,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        16,
+                        "Accessibility",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -245,8 +245,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        17,
+                        "Accessibility",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -254,8 +254,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -263,8 +263,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -272,8 +272,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        3,
+                        "Audio",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -281,8 +281,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        4,
+                        "Audio",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -290,8 +290,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        5,
+                        "Audio",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -299,8 +299,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        6,
+                        "Audio",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -308,8 +308,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        7,
+                        "Audio",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -317,8 +317,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        8,
+                        "Audio",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -326,8 +326,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        9,
+                        "Audio",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -335,8 +335,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        10,
+                        "Audio",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -344,8 +344,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        11,
+                        "Audio",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -353,8 +353,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        12,
+                        "Audio",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -362,8 +362,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        13,
+                        "Audio",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -371,8 +371,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        14,
+                        "Audio",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -380,8 +380,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        15,
+                        "Audio",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -389,8 +389,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        16,
+                        "Audio",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -398,8 +398,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        17,
+                        "Audio",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -407,8 +407,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "AudioPolicy",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -416,8 +416,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        2,
+                        "AudioPolicy",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -425,8 +425,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        3,
+                        "AudioPolicy",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -434,8 +434,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        4,
+                        "AudioPolicy",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -443,8 +443,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        5,
+                        "AudioPolicy",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -452,8 +452,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        6,
+                        "AudioPolicy",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -461,8 +461,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        7,
+                        "AudioPolicy",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -470,8 +470,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        8,
+                        "AudioPolicy",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -479,8 +479,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        9,
+                        "AudioPolicy",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -488,8 +488,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        10,
+                        "AudioPolicy",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -497,8 +497,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        11,
+                        "AudioPolicy",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -506,8 +506,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        12,
+                        "AudioPolicy",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -515,8 +515,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        13,
+                        "AudioPolicy",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -524,8 +524,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        14,
+                        "AudioPolicy",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -533,8 +533,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        15,
+                        "AudioPolicy",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -542,8 +542,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        16,
+                        "AudioPolicy",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -551,8 +551,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        17,
+                        "AudioPolicy",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -560,8 +560,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        1,
+                        "Display",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -569,8 +569,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        2,
+                        "Display",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -578,8 +578,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        3,
+                        "Display",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -587,8 +587,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        4,
+                        "Display",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -596,8 +596,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        5,
+                        "Display",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -605,8 +605,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        6,
+                        "Display",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -614,8 +614,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        7,
+                        "Display",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -623,8 +623,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        8,
+                        "Display",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -632,8 +632,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        9,
+                        "Display",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -641,8 +641,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        10,
+                        "Display",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -650,8 +650,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        11,
+                        "Display",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -659,8 +659,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        12,
+                        "Display",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -668,8 +668,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        13,
+                        "Display",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -677,8 +677,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        14,
+                        "Display",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -686,8 +686,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        15,
+                        "Display",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -695,8 +695,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        16,
+                        "Display",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -704,8 +704,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        17,
+                        "Display",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -713,8 +713,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        1,
+                        "DoNotDisturb",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -722,8 +722,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        2,
+                        "DoNotDisturb",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -731,8 +731,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        3,
+                        "DoNotDisturb",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -740,8 +740,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        4,
+                        "DoNotDisturb",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -749,8 +749,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        5,
+                        "DoNotDisturb",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -758,8 +758,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        6,
+                        "DoNotDisturb",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -767,8 +767,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        7,
+                        "DoNotDisturb",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -776,8 +776,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        8,
+                        "DoNotDisturb",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -785,8 +785,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        9,
+                        "DoNotDisturb",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -794,8 +794,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        10,
+                        "DoNotDisturb",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -803,8 +803,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        11,
+                        "DoNotDisturb",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -812,8 +812,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        12,
+                        "DoNotDisturb",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -821,8 +821,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        13,
+                        "DoNotDisturb",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -830,8 +830,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        14,
+                        "DoNotDisturb",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -839,8 +839,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        15,
+                        "DoNotDisturb",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -848,8 +848,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        16,
+                        "DoNotDisturb",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -857,8 +857,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        17,
+                        "DoNotDisturb",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -866,8 +866,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        1,
+                        "FactoryReset",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -875,8 +875,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        2,
+                        "FactoryReset",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -884,8 +884,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        3,
+                        "FactoryReset",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -893,8 +893,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        4,
+                        "FactoryReset",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -902,8 +902,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        5,
+                        "FactoryReset",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -911,8 +911,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        6,
+                        "FactoryReset",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -920,8 +920,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        7,
+                        "FactoryReset",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -929,8 +929,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        8,
+                        "FactoryReset",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -938,8 +938,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        9,
+                        "FactoryReset",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -947,8 +947,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        10,
+                        "FactoryReset",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -956,8 +956,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        11,
+                        "FactoryReset",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -965,8 +965,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        12,
+                        "FactoryReset",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -974,8 +974,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        13,
+                        "FactoryReset",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -983,8 +983,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        14,
+                        "FactoryReset",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -992,8 +992,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        15,
+                        "FactoryReset",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1001,8 +1001,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        16,
+                        "FactoryReset",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1010,8 +1010,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        17,
+                        "FactoryReset",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1019,8 +1019,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        1,
+                        "Input",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1028,8 +1028,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        2,
+                        "Input",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1037,8 +1037,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        3,
+                        "Input",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1046,8 +1046,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        4,
+                        "Input",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1055,8 +1055,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        5,
+                        "Input",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1064,8 +1064,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        6,
+                        "Input",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1073,8 +1073,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        7,
+                        "Input",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1082,8 +1082,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        8,
+                        "Input",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1091,8 +1091,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        9,
+                        "Input",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1100,8 +1100,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        10,
+                        "Input",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1109,8 +1109,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        11,
+                        "Input",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1118,8 +1118,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        12,
+                        "Input",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1127,8 +1127,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        13,
+                        "Input",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1136,8 +1136,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        14,
+                        "Input",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1145,8 +1145,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        15,
+                        "Input",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1154,8 +1154,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        16,
+                        "Input",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1163,8 +1163,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        17,
+                        "Input",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1172,8 +1172,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        1,
+                        "Intl",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1181,8 +1181,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        2,
+                        "Intl",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1190,8 +1190,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        3,
+                        "Intl",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1199,8 +1199,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        4,
+                        "Intl",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1208,8 +1208,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        5,
+                        "Intl",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1217,8 +1217,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        6,
+                        "Intl",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1226,8 +1226,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        7,
+                        "Intl",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1235,8 +1235,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        8,
+                        "Intl",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1244,8 +1244,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        9,
+                        "Intl",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1253,8 +1253,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        10,
+                        "Intl",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1262,8 +1262,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        11,
+                        "Intl",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1271,8 +1271,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        12,
+                        "Intl",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1280,8 +1280,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        13,
+                        "Intl",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1289,8 +1289,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        14,
+                        "Intl",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1298,8 +1298,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        15,
+                        "Intl",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1307,8 +1307,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        16,
+                        "Intl",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1316,8 +1316,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        17,
+                        "Intl",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1325,8 +1325,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        1,
+                        "Light",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1334,8 +1334,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        2,
+                        "Light",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1343,8 +1343,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        3,
+                        "Light",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1352,8 +1352,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        4,
+                        "Light",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1361,8 +1361,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        5,
+                        "Light",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1370,8 +1370,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        6,
+                        "Light",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1379,8 +1379,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        7,
+                        "Light",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1388,8 +1388,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        8,
+                        "Light",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1397,8 +1397,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        9,
+                        "Light",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1406,8 +1406,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        10,
+                        "Light",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1415,8 +1415,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        11,
+                        "Light",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1424,8 +1424,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        12,
+                        "Light",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1433,8 +1433,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        13,
+                        "Light",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1442,8 +1442,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        14,
+                        "Light",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1451,8 +1451,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        15,
+                        "Light",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1460,8 +1460,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        16,
+                        "Light",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1469,8 +1469,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        17,
+                        "Light",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1478,8 +1478,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        1,
+                        "NightMode",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1487,8 +1487,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        2,
+                        "NightMode",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1496,8 +1496,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        3,
+                        "NightMode",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1505,8 +1505,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        4,
+                        "NightMode",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1514,8 +1514,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        5,
+                        "NightMode",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1523,8 +1523,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        6,
+                        "NightMode",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1532,8 +1532,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        7,
+                        "NightMode",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1541,8 +1541,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        8,
+                        "NightMode",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1550,8 +1550,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        9,
+                        "NightMode",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1559,8 +1559,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        10,
+                        "NightMode",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1568,8 +1568,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        11,
+                        "NightMode",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1577,8 +1577,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        12,
+                        "NightMode",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1586,8 +1586,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        13,
+                        "NightMode",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1595,8 +1595,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        14,
+                        "NightMode",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1604,8 +1604,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        15,
+                        "NightMode",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1613,8 +1613,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        16,
+                        "NightMode",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1622,8 +1622,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        17,
+                        "NightMode",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1631,8 +1631,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        1,
+                        "Privacy",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1640,8 +1640,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        2,
+                        "Privacy",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1649,8 +1649,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        3,
+                        "Privacy",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1658,8 +1658,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        4,
+                        "Privacy",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1667,8 +1667,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        5,
+                        "Privacy",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1676,8 +1676,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        6,
+                        "Privacy",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1685,8 +1685,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        7,
+                        "Privacy",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1694,8 +1694,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        8,
+                        "Privacy",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1703,8 +1703,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        9,
+                        "Privacy",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1712,8 +1712,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        10,
+                        "Privacy",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1721,8 +1721,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        11,
+                        "Privacy",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1730,8 +1730,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        12,
+                        "Privacy",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1739,8 +1739,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        13,
+                        "Privacy",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1748,8 +1748,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        14,
+                        "Privacy",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1757,8 +1757,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        15,
+                        "Privacy",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1766,8 +1766,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        16,
+                        "Privacy",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1775,8 +1775,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        17,
+                        "Privacy",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1784,8 +1784,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        1,
+                        "Setup",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1793,8 +1793,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        2,
+                        "Setup",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1802,8 +1802,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        3,
+                        "Setup",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1811,8 +1811,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        4,
+                        "Setup",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1820,8 +1820,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        5,
+                        "Setup",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1829,8 +1829,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        6,
+                        "Setup",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1838,8 +1838,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        7,
+                        "Setup",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1847,8 +1847,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        8,
+                        "Setup",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1856,8 +1856,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        9,
+                        "Setup",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1865,8 +1865,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        10,
+                        "Setup",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1874,8 +1874,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        11,
+                        "Setup",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1883,8 +1883,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        12,
+                        "Setup",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1892,8 +1892,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        13,
+                        "Setup",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1901,8 +1901,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        14,
+                        "Setup",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1910,8 +1910,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        15,
+                        "Setup",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1919,8 +1919,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        16,
+                        "Setup",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1928,8 +1928,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        17,
+                        "Setup",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1937,8 +1937,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        1,
+                        "Keyboard",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1946,8 +1946,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        2,
+                        "Keyboard",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1955,8 +1955,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        3,
+                        "Keyboard",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1964,8 +1964,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        4,
+                        "Keyboard",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1973,8 +1973,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        5,
+                        "Keyboard",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1982,8 +1982,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        6,
+                        "Keyboard",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -1991,8 +1991,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        7,
+                        "Keyboard",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2000,8 +2000,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        8,
+                        "Keyboard",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2009,8 +2009,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        9,
+                        "Keyboard",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2018,8 +2018,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        10,
+                        "Keyboard",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2027,8 +2027,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        11,
+                        "Keyboard",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2036,8 +2036,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        12,
+                        "Keyboard",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2045,8 +2045,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        13,
+                        "Keyboard",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2054,8 +2054,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        14,
+                        "Keyboard",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2063,8 +2063,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        15,
+                        "Keyboard",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2072,8 +2072,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        16,
+                        "Keyboard",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2081,8 +2081,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        17,
+                        "Keyboard",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2090,8 +2090,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        1,
+                        "LightSensor",
+                        "OkSome",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2099,8 +2099,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        2,
+                        "LightSensor",
+                        "OkNone",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2108,8 +2108,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        3,
+                        "LightSensor",
+                        "UnimplementedRequest",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2117,8 +2117,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        4,
+                        "LightSensor",
+                        "StorageFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2126,8 +2126,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        5,
+                        "LightSensor",
+                        "InitFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2135,8 +2135,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        6,
+                        "LightSensor",
+                        "RestoreFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2144,8 +2144,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        7,
+                        "LightSensor",
+                        "InvalidArgument",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2153,8 +2153,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        8,
+                        "LightSensor",
+                        "IncompatibleArguments",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2162,8 +2162,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        9,
+                        "LightSensor",
+                        "ExternalFailure",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2171,8 +2171,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        10,
+                        "LightSensor",
+                        "UnhandledType",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2180,8 +2180,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        11,
+                        "LightSensor",
+                        "DeliveryError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2189,8 +2189,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        12,
+                        "LightSensor",
+                        "UnexpectedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2198,8 +2198,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        13,
+                        "LightSensor",
+                        "UndeliverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2207,8 +2207,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        14,
+                        "LightSensor",
+                        "UnsupportedError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2216,8 +2216,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        15,
+                        "LightSensor",
+                        "CommunicationError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2225,8 +2225,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        16,
+                        "LightSensor",
+                        "IrrecoverableError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2234,8 +2234,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        17,
+                        "LightSensor",
+                        "TimeoutError",
                     ],
                     metric_name: "request_responses",
                     metric_type: "Occurrence",
@@ -2243,7 +2243,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "Accessibility",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2251,7 +2251,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "Audio",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2259,7 +2259,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "AudioPolicy",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2267,7 +2267,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "Display",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2275,7 +2275,7 @@
                 },
                 {
                     event_codes: [
-                        5,
+                        "DoNotDisturb",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2283,7 +2283,7 @@
                 },
                 {
                     event_codes: [
-                        6,
+                        "FactoryReset",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2291,7 +2291,7 @@
                 },
                 {
                     event_codes: [
-                        7,
+                        "Input",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2299,7 +2299,7 @@
                 },
                 {
                     event_codes: [
-                        8,
+                        "Intl",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2307,7 +2307,7 @@
                 },
                 {
                     event_codes: [
-                        9,
+                        "Light",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2315,7 +2315,7 @@
                 },
                 {
                     event_codes: [
-                        10,
+                        "NightMode",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2323,7 +2323,7 @@
                 },
                 {
                     event_codes: [
-                        11,
+                        "Privacy",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2331,7 +2331,7 @@
                 },
                 {
                     event_codes: [
-                        12,
+                        "Setup",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2339,7 +2339,7 @@
                 },
                 {
                     event_codes: [
-                        13,
+                        "Keyboard",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2347,7 +2347,7 @@
                 },
                 {
                     event_codes: [
-                        14,
+                        "LightSensor",
                     ],
                     metric_name: "active_listeners",
                     metric_type: "Integer",
@@ -2355,8 +2355,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Accessibility",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2364,8 +2364,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        2,
+                        "Accessibility",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2373,8 +2373,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        3,
+                        "Accessibility",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2382,8 +2382,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        4,
+                        "Accessibility",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2391,8 +2391,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2400,8 +2400,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2409,8 +2409,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        3,
+                        "Audio",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2418,8 +2418,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        4,
+                        "Audio",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2427,8 +2427,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        1,
+                        "Display",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2436,8 +2436,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        2,
+                        "Display",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2445,8 +2445,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        3,
+                        "Display",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2454,8 +2454,8 @@
                 },
                 {
                     event_codes: [
-                        4,
-                        4,
+                        "Display",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2463,8 +2463,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        1,
+                        "DoNotDisturb",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2472,8 +2472,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        2,
+                        "DoNotDisturb",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2481,8 +2481,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        3,
+                        "DoNotDisturb",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2490,8 +2490,8 @@
                 },
                 {
                     event_codes: [
-                        5,
-                        4,
+                        "DoNotDisturb",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2499,8 +2499,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        1,
+                        "FactoryReset",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2508,8 +2508,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        2,
+                        "FactoryReset",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2517,8 +2517,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        3,
+                        "FactoryReset",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2526,8 +2526,8 @@
                 },
                 {
                     event_codes: [
-                        6,
-                        4,
+                        "FactoryReset",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2535,8 +2535,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        1,
+                        "Input",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2544,8 +2544,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        2,
+                        "Input",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2553,8 +2553,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        3,
+                        "Input",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2562,8 +2562,8 @@
                 },
                 {
                     event_codes: [
-                        7,
-                        4,
+                        "Input",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2571,8 +2571,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        1,
+                        "Intl",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2580,8 +2580,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        2,
+                        "Intl",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2589,8 +2589,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        3,
+                        "Intl",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2598,8 +2598,8 @@
                 },
                 {
                     event_codes: [
-                        8,
-                        4,
+                        "Intl",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2607,8 +2607,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        1,
+                        "Light",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2616,8 +2616,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        2,
+                        "Light",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2625,8 +2625,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        3,
+                        "Light",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2634,8 +2634,8 @@
                 },
                 {
                     event_codes: [
-                        9,
-                        4,
+                        "Light",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2643,8 +2643,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        1,
+                        "NightMode",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2652,8 +2652,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        2,
+                        "NightMode",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2661,8 +2661,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        3,
+                        "NightMode",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2670,8 +2670,8 @@
                 },
                 {
                     event_codes: [
-                        10,
-                        4,
+                        "NightMode",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2679,8 +2679,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        1,
+                        "Privacy",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2688,8 +2688,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        2,
+                        "Privacy",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2697,8 +2697,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        3,
+                        "Privacy",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2706,8 +2706,8 @@
                 },
                 {
                     event_codes: [
-                        11,
-                        4,
+                        "Privacy",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2715,8 +2715,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        1,
+                        "Setup",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2724,8 +2724,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        2,
+                        "Setup",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2733,8 +2733,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        3,
+                        "Setup",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2742,8 +2742,8 @@
                 },
                 {
                     event_codes: [
-                        12,
-                        4,
+                        "Setup",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2751,8 +2751,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        1,
+                        "Keyboard",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2760,8 +2760,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        2,
+                        "Keyboard",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2769,8 +2769,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        3,
+                        "Keyboard",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2778,8 +2778,8 @@
                 },
                 {
                     event_codes: [
-                        13,
-                        4,
+                        "Keyboard",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2787,8 +2787,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        1,
+                        "LightSensor",
+                        "Get",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2796,8 +2796,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        2,
+                        "LightSensor",
+                        "Listen",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2805,8 +2805,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        3,
+                        "LightSensor",
+                        "Set",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",
@@ -2814,8 +2814,8 @@
                 },
                 {
                     event_codes: [
-                        14,
-                        4,
+                        "LightSensor",
+                        "Restore",
                     ],
                     metric_name: "api_usage_counts",
                     metric_type: "Occurrence",

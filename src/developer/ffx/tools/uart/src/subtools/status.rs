@@ -30,17 +30,14 @@ pub struct ConnectionStatusInfo {
     /// Process ID (PID) of the driver daemon.
     pub pid: u32,
     /// Target nodename, if discovered.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub nodename: Option<String>,
     /// Target serial number, if discovered.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,
     /// Path to the driver's log file.
     pub log_file: String,
     /// Connection status (e.g. "Connected").
     pub status: String,
     /// Configured baud rate, if applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub baud: Option<u32>,
     /// Active framing protocol name (e.g. "ResendSP").
     pub active_protocol: String,
@@ -66,6 +63,8 @@ pub struct ConnectionStatusInfo {
     pub outgoing_queue_len: u32,
     /// Whether connection appears stalled.
     pub is_stalled: bool,
+    /// Most recent channel error reported by the target over the UART link, if any.
+    pub last_target_error: Option<String>,
 }
 
 #[derive(Debug, FfxTool)]
@@ -133,6 +132,7 @@ impl StatusTool {
             last_write_timestamp_ms: metrics.last_write_timestamp_ms,
             outgoing_queue_len: metrics.outgoing_queue_len,
             is_stalled,
+            last_target_error: metrics.last_target_error,
         };
 
         if writer.is_machine() {
@@ -254,6 +254,12 @@ fn print_status_report(
     writer.print(format!("  Last Read Activity:  {}\n", info.last_read_activity))?;
     writer.print(format!("  Last Write Activity: {}\n", info.last_write_activity))?;
     writer.print(format!("  Queue Backlog:       {} messages\n", info.outgoing_queue_len))?;
+    if let Some(err) = &info.last_target_error {
+        writer.print(format!(
+            "  Last Target Error:   {}\n",
+            safe_string::TermSafe::from_str_escaped(err)
+        ))?;
+    }
 
     if info.is_stalled {
         writer
@@ -339,6 +345,7 @@ mod tests {
             last_write_timestamp_ms: 2000,
             outgoing_queue_len: 0,
             is_stalled: false,
+            last_target_error: Some("Failed to register channel with RCS: PEER_CLOSED".to_string()),
         };
         let buffers = ffx_writer::TestBuffers::default();
         let mut writer = VerifiedMachineWriter::<ConnectionStatusInfo>::new_test(None, &buffers);
@@ -349,7 +356,20 @@ mod tests {
         assert!(output.contains("Node Name:           my-node"));
         assert!(output.contains("Serial Number:       SN123"));
         assert!(output.contains("Active Protocol:     ResendSP"));
+        assert!(
+            output
+                .contains("Last Target Error:   Failed to register channel with RCS: PEER_CLOSED")
+        );
         assert!(!output.contains("[WARNING] Connection appears stalled"));
+
+        let mut info_with_ansi = info;
+        info_with_ansi.last_target_error = Some("err \x1b[31mred\nspoof".to_string());
+        let buffers_ansi = ffx_writer::TestBuffers::default();
+        let mut writer_ansi =
+            VerifiedMachineWriter::<ConnectionStatusInfo>::new_test(None, &buffers_ansi);
+        print_status_report(&mut writer_ansi, &info_with_ansi).unwrap();
+        let output_ansi = buffers_ansi.stdout.into_string();
+        assert!(output_ansi.contains("Last Target Error:   err \\u{1b}[31mred\\nspoof"));
     }
 
     #[test]
@@ -375,6 +395,7 @@ mod tests {
             last_write_timestamp_ms: 0,
             outgoing_queue_len: 0,
             is_stalled: true,
+            last_target_error: None,
         };
         let buffers = ffx_writer::TestBuffers::default();
         let mut writer = VerifiedMachineWriter::<ConnectionStatusInfo>::new_test(None, &buffers);
@@ -408,6 +429,7 @@ mod tests {
             last_write_timestamp_ms: 1000,
             outgoing_queue_len: 0,
             is_stalled: false,
+            last_target_error: None,
         };
         let buffers = ffx_writer::TestBuffers::default();
         let mut writer = VerifiedMachineWriter::<ConnectionStatusInfo>::new_test(
@@ -443,6 +465,7 @@ mod tests {
             last_write_timestamp_ms: 0,
             outgoing_queue_len: 0,
             is_stalled: false,
+            last_target_error: None,
         };
         let val = serde_json::to_value(&info).unwrap();
         VerifiedMachineWriter::<ConnectionStatusInfo>::verify_schema(&val)

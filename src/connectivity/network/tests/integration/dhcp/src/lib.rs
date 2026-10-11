@@ -28,7 +28,7 @@ use net_types::ip::{Ip, Ipv4};
 use netemul::{InterfaceConfig, RealmUdpSocket as _};
 use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, Netstack3, OutOfStack, TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack, Netstack3, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT, Result, annotate,
@@ -123,7 +123,7 @@ async fn assert_client_acquires_addr(
         fidl_fuchsia_net_interfaces_ext::InterfaceState::<(), _>::Unknown(client_interface.id());
     for cycle in 0..cycles {
         // Enable the interface and assert that binding fails before the address is acquired.
-        client_interface.stop_dhcp::<OutOfStack>().await.expect("failed to stop DHCP");
+        client_interface.stop_dhcp().await.expect("failed to stop DHCP");
         client_interface.set_link_up(true).await.expect("failed to bring link up");
         assert_matches::assert_matches!(
             bind(&client_realm, expected_acquired).await,
@@ -133,7 +133,7 @@ async fn assert_client_acquires_addr(
                     .raw_os_error() == Some(libc::EADDRNOTAVAIL)
         );
 
-        client_interface.start_dhcp::<OutOfStack>().await.expect("failed to start DHCP");
+        client_interface.start_dhcp().await.expect("failed to start DHCP");
 
         let valid_until = annotate(
             assert_interface_assigned_addr(
@@ -174,7 +174,7 @@ async fn assert_client_acquires_addr(
 
         // Set interface online signal to down and wait for address to be removed.
         client_interface.set_link_up(false).await.expect("failed to bring link down");
-        client_interface.stop_dhcp::<OutOfStack>().await.expect("failed to stop DHCP");
+        client_interface.stop_dhcp().await.expect("failed to stop DHCP");
 
         annotate(
             fidl_fuchsia_net_interfaces_ext::wait_interface_with_id(
@@ -360,7 +360,7 @@ async fn removing_acquired_address_stops_dhcp(name: &str, remove_dhcp_address: b
             .expect("remove DHCP acquired address"),
     );
     let dhcp_stopped_fut = async {
-        client_iface.wait_dhcp_out_of_stack_stopped().await;
+        client_iface.wait_dhcp_client_stopped().await;
         assert!(remove_dhcp_address, "DHCP should not have stopped");
     };
     let timeout = if remove_dhcp_address {
@@ -1378,7 +1378,7 @@ async fn test_dhcp_server_persistence_mode(name: &str, mode: PersistenceMode) {
     }
 }
 
-// Verify that Netstack3 with an OutOfStack DHCP client will forfeit an address
+// Verify that Netstack3 with an out-of-stack DHCP client will forfeit an address
 // if it detects a conflict after it's been assigned. After forfeiting, it
 // should acquire a new address.
 #[netstack_test]

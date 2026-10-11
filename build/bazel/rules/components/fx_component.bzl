@@ -101,31 +101,6 @@ Explicitly setting this is necessary for sandboxed build action execution.""",
     },
 )
 
-def _fx_component_impl(
-        name,
-        component_name,
-        compiled_manifest,
-        deps,
-        testonly,
-        visibility,
-        **kwargs):
-    fuchsia_component_common(
-        name = name,
-        compiled_manifest = compiled_manifest,
-        component_name = component_name or name,
-        deps = deps,
-        testonly = testonly,
-        visibility = visibility,
-
-        # Attributes not supported by the in-tree macro.
-        moniker = None,
-        is_driver = False,
-        is_test = False,
-
-        # Forward extra attributes.
-        **kwargs
-    )
-
 _COMMON_COMPONENT_ATTRS = {
     # The behavior is different from that documented for the inherited attribute.
     "component_name": attr.string(
@@ -137,14 +112,69 @@ _COMMON_COMPONENT_ATTRS = {
         mandatory = False,
     ),
 
-    # This inherited attribute is set by the individual macros. Prevent callers from setting it.
+    # Set by each macro via `_is_test_component` instead: use
+    # `fx_test_component()` for test components.
     "is_test": None,
 
+    # Set from `test_type`, which only `fx_test_component()` accepts.
+    "test_realm": None,
+
     # TODO(https://fxbug.dev/520207779): Determine whether we need these attributes for platform
-    # packages.
+    # packages and update the implementation and `fuchsia_component_common()`'s documentation of
+    # these attributes as appropriate.
     "moniker": None,
     "is_driver": None,
 }
+
+def _fx_component_impl(
+        name,
+        component_name,
+        compiled_manifest,
+        deps,
+        testonly,
+        visibility,
+        _is_test_component,
+        # Only `fx_test_component()` declares this attribute.
+        test_type = None,
+        **kwargs):
+    if _is_test_component:
+        # Inherited attributes that are not set default to None, so only an
+        # explicit `testonly = False` is an error.
+        # See https://bazel.build/extending/macros#attribute-inheritance.
+        if testonly != None and not testonly:
+            fail("`fx_test_component()` targets are always testonly.")
+        testonly = True
+
+    fuchsia_component_common(
+        name = name,
+        compiled_manifest = compiled_manifest,
+        component_name = component_name or name,
+        deps = deps,
+        testonly = testonly,
+        visibility = visibility,
+
+        # Attributes not supported by the in-tree macro.
+        moniker = None,
+        is_driver = False,
+
+        # Required by `fx_package(test_components = ...)` and used by `fx_test()`.
+        is_test = _is_test_component,
+        test_realm = resolve_test_type_realm(test_type),
+
+        # Forward extra attributes.
+        **kwargs
+    )
+
+def _component_attrs(*, is_test_component):
+    return _COMMON_COMPONENT_ATTRS | {
+        # Private, so callers can't override which macro they're using, and
+        # non-configurable so the impl gets a plain bool rather than an
+        # always-truthy select().
+        "_is_test_component": attr.bool(
+            default = is_test_component,
+            configurable = False,
+        ),
+    }
 
 fx_component = macro(
     doc = """Creates a Fuchsia component which can be added to a package.
@@ -155,45 +185,8 @@ number of dependencies which will be included in the final package.
 """,
     implementation = _fx_component_impl,
     inherit_attrs = fuchsia_component_common,
-    attrs = _COMMON_COMPONENT_ATTRS,
+    attrs = _component_attrs(is_test_component = False),
 )
-
-def _fx_test_component_impl(
-        name,
-        component_name,
-        compiled_manifest,
-        deps,
-        test_type,
-        testonly,
-        visibility,
-        **kwargs):
-    # Inherited attributes that are not set default to None, so only an explicit
-    # `testonly = False` is an error.
-    # See https://bazel.build/extending/macros#attribute-inheritance.
-    if testonly != None and not testonly:
-        fail("`fx_test_component()` targets are always testonly.")
-
-    fuchsia_component_common(
-        name = name,
-        compiled_manifest = compiled_manifest,
-        component_name = component_name or name,
-        deps = deps,
-        testonly = True,
-        visibility = visibility,
-
-        # Attributes not supported by the in-tree macro.
-        moniker = None,
-        is_driver = False,
-
-        # Marks the component as a test, which is required by
-        # `fx_package(test_components = ...)` and used by `fx_test()` to
-        # distinguish test components from other components in the package.
-        is_test = True,
-        test_realm = resolve_test_type_realm(test_type),
-
-        # Forward extra attributes.
-        **kwargs
-    )
 
 fx_test_component = macro(
     doc = """Creates a Fuchsia test component which can be added to an `fx_package()`.
@@ -203,11 +196,9 @@ always testonly, and is marked as a test component, which means it must be
 listed in the `test_components` attribute of `fx_package()` (and not in
 `components`).
 """,
-    implementation = _fx_test_component_impl,
+    implementation = _fx_component_impl,
     inherit_attrs = fuchsia_component_common,
-    attrs = _COMMON_COMPONENT_ATTRS | {
-        # Set from `test_type`.
-        "test_realm": None,
+    attrs = _component_attrs(is_test_component = True) | {
         "test_type": attr.string(
             doc = """The non-hermetic test realm type to run the test component in (e.g. `"starnix"` or `"system"`).
 

@@ -192,6 +192,11 @@ impl DefineSubsystemConfiguration<PowerConfig> for PowerManagementSubsystem {
         )?;
 
         builder.set_config_capability(
+            "fuchsia.power.GpuPowerManagementEnabled",
+            Config::new(ConfigValueType::Bool, config.gpu_power_management_enabled.into()),
+        )?;
+
+        builder.set_config_capability(
             "fuchsia.power.StoragePowerManagementEnabled",
             Config::new(
                 ConfigValueType::Bool,

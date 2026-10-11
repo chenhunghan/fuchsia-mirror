@@ -69,5 +69,28 @@
             to: "self/toolbox",
             target_availability: "unknown",
         },
+        {
+            config: [
+                "fuchsia.bluetooth.ControllerEncodingCvsd",
+                "fuchsia.bluetooth.ControllerEncodingMsbc",
+                "fuchsia.bluetooth.OffloadType",
+                "fuchsia.bluetooth.WideBandSpeech",
+            ],
+            from: "parent",
+            to: "#bt-hfp-audio-gateway",
+            availability: "optional",
+        },
+        {
+            config: [
+                "fuchsia.bluetooth.AttachPhoneNumberToVoiceTag",
+                "fuchsia.bluetooth.EchoCancelingAndNoiseReduction",
+                "fuchsia.bluetooth.EnhancedCallControls",
+                "fuchsia.bluetooth.RejectIncomingVoiceCall",
+                "fuchsia.bluetooth.ThreeWayCalling",
+            ],
+            from: "void",
+            to: "#bt-hfp-audio-gateway",
+            availability: "optional",
+        },
     ],
 }

@@ -11,6 +11,8 @@
 #include <lib/sync/cpp/completion.h>
 #include <lib/trace/event.h>
 
+#include <atomic>
+
 namespace usb_peripheral {
 
 class UsbPeripheral;
@@ -60,6 +62,7 @@ class UsbDciInterfaceServer : public fidl::WireServer<fuchsia_hardware_usb_dci::
   // `fuchsia_hardware_usb_dci::UsbDciInterface::SetConnected`.
   fdf::SynchronizedDispatcher dispatcher_;
   libsync::Completion dispatcher_shutdown_;
+  std::atomic<bool> stopped_{false};
   fidl::ServerBindingGroup<fuchsia_hardware_usb_dci::UsbDciInterface> bindings_;
 };
 

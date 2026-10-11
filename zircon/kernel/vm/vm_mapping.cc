@@ -173,7 +173,7 @@ VmMapping::AttributionCounts VmMapping::GetAttributedMemory() const {
   return GetAttributedMemoryLocked(guard);
 }
 
-void VmMapping::DumpLocked(uint depth, bool verbose) const {
+void VmMapping::DumpLockedImpl(uint depth, bool verbose) const {
   canary_.Assert();
   for (uint i = 0; i < depth; ++i) {
     printf("  ");
@@ -519,7 +519,8 @@ zx_status_t VmMapping::UnmapLocked(vaddr_t base, size_t size) {
   // hold the object lock over the entire manipulation of mappings, and so the mappings being added
   // before being in the alive state is never visible.
   if (right) {
-    zx_status_t status = parent_->subregions_.InsertRegion(right);
+    zx_status_t status =
+        parent_->subregions_.InsertRegion(fbl::RefPtr<VmAddressRegionOrMapping>(right.get()));
     if (status != ZX_OK) {
       return status;
     }
@@ -539,7 +540,7 @@ zx_status_t VmMapping::UnmapLocked(vaddr_t base, size_t size) {
       return status;
     }
     // Replace can never fail as it does not need to allocate.
-    parent_->subregions_.ReplaceRegion(this, left);
+    parent_->subregions_.ReplaceRegion(this, fbl::RefPtr<VmAddressRegionOrMapping>(left.get()));
   } else {
     parent_->subregions_.RemoveRegion(this);
   }
@@ -1106,7 +1107,7 @@ zx_status_t VmMapping::DecommitRange(size_t offset, size_t len) {
   return object_->DecommitRange(object_offset_ + offset, len);
 }
 
-zx_status_t VmMapping::DestroyLocked() {
+zx_status_t VmMapping::DestroyLockedImpl() {
   canary_.Assert();
   // Keep a refptr to the object_ so we know our lock remains valid.
   fbl::RefPtr<VmObject> object(object_);
@@ -1468,7 +1469,7 @@ zx_status_t VmMapping::ActivateLocked(ActivateInsertRegions insert_region) {
   return ZX_OK;
 }
 
-zx_status_t VmMapping::Activate() {
+zx_status_t VmMapping::ActivateImpl() {
   Guard<CriticalMutex> guard{object_->lock()};
   return ActivateLocked(ActivateInsertRegions::Yes);
 }
@@ -1577,7 +1578,8 @@ fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_c
     // the new mapping in the subregions_ list. This temporarily results in the subregions_
     // list having overlapping mappings and an unactivated mapping, but as we hold both the main
     // lock and subregion lock over the entire operation this state cannot be observed.
-    parent_->subregions_.ReplaceRegion(this, new_mapping);
+    parent_->subregions_.ReplaceRegion(this,
+                                       fbl::RefPtr<VmAddressRegionOrMapping>(new_mapping.get()));
     status = DestroyLockedObject(DestroyUnmap::No, DestroyRemoveFromParent::No);
     ASSERT(status == ZX_OK);
     AssertHeld(new_mapping->region_lock_ref());
@@ -1719,7 +1721,7 @@ void VmMapping::SetMemoryPriorityHighAlreadyPositiveLockedObject() {
   }
 }
 
-void VmMapping::CommitHighMemoryPriority() {
+void VmMapping::CommitHighMemoryPriorityImpl() {
   fbl::RefPtr<VmObject> vmo;
   uint64_t offset;
   uint64_t len;
@@ -1830,7 +1832,7 @@ zx::result<fbl::RefPtr<VmMapping>> VmMapping::ForceWritable() {
 
     AssertHeld(parent_->lock_ref());
     AssertHeld(parent_->region_lock_ref());
-    parent_->subregions_.ReplaceRegion(this, writable);
+    parent_->subregions_.ReplaceRegion(this, fbl::RefPtr<VmAddressRegionOrMapping>(writable.get()));
     writable->ActivateNoInsertLocked();
   }
   // Now acquire the original object lock and destroy ourself.
@@ -1870,66 +1872,4 @@ uint64_t VmMapping::TrimmedObjectRangeLocked(uint64_t offset, uint64_t len) cons
   }
 
   return ktl::min(trim_len, len);
-}
-
-extern "C" {
-FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
-    VmMapping* mapping);
-void cpp_vm_mapping_free(VmMapping* mapping);
-zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping);
-const fbl::RefPtr<VmAspace>* cpp_vm_mapping_aspace(VmMapping* mapping);
-vaddr_t cpp_vm_mapping_base(VmMapping* mapping);
-size_t cpp_vm_mapping_size(VmMapping* mapping);
-uint32_t cpp_vm_mapping_flags(VmMapping* mapping);
-uint64_t cpp_vm_mapping_object_offset(VmMapping* mapping);
-zx_status_t cpp_vm_mapping_decommit_range(VmMapping* mapping, size_t offset, size_t len);
-zx_status_t cpp_vm_mapping_map_range(VmMapping* mapping, size_t offset, size_t len, bool commit,
-                                     bool ignore_existing);
-zx_status_t cpp_vm_mapping_debug_unmap(VmMapping* mapping, vaddr_t base, size_t size);
-zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base, size_t size,
-                                         arch_mmu_flags_t new_arch_mmu_flags);
-const VmObject* cpp_vm_mapping_vmo(VmMapping* mapping);
-zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping);
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
-    VmMapping* mapping) {
-  return mapping;
-}
-void cpp_vm_mapping_free(VmMapping* mapping) { delete mapping; }
-zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping) { return mapping->Destroy(); }
-const fbl::RefPtr<VmAspace>* cpp_vm_mapping_aspace(VmMapping* mapping) {
-  return &mapping->aspace();
-}
-vaddr_t cpp_vm_mapping_base(VmMapping* mapping) { return mapping->base(); }
-size_t cpp_vm_mapping_size(VmMapping* mapping) { return mapping->size(); }
-uint32_t cpp_vm_mapping_flags(VmMapping* mapping) { return mapping->flags(); }
-uint64_t cpp_vm_mapping_object_offset(VmMapping* mapping) { return mapping->object_offset(); }
-zx_status_t cpp_vm_mapping_decommit_range(VmMapping* mapping, size_t offset, size_t len) {
-  return mapping->DecommitRange(offset, len);
-}
-zx_status_t cpp_vm_mapping_map_range(VmMapping* mapping, size_t offset, size_t len, bool commit,
-                                     bool ignore_existing) {
-  return mapping->MapRange(offset, len, commit, ignore_existing);
-}
-zx_status_t cpp_vm_mapping_debug_unmap(VmMapping* mapping, vaddr_t base, size_t size) {
-  return mapping->DebugUnmap(base, size);
-}
-zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base, size_t size,
-                                         arch_mmu_flags_t new_arch_mmu_flags) {
-  return mapping->DebugProtect(base, size, new_arch_mmu_flags);
-}
-const VmObject* cpp_vm_mapping_vmo(VmMapping* mapping) {
-  fbl::RefPtr<VmObject> vmo = mapping->vmo();
-  return fbl::ExportToRawPtr(&vmo);
-}
-zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping) {
-  auto result = mapping->ForceWritable();
-  if (result.is_error()) {
-    return result.error_value();
-  }
-  auto res = *result;
-  *out_mapping = fbl::ExportToRawPtr(&res);
-  return ZX_OK;
-}
 }

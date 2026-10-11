@@ -72,12 +72,10 @@ async fn test_lifecycle(_: ()) {
     // Create and publish an HCI device after HostRealm::create
     let dev_dir = realm.dev().unwrap();
     let mut emulator = Emulator::create(dev_dir).await.unwrap();
-    let device_path =
-        emulator.publish_and_wait_for_device_path(Emulator::default_settings()).await.unwrap();
+    emulator.publish(Emulator::default_settings()).await.unwrap();
 
     // Create bt-host component in HostRealm after device is published
-    let host =
-        HostRealm::create_bt_host_in_collection(&realm, &device_path).await.unwrap().into_proxy();
+    let host = HostRealm::create_bt_host_in_collection(&realm).await.unwrap().into_proxy();
     let info: HostInfo = host
         .watch_state()
         .await

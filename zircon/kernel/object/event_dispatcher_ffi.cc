@@ -43,4 +43,11 @@ zx_status_t cpp_memory_stall_event_dispatcher_create(
   return ZX_OK;
 }
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_event_dispatcher_user_signal_self(EventDispatcher* event,
+                                                                    uint32_t clear_mask,
+                                                                    uint32_t set_mask) {
+  return event->user_signal_self(clear_mask, set_mask);
+}
+
 }  // extern "C"

@@ -79,10 +79,10 @@ rust_library(
     }),
     version = "0.13.4",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/ask2patch/memchr",
         "//third_party/rust_crates/vendor/bitflags-2.13.0:bitflags",
         "//third_party/rust_crates/vendor/getopts-0.2.24:getopts",
-        "//third_party/rust_crates/vendor/pulldown-cmark-0.13.4:build_script_build",
         "//third_party/rust_crates/vendor/pulldown-cmark-escape-0.11.0:pulldown_cmark_escape",
         "//third_party/rust_crates/vendor/serde-1.0.229:serde",
         "//third_party/rust_crates/vendor/unicase-2.9.0:unicase",
@@ -130,6 +130,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "pulldown-cmark",
     rustc_flags = [
         "--cap-lints=allow",

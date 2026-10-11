@@ -69,6 +69,7 @@
 
 #include <lib/arch/intrin.h>
 #include <lib/zbi-format/zbi.h>
+#include <lib/zx/result.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
 #include <zircon/syscalls/smc.h>
@@ -294,11 +295,12 @@ static void topology_cpu_init(void) {
         continue;
       }
 
-      zx::result<uintptr_t> result = arm64_create_secondary_stack(processor.logical_ids[i]);
-      DEBUG_ASSERT(result.is_ok());
+      uintptr_t stack;
+      status = arm64_create_secondary_stack(processor.logical_ids[i], &stack);
+      ASSERT(status == ZX_OK);
 
       // start the cpu
-      status = platform_start_cpu(processor.logical_ids[i], mpid, result.value());
+      status = platform_start_cpu(processor.logical_ids[i], mpid, stack);
 
       if (status != ZX_OK) {
         // TODO(maniscalco): Is continuing really the right thing to do here?

@@ -62,6 +62,16 @@ const char* obj_type_get_name(zx_obj_type_t type) {
       return "clock";
     case ZX_OBJ_TYPE_STREAM:
       return "stream";
+    case ZX_OBJ_TYPE_MSI:
+      return "msi";
+    case ZX_OBJ_TYPE_IOB:
+      return "iob";
+    case ZX_OBJ_TYPE_COUNTER:
+      return "counter";
+    case ZX_OBJ_TYPE_IOB_SHARED_REGION:
+      return "iob_shared_region";
+    case ZX_OBJ_TYPE_SAMPLER:
+      return "sampler";
     default:
       return "unknown";
   }

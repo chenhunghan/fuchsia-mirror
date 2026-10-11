@@ -42,7 +42,6 @@ use starnix_uapi::{
 use zerocopy::IntoBytes;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 #[cfg(target_arch = "x86_64")]
@@ -1248,7 +1247,7 @@ pub fn ptrace_attach(
 ) -> Result<SyscallResult, Errno> {
     let tracee = pid.get_task()?;
 
-    if tracee.thread_group == current_task.thread_group {
+    if tracee.thread_group == current_task.thread_group || tracee.mm().is_err() {
         return error!(EPERM);
     }
 
@@ -1366,68 +1365,6 @@ pub fn ptrace_setregset(
     }
 }
 
-#[inline(never)]
-pub fn ptrace_syscall_enter(current_task: &mut CurrentTask) {
-    let block = {
-        let mut state = current_task.write();
-        if state.ptrace.is_some() {
-            current_task.trace_syscalls.store(false, Ordering::Relaxed);
-            let mut sig = SignalInfo::with_detail(
-                SIGTRAP,
-                (linux_uapi::SIGTRAP | 0x80) as i32,
-                SignalDetail::None,
-            );
-            if state
-                .ptrace
-                .as_ref()
-                .is_some_and(|ptrace| ptrace.has_option(PtraceOptions::TRACESYSGOOD))
-            {
-                sig.signal.set_ptrace_syscall_bit();
-            }
-            state.set_stopped(StopState::SyscallEnterStopping, Some(sig), None, None);
-            true
-        } else {
-            false
-        }
-    };
-    if block {
-        current_task.block_if_stopped();
-    }
-}
-
-#[inline(never)]
-pub fn ptrace_syscall_exit(current_task: &mut CurrentTask, is_error: bool) {
-    let block = {
-        let mut state = current_task.write();
-        current_task.trace_syscalls.store(false, Ordering::Relaxed);
-        if state.ptrace.is_some() {
-            let mut sig = SignalInfo::with_detail(
-                SIGTRAP,
-                (linux_uapi::SIGTRAP | 0x80) as i32,
-                SignalDetail::None,
-            );
-            if state
-                .ptrace
-                .as_ref()
-                .is_some_and(|ptrace| ptrace.has_option(PtraceOptions::TRACESYSGOOD))
-            {
-                sig.signal.set_ptrace_syscall_bit();
-            }
-
-            state.set_stopped(StopState::SyscallExitStopping, Some(sig), None, None);
-            if let Some(ptrace) = &mut state.ptrace {
-                ptrace.last_syscall_was_error = is_error;
-            }
-            true
-        } else {
-            false
-        }
-    };
-    if block {
-        current_task.block_if_stopped();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1435,6 +1372,7 @@ mod tests {
     use crate::testing::{create_task, spawn_kernel_and_run};
     use starnix_uapi::PR_SET_PTRACER;
     use starnix_uapi::auth::CAP_SYS_PTRACE;
+    use std::sync::atomic::Ordering;
 
     #[::fuchsia::test]
     async fn test_set_ptracer() {

@@ -158,6 +158,22 @@ class FuchsiaHTTPClientTest : public ::gtest::TestLoopFixture {
     loader_->Unbind();
   }
 
+  StatusOr<HTTPResponse> GetAndWait(std::chrono::milliseconds duration = std::chrono::seconds(1)) {
+    auto deadline = std::chrono::steady_clock::now() + duration;
+    auto response_future = std::async(std::launch::async, [this, deadline]() {
+      return http_client->GetSync(HTTPRequest("http://www.test.com"), deadline);
+    });
+    auto start_time = std::chrono::steady_clock::now();
+    while (response_future.wait_for(std::chrono::microseconds(1)) != std::future_status::ready) {
+      RunLoopUntilIdle();
+
+      if (std::chrono::steady_clock::now() - start_time > std::chrono::seconds(5)) {
+        return Status(StatusCode::DEADLINE_EXCEEDED, "Timed out while waiting!");
+      }
+    }
+    return response_future.get();
+  }
+
  private:
   std::unique_ptr<sys::testing::ServiceDirectoryProvider> service_directory_provider_;
   std::unique_ptr<FakeHTTPLoader> loader_;
@@ -281,6 +297,47 @@ TEST_F(FuchsiaHTTPClientTest, HungSocket) {
 
   ASSERT_FALSE(response_or.ok());
   EXPECT_EQ(response_or.status().error_code(), StatusCode::DEADLINE_EXCEEDED);
+}
+
+TEST_F(FuchsiaHTTPClientTest, GetSyncBinaryPayloadAndHeadersReturnsResponse) {
+  constexpr size_t kBinaryPayloadLength = 22;
+  constexpr uint32_t kHttpOk = 200;
+  const std::string binary_payload("proto\0binary\0payload\x01\x02", kBinaryPayloadLength);
+  std::vector<fuchsia::net::http::Header> headers = {
+      fuchsia::net::http::Header{.name = ToBytes("Content-Type"),
+                                 .value = ToBytes("application/x-protobuf")},
+      fuchsia::net::http::Header{.name = ToBytes("ETag"), .value = ToBytes("\"v1\"")}};
+  SetHttpResponse(binary_payload, kHttpOk, headers);
+
+  StatusOr<HTTPResponse> response = GetAndWait();
+  ASSERT_TRUE(response.ok());
+  EXPECT_EQ(response->http_code, kHttpOk);
+  EXPECT_EQ(response->response, binary_payload);
+  EXPECT_EQ(response->headers["Content-Type"], "application/x-protobuf");
+  EXPECT_EQ(response->headers["ETag"], "\"v1\"");
+}
+
+TEST_F(FuchsiaHTTPClientTest, GetSyncHttpError404ReturnsOkWithStatusCode) {
+  constexpr uint32_t kHttpNotFound = 404;
+  SetHttpResponse("Error body", kHttpNotFound);
+  StatusOr<HTTPResponse> response = GetAndWait();
+  ASSERT_TRUE(response.ok());
+  EXPECT_EQ(response->http_code, kHttpNotFound);
+}
+
+TEST_F(FuchsiaHTTPClientTest, GetSyncHttpError503ReturnsOkWithStatusCode) {
+  constexpr uint32_t kHttpServiceUnavailable = 503;
+  SetHttpResponse("Error body", kHttpServiceUnavailable);
+  StatusOr<HTTPResponse> response = GetAndWait();
+  ASSERT_TRUE(response.ok());
+  EXPECT_EQ(response->http_code, kHttpServiceUnavailable);
+}
+
+TEST_F(FuchsiaHTTPClientTest, GetSyncTimeoutReturnsDeadlineExceeded) {
+  constexpr auto kShortTimeout = std::chrono::milliseconds(50);
+  StatusOr<HTTPResponse> response = GetAndWait(kShortTimeout);
+  ASSERT_FALSE(response.ok());
+  EXPECT_EQ(response.status().error_code(), StatusCode::DEADLINE_EXCEEDED);
 }
 
 }  // namespace utils

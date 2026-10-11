@@ -142,4 +142,7 @@ extern size_t (*platform_recover_crashlog)(FILE* tgt);
 /* Either enable or disable periodic updates of the crashlog uptime. */
 extern void (*platform_enable_crashlog_uptime_updates)(bool enabled);
 
+// FFI wrapper around PlatformCrashlog::HasNonTrivialImpl() for Rust callers.
+extern "C" bool cpp_platform_crashlog_has_non_trivial_impl();
+
 #endif  // ZIRCON_KERNEL_INCLUDE_PLATFORM_CRASHLOG_H_

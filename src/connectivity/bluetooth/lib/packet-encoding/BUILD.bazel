@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "packet-encoding",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    rustc_flags = ["-Dunused_results"],
+    # @bazel2gn:skip
+    test_deps = [
+        # Rust std needs fdio on Fuchsia. GN adds it to every Fuchsia
+        # executable, Bazel does not (https://fxbug.dev/42065890).
+        "//sdk/lib/fdio",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    visibility = ["//src/connectivity/bluetooth:__subpackages__"],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "packet-encoding_test_packaged_bin",
+    testonly = True,
+    binary = ":packet-encoding_test",
+    binary_name = "packet_encoding_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "packet-encoding-tests-manifest",
+    testonly = True,
+    component_name = "packet-encoding-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/packet_encoding_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "packet-encoding-tests-component",
+    compiled_manifest = ":packet-encoding-tests-manifest",
+    component_name = "packet-encoding-tests",
+    deps = [":packet-encoding_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "packet-encoding-tests-package",
+    package_name = "packet-encoding-tests",
+    test_components = [":packet-encoding-tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "packet-encoding-tests",
+    package = ":packet-encoding-tests-package",
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)

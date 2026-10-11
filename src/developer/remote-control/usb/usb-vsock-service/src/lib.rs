@@ -7,12 +7,14 @@ use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_hardware_vsock as vsock;
 use fidl_fuchsia_hardware_vsockbridge as vsockbridge;
 use fuchsia_async::scope::ScopeStream;
-use fuchsia_async::{Scope, Socket};
+use fuchsia_async::{self as fasync, Scope, Socket};
 use fuchsia_component::server::ServiceFs;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use futures::io::{ReadHalf, WriteHalf};
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt, TryStreamExt};
+use futures::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt, TryStreamExt,
+};
 use log::{debug, error, info, warn};
 use std::io::Error;
 use std::pin::pin;
@@ -376,8 +378,6 @@ impl Driver for UsbVsockServiceDriver {
         let scope = Scope::new_with_name(Self::NAME);
         let mut outgoing = ServiceFs::new();
 
-        let usb_device = get_usb_device(&context)?;
-
         info!("Offering a vsock service in the outgoing directory");
         outgoing.dir("svc").add_fidl_service_instance("default", move |i| {
             let vsock::ServiceRequest::Device(request_stream) = i;
@@ -386,21 +386,13 @@ impl Driver for UsbVsockServiceDriver {
 
         context.serve_outgoing(&mut outgoing)?;
 
+        let incoming = Arc::new(context.incoming);
         scope.spawn(async move {
-            let mut is_reconnect = false;
-            while let Some(request_stream) = outgoing.next().await {
-                let (usb_callback, usb_callback_server) = create_endpoints();
-                usb_device.set_callback(usb_callback).await.expect("usb device service went away");
-
-                run_connection(
-                    usb_callback_server.into_stream(),
-                    request_stream,
-                    None,
-                    is_reconnect,
-                )
-                .await;
-                is_reconnect = true;
-            }
+            serve_requests(outgoing, move || {
+                let incoming = Arc::clone(&incoming);
+                async move { get_usb_device(&incoming) }
+            })
+            .await;
         });
 
         Ok(Self { _scope: scope, _node: node })
@@ -451,11 +443,62 @@ async fn run_connection(
     scopes_stream.next().await;
 }
 
-fn get_usb_device(context: &DriverContext) -> Result<vsockbridge::UsbProxy, Status> {
-    let service_proxy = context.incoming.service_marker(vsockbridge::UsbServiceMarker).connect()?;
+async fn serve_requests<F, Fut>(
+    mut request_streams: impl Stream<Item = vsock::DeviceRequestStream> + Unpin,
+    mut get_usb_device: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<vsockbridge::UsbProxy, Status>>,
+{
+    let mut cached_usb_device: Option<vsockbridge::UsbProxy> = None;
+    let mut is_reconnect = false;
+    while let Some(request_stream) = request_streams.next().await {
+        let mut usb_callback_server_opt = None;
+
+        while usb_callback_server_opt.is_none() {
+            let usb_device = match cached_usb_device.as_ref() {
+                Some(device) => device.clone(),
+                None => match get_usb_device().await {
+                    Ok(device) => {
+                        cached_usb_device = Some(device.clone());
+                        device
+                    }
+                    Err(err) => {
+                        warn!("Usb device service unavailable ({err:?}), waiting to retry...");
+                        fasync::Timer::new(zx::MonotonicInstant::after(zx::Duration::from_millis(
+                            10,
+                        )))
+                        .await;
+                        continue;
+                    }
+                },
+            };
+
+            let (usb_callback, usb_callback_server) = create_endpoints();
+            match usb_device.set_callback(usb_callback).await {
+                Ok(()) => {
+                    usb_callback_server_opt = Some(usb_callback_server);
+                }
+                Err(err) => {
+                    warn!("Failed to set usb callback ({err:?}), resetting usb device proxy");
+                    cached_usb_device = None;
+                    fasync::Timer::new(zx::MonotonicInstant::after(zx::Duration::from_millis(10)))
+                        .await;
+                }
+            }
+        }
+
+        let usb_callback_server = usb_callback_server_opt.unwrap();
+        run_connection(usb_callback_server.into_stream(), request_stream, None, is_reconnect).await;
+        is_reconnect = true;
+    }
+}
+
+fn get_usb_device(incoming: &fdf_component::Incoming) -> Result<vsockbridge::UsbProxy, Status> {
+    let service_proxy = incoming.service_marker(vsockbridge::UsbServiceMarker).connect()?;
 
     service_proxy.connect_to_device().map_err(|err| {
-        error!("Error connecting to usb device proxy at driver startup: {err}");
+        error!("Error connecting to usb device proxy: {err}");
         Status::INTERNAL
     })
 }
@@ -464,6 +507,7 @@ fn get_usb_device(context: &DriverContext) -> Result<vsockbridge::UsbProxy, Stat
 mod tests {
     use fidl::endpoints::create_endpoints;
     use fidl_fuchsia_vsock as vsock_api;
+    use futures::SinkExt;
     use futures::future::join;
     use log::trace;
     use usb_vsock::CID_ANY;
@@ -722,5 +766,74 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_serve_requests_reconnects_after_usb_device_disconnect() {
+        let (mut device_tx, device_rx) = mpsc::channel(2);
+
+        let (usb_proxy1, mut usb_stream1) =
+            fidl::endpoints::create_proxy_and_stream::<vsockbridge::UsbMarker>();
+        let (usb_proxy2, mut usb_stream2) =
+            fidl::endpoints::create_proxy_and_stream::<vsockbridge::UsbMarker>();
+
+        let mut device_proxies = vec![usb_proxy2, usb_proxy1];
+        let get_device = move || {
+            let proxy = device_proxies.pop().ok_or(Status::NOT_CONNECTED);
+            async move { proxy }
+        };
+
+        let serve_fut = fasync::Task::spawn(serve_requests(device_rx, get_device));
+
+        // 1. Send first vsock connection request.
+        let (vsock_client1, vsock_server1) =
+            fidl::endpoints::create_endpoints::<vsock::DeviceMarker>();
+        device_tx.send(vsock_server1.into_stream()).await.unwrap();
+
+        let vsock_client1 = vsock_client1.into_proxy();
+        let (cb_client1, _cb_server1) = fidl::endpoints::create_endpoints();
+        let start_fut1 = vsock_client1.start(cb_client1);
+
+        // usb_stream1 receives SetCallback.
+        let callback1 = match usb_stream1.next().await.unwrap().unwrap() {
+            vsockbridge::UsbRequest::SetCallback { callback, responder } => {
+                responder.send().unwrap();
+                callback.into_proxy()
+            }
+        };
+
+        start_fut1.await.unwrap().unwrap();
+
+        // Complete first vsock connection by dropping vsock_client1.
+        drop(vsock_client1);
+
+        // Simulate USB device unbind / role-switch to host mode by dropping usb_stream1 and callback1.
+        drop(usb_stream1);
+        drop(callback1);
+
+        // 2. Send second vsock connection request while the previous USB device channel is closed.
+        let (vsock_client2, vsock_server2) =
+            fidl::endpoints::create_endpoints::<vsock::DeviceMarker>();
+        device_tx.send(vsock_server2.into_stream()).await.unwrap();
+
+        let vsock_client2 = vsock_client2.into_proxy();
+        let (cb_client2, _cb_server2) = fidl::endpoints::create_endpoints();
+        let start_fut2 = vsock_client2.start(cb_client2);
+
+        // In the unpatched code, serve_requests uses the stale usb_proxy1 and panics with
+        // .expect("usb device service went away"), so usb_stream2 never receives SetCallback.
+        // In the patched code, it reconnects to usb_proxy2 and usb_stream2 receives SetCallback.
+        let _callback2 = match usb_stream2.next().await.unwrap().unwrap() {
+            vsockbridge::UsbRequest::SetCallback { callback, responder } => {
+                responder.send().unwrap();
+                callback.into_proxy()
+            }
+        };
+
+        start_fut2.await.unwrap().unwrap();
+
+        drop(vsock_client2);
+        drop(device_tx);
+        serve_fut.await;
     }
 }

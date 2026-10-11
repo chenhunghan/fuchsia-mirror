@@ -4,9 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{
-    Dispatcher, Disposition, HandleValue, ProcessDispatcher, ReadType, SocketDispatcher,
-};
+use crate::object::{Disposition, HandleValue, ProcessDispatcher, ReadType, SocketDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -50,7 +48,9 @@ pub fn sys_socket_write(
         return Err(Status::INVALID_ARGS);
     }
 
-    let socket = Dispatcher::get_with_rights::<SocketDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let socket = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SocketDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     let nwritten = socket.write(buffer.reinterpret(), size)?;
 
     // Caller may ignore results if desired.
@@ -77,7 +77,9 @@ pub fn sys_socket_read(
         return Err(Status::INVALID_ARGS);
     }
 
-    let socket = Dispatcher::get_with_rights::<SocketDispatcher>(handle, ZX_RIGHT_READ)?;
+    let socket = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SocketDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     let read_type =
         if (options & ZX_SOCKET_PEEK) != 0 { ReadType::Peek } else { ReadType::Consume };
 
@@ -99,7 +101,13 @@ pub fn sys_socket_set_disposition(
     let disp = Disposition::try_from(disposition)?;
     let disp_peer = Disposition::try_from(disposition_peer)?;
 
-    let socket = Dispatcher::get_with_rights::<SocketDispatcher>(handle, ZX_RIGHT_MANAGE_SOCKET)?;
+    let socket = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SocketDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_MANAGE_SOCKET,
+        )
+    })?;
     socket.set_disposition(disp, disp_peer)?;
     Ok(())
 }

@@ -26,6 +26,21 @@ _python_prebuilt_files = glob(
     exclude = ["**/* *"],
 )
 
+# Used by host_shac_test(), which runs shac checks hermetically.
+exports_files(
+    [
+        "prebuilt/tools/shac/shac",
+        "shac.textproto",
+    ],
+    visibility = ["//build/bazel/rules/host_tests:__pkg__"],
+)
+
+# Executed by some shac tests, rather than mocked.
+exports_files(
+    glob(["prebuilt/third_party/keep-sorted/*/keep-sorted"]),
+    visibility = ["//scripts/shac/tests:__pkg__"],
+)
+
 exports_files(
     # Export these files for the benefit of the //build/bazel/toolchains/clang package.
     glob(["prebuilt/third_party/clang/**"]) +
@@ -82,12 +97,6 @@ exports_files(
         allow_empty = True,  # This could be empty on some infra builders.
     ) +
 
-    # wlan firmwares
-    glob(
-        ["prebuilt/connectivity/wlan/firmware/**/*"],
-        allow_empty = True,  # This could be empty on some infra builders.
-    ) +
-
     # prebuilt firmware
     glob(
         ["prebuilt/vendor/google_devices/*/prebuilts/firmware/**/*"],
@@ -119,6 +128,9 @@ exports_files(
     [
         "integration/MILESTONE",
     ] +
+
+    # Unicode data, used in //src/storage/fxfs/unicode.
+    ["prebuilt/third_party/ucd/UCD.zip"] +
 
     # end of list.
     [],

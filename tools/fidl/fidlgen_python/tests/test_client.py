@@ -97,7 +97,7 @@ class FidlClientTests(unittest.IsolatedAsyncioTestCase):
         proxy.pending_txids.add(1)
         waker.post_ready(channel)
         proxy.staged_messages[1] = asyncio.Queue(1)
-        proxy.staged_messages[1].put_nowait((bytearray([1, 0, 0, 0]), []))
+        proxy.staged_messages[1].put_nowait((bytes([1, 0, 0, 0]), []))
         proxy._decode = Mock()  # type: ignore[method-assign]
         proxy._decode.return_value = (bytearray([1, 2, 3]), [])
         await proxy._read_and_decode(1)
@@ -119,10 +119,10 @@ class FidlClientTests(unittest.IsolatedAsyncioTestCase):
         channel.as_int.return_value = 0
         proxy = ffx.EchoClient(channel)
         proxy.pending_txids.add(1)
-        proxy._stage_message(1, (bytearray([1, 2, 3]), []))
+        proxy._stage_message(1, (bytes([1, 2, 3]), []))
         self.assertEqual(len(proxy.staged_messages), 1)
         got = await proxy._get_staged_message(1)
-        self.assertEqual(got, (bytearray([1, 2, 3]), []))
+        self.assertEqual(got, (bytes([1, 2, 3]), []))
 
         # Find ordinal from registry
         ordinal = get_method_ordinal("EchoEchoStringResponse")

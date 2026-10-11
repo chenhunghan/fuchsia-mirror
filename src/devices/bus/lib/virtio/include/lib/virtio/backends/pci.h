@@ -85,6 +85,27 @@ class PciLegacyIoInterface : public LegacyIoInterface {
   }
 };
 
+// Platforms where PCI IO space is backed by MMIO (such as ARM64) use this
+// interface to access Virtio over a mapped BAR 0 VMO.
+class MmioLegacyIoInterface : public LegacyIoInterface {
+ public:
+  explicit MmioLegacyIoInterface(fdf::MmioBuffer mmio)
+      : mmio_(std::move(mmio)), view_(mmio_->View(0)) {}
+  explicit MmioLegacyIoInterface(fdf::MmioView view) : view_(view) {}
+  ~MmioLegacyIoInterface() override = default;
+
+  void Read(uint16_t offset, uint8_t* val) const override { *val = view_.Read8(offset); }
+  void Read(uint16_t offset, uint16_t* val) const override { *val = view_.Read16(offset); }
+  void Read(uint16_t offset, uint32_t* val) const override { *val = view_.Read32(offset); }
+  void Write(uint16_t offset, uint8_t val) const override { view_.Write8(val, offset); }
+  void Write(uint16_t offset, uint16_t val) const override { view_.Write16(val, offset); }
+  void Write(uint16_t offset, uint32_t val) const override { view_.Write32(val, offset); }
+
+ private:
+  std::optional<fdf::MmioBuffer> mmio_;
+  fdf::MmioView view_;
+};
+
 // PciLegacyBackend corresponds to the Virtio Legacy interface utilizing port IO
 // and the IO Bar 0. It has additional complications around offsets and
 // configuration structures when MSI-X is enabled.
@@ -136,6 +157,7 @@ class PciLegacyBackend : public PciBackend {
   void SetStatusBits(uint8_t bits);
   uint16_t bar0_base_ __TA_GUARDED(lock());
   uint16_t device_cfg_offset_ __TA_GUARDED(lock());
+  std::optional<MmioLegacyIoInterface> mmio_io_ __TA_GUARDED(lock());
   const LegacyIoInterface* legacy_io_ __TA_GUARDED(lock());
 };
 

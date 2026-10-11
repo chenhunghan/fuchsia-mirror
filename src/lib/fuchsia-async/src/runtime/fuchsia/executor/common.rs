@@ -476,13 +476,14 @@ impl Executor {
             // Keep track of whether we are considered asleep.
             let mut sleeping = false;
 
+            const ONE_SLEEPING: ThreadsState = ThreadsState(0).with_sleeping(1);
+
             match self.poll_ready_tasks(main_task) {
                 PollReadyTasksResult::NoneReady => {
                     // No more tasks, indicate we are sleeping. We use SeqCst ordering because we
                     // want this change here to happen *before* we check ready_tasks below. This
                     // synchronizes with notify_task_ready which is called *after* a task is added
                     // to ready_tasks.
-                    const ONE_SLEEPING: ThreadsState = ThreadsState(0).with_sleeping(1);
                     self.threads_state.fetch_add(ONE_SLEEPING.0, Ordering::SeqCst);
                     // Check ready tasks again. If a task got posted, wake up. This has to be done
                     // because a notification won't get sent if there is at least one active thread
@@ -502,6 +503,9 @@ impl Executor {
 
             // Check done here after updating threads_state to avoid shutdown races.
             if self.done.load(Ordering::SeqCst) {
+                if sleeping {
+                    self.threads_state.fetch_sub(ONE_SLEEPING.0, Ordering::Relaxed);
+                }
                 return;
             }
 

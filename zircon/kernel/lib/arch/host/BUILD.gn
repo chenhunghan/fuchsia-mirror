@@ -12,5 +12,6 @@ library_headers("host") {
   headers = [
     "lib/arch/intrin.h",
     "lib/arch/ticks.h",
+    "lib/arch/paging-traits.h",
   ]
 }

@@ -34,6 +34,18 @@
                 "WriteTest.PartialWriteSIGBUS",
                 "*/MMapFileParamTest.MapOffsetBeyondEndSigBusDeath/*",
                 "*/*SocketPairTest.SendFromMmapBeyondEof/*",
+
+                // fallocate_test
+                // TODO(https://fxbug.dev/568843982): Support FALLOC_FL_KEEP_SIZE and update timestamps in FxFile::allocate.
+                "AllocateTest.FallocateKeepSize",
+                "AllocateTest.FallocateTimestamps",
+
+                // rename_test
+                // TODO(https://fxbug.dev/568844233): Support renameat2 RENAME_EXCHANGE on RemoteFs.
+                "Renameat2Test.ExchangeDirectories",
+                "Renameat2Test.ExchangeFileAndDirectory",
+                "Renameat2Test.ExchangeFiles",
+                "Renameat2Test.ExchangeFilesSameParent",
             ],
         },
         {

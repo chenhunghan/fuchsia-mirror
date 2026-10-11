@@ -6,7 +6,6 @@
         {
             name: "fs_realm",
             url: "fuchsia-pkg://fuchsia.com/fs_realm#meta/fs_realm.cm",
-            startup: "eager",
         },
     ],
     offer: [

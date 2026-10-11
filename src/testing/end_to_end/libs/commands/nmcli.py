@@ -37,8 +37,8 @@ class LinuxNmcliCommand(LinuxCommand):
     def setup_device(self, device: str) -> None:
         """Create a device connection suitable for antlion testing.
 
-        Disables IPv4 DHCP so that tests can manage IP addresses manually, but
-        still enables automatic IPv6 link-local address assignment.
+        Disables IPv4 DHCP so that tests can manage IP addresses manually, and
+        ignores IPv6 so that SLAAC/RAs are handled natively by the kernel.
         """
         # Remove existing connections associated with device.
         for conn in self._get_connections():
@@ -56,7 +56,7 @@ class LinuxNmcliCommand(LinuxCommand):
                 "ipv4.method",
                 IPv4Method.DISABLED,
                 "ipv6.method",
-                IPv6Method.LINK_LOCAL,
+                IPv6Method.IGNORE,
             ],
             sudo=True,
         )

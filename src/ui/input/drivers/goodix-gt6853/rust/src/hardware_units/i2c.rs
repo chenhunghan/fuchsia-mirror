@@ -51,10 +51,7 @@ impl MessageInterfaceUnitI2c {
                 log::warn!("I2C FIDL transport error: {:?}", e);
                 zx::Status::INTERNAL
             })?
-            .map_err(|e| {
-                log::warn!("I2C hardware transfer error: {:?}", e);
-                e.err().unwrap_or(zx::Status::INTERNAL)
-            })?;
+            .inspect_err(|e| log::warn!("I2C hardware transfer error: {:?}", e))?;
 
         let [payload] = result.read_data.as_slice() else {
             log::warn!(
@@ -110,10 +107,7 @@ impl MessageInterfaceUnitI2c {
                 log::warn!("I2C FIDL transport error: {:?}", e);
                 zx::Status::INTERNAL
             })?
-            .map_err(|e| {
-                log::warn!("I2C hardware write error: {:?}", e);
-                e.err().unwrap_or(zx::Status::INTERNAL)
-            })?;
+            .inspect_err(|e| log::warn!("I2C hardware write error: {:?}", e))?;
 
         Ok(())
     }

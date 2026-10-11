@@ -77,7 +77,7 @@ fn parse_isa_override(
 ) -> IoApicIsaOverride {
     // 0 means ISA, ISOs are only ever for ISA IRQs.
     if record.bus != 0 {
-        panic!("Invalid bus for IO APIC interrupt override.\n");
+        panic!("Invalid bus for IO APIC interrupt override.");
     }
 
     // "Conforms" below means conforms to the bus spec: edge triggered and active high.
@@ -86,14 +86,14 @@ fn parse_isa_override(
         acpi_lite::structures::ACPI_MADT_FLAG_POLARITY_CONFORMS
         | acpi_lite::structures::ACPI_MADT_FLAG_POLARITY_HIGH => InterruptPolarity::High,
         acpi_lite::structures::ACPI_MADT_FLAG_POLARITY_LOW => InterruptPolarity::Low,
-        p => panic!("Unknown IRQ polarity in override: {}\n", p),
+        p => panic!("Unknown IRQ polarity in override: {}", p),
     };
 
     let trigger_mode = match flags & acpi_lite::structures::ACPI_MADT_FLAG_TRIGGER_MASK {
         acpi_lite::structures::ACPI_MADT_FLAG_TRIGGER_CONFORMS
         | acpi_lite::structures::ACPI_MADT_FLAG_TRIGGER_EDGE => InterruptTriggerMode::Edge,
         acpi_lite::structures::ACPI_MADT_FLAG_TRIGGER_LEVEL => InterruptTriggerMode::Level,
-        t => panic!("Unknown IRQ trigger in override: {}\n", t),
+        t => panic!("Unknown IRQ trigger in override: {}", t),
     };
 
     IoApicIsaOverride {

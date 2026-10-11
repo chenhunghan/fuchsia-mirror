@@ -293,7 +293,7 @@ impl BufferChain {
         // SAFETY: Caller guarantees `chain` is valid and uniquely owned.
         let this = unsafe { chain.as_mut() };
         // Remove the buffers and vm_page_t's from the chain *before* destroying it.
-        let mut buffers = mem::replace(&mut this.buffers, SinglyLinkedList::new());
+        let mut buffers = mem::take(&mut this.buffers);
 
         stack_pin_init!(let all_pages = PageList::new());
         // SAFETY: `all_pages` is pinned on the stack; mutating list does not move `all_pages`.

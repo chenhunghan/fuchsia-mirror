@@ -49,6 +49,14 @@ impl From<RadioRegion> for [u8; 2] {
 impl TryFrom<&str> for RadioRegion {
     type Error = anyhow::Error;
     fn try_from(region: &str) -> Result<Self, Self::Error> {
+        region.parse()
+    }
+}
+
+impl core::str::FromStr for RadioRegion {
+    type Err = anyhow::Error;
+
+    fn from_str(region: &str) -> Result<Self, Self::Err> {
         if region.is_empty() {
             return Ok(RadioRegion::default());
         }

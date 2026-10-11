@@ -25,6 +25,11 @@ readonly script_basename="${script##*/}"  # basename
 # not normalized
 readonly exec_root="$script_dir/../.."
 
+# LINT.IfChange(default_timeouts)
+readonly default_exec_timeout="10m"
+readonly default_reclient_timeout="11m"
+# LINT.ThenChange(/build/rbe/cxx_remote_wrapper.py:default_timeouts)
+
 # string join
 # $1 is delimiter character
 # the rest are strings to be joined
@@ -491,7 +496,8 @@ remote_cmd_prefix+=(
   # for C++
   --labels=type=compile,compiler=clang,lang=cpp
   --canonicalize_working_dir=true
-  --exec_timeout=10m
+  "--exec_timeout=$default_exec_timeout"
+  "--reclient_timeout=$default_reclient_timeout"
   # LINT.ThenChange(/build/rbe/cxx_remote_wrapper.py:compile_cfg)
 
   # Need to expand possible empty arrays as "${arr[@]+"${arr[@]}"}"

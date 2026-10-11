@@ -19,13 +19,13 @@ rust_binary(
     srcs = ["src/main.rs"],
     edition = "2024",
 
-    # TODO(https://fxbug.dev/42065890) make this be included automatically for all rust binaries.
-    deps = [
-        "//third_party/rust_crates/vendor:anyhow",
-    ] + select({
+    # Raw rules_rust rules do not link fdio, which the dynamically linked Rust
+    # standard library needs on Fuchsia, unlike the in-tree rustc_*() macros.
+    link_deps = select({
         "@platforms//os:fuchsia": ["@fuchsia_sdk//pkg/fdio"],
         "//conditions:default": [],
     }),
+    deps = ["//third_party/rust_crates/vendor:anyhow"],
 )
 
 fuchsia_wrap_rust_binary(
@@ -50,10 +50,8 @@ fuchsia_package(
 rust_test(
     name = "hello_fuchsia_rust_test_native",
     crate = ":hello_fuchsia_rust_native",
-    deps = [
-        "//third_party/rust_crates/vendor:assert_matches",
-        "@fuchsia_sdk//pkg/fdio",
-    ],
+    link_deps = ["@fuchsia_sdk//pkg/fdio"],
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
 )
 
 fuchsia_wrap_rust_binary(

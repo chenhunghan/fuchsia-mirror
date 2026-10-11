@@ -77,9 +77,9 @@ rust_library(
     }),
     version = "0.9.117",
     deps = [
+        ":build_script_main",
         "//third_party/rust_crates/forks/libc-0.2.189:libc",
         "//third_party/rust_crates/intree/bssl-sys:bssl_sys",
-        "//third_party/rust_crates/vendor/openssl-sys-0.9.117:build_script_main",
     ],
 )
 
@@ -121,6 +121,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     link_deps = [
         "//third_party/rust_crates/intree/bssl-sys:bssl_sys",
     ],

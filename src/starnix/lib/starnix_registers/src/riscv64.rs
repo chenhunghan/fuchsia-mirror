@@ -27,9 +27,11 @@ pub struct RegisterState<T: RegisterStorage> {
 }
 
 impl<T: RegisterStorage> RegisterState<T> {
-    /// Saves any register state required to restart `syscall`.
-    pub fn save_registers_for_restart(&mut self, _syscall_number: u64) {
-        // The x0 register may be clobbered during syscall handling (for the return value), but is
+    /// Saves any register state required to restart the syscall.
+    ///
+    /// Must be called at syscall entry, before `set_return_register` clobbers `a0`.
+    pub fn save_registers_for_restart(&mut self) {
+        // The a0 register may be clobbered during syscall handling (for the return value), but is
         // needed when restarting a syscall.
         self.orig_a0 = self.a0;
     }
@@ -276,11 +278,12 @@ impl<T: RegisterStorage> RegisterState<T> {
 
     pub fn load(&mut self, regs: zx::sys::zx_restricted_state_t) {
         *self.real_registers = regs;
-        self.sync_stack_ptr();
     }
 
-    pub fn sync_stack_ptr(&mut self) {
-        self.orig_a0 = self.a0;
+    /// Copies the restricted state and the orig_a0 bookkeeping register.
+    pub fn copy_from<O: RegisterStorage>(&mut self, other: &RegisterState<O>) {
+        self.load(*other.real_registers);
+        self.orig_a0 = other.orig_a0;
     }
 }
 

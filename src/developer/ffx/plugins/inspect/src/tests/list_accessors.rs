@@ -4,13 +4,13 @@
 
 use crate::run_command;
 use crate::tests::utils::{setup_fake_archive_accessor, setup_fake_rcs};
-use ffx_writer::{Format, MachineWriter, TestBuffers};
+use ffx_writer::{Format, TestBuffers, VerifiedMachineWriter};
 use iquery_fdomain::commands::ListAccessorsCommand;
 
 #[fuchsia::test]
 async fn test_list_accessors() {
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = ListAccessorsCommand {};
     let client = fdomain_local::local_client_empty();
     let rcs_proxy = setup_fake_rcs(client.clone(), vec![]);

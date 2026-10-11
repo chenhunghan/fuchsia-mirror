@@ -10,6 +10,7 @@ use std::sync::Arc;
 // Keeping the types as parameters instead of erasing them makes it easier to ensure that all of the
 // RootDirs created by pkg-cache are using BootfsThenBlobfs.
 pub(crate) type RootDir = package_directory::RootDir<BootfsThenBlobfs>;
+pub(crate) type CachedRootDir = package_directory::CachedRootDir<BootfsThenBlobfs>;
 pub(crate) type RootDirCache = package_directory::RootDirCache<BootfsThenBlobfs>;
 
 /// An implementation of package_directory::NonMetaStorage that serves blobs from bootfs if they
@@ -130,7 +131,7 @@ impl RootDirFactory {
         &self,
         hash: fuchsia_hash::Hash,
     ) -> Result<RootDir, package_directory::Error> {
-        package_directory::RootDir::new_raw(self.bootfs_then_blobfs.clone(), hash, None).await
+        package_directory::RootDir::new_raw(self.bootfs_then_blobfs.clone(), hash).await
     }
 }
 

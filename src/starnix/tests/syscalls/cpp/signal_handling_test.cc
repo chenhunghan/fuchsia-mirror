@@ -1891,6 +1891,175 @@ INSTANTIATE_TEST_SUITE_P(SignalHandling, HandlerEntryPointFaultTest,
                          [](const testing::TestParamInfo<uintptr_t> &info) {
                            return info.param == 1 ? "ThumbEntry" : "AlignedEntry";
                          });
+
+#ifdef __LP64__
+// Non-user address with both bit 63 (non-canonical on x86_64) and bit 55 (`VA[55]`, kernel range
+// on AArch64 with Top Byte Ignore enabled) set, rejected by Zircon's
+// `validate_state_pre_restricted_entry` (`BAD_STATE`). On x86_64 Linux, returning to user mode with
+// a non-canonical RIP raises #GP in the kernel and delivers `SIGSEGV` with `SI_KERNEL`; on AArch64
+// and RISC-V Linux, the transition to user mode succeeds and the thread immediately faults on
+// instruction fetch with `SEGV_MAPERR`.
+constexpr uintptr_t kInvalidUserPc = 0x8080000000000000ULL;
+#elif defined(__arm__)
+// Unaligned A32 address (T=0, PC[1:0] != 0) rejected by `validate_state_pre_restricted_entry`.
+constexpr uintptr_t kInvalidUserPc = 0x2UL;
+#endif
+
+TEST(SignalHandling, InvalidUserPcDeliversSigsegv) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    struct sigaction segv_sa = {};
+    segv_sa.sa_sigaction = [](int signum, siginfo_t *siginfo, void *ucontext_ptr) {
+#ifdef __x86_64__
+      const bool valid_si_code = siginfo->si_code == SI_KERNEL;
+#else
+      const bool valid_si_code = siginfo->si_code == SI_KERNEL || siginfo->si_code == SEGV_MAPERR;
+#endif
+      if (signum != SIGSEGV || !valid_si_code) {
+        _exit(1);
+      }
+      auto *ucontext = reinterpret_cast<ucontext_t *>(ucontext_ptr);
+      uintptr_t pc = 0;
+#ifdef __x86_64__
+      pc = ucontext->uc_mcontext.gregs[REG_RIP];
+#elif defined(__aarch64__)
+      pc = ucontext->uc_mcontext.pc;
+#elif defined(__arm__)
+      pc = ucontext->uc_mcontext.arm_pc;
+#elif defined(__riscv)
+      pc = ucontext->uc_mcontext.__gregs[0];
+#endif
+      if (pc != kInvalidUserPc) {
+        _exit(2);
+      }
+      _exit(0);
+    };
+    segv_sa.sa_flags = SA_SIGINFO;
+    ASSERT_THAT(sigaction(SIGSEGV, &segv_sa, nullptr), SyscallSucceeds());
+
+    struct sigaction usr1_sa = {};
+    usr1_sa.sa_handler = reinterpret_cast<sighandler_t>(kInvalidUserPc);
+    ASSERT_THAT(sigaction(SIGUSR1, &usr1_sa, nullptr), SyscallSucceeds());
+
+    raise(SIGUSR1);
+    _exit(3);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(SignalHandling, InvalidSigreturnStateDeliversSigsegv) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    struct sigaction segv_sa = {};
+    segv_sa.sa_sigaction = [](int signum, siginfo_t *siginfo, void * /*ucontext_ptr*/) {
+#ifdef __x86_64__
+      const bool valid_si_code = siginfo->si_code == SI_KERNEL;
+#else
+      const bool valid_si_code = siginfo->si_code == SI_KERNEL || siginfo->si_code == SEGV_MAPERR ||
+                                 siginfo->si_code == SEGV_ACCERR;
+#endif
+      if (signum != SIGSEGV || !valid_si_code) {
+        _exit(1);
+      }
+      _exit(0);
+    };
+    segv_sa.sa_flags = SA_SIGINFO;
+    ASSERT_THAT(sigaction(SIGSEGV, &segv_sa, nullptr), SyscallSucceeds());
+
+    struct sigaction usr1_sa = {};
+    usr1_sa.sa_sigaction = [](int /*signum*/, siginfo_t * /*siginfo*/, void *ucontext_ptr) {
+      auto *ucontext = reinterpret_cast<ucontext_t *>(ucontext_ptr);
+#ifdef __x86_64__
+      ucontext->uc_mcontext.gregs[REG_RIP] = kInvalidUserPc;
+#elif defined(__aarch64__)
+      ucontext->uc_mcontext.pc = kInvalidUserPc;
+      // Set both the AArch32 mode bit (0x10) and Thumb bit (0x20) in `pstate` to verify that
+      // `rt_sigreturn` preserves the 64-bit execution mode and `reset_flags()` clears `0x20` when
+      // entering the `SIGSEGV` handler.
+      ucontext->uc_mcontext.pstate |= 0x10 | 0x20;
+#elif defined(__arm__)
+      ucontext->uc_mcontext.arm_pc = kInvalidUserPc;
+      // Clear both the AArch32 mode bit (0x10) and Thumb bit (0x20) in `arm_cpsr` to verify that
+      // `rt_sigreturn` preserves the 32-bit execution mode.
+      ucontext->uc_mcontext.arm_cpsr &= ~(0x10UL | 0x20UL);
+#elif defined(__riscv)
+      ucontext->uc_mcontext.__gregs[0] = kInvalidUserPc;
+#endif
+    };
+    usr1_sa.sa_flags = SA_SIGINFO;
+    ASSERT_THAT(sigaction(SIGUSR1, &usr1_sa, nullptr), SyscallSucceeds());
+
+    raise(SIGUSR1);
+    _exit(2);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(SignalHandling, InvalidSigsegvHandlerPcResetsToDefault) {
+  constexpr size_t kAltStackSize = 0x10000;
+  auto altstack = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, kAltStackSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(
+        setup_sigaltstack_at(reinterpret_cast<uintptr_t>(altstack.mapping()), kAltStackSize),
+        SyscallSucceeds());
+
+    struct sigaction sa = {};
+    sa.sa_handler = reinterpret_cast<sighandler_t>(kInvalidUserPc);
+    sa.sa_flags = SA_ONSTACK;
+    ASSERT_THAT(sigaction(SIGSEGV, &sa, nullptr), SyscallSucceeds());
+
+    raise(SIGSEGV);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  const auto *bytes = static_cast<const uint8_t *>(altstack.mapping());
+  const bool upper_half_written = std::any_of(bytes + kAltStackSize / 2, bytes + kAltStackSize,
+                                              [](uint8_t b) { return b != 0; });
+  const bool lower_half_written =
+      std::any_of(bytes, bytes + kAltStackSize / 2, [](uint8_t b) { return b != 0; });
+
+  EXPECT_TRUE(upper_half_written);
+  EXPECT_FALSE(lower_half_written);
+}
+
+TEST(SignalHandling, InvalidSigsegvHandlerPcWithNodeferExhaustsAltStack) {
+  constexpr size_t kAltStackSize = 0x10000;
+  auto altstack = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, kAltStackSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGSEGV);
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(
+        setup_sigaltstack_at(reinterpret_cast<uintptr_t>(altstack.mapping()), kAltStackSize),
+        SyscallSucceeds());
+
+    struct sigaction sa = {};
+    sa.sa_handler = reinterpret_cast<sighandler_t>(kInvalidUserPc);
+    sa.sa_flags = SA_ONSTACK | SA_NODEFER;
+    ASSERT_THAT(sigaction(SIGSEGV, &sa, nullptr), SyscallSucceeds());
+
+    // With SA_NODEFER, SIGSEGV remains unmasked when the kernel attempts to enter `kInvalidUserPc`,
+    // so each rejected restricted entry (`ZX_ERR_BAD_STATE`) pushes another frame onto `altstack`
+    // and loops back to attempt entry again until `altstack` overflows and SIGSEGV is reset to
+    // SIG_DFL.
+    raise(SIGSEGV);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  const auto *bytes = static_cast<const uint8_t *>(altstack.mapping());
+  const bool upper_half_written = std::any_of(bytes + kAltStackSize / 2, bytes + kAltStackSize,
+                                              [](uint8_t b) { return b != 0; });
+  const bool lower_half_written =
+      std::any_of(bytes, bytes + kAltStackSize / 2, [](uint8_t b) { return b != 0; });
+
+  EXPECT_TRUE(upper_half_written);
+  EXPECT_TRUE(lower_half_written);
+}
 #endif  // (!__has_feature(address_sanitizer))
 
 }  // namespace

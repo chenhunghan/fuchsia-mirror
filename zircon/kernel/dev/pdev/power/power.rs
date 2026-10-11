@@ -237,6 +237,21 @@ pub unsafe extern "C" fn rust_pdev_swap_power_for_test(
 }
 
 /// Reboots the system using the registered power operations.
+pub fn power_reboot(flags: PowerRebootFlags) {
+    rust_power_reboot(flags)
+}
+
+/// Shuts down the system using the registered power operations.
+pub fn power_shutdown() {
+    rust_power_shutdown()
+}
+
+/// Powers off the calling CPU.
+pub fn power_cpu_off() -> Result<(), Status> {
+    rust_power_cpu_off()
+}
+
+/// Reboots the system using the registered power operations.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_power_reboot(flags: PowerRebootFlags) {
     let ops = get_ops();
@@ -270,6 +285,14 @@ pub extern "C" fn rust_power_cpu_on(
 ) -> Result<(), Status> {
     let ops = get_ops();
     if let Some(cpu_on_fn) = ops.cpu_on { cpu_on_fn(hw_cpu_id, entry, context) } else { Ok(()) }
+}
+
+/// Retrieves the power state of the CPU with the specified hardware ID.
+pub fn power_get_cpu_state(hw_cpu_id: u64) -> Result<PowerCpuState, Status> {
+    let mut state = PowerCpuState::Off;
+    // SAFETY: `state` is a live local, uniquely borrowed for the duration of the call.
+    unsafe { rust_power_get_cpu_state(hw_cpu_id, &mut state) }?;
+    Ok(state)
 }
 
 /// Retrieves the power state of the CPU with the specified hardware ID.

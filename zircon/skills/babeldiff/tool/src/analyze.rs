@@ -170,11 +170,10 @@ impl Report {
     /// The paired Rust functions that call an unpaired Rust function, for
     /// showing it as a helper of the code it serves.
     pub fn callers(&self, f: &Function) -> Vec<&str> {
-        let key = normalize::call(&f.base).unwrap_or_else(|| normalize::ident(&f.base));
         let mut v: Vec<&str> = self
             .pairs
             .iter()
-            .filter(|p| p.rust.name != f.name && p.rust.calls.contains(&key))
+            .filter(|p| p.rust.name != f.name && calls_function(&p.rust, f))
             .map(|p| p.rust.name.as_str())
             .collect();
         v.sort();
@@ -768,6 +767,10 @@ pub fn analyze(inputs: Inputs, opts: &Options, finder: &mut dyn CppFinder) -> Re
         out
     };
     let mut cpp_used = vec![false; cpp.len()];
+    let touched_rust: HashSet<(String, usize)> = rust
+        .iter()
+        .map(|r| (r.path.clone(), r.start_line))
+        .collect();
     let mut rust_pool: Vec<Function> = rust;
     for (s, _) in &shims {
         if !rust_pool
@@ -1416,7 +1419,7 @@ pub fn analyze(inputs: Inputs, opts: &Options, finder: &mut dyn CppFinder) -> Re
     report.unmatched_rust = rust_pool
         .into_iter()
         .zip(rust_used)
-        .filter(|(f, u)| !u && !f.is_ffi)
+        .filter(|(f, u)| !u && !f.is_ffi && touched_rust.contains(&(f.path.clone(), f.start_line)))
         .map(|(f, _)| f)
         .collect();
     let (facades, unmatched): (Vec<Function>, Vec<Function>) =
@@ -1451,8 +1454,21 @@ pub fn analyze(inputs: Inputs, opts: &Options, finder: &mut dyn CppFinder) -> Re
             (f, callee)
         })
         .collect();
+    let used_shims: HashSet<String> = report
+        .pairs
+        .iter()
+        .filter_map(|p| match &p.link {
+            Link::Ffi { shim, .. } | Link::FfiName { shim, .. } => Some(shim.clone()),
+            _ => None,
+        })
+        .collect();
     report.shims = shims
         .into_iter()
+        .filter(|(shim, target)| {
+            touched_rust.contains(&(shim.path.clone(), shim.start_line))
+                || used_shims.contains(&shim.name)
+                || matches!(target, Target::One(t) if touched_rust.contains(&(t.path.clone(), t.start_line)))
+        })
         .map(|(shim, target)| match target {
             Target::One(t) => Shim {
                 shim,
@@ -1974,7 +1990,166 @@ fn calls_function(r: &Function, t: &Function) -> bool {
         && t.class
             .as_deref()
             .is_some_and(|c| r.calls.contains(&normalize::ident(c)));
-    by_type || r.calls.contains(&normalize::ident(&t.base))
+    if by_type {
+        return true;
+    }
+    if r.calls.contains(&normalize::ident(&t.base)) {
+        return rust_call_matches(r, t, false);
+    }
+    !matches!(t.base.as_str(), "new" | "init" | "default")
+        && normalize::call(&t.base).is_none()
+        && rust_call_matches(r, t, true)
+}
+
+/// Checks that at least one call site of `callee.base` in `caller` matches
+/// `callee`'s parameter count (accounting for `self` receiver vs. associated
+/// call) and optional type qualifier, so e.g. `AtomicBool::store(val, order)`
+/// is not mistaken for `RelaxedAtomicPressureLevel::store(level)`.
+fn rust_call_matches(caller: &Function, callee: &Function, require_site: bool) -> bool {
+    if caller.lang != crate::model::Lang::Rust || callee.lang != crate::model::Lang::Rust {
+        return !require_site;
+    }
+    let Some((has_self, total_params)) = rust_fn_params(callee) else {
+        return !require_site;
+    };
+    let code = body_text(caller);
+    let base = &callee.base;
+    if base.is_empty() {
+        return !require_site;
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found_site = false;
+    for (idx, _) in code.match_indices(base.as_str()) {
+        let before = code[..idx].chars().next_back();
+        let after = code[idx + base.len()..].chars().next();
+        if before.is_some_and(is_word) || after.is_some_and(is_word) {
+            continue;
+        }
+        let mut rest = code[idx + base.len()..].trim_start();
+        if let Some(after_colons) = rest.strip_prefix("::") {
+            let after_colons = after_colons.trim_start();
+            if let Some(end_turbo) = balanced_delim(after_colons, '<', '>') {
+                rest = after_colons[end_turbo..].trim_start();
+            }
+        }
+        let Some(end_paren) = balanced_delim(rest, '(', ')') else {
+            continue;
+        };
+        found_site = true;
+        let args_str = &rest[1..end_paren - 1];
+        let call_args = count_top_level_items(args_str);
+        let prefix = code[..idx].trim_end();
+        if prefix.ends_with('.') {
+            if has_self && call_args + 1 == total_params {
+                return true;
+            }
+        } else if let Some(before_colons) = prefix.strip_suffix("::") {
+            let qual: String = before_colons
+                .trim_end()
+                .chars()
+                .rev()
+                .take_while(|&c| is_word(c))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let qual_ok = match callee.class.as_deref() {
+                Some(cls) if !qual.is_empty() && qual != "Self" => {
+                    normalize::ident(&qual) == normalize::ident(cls)
+                }
+                _ => true,
+            };
+            if qual_ok && call_args == total_params {
+                return true;
+            }
+        } else if !has_self && call_args == total_params {
+            return true;
+        }
+    }
+    !require_site && !found_site
+}
+
+fn rust_fn_params(f: &Function) -> Option<(bool, usize)> {
+    let code: String = f
+        .lines
+        .iter()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let fn_pos = code.find("fn ")?;
+    let after_fn = &code[fn_pos + 3..];
+    let open = after_fn.find('(')?;
+    let paren_slice = &after_fn[open..];
+    let end = balanced_delim(paren_slice, '(', ')')?;
+    let inner = paren_slice[1..end - 1].trim();
+    if inner.is_empty() {
+        return Some((false, 0));
+    }
+    let items = split_top_level_commas(inner);
+    let first = items.first().map(|s| s.trim()).unwrap_or("");
+    let first_name = first.split(':').next().unwrap_or(first).trim();
+    let has_self =
+        first_name == "self" || first_name.ends_with(" self") || first_name.ends_with("&self");
+    Some((has_self, items.len()))
+}
+
+fn balanced_delim(s: &str, open: char, close: char) -> Option<usize> {
+    if !s.starts_with(open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + ch.len_utf8());
+            }
+        }
+    }
+    None
+}
+
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut p, mut b, mut c, mut a) = (0i32, 0i32, 0i32, 0i32);
+    let mut start = 0usize;
+    let bytes = s.as_bytes();
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => p += 1,
+            ')' => p = (p - 1).max(0),
+            '[' => b += 1,
+            ']' => b = (b - 1).max(0),
+            '{' => c += 1,
+            '}' => c = (c - 1).max(0),
+            '<' if i == 0 || !matches!(bytes.get(i.wrapping_sub(1)), Some(b'-' | b'=')) => a += 1,
+            '>' if a > 0 && !matches!(bytes.get(i.wrapping_sub(1)), Some(b'-' | b'=')) => a -= 1,
+            ',' if p == 0 && b == 0 && c == 0 && a == 0 => {
+                let item = s[start..i].trim();
+                if !item.is_empty() {
+                    out.push(item);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = s[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn count_top_level_items(s: &str) -> usize {
+    let s = s.trim();
+    if s.is_empty() {
+        0
+    } else {
+        split_top_level_commas(s).len()
+    }
 }
 
 /// Aligns the primary C++ function, then each override in turn against the
@@ -2179,7 +2354,7 @@ fn merge_override_summaries(s: &mut Summary, rust: &Function, ovs: &[OverrideRep
         v.dedup();
     }
     s.flow
-        .retain(|(name, a, _)| !(*name == "switch" && *a == 0));
+        .retain(|(name, a, _)| !(matches!(*name, "switch" | "case") && *a == 0));
 }
 
 /// The text of a comment line without its markers, if it is long enough to

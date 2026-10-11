@@ -198,6 +198,54 @@ INSTANTIATE_TEST_SUITE_P(
       return std::string(info.param.test_name);
     });
 
+fbl::unique_fd CreateLruHashMap() {
+  bpf_attr attr = {
+      .map_type = BPF_MAP_TYPE_LRU_HASH,
+      .key_size = sizeof(int),
+      .value_size = sizeof(int),
+      .max_entries = 10,
+  };
+
+  return fbl::unique_fd(bpf(BPF_MAP_CREATE, &attr));
+}
+
+struct BpfCapabilityAuditTestParam {
+  const char* test_name;
+  const char* label;
+  bool should_succeed;
+
+  BpfCapabilityAuditTestParam(const char* test_name, const char* label, bool should_succeed)
+      : test_name(test_name), label(label), should_succeed(should_succeed) {}
+};
+
+class BpfCapabilityAuditTest : public ::testing::TestWithParam<BpfCapabilityAuditTestParam> {};
+
+TEST_P(BpfCapabilityAuditTest, MapCreate) {
+  auto [test_name, label, should_succeed] = GetParam();
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs(label, [&] {
+    fbl::unique_fd fd = CreateLruHashMap();
+    if (should_succeed) {
+      EXPECT_THAT(fd.get(), SyscallSucceeds());
+    } else {
+      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EPERM));
+    }
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    BpfCapabilityAuditTestSuite, BpfCapabilityAuditTest,
+    ::testing::Values(
+        BpfCapabilityAuditTestParam("bpf_only", "test_u:test_r:bpf_cap_bpf_only_t:s0", true),
+        BpfCapabilityAuditTestParam("sys_admin_only", "test_u:test_r:bpf_cap_sys_admin_only_t:s0",
+                                    true),
+        BpfCapabilityAuditTestParam("both", "test_u:test_r:bpf_cap_both_t:s0", true),
+        BpfCapabilityAuditTestParam("neither", "test_u:test_r:bpf_cap_neither_t:s0", false)),
+    [](const ::testing::TestParamInfo<BpfCapabilityAuditTestParam>& info) {
+      return std::string(info.param.test_name);
+    });
+
 class BpfMapTest : public ::testing::TestWithParam<BpfMapTestParam> {};
 
 TEST_P(BpfMapTest, Map) {

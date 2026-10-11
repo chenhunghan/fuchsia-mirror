@@ -677,14 +677,15 @@ class EventRecorder:
 
         class Iter:
             def __aiter__(self) -> typing.Self:
-                self._init_items: list[Event] = parent._events.copy()
-                self._init_index: int = 0
                 self._queue: asyncio.Queue[Event | None] = asyncio.Queue()
+                initial_count = len(parent._events)
                 if not parent._done.is_set():
                     parent._queues.append(self._queue)
                 else:
                     # Immediately end when we get to reading from the queue, but still return the stored events.
                     self._queue.put_nowait(None)
+                self._init_items: list[Event] = parent._events[:initial_count]
+                self._init_index: int = 0
                 return self
 
             async def __anext__(self) -> Event:
@@ -702,6 +703,13 @@ class EventRecorder:
                         pass
                     raise StopAsyncIteration()
                 return next
+
+            def __del__(self) -> None:
+                if hasattr(self, "_queue"):
+                    try:
+                        parent._queues.remove(self._queue)
+                    except ValueError:
+                        pass
 
         return Iter()
 

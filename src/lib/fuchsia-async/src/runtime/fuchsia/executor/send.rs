@@ -294,6 +294,16 @@ mod tests {
     }
 
     #[test]
+    fn run_repeatedly() {
+        let mut exec = SendExecutorBuilder::new().num_threads(2).build();
+        // Run more than 256 times to ensure `threads_state` sleeping count does not leak and
+        // overflow its u8 field across `run` invocations.
+        for _ in 0..300 {
+            exec.run(async {});
+        }
+    }
+
+    #[test]
     fn test_allow_interrupts() {
         use crate::OnInterrupt;
         use futures::StreamExt;

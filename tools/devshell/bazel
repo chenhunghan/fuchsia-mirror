@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_BAZEL} ${PREBUILT_JQ} ${PREBUILT_PYTHON3}
 ### Run experimental Bazel build for Fuchsia platform tree
 
 ## usage: fx bazel ...

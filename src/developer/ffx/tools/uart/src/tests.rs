@@ -682,6 +682,7 @@ fn make_mock_metrics() -> DaemonMetrics {
         last_read_timestamp_ms: 0,
         last_write_timestamp_ms: 0,
         outgoing_queue_len: 90,
+        last_target_error: None,
     }
 }
 

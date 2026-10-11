@@ -37,11 +37,6 @@ group("netstack-for-tests") {
   deps = [ "netstack3:component-dropin" ]
 }
 
-group("netstack-debug-for-tests") {
-  testonly = true
-  deps = [ "netstack3:component-debug-dropin" ]
-}
-
 fuchsia_package("netstack2") {
   package_name = "netstack"
   deps = [ _netstack2_component ]
@@ -70,17 +65,14 @@ network_unified_binary_regular_and_gub_packages("netstack3") {
   ]
 }
 
-# This is a single definition for the optimization configuration of crates used
-# by networking components that are performance sensitive.
-#
-# This roughly follows the same shape as
-# src/connectivity/network/netstack3:netstack3_configs, but we intentionally
-# define it as a separate target for split evolution if necessary.
+# LINT.IfChange(performance_critical_rust_crate)
 config("performance_critical_rust_crate") {
   if (is_release && !is_host) {
     configs = [ "//build/config:optimize_speed" ]
   }
 }
+
+# LINT.ThenChange(//src/connectivity/network/BUILD.bazel:performance_critical_rust_crate)
 
 group("drivers") {
   deps = [ "drivers/network-device" ]
@@ -112,11 +104,6 @@ group("tests") {
     "mdns:tests",
     "net-cli:tests",
     "netlink:tests",
-
-    # Ensure this target doesn't rot. This dependency can be removed if the
-    # target becomes load bearing elsewhere.
-    "netstack:component-with-tracing-dropin",
-    "netstack:tests",
     "netstack3:tests",
     "testing:tests",
     "tests",

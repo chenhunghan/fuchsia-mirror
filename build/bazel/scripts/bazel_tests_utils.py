@@ -303,7 +303,7 @@ def _generate_host_tests_json(
             raise RuntimeError(
                 f"Target '{next(iter(targets_missing_test_info))}' included in the bazel_host_test_suites GN group is a test target "
                 f"but does not provide FuchsiaHostTestInfo. "
-                f"Wrap it with host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
+                f"Wrap it with host_cc_test(), host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
             )
         else:
             targets_list = "\n".join(
@@ -312,7 +312,7 @@ def _generate_host_tests_json(
             raise RuntimeError(
                 f"The following targets included in the bazel_host_test_suites GN group are test targets "
                 f"but do not provide FuchsiaHostTestInfo:\n{targets_list}\n"
-                f"Wrap them with host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
+                f"Wrap them with host_cc_test(), host_go_test(), host_rustc_test(), host_py_test(), or host_test()."
             )
 
     return tests_json, {starlark_input}

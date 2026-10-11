@@ -5,7 +5,6 @@
 group("tools") {
   testonly = true
   deps = [
-    "nc",
     "sockscripter",
     "//src/lib/testing/expectation/tool:list_test_expectations",
   ]

@@ -393,7 +393,7 @@ func (f *Ffx) ProductDownload(ctx context.Context, transferURL, outDir, authPath
 }
 
 // EmuStart starts the emulator.
-func (f *Ffx) EmuStart(ctx context.Context, productDir, name, engine, device string) error {
+func (f *Ffx) EmuStart(ctx context.Context, productDir, name, engine, device, gpu string) error {
 	args := []string{
 		"emu",
 		"start",
@@ -408,6 +408,9 @@ func (f *Ffx) EmuStart(ctx context.Context, productDir, name, engine, device str
 	}
 	if device != "" {
 		args = append(args, "--device", device)
+	}
+	if gpu != "" {
+		args = append(args, "--gpu", gpu)
 	}
 	_, err := f.RunCmdSync(ctx, args...)
 	return err

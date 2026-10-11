@@ -381,15 +381,29 @@ class Phy:
         ifaces: list[ClientIface | ApIface] = []
         for iface_id in list_ifaces_response.iface_list:
             try:
-                query_response = (
-                    await self.device_monitor.query_iface(iface_id=iface_id)
-                ).unwrap()
-            except (FcTransportStatus, ZxStatus):
+                query_result = await self.device_monitor.query_iface(
+                    iface_id=iface_id
+                )
+            except (FcTransportStatus, ZxStatus) as e:
+                logger.warning(
+                    "Exception while querying iface %s: %s", iface_id, e
+                )
                 continue
+
             if (
-                query_response.resp is None
-                or query_response.resp.phy_id != self.id
+                query_result.err is not None
+                or query_result.response is None
+                or query_result.response.resp is None
             ):
+                logger.warning(
+                    "Failed to query iface %s (err: %s)",
+                    iface_id,
+                    query_result.err,
+                )
+                continue
+
+            query_response = query_result.response
+            if query_response.resp.phy_id != self.id:
                 continue
             if query_response.resp.role == f_wlan_common.WlanMacRole.CLIENT:
                 ifaces.append(await ClientIface.from_id(iface_id, self))

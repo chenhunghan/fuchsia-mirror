@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import tempfile
+import typing
 import unittest
 from collections.abc import Collection
 
@@ -321,6 +322,7 @@ class MetricProcessorsTest(unittest.TestCase):
     class TestMetricsProcessor(trace_metrics.MetricsProcessor):
         """TEST"""
 
+        @typing.override
         def process_metrics(
             self, model: trace_model.Model
         ) -> Collection[metrics.TestCaseResult]:

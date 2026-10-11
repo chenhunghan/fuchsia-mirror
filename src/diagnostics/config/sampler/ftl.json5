@@ -5,7 +5,7 @@
             metrics: [
                 {
                     event_codes: [
-                        1,
+                        "BLOCK_READ",
                     ],
                     metric_name: "ftl_block_operation_events",
                     metric_type: "Occurrence",
@@ -13,7 +13,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "BLOCK_WRITE",
                     ],
                     metric_name: "ftl_block_operation_events",
                     metric_type: "Occurrence",
@@ -21,7 +21,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "BLOCK_FLUSH",
                     ],
                     metric_name: "ftl_block_operation_events",
                     metric_type: "Occurrence",
@@ -29,7 +29,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "BLOCK_TRIM",
                     ],
                     metric_name: "ftl_block_operation_events",
                     metric_type: "Occurrence",
@@ -37,8 +37,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "NAND_READ",
+                        "BLOCK_READ",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -46,8 +46,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "NAND_WRITE",
+                        "BLOCK_READ",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -55,8 +55,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "NAND_ERASE",
+                        "BLOCK_READ",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -64,8 +64,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        2,
+                        "NAND_READ",
+                        "BLOCK_WRITE",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -73,8 +73,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        2,
+                        "NAND_WRITE",
+                        "BLOCK_WRITE",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -82,8 +82,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        2,
+                        "NAND_ERASE",
+                        "BLOCK_WRITE",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -91,8 +91,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        3,
+                        "NAND_READ",
+                        "BLOCK_FLUSH",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -100,8 +100,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        3,
+                        "NAND_WRITE",
+                        "BLOCK_FLUSH",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -109,8 +109,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        3,
+                        "NAND_ERASE",
+                        "BLOCK_FLUSH",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -118,8 +118,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        4,
+                        "NAND_READ",
+                        "BLOCK_TRIM",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -127,8 +127,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        4,
+                        "NAND_WRITE",
+                        "BLOCK_TRIM",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -136,8 +136,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        4,
+                        "NAND_ERASE",
+                        "BLOCK_TRIM",
                     ],
                     metric_name: "ftl_nand_operation_events",
                     metric_type: "Occurrence",
@@ -175,7 +175,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "INITIAL",
                     ],
                     metric_name: "ftl_bad_blocks",
                     metric_type: "Integer",
@@ -183,7 +183,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "RUNNING",
                     ],
                     metric_name: "ftl_bad_blocks",
                     metric_type: "Integer",
@@ -191,7 +191,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "TOTAL",
                     ],
                     metric_name: "ftl_bad_blocks",
                     metric_type: "Integer",
@@ -199,7 +199,7 @@
                 },
                 {
                     event_codes: [
-                        0,
+                        "Reason 0 (invalid page)",
                     ],
                     metric_name: "ftl_map_block_end_page_failures",
                     metric_type: "Occurrence",
@@ -207,7 +207,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "Reason 1 (erased page)",
                     ],
                     metric_name: "ftl_map_block_end_page_failures",
                     metric_type: "Occurrence",
@@ -215,7 +215,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "Reason 2 (uncorrectable ecc error)",
                     ],
                     metric_name: "ftl_map_block_end_page_failures",
                     metric_type: "Occurrence",
@@ -223,7 +223,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "Reason 3 (bad block-count)",
                     ],
                     metric_name: "ftl_map_block_end_page_failures",
                     metric_type: "Occurrence",
@@ -231,7 +231,7 @@
                 },
                 {
                     event_codes: [
-                        4,
+                        "Reason 4 (bad map page number)",
                     ],
                     metric_name: "ftl_map_block_end_page_failures",
                     metric_type: "Occurrence",

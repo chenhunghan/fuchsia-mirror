@@ -227,11 +227,7 @@ impl Resolver {
         inspect.record_string("blob_source", &http_blob_dir);
         let root_dir = self
             .package_fetcher
-            .fetch(
-                pkg_id,
-                http_blob_dir.parse().map_err(Error::InvalidBlobDirUri)?,
-                fpkg::GcProtection::Retained,
-            )
+            .fetch_retained(pkg_id, http_blob_dir.parse().map_err(Error::InvalidBlobDirUri)?)
             .await
             .map_err(Error::PackageFetcher)?;
         let hash = *root_dir.hash();
@@ -308,7 +304,7 @@ pub(crate) enum Error {
     #[error("invalid blob dir URI")]
     InvalidBlobDirUri(#[source] http::uri::InvalidUri),
 
-    #[error("forwarding to the package fetcher")]
+    #[error("forwarding to package fetcher")]
     PackageFetcher(#[source] Arc<crate::package_fetcher::Error>),
 
     #[error("authenticating context")]

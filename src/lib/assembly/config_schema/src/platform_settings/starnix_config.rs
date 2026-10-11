@@ -35,6 +35,10 @@ pub struct PlatformStarnixConfig {
     // for testing wakeup latency.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub enable_wakeup_test: bool,
+
+    /// Whether `remotevol` mounts the Fxfs volume in-process rather than over FIDL.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub remotevol_in_process: bool,
 }
 
 /// How starnix treats socket marks.

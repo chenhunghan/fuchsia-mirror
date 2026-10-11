@@ -77,6 +77,9 @@ class SystemLogRecorder : public fidl::Server<fuchsia_feedback_internal::SystemL
   const zx::duration write_period_;
   const StorageSize fallback_buffer_size_;
 
+  // `is_restart_` and `store_` must be declared (and thus initialized) before `writer_`, which
+  // asynchronously creates `logs_dir` and modifies `metadata_path` on `write_dispatcher`.
+  const bool is_restart_;
   LogMessageStore store_;
   LogSource log_source_;
   async_patterns::DispatcherBound<SystemLogWriter> writer_;

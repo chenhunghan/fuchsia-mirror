@@ -6,6 +6,7 @@
 import logging
 
 import fuchsia_base_test
+from honeydew.transports.fastboot import types as fastboot_types
 from mobly import asserts, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class FastbootTransportTests(fuchsia_base_test.FuchsiaBaseTest):
         #   * reboot back to fuchsia mode
         # So to avoid all these additional steps in actual test case, we are explicitly
         # instantiating fastboot transport in setup_class
-        self._fastboot_node_id: str = await self.dut.fastboot.node_id()
+        self._fastboot_node_id: str = self.dut.fastboot.node_id
 
     async def teardown_test(self) -> None:
         """teardown_test is called once after running each test.
@@ -41,7 +42,7 @@ class FastbootTransportTests(fuchsia_base_test.FuchsiaBaseTest):
             * Ensures device is in fuchsia mode.
         """
         await super().teardown_test()
-        if await self.dut.fastboot.is_in_fastboot_mode():
+        if self.dut.fastboot.is_in_fastboot_mode():
             _LOGGER.warning(
                 "%s is in fastboot mode which is not expected. "
                 "Rebooting to fuchsia mode",
@@ -49,7 +50,7 @@ class FastbootTransportTests(fuchsia_base_test.FuchsiaBaseTest):
             )
             await self.dut.fastboot.boot_to_fuchsia_mode()
 
-    async def test_fastboot_node_id(self) -> None:
+    def test_fastboot_node_id(self) -> None:
         """Test case for Fastboot.node_id."""
         # Note - If "node_id" is specified in "expected_values" in
         # params.yml then compare with it.
@@ -64,30 +65,47 @@ class FastbootTransportTests(fuchsia_base_test.FuchsiaBaseTest):
             asserts.assert_is_not_none(self._fastboot_node_id)
             asserts.assert_is_instance(self._fastboot_node_id, str)
 
-    async def test_fastboot_methods(self) -> None:
-        """Test case that puts the device in fastboot mode, runs a command in
-        fastboot mode and reboots the device back to fuchsia mode."""
-        await self.dut.fastboot.boot_to_fastboot_mode()
+    async def _verify_fastboot_methods(
+        self,
+        method: fastboot_types.BootToFuchsiaMethod = fastboot_types.BootToFuchsiaMethod.REBOOT,
+    ) -> None:
+        """Helper method that puts the device in fastboot mode, runs a command
+        in fastboot mode and boots the device back to fuchsia mode."""
+        self.dut.fastboot.boot_to_fastboot_mode()
 
-        await self.dut.fastboot.wait_for_fastboot_mode()
+        self.dut.fastboot.wait_for_fastboot_mode()
 
         asserts.assert_true(
-            await self.dut.fastboot.is_in_fastboot_mode(),
+            self.dut.fastboot.is_in_fastboot_mode(),
             msg=f"{self.dut.device_name} is not in fastboot mode which "
             f"is not expected",
         )
 
         cmd: list[str] = ["getvar", "hw-revision"]
-        await self.dut.fastboot.run(cmd)
+        self.dut.fastboot.run(cmd)
 
-        await self.dut.fastboot.boot_to_fuchsia_mode()
+        await self.dut.fastboot.boot_to_fuchsia_mode(method=method)
 
-        await self.dut.fastboot.wait_for_fuchsia_mode()
+        self.dut.fastboot.wait_for_fuchsia_mode()
 
         asserts.assert_false(
-            await self.dut.fastboot.is_in_fastboot_mode(),
+            self.dut.fastboot.is_in_fastboot_mode(),
             msg=f"{self.dut.device_name} is in fastboot mode when not "
             f"expected",
+        )
+
+    async def test_fastboot_methods_using_reboot(self) -> None:
+        """Test case that puts the device in fastboot mode, runs a command in
+        fastboot mode and reboots the device back to fuchsia mode."""
+        await self._verify_fastboot_methods(
+            method=fastboot_types.BootToFuchsiaMethod.REBOOT
+        )
+
+    async def test_fastboot_methods_using_continue(self) -> None:
+        """Test case that puts the device in fastboot mode, runs a command in
+        fastboot mode and continues booting the device back to fuchsia mode."""
+        await self._verify_fastboot_methods(
+            method=fastboot_types.BootToFuchsiaMethod.CONTINUE
         )
 
 

@@ -759,7 +759,6 @@ pub async fn publish_dml_devices(
             pbus.node_add(node)
                 .await
                 .context("NodeAdd request failed")?
-                .map_err(|e| e.err().unwrap_or(zx::Status::INTERNAL))
                 .context("NodeAdd failed")?;
         }
     }
@@ -799,7 +798,6 @@ async fn register_iommus(
                             "Failed to send RegisterIommu FIDL request for IOMMU {iommu_name:?}"
                         )
                     })?
-                    .map_err(|e| e.err().unwrap_or(zx::Status::INTERNAL))
                     .with_context(|| format!("Failed to register IOMMU {iommu_name:?}"))?;
                 Ok::<(), anyhow::Error>(())
             };

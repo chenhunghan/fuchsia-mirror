@@ -9,22 +9,22 @@ from datetime import timedelta
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 
-from antlion.controllers.access_point import (
-    AccessPoint,
-    setup_ap,
-)
-from antlion.controllers.ap_lib import dhcp_config, hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
-from antlion.controllers.ap_lib.hostapd_security import (
-    SecurityMode as DeprecatedSecurityMode,
-)
 from honeydew.affordances.connectivity.netstack.errors import (
     HoneydewNetstackError,
 )
 from honeydew.affordances.connectivity.netstack.types import PortClass
 from honeydew.fuchsia_device import fuchsia_device
+from legacy_access_point.access_point import (
+    AccessPoint,
+    setup_ap,
+)
+from legacy_access_point.ap_lib import dhcp_config, hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
+)
+from legacy_access_point.ap_lib.hostapd_security import (
+    SecurityMode as DeprecatedSecurityMode,
+)
 from mobly import asserts, signals
 from openwrt_access_point import AddrType as OpenWrtAddrType
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName

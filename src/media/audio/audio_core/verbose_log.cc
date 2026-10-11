@@ -7,7 +7,7 @@
 namespace media::audio {
 
 namespace internal {
-thread_local DeferredLogBuffer* const deffered_log = new DeferredLogBuffer;
+thread_local DeferredLogBuffer deferred_log;
 
 void DeferredLogBuffer::Dump() {
   std::ostringstream os;
@@ -24,6 +24,6 @@ void DeferredLogBuffer::Dump() {
 }
 }  // namespace internal
 
-void DumpVerboseLogs() { internal::deffered_log->Dump(); }
+void DumpVerboseLogs() { internal::deferred_log.Dump(); }
 
 }  // namespace media::audio

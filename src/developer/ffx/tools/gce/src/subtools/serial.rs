@@ -77,6 +77,18 @@ pub async fn stream_serial_output<W: Write>(
                 current_offset = Some(output.next);
                 has_data
             }
+            Err(e) if e.is_forbidden() => {
+                log::info!(
+                    "REST getSerialPortOutput returned 403 Forbidden for '{}'; falling back to \
+                     SSH serial console ({})",
+                    instance.name,
+                    gce.serial_endpoint()
+                );
+                return gce
+                    .stream_ssh_serial(&instance.name, port, follow, &mut writer)
+                    .await
+                    .map_err(|ssh_err| user_error!("{ssh_err}"));
+            }
             Err(e) => {
                 return_user_error!("{e}");
             }

@@ -681,3 +681,20 @@ void PortDispatcher::InitializeCacheAllocators(uint32_t /*level*/) {
 // Initialize the cache after the percpu data structures are initialized.
 LK_INIT_HOOK(port_observer_cache_init, PortDispatcher::InitializeCacheAllocators,
              LK_INIT_LEVEL_KERNEL)
+
+extern "C" {
+
+zx_status_t cpp_port_dispatcher_create(uint32_t options,
+                                       ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
+                                       zx_rights_t* rights_out) {
+  KernelHandle<PortDispatcher> handle;
+  zx_rights_t rights;
+  zx_status_t status = PortDispatcher::Create(options, &handle, &rights);
+  if (status == ZX_OK) {
+    handle_out->Initialize(ktl::move(handle));
+    *rights_out = rights;
+  }
+  return status;
+}
+
+}  // extern "C"

@@ -88,15 +88,6 @@ def main() -> None:
     ):
         parser.error("output_path must end with .fuchsiaperf.json")
 
-    if args.list_rails:
-        available = odpm_power.OdpmPowerMetricsProcessor.list_rails(
-            args.path_to_trace
-        )
-        print(f"Available ODPM rails ({len(available)}):")
-        for rail in available:
-            print(f"  {rail}")
-        return
-
     sum_rails: dict[str, list[str]] = {}
     for spec in args.sum_rails or []:
         if "=" not in spec:
@@ -114,7 +105,7 @@ def main() -> None:
     processor = odpm_power.OdpmPowerMetricsProcessor(
         rails=args.rails or (),
         sum_rails=sum_rails,
-        all_rails=args.all_rails,
+        all_rails=args.all_rails or args.list_rails,
     )
 
     if args.path_to_trace.endswith(".json"):
@@ -131,6 +122,13 @@ def main() -> None:
     model: trace_model.Model = trace_importing.create_model_from_file_path(
         path_to_trace_json
     )
+
+    if args.list_rails:
+        available = odpm_power.OdpmPowerMetricsProcessor.list_rails(model)
+        print(f"Available ODPM rails ({len(available)}):")
+        for rail in available:
+            print(f"  {rail}")
+        return
 
     trace_results = processor.process_metrics(model)
 

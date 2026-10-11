@@ -33,6 +33,7 @@ const ELEMENT_ID: &str = "element_id";
 const ELEMENT_NAME: &str = "name";
 const LEVEL: &str = "level";
 const LEASE_ID: &str = "lease_id";
+const LEASE_NAME: &str = "name";
 const STATUS: &str = "status";
 const TIME: &str = "@time";
 const EDGE_ID: &str = "edge_id";
@@ -67,6 +68,7 @@ pub struct ElementData {
 #[derive(Debug)]
 struct LeaseData {
     node: inspect::Node,
+    name: Option<inspect::StringProperty>,
     level: inspect::UintProperty,
     status: Option<inspect::UintProperty>,
 }
@@ -80,7 +82,6 @@ impl ElementData {
     const CURRENT_LEVEL: &str = "current_level";
     const REQUIRED_LEVEL: &str = "required_level";
     const LEASES: &str = "leases";
-    const SYNTHETIC: &str = "synthetic";
 
     fn new(
         node: inspect::Node,
@@ -107,22 +108,6 @@ impl ElementData {
         }
     }
 
-    fn synthetic(node: inspect::Node, name: &str, valid_levels: &[IndexedPowerLevel]) -> Self {
-        let name = node.create_string(ELEMENT_NAME, name);
-        node.record_bool(Self::SYNTHETIC, true);
-        let valid_levels = Self::create_valid_levels(&node, valid_levels);
-        let leases_node = node.create_child(Self::LEASES);
-        Self {
-            current_level: None,
-            required_level: None,
-            _node: node,
-            name,
-            valid_levels,
-            leases: Default::default(),
-            leases_node,
-        }
-    }
-
     fn update_level(&self, update_level: &UpdateLevelInfo) {
         if let Some(level) = update_level.current {
             self.inner_update_level(&self.current_level, level);
@@ -146,15 +131,21 @@ impl ElementData {
         }
     }
 
-    fn create_lease(&mut self, lease_id: LeaseID, level: fpb::PowerLevel) {
+    fn create_lease(
+        &mut self,
+        lease_id: LeaseID,
+        lease_name: Option<&str>,
+        level: fpb::PowerLevel,
+    ) {
         match self.leases.get_mut(&lease_id) {
             Some(_) => unreachable!("We can't call into create lease twice"),
             None => {
                 let lease_node = self.leases_node.create_child(format!("{lease_id}"));
+                let name = lease_name.map(|name| lease_node.create_string(LEASE_NAME, name));
                 let level = lease_node.create_uint(LEVEL, level as u64);
                 self.leases.insert(
                     lease_id.to_owned(),
-                    LeaseData { node: lease_node, level, status: None },
+                    LeaseData { node: lease_node, name, level, status: None },
                 );
             }
         }
@@ -284,20 +275,13 @@ impl TopologyInspect {
         &self,
         element_id: ElementID,
         name: &str,
-        synthetic: bool,
         valid_levels: &[IndexedPowerLevel],
         current_level: Option<fpb::PowerLevel>,
         required_level: Option<fpb::PowerLevel>,
     ) -> igraph::Vertex<ElementData> {
-        if synthetic {
-            self.graph.add_vertex(element_id, |meta_node| {
-                ElementData::synthetic(meta_node, name, &valid_levels)
-            })
-        } else {
-            self.graph.add_vertex(element_id.clone(), |meta_node| {
-                ElementData::new(meta_node, name, &valid_levels, current_level, required_level)
-            })
-        }
+        self.graph.add_vertex(element_id.clone(), |meta_node| {
+            ElementData::new(meta_node, name, &valid_levels, current_level, required_level)
+        })
     }
 
     fn emit_add_element_event(
@@ -328,12 +312,17 @@ impl TopologyInspect {
                 if !dependencies.is_empty() {
                     let deps_node = node.create_child("dependencies");
                     for (i, (dep, on_required_element_removal)) in dependencies.iter().enumerate() {
+                        // `dependent` is always set here: root dependencies are rejected by
+                        // Topology::add_dependency and never reach this writer.
+                        let Some(dependent) = &dep.dependent else {
+                            log::error!(dep:?; "Cannot record inspect event for root dependency.");
+                            continue;
+                        };
                         let dep_node = deps_node.create_child(format!("{i}"));
                         // No need to record the dependent_element event since that must be the
                         // element we are adding.
-                        // dep_node.record_uint(DEP_ELEMENT, *dep.dependent.element_id);
                         dep_node.record_uint(REQ_ELEMENT, *dep.requires.element_id as u64);
-                        dep_node.record_uint(DEPENDENT_LEVEL, dep.dependent.level.level as u64);
+                        dep_node.record_uint(DEPENDENT_LEVEL, dependent.level.level as u64);
                         dep_node.record_uint(REQUIRED_LEVEL, dep.requires.level.level as u64);
                         if *on_required_element_removal
                             == OnRequiredElementRemoval::RemoveWithRequiredElement
@@ -355,13 +344,17 @@ impl TopologyInspect {
         on_required_element_removal: OnRequiredElementRemoval,
         write_inspect_event: bool,
     ) {
-        let (dp_id, rq_id) = (dep.dependent.element_id, dep.requires.element_id);
+        let Some(dependent) = &dep.dependent else {
+            log::error!(dep:?; "Cannot add inspect edge for root dependency.");
+            return;
+        };
+        let (dp_id, rq_id) = (dependent.element_id, dep.requires.element_id);
         let (Some(dp), Some(rq)) = (elements.get(&dp_id), elements.get(&rq_id)) else {
             // elements[dp_id] and elements[rq_id] guaranteed by prior validation
             log::error!(dep:?; "Failed to add inspect for dependency.");
             return;
         };
-        let (dp_level, rq_level) = (dep.dependent.level, dep.requires.level);
+        let (dp_level, rq_level) = (dependent.level, dep.requires.level);
         let mut inspect_edges = dp.inspect_edges.borrow_mut();
         match inspect_edges.get_mut(&rq_id) {
             None => {
@@ -399,8 +392,11 @@ impl TopologyInspect {
     }
 
     pub fn on_remove_dependency(&self, elements: &HashMap<ElementID, Element>, dep: &Dependency) {
-        // elements[dp_id] and elements[rq_id] guaranteed by prior validation
-        let (dp_id, rq_id) = (&dep.dependent.element_id, &dep.requires.element_id);
+        let Some(dependent) = &dep.dependent else {
+            log::error!(dep:?; "Cannot remove inspect edge for root dependency.");
+            return;
+        };
+        let (dp_id, rq_id) = (&dependent.element_id, &dep.requires.element_id);
         let Some(dp) = elements.get(dp_id) else {
             log::error!(dp_id:?; "Missing element for removal");
             return;
@@ -409,7 +405,7 @@ impl TopologyInspect {
         let Some(edge) = dp_edges.get_mut(rq_id) else {
             return;
         };
-        let dp_level = dep.dependent.level;
+        let dp_level = dependent.level;
         edge.maybe_update_meta(|meta| {
             meta.remove(dp_level.level);
         });
@@ -470,12 +466,13 @@ impl TopologyInspect {
         &self,
         element: &Element,
         lease_id: LeaseID,
+        lease_name: Option<&str>,
         level: fpb::PowerLevel,
     ) {
         let Some(ref vertex) = element.inspect_vertex else {
             return;
         };
-        vertex.borrow_mut().meta().create_lease(lease_id, level);
+        vertex.borrow_mut().meta().create_lease(lease_id, lease_name, level);
         self.maybe_record_event(element, CREATE_LEASE_EVENT, |node| {
             node.record_uint(ELEMENT_ID, *element.id as u64);
             node.record_uint(LEASE_ID, *lease_id);
@@ -510,6 +507,11 @@ impl TopologyInspect {
         self.maybe_record_event(element, REMOVE_LEASE_EVENT, |node| {
             node.record_uint(ELEMENT_ID, *element.id as u64);
             node.record_uint(LEASE_ID, *lease.id);
+
+            if let Some(name) = lease_data.name {
+                let _ = name.reparent(&node);
+                node.record(name);
+            }
 
             let _ = lease_data.level.reparent(&node);
             node.record(lease_data.level);
@@ -690,7 +692,6 @@ impl AddElementInspectWriter {
             topology.inspect().create_element_vertex(
                 element.id,
                 &element.name,
-                element.synthetic,
                 &element.valid_levels,
                 self.current_level,
                 self.required_level,

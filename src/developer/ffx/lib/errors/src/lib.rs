@@ -41,14 +41,6 @@ pub enum FfxError {
     #[cfg(not(target_os = "fuchsia"))]
     #[error("{}", .err)]
     #[trace(opaque)]
-    TunnelError {
-        #[source]
-        err: Box<dyn std::error::Error + Send + Sync>,
-        target: Option<String>,
-    },
-    #[cfg(not(target_os = "fuchsia"))]
-    #[error("{}", .err)]
-    #[trace(opaque)]
     TargetConnectionError {
         #[source]
         err: Box<dyn std::error::Error + Send + Sync>,
@@ -170,8 +162,6 @@ impl IntoExitCode for FfxError {
             FfxError::DaemonError { .. } => 1,
             #[cfg(not(target_os = "fuchsia"))]
             FfxError::OpenTargetError { exit_code, .. } => *exit_code,
-            #[cfg(not(target_os = "fuchsia"))]
-            FfxError::TunnelError { .. } => 1,
             #[cfg(not(target_os = "fuchsia"))]
             FfxError::TargetConnectionError { .. } => 1,
         }

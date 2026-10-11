@@ -5,10 +5,11 @@
 // https://opensource.org/licenses/MIT
 
 use super::page::VmPagePtr;
+use super::page_source::PageSource;
+use super::stream_size_manager::StreamSizeManager;
 use super::vm_cow_pages::VmCowPages;
 use super::vm_object::{VmObject, VmObjectLockClass, VmObjectReadWriteOptions};
 use crate::user_copy::{UserInIovec, UserOutIovec};
-use crate::vm::stream_size_manager::StreamSizeManager;
 use core::marker::PhantomPinned;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
@@ -82,6 +83,59 @@ impl VmObjectPaged {
             )
         };
         Status::ok(status)?;
+        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+    }
+
+    /// Create a new paged VMO backed by an external `PageSource`.
+    pub fn create_external(
+        src: RefPtr<PageSource>,
+        options: u32,
+        size: u64,
+    ) -> Result<RefPtr<VmObjectPaged>, Status> {
+        let mut status = 0;
+        let src_raw = RefPtr::into_raw(src).cast_mut().cast();
+        // SAFETY: `src_raw` is a valid `PageSource` pointer with an owned reference, and `status`
+        // is a valid local mutable reference.
+        let raw = unsafe {
+            bindings::cpp_vm_object_paged_create_external(src_raw, options, size, &mut status)
+        };
+        Status::ok(status)?;
+        // SAFETY: `raw` is a valid `VmObjectPaged` pointer on `ZX_OK`.
+        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+    }
+
+    /// Resets any pager VMO modification statistics.
+    pub fn reset_pager_vmo_stats(&self) {
+        // SAFETY: `self.as_raw()` returns a valid `VmObjectPaged` pointer.
+        unsafe { bindings::cpp_vm_object_paged_reset_pager_vmo_stats(self.as_raw()) }
+    }
+
+    /// Creates a VMO from wired pages.
+    ///
+    /// Creating a VMO using this method is destructive. Once the VMO is released, its
+    /// pages will be released into the general purpose page pool, so it is not possible
+    /// to create multiple VMOs for the same region using this method.
+    ///
+    /// `exclusive` indicates whether or not the created vmo should have exclusive access to
+    /// the pages. If `exclusive` is true, then `data` will be unmapped from the
+    /// kernel address space (unless they lie in the physmap).
+    pub fn create_from_wired_pages(
+        data: &'static [u8],
+        exclusive: bool,
+    ) -> Result<RefPtr<VmObjectPaged>, Status> {
+        let mut status = 0;
+        // SAFETY: `data` points to `data.len()` bytes of wired kernel memory, and `status` is a
+        // valid local mutable reference.
+        let raw = unsafe {
+            bindings::cpp_vm_object_paged_create_from_wired_pages(
+                data.as_ptr().cast(),
+                data.len(),
+                exclusive,
+                &mut status,
+            )
+        };
+        Status::ok(status)?;
+        // SAFETY: On `ZX_OK`, `raw` is a valid `VmObjectPaged` exported from `fbl::RefPtr`.
         unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
     }
 

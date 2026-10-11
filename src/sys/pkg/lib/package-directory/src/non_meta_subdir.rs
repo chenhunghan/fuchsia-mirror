@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::root_dir::RootDir;
+use crate::NonMetaStorage as _;
+use crate::root_dir::AsRootDir;
 use fidl_fuchsia_io as fio;
 use std::sync::Arc;
 use vfs::directory::entry::EntryInfo;
@@ -11,26 +12,26 @@ use vfs::directory::traversal_position::TraversalPosition;
 use vfs::execution_scope::ExecutionScope;
 use vfs::{ObjectRequestRef, immutable_attributes};
 
-pub(crate) struct NonMetaSubdir<S: crate::NonMetaStorage> {
-    root_dir: Arc<RootDir<S>>,
+pub(crate) struct NonMetaSubdir<R> {
+    root_dir: Arc<R>,
     // The object relative path expression of the subdir relative to the package root with a
     // trailing slash appended.
     path: String,
 }
 
-impl<S: crate::NonMetaStorage> NonMetaSubdir<S> {
-    pub(crate) fn new(root_dir: Arc<RootDir<S>>, path: String) -> Arc<Self> {
+impl<R: AsRootDir> NonMetaSubdir<R> {
+    pub(crate) fn new(root_dir: Arc<R>, path: String) -> Arc<Self> {
         Arc::new(NonMetaSubdir { root_dir, path })
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::directory::entry::GetEntryInfo for NonMetaSubdir<S> {
+impl<R: AsRootDir> vfs::directory::entry::GetEntryInfo for NonMetaSubdir<R> {
     fn entry_info(&self) -> EntryInfo {
         EntryInfo::new(fio::INO_UNKNOWN, fio::DirentType::Directory)
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::node::Node for NonMetaSubdir<S> {
+impl<R: AsRootDir> vfs::node::Node for NonMetaSubdir<R> {
     async fn get_attributes(
         &self,
         requested_attributes: fio::NodeAttributesQuery,
@@ -46,7 +47,7 @@ impl<S: crate::NonMetaStorage> vfs::node::Node for NonMetaSubdir<S> {
     }
 }
 
-impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for NonMetaSubdir<S> {
+impl<R: AsRootDir> vfs::directory::entry_container::Directory for NonMetaSubdir<R> {
     fn open(
         self: Arc<Self>,
         scope: ExecutionScope,
@@ -74,11 +75,12 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for No
             path.as_ref().strip_suffix('/').unwrap_or_else(|| path.as_ref())
         );
 
-        if let Some(blob) = self.root_dir.non_meta_files.get(file_path.as_str()) {
+        let root_dir = self.root_dir.as_root_dir();
+        if let Some(blob) = root_dir.non_meta_files.get(file_path.as_str()) {
             if path.is_dir() {
                 return Err(zx::Status::NOT_DIR);
             }
-            return self.root_dir.non_meta_storage.open(blob, flags, scope, object_request);
+            return root_dir.non_meta_storage.open(blob, flags, scope, object_request);
         }
 
         if let Some(subdir) = self.root_dir.get_non_meta_subdir(file_path + "/") {
@@ -97,7 +99,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for No
         zx::Status,
     > {
         vfs::directory::read_dirents::read_dirents(
-            &crate::get_dir_children(self.root_dir.non_meta_files.keys(), &self.path),
+            &crate::get_dir_children(self.root_dir.as_root_dir().non_meta_files.keys(), &self.path),
             pos,
             sink,
         )
@@ -119,6 +121,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for No
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::root_dir::RootDir;
     use assert_matches::assert_matches;
     use fuchsia_fs::directory::{DirEntry, DirentKind};
     use fuchsia_pkg_testing::PackageBuilder;

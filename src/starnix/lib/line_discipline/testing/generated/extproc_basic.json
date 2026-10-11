@@ -1,0 +1,124 @@
+{
+    "name": "extproc_basic",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "pre"
+        },
+        {
+            "type": "read_once_from_master",
+            "size": 4096,
+            "data": "pre"
+        },
+        {
+            "type": "check_poll",
+            "side": "replica",
+            "events": [
+                "POLLOUT"
+            ]
+        },
+        {
+            "type": "set_packet_mode",
+            "enabled": true
+        },
+        {
+            "type": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IXON"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ISIG",
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOCTL",
+                    "IEXTEN",
+                    "EXTPROC"
+                ]
+            }
+        },
+        {
+            "type": "check_poll",
+            "side": "replica",
+            "events": [
+                "POLLIN",
+                "POLLOUT"
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "pre"
+        },
+        {
+            "type": "check_poll",
+            "side": "main",
+            "events": [
+                "POLLIN",
+                "POLLOUT",
+                "POLLPRI"
+            ]
+        },
+        {
+            "type": "read_once_from_master",
+            "size": 4096,
+            "data": "@"
+        },
+        {
+            "type": "write_to_master",
+            "data": "hello\u007f\u0003"
+        },
+        {
+            "type": "read_once_from_master_blocked",
+            "size": 4096
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "hello\u007f\u0003"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN",
+            "EXTPROC"
+        ]
+    }
+}

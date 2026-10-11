@@ -39,3 +39,61 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl::endpoints::{Proxy, create_proxy_and_stream};
+    use fidl_fuchsia_process_lifecycle::LifecycleMarker;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[fuchsia::test]
+    async fn on_stop_request_invokes_callback() {
+        let (proxy, stream) = create_proxy_and_stream::<LifecycleMarker>();
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        let stop_fut = on_stop_request(stream, move || async move {
+            called_clone.store(true, Ordering::Relaxed);
+        });
+
+        proxy.stop().unwrap();
+        stop_fut.await;
+
+        assert!(called.load(Ordering::Relaxed));
+    }
+
+    #[fuchsia::test]
+    async fn on_stop_request_channel_closed() {
+        let (proxy, stream) = create_proxy_and_stream::<LifecycleMarker>();
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        let stop_fut = on_stop_request(stream, move || async move {
+            called_clone.store(true, Ordering::Relaxed);
+        });
+
+        drop(proxy);
+        stop_fut.await;
+
+        assert!(!called.load(Ordering::Relaxed));
+    }
+
+    #[fuchsia::test]
+    async fn on_stop_request_stream_error() {
+        let (proxy, stream) = create_proxy_and_stream::<LifecycleMarker>();
+        let called = Arc::new(AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+
+        // Send invalid FIDL message
+        proxy.as_channel().write(&[0xff; 16], &mut []).expect("write invalid bytes");
+
+        on_stop_request(stream, move || async move {
+            called_clone.store(true, Ordering::Relaxed);
+        })
+        .await;
+
+        assert!(!called.load(Ordering::Relaxed));
+    }
+}

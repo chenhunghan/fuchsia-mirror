@@ -168,6 +168,13 @@ constexpr char kFeedbackConfigSchema[] = R"({
     "snapshot_persistence_max_tmp_size_mib": {
       "type": "number"
     },
+    "disk_endurance": {
+      "type": "string",
+      "enum": [
+        "high",
+        "low"
+      ]
+    },
     "spontaneous_reboot_reason": {
       "type": "string",
       "enum": [
@@ -209,6 +216,7 @@ constexpr char kFeedbackConfigSchema[] = R"({
     "report_persistence_max_tmp_size_kib",
     "snapshot_persistence_max_cache_size_mib",
     "snapshot_persistence_max_tmp_size_mib",
+    "disk_endurance",
     "spontaneous_reboot_reason",
     "crash_report_upload_policy",
     "daily_per_product_crash_report_quota",
@@ -245,6 +253,15 @@ std::optional<FeedbackConfig> ParseFeedbackConfig(const rapidjson::Document& jso
     config.snapshot_persistence_max_tmp_size = StorageSize::Megabytes(max_tmp_size_mib);
   } else {
     config.snapshot_persistence_max_tmp_size = std::nullopt;
+  }
+
+  if (const std::string disk_endurance = json[kDiskEnduranceKey].GetString();
+      disk_endurance == "high") {
+    config.disk_endurance = DiskEndurance::kHigh;
+  } else if (disk_endurance == "low") {
+    config.disk_endurance = DiskEndurance::kLow;
+  } else {
+    FX_LOGS(FATAL) << "Disk endurance '" << disk_endurance << "' not permitted by schema";
   }
 
   if (const std::string spontaneous_reboot_reason = json["spontaneous_reboot_reason"].GetString();
@@ -326,6 +343,7 @@ void ExposeConfig(inspect::Node& inspect_root, const FeedbackConfig& feedback_co
         node.RecordString(kCrashReportUploadPolicyKey,
                           ToString(feedback_config.build_type_config.crash_report_upload_policy));
         node.RecordString(kDailyPerProductCrashReportQuotaKey, crash_report_quota);
+        node.RecordString(kDiskEnduranceKey, ToString(feedback_config.disk_endurance));
         node.RecordBool(kEnableDataRedactionKey,
                         feedback_config.build_type_config.enable_data_redaction);
         node.RecordBool(kEnableHourlySnapshotsKey,
@@ -350,6 +368,15 @@ std::string ToString(const CrashReportUploadPolicy upload_policy) {
       return "ENABLED";
     case CrashReportUploadPolicy::kReadFromPrivacySettings:
       return "READ_FROM_PRIVACY_SETTINGS";
+  }
+}
+
+std::string ToString(const DiskEndurance disk_endurance) {
+  switch (disk_endurance) {
+    case DiskEndurance::kHigh:
+      return "HIGH";
+    case DiskEndurance::kLow:
+      return "LOW";
   }
 }
 

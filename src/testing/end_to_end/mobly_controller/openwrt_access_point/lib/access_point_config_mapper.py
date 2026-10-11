@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from antlion.controllers.ap_lib.hostapd_constants import BandType
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_constants import BandType
+from legacy_access_point.ap_lib.hostapd_security import (
     SecurityMode as HostapdSecurityMode,
 )
 from openwrt_access_point.lib.access_point_config import (
@@ -70,15 +70,18 @@ class AccessPointConfigMapper:
     @staticmethod
     def to_hostapd_n_cap(cap: str) -> object:
         """Maps a generic capability string to its hostapd_constants equivalent."""
-        from antlion.controllers.ap_lib import hostapd_constants
+        from legacy_access_point.ap_lib import hostapd_constants
         from openwrt_access_point.lib import capabilities
 
         mapping = {
             capabilities.N_CAPABILITY_LDPC: hostapd_constants.N_CAPABILITY_LDPC,
+            capabilities.N_CAPABILITY_GREENFIELD: hostapd_constants.N_CAPABILITY_GREENFIELD,
             capabilities.N_CAPABILITY_SHORT_GI_20: hostapd_constants.N_CAPABILITY_SGI20,
             capabilities.N_CAPABILITY_SHORT_GI_40: hostapd_constants.N_CAPABILITY_SGI40,
             capabilities.N_CAPABILITY_TX_STBC: hostapd_constants.N_CAPABILITY_TX_STBC,
             capabilities.N_CAPABILITY_RX_STBC1: hostapd_constants.N_CAPABILITY_RX_STBC1,
+            capabilities.N_CAPABILITY_RX_STBC12: hostapd_constants.N_CAPABILITY_RX_STBC12,
+            capabilities.N_CAPABILITY_RX_STBC123: hostapd_constants.N_CAPABILITY_RX_STBC123,
             capabilities.N_CAPABILITY_MAX_AMSDU_7935: hostapd_constants.N_CAPABILITY_MAX_AMSDU_7935,
             capabilities.N_CAPABILITY_HT40_PLUS: hostapd_constants.N_CAPABILITY_HT40_PLUS,
             capabilities.N_CAPABILITY_HT20: hostapd_constants.N_CAPABILITY_HT20,
@@ -91,7 +94,7 @@ class AccessPointConfigMapper:
     @staticmethod
     def to_hostapd_ac_cap(cap: str) -> object:
         """Maps a generic capability string to its hostapd_constants equivalent."""
-        from antlion.controllers.ap_lib import hostapd_constants
+        from legacy_access_point.ap_lib import hostapd_constants
         from openwrt_access_point.lib import capabilities
 
         mapping = {
@@ -135,6 +138,14 @@ class AccessPointConfigMapper:
         return mapping.get(cap, cap)
 
     @staticmethod
+    def _format_hostapd_value(v: object) -> object:
+        if isinstance(v, list):
+            return " ".join(str(x) for x in v)
+        if isinstance(v, bool):
+            return int(v)
+        return v
+
+    @staticmethod
     def to_legacy_params(radio_config: RadioConfig) -> dict[str, object]:
         """Maps RadioConfig to legacy hostapd options for legacy AP support."""
         mapping = {
@@ -154,22 +165,24 @@ class AccessPointConfigMapper:
                 hostapd_options[hostapd_key] = " ".join(
                     str(int(x) // 100) for x in v
                 )
-            elif isinstance(v, list):
-                hostapd_options[hostapd_key] = " ".join(str(x) for x in v)
             else:
-                hostapd_options[hostapd_key] = v
+                hostapd_options[
+                    hostapd_key
+                ] = AccessPointConfigMapper._format_hostapd_value(v)
 
         # 3. Map custom_uci_options on first BSS (assuming single BSS for compliance tests)
         if radio_config.bss_settings:
             bss = radio_config.bss_settings[0]
             for k, v in bss.custom_uci_options.items():
                 hostapd_key = mapping.get(k, k)
-                if isinstance(v, list):
-                    hostapd_options[hostapd_key] = " ".join(str(x) for x in v)
-                else:
-                    hostapd_options[hostapd_key] = v
+                hostapd_options[
+                    hostapd_key
+                ] = AccessPointConfigMapper._format_hostapd_value(v)
 
         # 4. Merge with custom_hostapd_options
-        hostapd_options.update(radio_config.custom_hostapd_options)
+        for k, v in radio_config.custom_hostapd_options.items():
+            hostapd_options[k] = AccessPointConfigMapper._format_hostapd_value(
+                v
+            )
 
         return hostapd_options

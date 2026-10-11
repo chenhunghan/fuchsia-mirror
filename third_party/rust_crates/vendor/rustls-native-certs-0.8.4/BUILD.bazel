@@ -42,7 +42,7 @@ rust_library(
         allow_empty = False,
     ),
     aliases = {
-        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.0:rustls_pki_types": "pki_types",
+        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.1:rustls_pki_types": "pki_types",
     },
     compile_data = glob(
         include = ["**"],
@@ -78,7 +78,7 @@ rust_library(
     }),
     version = "0.8.4",
     deps = [
-        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.0:rustls_pki_types",
+        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.1:rustls_pki_types",
     ] + select({
         "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
             "//third_party/rust_crates/vendor/openssl-probe-0.2.1:openssl_probe",  # cfg(all(unix, not(target_os = "macos")))

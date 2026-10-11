@@ -20,7 +20,6 @@
 
                 // TODO(https://fxbug.dev/437167254)
                 "IoctlTest.SIOCSIFADDR_Success",
-                "IoctlTest.EVIOCGNAME_Success",
                 "IoctlTest.SIOCSIFNETMASK_Success",
                 "IoctlTest.SIOCGIFNETMASK_Success",
                 "IoctlTest.SIOCGIFADDR_Success",
@@ -108,9 +107,7 @@
                 // TODO(https://fxbug.dev/437164575): Test needs to be reworked.
                 "InputTest.DevicePropertiesMatchKeyboardProperties",
                 "InputTest.DevicePropertiesMatchTouchProperties",
-                "InputTest.DeviceCanBeRegisteredWithEpoll",
                 "InputTest.DevicePropertiesMatchMouseProperties",
-                "InputTest.GetDeviceName",
                 "InputTest.CurrentStateQueriesSucceed",
 
                 // TODO(https://fxbug.dev/494326733)
@@ -194,12 +191,6 @@
                 // TODO(https://fxbug.dev/436986890): Reliant on a missing TUN / TAP interface.
                 "TunTap/TunTapTest.CreateTunTapDevice/0",
                 "TunTap/TunTapTest.CreateTunTapDevice/1",
-
-                // TODO(https://fxbug.dev/437171876): Machina is both missing the evdev module (event
-                // handler interface), and does not have any default input devices configured. For this
-                // test to pass, we'd need to add the missing module and either configure a default
-                // input device or modify the test to account for a potentially missing.
-                "UdevTest.AddInput",
 
                 // TODO(https://fxbug.dev/436904274): Expectation relies on kernel version >= 5.13.
                 "UffdTest.NoOperationsBeforeInit",

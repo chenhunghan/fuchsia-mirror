@@ -18,6 +18,7 @@
 #include <fbl/canary.h>
 #include <fbl/intrusive_double_list.h>
 #include <fbl/intrusive_wavl_tree.h>
+#include <fbl/recycler.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
 #include <ffl/saturating_arithmetic.h>
@@ -98,14 +99,15 @@ class MultiPageRequest;
 // DEAD, then the VmAddressRegion is invalid and has no meaning.
 //
 // All VmAddressRegion and VmMapping state is protected by the aspace lock.
-class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping> {
+class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping>,
+                                 public fbl::Recyclable<VmAddressRegionOrMapping> {
  public:
   // If a VMO-mapping, unmap all pages and remove dependency on vm object it has a ref to.
   // Otherwise recursively destroy child VMARs and transition to the DEAD state.
   //
   // Returns ZX_OK on success, ZX_ERR_BAD_STATE if already dead, and other
   // values on error (typically unmap failure).
-  virtual zx_status_t Destroy();
+  zx_status_t Destroy();
 
   // accessors
   vaddr_t base() const { return base_; }
@@ -127,7 +129,7 @@ class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping
       fbl::RefPtr<VmAddressRegionOrMapping>* region_or_map);
 
   // Dump debug info
-  virtual void DumpLocked(uint depth, bool verbose) const TA_REQ(lock()) = 0;
+  void DumpLocked(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
 
   // Expose our backing lock for annotation purposes.
   Lock<CriticalMutex>* lock() const TA_RET_CAP(aspace_->lock()) { return aspace_->lock(); }
@@ -161,6 +163,9 @@ class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping
   }
 
  private:
+  friend class fbl::Recyclable<VmAddressRegionOrMapping>;
+  void fbl_recycle();
+
   fbl::Canary<fbl::magic("VMRM")> canary_;
   const bool is_mapping_;
 
@@ -170,15 +175,15 @@ class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping
   template <VmAddressRegionEnumeratorType, typename>
   friend class VmAddressRegionEnumerator;
 
-  // destructor, should only be invoked from RefPtr
-  virtual ~VmAddressRegionOrMapping();
+  // destructor, should only be invoked from fbl_recycle
+  ~VmAddressRegionOrMapping();
   friend fbl::RefPtr<VmAddressRegionOrMapping>;
 
   enum class LifeCycleState : uint8_t {
-    // Initial state: if NOT_READY, then do not invoke Destroy() in the
-    // destructor
+    // Initial state: not yet in the address space layout, so no Destroy() is needed
     NOT_READY,
-    // Usual state: information is representative of the address space layout
+    // Usual state: information is representative of the address space layout. Must be destroyed
+    // before the last reference is dropped.
     ALIVE,
     // Object is invalid
     DEAD
@@ -213,7 +218,7 @@ class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping
     return (needed & actual) == needed;
   }
 
-  virtual zx_status_t DestroyLocked() TA_REQ(lock()) TA_REQ(region_lock()) = 0;
+  zx_status_t DestroyLocked() TA_REQ(lock()) TA_REQ(region_lock());
 
   // Performs any actions necessary to apply a high memory priority over the given range.
   // This method is always safe to call as it will internally check the memory priority status and
@@ -228,12 +233,12 @@ class VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping
   // committed.
   // This method has no return value as it is entirely best effort and no part of its operation is
   // needed for correctness.
-  virtual void CommitHighMemoryPriority() TA_EXCL(lock()) = 0;
+  void CommitHighMemoryPriority() TA_EXCL(lock());
 
   // Transition from NOT_READY to READY, and add references to self to related
   // structures.
   // On error no state is changed and no references are added.
-  virtual zx_status_t Activate() TA_REQ(region_lock()) TA_REQ(lock()) = 0;
+  zx_status_t Activate() TA_REQ(region_lock()) TA_REQ(lock());
 
   // current state of the VMAR.  If LifeCycleState::DEAD, then all other
   // fields are invalid.
@@ -710,8 +715,6 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   const char* name() const { return name_; }
   bool has_parent() const;
 
-  void DumpLocked(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock()) override;
-
   // Recursively traverses the regions for a given virtual address and returns a raw pointer to a
   // mapping if one is found. The returned pointer is only valid as long as the aspace lock remains
   // held.
@@ -749,8 +752,7 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   // constructor for use in creating the kernel aspace singleton
   explicit VmAddressRegion(VmAspace& kernel_aspace);
 
-  void CommitHighMemoryPriority() override TA_EXCL(lock());
-
+  friend class VmAddressRegionOrMapping;
   friend class VmMapping;
   template <VmAddressRegionEnumeratorType, typename>
   friend class VmAddressRegionEnumerator;
@@ -760,9 +762,10 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
 
   fbl::Canary<fbl::magic("VMAR")> canary_;
 
-  zx_status_t DestroyLocked() TA_REQ(lock()) TA_REQ(region_lock()) override;
-
-  zx_status_t Activate() TA_REQ(region_lock()) TA_REQ(lock()) override;
+  void DumpLockedImpl(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
+  void CommitHighMemoryPriorityImpl() TA_EXCL(lock());
+  zx_status_t DestroyLockedImpl() TA_REQ(lock()) TA_REQ(region_lock());
+  zx_status_t ActivateImpl() TA_REQ(region_lock()) TA_REQ(lock());
 
   // Helpers to share code between CreateSubVmar and CreateVmMapping
   zx_status_t CreateSubVmarInternal(size_t offset, size_t size, uint8_t align_pow2,
@@ -889,8 +892,6 @@ class VmMapping final : public VmAddressRegionOrMapping {
     Guard<CriticalMutex> guard{lock()};
     return ProtectLocked(base, size, new_arch_mmu_flags);
   }
-
-  void DumpLocked(uint depth, bool verbose) const TA_REQ(lock()) override;
 
   // Page fault in an address within the mapping. The requested address must be paged aligned. If
   // |additional_pages| is non-zero, then up to that many additional pages may be resolved using the
@@ -1055,7 +1056,7 @@ class VmMapping final : public VmAddressRegionOrMapping {
   zx::result<fbl::RefPtr<VmMapping>> ForceWritable();
 
  protected:
-  ~VmMapping() override;
+  ~VmMapping();
   friend fbl::RefPtr<VmMapping>;
   friend void ::cpp_vm_mapping_free(VmMapping*);
 
@@ -1069,6 +1070,7 @@ class VmMapping final : public VmAddressRegionOrMapping {
   // allow VmAddressRegion to manipulate VmMapping internals for construction
   // and bookkeeping
   friend class VmAddressRegion;
+  friend class VmAddressRegionOrMapping;
 
   // private constructors, use VmAddressRegion::Create...() instead
   VmMapping(VmAddressRegion& parent, bool private_clone, vaddr_t base, size_t size,
@@ -1079,7 +1081,8 @@ class VmMapping final : public VmAddressRegionOrMapping {
             arch_mmu_flags_t first_mmu_flags, btree::BTree<vaddr_t, arch_mmu_flags_t>&& ranges,
             Mergeable mergeable);
 
-  zx_status_t DestroyLocked() TA_REQ(region_lock()) TA_REQ(lock()) override;
+  void DumpLockedImpl(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
+  zx_status_t DestroyLockedImpl() TA_REQ(region_lock()) TA_REQ(lock());
 
   // Internal fully locked version of Destroy. Has controls to both skip the arch aspace unmapping
   // as well as removal from the parent subregions list. These controls facilitate the fine grained
@@ -1176,9 +1179,9 @@ class VmMapping final : public VmAddressRegionOrMapping {
   template <bool SplitOnUnmap = false>
   void SetMemoryPriorityHighAlreadyPositiveLockedObject() TA_REQ(lock()) TA_REQ(object_->lock());
 
-  void CommitHighMemoryPriority() override TA_EXCL(lock());
+  void CommitHighMemoryPriorityImpl() TA_EXCL(lock());
 
-  zx_status_t Activate() TA_REQ(region_lock()) TA_REQ(lock()) override;
+  zx_status_t ActivateImpl() TA_REQ(region_lock()) TA_REQ(lock());
 
   // Fully locked version of Activate that can additionally control whether the region is installed
   // into the parent subregion list and vmo mapping list or not. This control exists to facilitate

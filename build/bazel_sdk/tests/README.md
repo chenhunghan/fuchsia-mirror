@@ -61,10 +61,10 @@ to run an individual test).
 Because Bazel caches test results, this can still be moderately fast
 during development.
 
-## Custom invocation with `scripts/bazel_test.py`
+## Custom invocation with `scripts/run_tests.py`
 
 Another way is to prepare your Fuchsia build, then invoking
-`scripts/bazel_test.py` manually. You can use `--test_target=<label>`
+`scripts/run_tests.py` manually. You can use `--test_target=<label>`
 to select an individual test target (instead of all of them), or
 even pass extra arguments using `-- <extra_args>`.
 
@@ -80,12 +80,12 @@ fx build //sdk:final_fuchsia_idk.exported
 LOCAL_IDK="$(fx get-build-dir)/sdk/exported/fuchsia_idk"
 
 # Run the full test suite
-scripts/bazel_test.py \
+scripts/run_tests.py \
     --fuchsia_idk_directory="${LOCAL_IDK}" \
     --target_cpu=x64
 
 # Run a subset of test targets, and change test output.
-scripts/bazel_test.py \
+scripts/run_tests.py \
     --fuchsia_idk_directory="${LOCAL_IDK}" \
     --target_cpu=x64 \
     --test_target=:build_only_tests -- --test_output=streamed
@@ -100,7 +100,7 @@ fx build //sdk:final_fuchsia_sdk
 LOCAL_SDK="$(fx get-build-dir)/obj/sdk/final_fuchsia_sdk"
 
 # Run the full test suite
-scripts/bazel_test.py --fuchsia_sdk_directory="${LOCAL_SDK}"
+scripts/run_tests.py --fuchsia_sdk_directory="${LOCAL_SDK}"
 ```
 
 ### Running against the in-tree `@fuchsia_sdk` repository:
@@ -109,62 +109,15 @@ Note that this is only needed by Fuchsia developers modifying the Bazel rules
 or the content of the in-tree IDK/SDK.
 
 ```
-# Prepare the @fuchsia_sdk repository. Only needed once per `jiri update`
-fx build bazel_workspace
-fx bazel --query --config=quiet @fuchsia_sdk//:BUILD.bazel
+# Prepare the @fuchsia_sdk and @rules_fuchsia repositories.
+fx build //build/bazel/bazel_sdk:in_tree_fuchsia_sdk //:rules_fuchsia.export
+fx bazel query --config=quiet @fuchsia_sdk//:BUILD.bazel
 
 # Run the full test suite
-scripts/bazel_test.py --fuchsia-in-tree-sdk
+scripts/run_tests.py --fuchsia-in-tree-sdk
 
 # Run a subset of test targets, and change test output.
-scripts/bazel_test.py \
+scripts/run_tests.py \
     --fuchsia-in-tree-sdk \
     --test_target=:build_only_tests -- --test_output=streamed
-```
-
-## Direct bazel invocation
-
-Finally, it is possible to directly invoke `bazel test` in this directory
-after some necessary preparation.
-
-[TODO](https://fxbug.dev/383498090): Fix Bazel 8.0 invocation.
-
-### Running against a local IDK:
-
-This requires setting the `LOCAL_FUCHSIA_IDK_DIRECTORY` environment
-variable when calling Bazel. For example, when using the Fuchsia IDK:
-
-```
-fx build //sdk:final_fuchsia_idk.exported
-IDK="$(fx get-build-dir)/sdk/exported/final_fuchsia_idk
-LOCAL_FUCHSIA_IDK_DIRECTORY="${IDK}" bazel test --config=fuchsia_x64 :tests
-```
-
-### Running against the `@fuchsia_sdk` repository:
-
-This is only mentioned here for completeness, as this is only useful for
-Fuchsia build developers when debugging changes to the in-tree Bazel
-workspace itself, even though using `scripts/bazel_test.py` would be
-simpler to do the same.
-
-This requires overriding two repositories, for reasons explained
-in `//build/bazel/bazel_sdk/README.md`:
-
-```sh
-# Preparation steps is slightly different
-cd /work/fuchsia
-fx set minimal.x64
-fx build bazel_workspace
-fx bazel --query --config=quiet @fuchsia_sdk//:BUILD.bazel
-
-OUTPUT_BASE="$(fx get-build-dir)/gen/build/bazel/output_base"
-FUCHSIA_SDK_REPO="${OUTPUT_BASE}/external/fuchsia_sdk"
-FUCHSIA_IN_TREE_IDK_REPO="${OUTPUT_BASE}/external/fuchsia_in_tree_idk"
-
-# Run the test suite
-bazel test \
-    --config=fuchsia_x64 \
-    --override_repository=fuchsia_sdk="${FUCHSIA_SDK_REPO}" \
-    --override_repository=fuchsia_in_tree_idk="${FUCHSIA_IN_TREE_IDK_REPO}" \
-    :tests
 ```

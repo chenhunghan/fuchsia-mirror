@@ -150,6 +150,10 @@ open protocol WifiChip {
 };
 
 open protocol WifiStaIface {
+    /// Register a callback to be notified of future STA iface events.
+    flexible RegisterEventCallback(resource table {
+        1: callback client_end:WifiStaIfaceEventCallback;
+    });
     /// Get the name of this iface.
     flexible GetName() -> (table {
         1: iface_name string:16;
@@ -190,6 +194,31 @@ open protocol WifiStaIface {
     flexible GetLinkLayerStats() -> (table {
         1: stats LinkLayerStats;
     }) error zx.Status;
+
+    /// Fetches the feature set supported by this interface.
+    flexible GetFeatureSet() -> (table {
+        1: rssi_monitor_supported bool;
+    }) error zx.Status;
+
+    // RSSI monitoring extensions
+    /// Starts RSSI monitoring on the currently connected access point.
+    flexible StartRssiMonitoring(table {
+        1: cmd_id int32;
+        2: max_rssi_dbm int8;
+        3: min_rssi_dbm int8;
+    }) -> () error zx.Status;
+    /// Stops RSSI monitoring on the currently connected access point.
+    flexible StopRssiMonitoring(table {
+        1: cmd_id int32;
+    }) -> () error zx.Status;
+};
+
+open protocol WifiStaIfaceEventCallback {
+    flexible OnRssiThresholdBreached(table {
+        1: cmd_id int32;
+        2: curr_bssid fuchsia.wlan.ieee80211.MacAddr;
+        3: curr_rssi_dbm int8;
+    });
 };
 
 type LinkLayerStats = table {

@@ -23,11 +23,11 @@ def _readme_fuchsia_required_fields(ctx):
     Args:
       ctx: A ctx instance.
     """
-    exe = compiled_tool_path(ctx, "readme_fuchsia")
-
     files = _filter_readme_fuchsia_files(ctx, ctx.scm.affected_files(glob = "README.fuchsia"))
     if not files:
         return
+
+    exe = compiled_tool_path(ctx, "readme_fuchsia")
 
     procs = []
     for f in files:

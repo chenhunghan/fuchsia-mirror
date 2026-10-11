@@ -220,7 +220,7 @@ fn resolve_global_irq(irq: u32) -> &'static IoApic {
         io_apic
     } else {
         // Treat this as fatal, since dealing with an unmapped IRQ is a bug.
-        panic!("Could not resolve global IRQ: {}\n", irq);
+        panic!("Could not resolve global IRQ: {}", irq);
     }
 }
 

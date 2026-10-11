@@ -457,6 +457,7 @@ impl KgslFile {
         params.flags = gpuobj.flags;
         params.va_len = gpuobj.size;
         params.va_addr = 0;
+        drop(gpuobjs);
 
         current_task.write_multi_arch_object(params_ref, params)?;
         Ok(SUCCESS)
@@ -553,8 +554,9 @@ impl KgslFile {
         let params_ref = maur::kgsl_gpu_command::new(current_task, arg);
         let params = current_task.read_multi_arch_object(params_ref)?;
         kgsl_debug!("kgsl_gpu_command {:?}", params);
-        let contexts = self.contexts.lock();
-        let context = contexts.get(&params.context_id).ok_or_else(|| errno!(EINVAL))?;
+        if !self.contexts.lock().contains_key(&params.context_id) {
+            return error!(EINVAL);
+        }
 
         let cmds = current_task.read_objects_to_vec::<kgsl_command_object>(
             UserRef::from(UserAddress::from(params.cmdlist)),
@@ -585,38 +587,46 @@ impl KgslFile {
             log_warn!("kgsl: unsupported flags {:?}", flags);
         }
 
-        let gpuobjs = self.gpuobjs.lock();
+        let (magma_resources, magma_command_buffers) = {
+            let gpuobjs = self.gpuobjs.lock();
 
-        let to_exec_resources = |objects: &[kgsl_command_object],
-                                 kind: &str|
-         -> Result<Vec<kgsl_libmagma::ExecResource>, Errno> {
-            // The caller does not always set the id field of the command object, and the gpuaddr
-            // may not be the start of the buffer, so we have to search for the object manually.
-            // If this turns out to be a bottleneck, we may want to try an initial base address
-            // search before falling back to a full search and/or cache the results of the search.
-            // TODO(b/393160668): profile and optimize as necessary
-            objects
-                .iter()
-                .map(|obj| {
-                    let gpuobj = gpuobjs
-                        .values()
-                        .find(|o| obj.gpuaddr >= o.gpuaddr && obj.gpuaddr < o.gpuaddr + o.size)
-                        .ok_or_else(|| {
-                            log_error!("kgsl: {} gpuaddr {:#x} not found", kind, obj.gpuaddr);
-                            errno!(EINVAL)
-                        })?;
-                    Ok(kgsl_libmagma::ExecResource {
-                        buffer: gpuobj.buffer.clone(),
-                        offset: (obj.gpuaddr - gpuobj.gpuaddr) + obj.offset,
-                        length: obj.size,
-                    })
-                })
-                .collect()
+            let to_exec_resources =
+                |objects: &[kgsl_command_object],
+                 kind: &str|
+                 -> Result<Vec<kgsl_libmagma::ExecResource>, Errno> {
+                    // The caller does not always set the id of the command object, and the gpuaddr
+                    // may not be the start of the buffer, so search for the object manually.
+                    // TODO(b/393160668): profile and optimize as necessary
+                    objects
+                        .iter()
+                        .map(|obj| {
+                            let gpuobj = gpuobjs
+                                .values()
+                                .find(|o| {
+                                    obj.gpuaddr >= o.gpuaddr && obj.gpuaddr < o.gpuaddr + o.size
+                                })
+                                .ok_or_else(|| {
+                                    log_error!(
+                                        "kgsl: {} gpuaddr {:#x} not found",
+                                        kind,
+                                        obj.gpuaddr
+                                    );
+                                    errno!(EINVAL)
+                                })?;
+                            Ok(kgsl_libmagma::ExecResource {
+                                buffer: gpuobj.buffer.clone(),
+                                offset: (obj.gpuaddr - gpuobj.gpuaddr) + obj.offset,
+                                length: obj.size,
+                            })
+                        })
+                        .collect()
+                };
+
+            (to_exec_resources(&objs, "resource")?, to_exec_resources(&cmds, "command")?)
         };
 
-        let magma_resources = to_exec_resources(&objs, "resource")?;
-        let magma_command_buffers = to_exec_resources(&cmds, "command")?;
-
+        let contexts = self.contexts.lock();
+        let context = contexts.get(&params.context_id).ok_or_else(|| errno!(EINVAL))?;
         context
             .execute_command(magma_command_buffers, magma_resources, vec![], vec![], 0)
             .map_err(|_| errno!(EINVAL))?;
@@ -689,6 +699,7 @@ impl FileOps for KgslFile {
         let handle = gpuobj.buffer.get_handle().map_err(|_| errno!(ENXIO))?;
         let vmo = zx::Vmo::from(handle);
         let memory = Arc::new(MemoryObject::from(vmo).with_zx_name(b"starnix:kgsl"));
+        drop(gpuobjs);
         // The memory manager persists the memory object until the client exits or calls munmap.
         current_task.mm()?.map_memory(
             addr,

@@ -1,6 +1,7 @@
 Name: tenacity
 URL: https://github.com/jd/tenacity
-Revision: de409a00c18b1d26a030292f7820ee26cdad2aa1
+Version: 9.1.4
+Revision: d4e868d6b8368c00b5a1fad54de36c2c8c3a0fb3
 License: Apache 2.0
 License File: src/LICENSE
 Description: Tenacity is an Apache 2.0 licensed general-purpose retrying library,

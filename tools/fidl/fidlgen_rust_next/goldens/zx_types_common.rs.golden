@@ -2169,7 +2169,7 @@ pub mod natural {
         }
     }
 
-    pub type StatusAlias = ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>;
+    pub type StatusAlias = ::fidl_next::fuchsia::zx::Status;
 
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[repr(i32)]
@@ -2349,7 +2349,7 @@ pub mod natural {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[repr(C)]
     pub struct StatusProtocolARequest {
-        pub arg: ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>,
+        pub arg: ::fidl_next::fuchsia::zx::Status,
     }
 
     unsafe impl<___E> ::fidl_next::Encode<crate::wire::StatusProtocolARequest, ___E>
@@ -2362,13 +2362,12 @@ pub mod natural {
             crate::wire::StatusProtocolARequest,
         > = unsafe {
             ::fidl_next::CopyOptimization::enable_if(
-            true
-
-                && <
-                    ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status> as ::fidl_next::Encode<::fidl_next::wire::fuchsia::StatusResult, ___E>
-                >::COPY_OPTIMIZATION.is_enabled()
-
-        )
+                true && <::fidl_next::fuchsia::zx::Status as ::fidl_next::Encode<
+                    ::fidl_next::wire::fuchsia::Status,
+                    ___E,
+                >>::COPY_OPTIMIZATION
+                    .is_enabled(),
+            )
         };
 
         #[inline]
@@ -2484,13 +2483,11 @@ pub mod natural {
             Self,
         > = unsafe {
             ::fidl_next::CopyOptimization::enable_if(
-            true
-
-                && <
-                    ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status> as ::fidl_next::FromWire<::fidl_next::wire::fuchsia::StatusResult>
-                >::COPY_OPTIMIZATION.is_enabled()
-
-        )
+                true && <::fidl_next::fuchsia::zx::Status as ::fidl_next::FromWire<
+                    ::fidl_next::wire::fuchsia::Status,
+                >>::COPY_OPTIMIZATION
+                    .is_enabled(),
+            )
         };
 
         #[inline]
@@ -2509,7 +2506,7 @@ pub mod natural {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[repr(C)]
     pub struct StatusProtocolAResponse {
-        pub status: ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>,
+        pub status: ::fidl_next::fuchsia::zx::Status,
     }
 
     unsafe impl<___E> ::fidl_next::Encode<crate::wire::StatusProtocolAResponse, ___E>
@@ -2522,13 +2519,12 @@ pub mod natural {
             crate::wire::StatusProtocolAResponse,
         > = unsafe {
             ::fidl_next::CopyOptimization::enable_if(
-            true
-
-                && <
-                    ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status> as ::fidl_next::Encode<::fidl_next::wire::fuchsia::StatusResult, ___E>
-                >::COPY_OPTIMIZATION.is_enabled()
-
-        )
+                true && <::fidl_next::fuchsia::zx::Status as ::fidl_next::Encode<
+                    ::fidl_next::wire::fuchsia::Status,
+                    ___E,
+                >>::COPY_OPTIMIZATION
+                    .is_enabled(),
+            )
         };
 
         #[inline]
@@ -2645,13 +2641,11 @@ pub mod natural {
             Self,
         > = unsafe {
             ::fidl_next::CopyOptimization::enable_if(
-            true
-
-                && <
-                    ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status> as ::fidl_next::FromWire<::fidl_next::wire::fuchsia::StatusResult>
-                >::COPY_OPTIMIZATION.is_enabled()
-
-        )
+                true && <::fidl_next::fuchsia::zx::Status as ::fidl_next::FromWire<
+                    ::fidl_next::wire::fuchsia::Status,
+                >>::COPY_OPTIMIZATION
+                    .is_enabled(),
+            )
         };
 
         #[inline]
@@ -2982,12 +2976,11 @@ pub mod natural {
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct StatusStruct {
-        pub status: ::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>,
+        pub status: ::fidl_next::fuchsia::zx::Status,
 
-        pub status_array: [::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>; 10],
+        pub status_array: [::fidl_next::fuchsia::zx::Status; 10],
 
-        pub status_vector:
-            ::std::vec::Vec<::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>>,
+        pub status_vector: ::std::vec::Vec<::fidl_next::fuchsia::zx::Status>,
     }
 
     unsafe impl<___E> ::fidl_next::Encode<crate::wire::StatusStruct<'static>, ___E> for StatusStruct
@@ -3348,16 +3341,12 @@ pub mod natural {
 
     #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct StatusTable {
-        pub status:
-            ::core::option::Option<::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>>,
+        pub status: ::core::option::Option<::fidl_next::fuchsia::zx::Status>,
 
-        pub status_array: ::core::option::Option<
-            [::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>; 10],
-        >,
+        pub status_array: ::core::option::Option<[::fidl_next::fuchsia::zx::Status; 10]>,
 
-        pub status_vector: ::core::option::Option<
-            ::std::vec::Vec<::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>>,
-        >,
+        pub status_vector:
+            ::core::option::Option<::std::vec::Vec<::fidl_next::fuchsia::zx::Status>>,
     }
 
     impl StatusTable {
@@ -3407,7 +3396,7 @@ pub mod natural {
                             ::fidl_next::wire::Envelope::encode_value::<
                                 ::fidl_next::wire::Vector<
                                     'static,
-                                    ::fidl_next::wire::fuchsia::StatusResult,
+                                    ::fidl_next::wire::fuchsia::Status,
                                 >,
                                 ___E,
                             >(
@@ -3421,7 +3410,7 @@ pub mod natural {
                     2 => {
                         if let Some(value) = self.status_array.take() {
                             ::fidl_next::wire::Envelope::encode_value::<
-                                [::fidl_next::wire::fuchsia::StatusResult; 10],
+                                [::fidl_next::wire::fuchsia::Status; 10],
                                 ___E,
                             >(
                                 value, preallocated.encoder, &mut out, ()
@@ -3434,7 +3423,7 @@ pub mod natural {
                     1 => {
                         if let Some(value) = self.status.take() {
                             ::fidl_next::wire::Envelope::encode_value::<
-                                ::fidl_next::wire::fuchsia::StatusResult,
+                                ::fidl_next::wire::fuchsia::Status,
                                 ___E,
                             >(
                                 value, preallocated.encoder, &mut out, ()
@@ -3487,7 +3476,7 @@ pub mod natural {
                             ::fidl_next::wire::Envelope::encode_value::<
                                 ::fidl_next::wire::Vector<
                                     'static,
-                                    ::fidl_next::wire::fuchsia::StatusResult,
+                                    ::fidl_next::wire::fuchsia::Status,
                                 >,
                                 ___E,
                             >(
@@ -3501,7 +3490,7 @@ pub mod natural {
                     2 => {
                         if let Some(value) = &self.status_array {
                             ::fidl_next::wire::Envelope::encode_value::<
-                                [::fidl_next::wire::fuchsia::StatusResult; 10],
+                                [::fidl_next::wire::fuchsia::Status; 10],
                                 ___E,
                             >(
                                 value, preallocated.encoder, &mut out, ()
@@ -3514,7 +3503,7 @@ pub mod natural {
                     1 => {
                         if let Some(value) = &self.status {
                             ::fidl_next::wire::Envelope::encode_value::<
-                                ::fidl_next::wire::fuchsia::StatusResult,
+                                ::fidl_next::wire::fuchsia::Status,
                                 ___E,
                             >(
                                 value, preallocated.encoder, &mut out, ()
@@ -3549,27 +3538,23 @@ pub mod natural {
             let status_vector = wire_.table.get(3);
 
             Self {
-                status: status.map(|envelope| {
-                    ::fidl_next::FromWire::from_wire(unsafe {
-                        envelope.read_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
-                    })
-                }),
 
-                status_array: status_array.map(|envelope| {
-                    ::fidl_next::FromWire::from_wire(unsafe {
-                        envelope.read_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
-                    })
-                }),
 
-                status_vector: status_vector.map(|envelope| {
-                    ::fidl_next::FromWire::from_wire(unsafe {
-                        envelope.read_unchecked::<::fidl_next::wire::Vector<
-                                'de,
-                                ::fidl_next::wire::fuchsia::StatusResult,
-                            >>()
-                    })
-                }),
-            }
+                status: status.map(|envelope| ::fidl_next::FromWire::from_wire(
+                    unsafe { envelope.read_unchecked::<::fidl_next::wire::fuchsia::Status>() }
+                )),
+
+
+                status_array: status_array.map(|envelope| ::fidl_next::FromWire::from_wire(
+                    unsafe { envelope.read_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>() }
+                )),
+
+
+                status_vector: status_vector.map(|envelope| ::fidl_next::FromWire::from_wire(
+                    unsafe { envelope.read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>() }
+                )),
+
+        }
         }
     }
 
@@ -3577,27 +3562,26 @@ pub mod natural {
         #[inline]
         fn from_wire_ref(wire: &crate::wire::StatusTable<'de>) -> Self {
             Self {
-                status: wire.table.get(1).map(|envelope| {
-                    ::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                        envelope.deref_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
-                    })
-                }),
 
-                status_array: wire.table.get(2).map(|envelope| {
-                    ::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                        envelope.deref_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
-                    })
-                }),
 
-                status_vector: wire.table.get(3).map(|envelope| {
-                    ::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                        envelope.deref_unchecked::<::fidl_next::wire::Vector<
-                                'de,
-                                ::fidl_next::wire::fuchsia::StatusResult,
-                            >>()
-                    })
-                }),
-            }
+                status: wire.table.get(1)
+                    .map(|envelope| ::fidl_next::FromWireRef::from_wire_ref(
+                        unsafe { envelope.deref_unchecked::<::fidl_next::wire::fuchsia::Status>() }
+                    )),
+
+
+                status_array: wire.table.get(2)
+                    .map(|envelope| ::fidl_next::FromWireRef::from_wire_ref(
+                        unsafe { envelope.deref_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>() }
+                    )),
+
+
+                status_vector: wire.table.get(3)
+                    .map(|envelope| ::fidl_next::FromWireRef::from_wire_ref(
+                        unsafe { envelope.deref_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>() }
+                    )),
+
+        }
         }
     }
 
@@ -3843,11 +3827,11 @@ pub mod natural {
 
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum StatusUnion {
-        Status(::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>),
+        Status(::fidl_next::fuchsia::zx::Status),
 
-        StatusArray([::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>; 10]),
+        StatusArray([::fidl_next::fuchsia::zx::Status; 10]),
 
-        StatusVector(::std::vec::Vec<::core::result::Result<(), ::fidl_next::fuchsia::zx::Status>>),
+        StatusVector(::std::vec::Vec<::fidl_next::fuchsia::zx::Status>),
 
         UnknownOrdinal_(u64),
     }
@@ -3879,20 +3863,20 @@ pub mod natural {
             match self {
                 Self::Status(value) => ::fidl_next::wire::Union::encode_as::<
                     ___E,
-                    ::fidl_next::wire::fuchsia::StatusResult,
+                    ::fidl_next::wire::fuchsia::Status,
                 >(value, 1, encoder, raw, ())?,
 
                 Self::StatusArray(value) => ::fidl_next::wire::Union::encode_as::<
                     ___E,
-                    [::fidl_next::wire::fuchsia::StatusResult; 10],
+                    [::fidl_next::wire::fuchsia::Status; 10],
                 >(value, 2, encoder, raw, ())?,
 
-                Self::StatusVector(value) => ::fidl_next::wire::Union::encode_as::<
-                    ___E,
-                    ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::StatusResult>,
-                >(
-                    value, 3, encoder, raw, (4294967295, ())
-                )?,
+                Self::StatusVector(value) => {
+                    ::fidl_next::wire::Union::encode_as::<
+                        ___E,
+                        ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::Status>,
+                    >(value, 3, encoder, raw, (4294967295, ()))?
+                }
 
                 Self::UnknownOrdinal_(ordinal) => {
                     return Err(::fidl_next::EncodeError::UnknownUnionOrdinal(ordinal as usize));
@@ -3921,20 +3905,20 @@ pub mod natural {
             match self {
                 StatusUnion::Status(value) => ::fidl_next::wire::Union::encode_as::<
                     ___E,
-                    ::fidl_next::wire::fuchsia::StatusResult,
+                    ::fidl_next::wire::fuchsia::Status,
                 >(value, 1, encoder, raw, ())?,
 
                 StatusUnion::StatusArray(value) => ::fidl_next::wire::Union::encode_as::<
                     ___E,
-                    [::fidl_next::wire::fuchsia::StatusResult; 10],
+                    [::fidl_next::wire::fuchsia::Status; 10],
                 >(value, 2, encoder, raw, ())?,
 
-                StatusUnion::StatusVector(value) => ::fidl_next::wire::Union::encode_as::<
-                    ___E,
-                    ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::StatusResult>,
-                >(
-                    value, 3, encoder, raw, (4294967295, ())
-                )?,
+                StatusUnion::StatusVector(value) => {
+                    ::fidl_next::wire::Union::encode_as::<
+                        ___E,
+                        ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::Status>,
+                    >(value, 3, encoder, raw, (4294967295, ()))?
+                }
 
                 StatusUnion::UnknownOrdinal_(ordinal) => {
                     return Err(::fidl_next::EncodeError::UnknownUnionOrdinal(*ordinal as usize));
@@ -4004,17 +3988,15 @@ pub mod natural {
             let wire = ::core::mem::ManuallyDrop::new(wire);
             match wire.raw.ordinal() {
                 1 => Self::Status(::fidl_next::FromWire::from_wire(unsafe {
-                    wire.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                    wire.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::Status>()
                 })),
 
                 2 => Self::StatusArray(::fidl_next::FromWire::from_wire(unsafe {
-                    wire.raw
-                        .get()
-                        .read_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                    wire.raw.get().read_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                 })),
 
                 3 => Self::StatusVector(::fidl_next::FromWire::from_wire(unsafe {
-                    wire.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>>()
+                    wire.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>()
                 })),
 
                 ord => return Self::UnknownOrdinal_(ord as u64),
@@ -4027,17 +4009,15 @@ pub mod natural {
         fn from_wire_ref(wire: &crate::wire::StatusUnion<'de>) -> Self {
             match wire.raw.ordinal() {
                 1 => Self::Status(::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                    wire.raw.get().deref_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                    wire.raw.get().deref_unchecked::<::fidl_next::wire::fuchsia::Status>()
                 })),
 
                 2 => Self::StatusArray(::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                    wire.raw
-                        .get()
-                        .deref_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                    wire.raw.get().deref_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                 })),
 
                 3 => Self::StatusVector(::fidl_next::FromWireRef::from_wire_ref(unsafe {
-                    wire.raw.get().deref_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>>()
+                    wire.raw.get().deref_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>()
                 })),
 
                 ord => return Self::UnknownOrdinal_(ord as u64),
@@ -5596,7 +5576,7 @@ pub mod wire {
     }
 
     /// The wire type corresponding to [`StatusAlias`](crate::natural::StatusAlias).
-    pub type StatusAlias = ::fidl_next::wire::fuchsia::StatusResult;
+    pub type StatusAlias = ::fidl_next::wire::fuchsia::Status;
 
     /// The wire type corresponding to [`StatusEnum`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5722,7 +5702,7 @@ pub mod wire {
     #[derive(Clone, Debug)]
     #[repr(C)]
     pub struct StatusProtocolARequest {
-        pub arg: ::fidl_next::wire::fuchsia::StatusResult,
+        pub arg: ::fidl_next::wire::fuchsia::Status,
     }
 
     static_assertions::const_assert_eq!(std::mem::size_of::<StatusProtocolARequest>(), 4);
@@ -5789,7 +5769,7 @@ pub mod wire {
     #[derive(Clone, Debug)]
     #[repr(C)]
     pub struct StatusProtocolAResponse {
-        pub status: ::fidl_next::wire::fuchsia::StatusResult,
+        pub status: ::fidl_next::wire::fuchsia::Status,
     }
 
     static_assertions::const_assert_eq!(std::mem::size_of::<StatusProtocolAResponse>(), 4);
@@ -5990,11 +5970,11 @@ pub mod wire {
     #[derive(Debug)]
     #[repr(C)]
     pub struct StatusStruct<'de> {
-        pub status: ::fidl_next::wire::fuchsia::StatusResult,
+        pub status: ::fidl_next::wire::fuchsia::Status,
 
-        pub status_array: [::fidl_next::wire::fuchsia::StatusResult; 10],
+        pub status_array: [::fidl_next::wire::fuchsia::Status; 10],
 
-        pub status_vector: ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
+        pub status_vector: ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
     }
 
     static_assertions::const_assert_eq!(std::mem::size_of::<StatusStruct<'_>>(), 64);
@@ -6201,16 +6181,16 @@ pub mod wire {
     impl<'de> Drop for StatusTable<'de> {
         fn drop(&mut self) {
             let _ = self.table.get(1).map(|envelope| unsafe {
-                envelope.read_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                envelope.read_unchecked::<::fidl_next::wire::fuchsia::Status>()
             });
 
             let _ = self.table.get(2).map(|envelope| unsafe {
-                envelope.read_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                envelope.read_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
             });
 
             let _ = self.table.get(3)
                 .map(|envelope| unsafe {
-                    envelope.read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>>()
+                    envelope.read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>()
                 });
         }
     }
@@ -6254,7 +6234,7 @@ pub mod wire {
                     1 => {
                         ::fidl_next::wire::Envelope::decode_as::<
                             ___D,
-                            ::fidl_next::wire::fuchsia::StatusResult,
+                            ::fidl_next::wire::fuchsia::Status,
                         >(slot.as_mut(), decoder, ())?;
 
                         Ok(())
@@ -6263,7 +6243,7 @@ pub mod wire {
                     2 => {
                         ::fidl_next::wire::Envelope::decode_as::<
                             ___D,
-                            [::fidl_next::wire::fuchsia::StatusResult; 10],
+                            [::fidl_next::wire::fuchsia::Status; 10],
                         >(slot.as_mut(), decoder, ())?;
 
                         Ok(())
@@ -6272,10 +6252,7 @@ pub mod wire {
                     3 => {
                         ::fidl_next::wire::Envelope::decode_as::<
                             ___D,
-                            ::fidl_next::wire::Vector<
-                                'de,
-                                ::fidl_next::wire::fuchsia::StatusResult,
-                            >,
+                            ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
                         >(slot.as_mut(), decoder, (4294967295, ()))?;
 
                         Ok(())
@@ -6288,32 +6265,32 @@ pub mod wire {
     }
 
     impl<'de> StatusTable<'de> {
-        pub fn status(&self) -> ::core::option::Option<&::fidl_next::wire::fuchsia::StatusResult> {
+        pub fn status(&self) -> ::core::option::Option<&::fidl_next::wire::fuchsia::Status> {
             unsafe { Some(self.table.get(1)?.deref_unchecked()) }
         }
 
         pub fn take_status(
             &mut self,
-        ) -> ::core::option::Option<::fidl_next::wire::fuchsia::StatusResult> {
+        ) -> ::core::option::Option<::fidl_next::wire::fuchsia::Status> {
             unsafe { Some(self.table.get_mut(1)?.take_unchecked()) }
         }
 
         pub fn status_array(
             &self,
-        ) -> ::core::option::Option<&[::fidl_next::wire::fuchsia::StatusResult; 10]> {
+        ) -> ::core::option::Option<&[::fidl_next::wire::fuchsia::Status; 10]> {
             unsafe { Some(self.table.get(2)?.deref_unchecked()) }
         }
 
         pub fn take_status_array(
             &mut self,
-        ) -> ::core::option::Option<[::fidl_next::wire::fuchsia::StatusResult; 10]> {
+        ) -> ::core::option::Option<[::fidl_next::wire::fuchsia::Status; 10]> {
             unsafe { Some(self.table.get_mut(2)?.take_unchecked()) }
         }
 
         pub fn status_vector(
             &self,
         ) -> ::core::option::Option<
-            &::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
+            &::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
         > {
             unsafe { Some(self.table.get(3)?.deref_unchecked()) }
         }
@@ -6321,7 +6298,7 @@ pub mod wire {
         pub fn take_status_vector(
             &mut self,
         ) -> ::core::option::Option<
-            ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
+            ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
         > {
             unsafe { Some(self.table.get_mut(3)?.take_unchecked()) }
         }
@@ -6501,21 +6478,19 @@ pub mod wire {
             match self.raw.ordinal() {
                 1 => {
                     let _ = unsafe {
-                        self.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                        self.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::Status>()
                     };
                 }
 
                 2 => {
                     let _ = unsafe {
-                        self.raw
-                            .get()
-                            .read_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                        self.raw.get().read_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                     };
                 }
 
                 3 => {
                     let _ = unsafe {
-                        self.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>>()
+                        self.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>()
                     };
                 }
 
@@ -6547,23 +6522,21 @@ pub mod wire {
 
     pub mod status_union {
         pub enum Ref<'de> {
-            Status(&'de ::fidl_next::wire::fuchsia::StatusResult),
+            Status(&'de ::fidl_next::wire::fuchsia::Status),
 
-            StatusArray(&'de [::fidl_next::wire::fuchsia::StatusResult; 10]),
+            StatusArray(&'de [::fidl_next::wire::fuchsia::Status; 10]),
 
-            StatusVector(
-                &'de ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
-            ),
+            StatusVector(&'de ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>),
 
             UnknownOrdinal_(u64),
         }
 
         pub enum Value<'de> {
-            Status(::fidl_next::wire::fuchsia::StatusResult),
+            Status(::fidl_next::wire::fuchsia::Status),
 
-            StatusArray([::fidl_next::wire::fuchsia::StatusResult; 10]),
+            StatusArray([::fidl_next::wire::fuchsia::Status; 10]),
 
-            StatusVector(::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>),
+            StatusVector(::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>),
 
             UnknownOrdinal_(u64),
         }
@@ -6573,17 +6546,15 @@ pub mod wire {
         pub fn as_ref(&self) -> crate::wire::status_union::Ref<'_> {
             match self.raw.ordinal() {
                 1 => crate::wire::status_union::Ref::Status(unsafe {
-                    self.raw.get().deref_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                    self.raw.get().deref_unchecked::<::fidl_next::wire::fuchsia::Status>()
                 }),
 
                 2 => crate::wire::status_union::Ref::StatusArray(unsafe {
-                    self.raw
-                        .get()
-                        .deref_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                    self.raw.get().deref_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                 }),
 
                 3 => crate::wire::status_union::Ref::StatusVector(unsafe {
-                    self.raw.get().deref_unchecked::<::fidl_next::wire::Vector<'_, ::fidl_next::wire::fuchsia::StatusResult>>()
+                    self.raw.get().deref_unchecked::<::fidl_next::wire::Vector<'_, ::fidl_next::wire::fuchsia::Status>>()
                 }),
 
                 unknown => crate::wire::status_union::Ref::UnknownOrdinal_(unknown),
@@ -6595,17 +6566,15 @@ pub mod wire {
 
             match this.raw.ordinal() {
                 1 => crate::wire::status_union::Value::Status(unsafe {
-                    this.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
+                    this.raw.get().read_unchecked::<::fidl_next::wire::fuchsia::Status>()
                 }),
 
                 2 => crate::wire::status_union::Value::StatusArray(unsafe {
-                    this.raw
-                        .get()
-                        .read_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                    this.raw.get().read_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                 }),
 
                 3 => crate::wire::status_union::Value::StatusVector(unsafe {
-                    this.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>>()
+                    this.raw.get().read_unchecked::<::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>>()
                 }),
 
                 unknown => crate::wire::status_union::Value::UnknownOrdinal_(unknown),
@@ -6625,19 +6594,22 @@ pub mod wire {
         ) -> ::core::result::Result<(), ::fidl_next::DecodeError> {
             ::fidl_next::munge!(let Self { mut raw, _phantom: _ } = slot.as_mut());
             match ::fidl_next::wire::Union::encoded_ordinal(raw.as_mut()) {
-                1 => ::fidl_next::wire::Union::decode_as::<
-                    ___D,
-                    ::fidl_next::wire::fuchsia::StatusResult,
-                >(raw, decoder, ())?,
+                1 => {
+                    ::fidl_next::wire::Union::decode_as::<___D, ::fidl_next::wire::fuchsia::Status>(
+                        raw,
+                        decoder,
+                        (),
+                    )?
+                }
 
                 2 => ::fidl_next::wire::Union::decode_as::<
                     ___D,
-                    [::fidl_next::wire::fuchsia::StatusResult; 10],
+                    [::fidl_next::wire::fuchsia::Status; 10],
                 >(raw, decoder, ())?,
 
                 3 => ::fidl_next::wire::Union::decode_as::<
                     ___D,
-                    ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
+                    ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
                 >(raw, decoder, (4294967295, ()))?,
 
                 _ => ::fidl_next::wire::Union::decode_unknown(raw, decoder)?,
@@ -6651,20 +6623,17 @@ pub mod wire {
         fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
             match self.raw.ordinal() {
                 1 => unsafe {
-                    self.raw
-                        .get()
-                        .deref_unchecked::<::fidl_next::wire::fuchsia::StatusResult>()
-                        .fmt(f)
+                    self.raw.get().deref_unchecked::<::fidl_next::wire::fuchsia::Status>().fmt(f)
                 },
                 2 => unsafe {
                     self.raw
                         .get()
-                        .deref_unchecked::<[::fidl_next::wire::fuchsia::StatusResult; 10]>()
+                        .deref_unchecked::<[::fidl_next::wire::fuchsia::Status; 10]>()
                         .fmt(f)
                 },
                 3 => unsafe {
                     self.raw.get().deref_unchecked::<
-                            ::fidl_next::wire::Vector<'_, ::fidl_next::wire::fuchsia::StatusResult>
+                            ::fidl_next::wire::Vector<'_, ::fidl_next::wire::fuchsia::Status>
                         >().fmt(f)
                 },
                 _ => unsafe { ::core::hint::unreachable_unchecked() },
@@ -7116,19 +7085,22 @@ pub mod wire_optional {
         ) -> ::core::result::Result<(), ::fidl_next::DecodeError> {
             ::fidl_next::munge!(let Self { mut raw, _phantom: _ } = slot.as_mut());
             match ::fidl_next::wire::Union::encoded_ordinal(raw.as_mut()) {
-                1 => ::fidl_next::wire::Union::decode_as::<
-                    ___D,
-                    ::fidl_next::wire::fuchsia::StatusResult,
-                >(raw, decoder, ())?,
+                1 => {
+                    ::fidl_next::wire::Union::decode_as::<___D, ::fidl_next::wire::fuchsia::Status>(
+                        raw,
+                        decoder,
+                        (),
+                    )?
+                }
 
                 2 => ::fidl_next::wire::Union::decode_as::<
                     ___D,
-                    [::fidl_next::wire::fuchsia::StatusResult; 10],
+                    [::fidl_next::wire::fuchsia::Status; 10],
                 >(raw, decoder, ())?,
 
                 3 => ::fidl_next::wire::Union::decode_as::<
                     ___D,
-                    ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::StatusResult>,
+                    ::fidl_next::wire::Vector<'de, ::fidl_next::wire::fuchsia::Status>,
                 >(raw, decoder, (4294967295, ()))?,
 
                 0 => ::fidl_next::wire::Union::decode_absent(raw)?,
@@ -7485,7 +7457,7 @@ pub mod generic {
         for StatusProtocolARequest<T0>
     where
         ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
-        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::StatusResult, ___E>,
+        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::Status, ___E>,
     {
         #[inline]
         fn encode(
@@ -7516,7 +7488,7 @@ pub mod generic {
         for StatusProtocolAResponse<T0>
     where
         ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
-        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::StatusResult, ___E>,
+        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::Status, ___E>,
     {
         #[inline]
         fn encode(
@@ -7614,10 +7586,10 @@ pub mod generic {
     where
         ___E: ::fidl_next::encoder::InternalHandleEncoder + ?Sized,
         ___E: ::fidl_next::Encoder,
-        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::StatusResult, ___E>,
-        T1: ::fidl_next::Encode<[::fidl_next::wire::fuchsia::StatusResult; 10], ___E>,
+        T0: ::fidl_next::Encode<::fidl_next::wire::fuchsia::Status, ___E>,
+        T1: ::fidl_next::Encode<[::fidl_next::wire::fuchsia::Status; 10], ___E>,
         T2: ::fidl_next::Encode<
-                ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::StatusResult>,
+                ::fidl_next::wire::Vector<'static, ::fidl_next::wire::fuchsia::Status>,
                 ___E,
             >,
     {
@@ -8330,7 +8302,7 @@ pub mod status_protocol {
         type Response = ::fidl_next::wire::Result<
             'static,
             crate::wire::StatusProtocolAResponse,
-            ::fidl_next::wire::fuchsia::StatusResult,
+            ::fidl_next::wire::fuchsia::Status,
         >;
     }
 
@@ -8416,7 +8388,7 @@ pub mod status_protocol {
                 &self,
 
                 arg: impl ::fidl_next::Encode<
-                    ::fidl_next::wire::fuchsia::StatusResult,
+                    ::fidl_next::wire::fuchsia::Status,
                     <___T as ::fidl_next::Transport>::SendBuffer,
                 >,
             ) -> ::fidl_next::TwoWayFuture<'_, super::A, ___T>

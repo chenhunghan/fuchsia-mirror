@@ -37,7 +37,7 @@ import("//build/toolchain/toolchain_environment.gni")
 #
 #   * llvm_flags
 #     - Optional: LLVM "backend" flags for both Clang and Rust compilers.
-#     These are added to $cflags, $ldflags, and $rustflags, with the
+#     These are added to $cflags and $rustflags, with the
 #     appropriate syntax for each compiler driver.  This is implicitly ignored
 #     under `is_gcc`, so setting it doesn't need to be conditionalized.
 #     - Type: list(string)
@@ -199,10 +199,6 @@ template("compiler_config") {
 
     foreach(arg, _llvm_flags) {
       cflags += [
-        "-mllvm",
-        arg,
-      ]
-      ldflags += [
         "-mllvm",
         arg,
       ]

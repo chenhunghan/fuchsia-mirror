@@ -6,13 +6,18 @@
 
 use crate::platform_rs::timer::{DurationMono, InstantMono};
 use core::ffi::{c_char, c_void};
-use core::marker::PhantomData;
+use core::marker::{PhantomData, PhantomPinned};
+use core::pin::Pin;
 use core::ptr::NonNull;
+use pin_init::{PinInit, pin_data, pinned_drop};
+use thread_lock_guard_bindings as lock_guard_bindings;
+use zr::Opaque;
 use zx_status::Status;
 use zx_types::{zx_instant_mono_t, zx_status_t};
 
 use crate::kernel::restricted_state::RestrictedState;
 use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
+use crate::ktrace_rs::InternedString;
 use crate::vm::vm_aspace::VmAspace;
 
 #[allow(improper_ctypes)]
@@ -45,32 +50,45 @@ unsafe extern "C" {
     fn cpp_thread_kill(thread: *mut Thread);
     fn cpp_thread_suspend(thread: *mut Thread) -> zx_status_t;
     fn cpp_thread_is_blocked(thread: *mut Thread) -> bool;
+    fn cpp_thread_lock_guard_init(
+        guard: *mut lock_guard_bindings::ThreadLockGuard,
+        thread: *mut Thread,
+        label: &'static InternedString,
+        line: u32,
+    );
+    fn cpp_thread_lock_guard_destroy(guard: *mut lock_guard_bindings::ThreadLockGuard);
     fn cpp_thread_current_get() -> *mut Thread;
     fn cpp_thread_current_active_aspace() -> *mut VmAspace;
     fn cpp_thread_fxt_ref(thread: *mut Thread) -> FxtRef;
     fn cpp_thread_preempt_set_timeslice_extension(duration: DurationMono) -> bool;
     fn cpp_thread_preempt_clear_timeslice_extension();
     fn cpp_thread_preempt_disable();
-    fn cpp_thread_preempt_enable();
+    fn cpp_thread_preempt_reenable();
+    fn cpp_thread_eager_resched_disable();
+    fn cpp_thread_eager_resched_reenable();
+    fn cpp_thread_preempt_disable_count() -> u32;
+    fn cpp_thread_eager_resched_disable_count() -> u32;
     fn cpp_thread_preempt();
     fn cpp_thread_current_sleep_etc(
         deadline: *const crate::kernel::deadline::Deadline,
         interruptible: Interruptible,
         now: zx_instant_mono_t,
     ) -> zx_status_t;
-    fn cpp_thread_current_sleep(duration: InstantMono) -> zx_status_t;
+    fn cpp_thread_current_sleep(deadline: InstantMono) -> zx_status_t;
     fn cpp_thread_current_sleep_relative(duration: DurationMono) -> zx_status_t;
-    fn cpp_thread_current_sleep_interruptible(duration: InstantMono) -> zx_status_t;
+    fn cpp_thread_current_sleep_interruptible(deadline: InstantMono) -> zx_status_t;
     fn cpp_thread_current_soft_fault(va: usize, flags: u32) -> zx_status_t;
     fn cpp_thread_get_arch(thread: *mut Thread) -> *mut c_void;
     fn cpp_thread_get_stack_top(thread: *mut Thread) -> usize;
     fn cpp_thread_get_shadow_call_base(thread: *mut Thread) -> usize;
     fn cpp_thread_dump_current_stack();
-    fn cpp_thread_is_user_state_saved(thread: *mut Thread) -> bool;
+    fn cpp_thread_is_user_state_saved_locked(thread: *mut Thread) -> bool;
     fn cpp_thread_is_running(thread: *const Thread) -> bool;
     fn cpp_thread_name(thread: *const Thread) -> *const c_char;
     fn cpp_thread_process_pending_signals(frame: *mut c_void);
-    fn cpp_thread_is_in_restricted_mode(thread: *mut Thread) -> bool;
+    fn cpp_thread_in_restricted(thread: *mut Thread) -> bool;
+    fn cpp_thread_is_user_thread(thread: *const Thread) -> bool;
+    fn cpp_thread_active_aspace(thread: *mut Thread) -> *mut VmAspace;
     fn cpp_thread_current_restricted_state() -> *mut RestrictedState;
     fn cpp_thread_current_set_restricted_state(raw_rs: *mut RestrictedState);
     fn cpp_thread_current_is_signaled() -> bool;
@@ -107,7 +125,12 @@ pub struct Thread {
     _private: [u8; 0],
 }
 
-/// Enters restricted mode using the given vector table pointer and context.
+/// Enters restricted mode on the current thread using the given vector table pointer and context.
+///
+/// # Errors
+/// - `Status::INVALID_ARGS`: `vector_table_ptr` is not a valid user-accessible address.
+/// - `Status::BAD_STATE`: No `RestrictedState` is bound to the current thread, or state is invalid.
+/// - `Status::INTERRUPTED_RETRY`: Current thread has pending signals that must be processed.
 pub fn restricted_enter(vector_table_ptr: usize, context: usize) -> Result<(), Status> {
     crate::kernel::restricted::restricted_enter(vector_table_ptr, context)
 }
@@ -144,7 +167,10 @@ impl ThreadPtr {
         self.0.as_ptr()
     }
 
-    /// Resumes execution of the thread.
+    /// Makes a suspended thread executable.
+    ///
+    /// This function is called to start a thread which has just been created with [`create`] or
+    /// which has been suspended with [`ThreadPtr::suspend`]. It cannot fail.
     ///
     /// # Safety
     ///
@@ -153,7 +179,7 @@ impl ThreadPtr {
         unsafe { cpp_thread_resume(self.as_raw()) }
     }
 
-    /// Joins the thread, waiting for it to exit.
+    /// Waits `deadline` time for a thread to complete execution then releases its memory.
     ///
     /// Returns the thread's return code on success.
     ///
@@ -166,7 +192,7 @@ impl ThreadPtr {
         Status::ok(status).map(|_| retcode)
     }
 
-    /// Kills the thread.
+    /// Delivers a kill signal to a thread.
     ///
     /// # Safety
     ///
@@ -175,7 +201,9 @@ impl ThreadPtr {
         unsafe { cpp_thread_kill(self.as_raw()) }
     }
 
-    /// Suspends execution of the thread.
+    /// Suspends an initialized/ready/running thread.
+    ///
+    /// Returns `Ok(())` on success, `Err(Status::BAD_STATE)` if the thread is dead.
     ///
     /// # Safety
     ///
@@ -205,7 +233,7 @@ impl ThreadPtr {
         unsafe { Self::from_raw(cpp_thread_current_get()) }.unwrap()
     }
 
-    /// Returns the thread's process and thread KOIDs.
+    /// Returns the pid/tid of the thread as a tracing thread reference.
     ///
     /// # Safety
     ///
@@ -216,7 +244,108 @@ impl ThreadPtr {
     }
 }
 
-/// Creates a new kernel thread with default priority.
+/// A chain lock transaction's call site, matching C++ `ChainLockTransaction::CallsiteInfo`.
+/// Build one with `clt_tag!`.
+#[derive(Clone, Copy)]
+pub struct CltTag {
+    /// The interned label naming the call site.
+    pub label: &'static InternedString,
+    /// The source line of the call site.
+    pub line: u32,
+}
+
+/// Returns a [`CltTag`] for the given string literal label at the current source line, like C++
+/// `CLT_TAG(label)`.
+#[macro_export]
+macro_rules! clt_tag {
+    ($label:literal) => {
+        $crate::kernel::thread::CltTag {
+            label: $crate::ktrace_rs::resolve_string!($label),
+            line: line!(),
+        }
+    };
+}
+
+/// A thread's lock, held with interrupts disabled until the guard is dropped: the
+/// `SingleChainLockGuard{IrqSaveOption, thread->get_lock(), tag}` that a C++ scope would hold.
+///
+/// Built in place as a pinned local, for example
+/// `ksync::lock!(let guard = ThreadLockGuard::lock(thread, clt_tag!("label")))`. The chain lock
+/// transaction inside records its own address, so the guard never moves.
+#[pin_data(PinnedDrop)]
+#[repr(C)]
+pub struct ThreadLockGuard {
+    raw: Opaque<lock_guard_bindings::ThreadLockGuard>,
+    thread: NonNull<Thread>,
+    phantom: PhantomData<PhantomPinned>,
+}
+
+impl ThreadLockGuard {
+    /// Returns an initializer that takes `thread`'s lock with interrupts disabled, tagging the
+    /// chain lock transaction with `tag`.
+    ///
+    /// # Safety
+    /// - `thread` points to a valid C++ `Thread` instance for as long as the guard lives.
+    /// - The calling CPU is not already in a chain lock transaction, and none starts while the
+    ///   guard lives.
+    /// - The guard is a stack-pinned local (`ksync::lock!` or `pin_init::stack_pin_init!`) that is
+    ///   dropped on this CPU, before anything that can block.
+    pub unsafe fn lock(
+        thread: *mut Thread,
+        tag: CltTag,
+    ) -> impl PinInit<Self, core::convert::Infallible> {
+        debug_assert!(!thread.is_null());
+        // SAFETY: the closure initializes every field of `slot` in place and never moves it:
+        // `thread` by a write, `raw` by the C++ constructor, and `phantom` is zero-sized. The
+        // caller upholds the rest of `lock`'s contract.
+        unsafe {
+            pin_init::pin_init_from_closure(move |slot: *mut Self| {
+                (&raw mut (*slot).thread).write(NonNull::new_unchecked(thread));
+                cpp_thread_lock_guard_init(
+                    (&raw mut (*slot).raw).cast(),
+                    thread,
+                    tag.label,
+                    tag.line,
+                );
+                Ok(())
+            })
+        }
+    }
+
+    /// Returns the raw pointer to the locked thread.
+    pub fn thread(&self) -> *mut Thread {
+        self.thread.as_ptr()
+    }
+
+    /// Returns a pointer to the architecture-specific state (`arch_thread`) of the locked thread.
+    pub fn arch(&self) -> *mut c_void {
+        // SAFETY: `lock`'s caller guarantees the thread is a live C++ `Thread`.
+        unsafe { get_arch(self.thread()) }
+    }
+
+    /// Checks whether user state is saved for the locked thread, like C++
+    /// `Thread::IsUserStateSavedLocked()`.
+    pub fn is_user_state_saved_locked(&self) -> bool {
+        // SAFETY: the thread is a live C++ `Thread` whose lock this guard holds.
+        unsafe { cpp_thread_is_user_state_saved_locked(self.thread()) }
+    }
+}
+
+#[pinned_drop]
+impl PinnedDrop for ThreadLockGuard {
+    fn drop(self: Pin<&mut Self>) {
+        // SAFETY: `raw` holds the C++ guard that `lock` built, and this is its only destruction.
+        unsafe { cpp_thread_lock_guard_destroy(self.raw.get()) };
+    }
+}
+
+/// Creates a thread with `name` that will execute `entry` at [`DEFAULT_PRIORITY`]. `arg` will be
+/// passed to `entry` when executed, and the return value of `entry` will be passed to `Exit()`.
+///
+/// This call allocates a thread and places it in the global thread list. This memory will be freed
+/// by either [`ThreadPtr::join`] or `Detach()`, one of which MUST be called.
+///
+/// The thread will not be scheduled until [`ThreadPtr::resume`] is called.
 ///
 /// # Safety
 ///
@@ -235,7 +364,16 @@ pub const LOW_PRIORITY: i32 = 8;
 pub const DEFAULT_PRIORITY: i32 = 16;
 pub const HIGH_PRIORITY: i32 = 24;
 
-/// Creates a new kernel thread with the specified priority.
+/// Creates a thread with `name` that will execute `entry` at `priority`. `arg` will be passed to
+/// `entry` when executed, and the return value of `entry` will be passed to `Exit()`.
+///
+/// This call allocates a thread and places it in the global thread list. This memory will be freed
+/// by either [`ThreadPtr::join`] or `Detach()`, one of which MUST be called.
+///
+/// The thread will not be scheduled until [`ThreadPtr::resume`] is called.
+///
+/// Thread priority is an integer from 0 (lowest) to 31 (highest). Standard priorities include
+/// [`HIGH_PRIORITY`], [`DEFAULT_PRIORITY`], and [`LOW_PRIORITY`].
 ///
 /// # Safety
 ///
@@ -249,7 +387,15 @@ pub unsafe fn create_with_priority(
     let thread = unsafe { cpp_thread_create_with_priority(name, entry, arg, priority) };
     unsafe { ThreadPtr::from_raw(thread) }.ok_or(Status::NO_MEMORY)
 }
-/// Creates a new thread with the given base profile.
+
+/// Creates a thread with `name` that will execute `entry` with the given base `profile`. `arg`
+/// will be passed to `entry` when executed, and the return value of `entry` will be passed to
+/// `Exit()`.
+///
+/// This call allocates a thread and places it in the global thread list. This memory will be freed
+/// by either [`ThreadPtr::join`] or `Detach()`, one of which MUST be called.
+///
+/// The thread will not be scheduled until [`ThreadPtr::resume`] is called.
 ///
 /// # Safety
 ///
@@ -288,40 +434,119 @@ pub unsafe fn spawn(
     Ok(thread)
 }
 
-/// Yields the current thread's CPU time slice.
+/// Yields the CPU to another thread.
+///
+/// This function places the current thread at the end of the run queue and yields the CPU to
+/// another waiting thread (if any).
+///
+/// This function will return at some later time. Possibly immediately if no other threads are
+/// waiting to execute.
 pub fn r#yield() {
     unsafe { cpp_thread_current_yield() }
 }
 
-/// Disables preemption on the current thread.
+/// Increments the preempt disable counter for the current thread.
+///
+/// While preempt disable is non-zero, preemption of the thread is disabled, including preemption
+/// from interrupt handlers. During this time, any call to `Reschedule()` will only record that a
+/// reschedule is pending, and won't do a context switch.
+///
+/// Note that this does not disallow blocking operations (e.g. `mutex.Acquire()`). Disabling
+/// preemption does not prevent switching away from the current thread if it blocks.
+///
+/// A call to [`preempt_disable`] must be matched by a later call to [`preempt_reenable`] to
+/// decrement the preempt disable counter.
+#[inline]
 pub fn preempt_disable() {
     // SAFETY: Calling this FFI function safely increments the preemption disable count for the
     // current thread.
     unsafe { cpp_thread_preempt_disable() }
 }
 
-/// Re-enables preemption on the current thread.
-pub fn preempt_enable() {
+/// Decrements the preempt disable counter and flushes any pending local preemption operation.
+///
+/// Callers must ensure that they are calling from a context where blocking is allowed, as the call
+/// may result in the immediate preemption of the calling thread.
+#[inline]
+pub fn preempt_reenable() {
     // SAFETY: Calling this FFI function safely decrements the preemption disable count for the
     // current thread.
-    unsafe { cpp_thread_preempt_enable() }
+    unsafe { cpp_thread_preempt_reenable() }
 }
 
-/// Sets a timeslice extension on the current thread's preemption state.
+/// Increments the eager resched disable counter for the current thread.
+///
+/// When eager resched disable is non-zero, issuing local and remote preemptions is disabled,
+/// including from interrupt handlers. During this time, any call to `Reschedule()` or other
+/// scheduler entry points that imply a reschedule will only record the pending reschedule for the
+/// affected CPU, but will not perform reschedule IPIs or a local context switch.
+///
+/// As with [`preempt_disable`], blocking operations are still allowed while eager resched disable
+/// is non-zero.
+///
+/// A call to [`eager_resched_disable`] must be matched by a later call to
+/// [`eager_resched_reenable`] to decrement the eager resched disable counter.
+#[inline]
+pub fn eager_resched_disable() {
+    // SAFETY: Calling this FFI function safely increments the eager resched disable count for the
+    // current thread.
+    unsafe { cpp_thread_eager_resched_disable() }
+}
+
+/// Decrements the eager resched disable counter and flushes pending local and/or remote
+/// preemptions if enabled, respectively.
+#[inline]
+pub fn eager_resched_reenable() {
+    // SAFETY: Calling this FFI function safely decrements the eager resched disable count for the
+    // current thread.
+    unsafe { cpp_thread_eager_resched_reenable() }
+}
+
+/// Returns the current thread's preemption disable count.
+#[inline]
+pub fn preempt_disable_count() -> u32 {
+    // SAFETY: Calling this FFI function safely reads the current thread's preemption disable count.
+    unsafe { cpp_thread_preempt_disable_count() }
+}
+
+/// Returns the current thread's eager resched disable count.
+#[inline]
+pub fn eager_resched_disable_count() -> u32 {
+    // SAFETY: Calling this FFI function safely reads the current thread's eager resched disable
+    // count.
+    unsafe { cpp_thread_eager_resched_disable_count() }
+}
+
+/// Sets a timeslice extension if one is not already set.
+///
+/// This function should only be called in normal thread context.
+///
+/// Returns `false` if a timeslice extension was already present or if the supplied duration is
+/// `<= 0`.
+///
+/// Note: It is OK to call this from a context where preemption is (hard) disabled. If preemption
+/// is requested while the preempt disable count is non-zero and a timeslice extension is in place,
+/// the extension will be activated, but preemption will not occur until the count has dropped to
+/// zero and the extension has expired or has been cleared.
 pub fn preempt_set_timeslice_extension(duration: DurationMono) -> bool {
     // SAFETY: Calling this FFI function safely sets the timeslice extension on the current thread's
     // preemption state.
     unsafe { cpp_thread_preempt_set_timeslice_extension(duration) }
 }
 
-/// Clears an expiring timeslice extension on the current thread's preemption state.
+/// Unconditionally clears any timeslice extension.
+///
+/// This function must be called in normal thread context because it may trigger local preemption.
 pub fn preempt_clear_timeslice_extension() {
     // SAFETY: Calling this FFI function safely clears the timeslice extension on the current
     // thread's preemption state.
     unsafe { cpp_thread_preempt_clear_timeslice_extension() }
 }
 
-/// RAII guard that disables preemption for its scope.
+/// RAII helper that automatically manages disabling and re-enabling preemption.
+///
+/// When the object goes out of scope, it automatically re-enables preemption if it had been
+/// previously disabled by the instance.
 ///
 /// This guard is `!Send` and `!Sync` because preemption state is CPU- and thread-local.
 pub struct AutoPreemptDisabler {
@@ -341,7 +566,7 @@ impl AutoPreemptDisabler {
         Self { disabled: false, _marker: PhantomData }
     }
 
-    /// Disables preemption if not already disabled by this guard instance.
+    /// Disables preemption if it was not disabled by this instance already.
     pub fn disable(&mut self) {
         if !self.disabled {
             preempt_disable();
@@ -349,10 +574,10 @@ impl AutoPreemptDisabler {
         }
     }
 
-    /// Re-enables preemption if previously disabled by this guard instance.
+    /// Enables preemption if it was previously disabled by this instance.
     pub fn enable(&mut self) {
         if self.disabled {
-            preempt_enable();
+            preempt_reenable();
             self.disabled = false;
         }
     }
@@ -375,7 +600,8 @@ impl Drop for AutoPreemptDisabler {
     }
 }
 
-/// RAII guard that sets a timeslice extension for its scope.
+/// RAII helper that defers preemption of the current thread until either `duration` nanoseconds
+/// after preemption is requested or the object is destroyed, whichever comes first.
 ///
 /// This guard is `!Send` and `!Sync` because timeslice extensions modify CPU- and thread-local
 /// state.
@@ -385,7 +611,8 @@ pub struct AutoExpiringPreemptDisabler {
 }
 
 impl AutoExpiringPreemptDisabler {
-    /// Default timeslice extension duration (150us), matching C++ `AutoExpiringPreemptDisabler::kDefaultSliceExtension`.
+    /// Default timeslice extension duration (150us), matching C++
+    /// `Mutex::DEFAULT_TIMESLICE_EXTENSION`.
     pub const DEFAULT_TIMESLICE_EXTENSION: DurationMono = DurationMono::from_micros(150);
 
     /// Creates a new guard and attempts to set a timeslice extension for `duration`.
@@ -410,7 +637,7 @@ impl Drop for AutoExpiringPreemptDisabler {
 
 /// RAII helper to enforce that a block of code does not allocate memory.
 ///
-/// See |Thread::Current::memory_allocation_state()|.
+/// See `Thread::Current::memory_allocation_state()`.
 pub struct ScopedMemoryAllocationDisabled;
 
 impl ScopedMemoryAllocationDisabled {
@@ -461,10 +688,14 @@ impl From<bool> for Interruptible {
     }
 }
 
-/// Wait until the deadline has occurred.
+/// Puts the current thread to sleep until the specified `deadline` has occurred.
 ///
-/// If interruptible, may return early with ZX_ERR_INTERNAL_INTR_KILLED if
-/// thread is signaled for kill.
+/// Note that this function could continue to sleep after the specified deadline if other threads
+/// are running. When the deadline occurs, this thread will be placed at the head of the run queue.
+///
+/// If `interruptible` is [`Interruptible::YES`], this routine may return early with
+/// `Status::INTERNAL_INTR_KILLED` if the thread is signaled for kill, or
+/// `Status::INTERNAL_INTR_RETRY` if signaled for suspend.
 pub fn sleep_etc(
     deadline: &crate::kernel::deadline::Deadline,
     interruptible: Interruptible,
@@ -475,28 +706,34 @@ pub fn sleep_etc(
     Status::ok(status)
 }
 
-/// Non-interruptible version of sleep_etc.
+/// Non-interruptible version of [`sleep_etc`].
 pub fn sleep(deadline: InstantMono) -> Result<(), Status> {
-    // SAFETY: FFI function has not requirements.
+    // SAFETY: FFI function has no special safety requirements in thread context.
     let status = unsafe { cpp_thread_current_sleep(deadline) };
     Status::ok(status)
 }
 
-/// Sleeps the current thread for the specified relative duration.
+/// Non-interruptible relative delay version of [`sleep`].
 pub fn sleep_relative(duration: DurationMono) -> Result<(), Status> {
     // SAFETY: cpp_thread_current_sleep_relative is safe to call at any time in thread context.
     let status = unsafe { cpp_thread_current_sleep_relative(duration) };
     Status::ok(status)
 }
 
-/// Interruptible version of sleep.
+/// Interruptible version of [`sleep`].
 pub fn sleep_interruptible(deadline: InstantMono) -> Result<(), Status> {
-    // SAFETY: FFI function has not requirements.
+    // SAFETY: FFI function has no special safety requirements in thread context.
     let status = unsafe { cpp_thread_current_sleep_interruptible(deadline) };
     Status::ok(status)
 }
 
-/// Soft faults a page at the given virtual address for the current thread.
+/// Handles a soft fault on the address space containing `va` for the current thread.
+///
+/// If there is no address space that contains `va`, or the thread does not have access to it,
+/// `Status::NOT_FOUND` is returned.
+///
+/// Calling this method on a pure kernel thread (i.e. one without an associated `ThreadDispatcher`)
+/// is a programming error. May block on page requests and must be called without locks held.
 pub fn soft_fault(va: usize, flags: u32) -> Result<(), Status> {
     // SAFETY: cpp_thread_current_soft_fault is safe to call from thread context.
     let status = unsafe { cpp_thread_current_soft_fault(va, flags) };
@@ -508,20 +745,35 @@ pub fn current_get() -> *mut Thread {
     unsafe { cpp_thread_current_get() }
 }
 
-/// Triggers preemption on the current thread.
+/// Preempts the current thread from an interrupt.
+///
+/// This function places the current thread at the head of the run queue and then yields the CPU to
+/// another thread.
 pub fn preempt() {
     unsafe { cpp_thread_preempt() }
 }
 
-/// Dumps the call stack of the current thread.
+/// Logs the relevant stack memory addresses of the current thread at the `CRITICAL` debug level.
+///
+/// This is useful during a thread dump.
 pub fn dump_current_stack() {
     unsafe { cpp_thread_dump_current_stack() }
 }
 
-/// Processes pending signals on the current thread using the given iframe.
+/// Processes any pending thread signals on the current thread using the given `frame`.
+///
+/// This function may never return if the thread has a pending kill signal.
+///
+/// Interrupt state: This function modifies interrupt state. It is critical that this function be
+/// called with interrupts disabled to eliminate a "lost wakeup" race condition. While interrupts
+/// must be disabled prior to calling this function, it may re-enable them during the processing of
+/// certain signals. This function guarantees that if it does return, it will do so with interrupts
+/// disabled.
 ///
 /// # Safety
-/// Caller must ensure `frame` points to a valid architectural `iframe_t`.
+///
+/// Caller must ensure `frame` points to a valid architectural `iframe_t` and that interrupts are
+/// disabled.
 pub unsafe fn process_pending_signals(frame: *mut c_void) {
     // SAFETY: Forwarded to C++ Thread::Current::ProcessPendingSignals with caller-verified frame.
     unsafe { cpp_thread_process_pending_signals(frame) }
@@ -557,13 +809,14 @@ pub unsafe fn get_shadow_call_base(thread: *mut Thread) -> usize {
     unsafe { cpp_thread_get_shadow_call_base(thread) }
 }
 
-/// Checks whether user state is saved for `thread`.
+/// Returns `true` if `thread`'s user state has been saved.
 ///
 /// # Safety
-/// Caller must ensure `thread` points to a valid C++ `Thread` instance whose thread lock is held.
-pub unsafe fn is_user_state_saved(thread: *mut Thread) -> bool {
+/// Caller must ensure `thread` points to a valid C++ `Thread` instance and that the caller holds
+/// `thread`'s lock.
+pub unsafe fn is_user_state_saved_locked(thread: *mut Thread) -> bool {
     // SAFETY: Forwarded to C++ Thread::IsUserStateSavedLocked() with caller-verified pointer.
-    unsafe { cpp_thread_is_user_state_saved(thread) }
+    unsafe { cpp_thread_is_user_state_saved_locked(thread) }
 }
 
 /// Checks whether `thread` is currently running.
@@ -588,9 +841,46 @@ pub unsafe fn name(thread: *const Thread) -> *const c_char {
 ///
 /// # Safety
 /// Caller must ensure `thread` points to a valid C++ `Thread` instance.
-pub unsafe fn is_in_restricted_mode(thread: *mut Thread) -> bool {
-    // SAFETY: Forwarded to C++ Thread restricted state query with caller-verified pointer.
-    unsafe { cpp_thread_is_in_restricted_mode(thread) }
+pub unsafe fn in_restricted(thread: *mut Thread) -> bool {
+    // SAFETY: Forwarded to C++ Thread::in_restricted() with caller-verified pointer.
+    unsafe { cpp_thread_in_restricted(thread) }
+}
+
+/// Checks whether `thread` is a user thread, i.e. has an associated `ThreadDispatcher`.
+///
+/// # Safety
+/// Caller must ensure `thread` points to a valid C++ `Thread` instance.
+pub unsafe fn is_user_thread(thread: *const Thread) -> bool {
+    // SAFETY: Forwarded to C++ Thread::user_thread() with caller-verified pointer.
+    unsafe { cpp_thread_is_user_thread(thread) }
+}
+
+/// Returns the currently active address space of `thread`, which is the address space currently
+/// hosting page tables for the thread.
+///
+/// The active address space should be used only when context switching. It should not be used for
+/// resolving faults, as it may be a unified aspace that does not keep track of its own mappings.
+///
+/// Kernel-only thread -- This will return null, unless a caller has explicitly set the aspace
+/// using `switch_aspace`, which is done by a few kernel unittests.
+///
+/// User thread -- If the thread is in Restricted Mode, this will return the restricted aspace.
+/// Otherwise, it will return the process's normal aspace.
+///
+/// Note, the normal aspace is, by definition, the aspace that's active when a thread is in Normal
+/// Mode. All threads not in Restricted Mode are said to be in Normal Mode. See
+/// `ProcessDispatcher::normal_aspace()` for more information.
+///
+/// Only the thread itself, or the context switch path for the two threads it is switching
+/// between, may read a thread's active aspace without holding a reference to it; see the rules for
+/// `Thread::aspace_` in `kernel/thread.h`.
+///
+/// # Safety
+/// Caller must ensure `thread` points to a valid C++ `Thread` instance that is either the current
+/// thread or one of the two threads of a context switch in progress.
+pub unsafe fn active_aspace(thread: *mut Thread) -> *mut VmAspace {
+    // SAFETY: Forwarded to C++ Thread::active_aspace() with caller-verified pointer.
+    unsafe { cpp_thread_active_aspace(thread) }
 }
 
 /// Returns the current thread's restricted mode state pointer.
@@ -599,8 +889,21 @@ pub fn current_restricted_state() -> *mut RestrictedState {
     unsafe { cpp_thread_current_restricted_state() }
 }
 
-/// The current address space this thread is associated with. This can be None if this is a kernel
-/// thread.
+/// Returns the currently active address space, which is the address space currently hosting page
+/// tables for the current thread.
+///
+/// The active address space should be used only when context switching. It should not be used for
+/// resolving faults, as it may be a unified aspace that does not keep track of its own mappings.
+///
+/// Kernel-only thread -- This will return `None`, unless a caller has explicitly set `aspace_`
+/// using `switch_aspace`, which is done by a few kernel unittests.
+///
+/// User thread -- If the thread is in Restricted Mode, this will return the restricted aspace.
+/// Otherwise, it will return the process's normal aspace.
+///
+/// Note, the normal aspace is, by definition, the aspace that's active when a thread is in Normal
+/// Mode. All threads not in Restricted Mode are said to be in Normal Mode. See
+/// `ProcessDispatcher::normal_aspace()` for more information.
 ///
 /// # Safety
 ///
@@ -621,25 +924,34 @@ pub unsafe fn current_set_restricted_state(raw_rs: *mut RestrictedState) {
     unsafe { cpp_thread_current_set_restricted_state(raw_rs) }
 }
 
-/// Returns whether the current thread is signaled.
+/// Returns `true` if the current thread has been signaled.
 pub fn current_is_signaled() -> bool {
     // SAFETY: Foreign function wrapper for Thread::Current::Get()->IsSignaled().
     unsafe { cpp_thread_current_is_signaled() }
 }
 
-/// Checks and clears the current thread's restricted kick flag.
+/// If a restricted kick is pending on the current thread, clears it and returns `true`.
+/// Otherwise returns `false`.
+///
+/// Must be called with interrupts disabled.
 pub fn current_check_for_restricted_kick() -> bool {
     // SAFETY: Foreign function wrapper for Thread::Current::CheckForRestrictedKick().
     unsafe { cpp_thread_current_check_for_restricted_kick() }
 }
 
-/// Checks whether the current thread has memory allocations enabled or not.
+/// Returns `true` if memory allocation is allowed on the current thread.
 pub fn current_memory_allocation_state_is_enabled() -> bool {
     // SAFETY: Foreign function wrapper for Thread::Current::memory_allocation_state().IsEnabled().
     unsafe { cpp_thread_current_memory_allocation_state_is_enabled() }
 }
 
-/// Signals a policy exception on the current thread.
+/// Signals an exception on the current thread, to be handled when the current syscall exits.
+///
+/// Unlike other signals, this is synchronous, in the sense that a thread signals itself. This
+/// exists primarily so that we can unwind the stack in order to get the state of userland's
+/// callee-saved registers at the point where userland invoked the syscall.
+///
+/// `policy_exception_code` should be a `ZX_EXCP_POLICY_CODE_*` value.
 pub fn signal_policy_exception(policy_exception_code: u32, policy_exception_data: u32) {
     // SAFETY: Foreign function wrapper for Thread::Current::SignalPolicyException.
     unsafe {

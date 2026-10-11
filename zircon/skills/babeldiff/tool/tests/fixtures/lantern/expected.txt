@@ -1,5 +1,5 @@
-babeldiff: 8 pairs, 12 issues, 17 notes; 0 C++ and 1 Rust function unpaired
-issues by kind: call 3, value 3, comment 2, assert 2, error-path 1, pairing 1
+babeldiff: 8 pairs, 10 issues, 17 notes; 0 C++ and 1 Rust function unpaired
+issues by kind: call 3, value 3, assert 2, error-path 1, pairing 1
 rubric lints: 3 issues, 0 notes (file-placement 1, provenance-comment 1, invented-lifetime 1); see the end of the report
 legend: = same  ~ note  ! issue  < only in C++  > only in Rust
 
@@ -28,10 +28,9 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   C++   zircon/kernel/arch/toy/lantern.cc:13-17
   Rust  zircon/kernel/arch/toy/src/glow.rs:9-17
   why   a second Rust definition of read_brightness; the first is at zircon/kernel/arch/toy/src/lantern.rs:8 (score 0.68)
-  similarity 0.68, 3 issues, 0 notes
+  similarity 0.68, 2 issues, 0 notes
 
 > R      9  /// Reads the brightness register.
-        ^ ! doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
 = C     13  static uint64_t read_brightness(void) {
   R     10  pub fn read_brightness() -> u64 {
 = C     14    uint64_t value;
@@ -49,7 +48,6 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
   findings
     ! - | glow.rs:9  the change defines read_brightness twice, here and at zircon/kernel/arch/toy/src/lantern.rs:8, and the copies differ; both are compared with the C++, and callers may reach either
-    ! - | glow.rs:9  doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
     ! lantern.cc:16 | glow.rs:16  C++ sets LANTERN_BRIGHT_MASK here, and the Rust doesn't
 
 ==== lantern_disable  <->  lantern_disable
@@ -191,10 +189,9 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   C++   zircon/kernel/arch/toy/lantern.cc:50-68
   Rust  zircon/kernel/arch/toy/src/lantern.rs:44-80
   via   FFI shim lantern_get_state  zircon/kernel/arch/toy/src/lantern.rs:44-80
-  similarity 0.61, 4 issues, 9 notes
+  similarity 0.61, 3 issues, 9 notes
 
 > R     44  /// Reads the lantern's state (`lantern.cc:52-70`).
-        ^ ! doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
 > R     46  /// # Safety
   R     47  ///
   R     48  /// `lantern` and `out` must be null or valid.
@@ -257,10 +254,9 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   locks    same
            C++:  lantern
            Rust: lantern
-  flow     if 1/4!, else 0/1!, switch 4/0!, return 2/4!  (C++/Rust counts where they differ)
+  flow     if 1/4!, else 0/1!, switch 1/0!, case 3/0!, return 2/4!  (C++/Rust counts where they differ)
   comments 1 C++ comment: 1 identical, 0 reworded, 0 missing in Rust
   findings
-    ! - | lantern.rs:44  doc comment added in Rust where the C++ function has none; a conversion adds no comments other than SAFETY
     ! - | lantern.rs:51  Rust adds a check `lantern.is_null() || out.is_null()`, returning INVALID_ARGS, that the C++ doesn't make
     ! lantern.cc:52 | lantern.rs:59  C++ calls is_lit_locked only inside DEBUG_ASSERT, so only in debug builds; the Rust calls it unconditionally at line 56
     ! lantern.cc:64 | -  C++ panics here (ASSERT(false)); the Rust returns NOT_SUPPORTED instead (line 73)

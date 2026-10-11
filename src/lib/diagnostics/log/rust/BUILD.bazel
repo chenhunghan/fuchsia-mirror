@@ -33,9 +33,6 @@ LIB_DEPS = [
 ] + select({
     "@platforms//os:fuchsia": [
         "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
-        # Empty stub in Bazel; an expect_includes() target in GN that checks
-        # dependent components for `syslog/client.shard.cml` in their manifest.
-        "//sdk/lib/syslog:client_includes",
         "//sdk/rust/zx",
         "//src/lib/diagnostics/log/encoding/rust",
         "//src/lib/fidl/rust/fidl",
@@ -47,11 +44,20 @@ LIB_DEPS = [
     "//conditions:default": ["//third_party/rust_crates/vendor:chrono"],
 })
 
+# @bazel2gn:transformer=deps
+LIB_LINK_DEPS = select({
+    # Empty stub in Bazel; an expect_includes() target in GN that checks
+    # dependent components for `syslog/client.shard.cml` in their manifest.
+    "@platforms//os:fuchsia": ["//sdk/lib/syslog:client_includes"],
+    "//conditions:default": [],
+})
+
 rustc_library(
     name = "rust",
     srcs = LIB_SRCS,
     crate_name = "diagnostics_log",
     edition = "2024",
+    link_deps = LIB_LINK_DEPS,
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     proc_macro_deps = LIB_PROC_MACRO_DEPS,
     visibility = ["//:__subpackages__"],
@@ -67,6 +73,7 @@ rustc_library(
     crate_features = ["no_startup_handle"],
     crate_name = "driver_diagnostics_log",
     edition = "2024",
+    link_deps = LIB_LINK_DEPS,
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     proc_macro_deps = LIB_PROC_MACRO_DEPS,
     visibility = ["//:__subpackages__"],
@@ -90,6 +97,7 @@ rustc_test(
         "//conditions:default": ["--test-threads=1"],
     }),
     edition = "2024",
+    link_deps = LIB_LINK_DEPS,
     proc_macro_deps = LIB_PROC_MACRO_DEPS,
     # Conditioned on the same constraint as LIB_DEPS above. Using a different
     # condition here (such as :is_host_os) would let the two selects disagree

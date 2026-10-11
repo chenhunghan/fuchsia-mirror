@@ -82,6 +82,8 @@ pub struct EnvironmentContext {
     override_target_spec: Option<Option<String>>,
     /// if true, do not read or write any environment files.
     pub(crate) no_environment: bool,
+    queried_configs:
+        std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
 }
 
 impl Default for EnvironmentContext {
@@ -96,6 +98,9 @@ impl Default for EnvironmentContext {
             override_target_spec: None,
             self_path: std::env::current_exe().unwrap(),
             no_environment: false,
+            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
         }
     }
 }
@@ -186,6 +191,9 @@ impl EnvironmentContext {
             override_target_spec: None,
             self_path: std::env::current_exe().unwrap(),
             no_environment,
+            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
         })
     }
 
@@ -203,6 +211,9 @@ impl EnvironmentContext {
             override_target_spec: None,
             config: Config::new(None, None, None, runtime_args.clone(), ConfigMap::new()),
             self_path: std::env::current_exe().unwrap(),
+            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeMap::new(),
+            )),
         };
 
         // Since environment variables won't be
@@ -296,6 +307,14 @@ impl EnvironmentContext {
                 no_environment,
             )
         }
+    }
+
+    pub fn query_configs(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        self.queried_configs.lock().unwrap().clone()
+    }
+
+    pub(crate) fn record_query(&self, name: &str, value: &serde_json::Value) {
+        self.queried_configs.lock().unwrap().insert(name.to_string(), value.clone());
     }
 
     pub fn is_strict(&self) -> bool {

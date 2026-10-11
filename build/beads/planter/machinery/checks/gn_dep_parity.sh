@@ -10,8 +10,8 @@ set -euo pipefail
 # BUILD.gn existed at $PLANTER_CHANGE_BASE and still exists (a package whose
 # BUILD.gn is deleted has no GN dependents left), every GN target that still
 # exists under the same name is compared with its original over deps,
-# public_deps, non_rust_deps, test_deps, proc_macro_deps, data_deps and
-# non_test_deps (moving a label between these lists is fine, except out of
+# public_deps, non_rust_deps, test_deps, proc_macro_deps, link_deps, data_deps
+# and non_test_deps (moving a label between these lists is fine, except out of
 # public_deps, see 3.; so is moving a test_deps label to another target of the
 # package, e.g. an explicit test target replacing `with_unit_tests`). A label
 # the target now reaches through a GN `group` it newly depends on (e.g. a
@@ -49,7 +49,7 @@ workdir = os.path.abspath(sys.argv[1])
 target_dir = sys.argv[2].strip().strip("/")
 change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
 
-GN_DEP_ATTRS = ("deps", "public_deps", "non_rust_deps", "test_deps", "proc_macro_deps", "data_deps", "non_test_deps")
+GN_DEP_ATTRS = ("deps", "public_deps", "non_rust_deps", "test_deps", "proc_macro_deps", "link_deps", "data_deps", "non_test_deps")
 LINK_ATTRS = ("public_configs", "all_dependent_configs", "ldflags", "libs", "rustflags", "complete_static_lib")
 FORWARDING_ONLY_ATTRS = {"public_deps", "deps", "visibility", "testonly"}
 SENTINEL = re.compile(r"^##\s*BAZEL2GN SENTINEL|#LOCAL_BAZEL_BUILD_SENTINEL", re.M)

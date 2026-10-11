@@ -5,6 +5,7 @@
 use crate::ContainerStartInfo;
 use anyhow::{Context, Error, anyhow};
 use fidl_fuchsia_ui_composition as fuicomposition;
+use fidl_fuchsia_ui_input as fuiinput;
 use fidl_fuchsia_ui_input3 as fuiinput3;
 use fidl_fuchsia_ui_policy as fuipolicy;
 use fidl_fuchsia_ui_views as fuiviews;
@@ -25,15 +26,12 @@ use starnix_modules_gpu::gpu_device_init;
 use starnix_modules_gralloc::gralloc_device_init;
 use starnix_modules_hvdcp_opti::hvdcp_opti_init;
 use starnix_modules_input::uinput::register_uinput_device;
-use starnix_modules_input::{
-    DEFAULT_KEYBOARD_DEVICE_ID, DEFAULT_MOUSE_DEVICE_ID, DEFAULT_TOUCH_DEVICE_ID, EventProxyMode,
-    InputDevice, InputDeviceInfo, KEYBOARD_INPUT_ID, MOUSE_INPUT_ID, StartRelaysArgs,
-    TOUCH_INPUT_ID, new_input_relay,
-};
+use starnix_modules_input::{EventProxyMode, StartRelaysArgs, new_input_relay};
 use starnix_modules_kgsl::kgsl_device_init;
 use starnix_modules_magma::magma_device_init;
 use starnix_modules_nanohub::nanohub_device_init;
 use starnix_modules_nmfs::nmfs_init;
+use starnix_modules_odpm::odpm_device_init;
 use starnix_modules_perfetto_consumer::start_perfetto_consumer_thread;
 use starnix_modules_thermal::{cooling_device_init, thermal_device_init};
 use starnix_modules_touch_power_policy::TouchPowerPolicyDevice;
@@ -130,6 +128,10 @@ pub struct Features {
     /// Whether to add android bootreason to kernel cmdline.
     pub android_bootreason: bool,
 
+    /// Whether to enable hvdcp_opti sysfs logic.
+    ///
+    /// Note: Statically registers IIO devices (`iio:device0`, `iio:device1`).
+    /// Conflicts with `google_odpm`, so they cannot both be enabled simultaneously.
     pub hvdcp_opti: bool,
 
     pub additional_mounts: Option<Vec<String>>,
@@ -146,6 +148,12 @@ pub struct Features {
 
     /// Whether to initialize unified tracing with a Fuchsia trace observer.
     pub unified_tracing: bool,
+
+    /// Whether to enable google-odpm power monitoring sysfs logic.
+    ///
+    /// Note: Statically registers `iio:device0`.
+    /// Conflicts with `hvdcp_opti`, so they cannot both be enabled simultaneously.
+    pub google_odpm: bool,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -181,6 +189,8 @@ impl Features {
                         cached_zx_map_info_bytes,
                         dirent_cache_size,
                         fake_ion,
+                        remotevol_in_process,
+                        log_sysfs_lookup_misses,
                     },
                 system_limits,
                 selinux,
@@ -214,8 +224,10 @@ impl Features {
                 mmcblk_stub,
                 android_usb,
                 unified_tracing,
+                google_odpm,
                 initial_view_id_annotation,
             } => {
+                inspect_node.record_bool("google_odpm", *google_odpm);
                 inspect_node.record_bool("selinux", selinux.enabled);
                 inspect_node.record_bool("unified_tracing", *unified_tracing);
                 inspect_node.record_bool("ashmem", *ashmem);
@@ -298,6 +310,7 @@ impl Features {
                     kernel_node.record_bool("crash_report_throttling", *crash_report_throttling);
                     kernel_node
                         .record_uint("cached_zx_map_info_bytes", *cached_zx_map_info_bytes as u64);
+                    kernel_node.record_bool("log_sysfs_lookup_misses", *log_sysfs_lookup_misses);
                     inspect_node.record_string(
                         "default_ns_mount_options",
                         format!("{:?}", default_ns_mount_options),
@@ -315,6 +328,7 @@ impl Features {
                     inspect_node.record_bool("mmcblk_stub", *mmcblk_stub);
                     inspect_node.record_bool("android_usb", *android_usb);
                     inspect_node.record_bool("fake_ion", *fake_ion);
+                    inspect_node.record_bool("remotevol_in_process", *remotevol_in_process);
                 });
             }
         });
@@ -473,11 +487,20 @@ pub fn parse_features(
             (Feature::MmcblkStub, _) => features.mmcblk_stub = true,
             (Feature::FakeIon, _) => features.kernel.fake_ion = true,
             (Feature::AndroidUsb, _) => features.android_usb = true,
+            (Feature::GoogleOdpm, _) => features.google_odpm = true,
+            (Feature::RemotevolInProcess, _) => features.kernel.remotevol_in_process = true,
+            (Feature::LogSysfsLookupMisses, _) => features.kernel.log_sysfs_lookup_misses = true,
         };
     }
 
     if features.boot_notifier_cpu_boost.is_some() && !features.boot_notifier {
         return Err(anyhow!("boot_notifier_cpu_boost feature requires boot_notifier"));
+    }
+
+    if features.google_odpm && features.hvdcp_opti {
+        return Err(anyhow!(
+            "features 'google_odpm' and 'hvdcp_opti' cannot be enabled simultaneously"
+        ));
     }
 
     if *ui_visual_debugging_level > 0 {
@@ -543,7 +566,11 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
         let registry_proxy = fuchsia_component::client::connect_to_protocol_sync::<
             fuipolicy::DeviceListenerRegistryMarker,
         >()
-        .expect("Failed to connect to device listener registry");
+        .context("Failed to connect to policy device listener registry")?;
+        let device_listener_registry = fuchsia_component::client::connect_to_protocol_sync::<
+            fuiinput::DeviceListenerRegistryMarker,
+        >()
+        .context("Failed to connect to device listener registry")?;
 
         // These need to be set before `Framebuffer::start_server` is called.
         // `Framebuffer::start_server` is only called when the `framebuffer` component feature is
@@ -561,46 +588,7 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
             (framebuffer_info.xres as i32, framebuffer_info.yres as i32)
         };
 
-        let touch_device = InputDevice::new_touch(
-            display_width,
-            display_height,
-            InputDeviceInfo::new(TOUCH_INPUT_ID, "starnix_touch".to_string()),
-            "touch_device",
-            &kernel.inspect_node,
-        );
-        let keyboard_device = InputDevice::new_keyboard(
-            InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_buttons".to_string()),
-            "keyboard_device",
-            &kernel.inspect_node,
-        );
-        let mouse_device = InputDevice::new_mouse(
-            InputDeviceInfo::new(MOUSE_INPUT_ID, "starnix_mouse".to_string()),
-            "mouse_device",
-            &kernel.inspect_node,
-        );
-
-        touch_device.clone().register(kernel, DEFAULT_TOUCH_DEVICE_ID)?;
-        keyboard_device.clone().register(kernel, DEFAULT_KEYBOARD_DEVICE_ID)?;
-        // Prefer to lazily register the mouse device on first mouse event, rather than on
-        // initialization here, to avoid drawing a cursor eagerly.
-
-        let (mut input_events_relay, input_events_relay_handle) = new_input_relay();
-        input_events_relay.add_touch_device(
-            DEFAULT_TOUCH_DEVICE_ID,
-            touch_device.open_files,
-            Some(touch_device.inspect_status),
-        );
-        input_events_relay.add_keyboard_device(
-            DEFAULT_KEYBOARD_DEVICE_ID,
-            keyboard_device.open_files,
-            Some(keyboard_device.inspect_status),
-        );
-        input_events_relay.add_pending_mouse_device(
-            kernel.clone(),
-            mouse_device,
-            DEFAULT_MOUSE_DEVICE_ID,
-        );
-
+        let (input_events_relay, input_events_relay_handle) = new_input_relay();
         input_events_relay.start_relays(
             &kernel,
             StartRelaysArgs {
@@ -610,6 +598,9 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
                 mouse_source_client_end: mouse_source_client,
                 view_ref,
                 registry_proxy,
+                device_listener_registry: Some(device_listener_registry),
+                display_width,
+                display_height,
             },
         );
 
@@ -689,6 +680,9 @@ pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Resu
     }
     if features.android_usb {
         usb_device_init(kernel).context("Failed to add android usb device nodes")?;
+    }
+    if features.google_odpm {
+        odpm_device_init(kernel);
     }
     Ok(())
 }

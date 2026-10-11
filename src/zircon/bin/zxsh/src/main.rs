@@ -83,7 +83,8 @@ fn main() {
         }
     }
 
-    repl::run_repl(state);
+    let status = repl::run_repl(state);
+    std::process::exit(status);
 }
 
 #[cfg(test)]

@@ -151,7 +151,7 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
   // operation are assumed to be synchronous.
   async::Loop resource_loop_{&kAsyncLoopConfigNoAttachToCurrentThread};
 
-  std::optional<ClosureQueue> shared_fidl_thread_closure_queue_;
+  std::optional<ClosureQueue> shared_fidl_sequence_closure_queue_;
 
   bool have_queued_trigger_decoder_ = false;
 

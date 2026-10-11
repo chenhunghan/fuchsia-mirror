@@ -27,6 +27,14 @@ import remote_action
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
 
+# Default remote execution and reclient timeouts for C++ compile actions.
+# Keep reclient_timeout slightly above exec_timeout so reproxy doesn't fall
+# back to its 1-hour default if a remote worker or CAS phase stalls.
+# LINT.IfChange(default_timeouts)
+_DEFAULT_EXEC_TIMEOUT = "10m"
+_DEFAULT_RECLIENT_TIMEOUT = "11m"
+# LINT.ThenChange(/build/rbe/reclient_cxx.sh:default_timeouts)
+
 
 def msg(text: str) -> None:
     print(f"[{_SCRIPT_BASENAME}] {text}")
@@ -306,7 +314,8 @@ class CxxRemoteAction(object):
             # LINT.IfChange(compile_cfg)
             "--labels=type=compile,compiler=clang,lang=cpp",  # TODO: gcc?
             "--canonicalize_working_dir=true",
-            "--exec_timeout=10m",
+            f"--exec_timeout={_DEFAULT_EXEC_TIMEOUT}",
+            f"--reclient_timeout={_DEFAULT_RECLIENT_TIMEOUT}",
             # LINT.ThenChange(/build/rbe/reclient_cxx.sh:compile_cfg)
         ] + self._main_remote_options  # allow forwarded options to override defaults
 

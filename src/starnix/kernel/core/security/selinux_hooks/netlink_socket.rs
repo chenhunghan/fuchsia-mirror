@@ -155,16 +155,12 @@ pub(in crate::security) fn check_netlink_send_access(
         );
         return Ok(());
     };
+    debug_assert!(!socket_node.is_private());
 
     let netlink_family = NetlinkFamily::from_raw(socket.protocol.as_raw());
     let audit_context = &[current_task.into(), Auditable::NlMsgtype(message_type)];
 
     if security_server.is_policycap_enabled(PolicyCap::NetlinkXperm) {
-        // Permissions are allowed for kernel sockets.
-        if socket_node.is_private() {
-            return Ok(());
-        }
-
         // If "netlink_xperm" is enabled then make an extended permissions check for "nlmsg".
         let Some(nlmsg_permission) = nlmsg_permission_for_netlink_family(netlink_family) else {
             // No "nlmsg" permission checks are required for this netlink family.

@@ -43,7 +43,7 @@ if str(_FUCHSIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_ROOT))
 
 from build.auth import gcloud
-from build.rbe import rbe_settings
+from build.rbe import build_summary, rbe_settings
 
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
@@ -129,6 +129,9 @@ DEFAULT_CAS_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
 # LINT.IfChange(ninja_build_trace_filename)
 NINJA_BUILD_TRACE_GZ = "ninja_build_trace.json.gz"
 # LINT.ThenChange(/tools/integration/fint/fint_build.py:ninja_build_trace_filename)
+NINJA_LOGS_DIR = "ninja_logs"
+NINJA_ACTION_METRICS_JSON = "ninja_action_metrics.json"
+NINJA_ERRORS_JSON = "ninja_errors.json"
 FINT_BUILD_PY_RELATIVE_PATH = pathlib.Path(
     "tools/integration/fint/fint_build.py"
 )
@@ -237,7 +240,8 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
 
     Returns:
         A dictionary containing paths to the reproxy log directory, diagnostic
-        log files, CAS upload candidates (.rrpl/.rpl), and serialized proto logs.
+        log files, CAS upload candidates (.rrpl/.rpl), serialized proto logs,
+        and summarized metrics.
     """
     rbe_metadata: JSONObject = {}
     # LINT.IfChange(reproxy_logs_dir)
@@ -274,6 +278,17 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
         candidate = reproxy_log_dir_abs / pb_filename
         if candidate.exists():
             rbe_metadata[pb_name] = str(candidate)
+
+    try:
+        metrics_summary = build_summary.summarize_rbe_metrics_from_logdir(
+            reproxy_log_dir_abs
+        )
+    except Exception as e:
+        msg(f"Warning: Failed to summarize RBE metrics: {e}", file=sys.stderr)
+        metrics_summary = None
+
+    if metrics_summary is not None:
+        rbe_metadata["metrics_summary"] = metrics_summary
 
     return rbe_metadata
 
@@ -646,10 +661,10 @@ class FuchsiaBuildContext(object):
                 pass
 
         if not user:
-            if self.loas_type != "skip":
+            if self.auth_type in ("loas", "oauth"):
                 raise BuildConfigurationError(
                     "USER environment variable is not set and could not be "
-                    "inferred. This is required for RBE/ResultStore LOAS/gcert authentication."
+                    "inferred. This is required for RBE/ResultStore user authentication."
                 )
             user = "builder"
         return user
@@ -735,7 +750,7 @@ class FuchsiaBuildContext(object):
             The Path to the isolated credentials file, or None if isolation failed
             or was bypassed.
         """
-        if self.resolved_auth_mode in ("machine", "none"):
+        if self.auth_type in ("machine", "none"):
             return None
 
         isolate_script = self.gcloud_creds_script
@@ -779,7 +794,7 @@ class FuchsiaBuildContext(object):
         if not self.needs_auth:
             return env
 
-        env["FX_BUILD_LOAS_TYPE"] = self.loas_type
+        env["FX_BUILD_AUTH_TYPE"] = self.auth_type
 
         # Isolate Google Application Credentials to avoid global quota_project_id contamination.
         local_adc_path = self._isolate_gcloud_credentials()
@@ -789,7 +804,7 @@ class FuchsiaBuildContext(object):
             env["GOOGLE_APPLICATION_CREDENTIALS"] = self.env[
                 "GOOGLE_APPLICATION_CREDENTIALS"
             ]
-        elif self.resolved_auth_mode != "machine":
+        elif self.auth_type not in ("machine", "none"):
             try:
                 default_adc = pathlib.Path.home() / gcloud.ADC_SUBPATH
                 env["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_adc)
@@ -833,7 +848,7 @@ class FuchsiaBuildContext(object):
             env["FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"] = socket_str
         # LINT.ThenChange(
         #   //build/bazel/scripts/generate_invocation_bazelrc.py:bazel_socket_env_vars,
-        #   //build/bazel_sdk/tests/scripts/bazel_test.py:bazel_socket_env_vars
+        #   //build/bazel_sdk/tests/scripts/run_tests.py:bazel_socket_env_vars
         # )
 
         # Forward ResultStore/CAS instance names unconditionally.
@@ -924,6 +939,7 @@ class FuchsiaBuildContext(object):
         print_artifact_dir: bool = False,
         print_job_count: bool = False,
         ninja_error_logging_output: pathlib.Path | None = None,
+        ninja_action_metrics_output: pathlib.Path | None = None,
     ) -> Iterable[str]:
         """Constructs and yields command-line arguments for executing fint_build.py.
 
@@ -935,6 +951,7 @@ class FuchsiaBuildContext(object):
             print_job_count: If True, appends the query flag to print the
               job_count value and exits instead of running the build.
             ninja_error_logging_output: Path where Ninja should write its error logs (ninja_errors.json).
+            ninja_action_metrics_output: Path where Ninja should write its action metrics (ninja_action_metrics.json).
         """
         yield str(PYTHON_BIN)
         yield "-S"
@@ -947,6 +964,9 @@ class FuchsiaBuildContext(object):
         if context_path:
             yield "--context"
             yield str(context_path)
+        elif self.build_dir:
+            yield "--build-dir"
+            yield str(self.build_dir)
         if self.config.verbose:
             yield "--verbose"
         if print_artifact_dir:
@@ -957,10 +977,15 @@ class FuchsiaBuildContext(object):
             if ninja_error_logging_output:
                 yield "--ninja-error-logging-output"
                 yield str(ninja_error_logging_output)
+            if ninja_action_metrics_output:
+                yield "--ninja-action-metrics-output"
+                yield str(ninja_action_metrics_output)
             yield "--"
 
     def fint_build_cmd(
-        self, ninja_error_logging_output: pathlib.Path | None = None
+        self,
+        ninja_error_logging_output: pathlib.Path | None = None,
+        ninja_action_metrics_output: pathlib.Path | None = None,
     ) -> Iterable[str]:
         """Constructs and yields command-line arguments for standard Fint build execution."""
         if not self.config.fint_params_path:
@@ -969,6 +994,7 @@ class FuchsiaBuildContext(object):
             static_path=self.config.fint_params_path,
             context_path=self.config.fint_context_path,
             ninja_error_logging_output=ninja_error_logging_output,
+            ninja_action_metrics_output=ninja_action_metrics_output,
         )
 
     @functools.cached_property
@@ -1030,8 +1056,8 @@ class FuchsiaBuildContext(object):
         return self.build_dir / "rbe_config.json"
 
     @property
-    def check_loas_script(self) -> pathlib.Path:
-        return self.source_dir / "build/auth/check_loas_restrictions.sh"
+    def select_auth_script(self) -> pathlib.Path:
+        return self.source_dir / "build/auth/select_auth_method.py"
 
     @property
     def gcloud_creds_script(self) -> pathlib.Path:
@@ -1044,6 +1070,18 @@ class FuchsiaBuildContext(object):
     @property
     def args_gn(self) -> pathlib.Path:
         return self.build_dir / "args.gn"
+
+    @property
+    def args_json(self) -> pathlib.Path:
+        return self.build_dir / "args.json"
+
+    @functools.cached_property
+    def enable_jobserver(self) -> bool:
+        """Returns True if enable_jobserver is enabled in args.json."""
+        if not exists(self.args_json):
+            return False
+        data = read_json(self.args_json)
+        return isinstance(data, dict) and data.get("enable_jobserver") is True
 
     @property
     def gn_trace_path(self) -> pathlib.Path:
@@ -1108,22 +1146,6 @@ class FuchsiaBuildContext(object):
 
         return self._rbe_settings.needs_auth
 
-    @functools.cached_property
-    def resolved_auth_mode(self) -> str:
-        """Resolves the concrete authentication mode (user, machine, or none)."""
-        mode = self.config.auth_mode
-        if mode == "none" or not self.needs_auth:
-            return "none"
-
-        if mode == "auto":
-            # Auto-detect if we are in an infra/bot environment
-            infra_env_hints = ["BUILDBUCKET_ID", "SWARMING_TASK_ID"]
-            if any(hint in self.env for hint in infra_env_hints):
-                return "machine"
-            return "user"
-
-        return mode
-
     @property
     def concurrency(self) -> int:
         """The -j value to use. Returns the Fint job_count override if present,
@@ -1139,54 +1161,39 @@ class FuchsiaBuildContext(object):
 
         return min(factors)
 
+    def _run_select_auth_script(self) -> str:
+        """Invokes select_auth_method.py to determine the auth type."""
+        select_script = self.select_auth_script
+        try:
+            output = subprocess.check_output(
+                [str(PYTHON_BIN), str(select_script)],
+                text=True,
+                stderr=None,  # Let warnings flow through to the console directly
+                env=self.env,
+            )
+            lines = output.strip().splitlines()
+            if lines:
+                return lines[-1]
+            raise BuildConfigurationError(
+                "Authentication selection script succeeded but returned no output."
+            )
+        except subprocess.CalledProcessError:
+            raise BuildConfigurationError(
+                "Failed to detect valid build authentication. See error messages above."
+            )
+
     @functools.cached_property
-    def loas_type(self) -> str:
-        """Automatically detect the LOAS type."""
-        if self.resolved_auth_mode == "none":
-            return "skip"
+    def auth_type(self) -> str:
+        """Automatically detect the authentication type (loas, oauth, machine, or none)."""
+        mode = self.config.auth_mode
+        if mode == "none" or not self.needs_auth:
+            return "none"
 
-        if self.resolved_auth_mode == "machine":
-            return "skip"
+        if mode == "machine":
+            return "machine"
 
-        # Under 'user' mode: if we have LOAS, detect the specific restriction level
-        if has_loas():
-            check_loas_script = self.check_loas_script
-            if is_executable(check_loas_script):
-                try:
-                    output = subprocess.check_output(
-                        [str(check_loas_script)],
-                        text=True,
-                        stderr=subprocess.DEVNULL,
-                        env=self.env,
-                    )
-                    lines = output.strip().splitlines()
-                    if lines:
-                        loas_type = lines[-1]
-                        if loas_type == "unrestricted":
-                            # In corporate environments, an unrestricted LOAS type implies we can use
-                            # Bazel's gcert credential helper. However, if that helper is not executable or
-                            # accessible (e.g. on new systems, cloudtops with unmounted SrcFS, or due to
-                            # specific subdirectory permission/ACL restrictions), any attempt to run Bazel
-                            # with --config=gcertauth will fail immediately with permission denied.
-                            # In these circumstances, we gracefully downgrade to "restricted" mode to fall
-                            # back to local gcloud Application Default Credentials (ADC).
-                            if not is_executable(BAZEL_CRED_HELPER):
-                                msg(
-                                    f"WARNING: Bazel credential helper on SrcFS is not accessible: {BAZEL_CRED_HELPER}",
-                                    file=sys.stderr,
-                                )
-                                msg(
-                                    "WARNING: Gracefully falling back to restricted (local gcloud/ADC) mode.",
-                                    file=sys.stderr,
-                                )
-                                return "restricted"
-                        return loas_type
-                except subprocess.CalledProcessError:
-                    pass
-            return "skip"
-
-        # If no LOAS is available but we are in 'user' mode, we must be using local OAuth/ADC
-        return "skip"
+        # Under 'user' or 'auto' mode: run our auth selection script
+        return self._run_select_auth_script()
 
 
 class BuildInvocation(object):
@@ -1323,7 +1330,12 @@ class BuildInvocation(object):
     @property
     def ninja_errors_path(self) -> pathlib.Path:
         """The path where Ninja-specific structured action failures are recorded."""
-        return self.log_dir / "ninja_errors.json"
+        return self.log_dir / NINJA_ERRORS_JSON
+
+    @property
+    def ninja_action_metrics_path(self) -> pathlib.Path:
+        """The path where Ninja action metrics are recorded."""
+        return self.log_dir / NINJA_LOGS_DIR / NINJA_ACTION_METRICS_JSON
 
     def top_build_command_prefix(self) -> Iterable[str]:
         """Construct the prefix command for the top-level wrapper."""
@@ -1344,10 +1356,10 @@ class BuildInvocation(object):
                 yield "--reproxy-cfg"
                 yield str(cfg_path)
 
-        # LOAS handling
-        yield "--loas-type"
-        yield context.loas_type
-        if context.resolved_auth_mode == "machine":
+        # Auth type handling
+        yield "--auth-type"
+        yield context.auth_type
+        if context.auth_type == "machine":
             yield "--use-machine-credentials"
 
         # Log directory setup
@@ -1450,7 +1462,7 @@ class BuildInvocation(object):
         if resultstore in ("all", "bazel"):
             # Decide between "resultstore" (developer) and "resultstore_infra" (infra).
             if (
-                self.context.loas_type == "unrestricted"
+                self.context.auth_type == "loas"
                 and "BUILDBUCKET_ID" not in self.context.env
             ):
                 resultstore_bazel = "resultstore"
@@ -1511,7 +1523,12 @@ class BuildInvocation(object):
 
         fint_cmd = list(
             context.fint_build_cmd(
-                ninja_error_logging_output=self.ninja_errors_path
+                ninja_error_logging_output=self.ninja_errors_path,
+                ninja_action_metrics_output=(
+                    self.ninja_action_metrics_path
+                    if command_type == "ninja"
+                    else None
+                ),
             )
         )
         if fint_cmd:
@@ -1537,7 +1554,7 @@ class BuildInvocation(object):
         # Record the set of inputs that triggered build actions.
         dirty_sources = ninja_log_dir / "ninja_dirty_sources.log"
         # Record action count metrics.
-        action_metrics = ninja_log_dir / "ninja_action_metrics.json"
+        action_metrics = self.ninja_action_metrics_path
         # Record structured action failures
         error_logging_output = self.ninja_errors_path
         # Record Ninja's raw chrome build trace file
@@ -1545,7 +1562,7 @@ class BuildInvocation(object):
 
         ninja_bin = build_command[0]
         remaining_args = build_command[1:]
-        return [
+        injected = [
             ninja_bin,
             "--dirty_sources_list",
             str(dirty_sources),
@@ -1555,7 +1572,14 @@ class BuildInvocation(object):
             str(error_logging_output),
             "--chrome_trace",
             str(chrome_trace_output),
-        ] + list(remaining_args)
+        ]
+        if (
+            self.context.enable_jobserver
+            and "--jobserver" not in remaining_args
+            and "--jobserver-pool" not in remaining_args
+        ):
+            injected.append("--jobserver")
+        return injected + list(remaining_args)
 
 
 @dataclasses.dataclass
@@ -1591,8 +1615,8 @@ class BuildCommandExecution(object):
         if config.verbose:
             auth_summary = (
                 f"\n[Auth Configuration Resolved]:\n"
-                f"  Auth Mode:       {self.invocation.context.resolved_auth_mode}\n"
-                f"  LOAS Type:       {self.invocation.context.loas_type}\n"
+                f"  Config Auth Mode: {config.auth_mode}\n"
+                f"  Resolved Auth:    {self.invocation.context.auth_type}\n"
                 f"  Auth User:       {self.invocation.context.authenticated_user}\n"
                 f"  Metadata Host:   {self.env.get('GCE_METADATA_HOST', 'NOT_SET')}\n"
                 f"  Java Metadata:   {self.env.get('G_CLOUD_METADATA_HOST', 'NOT_SET')}\n"

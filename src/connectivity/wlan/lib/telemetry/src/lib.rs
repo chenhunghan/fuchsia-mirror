@@ -79,7 +79,6 @@ pub enum TelemetryEvent {
         source: TimeoutSource,
     },
     ChipPowerUpFailure,
-    ChipPowerDownFailure,
     ResetTxPowerScenario,
     SetTxPowerScenario {
         scenario: fidl_internal::TxPowerScenario,
@@ -362,14 +361,6 @@ pub fn serve_telemetry(
                             }
                             if let Some(ref connect_disconnect) = connect_disconnect {
                                 connect_disconnect.handle_client_connections_failed_to_start().await;
-                            }
-                        }
-                        ChipPowerDownFailure => {
-                            if let Some(ref power_logger) = power_logger {
-                                power_logger.chip_power_down_failure().await;
-                            }
-                            if let Some(ref connect_disconnect) = connect_disconnect {
-                                connect_disconnect.handle_client_connections_failed_to_stop().await;
                             }
                         }
                         BatteryChargeStatus(charge_status) => {

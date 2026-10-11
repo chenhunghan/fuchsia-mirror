@@ -10,9 +10,19 @@ load(":fuchsia_shell_task.bzl", "shell_task_rule")
 load(":providers.bzl", "FuchsiaProductBundleInfo")
 
 def get_product_bundle_dir(ctx):
+    """Returns the local path or cache directory for a product bundle target.
+
+    Args:
+        ctx: The rule context.
+
+    Returns:
+        A string or File representing the product bundle directory.
+    """
     pb = ctx.attr.product_bundle[FuchsiaProductBundleInfo]
     if pb.is_remote:
-        return "/tmp/%s-%s" % (pb.product_bundle_name, pb.product_version)
+        if getattr(pb, "product_version", ""):
+            return "/tmp/%s-%s" % (pb.product_bundle_name, pb.product_version)
+        return "/tmp/%s" % pb.product_bundle_name
     else:
         return pb.product_bundle
 

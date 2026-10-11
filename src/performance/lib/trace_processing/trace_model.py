@@ -5,6 +5,7 @@
 
 import copy
 import enum
+import typing
 from collections.abc import Iterator, Mapping, Sequence
 from functools import total_ordering
 from typing import Any, Self, TypeVar
@@ -208,6 +209,7 @@ class DurationEvent(Event):
             base=Event._consume_dict(event_dict),
         )
 
+    @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
         if self.duration:
             return self.start + self.duration
@@ -236,6 +238,7 @@ class AsyncEvent(Event):
         """Factory-style constructor."""
         return cls(id, duration=None, base=Event._consume_dict(event_dict))
 
+    @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
         if self.duration:
             return self.start + self.duration

@@ -289,9 +289,10 @@ TEST(PtraceTest, TraceSyscall) {
   ASSERT_EQ(ptrace(PTRACE_CONT, child_pid, 0, 0), 0);
 }
 
-#ifdef __x86_64__
-
 static constexpr int kUnmaskedSignal = SIGUSR1;
+static constexpr int kERESTARTSYS = 512;
+
+#ifdef __x86_64__
 
 // Linux has internal errnos that capture the circumstances when an interrupted
 // syscall should restart rather than return.  These are ordinarily invisible to
@@ -423,6 +424,230 @@ TEST(PtraceTest, PokeUser) {
 }
 
 #endif  // __x86_64__
+
+// Pokes a caller-saved scratch register that is neither a syscall argument used by read() nor
+// the syscall number/return register. Callee-saved registers must not be used here: libc's
+// syscall wrappers may keep live values in them across the syscall instruction (e.g. glibc on
+// aarch64 holds a TLS pointer in x19 across `svc`), so clobbering them crashes the tracee.
+void PokeScratchRegister(pid_t tracee_pid, unsigned long val) {
+  struct user_regs_struct regs = {};
+  struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
+  ASSERT_THAT(ptrace(PTRACE_GETREGSET, tracee_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+#if defined(__x86_64__)
+  regs.r10 = val;
+#elif defined(__aarch64__) || defined(__arm__)
+  regs.regs[12] = val;
+#elif defined(__riscv)
+  regs.t0 = val;
+#else
+#error "Unsupported architecture"
+#endif
+  ASSERT_THAT(ptrace(PTRACE_SETREGSET, tracee_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+}
+
+void AssertPokeLanded(pid_t tracee_pid, unsigned long expected) {
+  struct user_regs_struct regs = {};
+  struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
+  ASSERT_THAT(ptrace(PTRACE_GETREGSET, tracee_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+#if defined(__x86_64__)
+  ASSERT_EQ(expected, static_cast<unsigned long>(regs.r10));
+#elif defined(__aarch64__) || defined(__arm__)
+  ASSERT_EQ(expected, static_cast<unsigned long>(regs.regs[12]));
+#elif defined(__riscv)
+  ASSERT_EQ(expected, static_cast<unsigned long>(regs.t0));
+#else
+#error "Unsupported architecture"
+#endif
+}
+
+// These tests validate that a tracer modifying registers at syscall-enter/exit must not disturb the
+// kernel's saved copy of the syscall number or arguments.
+class PtracePokePreservesRestartTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    helper_.OnlyWaitForForkedChildren();
+
+    int fds[2];
+    SAFE_SYSCALL(pipe(fds));
+    child_read_fd_ = fds[0];
+    read_fd_ = fbl::unique_fd(fds[0]);
+    write_fd_ = fbl::unique_fd(fds[1]);
+
+    child_pid_ = helper_.RunInForkedProcess([this] {
+      write_fd_.reset();
+
+      struct sigaction sa = {};
+      sa.sa_handler = [](int) {};
+      sa.sa_flags = SA_RESTART;
+      ASSERT_THAT(sigaction(kUnmaskedSignal, &sa, nullptr), SyscallSucceeds());
+
+      ASSERT_THAT(ptrace(PTRACE_TRACEME, 0, 0, 0), SyscallSucceeds());
+      raise(SIGSTOP);
+
+      char c = 0;
+      ASSERT_THAT(read(read_fd_.get(), &c, 1), SyscallSucceedsWithValue(1));
+      ASSERT_EQ('x', c);
+    });
+    read_fd_.reset();
+
+    // Wait for the initial SIGSTOP.
+    int status;
+    ASSERT_EQ(waitpid(child_pid_, &status, 0), child_pid_);
+    ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP)
+        << "status = " << status << " WIFSTOPPED = " << WIFSTOPPED(status)
+        << " WSTOPSIG = " << WSTOPSIG(status);
+
+    ASSERT_THAT(ptrace(PTRACE_SETOPTIONS, child_pid_, 0, PTRACE_O_TRACESYSGOOD), SyscallSucceeds());
+    ASSERT_NO_FATAL_FAILURE(StepToSyscallEntry(child_pid_, {SYS_read}));
+
+    // At this point, the child is syscall-enter-stopped for read().
+  }
+
+  void PokeScratchRegister(unsigned long val) {
+    ASSERT_NO_FATAL_FAILURE(::PokeScratchRegister(child_pid_, val));
+  }
+
+  void AssertPokeLanded(unsigned long expected) {
+    ASSERT_NO_FATAL_FAILURE(::AssertPokeLanded(child_pid_, expected));
+  }
+
+  void AssertSyscallRestartRegisters() {
+    struct user_regs_struct regs = {};
+    struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
+    ASSERT_THAT(ptrace(PTRACE_GETREGSET, child_pid_, NT_PRSTATUS, &iov), SyscallSucceeds());
+#if defined(__x86_64__)
+    ASSERT_EQ(SYS_read, static_cast<int>(regs.orig_rax));
+    ASSERT_EQ(-kERESTARTSYS, static_cast<int>(regs.rax));
+    ASSERT_EQ(child_read_fd_, static_cast<int>(regs.rdi));
+#elif defined(__aarch64__)
+    ASSERT_EQ(-kERESTARTSYS, static_cast<long>(regs.regs[0]));
+#elif defined(__arm__)
+    ASSERT_EQ(-kERESTARTSYS, static_cast<long>(regs.regs[0]));
+    ASSERT_EQ(static_cast<unsigned long>(child_read_fd_), regs.regs[17]);
+#elif defined(__riscv)
+    ASSERT_EQ(-kERESTARTSYS, static_cast<long>(regs.a0));
+#else
+#error "Unsupported architecture"
+#endif
+  }
+
+  void TearDown() override {
+    if (child_pid_ > 0) {
+      ptrace(PTRACE_DETACH, child_pid_, 0, 0);
+      write_fd_.reset();
+      EXPECT_TRUE(helper_.WaitForChildren());
+    }
+  }
+
+  test_helper::ForkHelper helper_;
+  pid_t child_pid_ = -1;
+  [[maybe_unused]] int child_read_fd_ = -1;
+  fbl::unique_fd read_fd_;
+  fbl::unique_fd write_fd_;
+};
+
+TEST_F(PtracePokePreservesRestartTest, PokeAtSyscallEnter) {
+  // Poke a register so that the kernel marks the snapshot as dirty.
+  ASSERT_NO_FATAL_FAILURE(PokeScratchRegister(0xabcd));
+
+  // Allow the tracee to block on read().
+  ASSERT_THAT(ptrace(PTRACE_SYSCALL, child_pid_, 0, 0), SyscallSucceeds());
+  ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid_, true));
+
+  ASSERT_THAT(kill(child_pid_, kUnmaskedSignal), SyscallSucceeds());
+
+  // The kernel unblocks read() with internal -ERESTARTSYS. Before delivering the signal, the tracee
+  // stops at syscall-exit-stop.
+  int status;
+  ASSERT_EQ(waitpid(child_pid_, &status, 0), child_pid_);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80)) << " status " << status;
+
+  ASSERT_NO_FATAL_FAILURE(AssertPokeLanded(0xabcd));
+  // Check that the read() is able to be restarted.
+  ASSERT_NO_FATAL_FAILURE(AssertSyscallRestartRegisters());
+
+  ASSERT_THAT(ptrace(PTRACE_DETACH, child_pid_, 0, 0), SyscallSucceeds());
+  ASSERT_THAT(write(write_fd_.get(), "x", 1), SyscallSucceedsWithValue(1));
+}
+
+TEST_F(PtracePokePreservesRestartTest, PokeAtSyscallExit) {
+  // Allow the tracee to block on read().
+  ASSERT_THAT(ptrace(PTRACE_SYSCALL, child_pid_, 0, 0), SyscallSucceeds());
+  ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid_, true));
+
+  ASSERT_THAT(kill(child_pid_, kUnmaskedSignal), SyscallSucceeds());
+
+  // The kernel unblocks read() with internal -ERESTARTSYS. Before delivering the signal, the tracee
+  // stops at syscall-exit-stop.
+  int status;
+  ASSERT_EQ(waitpid(child_pid_, &status, 0), child_pid_);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == (SIGTRAP | 0x80)) << " status " << status;
+
+  // Check that the read() is able to be restarted.
+  ASSERT_NO_FATAL_FAILURE(AssertSyscallRestartRegisters());
+
+  // Poke a register so that the kernel marks the snapshot as dirty.
+  ASSERT_NO_FATAL_FAILURE(PokeScratchRegister(0xabcd));
+
+  // Resume to signal-delivery-stop for kUnmaskedSignal so the kernel writes back
+  // the dirty snapshot from syscall-exit-stop and takes a fresh snapshot.
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid_, 0, 0), SyscallSucceeds());
+  ASSERT_EQ(waitpid(child_pid_, &status, 0), child_pid_);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == kUnmaskedSignal) << " status " << status;
+
+  ASSERT_NO_FATAL_FAILURE(AssertPokeLanded(0xabcd));
+
+  ASSERT_THAT(ptrace(PTRACE_DETACH, child_pid_, 0, kUnmaskedSignal), SyscallSucceeds());
+  ASSERT_THAT(write(write_fd_.get(), "x", 1), SyscallSucceedsWithValue(1));
+}
+
+TEST(PtraceTest, PokePreservedAcrossBackToBackStop) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+
+  int notify_pipe[2];
+  SAFE_SYSCALL(pipe(notify_pipe));
+  fbl::unique_fd read_fd(notify_pipe[0]);
+  fbl::unique_fd write_fd(notify_pipe[1]);
+
+  pid_t child_pid =
+      helper.RunInForkedProcess([read_fd = std::move(read_fd), write_pipe_fd = write_fd.get()] {
+        close(write_pipe_fd);
+        char c = 0;
+        ASSERT_THAT(read(read_fd.get(), &c, 1), SyscallSucceedsWithValue(1));
+        ASSERT_EQ('x', c);
+        _exit(0);
+      });
+  read_fd.reset();
+
+  // PTRACE_SEIZE attaches without delivering a SIGSTOP, allowing us to use PTRACE_INTERRUPT
+  // to cleanly stop the tracee while it is blocked in a syscall.
+  ASSERT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, 0), SyscallSucceeds());
+
+  // Interrupt and stop the tracee while it is blocked in read().
+  ASSERT_THAT(ptrace(PTRACE_INTERRUPT, child_pid, 0, 0), SyscallSucceeds());
+  int status = 0;
+  ASSERT_EQ(waitpid(child_pid, &status, 0), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status));
+  ASSERT_EQ(SIGTRAP | (PTRACE_EVENT_STOP << 8), status >> 8);
+
+  // Poke a scratch register so the kernel snapshot is dirty.
+  constexpr unsigned long kPokeValue = 0x1234abcd;
+  ASSERT_NO_FATAL_FAILURE(PokeScratchRegister(child_pid, kPokeValue));
+
+  // Issue another interrupt while the tracee is still stopped. In the kernel, ptrace_interrupt
+  // is a no-op on an already-stopped tracee, and the parked tracee is not awakened. Verify that
+  // issuing redundant stop interrupts does not disturb the tracee's stop state or corrupt the
+  // dirty register snapshot.
+  ASSERT_THAT(ptrace(PTRACE_INTERRUPT, child_pid, 0, 0), SyscallSucceeds());
+
+  EXPECT_NO_FATAL_FAILURE(AssertPokeLanded(child_pid, kPokeValue));
+
+  ASSERT_THAT(ptrace(PTRACE_DETACH, child_pid, 0, 0), SyscallSucceeds());
+  ASSERT_THAT(write(write_fd.get(), "x", 1), SyscallSucceedsWithValue(1));
+
+  EXPECT_TRUE(helper.WaitForChildren());
+}
 
 TEST(PtraceTest, GetGeneralRegs) {
   test_helper::ForkHelper helper;
@@ -2408,9 +2633,13 @@ TEST(PtraceTest, PtraceAttachesDuringPpoll) {
 }
 
 TEST(PtraceTest, PtraceAttachesDuringPpollAndSignal) {
+  test_helper::ScopedPipe pipe;
+
   test_helper::ForkHelper helper;
   helper.OnlyWaitForForkedChildren();
-  pid_t child_pid = helper.RunInForkedProcess([&] {
+  pid_t child_pid = helper.RunInForkedProcess([&pipe] {
+    pipe.WriteSide().reset();
+
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGUSR1);
@@ -2422,21 +2651,23 @@ TEST(PtraceTest, PtraceAttachesDuringPpollAndSignal) {
     sa.sa_handler = [](int) { sigusr1_received = 1; };
     sigaction(SIGUSR1, &sa, nullptr);
 
-    // Block on ppoll.
+    // Block on ppoll waiting for the pipe to become readable.
     sigset_t ppoll_mask;
     sigemptyset(&ppoll_mask);
-    struct timespec timeout = {.tv_sec = 2, .tv_nsec = 0};
+    struct pollfd pfd = {.fd = pipe.ReadSide().get(), .events = POLLIN};
+    struct timespec timeout = {.tv_sec = 10, .tv_nsec = 0};
 
     // While blocked on the first ppoll, the parent will ptrace-attach, and send a SIGUSR1 signal.
     // The parent will intercept this signal and suppress it, so that the signal is not delivered.
-    // On Linux, this happens transparently and ppoll returns success after 2 seconds, but on
-    // Starnix it returns EINTR after the signal is suppressed.
+    // On Linux, this happens transparently and ppoll returns success once unblocked, but on Starnix
+    // it returns EINTR after the signal is suppressed.
     // TODO(wintermelons): Fix this so that ppoll returns success.
-    ppoll(nullptr, 0, &timeout, &ppoll_mask);
+    ppoll(&pfd, 1, &timeout, &ppoll_mask);
 
     // Block on ppoll again. By doing 2 ppolls in quick succession, this occasionally triggers a
     // race condition where the signal mask is not updated correctly.
-    ASSERT_THAT(ppoll(nullptr, 0, &timeout, &ppoll_mask), SyscallSucceeds());
+    struct timespec zero_timeout = {};
+    ASSERT_THAT(ppoll(nullptr, 0, &zero_timeout, &ppoll_mask), SyscallSucceeds());
 
     // Check if temporary signal mask leaked
     sigset_t current_mask;
@@ -2445,7 +2676,9 @@ TEST(PtraceTest, PtraceAttachesDuringPpollAndSignal) {
 
     EXPECT_FALSE(sigusr1_received);
   });
+
   ASSERT_NE(child_pid, 0);
+  pipe.ReadSide().reset();
 
   ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid, true));
 
@@ -2469,6 +2702,10 @@ TEST(PtraceTest, PtraceAttachesDuringPpollAndSignal) {
 
   // Continue the child without delivering the captured signal.
   ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, 0, 0), SyscallSucceeds());
+
+  // Unblock the child if ppoll was restarted (as on Linux).
+  pipe.WriteSide().reset();
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 TEST(PtraceTest, AttachDeniedWithoutCapSysPtrace) {
@@ -3007,6 +3244,114 @@ TEST(PtraceTest, PokeInstructionCacheCoherency) {
   }
 
   ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Verifies that modifying syscall argument registers at syscall-enter-stop affects the dispatched
+// syscall.
+TEST(PtraceTest, ModifySyscallArgumentAtSyscallEnterStop) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+
+  pid_t child_pid = helper.RunInForkedProcess([] {
+    int fd = SAFE_SYSCALL(open("/dev/null", O_WRONLY));
+    SAFE_SYSCALL(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr));
+    SAFE_SYSCALL(raise(SIGSTOP));
+
+    const char data[] = "hello";
+    ssize_t ret = SAFE_SYSCALL(write(fd, data, 5));
+
+    // Tracer modifies the syscall argument to only write 2 bytes.
+    ASSERT_EQ(ret, 2);
+    SAFE_SYSCALL(close(fd));
+  });
+
+  int status = 0;
+  ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+
+  ASSERT_THAT(ptrace(PTRACE_SETOPTIONS, child_pid, nullptr, PTRACE_O_TRACESYSGOOD),
+              SyscallSucceeds());
+
+  ASSERT_NO_FATAL_FAILURE(StepToSyscallEntry(child_pid, {__NR_write}));
+
+  // Modifies the syscall argument to write 2 bytes instead of 5.
+  struct user_regs_struct regs = {};
+  struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
+  ASSERT_THAT(ptrace(PTRACE_GETREGSET, child_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+
+#if defined(__x86_64__)
+  ASSERT_EQ(regs.rdx, 5u);
+  regs.rdx = 2;
+#elif defined(__aarch64__) || defined(__arm__)
+  ASSERT_EQ(regs.regs[2], 5u);
+  regs.regs[2] = 2;
+#elif defined(__riscv)
+  ASSERT_EQ(regs.a2, 5u);
+  regs.a2 = 2;
+#else
+#error "Unsupported architecture"
+#endif
+
+  ASSERT_THAT(ptrace(PTRACE_SETREGSET, child_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+
+  helper.ExpectExitValue(0);
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Verifies that modifying the syscall number register at syscall-enter-stop affects the dispatched
+// syscall.
+TEST(PtraceTest, ModifySyscallNumberAtSyscallEnterStop) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+
+  pid_t child_pid = helper.RunInForkedProcess([] {
+    pid_t expected_pid = getpid();
+
+    SAFE_SYSCALL(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr));
+    SAFE_SYSCALL(raise(SIGSTOP));
+
+    pid_t ret = static_cast<pid_t>(SAFE_SYSCALL(syscall(__NR_getppid)));
+
+    // Tracer modifies the syscall number to getpid instead of getppid.
+    ASSERT_EQ(ret, expected_pid);
+  });
+
+  int status = 0;
+  ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+
+  ASSERT_THAT(ptrace(PTRACE_SETOPTIONS, child_pid, nullptr, PTRACE_O_TRACESYSGOOD),
+              SyscallSucceeds());
+
+  ASSERT_NO_FATAL_FAILURE(StepToSyscallEntry(child_pid, {__NR_getppid}));
+
+  // Modifies the syscall number to getpid instead of getppid.
+  struct user_regs_struct regs = {};
+  struct iovec iov = {.iov_base = &regs, .iov_len = sizeof(regs)};
+  ASSERT_THAT(ptrace(PTRACE_GETREGSET, child_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+
+#if defined(__x86_64__)
+  ASSERT_EQ(regs.orig_rax, static_cast<unsigned long>(__NR_getppid));
+  regs.orig_rax = __NR_getpid;
+#elif defined(__aarch64__)
+  ASSERT_EQ(regs.regs[8], static_cast<uint64_t>(__NR_getppid));
+  regs.regs[8] = __NR_getpid;
+#elif defined(__arm__)
+  ASSERT_EQ(regs.regs[7], static_cast<unsigned long>(__NR_getppid));
+  regs.regs[7] = __NR_getpid;
+#elif defined(__riscv)
+  ASSERT_EQ(regs.a7, static_cast<unsigned long>(__NR_getppid));
+  regs.a7 = __NR_getpid;
+#else
+#error "Unsupported architecture"
+#endif
+
+  ASSERT_THAT(ptrace(PTRACE_SETREGSET, child_pid, NT_PRSTATUS, &iov), SyscallSucceeds());
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+
+  helper.ExpectExitValue(0);
   EXPECT_TRUE(helper.WaitForChildren());
 }
 

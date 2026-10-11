@@ -6,6 +6,8 @@ use fdf::AsyncDispatcher;
 use fidl_next_fuchsia_hardware_serial as serial;
 use fidl_next_fuchsia_hardware_serialimpl as serialimpl;
 use fuchsia_sync::Mutex;
+use futures::channel::mpsc;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 pub const FAKE_SERIAL_PID: u32 = 0x1234;
@@ -15,6 +17,10 @@ pub struct FakeSerialState {
     pub info_result: Result<serial::SerialPortInfo, zx::Status>,
     pub enable_result: Result<(), zx::Status>,
     pub config_result: Result<(), zx::Status>,
+    pub read_responses: VecDeque<Result<Vec<u8>, zx::Status>>,
+    pub write_results: VecDeque<Result<(), zx::Status>>,
+    pub written_packets: Vec<Vec<u8>>,
+    pub write_sender: Option<mpsc::UnboundedSender<Vec<u8>>>,
     pub enabled: bool,
     pub last_config: Option<(u32, u32)>,
     pub cancel_all_count: usize,
@@ -30,6 +36,10 @@ impl Default for FakeSerialState {
             }),
             enable_result: Ok(()),
             config_result: Ok(()),
+            read_responses: VecDeque::new(),
+            write_results: VecDeque::new(),
+            written_packets: Vec::new(),
+            write_sender: None,
             enabled: false,
             last_config: None,
             cancel_all_count: 0,
@@ -105,15 +115,43 @@ impl serialimpl::DeviceServerHandler<fdf_fidl::DriverChannel> for FakeSerialServ
         &mut self,
         responder: fidl_next::Responder<serialimpl::device::Read, fdf_fidl::DriverChannel>,
     ) {
-        let _ = responder.respond_err(zx::Status::NOT_SUPPORTED).await;
+        let read_result =
+            self.state.lock().read_responses.pop_front().unwrap_or(Err(zx::Status::NOT_SUPPORTED));
+        match read_result {
+            Ok(data) => {
+                let _ = responder.respond(&data).await;
+            }
+            Err(status) => {
+                let _ = responder.respond_err(status).await;
+            }
+        }
     }
 
     async fn write(
         &mut self,
-        _request: fidl_next::Request<serialimpl::device::Write, fdf_fidl::DriverChannel>,
+        request: fidl_next::Request<serialimpl::device::Write, fdf_fidl::DriverChannel>,
         responder: fidl_next::Responder<serialimpl::device::Write, fdf_fidl::DriverChannel>,
     ) {
-        let _ = responder.respond_err(zx::Status::NOT_SUPPORTED).await;
+        let write_result = {
+            let mut state = self.state.lock();
+            let result = state.write_results.pop_front().unwrap_or(Ok(()));
+            if result.is_ok() {
+                let data = request.payload().data.clone();
+                state.written_packets.push(data.clone());
+                if let Some(sender) = &state.write_sender {
+                    let _ = sender.unbounded_send(data);
+                }
+            }
+            result
+        };
+        match write_result {
+            Ok(()) => {
+                let _ = responder.respond(()).await;
+            }
+            Err(status) => {
+                let _ = responder.respond_err(status).await;
+            }
+        }
     }
 
     async fn cancel_all(

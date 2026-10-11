@@ -90,7 +90,8 @@ class GoldenMismatchError(Exception):
             hints.append(
                 f"Please acknowledge this change by updating the golden.\n"
                 f"To do this, please run:\n"
-                f"  {cmd}\n"
+                f"  {cmd}\n\n"
+                "Or, you can simply rebuild with `update_goldens=true` set in your GN args (e.g. via `fx args`).\n"
             )
 
         hint_lines = "\n".join(hints)
@@ -102,7 +103,8 @@ def golden_not_found_error(filename):
         f"The golden file {filename} does not exist.\n"
         f"If this is a new FIDL API you must first create this file.\n"
         f"To do so, run:\n"
-        f"  touch {os.path.abspath(filename)}\n"
+        f"  touch {os.path.abspath(filename)}\n\n"
+        "Or, you can simply rebuild with `update_goldens=true` set in your GN args (e.g. via `fx args`).\n"
     )
     return FileNotFoundError(errno.ENOENT, message, filename)
 

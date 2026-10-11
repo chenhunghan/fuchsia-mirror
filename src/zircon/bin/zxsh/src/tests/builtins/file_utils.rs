@@ -362,6 +362,35 @@ fn test_mkdir_and_rm_flags_and_errors() {
     );
     assert_eq!(code, 1);
 
+    // mkdir existing directory without -p -> EXIT_FAILURE (1)
+    let code =
+        builtin_mkdir(&[sub1_bstr.clone()], &mut state, &mut stdin, &mut stdout, &mut stderr);
+    assert_eq!(code, 1);
+
+    // mkdir in non-existent parent without -p -> EXIT_FAILURE (1)
+    let missing_parent = temp_dir.join("no_such_parent").join("child");
+    let code = builtin_mkdir(
+        &[to_bstr(&missing_parent)],
+        &mut state,
+        &mut stdin,
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 1);
+
+    // mkdir -p when an intermediate component is a regular file -> EXIT_FAILURE (1)
+    let blocker_file = temp_dir.join("blocker_file");
+    std::fs::write(&blocker_file, b"file").unwrap();
+    let blocked_nested = blocker_file.join("intermediate").join("leaf");
+    let code = builtin_mkdir(
+        &[BString::from("-p"), to_bstr(&blocked_nested)],
+        &mut state,
+        &mut stdin,
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 1);
+
     // rm with capital -R flag (recursive)
     let code = builtin_rm(
         &[BString::from("-R"), to_bstr(&temp_dir)],

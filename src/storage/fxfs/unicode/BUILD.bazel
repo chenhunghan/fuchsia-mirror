@@ -1,0 +1,110 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load(
+    "//build/bazel/rules/rust:defs.bzl",
+    "rustc_binary",
+    "rustc_library",
+    "rustc_test",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "unicode",
+    srcs = [
+        "src/lib.rs",
+        "src/lookup.rs",
+        "src/nfd.rs",
+    ],
+    crate_name = "fxfs_unicode",
+    edition = "2024",
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/storage/fxfs:__subpackages__",
+        "//src/storage/lib/fscrypt:__pkg__",
+    ],
+    deps = [
+        ":types",
+        ":unicode_gen",
+        "//src/storage/type-fprint:fprint",
+        "//third_party/rust_crates/vendor:arbitrary",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:smallvec",
+    ],
+)
+
+# We compile this file into its own crate to avoid gen/ path imports from rust.
+rustc_library(
+    name = "unicode_gen",
+    srcs = [
+        ":unicode_gen.rs",  # @bazel2gn:path_overwrite:${target_gen_dir}/unicode_gen.rs
+    ],
+    crate_root = ":unicode_gen.rs",  # @bazel2gn:raw_overwrite:"${target_gen_dir}/unicode_gen.rs"
+    data = [":generate_unicode_gen"],
+    edition = "2024",
+    deps = [":types"],
+)
+
+# This rule is for executing unicode_gen_builder.
+# @bazel2gn:skip
+genrule(
+    name = "generate_unicode_gen",
+    srcs = ["//:prebuilt/third_party/ucd/UCD.zip"],
+    outs = ["unicode_gen.rs"],
+    cmd = "$(location :unicode_gen_builder) $< $@",
+    tools = [":unicode_gen_builder"],
+)
+
+rustc_test(
+    name = "fxfs_unicode_test",
+    srcs = [
+        "src/lib.rs",
+        "src/lookup.rs",
+        "src/nfd.rs",
+    ],
+    data = [
+        "//:prebuilt/third_party/ucd/UCD.zip",
+    ],  # @bazel2gn:raw_overwrite:[ ":ucd_zip" ]
+    edition = "2024",
+    rustc_env = {
+        "UCD_ZIP": "prebuilt/third_party/ucd/UCD.zip",
+    },  # @bazel2gn:raw_overwrite:[ "UCD_ZIP=" + rebase_path("//prebuilt/third_party/ucd/UCD.zip", root_build_dir) ]
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":types",
+        ":unicode_gen",
+        "//src/storage/type-fprint:fprint",
+        "//third_party/rust_crates/vendor:arbitrary",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:smallvec",
+        "//third_party/rust_crates/vendor:zip",
+    ],
+)
+
+# This (host) binary is responsible for taking UCD.zip and creating
+# unicode_gen.rs.
+rustc_binary(
+    name = "unicode_gen_builder",
+    srcs = ["src/generator.rs"],
+    crate_root = "src/generator.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":types",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:zip",
+    ],
+)
+
+# The types that we generate are shared with the library and generator so
+# we put them in their own target.
+rustc_library(
+    name = "types",
+    srcs = ["src/types.rs"],
+    crate_root = "src/types.rs",
+    edition = "2024",
+)

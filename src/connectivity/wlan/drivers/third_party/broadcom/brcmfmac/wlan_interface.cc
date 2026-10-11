@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 #include <bind/fuchsia/cpp/bind.h>
 
@@ -48,9 +49,15 @@ void WlanInterface::Create(
     wlan::brcmfmac::Device* device, const char* name, wireless_dev* wdev,
     fuchsia_wlan_common::WlanMacRole role, uint16_t iface_id,
     fit::callback<void(zx::result<std::unique_ptr<WlanInterface>>)>&& on_complete) {
+  const int ifidx = ndev_to_if(wdev->netdev)->ifidx;
+  if (!std::in_range<uint8_t>(ifidx)) {
+    BRCMF_ERR("Invalid interface index %d", ifidx);
+    on_complete(zx::error(ZX_ERR_INTERNAL));
+    return;
+  }
   std::unique_ptr<WlanInterface> interface(
       new WlanInterface(device, device->NetDev().NetDevIfcClient().Clone(),
-                        ndev_to_if(wdev->netdev)->ifidx, name, iface_id));
+                        static_cast<uint8_t>(ifidx), name, iface_id));
 
   const zx_status_t status = [&] {
     interface->device_ = device;
@@ -261,7 +268,7 @@ zx_status_t WlanInterface::GetSupportedMacRoles(
     return ZX_ERR_INTERNAL;
   }
 
-  size_t len = 0;
+  uint8_t len = 0;
   if (brcmf_feat_is_enabled(drvr, BRCMF_FEAT_STA)) {
     out_supported_mac_roles_list[len] = fuchsia_wlan_common::WlanMacRole::kClient;
     ++len;
@@ -564,14 +571,20 @@ void WlanInterface::GetSignalReport(GetSignalReportCompleter::Sync& completer) {
 
 void WlanInterface::SaeHandshakeResp(SaeHandshakeRespRequestView request,
                                      SaeHandshakeRespCompleter::Sync& completer) {
-  brcmf_if_sae_handshake_resp(wdev_->netdev, request);
+  std::shared_lock<std::shared_mutex> guard(lock_);
+  if (wdev_ != nullptr) {
+    brcmf_if_sae_handshake_resp(wdev_->netdev, request);
+  }
   completer.Reply();
 }
 
 void WlanInterface::SaeFrameTx(SaeFrameTxRequestView request,
                                SaeFrameTxCompleter::Sync& completer) {
-  const fuchsia_wlan_fullmac::wire::SaeFrame frame = request->frame;
-  brcmf_if_sae_frame_tx(wdev_->netdev, &frame);
+  std::shared_lock<std::shared_mutex> guard(lock_);
+  if (wdev_ != nullptr) {
+    const fuchsia_wlan_fullmac::wire::SaeFrame frame = request->frame;
+    brcmf_if_sae_frame_tx(wdev_->netdev, &frame);
+  }
   completer.Reply();
 }
 

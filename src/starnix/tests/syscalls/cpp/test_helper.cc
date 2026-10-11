@@ -38,7 +38,9 @@
 #include <gtest/gtest.h>
 #include <linux/capability.h>
 #include <linux/fs.h>
+#include <linux/input.h>
 #include <linux/loop.h>
+#include <linux/uinput.h>
 
 #include "src/lib/files/file.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -320,6 +322,18 @@ ScopedTempSymlink::ScopedTempSymlink(const char *target_path) {
 ScopedTempSymlink::~ScopedTempSymlink() {
   if (!path_.empty()) {
     unlink(path_.c_str());
+  }
+}
+
+ScopedPerfEventParanoid::ScopedPerfEventParanoid(int value) {
+  restore_ = files::ReadFileToString(kPerfEventParanoidPath, &previous_value_);
+  EXPECT_TRUE(restore_) << strerror(errno);
+  EXPECT_TRUE(files::WriteFile(kPerfEventParanoidPath, std::to_string(value))) << strerror(errno);
+}
+
+ScopedPerfEventParanoid::~ScopedPerfEventParanoid() {
+  if (restore_) {
+    EXPECT_TRUE(files::WriteFile(kPerfEventParanoidPath, previous_value_)) << strerror(errno);
   }
 }
 
@@ -988,7 +1002,7 @@ constexpr char kDevInputDir[] = "/dev/input";
 
 std::vector<std::string> WaitForDevice(const std::set<std::string> &ls_before) {
   std::vector<std::string> diff;
-  for (int i = 0; i < 100; ++i) {
+  for (int i = 0; i < 200; ++i) {
     diff.clear();
     auto ls_after = ListDirectory(kDevInputDir);
     if (ls_after.is_error()) {
@@ -1002,9 +1016,94 @@ std::vector<std::string> WaitForDevice(const std::set<std::string> &ls_before) {
         break;
       }
     }
-    usleep(50000);  // 50ms (total 5s)
+    usleep(50000);  // 50ms (total 10s)
   }
   return diff;
+}
+
+bool WaitForDevicesRemoved(const std::set<std::string> &baseline) {
+  for (int i = 0; i < 200; ++i) {
+    auto ls = ListDirectory(kDevInputDir);
+    if (ls.is_error()) {
+      if (ls.error_value() == ENOENT) {
+        return true;
+      }
+      return false;
+    }
+    if (std::includes(baseline.begin(), baseline.end(), ls->begin(), ls->end())) {
+      return true;
+    }
+    usleep(50000);  // 50ms (total 10s)
+  }
+  return false;
+}
+
+ScopedUinputDevice::~ScopedUinputDevice() {
+  event_fd.reset();
+  if (uinput_fd.is_valid()) {
+    EXPECT_EQ(0, ioctl(uinput_fd.get(), UI_DEV_DESTROY));
+    uinput_fd.reset();
+    EXPECT_TRUE(WaitForDevicesRemoved(ls_before));
+  }
+}
+
+std::optional<ScopedUinputDevice> ScopedUinputDevice::Create(const char *name, uint16_t product,
+                                                             std::optional<int> evbit) {
+  fbl::unique_fd uinput_fd(open("/dev/uinput", O_RDWR));
+  if (!uinput_fd.is_valid()) {
+    if (IsStarnix()) {
+      ADD_FAILURE() << "open(\"/dev/uinput\") failed: " << strerror(errno);
+    } else {
+      [] { GTEST_SKIP() << "/dev/uinput not available, skipping."; }();
+    }
+    return std::nullopt;
+  }
+
+  if (evbit.has_value()) {
+    if (ioctl(uinput_fd.get(), UI_SET_EVBIT, *evbit) != 0) {
+      ADD_FAILURE() << "ioctl(UI_SET_EVBIT) failed: " << strerror(errno);
+      return std::nullopt;
+    }
+  }
+
+  uinput_setup usetup{.id = {.bustype = BUS_USB, .vendor = 0x18d1, .product = product}};
+  strncpy(usetup.name, name, sizeof(usetup.name) - 1);
+  if (ioctl(uinput_fd.get(), UI_DEV_SETUP, &usetup) != 0) {
+    ADD_FAILURE() << "ioctl(UI_DEV_SETUP) failed: " << strerror(errno);
+    return std::nullopt;
+  }
+
+  auto ls_before = ListDirectory(kDevInputDir).value_or(std::set<std::string>{});
+  if (ioctl(uinput_fd.get(), UI_DEV_CREATE) != 0) {
+#if !defined(__x86_64__)
+    if (errno == EPERM) {
+      [] {
+        GTEST_SKIP() << "UI_DEV_CREATE not supported (input registry not available), skipping.";
+      }();
+      return std::nullopt;
+    }
+#endif
+    ADD_FAILURE() << "ioctl(UI_DEV_CREATE) failed: " << strerror(errno);
+    return std::nullopt;
+  }
+
+  ScopedUinputDevice device(std::move(uinput_fd), /*event_fd=*/{}, /*event_node=*/{},
+                            std::move(ls_before));
+
+  auto diff = WaitForDevice(device.ls_before);
+  if (diff.size() != 1u) {
+    ADD_FAILURE() << "Expected 1 device, got " << diff.size();
+    return std::nullopt;
+  }
+  device.event_node = std::move(diff[0]);
+  std::string event_path = std::string(kDevInputDir) + "/" + device.event_node;
+  device.event_fd = fbl::unique_fd(open(event_path.c_str(), O_RDONLY));
+  if (!device.event_fd.is_valid()) {
+    ADD_FAILURE() << "failed to open " << event_path << ": " << strerror(errno);
+    return std::nullopt;
+  }
+
+  return device;
 }
 
 }  // namespace test_helper

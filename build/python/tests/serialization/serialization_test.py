@@ -622,6 +622,86 @@ class SerializeFieldsTest(unittest.TestCase):
             instance_from_dict(Outer, {"inner": {"int_field": 43}}),
         )
 
+    def test_serialize_nested_union_classes(self) -> None:
+        @dataclass
+        class Inner:
+            int_field: int
+
+        @dataclass
+        class Outer:
+            inner: Inner | int | None = None
+
+        self.assertEqual(
+            {"inner": {"int_field": 43}},
+            instance_to_dict(Outer(Inner(43))),
+        )
+        self.assertEqual(
+            {"inner": 7},
+            instance_to_dict(Outer(7)),
+        )
+        self.assertEqual(
+            {},
+            instance_to_dict(Outer()),
+        )
+
+    def test_deserialize_nested_union_classes(self) -> None:
+        @dataclass
+        class Inner:
+            int_field: int
+
+        @dataclass
+        class Outer:
+            inner: Inner | int | None = None
+
+        self.assertEqual(
+            Outer(Inner(43)),
+            instance_from_dict(Outer, {"inner": {"int_field": 43}}),
+        )
+        self.assertEqual(
+            Outer(7),
+            instance_from_dict(Outer, {"inner": 7}),
+        )
+        self.assertEqual(
+            Outer(),
+            instance_from_dict(Outer, {}),
+        )
+
+    def test_serialize_nested_inherited_classes(self) -> None:
+        @dataclass
+        class BaseInner:
+            int_field: int
+
+        @dataclass
+        class SubInner(BaseInner):
+            pass
+
+        @dataclass
+        class Outer:
+            inner: SubInner
+
+        self.assertEqual(
+            {"inner": {"int_field": 43}},
+            instance_to_dict(Outer(SubInner(43))),
+        )
+
+    def test_deserialize_nested_inherited_classes(self) -> None:
+        @dataclass
+        class BaseInner:
+            int_field: int
+
+        @dataclass
+        class SubInner(BaseInner):
+            pass
+
+        @dataclass
+        class Outer:
+            inner: SubInner
+
+        self.assertEqual(
+            Outer(SubInner(43)),
+            instance_from_dict(Outer, {"inner": {"int_field": 43}}),
+        )
+
 
 class SerializeToDictDecorator(unittest.TestCase):
     """Validate that the `@serialize_to_dict class decorator behaves correctly.

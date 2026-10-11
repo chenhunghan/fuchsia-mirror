@@ -43,7 +43,6 @@ fidl("fuchsia.developer.ffx") {
     "echo.fidl",
     "overview.fidl",
     "target.fidl",
-    "tunnel.fidl",
   ]
   visibility = [
     ":*",
@@ -55,11 +54,5 @@ fidl("fuchsia.developer.ffx") {
     "//tools/funnel/*",
     "//vendor/google/tools/*",
   ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.buildinfo",
-    "//sdk/fidl/fuchsia.developer.remotecontrol",
-    "//sdk/fidl/fuchsia.io",
-    "//sdk/fidl/fuchsia.net",
-    "//zircon/vdso/zx",
-  ]
+  public_deps = [ "//sdk/fidl/fuchsia.net" ]
 }

@@ -89,7 +89,6 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         """Test get_status successfully returns BatteryStatus."""
         mock_proxy = mock.AsyncMock()
         mock_fidl_status = f_battery.Status(
-            charge_status=f_battery.ChargeStatus.CHARGING,
             level_percent=85.5,
             remaining_capacity_uah=3400000,
         )
@@ -103,8 +102,8 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.battery._ready = True
 
         status = await self.battery.get_status()
-        self.assertEqual(status.charge_status, 2)
         self.assertEqual(status.level_percent, 85.5)
+        self.assertEqual(status.remaining_capacity_uah, 3400000)
 
     async def test_get_status_error(self) -> None:
         """Test get_status raises BatteryRequestError when driver returns error."""
@@ -144,7 +143,6 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         """Test watch successfully returns BatteryStatus."""
         mock_proxy = mock.AsyncMock()
         mock_fidl_status = f_battery.Status(
-            charge_status=f_battery.ChargeStatus.FULL,
             level_percent=100.0,
             present=True,
         )
@@ -158,7 +156,6 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.battery._ready = True
 
         status = await self.battery.watch()
-        self.assertEqual(status.charge_status, 4)
         self.assertEqual(status.level_percent, 100.0)
         self.assertTrue(status.present)
         mock_proxy.watch.assert_awaited_once_with(lease=None)

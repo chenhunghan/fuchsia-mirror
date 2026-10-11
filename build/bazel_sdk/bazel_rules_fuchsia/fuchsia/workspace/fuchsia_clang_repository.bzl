@@ -5,10 +5,6 @@
 """Defines module extensions for instantiating the `@fuchsia_clang` repository."""
 
 load(
-    "//common:repository_utils.bzl",
-    "bazel_major_version_is_at_least",
-)
-load(
     "//common:toolchains/clang/repository_utils.bzl",
     "prepare_clang_repository",
 )
@@ -61,11 +57,9 @@ def _instantiate_from_local_dir(ctx, local_clang):
     else:
         version_file = ctx.os.environ.get(_LOCAL_FUCHSIA_CLANG_VERSION_FILE)
         if version_file:
-            if version_file.startswith(("/", "..")):
-                # buildifier: disable=print
-                print("### Ignoring %s value, path should be relative to workspace root: %s" % (_LOCAL_FUCHSIA_CLANG_VERSION_FILE, version_file))
-            else:
-                version_file_path = ctx.path("%s/%s" % (ctx.workspace_root, version_file))
+            if not version_file.startswith("/"):
+                version_file = "%s/%s" % (ctx.workspace_root, version_file)
+            version_file_path = ctx.path(version_file)
         else:
             # Fallback to a CIPD version file if it exists.
             cipd_version_path = ctx.path("%s/.versions/clang.cipd_version" % local_clang)
@@ -75,12 +69,7 @@ def _instantiate_from_local_dir(ctx, local_clang):
     if version_file_path:
         if not version_file_path.exists:
             fail("Missing Clang version file: %s" % version_file_path)
-
-        # repository_ctx.watch() doesn't exist on Bazel 6, which is still being used
-        # by the HSP build. Remove this once it has been upgraded to 7.5 or above.'
-        # NOTE: An empty native.bazel_version string denotes a development version.
-        if bazel_major_version_is_at_least(ctx, 7):
-            ctx.watch(version_file_path)
+        ctx.watch(version_file_path)
 
 def _instantiate_from_local_fuchsia_tree(ctx):
     # Copies clang prebuilt from a local Fuchsia platform tree.

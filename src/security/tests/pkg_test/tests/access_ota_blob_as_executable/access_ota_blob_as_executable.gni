@@ -168,7 +168,7 @@ template("access_ota_blob_as_executable") {
              "//src/sys/pkg/bin/system-updater:component",
 
              # Production network components for OTA update.
-             "//src/connectivity/network/netstack:component",
+             "//src/connectivity/network/netstack3:component-for-tests",
              "//src/connectivity/policy/http-client:component",
 
              # Mock SWD component dependencies.

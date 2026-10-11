@@ -90,9 +90,6 @@ source_set("bcdc") {
     ":linuxisms",
     "//sdk/lib/stdcompat",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 # Sources for timer implementation.
@@ -183,9 +180,6 @@ source_set("core") {
   # Suppress warnings the brcmfmac code doesn't comply with.
   configs += [ "//build/config:Wno-unused-but-set-variable" ]
 
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
-
   # TODO(https://fxbug.dev/42085293): delete the below and fix compiler warnings
   configs += [ "//build/config:Wno-vla-cxx-extension" ]
 }
@@ -241,9 +235,6 @@ fuchsia_cc_driver("fuchsia_driver-driver") {
     ":driver_sources",
     "//src/connectivity/wlan/lib/common/cpp:common",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("fuchsia_driver") {
@@ -267,9 +258,6 @@ fuchsia_cc_driver("test_fuchsia_driver-driver") {
     ":core",
     ":driver_sources",
   ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }
 
 fuchsia_driver_component("test_fuchsia_driver") {

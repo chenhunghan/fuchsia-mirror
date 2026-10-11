@@ -4,7 +4,7 @@
 
 use crate::environment::{DevicePublisher, Environment, FshostEnvironment};
 use crate::inspect::register_stats;
-use crate::watcher::{DirSource, PathSource, PathSourceType, WatchSource, Watcher};
+use crate::watcher::{DirSource, WatchSource, Watcher};
 use anyhow::{Context as _, Error, format_err};
 use device::Parent;
 use fidl::prelude::*;
@@ -34,8 +34,6 @@ mod recovery;
 mod service;
 mod watcher;
 
-const DEV_CLASS_BLOCK: &str = "/dev/class/block";
-const DEV_CLASS_NAND: &str = "/dev/class/nand";
 const VOLUME_SERVICE_PATH: &str = "/svc/fuchsia.hardware.block.volume.Service";
 
 // Logs directly to the serial port.  To be used when it's expected that fshost will terminate
@@ -88,31 +86,17 @@ async fn main() -> Result<(), Error> {
 
     let registered_devices = Arc::new(device::RegisteredDevices::default());
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<service::FshostShutdownResponder>(1);
-    let (watcher, device_stream) = Watcher::new({
-        // TODO(https://fxbug.dev/394968352): Don't watch /dev/class/nand
-        let mut sources =
-            vec![Box::new(PathSource::new(DEV_CLASS_NAND, PathSourceType::Nand, None))
-                as Box<dyn WatchSource>];
-        if config.watch_deprecated_v1_drivers {
-            // TODO(https://fxbug.dev/394968352): Don't watch /dev/class/block
-            sources.push(Box::new(PathSource::new(
-                DEV_CLASS_BLOCK,
-                PathSourceType::Block,
-                Some(Arc::new(|_| Parent::Dev)),
-            )) as Box<dyn WatchSource>);
-        }
-        sources.extend(
-            fuchsia_fs::directory::open_in_namespace(
-                VOLUME_SERVICE_PATH,
-                fio::PERM_READABLE | fio::Flags::PROTOCOL_DIRECTORY,
-            )
-            .map(|d| {
-                Box::new(DirSource::new(d, VOLUME_SERVICE_PATH, Parent::Dev))
-                    as Box<dyn WatchSource>
-            }),
-        );
-        sources
-    })
+    let (watcher, device_stream) = Watcher::new(
+        fuchsia_fs::directory::open_in_namespace(
+            VOLUME_SERVICE_PATH,
+            fio::PERM_READABLE | fio::Flags::PROTOCOL_DIRECTORY,
+        )
+        .map(|d| {
+            Box::new(DirSource::new(d, VOLUME_SERVICE_PATH, Parent::Dev)) as Box<dyn WatchSource>
+        })
+        .into_iter()
+        .collect(),
+    )
     .await?;
     // Potentially launch the boot items ramdisk. It's not fatal, so if it fails we print an error
     // and continue.

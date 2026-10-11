@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::atomic::AtomicOperand;
 use crate::inject::{VmoMemoryHandler, VmoOpHelper};
 
 /// Trait for MMIO operand types that can be loaded or stored via a test
@@ -10,7 +11,7 @@ use crate::inject::{VmoMemoryHandler, VmoOpHelper};
 /// This trait is local version of [`mmio::MmioOperand`] with extensions
 /// specifically tailored for testing.
 pub trait MmioOperand:
-    mmio::MmioOperand + sealed::MmioOperand + TryFrom<usize, Error: std::fmt::Debug>
+    mmio::MmioOperand + AtomicOperand + sealed::MmioOperand + TryFrom<usize, Error: std::fmt::Debug>
 {
     /// Dispatches a load operation of this operand type to `handler`.
     fn load<H: VmoMemoryHandler + ?Sized>(handler: &H, op: VmoOpHelper<'_, Self>) -> Self;

@@ -180,7 +180,6 @@ group("tests") {
   testonly = true
   deps = [
     ":lib_fdomain_test($host_toolchain)",
-    ":lib_test($host_toolchain)",
     ":net-cli-fdomain-tests",
     ":net-cli-tests",
     "tests",

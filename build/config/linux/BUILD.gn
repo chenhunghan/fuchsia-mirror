@@ -43,6 +43,7 @@ config("default-pie") {
   }
 }
 
+# LINT.IfChange(implicit-host-libs)
 compiler_config("implicit-host-libs") {
   ldflags = [
     # Use static C++ standard library.
@@ -59,6 +60,8 @@ compiler_config("implicit-host-libs") {
     rustflags += [ "-Clink-arg=$flag" ]
   }
 }
+
+# LINT.ThenChange(//build/config/linux/BUILD.bazel:implicit-host-libs)
 
 config("sysroot") {
   cflags = [ "--sysroot=" + rebase_path(sysroot, root_build_dir) ]

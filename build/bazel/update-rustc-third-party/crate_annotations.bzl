@@ -34,10 +34,10 @@ CRATE_ANNOTATIONS = {
     "alloca": [
         crate.annotation(
             version = "*",
-            deps = [
+            gen_build_script = False,
+            link_deps = [
                 "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
             ],
-            gen_build_script = False,
         ),
     ],
     "anyhow": [
@@ -393,10 +393,10 @@ CRATE_ANNOTATIONS = {
     "ring": [
         crate.annotation(
             version = "0.17.14",
-            deps = [
+            gen_build_script = False,
+            link_deps = [
                 "//third_party/rust_crates/compat/ring-0.17.14:ring-core",
             ],
-            gen_build_script = False,
             rustc_env = {
                 "RING_CORE_PREFIX": "ring_core_0_17_14_",
             },
@@ -547,7 +547,7 @@ CRATE_ANNOTATIONS = {
     ],
     "tracing-mutex": [
         crate.annotation(
-            version = "0.3.2",
+            version = "0.3.3",
             rustc_flags = [
                 "--cfg=has_std__sync__LazyLock",
             ],

@@ -36,7 +36,7 @@ use netstack3_base::testutil::{
 use netstack3_base::{
     AddressResolutionFailed, CtxPair, DeferredResourceRemovalContext, EventContext,
     InstantBindingsTypes, InstantContext, IpDeviceAddr, LinkDevice, LocalFrameDestination,
-    MarkDomain, Marks, MatcherBindingsTypes, NetworkParsingContext, NotFoundError,
+    MarkDomain, Marks, MatcherBindingsTypes, NetworkParsingContext, NotFoundError, PacketType,
     ReferenceNotifiers, RemoveResourceResult, RemoveResourceResultWithContext, RngContext,
     SocketDiagnosticsSeed, TimerBindingsTypes, TimerContext, TimerHandler, TxMetadataBindingsTypes,
     WorkQueueReport,
@@ -328,13 +328,15 @@ where
         parsing_context: NetworkParsingContext,
     ) {
         let (core_ctx, bindings_ctx) = self.contexts();
+        let packet_type = frame_dst.map(PacketType::from).unwrap_or(PacketType::Host);
+        let metadata = DeviceIpLayerMetadata::with_marks_and_packet_type(marks, packet_type);
         match I::VERSION {
             IpVersion::V4 => ip::receive_ipv4_packet(
                 core_ctx,
                 bindings_ctx,
                 device,
                 frame_dst,
-                DeviceIpLayerMetadata::with_marks(marks),
+                metadata,
                 parsing_context,
                 None,
                 buffer,
@@ -344,7 +346,7 @@ where
                 bindings_ctx,
                 device,
                 frame_dst,
-                DeviceIpLayerMetadata::with_marks(marks),
+                metadata,
                 parsing_context,
                 None,
                 buffer,
@@ -597,8 +599,8 @@ pub struct FakeBindingsCtxState {
     pub rx_available: Vec<LoopbackDeviceId<FakeBindingsCtx>>,
     /// IDs with tx queue signaled available.
     pub tx_available: Vec<DeviceId<FakeBindingsCtx>>,
-    /// Recorded `(SocketInfo, Marks)` passed to `SocketOpsFilter::on_ingress`.
-    pub socket_ingress_filter_marks: Vec<(netstack3_base::socket::SocketInfo, Marks)>,
+    /// Recorded `(SocketInfo, Marks, PacketType)` passed to `SocketOpsFilter::on_ingress`.
+    pub packet_metadata: Vec<(netstack3_base::socket::SocketInfo, Marks, PacketType)>,
     /// Deferred resource removals.
     #[cfg(loom)]
     pub deferred_receivers: Vec<loom_notifiers::LoomReceiver>,
@@ -847,8 +849,9 @@ impl SocketOpsFilter<DeviceId<FakeBindingsCtx>> for FakeSocketOpsFilter<'_> {
         _device: &DeviceId<FakeBindingsCtx>,
         socket_info: netstack3_base::socket::SocketInfo,
         marks: &Marks,
+        packet_type: PacketType,
     ) -> netstack3_filter::SocketIngressFilterResult {
-        self.0.0.lock().state.socket_ingress_filter_marks.push((socket_info, *marks));
+        self.0.0.lock().state.packet_metadata.push((socket_info, *marks, packet_type));
         netstack3_filter::SocketIngressFilterResult::Accept
     }
 }

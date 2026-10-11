@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Source tree
+#### PREBUILTS=${PREBUILT_GSUTIL} ${PREBUILT_PYTHON3}
 ### Sync the local Fuchsia source tree to a given state
 
 import argparse

@@ -6,12 +6,14 @@ use crate::fs::fuchsia::update_info_from_attrs;
 use crate::mm::memory::MemoryObject;
 use crate::mm::{ProtectionFlags, VMEX_RESOURCE};
 use crate::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, Waiter};
+use crate::vfs::fs_args::MountParams;
 use crate::vfs::{
-    CacheConfig, CacheMode, DEFAULT_BYTES_PER_BLOCK, DirectoryEntryType, DirentSink, FileObject,
-    FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeHandle,
-    FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, OutputBuffer, SeekTarget, SymlinkTarget,
-    ValueOrSize, default_seek, emit_dotdot, fileops_impl_directory, fileops_impl_noop_sync,
-    fileops_impl_seekable, fs_node_impl_dir_readonly, fs_node_impl_not_dir, fs_node_impl_symlink,
+    CacheConfig, CacheMode, DEFAULT_BYTES_PER_BLOCK, DirEntry, DirectoryEntryType, DirentSink,
+    FileObject, FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode,
+    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, OutputBuffer, SeekTarget,
+    StatxFlags, SymlinkTarget, ValueOrSize, default_seek, emit_dotdot, fileops_impl_directory,
+    fileops_impl_noop_sync, fileops_impl_seekable, fs_node_impl_dir_readonly, fs_node_impl_not_dir,
+    fs_node_impl_symlink,
 };
 use anyhow::{Error, anyhow, ensure};
 use ext4_metadata::{Metadata, Node, NodeInfo};
@@ -163,12 +165,16 @@ impl FileSystemOps for RemoteBundle {
     fn name(&self) -> &'static FsStr {
         "remote_bundle".into()
     }
-    fn update_flags(
+    fn reconfigure(
         &self,
         fs: &FileSystem,
         _current_task: &CurrentTask,
         flags: FileSystemFlags,
+        params: &MountParams,
     ) -> Result<(), Errno> {
+        if !params.is_empty() {
+            track_stub!(TODO("https://fxbug.dev/322875506"), "MS_REMOUNT: Updating data");
+        }
         fs.options.flags.store(flags | FileSystemFlags::RDONLY, Ordering::Relaxed);
         Ok(())
     }
@@ -217,7 +223,11 @@ impl FsNodeOps for File {
         _node: &FsNode,
         _current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
+        flags: StatxFlags,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
+        if flags.contains(StatxFlags::AT_STATX_DONT_SYNC) {
+            return Ok(info.read());
+        }
         let memory = self.inner.lock().get_memory()?;
         let content_size = memory.get_content_size();
         let attrs = zxio_node_attributes_t {
@@ -411,7 +421,7 @@ impl FsNodeOps for DirectoryObject {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -420,11 +430,11 @@ impl FsNodeOps for DirectoryObject {
             errno!(EINVAL)
         })?;
 
-        let fs = node.fs();
+        let fs = entry.node.fs();
         let bundle = RemoteBundle::from_fs(&fs);
         let metadata = &bundle.metadata;
         let ino = metadata
-            .lookup(node.ino, name)
+            .lookup(entry.node.ino, name)
             .map_err(|e| errno!(ENOENT, format!("Error: {e:?} opening {name}")))?;
         let metadata_node = metadata.get(ino).ok_or_else(|| errno!(EIO))?;
         let info = to_fs_node_info(metadata_node);

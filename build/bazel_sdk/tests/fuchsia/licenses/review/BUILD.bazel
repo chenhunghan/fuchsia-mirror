@@ -16,7 +16,7 @@ fuchsia_licenses_review(
 )
 
 # When the goldens don't match, you may update them via:
-#    ./build/bazel_sdk/tests/scripts/bazel_test.py \
+#    ./build/bazel_sdk/tests/scripts/run_tests.py \
 #      --test_target //:licenses_tests \
 #      --output_base /tmp/bazel_sdk_tests_output
 #    cp -a \

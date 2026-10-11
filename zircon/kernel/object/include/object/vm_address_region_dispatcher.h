@@ -7,70 +7,88 @@
 #ifndef ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_VM_ADDRESS_REGION_DISPATCHER_H_
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_VM_ADDRESS_REGION_DISPATCHER_H_
 
+#include <lib/object-constants.h>
+#include <lib/zx/result.h>
 #include <sys/types.h>
-#include <zircon/rights.h>
 #include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
+#include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
+#include <object/opaque_storage.h>
+#include <vm/vm_address_region.h>
 
-class VmAddressRegion;
 class VmMapping;
 class VmObject;
+class VmAddressRegionDispatcher;
 
-class VmAddressRegionDispatcher final
-    : public SoloDispatcher<VmAddressRegionDispatcher, ZX_DEFAULT_VMAR_RIGHTS> {
+extern "C" {
+zx_status_t cpp_vmar_dispatcher_create(
+    VmAddressRegion* vmar, arch_mmu_flags_t base_arch_mmu_flags,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out);
+
+void rust_vm_address_region_dispatcher_state_init(void* state,
+                                                  const VmAddressRegionDispatcher* disp,
+                                                  VmAddressRegion* vmar,
+                                                  arch_mmu_flags_t base_arch_mmu_flags);
+void rust_vm_address_region_dispatcher_state_destroy(void* state);
+Lock<CriticalMutex>* rust_vm_address_region_dispatcher_state_get_lock(const void* state);
+const fbl::RefPtr<VmAddressRegion>* rust_vmar_dispatcher_get_vmar(
+    const VmAddressRegionDispatcher* disp);
+zx_status_t rust_vmar_dispatcher_create(
+    VmAddressRegion* vmar_raw, arch_mmu_flags_t base_arch_mmu_flags,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out,
+    ffi::Uninitialized<zx_rights_t>* rights_out);
+zx_status_t rust_vmar_dispatcher_allocate(
+    const VmAddressRegionDispatcher* disp, size_t offset, size_t size, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out,
+    ffi::Uninitialized<zx_rights_t>* rights_out);
+zx_status_t rust_vmar_dispatcher_map(const VmAddressRegionDispatcher* disp, size_t vmar_offset,
+                                     VmObject* vmo_raw, uint64_t vmo_offset, size_t len,
+                                     uint32_t flags, VmMapping** out_mapping, vaddr_t* out_base);
+}
+
+class VmAddressRegionDispatcher final : public Dispatcher {
  public:
   static zx_status_t Create(fbl::RefPtr<VmAddressRegion> vmar, arch_mmu_flags_t base_arch_mmu_flags,
                             KernelHandle<VmAddressRegionDispatcher>* handle, zx_rights_t* rights);
 
   ~VmAddressRegionDispatcher() final;
+
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_VMAR; }
+  zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
+  bool is_waitable() const final { return false; }
+
+  zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
+    return UserSignalSelfSolo(this, clear_mask, set_mask, 0);
+  }
+  zx_status_t user_signal_peer(uint32_t clear_mask, uint32_t set_mask) final {
+    return ZX_ERR_NOT_SUPPORTED;
+  }
 
   // TODO(teisenbe): Make this the planned batch interface
   zx_status_t Allocate(size_t offset, size_t size, uint32_t flags,
-                       KernelHandle<VmAddressRegionDispatcher>* handle, zx_rights_t* rights);
-
-  zx_status_t Destroy();
+                       KernelHandle<VmAddressRegionDispatcher>* handle, zx_rights_t* rights) const;
 
   using MapResult = VmAddressRegion::MapResult;
   zx::result<MapResult> Map(size_t vmar_offset, fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset,
-                            size_t len, uint32_t flags);
+                            size_t len, uint32_t flags) const;
 
-  zx_status_t Protect(vaddr_t base, size_t len, uint32_t flags,
-                      VmAddressRegionOpChildren op_children);
+  const fbl::RefPtr<VmAddressRegion>& vmar() const;
 
-  zx_status_t RangeOp(uint32_t op, uint64_t offset, uint64_t size, zx_rights_t rights,
-                      user_inout_ptr<void> buffer, size_t buffer_size);
-
-  zx_status_t Unmap(vaddr_t base, size_t len, VmAddressRegionOpChildren op_children);
-
-  zx_status_t SetMemoryPriority(VmAddressRegion::MemoryPriority priority);
-
-  zx_info_vmar_t GetVmarInfo() const;
-
-  const fbl::RefPtr<VmAddressRegion>& vmar() const { return vmar_; }
-
-  // Check if the given flags define an allowed combination of RWX
-  // protections.
-  static bool is_valid_mapping_protection(uint32_t flags);
-
-  static ktl::optional<VmAddressRegion::RangeOpType> range_op_type_from_code(uint32_t op);
-
-  static bool is_operation_allowed_from_rights(VmAddressRegion::RangeOpType op, zx_rights_t rights);
-
-  static VmAddressRegionOpChildren op_children_from_rights(zx_rights_t rights) {
-    return (rights & ZX_RIGHT_OP_CHILDREN) == 0 ? VmAddressRegionOpChildren::No
-                                                : VmAddressRegionOpChildren::Yes;
-  }
+ protected:
+  Lock<CriticalMutex>* get_lock() const final;
 
  private:
-  explicit VmAddressRegionDispatcher(fbl::RefPtr<VmAddressRegion> vmar,
-                                     arch_mmu_flags_t base_arch_mmu_flags);
+  friend zx_status_t cpp_vmar_dispatcher_create(
+      VmAddressRegion* vmar, arch_mmu_flags_t base_arch_mmu_flags,
+      ffi::Uninitialized<KernelHandle<VmAddressRegionDispatcher>>* handle_out);
+  VmAddressRegionDispatcher(fbl::RefPtr<VmAddressRegion> vmar,
+                            arch_mmu_flags_t base_arch_mmu_flags);
 
-  const fbl::RefPtr<VmAddressRegion> vmar_;
-  const arch_mmu_flags_t base_arch_mmu_flags_;
+  OpaqueStorage<kVmAddressRegionDispatcherStateSize, kVmAddressRegionDispatcherStateAlign>
+      opaque_storage_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_VM_ADDRESS_REGION_DISPATCHER_H_

@@ -43,15 +43,16 @@ rustc_library(
     }),
     crate_name = "extended_pstate",
     edition = "2024",
-    lint_config = "//src/starnix/build:kernel_library_config",
-    test_deps = ["//src/lib/fuchsia"],
-    visibility = ["//src/starnix/kernel:__subpackages__"],
-    with_unit_tests = True,
-    deps = ["//third_party/rust_crates/vendor:static_assertions"] + select({
+    link_deps = select({
         "@platforms//cpu:x86_64": [":x64_assembly"],
         "@platforms//cpu:arm64": [":aarch64_assembly"],
         "@platforms//cpu:riscv64": [":riscv64_assembly"],
     }),
+    lint_config = "//src/starnix/build:kernel_library_config",
+    test_deps = ["//src/lib/fuchsia"],
+    visibility = ["//src/starnix/kernel:__subpackages__"],
+    with_unit_tests = True,
+    deps = ["//third_party/rust_crates/vendor:static_assertions"],
 )
 
 rustc_binary(

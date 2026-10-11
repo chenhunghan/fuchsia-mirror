@@ -5,7 +5,7 @@ You are migrating a Fuchsia package directory from GN (BUILD.gn) to Bazel (BUILD
 ## How This Prompt and the Checks Fit Together
 Planter enforces most migration rules with deterministic checks (`run_checks.sh`), and every
 finding names the file, the problem and the fix. This prompt does not repeat what the checks
-enforce (for example visibility scoping, sentinel placement, `verify_bazel2gn` registration,
+enforce (for example visibility scoping, sentinel placement,
 redundant attributes, buildifier formatting, build-only scope, confidentiality). It covers what
 the checks cannot decide for you: the workflow, the techniques for expressing GN semantics in
 Bazel, and when to widen the change. Do not read the check scripts; run them and fix what they
@@ -23,8 +23,7 @@ report.
    and regenerate BUILD.gn with `fx bazel2gn -d <dir>`. Tests are the exception: they live only
    in Bazel and bazel2gn never translates them (see "Migrating Tests"). Only GN-only constructs
    (imports, `config()`, `bazel_test_suite`, `group("tests")`, forwarding groups below, and a
-   test that Bazel cannot express yet per "Migrating Tests") stay above the sentinel. Register
-   `//<dir>:verify_bazel2gn`.
+   test that Bazel cannot express yet per "Migrating Tests") stay above the sentinel.
 
 ## Workflow
 1. Read the package's BUILD.gn and list every target and its dependencies
@@ -64,8 +63,9 @@ Non-test `fuchsia_package`, `fuchsia_package_with_single_component`, `fuchsia_co
      `"//sdk/lib/syslog:use.shard.cml"`; `"inspect/client.shard.cml"` needs
      `"//sdk/lib/inspect:{client,offer,use}.shard.cml"`).
 2. **Packaged binary & component (`fx_packaged_binary`, `fx_component`)**:
-   - Declare the binary (`fx_cc_binary` or `rustc_binary`) with `tags = ["manual"]` and include
-     `"//sdk/lib/fdio"` in `deps` (added implicitly in GN by `BUILDCONFIG.gn`).
+   - Declare the binary (`fx_cc_binary` or `rustc_binary`) with `tags = ["manual"]`. An
+     `fx_cc_binary` must include `"//sdk/lib/fdio"` in `deps` (added implicitly in GN by
+     `BUILDCONFIG.gn`); `rustc_binary` and `rustc_test` already add it on Fuchsia.
    - Wrap it with `fx_packaged_binary(name = "<n>_packaged_bin", binary = ":<bin>", binary_name = "<elf_name>")`,
      where `binary_name` matches `bin/<elf_name>` in the `.cml`'s `program.binary` (GN
      `output_name` / `name`), and pass `deps = [":<n>_packaged_bin"]` to
@@ -79,8 +79,8 @@ Non-test `fuchsia_package`, `fuchsia_package_with_single_component`, `fuchsia_co
    - If nothing remains in `BUILD.gn`, delete `BUILD.gn` (`git rm <dir>/BUILD.gn`, Case 1). If
      `BUILD.gn` retains only GN-only targets (`bazel_test_suite`, `group("tests")`, a test package
      that must stay in GN, or an unmigratable library) and `BUILD.bazel` defines only `fx_*`
-     package/test targets, do NOT add `## BAZEL2GN SENTINEL`, do NOT run `fx bazel2gn`, and do
-     NOT register `verify_bazel2gn`. (If `BUILD.bazel` also dual-builds a library via `bazel2gn`,
+     package/test targets, do NOT add `## BAZEL2GN SENTINEL` and do NOT run `fx bazel2gn`.
+     (If `BUILD.bazel` also dual-builds a library via `bazel2gn`,
      annotate every `fx_*` target and packaged binary with `# @bazel2gn:skip`).
    - When `//bundles/assembly/bazel_inputs/<dir>/BUILD.gn` bridges the package: (a) replace
      `"//bundles/assembly/bazel_inputs/<dir>..."` with `"//<dir>:<pkg>"` in
@@ -226,6 +226,14 @@ When a vendored crate in `//third_party/rust_crates` fails to build in Bazel (ty
    ```
 - **`rustc_binary` attributes**: bazel2gn maps Bazel `crate_name` to GN `output_name`,
    `crate_root` to `source_root`, and `lint_config` to GN lint `configs`.
+- **Legacy host-tool macros (`go_binary_host_tool`, `py_binary_host_tool`) and `output_name`**:
+   these macros in `//build/bazel/rules/host:defs.bzl` are legacy macros that expand a `select()`
+   referencing `//build/bazel/versioning:is_api_level_PLATFORM` in the caller package - grant the
+   caller package `"//<dir>:__pkg__"` visibility on `is_api_level_PLATFORM` in
+   `//build/bazel/versioning/BUILD.bazel` rather than editing `//build/bazel/rules/host:defs.bzl`
+   or any shared rule/macro file under `//build/bazel/rules/`. When a GN target sets
+   `output_name = "<name>"` equal to `name`, omit `output_name` in `BUILD.bazel` (so `bazel2gn`
+   emits the equivalent GN default without `output_name`).
 - **GN `declare_args()` build arguments**: keep `declare_args()` in a `.gni` file imported above
    the sentinel with `# LINT.IfChange` / `# LINT.ThenChange(//build/bazel/BUILD.gn:<arg>)`, export it
    from `generated_file("gn_build_variables_for_bazel")` in `//build/bazel/BUILD.gn` inside a
@@ -240,6 +248,9 @@ When a vendored crate in `//third_party/rust_crates` fails to build in Bazel (ty
    `"//sdk/lib/zxio",  # @bazel2gn:path_overwrite://sdk/lib/zxio:zxio_static`).
 2. **Same edge kinds**: bazel2gn emits C/C++ `deps` as GN `public_deps` and
    `implementation_deps` as GN `deps`. For Rust rules every dependency becomes a private GN dep.
+   Rust rules only accept Rust targets in `deps`: list C/C++ libraries (e.g. `cc_library`,
+   `fx_cc_library`, `cc_import`) in `link_deps`, which bazel2gn emits as GN `link_deps` (same
+   semantics as GN `deps`). Moving a C/C++ label from GN `deps` to `link_deps` keeps the edge.
 3. **Rust `public_deps` that forward configs**: keep them with a package-local group above the
    sentinel (`group("<name>") { visibility = [ ":*" ] public_deps = [ "<label>" ] all_dependent_configs = [ ... ] }`)
    and point the BUILD.bazel entry at it with `# @bazel2gn:path_overwrite::<name>`.
@@ -247,16 +258,22 @@ When a vendored crate in `//third_party/rust_crates` fails to build in Bazel (ty
 
 ## Lint Parity
 - An area `rust_lint_config` composes defaults from `//build/config/rust/lints` (`CLIPPY_WARN_PRODUCTION | _AREA_CLIPPY`, test variant `CLIPPY_WARN_DEFAULT | _AREA_CLIPPY`, `rustc = RUSTC_LINT_CONFIGS`) and needs a same-named GN `config()` next to it.
-- **Lints that fire only on Bazel test code**: when `with_unit_tests` plus a custom `lint_config`
-   fails on test code, drop `with_unit_tests`/`test_deps` from the library and declare an
-   explicit `rustc_test` named `<crate_name>_lib_test` with `lint_config` set to the area's
-   test-flavored `rust_lint_config` (e.g. `"//src/starnix/config:starnix_clippy_lints_test"`).
+- **Lints that fire only on Bazel test code**: set `lint_config` of the explicit `rustc_test`
+   to the area's test-flavored `rust_lint_config` (e.g.
+   `"//src/starnix/config:starnix_clippy_lints_test"`).
+- **Comments**: carry each migrated GN target's comments (and comments about it in parent
+   BUILD.gn files) over to the BUILD.bazel that now defines it.
 
 ## Verify, Then Run the Checks Once
 `run_checks.sh` (on `$PATH`) runs every static check and `build_verification` (`fx build`, GN
-dependents, `fx build --host //build:bazel2gn_verifications`, and `fx bazel build` for fuchsia
-and host). Do NOT run full product builds by hand as well. From `$PLANTER_WORKDIR`:
+dependents, the shac `verify_bazel2gn` BUILD.gn/BUILD.bazel drift check, and `fx bazel build` for
+fuchsia and host). Do NOT run full product builds by hand as well. From `$PLANTER_WORKDIR`:
 1. While iterating, run `run_checks.sh --skip-build` (seconds) and fix every ERROR and WARNING.
+   If CQ failed with `Failed to rebase` (`checkout|jiri patch`) or `cq_reachability` reports
+   `upstream_rebase_conflict`, fetch and rebase onto the latest `origin/main`
+   (`git fetch origin main && git rebase origin/main`, resolve conflicts in shared lists keeping both
+   `origin/main` and your entries in alphabetical order, `git add <file>`, and `git -c core.editor=true rebase --continue`
+   preserving `Change-Id`).
    For fast compile feedback, run `fx bazel2gn -d <dir>` and
    `fx bazel build --config=fuchsia_platform //<dir>:all` (for `fidl_library`/`validate_json`
    packages pass `-- //<dir>:all -//<dir>:<name>_validate_ir_json`). Fix BUILD files, never sources.

@@ -14,7 +14,7 @@ use termio::Colors;
 
 pub const DOCTOR_OUTPUT_FILENAME: &str = "doctor_output.txt";
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
 pub struct DoctorResult {
     pub steps: LedgerNode,
 }

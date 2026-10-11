@@ -110,6 +110,7 @@
                 "fuchsia.driver.devicetree.EnabledNodes",
                 "fuchsia.driver.ExposeDebugCapabilities",
                 "fuchsia.driver.UseHardwareIommu",
+                "fuchsia.power.GpuPowerManagementEnabled",
                 "fuchsia.power.PowerFrameworkEnabledForWlanDriver",
                 "fuchsia.power.RuntimeProcessorPowerManagementEnabled",
                 "fuchsia.power.StoragePowerManagementEnabled",
@@ -249,6 +250,13 @@
         },
         {
             protocol: "fuchsia.kernel.InfoResource",
+            from: "parent",
+            to: "#boot-drivers",
+        },
+        {
+            // Lets the driver for the kernel's debug UART suspend and resume the kernel's use
+            // of it (`zx_debug_suspend` and `zx_debug_resume`) across system suspend.
+            protocol: "fuchsia.kernel.DebugResource",
             from: "parent",
             to: "#boot-drivers",
         },
@@ -556,10 +564,12 @@
                 "fuchsia.hardware.google.nanohub.DisplayService",
                 "fuchsia.hardware.google.nanohub.Service",
                 "fuchsia.hardware.google.nanohub.StarnixDataChannelService",
+                "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.haptics.Service",
                 "fuchsia.hardware.nfc.Service",
                 "fuchsia.hardware.pci.BusService",
                 "fuchsia.hardware.power.suspend.SuspendService",
+                "fuchsia.hardware.power.usb.DebugService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
                 "fuchsia.hardware.qualcomm.fastrpc.SecureService",
                 "fuchsia.hardware.rpmb.Service",

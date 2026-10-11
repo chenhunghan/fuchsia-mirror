@@ -227,6 +227,73 @@ which we can test the `http_links` check described above:
 It is recommended that you document your check if it is opt-in (not run in pre-submit) or there's a non-obvious
 opt-out mechanism. All documentation should be added to `//docs/development/source_code/presubmit_checks.md`
 
+### Unit testing checks
+
+Checks should have unit tests, which are written in Starlark and run with
+`shac test`. A test runs a check against a small, temporary checkout whose files
+are specified by the test, so tests are fast and hermetic and don't depend on
+the contents of the real checkout.
+
+Tests for the checks in `//scripts/shac` live in `//scripts/shac/tests`, in a
+`<name>_test.star` file named after the file containing the check (e.g.
+`python_test.star` tests checks in `python.star`). Every top-level function
+whose name starts with `test_` is a test case. Test files can `load()` check
+functions directly, including private ones.
+
+Here is an example of tests for the `http_links` check from the
+[simple example](#simple-example):
+
+```python
+load("//scripts/shac/http_links.star", "http_links")
+
+def test_http_links():
+    res = testing.run(http_links, files = {
+        "foo.md": "See http://example.com.\n",
+    })
+    asserts.eq(res.findings, (
+        testing.finding(
+            level = "warning",
+            message = "Avoid http:// links, prefer https://",
+            filepath = "foo.md",
+            line = 1,
+            col = 5,
+            end_col = 12,
+            replacements = ["https://"],
+        ),
+    ))
+    # `res.files` contains the file contents after applying all fixes.
+    asserts.eq(res.files["foo.md"], "See https://example.com.\n")
+
+def test_http_links_ok():
+    res = testing.run(http_links, files = {
+        "foo.md": "See https://example.com.\n",
+    })
+    asserts.eq(res.findings, ())
+```
+
+`testing.run()` treats every file passed in `files` as affected by the change
+under test, unless `affected_files` is set. Checks that run subprocesses can
+either execute real prebuilt tools or mock them with `testing.exec_mock()`.
+See the [shac-documentation] for the full `testing` and `asserts` APIs.
+
+Fuchsia's own checks also run on test files, so test data that would trigger a
+check on the test file itself (e.g. a confusing character or a bug URL) must be
+split up or escaped, e.g. `"http" + "://"` or `"\u200b"`.
+
+To add a new test file, add a `host_shac_test()` target for it in
+`//scripts/shac/tests/BUILD.bazel`, named after the file, and add it to the
+`host_tests` test suite in the same file. If the tests execute any real tools,
+also add those tools to the target's `data`. Each test runs in presubmit
+whenever the checks it depends on or the test file itself change.
+
+To run tests locally, use any of the following:
+
+* `fx test //scripts/shac/tests:python_test` runs the tests in a single file.
+* `fx bazel test --config=host //scripts/shac/tests:host_tests` runs all tests.
+* `fx host-tool shac test scripts/shac/tests/python_test.star`, from the root
+  of the checkout, runs the tests in a single file without building anything.
+  Use `--only <test_name>` to run only specific test cases.
+
 <!-- Reference links -->
 
 [starlark]: https://bazel.build/rules/language

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::fs::{HidePid, ProcFs};
 use itertools::Itertools;
 use regex_lite::Regex;
 use starnix_core::mm::{
@@ -10,7 +11,7 @@ use starnix_core::mm::{
 };
 use starnix_core::security;
 use starnix_core::task::{
-    CurrentTask, Pid, Task, TaskPersistentInfo, TaskStateCode, ThreadGroup, path_from_root,
+    CurrentTask, Pid, Task, TaskContainer, TaskEntryScope, TaskStateCode, path_from_root,
 };
 use starnix_core::vfs::buffers::{InputBuffer, OutputBuffer};
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
@@ -22,13 +23,15 @@ use starnix_core::vfs::pseudo::simple_file::{
 use starnix_core::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
-    CallbackSymlinkNode, CloseFreeSafe, DirectoryEntryType, DirentSink, FdNumber, FileObject,
-    FileOps, FileSystemHandle, FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString,
-    ProcMountinfoFile, ProcMountsFile, SeekTarget, SymlinkTarget, default_seek, emit_dotdot,
-    fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_seekable,
-    fileops_impl_unbounded_seek, fs_node_impl_dir_readonly,
+    CallbackSymlinkNode, CheckAccessReason, CloseFreeSafe, DirEntry, DirEntryOps,
+    DirectoryEntryType, DirentSink, FdNumber, FileObject, FileOps, FileSystemHandle, FsNode,
+    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, ProcMountinfoFile, ProcMountsFile,
+    SeekTarget, StatxFlags, SymlinkTarget, default_seek, emit_dotdot, fileops_impl_directory,
+    fileops_impl_noop_sync, fileops_impl_seekable, fileops_impl_unbounded_seek,
+    fs_node_impl_dir_readonly, fs_node_impl_dir_readonly_ops,
 };
 use starnix_logging::{bug_ref, track_stub};
+use starnix_sync::{DynamicLockDepRwLock, LockDepReadGuard};
 
 use starnix_task_command::TaskCommand;
 use starnix_types::time::duration_to_scheduler_clock;
@@ -97,12 +100,6 @@ fn task_entries(scope: TaskEntryScope) -> &'static [(&'static [u8], FileMode)] {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub enum TaskEntryScope {
-    Task,
-    ThreadGroup,
-}
-
 /// Represents a directory node for either `/proc/<pid>` or `/proc/<pid>/task/<tid>`.
 ///
 /// This directory lazily creates its child entries to save memory.
@@ -111,8 +108,7 @@ pub enum TaskEntryScope {
 /// them as unchanged when re-accessed.
 /// The `creds` stored within is applied to the directory node itself and child entries.
 pub struct TaskDirectory {
-    tid: Pid,
-    scope: TaskEntryScope,
+    target: TaskContainer,
     inode_range: Range<ino_t>,
 }
 
@@ -130,14 +126,13 @@ impl Deref for TaskDirectoryNode {
 }
 
 impl TaskDirectory {
-    fn new(fs: &FileSystemHandle, task: &Arc<Task>, scope: TaskEntryScope) -> FsNodeHandle {
+    fn new(fs: &FileSystemHandle, task: &Arc<Task>, target: TaskContainer) -> FsNodeHandle {
         let creds = task.real_creds().euid_as_fscred();
-        let tid = task.tid.clone();
+        let scope = target.scope;
         fs.create_node_and_allocate_node_id(
             TaskDirectoryNode {
                 task_directory: Arc::new(TaskDirectory {
-                    tid,
-                    scope,
+                    target,
                     inode_range: fs.allocate_ino_range(task_entries(scope).len()),
                 }),
             },
@@ -146,8 +141,77 @@ impl TaskDirectory {
     }
 }
 
+struct TaskDirectoryDirEntryOps {
+    target: TaskContainer,
+}
+
+impl DirEntryOps for TaskDirectoryDirEntryOps {
+    fn revalidate(&self, current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
+        let Ok(target_task) = self.target.get_task() else {
+            return Ok(false);
+        };
+        if let Some(proc_fs) = dir_entry.node.fs().downcast_ops::<ProcFs>() {
+            if !proc_fs.has_pid_permissions(current_task, &target_task, HidePid::Invisible) {
+                return error!(ENOENT);
+            }
+        }
+        Ok(true)
+    }
+}
+
+macro_rules! task_dir_impl_readonly {
+    () => {
+        fn create_dir_entry_ops(&self) -> Box<dyn DirEntryOps> {
+            Box::new(TaskDirectoryDirEntryOps { target: self.target.clone() })
+        }
+
+        fn check_access(
+            &self,
+            node: &FsNode,
+            current_task: &CurrentTask,
+            permission_flags: security::PermissionFlags,
+            info: &DynamicLockDepRwLock<FsNodeInfo>,
+            reason: CheckAccessReason,
+            audit_context: security::Auditable<'_>,
+        ) -> Result<(), Errno> {
+            if let Some(proc_fs) = node.fs().downcast_ops::<ProcFs>() {
+                proc_fs.check_pid_access(current_task, &self.target, HidePid::NoAccess)?;
+            }
+            if permission_flags.as_access().contains(Access::WRITE) {
+                return error!(EROFS, format!("check_access failed: read-only directory"));
+            }
+            node.default_check_access_impl(
+                current_task,
+                permission_flags,
+                reason,
+                info.read(),
+                audit_context,
+            )
+        }
+
+        fn fetch_and_refresh_info<'a>(
+            &self,
+            node: &FsNode,
+            current_task: &CurrentTask,
+            info: &'a DynamicLockDepRwLock<FsNodeInfo>,
+            _flags: StatxFlags,
+        ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
+            if let (Some(proc_fs), Ok(target_task)) =
+                (node.fs().downcast_ops::<ProcFs>(), self.target.get_task())
+            {
+                if !proc_fs.has_pid_permissions(current_task, &target_task, HidePid::Invisible) {
+                    return error!(ENOENT);
+                }
+            }
+            Ok(info.read())
+        }
+
+        fs_node_impl_dir_readonly_ops!();
+    };
+}
+
 impl FsNodeOps for TaskDirectoryNode {
-    fs_node_impl_dir_readonly!();
+    task_dir_impl_readonly!();
 
     fn create_file_ops(
         &self,
@@ -160,14 +224,15 @@ impl FsNodeOps for TaskDirectoryNode {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let tid = self.tid.clone();
-        let creds = node.info().cred();
-        let fs = node.fs();
-        let (mode, ino) = task_entries(self.scope)
+        let _task = self.target.get_task()?;
+        let target = self.target.clone();
+        let creds = entry.node.info().cred();
+        let fs = entry.node.fs();
+        let (mode, ino) = task_entries(self.target.scope)
             .iter()
             .enumerate()
             .find_map(|(index, (n, mode))| {
@@ -181,55 +246,61 @@ impl FsNodeOps for TaskDirectoryNode {
 
         // NOTE: keep entries in sync with `task_entries()`.
         let ops: Box<dyn FsNodeOps> = match &**name {
-            b"cgroup" => Box::new(CgroupFile::new_node(tid)),
+            b"cgroup" => Box::new(CgroupFile::new_node(target)),
             b"cwd" => Box::new(CallbackSymlinkNode::new(move || {
-                Ok(SymlinkTarget::Node(tid.get_task()?.fs()?.cwd()))
+                Ok(SymlinkTarget::Node(target.get_task()?.fs()?.cwd()))
             })),
             b"exe" => Box::new(CallbackSymlinkNode::new(move || {
-                let task = tid.get_task()?;
+                let task = target.get_task()?;
                 if let Some(node) = task.mm().ok().and_then(|mm| mm.executable_node()) {
                     Ok(SymlinkTarget::Node(node))
                 } else {
                     error!(ENOENT)
                 }
             })),
-            b"fd" => Box::new(FdDirectory::new(tid)),
-            b"fdinfo" => Box::new(FdInfoDirectory::new(tid)),
+            b"fd" => Box::new(FdDirectory::new(target)),
+            b"fdinfo" => Box::new(FdInfoDirectory::new(target)),
             b"io" => Box::new(IoFile::new_node()),
-            b"limits" => Box::new(LimitsFile::new_node(tid)),
+            b"limits" => Box::new(LimitsFile::new_node(target)),
             b"maps" => {
-                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |task| {
-                    Ok(ProcMapsFile::new(task))
-                }))
+                let target_for_file = target.clone();
+                Box::new(PtraceCheckedNode::new_node(
+                    target,
+                    PTRACE_MODE_READ_FSCREDS,
+                    move |task| Ok(ProcMapsFile::new(task, target_for_file.clone())),
+                ))
             }
-            b"mem" => Box::new(MemFile::new_node(tid)),
+            b"mem" => Box::new(MemFile::new_node(target)),
             b"root" => Box::new(CallbackSymlinkNode::new(move || {
-                Ok(SymlinkTarget::Node(tid.get_task()?.fs()?.root()))
+                Ok(SymlinkTarget::Node(target.get_task()?.fs()?.root()))
             })),
             b"sched" => Box::new(StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/322893980"))),
             b"schedstat" => {
                 Box::new(StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/322894256")))
             }
             b"smaps" => {
-                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |task| {
-                    Ok(ProcSmapsFile::new(task))
-                }))
+                let target_for_file = target.clone();
+                Box::new(PtraceCheckedNode::new_node(
+                    target,
+                    PTRACE_MODE_READ_FSCREDS,
+                    move |task| Ok(ProcSmapsFile::new(task, target_for_file.clone())),
+                ))
             }
             b"smaps_rollup" => {
-                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |task| {
-                    Ok(ProcSmapsRollupFile::new(task))
-                }))
+                let target_for_file = target.clone();
+                Box::new(PtraceCheckedNode::new_node(
+                    target,
+                    PTRACE_MODE_READ_FSCREDS,
+                    move |task| Ok(ProcSmapsRollupFile::new(task, target_for_file.clone())),
+                ))
             }
-            b"stat" => Box::new(StatFile::new_node(tid, self.scope)),
-            b"statm" => Box::new(StatmFile::new_node(tid)),
-            b"status" => Box::new(StatusFile::new_node(tid)),
-            b"cmdline" => Box::new(CmdlineFile::new_node(tid)),
-            b"environ" => Box::new(EnvironFile::new_node(tid)),
-            b"auxv" => Box::new(AuxvFile::new_node(tid)),
-            b"comm" => {
-                let task = tid.get_task()?;
-                Box::new(CommFile::new_node(tid, task.persistent_info.clone()))
-            }
+            b"stat" => Box::new(StatFile::new_node(target)),
+            b"statm" => Box::new(StatmFile::new_node(target)),
+            b"status" => Box::new(StatusFile::new_node(target)),
+            b"cmdline" => Box::new(CmdlineFile::new_node(target)),
+            b"environ" => Box::new(EnvironFile::new_node(target)),
+            b"auxv" => Box::new(AuxvFile::new_node(target)),
+            b"comm" => Box::new(CommFile::new_node(target)),
             b"attr" => {
                 let dir = SimpleDirectory::new();
                 dir.edit(&fs, |dir| {
@@ -242,7 +313,7 @@ impl FsNodeOps for TaskDirectoryNode {
                     ] {
                         dir.entry_etc(
                             name.into(),
-                            AttrNode::new(tid.clone(), attr),
+                            AttrNode::new(target.clone(), attr),
                             mode!(IFREG, 0o666),
                             DeviceId::NONE,
                             creds,
@@ -250,7 +321,7 @@ impl FsNodeOps for TaskDirectoryNode {
                     }
                     dir.entry_etc(
                         "prev".into(),
-                        AttrNode::new(tid, security::ProcAttr::Previous),
+                        AttrNode::new(target, security::ProcAttr::Previous),
                         mode!(IFREG, 0o444),
                         DeviceId::NONE,
                         creds,
@@ -258,21 +329,21 @@ impl FsNodeOps for TaskDirectoryNode {
                 });
                 Box::new(dir)
             }
-            b"ns" => Box::new(NsDirectory::new(tid)),
-            b"mountinfo" => Box::new(ProcMountinfoFile::new_node(tid)),
-            b"mounts" => Box::new(ProcMountsFile::new_node(tid)),
-            b"oom_adj" => Box::new(OomAdjFile::new_node(tid)),
-            b"oom_score" => Box::new(OomScoreFile::new_node(tid)),
-            b"oom_score_adj" => Box::new(OomScoreAdjFile::new_node(tid)),
-            b"timerslack_ns" => Box::new(TimerslackNsFile::new_node(tid)),
+            b"ns" => Box::new(NsDirectory::new(target)),
+            b"mountinfo" => Box::new(ProcMountinfoFile::new_node(target)),
+            b"mounts" => Box::new(ProcMountsFile::new_node(target)),
+            b"oom_adj" => Box::new(OomAdjFile::new_node(target)),
+            b"oom_score" => Box::new(OomScoreFile::new_node(target)),
+            b"oom_score_adj" => Box::new(OomScoreAdjFile::new_node(target)),
+            b"timerslack_ns" => Box::new(TimerslackNsFile::new_node(target)),
             b"wchan" => Box::new(BytesFile::new_node(b"0".to_vec())),
-            b"clear_refs" => Box::new(ClearRefsFile::new_node(tid)),
-            b"pagemap" => {
-                Box::new(PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, |task| {
-                    Ok(ProcPagemapFile::new(task.tid.clone()))
-                }))
-            }
-            b"task" => Box::new(TaskListDirectory::new_node(tid.get_task()?.pid.clone())),
+            b"clear_refs" => Box::new(ClearRefsFile::new_node(target)),
+            b"pagemap" => Box::new(PtraceCheckedNode::new_node_with_current_task(
+                target,
+                PTRACE_MODE_READ_FSCREDS,
+                |current_task, task| Ok(ProcPagemapFile::new(current_task, &task)),
+            )),
+            b"task" => Box::new(TaskListDirectory::new_node(target.pid)),
             name => unreachable!(
                 "entry \"{:?}\" should be supported to keep in sync with task_entries()",
                 name
@@ -296,12 +367,13 @@ impl FileOps for TaskDirectory {
         _current_task: &CurrentTask,
         sink: &mut dyn DirentSink,
     ) -> Result<(), Errno> {
+        let _task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
         emit_dotdot(file, sink)?;
 
         // Skip through the entries until the current offset is reached.
         // Subtract 2 from the offset to account for `.` and `..`.
         for (index, (name, mode)) in
-            task_entries(self.scope).iter().enumerate().skip(sink.offset() as usize - 2)
+            task_entries(self.target.scope).iter().enumerate().skip(sink.offset() as usize - 2)
         {
             sink.add(
                 self.inode_range.start + index as ino_t,
@@ -314,7 +386,7 @@ impl FileOps for TaskDirectory {
     }
 
     fn as_pid(&self, _file: &FileObject) -> Result<Pid, Errno> {
-        Ok(self.tid.get_task()?.pid.clone())
+        Ok(self.target.pid.clone())
     }
 }
 
@@ -323,10 +395,12 @@ pub fn pid_directory(
     current_task: &CurrentTask,
     fs: &FileSystemHandle,
     task: &Arc<Task>,
+    tid: Pid,
 ) -> FsNodeHandle {
     // proc(5): "The files inside each /proc/pid directory are normally
     // owned by the effective user and effective group ID of the process."
-    let fs_node = TaskDirectory::new(fs, task, TaskEntryScope::ThreadGroup);
+    let fs_node =
+        TaskDirectory::new(fs, task, TaskContainer::from_thread_group(task.pid.clone(), tid));
 
     security::task_to_fs_node(current_task, task, &fs_node);
     fs_node
@@ -334,7 +408,7 @@ pub fn pid_directory(
 
 /// Creates an [`FsNode`] that represents the `/proc/<pid>/task/<tid>` directory for `task`.
 fn tid_directory(fs: &FileSystemHandle, task: &Arc<Task>) -> FsNodeHandle {
-    TaskDirectory::new(fs, task, TaskEntryScope::Task)
+    TaskDirectory::new(fs, task, TaskContainer::from_task(task))
 }
 
 /// `FdDirectory` implements the directory listing operations for a `proc/<pid>/fd` directory.
@@ -342,12 +416,12 @@ fn tid_directory(fs: &FileSystemHandle, task: &Arc<Task>) -> FsNodeHandle {
 /// Reading the directory returns a list of all the currently open file descriptors for the
 /// associated task.
 struct FdDirectory {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl FdDirectory {
-    fn new(tid: Pid) -> Self {
-        Self { tid }
+    fn new(target: TaskContainer) -> Self {
+        Self { target }
     }
 }
 
@@ -360,27 +434,27 @@ impl FsNodeOps for FdDirectory {
         _current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        Ok(VecDirectory::new_file(fds_to_directory_entries(
-            self.tid.get_task()?.files()?.get_all_fds(),
-        )))
+        let task = self.target.get_task()?;
+        let fds = task.files().map_or_else(|_| Vec::new(), |files| files.get_all_fds());
+        Ok(VecDirectory::new_file(fds_to_directory_entries(fds)))
     }
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         let fd = FdNumber::from_fs_str(name).map_err(|_| errno!(ENOENT))?;
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         // Make sure that the file descriptor exists before creating the node.
         let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
         // Derive the symlink's mode from the mode in which the file was opened.
         let mode = FileMode::IFLNK | Access::from_open_flags(file.flags()).user_mode();
-        let tid = self.tid.clone();
-        Ok(node.fs().create_node_and_allocate_node_id(
+        let target = self.target.clone();
+        Ok(entry.node.fs().create_node_and_allocate_node_id(
             CallbackSymlinkNode::new(move || {
-                let task = tid.get_task()?;
+                let task = target.get_task()?;
                 let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
                 Ok(SymlinkTarget::Node(file.name.to_passive()))
             }),
@@ -405,12 +479,12 @@ const NS_ENTRIES: &[&str] = &[
 /// /proc/<pid>/attr directory entry.
 struct AttrNode {
     attr: security::ProcAttr,
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl AttrNode {
-    fn new(tid: Pid, attr: security::ProcAttr) -> impl FsNodeOps {
-        SimpleFileNode::new(move |_| Ok(AttrNode { attr, tid: tid.clone() }))
+    fn new(target: TaskContainer, attr: security::ProcAttr) -> impl FsNodeOps {
+        SimpleFileNode::new(move |_| Ok(AttrNode { attr, target: target.clone() }))
     }
 }
 
@@ -429,7 +503,7 @@ impl FileOps for AttrNode {
         offset: usize,
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let response = security::get_procattr(current_task, &task, self.attr)?;
         data.write(&response[offset..])
     }
@@ -441,7 +515,7 @@ impl FileOps for AttrNode {
         offset: usize,
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
 
         // If the current task is not the target then writes are not allowed.
         if current_task.task != task {
@@ -460,12 +534,12 @@ impl FileOps for AttrNode {
 
 /// /proc/[pid]/ns directory
 struct NsDirectory {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl NsDirectory {
-    fn new(tid: Pid) -> Self {
-        Self { tid }
+    fn new(target: TaskContainer) -> Self {
+        Self { target }
     }
 }
 
@@ -494,7 +568,7 @@ impl FsNodeOps for NsDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -510,7 +584,7 @@ impl FsNodeOps for NsDirectory {
             return error!(ENOENT);
         }
 
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         if let Some(id) = elements.next() {
             // The name starts with {namespace}:, check that it matches {namespace}:[id]
             static NS_IDENTIFIER_RE: LazyLock<Regex> =
@@ -520,7 +594,10 @@ impl FsNodeOps for NsDirectory {
             }
             let node_info = || FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred());
             let fallback = || {
-                node.fs().create_node_and_allocate_node_id(BytesFile::new_node(vec![]), node_info())
+                entry
+                    .node
+                    .fs()
+                    .create_node_and_allocate_node_id(BytesFile::new_node(vec![]), node_info())
             };
             Ok(match ns {
                 "cgroup" => {
@@ -531,7 +608,8 @@ impl FsNodeOps for NsDirectory {
                     track_stub!(TODO("https://fxbug.dev/297313673"), "ipc namespaces");
                     fallback()
                 }
-                "mnt" => node
+                "mnt" => entry
+                    .node
                     .fs()
                     .create_node_and_allocate_node_id(current_task.fs().namespace(), node_info()),
                 "net" => {
@@ -570,7 +648,7 @@ impl FsNodeOps for NsDirectory {
         } else {
             // The name is {namespace}, link to the correct one of the current task.
             let id = current_task.fs().namespace().id;
-            Ok(node.fs().create_node_and_allocate_node_id(
+            Ok(entry.node.fs().create_node_and_allocate_node_id(
                 CallbackSymlinkNode::new(move || {
                     Ok(SymlinkTarget::Path(format!("{name}:[{id}]").into()))
                 }),
@@ -586,12 +664,12 @@ impl FsNodeOps for NsDirectory {
 /// Reading the directory returns a list of all the currently open file descriptors for the
 /// associated task.
 struct FdInfoDirectory {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl FdInfoDirectory {
-    fn new(tid: Pid) -> Self {
-        Self { tid }
+    fn new(target: TaskContainer) -> Self {
+        Self { target }
     }
 }
 
@@ -604,21 +682,22 @@ impl FsNodeOps for FdInfoDirectory {
         current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         current_task
             .check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, &task)
             .map_err(|_| errno!(EACCES))?;
 
-        Ok(VecDirectory::new_file(fds_to_directory_entries(task.files()?.get_all_fds())))
+        let fds = task.files().map_or_else(|_| Vec::new(), |files| files.get_all_fds());
+        Ok(VecDirectory::new_file(fds_to_directory_entries(fds)))
     }
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let fd = FdNumber::from_fs_str(name).map_err(|_| errno!(ENOENT))?;
         let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
         let pos = file.offset.read();
@@ -627,7 +706,7 @@ impl FsNodeOps for FdInfoDirectory {
         if let Some(extra_fdinfo) = file.extra_fdinfo(current_task) {
             data.extend_from_slice(extra_fdinfo.as_slice());
         }
-        Ok(node.fs().create_node_and_allocate_node_id(
+        Ok(entry.node.fs().create_node_and_allocate_node_id(
             BytesFile::new_node(data),
             FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred()),
         ))
@@ -646,21 +725,38 @@ fn fds_to_directory_entries(fds: Vec<FdNumber>) -> Vec<VecDirectoryEntry> {
 
 /// Directory that lists the task IDs (tid) in a process. Located at `/proc/<pid>/task/`.
 struct TaskListDirectory {
-    pid: Pid,
+    target: TaskContainer,
+}
+
+struct TaskListFile {
+    target: TaskContainer,
+    inner: Box<dyn FileOps>,
+}
+
+impl FileOps for TaskListFile {
+    fileops_impl_directory!();
+    fileops_impl_noop_sync!();
+    fileops_impl_unbounded_seek!();
+
+    fn readdir(
+        &self,
+        file: &FileObject,
+        current_task: &CurrentTask,
+        sink: &mut dyn DirentSink,
+    ) -> Result<(), Errno> {
+        let _task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        self.inner.readdir(file, current_task, sink)
+    }
 }
 
 impl TaskListDirectory {
     fn new_node(pid: Pid) -> impl FsNodeOps {
-        Self { pid }
-    }
-
-    fn thread_group(&self) -> Result<Arc<ThreadGroup>, Errno> {
-        self.pid.get_thread_group()
+        Self { target: TaskContainer::from_pid(pid) }
     }
 }
 
 impl FsNodeOps for TaskListDirectory {
-    fs_node_impl_dir_readonly!();
+    task_dir_impl_readonly!();
 
     fn create_file_ops(
         &self,
@@ -668,8 +764,9 @@ impl FsNodeOps for TaskListDirectory {
         _current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        Ok(VecDirectory::new_file(
-            self.thread_group()?
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        let inner = VecDirectory::new_file(
+            task.thread_group()
                 .read()
                 .task_ids()
                 .map(|tid| VecDirectoryEntry {
@@ -678,16 +775,17 @@ impl FsNodeOps for TaskListDirectory {
                     inode: None,
                 })
                 .collect(),
-        ))
+        );
+        Ok(Box::new(TaskListFile { target: self.target.clone(), inner }))
     }
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let thread_group = self.thread_group()?;
+        let target_task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
         let tid = std::str::from_utf8(name)
             .map_err(|_| errno!(ENOENT))?
             .parse::<pid_t>()
@@ -695,21 +793,26 @@ impl FsNodeOps for TaskListDirectory {
 
         let task = current_task.get_task(tid).map_err(|_| errno!(ENOENT))?;
         // Make sure the tid belongs to this process.
-        if task.pid != thread_group.leader {
+        if task.pid != target_task.thread_group().leader {
             return error!(ENOENT);
         }
+        if let Some(proc_fs) = entry.node.fs().downcast_ops::<ProcFs>() {
+            if !proc_fs.has_pid_permissions(current_task, &task, HidePid::Invisible) {
+                return error!(ENOENT);
+            }
+        }
 
-        Ok(tid_directory(&node.fs(), &task))
+        Ok(tid_directory(&entry.node.fs(), &task))
     }
 }
 
 #[derive(Clone)]
 struct CgroupFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl CgroupFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for CgroupFile {
@@ -718,7 +821,7 @@ impl DynamicFileSource for CgroupFile {
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let cgroup1 = task.kernel().cgroups.cgroup1.lock();
         for (key, root) in &cgroup1.hierarchies {
             let mut parts: Vec<&str> = key.controllers.iter().map(|c| c.as_str()).collect();
@@ -758,11 +861,11 @@ fn fill_buf_from_addr_range(
 /// `CmdlineFile` implements `proc/<pid>/cmdline` file.
 #[derive(Clone)]
 pub struct CmdlineFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl CmdlineFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for CmdlineFile {
@@ -772,7 +875,7 @@ impl DynamicFileSource for CmdlineFile {
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
         // Opened cmdline file should still be functional once the task is a zombie.
-        let Ok(task) = self.tid.get_task() else {
+        let Ok(task) = self.target.get_task() else {
             return Ok(());
         };
         // /proc/<pid>/cmdline is empty for kthreads.
@@ -790,18 +893,34 @@ impl DynamicFileSource for CmdlineFile {
 struct PtraceCheckedNode {}
 
 impl PtraceCheckedNode {
-    pub fn new_node<F, O>(tid: Pid, mode: PtraceAccessMode, create_ops: F) -> impl FsNodeOps
+    pub fn new_node<F, O>(
+        target: TaskContainer,
+        mode: PtraceAccessMode,
+        create_ops: F,
+    ) -> impl FsNodeOps
     where
         F: Fn(Arc<Task>) -> Result<O, Errno> + Send + Sync + 'static,
         O: FileOps,
     {
+        Self::new_node_with_current_task(target, mode, move |_current_task, task| create_ops(task))
+    }
+
+    pub fn new_node_with_current_task<F, O>(
+        target: TaskContainer,
+        mode: PtraceAccessMode,
+        create_ops: F,
+    ) -> impl FsNodeOps
+    where
+        F: Fn(&CurrentTask, Arc<Task>) -> Result<O, Errno> + Send + Sync + 'static,
+        O: FileOps,
+    {
         SimpleFileNode::new(move |current_task: &CurrentTask| {
-            let task = tid.get_task()?;
+            let task = target.get_task()?;
             // proc-pid nodes for kthreads do not require ptrace access checks.
-            if task.mm().is_ok() {
+            if task.mm().is_ok() || task.state_code() == TaskStateCode::Zombie {
                 current_task.check_ptrace_access_mode(mode, &task).map_err(|_| errno!(EACCES))?;
             }
-            create_ops(task)
+            create_ops(current_task, task)
         })
     }
 }
@@ -809,12 +928,13 @@ impl PtraceCheckedNode {
 /// `EnvironFile` implements `proc/<pid>/environ` file.
 #[derive(Clone)]
 pub struct EnvironFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl EnvironFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, move |task| {
-            Ok(DynamicFile::new(Self { tid: task.tid.clone() }))
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        let target_for_file = target.clone();
+        PtraceCheckedNode::new_node(target, PTRACE_MODE_READ_FSCREDS, move |_| {
+            Ok(DynamicFile::new(Self { target: target_for_file.clone() }))
         })
     }
 }
@@ -824,7 +944,7 @@ impl DynamicFileSource for EnvironFile {
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         // /proc/<pid>/environ is empty for kthreads.
         let Ok(mm) = task.mm() else {
             return Ok(());
@@ -840,12 +960,13 @@ impl DynamicFileSource for EnvironFile {
 /// `AuxvFile` implements `proc/<pid>/auxv` file.
 #[derive(Clone)]
 pub struct AuxvFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl AuxvFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        PtraceCheckedNode::new_node(tid, PTRACE_MODE_READ_FSCREDS, move |task| {
-            Ok(DynamicFile::new(Self { tid: task.tid.clone() }))
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        let target_for_file = target.clone();
+        PtraceCheckedNode::new_node(target, PTRACE_MODE_READ_FSCREDS, move |_| {
+            Ok(DynamicFile::new(Self { target: target_for_file.clone() }))
         })
     }
 }
@@ -855,7 +976,7 @@ impl DynamicFileSource for AuxvFile {
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         // /proc/<pid>/auxv is empty for kthreads.
         let Ok(mm) = task.mm() else {
             return Ok(());
@@ -869,15 +990,13 @@ impl DynamicFileSource for AuxvFile {
 }
 
 /// `CommFile` implements `proc/<pid>/comm` file.
+#[derive(Clone)]
 pub struct CommFile {
-    tid: Pid,
-    info: TaskPersistentInfo,
+    target: TaskContainer,
 }
 impl CommFile {
-    pub fn new_node(tid: Pid, info: TaskPersistentInfo) -> impl FsNodeOps {
-        SimpleFileNode::new(move |_| {
-            Ok(DynamicFile::new(CommFile { tid: tid.clone(), info: info.clone() }))
-        })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 
@@ -887,7 +1006,8 @@ impl DynamicFileSource for CommFile {
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        sink.write(self.info.command_guard().comm_name());
+        let task = self.target.get_task()?;
+        sink.write(task.persistent_info.command_guard().comm_name());
         sink.write(b"\n");
         Ok(())
     }
@@ -898,7 +1018,7 @@ impl DynamicFileSource for CommFile {
         _offset: usize,
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         if !Arc::ptr_eq(&task.thread_group(), &current_task.thread_group()) {
             return error!(EINVAL);
         }
@@ -939,11 +1059,11 @@ impl DynamicFileSource for IoFile {
 /// `LimitsFile` implements `proc/<pid>/limits` file.
 #[derive(Clone)]
 pub struct LimitsFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl LimitsFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for LimitsFile {
@@ -952,7 +1072,7 @@ impl DynamicFileSource for LimitsFile {
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let limits = task.thread_group().limits.lock();
 
         let write_limit = |sink: &mut DynamicFileBuf, value| {
@@ -988,14 +1108,15 @@ pub struct MemFile {
     // TODO: https://fxbug.dev/442459337 - Tear-down MemoryManager internals on process exit, to
     // avoid extension of the MM lifetime prolonging access to memory via "/proc/pid/mem", etc
     // beyond that of the actual process/address-space.
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl MemFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        PtraceCheckedNode::new_node(tid, PTRACE_MODE_ATTACH_FSCREDS, move |task| {
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        let target_for_file = target.clone();
+        PtraceCheckedNode::new_node(target, PTRACE_MODE_ATTACH_FSCREDS, move |task| {
             let mm = task.mm().ok().as_ref().map(Arc::downgrade).unwrap_or_default();
-            Ok(Self { mm, tid: task.tid.clone() })
+            Ok(Self { mm, target: target_for_file.clone() })
         })
     }
 }
@@ -1024,7 +1145,7 @@ impl FileOps for MemFile {
         offset: usize,
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
-        let Ok(_task) = self.tid.get_task() else {
+        let Ok(_task) = self.target.get_task() else {
             return Ok(0);
         };
         let Some(mm) = self.mm.upgrade() else {
@@ -1051,7 +1172,7 @@ impl FileOps for MemFile {
         offset: usize,
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
-        let Ok(_task) = self.tid.get_task() else {
+        let Ok(_task) = self.target.get_task() else {
             return Ok(0);
         };
         let Some(mm) = self.mm.upgrade() else {
@@ -1100,13 +1221,12 @@ fn stub_memory_stats() -> MemoryStats {
 
 #[derive(Clone)]
 pub struct StatFile {
-    tid: Pid,
-    scope: TaskEntryScope,
+    target: TaskContainer,
 }
 
 impl StatFile {
-    pub fn new_node(tid: Pid, scope: TaskEntryScope) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid, scope })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for StatFile {
@@ -1115,7 +1235,7 @@ impl DynamicFileSource for StatFile {
         current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
     ) -> Result<(), Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
 
         // All fields and their types as specified in the man page.
         // Unimplemented fields are set to 0 here.
@@ -1172,7 +1292,7 @@ impl DynamicFileSource for StatFile {
         let mut env_end: usize = 0;
         let mut exit_code: i32 = 0;
 
-        pid = task.get_tid();
+        pid = self.target.tid.id;
         comm = task.command();
         state = task.state_code().code_char();
         nice = task.read().scheduler_state.normal_priority().as_nice() as i64;
@@ -1180,26 +1300,23 @@ impl DynamicFileSource for StatFile {
         {
             let thread_group = task.thread_group().read();
             ppid = thread_group.get_ppid();
-            pgrp = thread_group.process_group.leader.id;
-            session = thread_group.process_group.session.leader.id;
+            pgrp = thread_group.process_group.id;
+            session = thread_group.session.id;
 
             // TTY device ID.
-            {
-                let session = thread_group.process_group.session.read();
-                tty_nr = session
-                    .controlling_terminal
-                    .as_ref()
-                    .map(|t| t.terminal.device().bits())
-                    .unwrap_or(0) as i32;
-            }
+            tty_nr = thread_group
+                .controlling_terminal
+                .as_ref()
+                .map(|t| t.terminal.device().bits())
+                .unwrap_or(0) as i32;
 
             cutime = duration_to_scheduler_clock(thread_group.children_time_stats.user_time);
             cstime = duration_to_scheduler_clock(thread_group.children_time_stats.system_time);
 
-            num_threads = thread_group.tasks_count() as i64;
+            num_threads = std::cmp::max(1, thread_group.tasks_count()) as i64;
         }
 
-        let time_stats = match self.scope {
+        let time_stats = match self.target.scope {
             TaskEntryScope::Task => task.time_stats(),
             TaskEntryScope::ThreadGroup => task.thread_group().time_stats(),
         };
@@ -1267,17 +1384,17 @@ impl DynamicFileSource for StatFile {
 
 #[derive(Clone)]
 pub struct StatmFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl StatmFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for StatmFile {
     fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
         // /proc/<pid>/statm reports zeroes for kthreads.
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         // TODO(b/525059309): Bypassed for traced_probes due to VMAR walk slowness. Re-enable when optimized.
         let mem_stats = if should_skip_memory_stats(current_task) {
             stub_memory_stats()
@@ -1305,55 +1422,45 @@ impl DynamicFileSource for StatmFile {
 
 #[derive(Clone)]
 pub struct StatusFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl StatusFile {
-    pub fn new_node(tid: Pid) -> impl FsNodeOps {
-        DynamicFile::new_node(Self { tid })
+    pub fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target })
     }
 }
 impl DynamicFileSource for StatusFile {
     fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
         let start_monotonic = zx::MonotonicInstant::get();
         let start_boot = zx::BootInstant::get();
-        let task = self.tid.get_task().ok();
-        let task = task.as_ref();
-        let (tgid, pid, creds_string) = {
-            if let Some(task) = task {
-                track_stub!(TODO("https://fxbug.dev/297440106"), "/proc/pid/status zombies");
-                // Collect everything stored in info in this block.  There is a lock ordering
-                // issue with the task lock acquired below, and cloning info is
-                // expensive.
-                write!(sink, "Name:\t")?;
-                sink.write(task.persistent_info.command_guard().comm_name());
-                let creds = task.persistent_info.real_creds();
-                (
-                    Some(task.pid.clone()),
-                    Some(task.tid.clone()),
-                    Some(format!(
-                        "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}",
-                        creds.uid,
-                        creds.euid,
-                        creds.saved_uid,
-                        creds.fsuid,
-                        creds.gid,
-                        creds.egid,
-                        creds.saved_gid,
-                        creds.fsgid,
-                        creds.groups.iter().map(|n| n.to_string()).join(" ")
-                    )),
-                )
-            } else {
-                (None, None, None)
-            }
+        let task = self.target.get_task()?;
+        let creds_string = {
+            // Collect everything stored in info in this block.  There is a lock ordering
+            // issue with the task lock acquired below, and cloning info is
+            // expensive.
+            write!(sink, "Name:\t")?;
+            sink.write(task.persistent_info.command_guard().comm_name());
+            let creds = task.persistent_info.real_creds();
+            format!(
+                "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}",
+                creds.uid,
+                creds.euid,
+                creds.saved_uid,
+                creds.fsuid,
+                creds.gid,
+                creds.egid,
+                creds.saved_gid,
+                creds.fsgid,
+                creds.groups.iter().map(|n| n.to_string()).join(" ")
+            )
         };
 
         writeln!(sink)?;
 
-        if let Some(task) = task {
-            if let Ok(fs) = task.fs() {
-                writeln!(sink, "Umask:\t0{:03o}", fs.umask().bits())?;
-            }
+        if let Ok(fs) = task.fs() {
+            writeln!(sink, "Umask:\t0{:03o}", fs.umask().bits())?;
+        }
+        {
             let task_state = task.read();
             writeln!(sink, "SigBlk:\t{:016x}", task_state.signal_mask().0)?;
             writeln!(sink, "SigPnd:\t{:016x}", task_state.task_specific_pending_signals().0)?;
@@ -1363,67 +1470,56 @@ impl DynamicFileSource for StatusFile {
                 task.thread_group().pending_signals.lock().pending().0
             )?;
             writeln!(sink, "NoNewPrivs:\t{}", task_state.no_new_privs() as u8)?;
-
-            // Since version 3.8 all nonexistent capabilities are reported as not-enabled.
-            let creds = task.real_creds();
-            writeln!(sink, "CapInh:\t{:016x}", creds.cap_inheritable)?;
-            writeln!(sink, "CapPrm:\t{:016x}", creds.cap_permitted)?;
-            writeln!(sink, "CapEff:\t{:016x}", creds.cap_effective)?;
-            writeln!(sink, "CapBnd:\t{:016x}", creds.cap_bounding)?;
-            writeln!(sink, "CapAmb:\t{:016x}", creds.cap_ambient)?;
         }
 
-        let state_code =
-            if let Some(task) = task { task.state_code() } else { TaskStateCode::Zombie };
+        // Since version 3.8 all nonexistent capabilities are reported as not-enabled.
+        let creds = task.real_creds();
+        writeln!(sink, "CapInh:\t{:016x}", creds.cap_inheritable)?;
+        writeln!(sink, "CapPrm:\t{:016x}", creds.cap_permitted)?;
+        writeln!(sink, "CapEff:\t{:016x}", creds.cap_effective)?;
+        writeln!(sink, "CapBnd:\t{:016x}", creds.cap_bounding)?;
+        writeln!(sink, "CapAmb:\t{:016x}", creds.cap_ambient)?;
+
+        let state_code = task.state_code();
         writeln!(sink, "State:\t{} ({})", state_code.code_char(), state_code.name())?;
 
-        if let Some(tgid) = tgid {
-            writeln!(sink, "Tgid:\t{}", tgid)?;
-        }
-        if let Some(pid) = pid {
-            writeln!(sink, "Pid:\t{}", pid)?;
-        }
-        let (ppid, threads, tracer_pid) = if let Some(task) = task {
+        writeln!(sink, "Tgid:\t{}", task.pid)?;
+        writeln!(sink, "Pid:\t{}", self.target.tid)?;
+        let (ppid, threads, tracer_pid) = {
             let tracer_pid =
                 task.read().ptrace.as_ref().map_or(0, |p| {
                     p.core_state.thread_group.upgrade().map_or(0, |tg| tg.leader.id)
                 });
             let task_group = task.thread_group().read();
             (task_group.get_ppid(), task_group.tasks_count(), tracer_pid)
-        } else {
-            (1, 1, 0)
         };
         writeln!(sink, "PPid:\t{}", ppid)?;
         writeln!(sink, "TracerPid:\t{}", tracer_pid)?;
 
-        if let Some(creds_string) = creds_string {
-            writeln!(sink, "{}", creds_string)?;
-        }
+        writeln!(sink, "{}", creds_string)?;
 
-        if let Some(task) = task {
-            if let Ok(mm) = task.mm() {
-                // TODO(b/525059309): Bypassed for traced_probes due to VMAR walk slowness. Re-enable when optimized.
-                let mem_stats = if should_skip_memory_stats(current_task) {
-                    stub_memory_stats()
-                } else {
-                    mm.get_stats(current_task)
-                };
-                writeln!(sink, "VmSize:\t{} kB", mem_stats.vm_size / 1024)?;
-                writeln!(sink, "VmLck:\t{} kB", mem_stats.vm_lck / 1024)?;
-                writeln!(sink, "VmRSS:\t{} kB", mem_stats.vm_rss / 1024)?;
-                writeln!(sink, "RssAnon:\t{} kB", mem_stats.rss_anonymous / 1024)?;
-                writeln!(sink, "RssFile:\t{} kB", mem_stats.rss_file / 1024)?;
-                writeln!(sink, "RssShmem:\t{} kB", mem_stats.rss_shared / 1024)?;
-                writeln!(sink, "VmData:\t{} kB", mem_stats.vm_data / 1024)?;
-                writeln!(sink, "VmStk:\t{} kB", mem_stats.vm_stack / 1024)?;
-                writeln!(sink, "VmExe:\t{} kB", mem_stats.vm_exe / 1024)?;
-                writeln!(sink, "VmSwap:\t{} kB", mem_stats.vm_swap / 1024)?;
-                writeln!(sink, "VmHWM:\t{} kB", mem_stats.vm_rss_hwm / 1024)?;
-            }
-            // Report seccomp filter status.
-            let seccomp = task.seccomp_filter_state.get() as u8;
-            writeln!(sink, "Seccomp:\t{}", seccomp)?;
+        if let Ok(mm) = task.mm() {
+            // TODO(b/525059309): Bypassed for traced_probes due to VMAR walk slowness. Re-enable when optimized.
+            let mem_stats = if should_skip_memory_stats(current_task) {
+                stub_memory_stats()
+            } else {
+                mm.get_stats(current_task)
+            };
+            writeln!(sink, "VmSize:\t{} kB", mem_stats.vm_size / 1024)?;
+            writeln!(sink, "VmLck:\t{} kB", mem_stats.vm_lck / 1024)?;
+            writeln!(sink, "VmRSS:\t{} kB", mem_stats.vm_rss / 1024)?;
+            writeln!(sink, "RssAnon:\t{} kB", mem_stats.rss_anonymous / 1024)?;
+            writeln!(sink, "RssFile:\t{} kB", mem_stats.rss_file / 1024)?;
+            writeln!(sink, "RssShmem:\t{} kB", mem_stats.rss_shared / 1024)?;
+            writeln!(sink, "VmData:\t{} kB", mem_stats.vm_data / 1024)?;
+            writeln!(sink, "VmStk:\t{} kB", mem_stats.vm_stack / 1024)?;
+            writeln!(sink, "VmExe:\t{} kB", mem_stats.vm_exe / 1024)?;
+            writeln!(sink, "VmSwap:\t{} kB", mem_stats.vm_swap / 1024)?;
+            writeln!(sink, "VmHWM:\t{} kB", mem_stats.vm_rss_hwm / 1024)?;
         }
+        // Report seccomp filter status.
+        let seccomp = task.seccomp_filter_state.get() as u8;
+        writeln!(sink, "Seccomp:\t{}", seccomp)?;
 
         // There should be at least one thread in Zombie processes.
         writeln!(sink, "Threads:\t{}", std::cmp::max(1, threads))?;
@@ -1433,14 +1529,10 @@ impl DynamicFileSource for StatusFile {
         if elapsed_monotonic > zx::MonotonicDuration::from_millis(100)
             || elapsed_boot > zx::BootDuration::from_seconds(1)
         {
-            let target_pid = task.as_ref().map(|t| t.pid.id).unwrap_or(-1);
-            let target_comm = task
-                .as_ref()
-                .map(|t| {
-                    String::from_utf8_lossy(t.persistent_info.command_guard().comm_name())
-                        .into_owned()
-                })
-                .unwrap_or_default();
+            let target_pid = task.pid.id;
+            let target_comm =
+                String::from_utf8_lossy(task.persistent_info.command_guard().comm_name())
+                    .into_owned();
             starnix_logging::log_warn!(
                 "StatusFile::generate for task {} ({}) took {} ms (monotonic), {} ms (boot)",
                 target_pid,
@@ -1455,18 +1547,18 @@ impl DynamicFileSource for StatusFile {
 }
 
 struct OomScoreFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl OomScoreFile {
-    fn new_node(tid: Pid) -> impl FsNodeOps {
-        BytesFile::new_node(Self { tid })
+    fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        BytesFile::new_node(Self { target })
     }
 }
 
 impl BytesFileOps for OomScoreFile {
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let _task = self.tid.get_task()?;
+        let _task = self.target.get_task()?;
         track_stub!(TODO("https://fxbug.dev/322873459"), "/proc/pid/oom_score");
         Ok(serialize_for_file(0).into())
     }
@@ -1477,11 +1569,11 @@ const OOM_ADJUST_MAX: i32 = uapi::OOM_ADJUST_MAX as i32;
 const OOM_SCORE_ADJ_MAX: i32 = uapi::OOM_SCORE_ADJ_MAX as i32;
 
 struct OomAdjFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 impl OomAdjFile {
-    fn new_node(tid: Pid) -> impl FsNodeOps {
-        BytesFile::new_node(Self { tid })
+    fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        BytesFile::new_node(Self { target })
     }
 }
 
@@ -1498,13 +1590,13 @@ impl BytesFileOps for OomAdjFile {
             fraction * (OOM_SCORE_ADJ_MAX - OOM_SCORE_ADJ_MIN) + OOM_SCORE_ADJ_MIN
         };
         security::check_task_capable(current_task, CAP_SYS_RESOURCE)?;
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         task.write().oom_score_adj = oom_score_adj;
         Ok(())
     }
 
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let oom_score_adj = task.read().oom_score_adj;
         let oom_adj = if oom_score_adj == OOM_SCORE_ADJ_MIN {
             OOM_DISABLE
@@ -1518,12 +1610,12 @@ impl BytesFileOps for OomAdjFile {
 }
 
 struct OomScoreAdjFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl OomScoreAdjFile {
-    fn new_node(tid: Pid) -> impl FsNodeOps {
-        BytesFile::new_node(Self { tid })
+    fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        BytesFile::new_node(Self { target })
     }
 }
 
@@ -1534,31 +1626,31 @@ impl BytesFileOps for OomScoreAdjFile {
             return error!(EINVAL);
         }
         security::check_task_capable(current_task, CAP_SYS_RESOURCE)?;
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         task.write().oom_score_adj = value;
         Ok(())
     }
 
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let task = self.tid.get_task()?;
+        let task = self.target.get_task()?;
         let oom_score_adj = task.read().oom_score_adj;
         Ok(serialize_for_file(oom_score_adj).into())
     }
 }
 
 struct TimerslackNsFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl TimerslackNsFile {
-    fn new_node(tid: Pid) -> impl FsNodeOps {
-        BytesFile::new_node(Self { tid })
+    fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        BytesFile::new_node(Self { target })
     }
 }
 
 impl BytesFileOps for TimerslackNsFile {
     fn write(&self, current_task: &CurrentTask, data: Vec<u8>) -> Result<(), Errno> {
-        let target_task = self.tid.get_task()?;
+        let target_task = self.target.get_task()?;
         let same_task = current_task.task.pid == target_task.pid;
         if !same_task {
             security::check_task_capable(current_task, CAP_SYS_NICE)?;
@@ -1571,7 +1663,7 @@ impl BytesFileOps for TimerslackNsFile {
     }
 
     fn read(&self, current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let target_task = self.tid.get_task()?;
+        let target_task = self.target.get_task()?;
         let same_task = current_task.task.pid == target_task.pid;
         if !same_task {
             security::check_task_capable(current_task, CAP_SYS_NICE)?;
@@ -1584,18 +1676,18 @@ impl BytesFileOps for TimerslackNsFile {
 }
 
 struct ClearRefsFile {
-    tid: Pid,
+    target: TaskContainer,
 }
 
 impl ClearRefsFile {
-    fn new_node(tid: Pid) -> impl FsNodeOps {
-        BytesFile::new_node(Self { tid })
+    fn new_node(target: TaskContainer) -> impl FsNodeOps {
+        BytesFile::new_node(Self { target })
     }
 }
 
 impl BytesFileOps for ClearRefsFile {
     fn write(&self, _current_task: &CurrentTask, _data: Vec<u8>) -> Result<(), Errno> {
-        let _task = self.tid.get_task()?;
+        let _task = self.target.get_task()?;
         track_stub!(TODO("https://fxbug.dev/396221597"), "/proc/pid/clear_refs");
         Ok(())
     }

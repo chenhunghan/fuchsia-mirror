@@ -172,7 +172,13 @@ async fn do_start(
     mut incoming: IncomingCapabilities,
     abortable_scope: AbortableScope,
 ) -> Result<(), StartActionError> {
-    trace::duration!("component_manager", "Actions::Start", "moniker" => component.moniker.as_str());
+    let start_reason_str = start_reason.as_str();
+    trace::duration!(
+        "component_manager",
+        "Actions::Start",
+        "moniker" => component.moniker.as_str(),
+        "start_reason" => start_reason_str.as_ref()
+    );
 
     // Translates the error when a long running future is aborted.
     let abort_error =
@@ -471,12 +477,13 @@ async fn start_component(
         let started = StartedInstanceState::new(
             program,
             component.as_weak(),
-            start_reason,
+            start_reason.clone(),
             execution_controller_task,
         );
         timestamp = started.timestamp;
         let timestamp_monotonic = started.timestamp_monotonic;
-        runtime_info = RuntimeInfo::new(timestamp, timestamp_monotonic, diagnostics_receiver);
+        runtime_info =
+            RuntimeInfo::new(timestamp, timestamp_monotonic, diagnostics_receiver, start_reason);
         runtime_dir = started.runtime_dir().cloned();
 
         state.replace(|instance_state| match instance_state {

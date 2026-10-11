@@ -10,6 +10,7 @@ test_packages = [
   "artifacts",
   "avb",
   "build",
+  "cli",
   "device",
   "ffx",
   "omaha_tool",

@@ -546,6 +546,7 @@ fn extern_signatures(cs: &ChangeSet) -> Vec<Lint> {
             cpp.entry(s.name.clone()).or_default().push(s);
         }
     }
+    let mut had_problem: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
     for v in &cs.rust_new {
         for r in rust_sigs(v) {
@@ -619,6 +620,9 @@ fn extern_signatures(cs: &ChangeSet) -> Vec<Lint> {
                     ),
                 ));
             }
+            if !problems.is_empty() {
+                had_problem.insert(r.name.clone());
+            }
             for (sev, msg) in problems {
                 out.push(Lint {
                     kind: LintKind::ExternSignature,
@@ -629,6 +633,75 @@ fn extern_signatures(cs: &ChangeSet) -> Vec<Lint> {
                     related: Some((c.path.clone(), c.line)),
                 });
             }
+        }
+    }
+
+    // Check that touched `cpp_*` definitions in `.cc` files have a matching
+    // `extern "C"` prototype declaration (Rubric Section 3.13 / 4.18).
+    static INCLUDE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?m)^\s*#\s*include\s*[<"]([^>"]+)[>"]"#).unwrap());
+    let stem = |path: &str| -> String {
+        let base = path.rsplit('/').next().unwrap_or(path);
+        let s = base.split('.').next().unwrap_or(base);
+        s.strip_suffix("_ffi").unwrap_or(s).to_string()
+    };
+    let has_header_context = cs.cpp_new.iter().any(|v| {
+        v.path.ends_with(".h") || v.path.ends_with(".hpp") || INCLUDE_RE.is_match(&v.text)
+    });
+    if has_header_context {
+        for cands in cpp.values() {
+            let Some(c) = cands
+                .iter()
+                .find(|s| s.definition && s.touched && s.name.starts_with("cpp_"))
+            else {
+                continue;
+            };
+            if had_problem.contains(&c.name) {
+                continue;
+            }
+            let is_ffi_cc = c.path.ends_with("_ffi.cc") || c.path.ends_with("_ffi.cpp");
+            let has_decl = cands.iter().any(|s| {
+                !s.definition && (!is_ffi_cc || s.path.ends_with(".h") || s.path.ends_with(".hpp"))
+            });
+            if has_decl {
+                continue;
+            }
+            let want = stem(&c.path);
+            let hdr = cs
+                .cpp_new
+                .iter()
+                .find(|v| v.path == c.path)
+                .and_then(|v| {
+                    INCLUDE_RE
+                        .captures_iter(&v.text)
+                        .map(|cap| cap[1].to_string())
+                        .find(|inc| stem(inc) == want)
+                })
+                .or_else(|| {
+                    cs.cpp_new
+                        .iter()
+                        .find(|v| {
+                            (v.path.ends_with(".h") || v.path.ends_with(".hpp"))
+                                && stem(&v.path) == want
+                        })
+                        .map(|v| v.path.clone())
+                })
+                .map(|p| p.rsplit('/').next().unwrap_or(&p).to_string());
+            let where_decl = match hdr {
+                Some(h) => format!("in {h}"),
+                None => "in a C++ header".to_string(),
+            };
+            out.push(Lint {
+                kind: LintKind::ExternSignature,
+                severity: Severity::Issue,
+                path: c.path.clone(),
+                line: c.line,
+                message: format!(
+                    "{}: defined without an `extern \"C\"` prototype declaration {where_decl}",
+                    c.name
+                ),
+                related: None,
+            });
         }
     }
     out
@@ -720,10 +793,94 @@ fn invented_lifetime(v: &Version, f: &Function) -> Vec<Lint> {
     static FROM_PLACE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]*)?=\s*&?(?:mut\s+)?([a-z_][\w.]*(?:\[[^\]]*\])?)\s*\.\s*as_(?:mut_)?ptr\s*\(\s*\)").unwrap()
     });
+    static MUT_GET: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]*)?=\s*(?:unsafe\s*\{\s*)?&\s*mut\s*\*\s*([a-z_][\w.]*)\s*\.\s*get\s*\(\s*\)").unwrap()
+    });
+    static SELF_CALL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\bself\s*\.\s*([a-z_]\w*)\s*\(").unwrap());
     static LET: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\blet\s+(?:mut\s+)?([a-z_]\w*)\s*(?::[^=]*)?=(.*)").unwrap());
     static DEREF: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"&\s*(?:mut\s+)?\*\s*\(?\s*([a-z_]\w*)\b").unwrap());
+    let mut out = Vec::new();
+    let code: Vec<&str> = f.lines.iter().map(|l| code_part(l).trim()).collect();
+
+    // Check for `&mut *place.get()` held across a `self.method()` call or
+    // another `place.get()` access and used again afterwards.
+    for (k, text) in code.iter().enumerate() {
+        if !LET.is_match(text) {
+            continue;
+        }
+        let end = (k..code.len().min(k + 8))
+            .find(|&m| code[m].ends_with(';'))
+            .unwrap_or(k);
+        let whole = code[k..=end].join(" ");
+        let Some(c) = MUT_GET.captures(&whole) else {
+            continue;
+        };
+        let (var, place) = (&c[1], &c[2]);
+        let bind_line = f.start_line + k;
+        let var_re = Regex::new(&format!(r"\b{}\b", regex::escape(var))).unwrap();
+        let rebind_re =
+            Regex::new(&format!(r"\blet\s+(?:mut\s+)?{}\b", regex::escape(var))).unwrap();
+        let place_get_re =
+            Regex::new(&format!(r"\b{}\s*\.\s*get\s*\(", regex::escape(place))).unwrap();
+        let mut last_use = None;
+        let mut scan_end = code.len();
+        for (m, line_code) in code.iter().enumerate().skip(end + 1) {
+            if rebind_re.is_match(line_code) {
+                scan_end = m;
+                break;
+            }
+            if var_re.is_match(line_code) {
+                last_use = Some(m);
+            }
+        }
+        let Some(use_idx) = last_use else {
+            continue;
+        };
+        let use_line = f.start_line + use_idx;
+        if !touched(v, bind_line..=use_line) {
+            continue;
+        }
+        let is_self_place = place.starts_with("self.");
+        for m in (end + 1)..=use_idx.min(scan_end.saturating_sub(1)) {
+            let line_code = code[m];
+            let call_line = f.start_line + m;
+            if place_get_re.is_match(line_code) && m < use_idx {
+                out.push(Lint {
+                    kind: LintKind::InventedLifetime,
+                    severity: Severity::Issue,
+                    path: v.path.clone(),
+                    line: bind_line,
+                    message: format!(
+                        "`{var}` borrows `&mut *{place}.get()` (line {bind_line}) across `{place}.get()` at line {call_line} and is used again at line {use_line}, risking aliasing UB"
+                    ),
+                    related: None,
+                });
+                break;
+            }
+            if is_self_place {
+                if let Some(sc) = SELF_CALL.captures(line_code) {
+                    let method = &sc[1];
+                    if method != "get" && m < use_idx {
+                        out.push(Lint {
+                            kind: LintKind::InventedLifetime,
+                            severity: Severity::Issue,
+                            path: v.path.clone(),
+                            line: bind_line,
+                            message: format!(
+                                "`{var}` borrows `&mut *{place}.get()` (line {bind_line}) across `self.{method}()` at line {call_line} and is used again at line {use_line}, risking aliasing UB"
+                            ),
+                            related: None,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Code that reaches everything through one base pointer on purpose,
     // because other raw aliases (`NonNull`s stored elsewhere) must stay
     // valid, says so; a borrow there would invalidate those aliases.
@@ -732,12 +889,10 @@ fn invented_lifetime(v: &Version, f: &Function) -> Vec<Lint> {
         .iter()
         .any(|k| all.contains(k))
     {
-        return Vec::new();
+        return out;
     }
     // Pointer name -> the place it came from, and the line.
     let mut derived: Vec<(String, String, usize)> = Vec::new();
-    let mut out = Vec::new();
-    let code: Vec<&str> = f.lines.iter().map(|l| code_part(l).trim()).collect();
     for (k, text) in code.iter().enumerate() {
         let line = f.start_line + k;
         // A `let` can span lines (a call that returns a derived pointer):
@@ -1328,6 +1483,23 @@ mod tests {
     }
 
     #[test]
+    fn mut_cell_ref_held_across_self_call_is_reported() {
+        let rust = "impl State {\n    pub fn init(&self) {\n        unsafe {\n            let events = &mut *self.events.get();\n            events[0] = 1;\n            let watermarks = &mut *self.mem_watermarks.get();\n            watermarks[0] = 10;\n            let _ = NonNull::from(self.signal.as_event());\n            if self.is_imminent_oom_enabled() {\n                kprintln!(\"{}\", watermarks[1]);\n            }\n        }\n    }\n}\n";
+        let v = version("memory_watchdog.rs", rust);
+        let f = &crate::extract::extract(Lang::Rust, "memory_watchdog.rs", rust).functions[0];
+        let l = invented_lifetime(&v, f);
+        assert_eq!(l.len(), 1, "{l:?}");
+        assert_eq!(l[0].line, 6);
+        assert!(
+            l[0].message.contains("`watermarks`")
+                && l[0].message.contains("`self.is_imminent_oom_enabled()`")
+                && l[0].message.contains("line 10"),
+            "{}",
+            l[0].message
+        );
+    }
+
+    #[test]
     fn mangled_symbols_are_reported() {
         let v = version(
             "foo.rs",
@@ -1425,6 +1597,49 @@ pub extern "C" fn rust_foo_set(f: *mut Foo, v: u64) -> zx_status_t { 0 }
         assert!(
             m.iter().any(|x| x.contains("rust_foo_set: returns")),
             "{m:?}"
+        );
+    }
+
+    #[test]
+    fn missing_cpp_header_prototype_is_reported() {
+        let hdr = r#"
+extern "C" {
+void cpp_event_dispatcher_declared(EventDispatcher* e);
+}
+"#;
+        let ffi_cc = r#"
+#include <object/event_dispatcher.h>
+
+extern "C" {
+void cpp_event_dispatcher_declared(EventDispatcher* e) { e->Declared(); }
+FFI_ALWAYS_INLINE zx_status_t cpp_event_dispatcher_user_signal_self(EventDispatcher* e, uint32_t clear_mask, uint32_t set_mask) {
+  return e->user_signal_self(clear_mask, set_mask);
+}
+}
+"#;
+        let rust = r#"
+unsafe extern "C" {
+    fn cpp_event_dispatcher_declared(e: *mut EventDispatcher);
+    fn cpp_event_dispatcher_user_signal_self(e: *mut EventDispatcher, clear_mask: u32, set_mask: u32) -> zx_status_t;
+}
+"#;
+        let cs = ChangeSet {
+            cpp_old: Vec::new(),
+            cpp_new: vec![
+                version(
+                    "zircon/kernel/object/include/object/event_dispatcher.h",
+                    hdr,
+                ),
+                version("zircon/kernel/object/event_dispatcher_ffi.cc", ffi_cc),
+            ],
+            rust_new: vec![version("zircon/kernel/object/event_dispatcher.rs", rust)],
+        };
+        let l = lint(&cs);
+        let m = messages(&l, LintKind::ExternSignature);
+        assert_eq!(
+            m,
+            ["cpp_event_dispatcher_user_signal_self: defined without an `extern \"C\"` prototype declaration in event_dispatcher.h"],
+            "{l:?}"
         );
     }
 

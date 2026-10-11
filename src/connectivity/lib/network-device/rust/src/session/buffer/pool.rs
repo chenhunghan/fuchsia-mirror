@@ -1046,15 +1046,11 @@ impl<T: Debug> Debug for Chained<T> {
 }
 
 impl<T> Chained<T> {
-    #[allow(clippy::uninit_assumed_init)]
     fn empty() -> Self {
-        // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-        // safe because the type we are claiming to have initialized here is a
-        // bunch of `MaybeUninit`s, which do not require initialization.
-        // TODO(https://fxbug.dev/42160423): use MaybeUninit::uninit_array once it
-        // is stablized.
-        // https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#method.uninit_array
-        Self { storage: unsafe { MaybeUninit::uninit().assume_init() }, len: ChainLength::ZERO }
+        Self {
+            storage: [const { MaybeUninit::uninit() }; netdev::MAX_DESCRIPTOR_CHAIN as usize],
+            len: ChainLength::ZERO,
+        }
     }
 }
 
@@ -1083,15 +1079,10 @@ impl<T> IntoIterator for Chained<T> {
     fn into_iter(mut self) -> Self::IntoIter {
         let len = self.len;
         self.len = ChainLength::ZERO;
-        // Safety: we have reset the length to zero, it is now safe to move out
-        // the values and set them to be uninitialized. The `assume_init` is
-        // safe because the type we are claiming to have initialized here is a
-        // bunch of `MaybeUninit`s, which do not require initialization.
-        // TODO(https://fxbug.dev/42160423): use MaybeUninit::uninit_array once it
-        // is stablized.
-        #[allow(clippy::uninit_assumed_init)]
-        let storage =
-            std::mem::replace(&mut self.storage, unsafe { MaybeUninit::uninit().assume_init() });
+        let storage = std::mem::replace(
+            &mut self.storage,
+            [const { MaybeUninit::uninit() }; netdev::MAX_DESCRIPTOR_CHAIN as usize],
+        );
         ChainedIter { storage, len, consumed: 0 }
     }
 }

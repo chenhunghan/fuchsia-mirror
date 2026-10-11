@@ -12,6 +12,7 @@ use fuchsia_trace::duration;
 use futures::{TryFutureExt, join, try_join};
 use humansize::{BINARY, FormatSizeOptions, format_size};
 use stalls::StallProvider;
+use stalls::refaults::RefaultProvider;
 use traces::CATEGORY_MEMORY_CAPTURE;
 
 use fidl_fuchsia_kernel as fkernel;
@@ -27,6 +28,7 @@ pub async fn periodic_monitoring(
     kernel_stats_proxy: fkernel::StatsProxy,
     attribution_data_service: &impl AttributionDataProvider,
     stall_provider: &impl StallProvider,
+    refault_provider: &impl RefaultProvider,
     metric_event_logger: &fmetrics::MetricEventLoggerProxy,
     bucket_definitions: &[BucketDefinition],
     inspect_root: Node,
@@ -82,6 +84,7 @@ pub async fn periodic_monitoring(
                 timestamp,
                 &digest,
                 stall_provider,
+                refault_provider,
                 &mut bucket_list_node,
                 &inspect_root,
             )?;
@@ -112,11 +115,13 @@ fn update_inspect_history(
     timestamp: zx::BootInstant,
     digest: &Digest,
     stall_provider: &impl StallProvider,
+    refault_provider: &impl RefaultProvider,
     bucket_list_node: &mut std::cell::OnceCell<BoundedListNode>,
     inspect_root: &Node,
 ) -> Result<()> {
     let stall_values =
         stall_provider.get_stall_info().with_context(|| "Unable to retrieve stall information")?;
+    let page_refaults = refault_provider.get_count();
     // Add an entry for the current aggregation.
     let _ = bucket_list_node
         .get_or_init(|| BoundedListNode::new(inspect_root.create_child("measurements"), 100));
@@ -143,6 +148,10 @@ fn update_inspect_history(
                 "full_ms",
                 stall_values.full.as_millis().try_into().unwrap_or(u64::MAX),
             );
+        });
+
+        n.record_child("refaults", |child| {
+            child.record_uint("count", page_refaults);
         });
     });
     Ok(())
@@ -319,6 +328,17 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct FakeRefaultProvider {
+        count: u64,
+    }
+
+    impl RefaultProvider for FakeRefaultProvider {
+        fn get_count(&self) -> u64 {
+            self.count
+        }
+    }
+
     #[fuchsia::test]
     async fn test_update_inspect() -> Result<()> {
         let inspector = fuchsia_inspect::Inspector::default();
@@ -341,6 +361,7 @@ mod tests {
             timestamp,
             &digest,
             &FakeStallProvider {},
+            &FakeRefaultProvider { count: 300 },
             &mut bucket_list_node,
             &digest_node,
         )?;
@@ -349,6 +370,7 @@ mod tests {
             timestamp,
             &digest,
             &FakeStallProvider {},
+            &FakeRefaultProvider { count: 700 },
             &mut bucket_list_node,
             &digest_node,
         )?;
@@ -393,6 +415,9 @@ mod tests {
                             some_ms: 10u64,
                             full_ms: 20u64,
                         },
+                        refaults: {
+                            count: 300u64,
+                        },
                     },
                     // Second update.
                     "1": {
@@ -430,6 +455,9 @@ mod tests {
                         stalls: {
                             some_ms: 10u64,
                             full_ms: 20u64,
+                        },
+                        refaults: {
+                            count: 700u64,
                         },
                     },
                 },

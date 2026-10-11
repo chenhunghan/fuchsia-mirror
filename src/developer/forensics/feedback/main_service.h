@@ -41,6 +41,7 @@ class MainService {
     std::optional<std::string> local_device_id_path;
     std::string graceful_shutdown_info_write_path;
     std::string current_system_time_write_path;
+    bool enable_periodic_system_time_writes;
     LastReboot::Options last_reboot_options;
     CrashReports::Options crash_reports_options;
     FeedbackData::Options feedback_data_options;

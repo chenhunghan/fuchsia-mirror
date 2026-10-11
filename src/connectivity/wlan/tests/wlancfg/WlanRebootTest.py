@@ -17,12 +17,6 @@ import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
 from antlion import utils
 from antlion.controllers import pdu
-from antlion.controllers.ap_lib.hostapd_ap_preset import create_ap_preset
-from antlion.controllers.ap_lib.hostapd_constants import AP_SSID_LENGTH_2G
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
-from antlion.controllers.ap_lib.radvd_config import RadvdConfig
 from honeydew.affordances.connectivity.netstack.errors import (
     HoneydewNetstackError,
 )
@@ -33,6 +27,12 @@ from honeydew.affordances.connectivity.wlan.utils.errors import (
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
 )
+from legacy_access_point.ap_lib.hostapd_ap_preset import create_ap_preset
+from legacy_access_point.ap_lib.hostapd_constants import AP_SSID_LENGTH_2G
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
+)
+from legacy_access_point.ap_lib.radvd_config import RadvdConfig
 from mobly import signals, test_runner
 from openwrt_access_point import AddrType as OpenWrtAddrType
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName

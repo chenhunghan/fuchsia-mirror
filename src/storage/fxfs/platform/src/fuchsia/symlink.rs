@@ -233,6 +233,13 @@ impl Node for FxSymlink {
     }
 }
 
+impl Drop for FxSymlink {
+    fn drop(&mut self) {
+        let volume = self.handle.owner();
+        volume.cache().remove(self);
+    }
+}
+
 impl FxNode for FxSymlink {
     fn object_id(&self) -> u64 {
         self.handle.object_id()

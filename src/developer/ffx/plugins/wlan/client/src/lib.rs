@@ -6,7 +6,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use fdomain_fuchsia_wlan_policy as wlan_policy;
 use ffx_wlan_client_args as arg_types;
-use ffx_writer::SimpleWriter;
+use ffx_writer::{ToolIO as _, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool};
 use target_holders::moniker;
 
@@ -24,12 +24,13 @@ fho::embedded_plugin!(ClientTool);
 
 #[async_trait(?Send)]
 impl FfxMain for ClientTool {
-    type Writer = SimpleWriter;
+    type Writer = VerifiedMachineWriter<String>;
 
     type Error = ::fho::Error;
 
-    async fn main(self, _writer: Self::Writer) -> fho::Result<()> {
-        handle_client_command(self.client_provider, self.client_listener, self.cmd).await?;
+    async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
+        handle_client_command(self.client_provider, self.client_listener, self.cmd, &mut writer)
+            .await?;
         Ok(())
     }
 }
@@ -38,6 +39,7 @@ async fn handle_client_command(
     client_provider: wlan_policy::ClientProviderProxy,
     client_listener: wlan_policy::ClientListenerProxy,
     cmd: arg_types::ClientCommand,
+    writer: &mut VerifiedMachineWriter<String>,
 ) -> Result<(), Error> {
     let (client_controller, _) = ffx_wlan_common::get_client_controller(client_provider).await?;
     let listener_stream = ffx_wlan_common::get_client_listener_stream(client_listener)?;
@@ -47,11 +49,22 @@ async fn handle_client_command(
             arg_types::BatchConfigSubCommand::Dump(arg_types::Dump {}) => {
                 let saved_networks =
                     donut_lib_fdomain::handle_get_saved_networks(&client_controller).await?;
-                donut_lib_fdomain::print_serialized_saved_networks(saved_networks)
+                if writer.is_machine() {
+                    let serialized =
+                        donut_lib_fdomain::serialize::serialize_saved_networks(saved_networks)?;
+                    writer.machine(&serialized).map_err(Into::into)
+                } else {
+                    donut_lib_fdomain::print_serialized_saved_networks(saved_networks)
+                }
             }
             arg_types::BatchConfigSubCommand::Restore(arg_types::Restore { serialized_config }) => {
                 donut_lib_fdomain::restore_serialized_config(client_controller, serialized_config)
-                    .await
+                    .await?;
+                if writer.is_machine() {
+                    writer.machine(&"".to_string()).map_err(Into::into)
+                } else {
+                    Ok(())
+                }
             }
         },
         arg_types::ClientSubCommand::Connect(connect_args) => {

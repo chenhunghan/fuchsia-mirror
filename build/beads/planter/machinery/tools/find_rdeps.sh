@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-# Helper tool to discover true reverse dependencies (deps, public_deps, test_deps, proc_macro_deps, actual)
+# Helper tool to discover true reverse dependencies (deps, public_deps, test_deps, proc_macro_deps, link_deps, actual)
 # of a target package directory while filtering out:
 # 1. References inside visibility = [...] or visibility.gni allowlists
 # 2. Substring prefix collisions with sibling packages (e.g. //a/b-foo or //a/b/subpkg)
@@ -43,7 +43,6 @@ gn_file = os.path.join(workdir, target_pkg, "BUILD.gn")
 
 bazel_targets = []
 package_targets = set()
-fidl_targets = set()
 alias_map = {}
 if os.path.isfile(bazel_file):
     try:
@@ -67,8 +66,6 @@ if os.path.isfile(bazel_file):
                     bazel_targets.append(tname)
                     if func in ("fx_package", "fuchsia_package"):
                         package_targets.add(tname)
-                    if func == "fidl_library":
-                        fidl_targets.add(tname)
                     if func == "alias" and actual and actual.startswith(":"):
                         alias_map[tname] = actual[1:]
     except Exception:
@@ -168,6 +165,17 @@ visibility_only_packages = set()
 excluded_gn_only_references = set()
 per_target_rdeps = {t: set() for t in bazel_targets}
 
+def owning_bazel_target(sub):
+    # Rules such as fidl_library emit sub-targets named '<name>_<suffix>' (e.g. '<fidl>_rust',
+    # '<fidl>_cpp') that share the visibility of '<name>'; attribute them to the longest match.
+    if sub in per_target_rdeps:
+        return sub
+    best = None
+    for t in bazel_targets:
+        if sub.startswith(t + "_") and (best is None or len(t) > len(best)):
+            best = t
+    return best
+
 for fpath in sorted(set(files)):
     rel = os.path.relpath(fpath, workdir)
     pkg = os.path.dirname(rel).strip("/")
@@ -223,16 +231,11 @@ for fpath in sorted(set(files)):
             excluded_gn_only_references.add(f"//{pkg} (:{sub})")
             continue
         true_rdep_packages.add(caller_pkg)
-        if sub in per_target_rdeps:
-            per_target_rdeps[sub].add(caller_pkg)
+        owner = owning_bazel_target(sub)
+        if owner is not None:
+            per_target_rdeps[owner].add(caller_pkg)
         elif sub == default_target and len(bazel_targets) == 1:
             per_target_rdeps[bazel_targets[0]].add(caller_pkg)
-        else:
-            # GN fidl() callers depend on generated binding sub-targets
-            # (<name>_rust, <name>_cpp, <name>_hlcpp, ...) of the fidl_library.
-            owners = [t for t in fidl_targets if sub.startswith(t + "_")]
-            if owners:
-                per_target_rdeps[max(owners, key=len)].add(caller_pkg)
 
 for alias_name, actual_name in alias_map.items():
     if alias_name in per_target_rdeps and actual_name in per_target_rdeps:

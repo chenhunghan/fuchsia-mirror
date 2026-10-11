@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Source tree
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### Checks all golden file comparisons in the GN build graph.
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"

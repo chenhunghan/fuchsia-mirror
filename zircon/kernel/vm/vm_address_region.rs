@@ -9,12 +9,22 @@ use super::vm_aspace::VmAspace;
 use super::vm_mapping::VmMapping;
 use super::vm_object::VmObject;
 use crate::kernel::types::VAddr;
-use core::ffi::{CStr, c_char};
-use fbl::RefPtr;
+use crate::user_copy::UserInOutPtr;
+use core::ffi::CStr;
+use core::ptr::NonNull;
+use fbl::{HasRefCount, OpaqueRefCountedFacade, Recyclable, RefCounted, RefPtr};
 use zr::ToMutPtr;
 use zx_status::Status;
+use zx_types::ZX_MAX_NAME_LEN;
 
 use vm_address_region_bindings as bindings;
+
+fn name_to_c_buf(name: &[u8]) -> [u8; ZX_MAX_NAME_LEN] {
+    let mut buf = [0u8; ZX_MAX_NAME_LEN];
+    let len = name.len().min(buf.len() - 1);
+    buf[..len].copy_from_slice(&name[..len]);
+    buf
+}
 
 pub mod flag {
     use vm_address_region_bindings as bindings;
@@ -53,8 +63,62 @@ pub mod flag {
 
 /// Memory priorities that can be applied to VMARs and mappings to propagate to VMOs and page
 /// tables.
-pub type MemoryPriority = bindings::VmAddressRegionOrMapping_MemoryPriority;
-pub type VmAddressRegionOpChildren = bindings::VmAddressRegionOpChildren;
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPriority {
+    /// Default overcommit priority where reclamation is allowed.
+    Default = 0,
+    /// High priority prevents all reclamation.
+    High = 1,
+}
+
+zr::static_assert!(
+    core::mem::size_of::<MemoryPriority>()
+        == core::mem::size_of::<bindings::VmAddressRegionOrMapping_MemoryPriority>()
+);
+zr::static_assert!(
+    MemoryPriority::Default as u8
+        == bindings::VmAddressRegionOrMapping_MemoryPriority::DEFAULT as u8
+);
+zr::static_assert!(
+    MemoryPriority::High as u8 == bindings::VmAddressRegionOrMapping_MemoryPriority::HIGH as u8
+);
+
+impl From<MemoryPriority> for bindings::VmAddressRegionOrMapping_MemoryPriority {
+    fn from(priority: MemoryPriority) -> Self {
+        match priority {
+            MemoryPriority::Default => Self::DEFAULT,
+            MemoryPriority::High => Self::HIGH,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmAddressRegionOpChildren {
+    Yes = 0,
+    No = 1,
+}
+
+zr::static_assert!(
+    core::mem::size_of::<VmAddressRegionOpChildren>()
+        == core::mem::size_of::<bindings::VmAddressRegionOpChildren>()
+);
+zr::static_assert!(
+    VmAddressRegionOpChildren::Yes as u8 == bindings::VmAddressRegionOpChildren::Yes as u8
+);
+zr::static_assert!(
+    VmAddressRegionOpChildren::No as u8 == bindings::VmAddressRegionOpChildren::No as u8
+);
+
+impl From<VmAddressRegionOpChildren> for bindings::VmAddressRegionOpChildren {
+    fn from(op_children: VmAddressRegionOpChildren) -> Self {
+        match op_children {
+            VmAddressRegionOpChildren::Yes => Self::Yes,
+            VmAddressRegionOpChildren::No => Self::No,
+        }
+    }
+}
 pub type RangeOpType = bindings::VmAddressRegion_RangeOpType;
 pub type UnmapOptions = bindings::VmMapping_UnmapOptions;
 
@@ -83,72 +147,36 @@ pub struct MapResult {
     pub base: usize,
 }
 
-unsafe extern "C" {
-    fn cpp_vm_address_region_get_ref_counted(vmar: *mut VmAddressRegion) -> *mut fbl::RefCounted;
-    fn cpp_vm_address_region_free(vmar: *mut VmAddressRegion);
-    fn cpp_vm_address_region_destroy(vmar: *mut VmAddressRegion) -> i32;
-    fn cpp_vm_address_region_aspace(vmar: *mut VmAddressRegion) -> *const RefPtr<VmAspace>;
-    fn cpp_vm_address_region_base(vmar: *mut VmAddressRegion) -> VAddr;
-    fn cpp_vm_address_region_size(vmar: *mut VmAddressRegion) -> usize;
-    fn cpp_vm_address_region_flags(vmar: *mut VmAddressRegion) -> u32;
-    fn cpp_vm_address_region_name(vmar: *mut VmAddressRegion) -> *const c_char;
-    fn cpp_vm_address_region_has_parent(vmar: *mut VmAddressRegion) -> bool;
-    fn cpp_vm_address_region_set_memory_priority(
-        vmar: *mut VmAddressRegion,
-        priority: MemoryPriority,
-    ) -> i32;
-    fn cpp_vm_address_region_unmap(
-        vmar: *mut VmAddressRegion,
-        base: VAddr,
-        size: usize,
-        op_children: VmAddressRegionOpChildren,
-    ) -> i32;
-    fn cpp_vm_address_region_protect(
-        vmar: *mut VmAddressRegion,
-        base: VAddr,
-        size: usize,
-        new_arch_mmu_flags: ArchMmuFlags,
-        op_children: VmAddressRegionOpChildren,
-    ) -> i32;
-    fn cpp_vm_address_region_reserve_space(
-        vmar: *mut VmAddressRegion,
-        name: *const c_char,
-        base: usize,
-        size: usize,
-        arch_mmu_flags: ArchMmuFlags,
-    ) -> i32;
-    fn cpp_vm_address_region_create_sub_vmar(
-        vmar: *mut VmAddressRegion,
-        offset: usize,
-        size: usize,
-        align_pow2: u8,
-        vmar_flags: u32,
-        name: *const c_char,
-        out_status: *mut i32,
-    ) -> *mut VmAddressRegion;
-    fn cpp_vm_address_region_create_vm_mapping(
-        vmar: *mut VmAddressRegion,
-        mapping_offset: usize,
-        size: usize,
-        align_pow2: u8,
-        vmar_flags: u32,
-        vmo: *const VmObject,
-        vmo_offset: u64,
-        arch_mmu_flags: ArchMmuFlags,
-        name: *const c_char,
-        out_base: *mut usize,
-        out_status: *mut i32,
-    ) -> *mut VmMapping;
+/// A representation of a contiguous range of virtual address space
+#[repr(C)]
+pub struct VmAddressRegion {
+    _facade: OpaqueRefCountedFacade,
 }
 
-fbl::impl_opaque_ref_counted_facade!(
-    /// A contiguous region of the virtual address space.
-    pub struct VmAddressRegion,
-    cpp_vm_address_region_free,
-    cpp_vm_address_region_get_ref_counted,
-);
+impl HasRefCount for VmAddressRegion {
+    #[inline]
+    fn ref_count(&self) -> &RefCounted {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        let raw = unsafe { bindings::cpp_vm_address_region_get_ref_counted(self.as_ffi_ptr()) };
+        // SAFETY: `raw` points to the `fbl::RefCounted` subobject of `self`.
+        unsafe { &*raw.cast::<RefCounted>() }
+    }
+}
+
+// SAFETY: `recycle` releases the allocation exactly once when the last reference is dropped.
+unsafe impl Recyclable for VmAddressRegion {
+    #[inline]
+    unsafe fn recycle(ptr: NonNull<Self>) {
+        // SAFETY: `ptr` is the last reference to a live `VmAddressRegion`.
+        unsafe { bindings::cpp_vm_address_region_free(ptr.as_ptr().cast()) }
+    }
+}
 
 impl VmAddressRegion {
+    fn as_ffi_ptr(&self) -> *mut bindings::VmAddressRegion {
+        self.to_mut_ptr().cast()
+    }
+
     /// Creates a subregion of this region.
     pub fn create_sub_vmar(
         &self,
@@ -156,22 +184,25 @@ impl VmAddressRegion {
         size: usize,
         align_pow2: u8,
         vmar_flags: u32,
-        name: &CStr,
+        name: &[u8],
     ) -> Result<RefPtr<VmAddressRegion>, Status> {
+        let name_buf = name_to_c_buf(name);
         let mut status = 0;
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         let raw = unsafe {
-            cpp_vm_address_region_create_sub_vmar(
-                self.to_mut_ptr(),
+            bindings::cpp_vm_address_region_create_sub_vmar(
+                self.as_ffi_ptr(),
                 offset,
                 size,
                 align_pow2,
                 vmar_flags,
-                name.as_ptr(),
+                name_buf.as_ptr().cast(),
                 &mut status,
             )
         };
         Status::ok(status)?;
-        unsafe { RefPtr::try_from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: `raw` is null or an owned reference to a live `VmAddressRegion`.
+        unsafe { RefPtr::try_from_raw(raw.cast()).ok_or(Status::NO_MEMORY) }
     }
 
     /// Creates a [`VmMapping`] within this region.
@@ -188,71 +219,80 @@ impl VmAddressRegion {
         vmo: RefPtr<VmObject>,
         vmo_offset: u64,
         arch_mmu_flags: ArchMmuFlags,
-        name: &CStr,
+        name: &[u8],
     ) -> Result<MapResult, Status> {
+        let name_buf = name_to_c_buf(name);
         let mut base = 0;
         let mut status = 0;
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         let raw = unsafe {
-            cpp_vm_address_region_create_vm_mapping(
-                self.to_mut_ptr(),
+            bindings::cpp_vm_address_region_create_vm_mapping(
+                self.as_ffi_ptr(),
                 mapping_offset,
                 size,
                 align_pow2,
                 vmar_flags,
-                RefPtr::into_raw(vmo),
+                RefPtr::into_raw(vmo).cast(),
                 vmo_offset,
                 arch_mmu_flags,
-                name.as_ptr(),
+                name_buf.as_ptr().cast(),
                 &mut base,
                 &mut status,
             )
         };
         Status::ok(status)?;
-        let mapping = unsafe { RefPtr::try_from_raw(raw).ok_or(Status::NO_MEMORY)? };
+        // SAFETY: `raw` is null or an owned reference to a live `VmMapping`.
+        let mapping = unsafe { RefPtr::try_from_raw(raw.cast()).ok_or(Status::NO_MEMORY)? };
         Ok(MapResult { mapping, base })
     }
 
     /// Destroys this region and recursively destroys child VMARs.
     pub fn destroy(&self) -> Result<(), Status> {
-        Status::ok(unsafe { cpp_vm_address_region_destroy(self.to_mut_ptr()) })
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        Status::ok(unsafe { bindings::cpp_vm_address_region_destroy(self.as_ffi_ptr()) })
     }
 
     /// Returns a reference to the address space this region belongs to.
     pub fn aspace(&self) -> &RefPtr<VmAspace> {
-        // SAFETY: `vmar->aspace()` returns a reference to `vmar->aspace_`, which is non-null
-        // and lives for the lifetime of `self`.
-        unsafe { &*cpp_vm_address_region_aspace(self.to_mut_ptr()) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        unsafe { &*(bindings::cpp_vm_address_region_aspace(self.as_ffi_ptr()).cast()) }
     }
 
     /// Returns the base address of this region.
     pub fn base(&self) -> VAddr {
-        unsafe { cpp_vm_address_region_base(self.to_mut_ptr()) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        VAddr(unsafe { bindings::cpp_vm_address_region_base(self.as_ffi_ptr()) })
     }
 
     /// Returns the size in bytes of this region.
     pub fn size(&self) -> usize {
-        unsafe { cpp_vm_address_region_size(self.to_mut_ptr()) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        unsafe { bindings::cpp_vm_address_region_size(self.as_ffi_ptr()) }
     }
 
     /// Returns the creation flags of this region.
     pub fn flags(&self) -> u32 {
-        unsafe { cpp_vm_address_region_flags(self.to_mut_ptr()) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        unsafe { bindings::cpp_vm_address_region_flags(self.as_ffi_ptr()) }
     }
 
     /// Returns the name of this region.
     pub fn name(&self) -> &CStr {
-        unsafe { CStr::from_ptr(cpp_vm_address_region_name(self.to_mut_ptr())) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        unsafe { CStr::from_ptr(bindings::cpp_vm_address_region_name(self.as_ffi_ptr())) }
     }
 
     /// Returns true if this region has a parent region.
     pub fn has_parent(&self) -> bool {
-        unsafe { cpp_vm_address_region_has_parent(self.to_mut_ptr()) }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        unsafe { bindings::cpp_vm_address_region_has_parent(self.as_ffi_ptr()) }
     }
 
     /// Applies the given memory priority to this region and all subregions.
     pub fn set_memory_priority(&self, priority: MemoryPriority) -> Result<(), Status> {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         Status::ok(unsafe {
-            cpp_vm_address_region_set_memory_priority(self.to_mut_ptr(), priority)
+            bindings::cpp_vm_address_region_set_memory_priority(self.as_ffi_ptr(), priority.into())
         })
     }
 
@@ -267,8 +307,14 @@ impl VmAddressRegion {
         size: usize,
         op_children: VmAddressRegionOpChildren,
     ) -> Result<(), Status> {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         Status::ok(unsafe {
-            cpp_vm_address_region_unmap(self.to_mut_ptr(), base, size, op_children)
+            bindings::cpp_vm_address_region_unmap(
+                self.as_ffi_ptr(),
+                base.0,
+                size,
+                op_children.into(),
+            )
         })
     }
 
@@ -280,13 +326,38 @@ impl VmAddressRegion {
         new_arch_mmu_flags: ArchMmuFlags,
         op_children: VmAddressRegionOpChildren,
     ) -> Result<(), Status> {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         Status::ok(unsafe {
-            cpp_vm_address_region_protect(
-                self.to_mut_ptr(),
-                base,
+            bindings::cpp_vm_address_region_protect(
+                self.as_ffi_ptr(),
+                base.0,
                 size,
                 new_arch_mmu_flags,
-                op_children,
+                op_children.into(),
+            )
+        })
+    }
+
+    /// Performs a VMO or mapping operation (`op`) across mappings in `[base, base + len)`.
+    pub fn range_op(
+        &self,
+        op: RangeOpType,
+        base: VAddr,
+        len: usize,
+        op_children: VmAddressRegionOpChildren,
+        buffer: UserInOutPtr<u8>,
+        buffer_size: usize,
+    ) -> Result<(), Status> {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
+        Status::ok(unsafe {
+            bindings::cpp_vm_address_region_range_op(
+                self.as_ffi_ptr(),
+                op,
+                base.0,
+                len,
+                op_children.into(),
+                buffer.as_ptr().cast(),
+                buffer_size,
             )
         })
     }
@@ -294,15 +365,17 @@ impl VmAddressRegion {
     /// Reserves a memory region within this VMAR without allocating physical pages.
     pub fn reserve_space(
         &self,
-        name: &CStr,
+        name: &[u8],
         base: usize,
         size: usize,
         arch_mmu_flags: ArchMmuFlags,
     ) -> Result<(), Status> {
+        let name_buf = name_to_c_buf(name);
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
         Status::ok(unsafe {
-            cpp_vm_address_region_reserve_space(
-                self.to_mut_ptr(),
-                name.as_ptr(),
+            bindings::cpp_vm_address_region_reserve_space(
+                self.as_ffi_ptr(),
+                name_buf.as_ptr().cast(),
                 base,
                 size,
                 arch_mmu_flags,

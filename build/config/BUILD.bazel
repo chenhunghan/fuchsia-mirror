@@ -1,0 +1,103 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/config/derived:fuchsia_cxx_version.bzl", "fuchsia_cxx_version")
+load(":compress_debuginfo.bzl", "compress_debuginfo_build_flags")
+load(":dwarf_version.bzl", "dwarf_version_build_flags")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(debug)
+build_flags(
+    name = "debug",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:debug)
+
+# LINT.IfChange(shared_library_config)
+build_flags(
+    name = "shared_library_config",
+    cflags = select({
+        "@platforms//os:linux": ["-fPIC"],
+        "//conditions:default": [],
+    }),
+    subflags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:shared_library_config"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:shared_library_config)
+
+# LINT.IfChange(executable_config)
+build_flags(
+    name = "executable_config",
+    subflags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:executable_config"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:executable_config)
+
+# LINT.IfChange(default_libs)
+build_flags(
+    name = "default_libs",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:default_libs)
+
+# LINT.IfChange(language)
+build_flags(
+    name = "language",
+    cflags_c = ["-std=c11"],
+    cflags_cc = ["-std=c++{}".format(fuchsia_cxx_version)],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:language)
+
+# LINT.IfChange(libcpp_remove_transitive_includes)
+build_flags(
+    name = "libcpp_remove_transitive_includes",
+    defines = ["_LIBCPP_REMOVE_TRANSITIVE_INCLUDES"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:libcpp_remove_transitive_includes)
+
+# LINT.IfChange(no-template-backtrace-limit)
+build_flags(
+    name = "no-template-backtrace-limit",
+    cflags_cc = ["-ftemplate-backtrace-limit=0"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:no-template-backtrace-limit)
+
+# LINT.IfChange(no_exceptions)
+build_flags(
+    name = "no_exceptions",
+    cflags_cc = ["-fno-exceptions"],
+    ldflags = ["-fno-exceptions"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/BUILD.gn:no_exceptions)
+
+# LINT.IfChange(dwarf_version)
+# This uses a custom rule to extract the value of the
+# dwarf_version at analysis time and generate a target
+# that produces the corresponding BuildFlagsInfo value.
+dwarf_version_build_flags(
+    name = "dwarf_version",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:dwarf_version)
+
+# LINT.IfChange(compress_debuginfo)
+# Use a custom rule which produces a BuildFlagsInfo value that
+# depends on the toolchain-specific compress_debuginfo variable.
+compress_debuginfo_build_flags(
+    name = "compress_debuginfo",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compress_debuginfo)

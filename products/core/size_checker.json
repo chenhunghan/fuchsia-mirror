@@ -270,7 +270,6 @@
                 "iperf3",
                 "lowpanctl",
                 "mdns-util",
-                "nc",
                 "net-cli",
                 "sockscripter",
                 "tcpdump"

@@ -4,7 +4,7 @@
 
 use anyhow::Context as _;
 
-use fidl_fuchsia_net_filter_deprecated as filter;
+use flex_fuchsia_net_filter_deprecated as filter;
 
 pub trait FidlReturn {
     type Item;

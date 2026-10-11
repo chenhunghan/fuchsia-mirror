@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::AnalyticsError;
+use futures::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::analytics_client::GA4AnalyticsClient;
@@ -11,12 +12,56 @@ use crate::ga4_event::*;
 use crate::metrics_state::*;
 use crate::notice::{BRIEF_NOTICE, FULL_NOTICE, GOOGLER_ENHANCED_NOTICE, SHOW_NOTICE_TEMPLATE};
 
+pub(crate) enum WorkerMessage {
+    Events(Vec<Event>),
+    Flush(futures::channel::oneshot::Sender<()>),
+    Drain(futures::channel::oneshot::Sender<()>),
+    Stop,
+}
+
+struct WorkerHandle {
+    sender: futures::channel::mpsc::UnboundedSender<WorkerMessage>,
+    abort_handle: futures::future::AbortHandle,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WorkerHandle {
+    fn post_events(&self, events: Vec<Event>) {
+        if let Err(e) = self.sender.unbounded_send(WorkerMessage::Events(events)) {
+            log::warn!("Failed to enqueue analytics events: {e}");
+        }
+    }
+
+    async fn flush(&self) -> Result<(), AnalyticsError> {
+        let (ack_tx, ack_rx) = futures::channel::oneshot::channel();
+        if self.sender.unbounded_send(WorkerMessage::Flush(ack_tx)).is_ok() {
+            let _ = ack_rx.await;
+        }
+        Ok(())
+    }
+
+    async fn drain(self) -> Result<(), AnalyticsError> {
+        let (ack_tx, ack_rx) = futures::channel::oneshot::channel();
+        if self.sender.unbounded_send(WorkerMessage::Drain(ack_tx)).is_ok() {
+            let _ = ack_rx.await;
+        }
+        Ok(())
+    }
+
+    fn stop(self) {
+        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.abort_handle.abort();
+        let _ = self.sender.unbounded_send(WorkerMessage::Stop);
+    }
+}
+
 /// The implementation of the GA4 Measurement Protocol metrics public api.
 //#[derive(Clone)]
 pub struct GA4MetricsService {
     metrics_state: MetricsState,
     client: Option<GA4AnalyticsClient>,
     post: Post,
+    worker: Option<WorkerHandle>,
 }
 
 impl GA4MetricsService {
@@ -26,8 +71,12 @@ impl GA4MetricsService {
         } else {
             None
         };
-        let mut svc = GA4MetricsService { metrics_state: state, client, post: Post::default() };
+        let mut svc =
+            GA4MetricsService { metrics_state: state, client, post: Post::default(), worker: None };
         svc.init_post();
+        if svc.is_opted_in() {
+            let _ = svc.start_worker();
+        }
         svc
     }
 
@@ -75,6 +124,7 @@ impl GA4MetricsService {
     /// Records Analytics participation status.
     /// TODO remove this once foxtrot is migrated to set_new_opt_in_status
     pub fn set_opt_in_status(&mut self, enabled: bool) -> Result<(), AnalyticsError> {
+        self.metrics_state.set_opt_in_status(enabled)?;
         if enabled {
             if self.client.is_none() {
                 self.client = Some(GA4AnalyticsClient::new(
@@ -82,26 +132,32 @@ impl GA4MetricsService {
                     self.metrics_state.ga4_product_code.clone(),
                 ));
             }
+            self.start_worker()?;
         } else {
+            self.stop_worker();
             self.client = None;
         }
-        self.metrics_state.set_opt_in_status(enabled)
+        Ok(())
     }
 
     /// Record analytics participation status in new migrated status file to support
     /// enhanced analytics for Googlers.
     pub fn set_new_opt_in_status(&mut self, status: MetricsStatus) -> Result<(), AnalyticsError> {
-        if status.is_opted_in() {
+        let is_opted_in = status.is_opted_in();
+        self.metrics_state.set_new_opt_in_status(status)?;
+        if is_opted_in {
             if self.client.is_none() {
                 self.client = Some(GA4AnalyticsClient::new(
                     self.metrics_state.ga4_key.clone(),
                     self.metrics_state.ga4_product_code.clone(),
                 ));
             }
+            self.start_worker()?;
         } else {
+            self.stop_worker();
             self.client = None;
         }
-        self.metrics_state.set_new_opt_in_status(status)
+        Ok(())
     }
 
     pub fn opt_in_status(&self) -> MetricsStatus {
@@ -116,16 +172,119 @@ impl GA4MetricsService {
     /// Disables analytics for this invocation only.
     /// This does not affect the global analytics state.
     pub fn opt_out_for_this_invocation(&mut self) -> Result<(), AnalyticsError> {
+        self.stop_worker();
         self.client = None;
         self.metrics_state.opt_out_for_this_invocation()
     }
 
-    /// Adds a launch event to the Post
+    fn start_worker(&mut self) -> Result<(), AnalyticsError> {
+        if self.worker.is_some() || !self.is_opted_in() {
+            return Ok(());
+        }
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stopped = std::sync::Arc::clone(&stopped);
+        let ga4_key = self.metrics_state.ga4_key.clone();
+        let ga4_product_code = self.metrics_state.ga4_product_code.clone();
+        let post = self.post.clone();
+        match std::thread::Builder::new().name("analytics-worker".to_string()).spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::new();
+            let client = GA4AnalyticsClient::new(ga4_key, ga4_product_code);
+            let fut = futures::future::Abortable::new(
+                run_worker_loop(rx, client, post, worker_stopped),
+                abort_registration,
+            );
+            let _ = executor.run_singlethreaded(fut);
+        }) {
+            Ok(_thread) => {
+                self.worker = Some(WorkerHandle { sender: tx, abort_handle, stopped });
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to spawn analytics worker thread: {e}");
+                self.worker = None;
+                Err(e.into())
+            }
+        }
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            worker.stop();
+        }
+        self.post.events.clear();
+    }
+
+    fn enqueue_events(&mut self, events: Vec<Event>) -> Result<(), AnalyticsError> {
+        if let Some(ref mut worker) = self.worker {
+            worker.post_events(events);
+        } else {
+            for event in events {
+                self.post.add_event(event);
+            }
+        }
+        Ok(())
+    }
+
+    fn enqueue_event(&mut self, event: Event) -> Result<(), AnalyticsError> {
+        self.enqueue_events(vec![event])
+    }
+
+    /// Creates a custom GA4 event configured with the service's invoker metadata,
+    /// suitable for batching via [`Self::add_events`].
+    pub fn make_custom_event(
+        &self,
+        category: Option<&str>,
+        action: Option<&str>,
+        label: Option<&str>,
+        custom_dimensions: BTreeMap<&str, GA4Value>,
+        event_name: Option<&str>,
+    ) -> Event {
+        make_ga4_event(
+            category,
+            action,
+            label,
+            custom_dimensions,
+            self.metrics_state.invoker.as_deref(),
+            event_name,
+        )
+    }
+
+    /// Creates a timing GA4 event configured with the service's invoker metadata,
+    /// suitable for batching via [`Self::add_events`].
+    pub fn make_timing_event(
+        &self,
+        category: Option<&str>,
+        time: u64,
+        variable: Option<&str>,
+        label: Option<&str>,
+        custom_dimensions: BTreeMap<&str, GA4Value>,
+    ) -> Event {
+        make_ga4_timing_event(
+            category,
+            time,
+            variable,
+            label,
+            custom_dimensions,
+            self.metrics_state.invoker.as_deref(),
+        )
+    }
+
+    /// Adds a batch of events to the queue
+    pub async fn add_events(&mut self, events: Vec<Event>) -> Result<(), AnalyticsError> {
+        if !self.is_opted_in() {
+            return Ok(());
+        }
+        self.enqueue_events(events)
+    }
+
+    /// Adds a launch event to the queue
     pub async fn add_launch_event(&mut self, args: Option<&str>) -> Result<(), AnalyticsError> {
         self.add_custom_event(None, args, args, BTreeMap::new(), Some("launch")).await
     }
 
-    /// Adds an event to the post with open-ended parameters
+    /// Adds an event to the queue with open-ended parameters
     /// while still honoring the UA Event parameters already
     /// in use.
     pub async fn add_custom_event(
@@ -139,22 +298,14 @@ impl GA4MetricsService {
         if !self.is_opted_in() {
             return Ok(());
         }
-        let ga4_event = make_ga4_event(
-            category,
-            action,
-            label,
-            custom_dimensions,
-            self.metrics_state.invoker.as_deref(),
-            event_name,
-        );
-        self.post.add_event(ga4_event);
-        Ok(())
+        let ga4_event =
+            self.make_custom_event(category, action, label, custom_dimensions, event_name);
+        self.enqueue_event(ga4_event)
     }
 
-    /// Adds a crash/exception event to the post
+    /// Adds a crash/exception event to the queue
     /// conforming to the UA Event parameters already
     /// in use.
-    // TODO With GA4's flexibility, rework exception reporting to be more informative
     pub async fn add_crash_event(
         &mut self,
         description: &str,
@@ -165,8 +316,7 @@ impl GA4MetricsService {
         }
         let ga4_event =
             make_ga4_crash_event(description, fatal, self.metrics_state.invoker.as_deref());
-        self.post.add_event(ga4_event);
-        Ok(())
+        self.enqueue_event(ga4_event)
     }
 
     /// Records a timing event from the app.
@@ -181,38 +331,43 @@ impl GA4MetricsService {
         if !self.is_opted_in() {
             return Ok(());
         }
-        let ga4_event = make_ga4_timing_event(
-            category,
-            time,
-            variable,
-            label,
-            custom_dimensions,
-            self.metrics_state.invoker.as_deref(),
-        );
-        self.post.add_event(ga4_event);
+        let ga4_event = self.make_timing_event(category, time, variable, label, custom_dimensions);
+        self.enqueue_event(ga4_event)
+    }
+
+    async fn flush_local_post(&mut self) -> Result<(), AnalyticsError> {
+        if let Some(ref client) = self.client {
+            rewrite_ua_ffx_known_batch_to_ga4_post(&mut self.post);
+            if !self.post.events.is_empty() {
+                let _ = self.post.validate()?;
+                client.send(&mut self.post).await?;
+                self.post.events.clear();
+            }
+        }
         Ok(())
     }
 
-    /// Sends the Post, with all accumulated events
-    /// to the Google Analytics service.
+    /// Flushes all accumulated events in the background worker queue.
     pub async fn send_events(&mut self) -> Result<(), AnalyticsError> {
         if !self.is_opted_in() {
             return Ok(());
         }
-        self.rewrite_ua_ffx_known_batch_to_ga4();
-
-        if let Some(ref client) = self.client {
-            let _ = self.post.validate()?;
-            client.send(&mut self.post).await
-        } else {
-            // Normally analytics errors are logged as traces only, esp. those caused by network
-            // errors. However this branch being reachable would be a real bug in the code.
-            // We log the error and disable analytics for the session.
-            log::error!("Analytics Error: branch should not be reachable");
-            // Unwrap is safe here as the function only returns Ok(()).
-            self.opt_out_for_this_invocation().unwrap();
-            Ok(())
+        if let Some(ref worker) = self.worker {
+            worker.flush().await?;
         }
+        self.flush_local_post().await
+    }
+
+    /// Drains all accumulated events in the background worker and terminates the worker thread.
+    pub async fn drain(&mut self) -> Result<(), AnalyticsError> {
+        if !self.is_opted_in() {
+            return Ok(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.drain().await?;
+        }
+        let _ = self.flush_local_post().await;
+        Ok(())
     }
 
     // Send a signal analytics only if the user is a new internal user.
@@ -243,29 +398,6 @@ impl GA4MetricsService {
             )],
         );
         let _ = client.send(&mut post).await;
-    }
-
-    /// Rewrites the batch call from ffx invoke under UA analytics
-    /// to a single event under GA4 Analytics.
-    /// TODO Remove this once we remove UA analtyics and the ffx client has been updated
-    /// to speak to the GA4 Metrics Service.
-    fn rewrite_ua_ffx_known_batch_to_ga4(&mut self) {
-        if self.post.events.len() == 2
-            && self.post.events[0].name.eq_ignore_ascii_case("invoke")
-            && self.post.events[1].name.eq_ignore_ascii_case("timing")
-        {
-            log::trace!("Rewriting ffx batch invoke to ga4 post invoke");
-            let events = &mut self.post.events;
-            let invoke_event = &mut events[0].clone();
-            let timing_event = events.remove(1);
-            if let Some(params) = timing_event.params {
-                if params.params.contains_key("time") {
-                    let time = params.params["time"].clone();
-                    invoke_event.add_param("timing", time);
-                }
-                self.post.events = vec![invoke_event.to_owned()];
-            }
-        }
     }
 
     fn uuid_as_str(&self) -> String {
@@ -311,6 +443,12 @@ fn is_googler_as_int() -> u64 {
     }
 }
 
+impl Drop for GA4MetricsService {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
+}
+
 impl Default for GA4MetricsService {
     fn default() -> Self {
         let metrics_state = MetricsState::default();
@@ -318,7 +456,111 @@ impl Default for GA4MetricsService {
             metrics_state.ga4_key.clone(),
             metrics_state.ga4_product_code.clone(),
         ));
-        Self { metrics_state, client, post: Post::default() }
+        Self { metrics_state, client, post: Post::default(), worker: None }
+    }
+}
+
+async fn send_pending_batches(
+    client: &GA4AnalyticsClient,
+    post: &mut Post,
+    pending: &mut Vec<Event>,
+    stopped: &std::sync::atomic::AtomicBool,
+) {
+    rewrite_ua_ffx_known_batch_events(pending);
+    let mut iter = pending.drain(..).peekable();
+    while iter.peek().is_some() {
+        post.events.clear();
+        if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        post.events.extend(iter.by_ref().take(POST_EVENT_COUNT_MAX));
+        if post.validate().is_ok() {
+            let _ = client.send(post).await;
+        } else {
+            post.events.clear();
+        }
+    }
+}
+
+fn rewrite_ua_ffx_known_batch_events(events: &mut Vec<Event>) {
+    let mut i = 0;
+    while i + 1 < events.len() {
+        if events[i].name.eq_ignore_ascii_case("invoke")
+            && events[i + 1].name.eq_ignore_ascii_case("timing")
+        {
+            log::trace!("Rewriting ffx batch invoke to ga4 post invoke");
+            let timing_event = events.remove(i + 1);
+            if let Some(params) = timing_event.params {
+                if let Some(time) = params.params.get("time").cloned() {
+                    events[i].add_param("timing", time);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn rewrite_ua_ffx_known_batch_to_ga4_post(post: &mut Post) {
+    rewrite_ua_ffx_known_batch_events(&mut post.events);
+}
+
+async fn run_worker_loop(
+    mut rx: futures::channel::mpsc::UnboundedReceiver<WorkerMessage>,
+    client: GA4AnalyticsClient,
+    mut post: Post,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut pending_events: Vec<Event> = Vec::new();
+
+    while let Some(msg) = rx.next().await {
+        if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            pending_events.clear();
+            return;
+        }
+        match msg {
+            WorkerMessage::Events(events) => {
+                pending_events.extend(events);
+                while let Ok(next_msg) = rx.try_recv() {
+                    if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                        pending_events.clear();
+                        return;
+                    }
+                    match next_msg {
+                        WorkerMessage::Events(e) => pending_events.extend(e),
+                        WorkerMessage::Flush(ack) => {
+                            send_pending_batches(&client, &mut post, &mut pending_events, &stopped)
+                                .await;
+                            let _ = ack.send(());
+                        }
+                        WorkerMessage::Drain(ack) => {
+                            send_pending_batches(&client, &mut post, &mut pending_events, &stopped)
+                                .await;
+                            let _ = ack.send(());
+                            return;
+                        }
+                        WorkerMessage::Stop => {
+                            pending_events.clear();
+                            return;
+                        }
+                    }
+                }
+                send_pending_batches(&client, &mut post, &mut pending_events, &stopped).await;
+            }
+            WorkerMessage::Flush(ack) => {
+                send_pending_batches(&client, &mut post, &mut pending_events, &stopped).await;
+                let _ = ack.send(());
+            }
+            WorkerMessage::Drain(ack) => {
+                send_pending_batches(&client, &mut post, &mut pending_events, &stopped).await;
+                let _ = ack.send(());
+                return;
+            }
+            WorkerMessage::Stop => {
+                pending_events.clear();
+                return;
+            }
+        }
     }
 }
 
@@ -602,6 +844,61 @@ mod tests {
         ms.set_new_opt_in_status(MetricsStatus::OptedOut).unwrap();
         assert!(!ms.metrics_state.status.is_opted_in());
         assert!(ms.client.is_none());
+
+        drop(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_rewrite_ua_ffx_known_batch() {
+        let mut events = vec![
+            Event::new("ffx_connection_mode".to_string(), None),
+            Event::new("invoke".to_string(), None),
+            Event::new(
+                "timing".to_string(),
+                Some(Params {
+                    items: None,
+                    params: HashMap::from([(
+                        "time".to_string(),
+                        crate::ga4_event::GA4Value::Str("42".to_string()),
+                    )]),
+                }),
+            ),
+        ];
+        rewrite_ua_ffx_known_batch_events(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].name, "ffx_connection_mode");
+        assert_eq!(events[1].name, "invoke");
+        let params = events[1].params.as_ref().unwrap();
+        assert_eq!(
+            params.params.get("timing"),
+            Some(&crate::ga4_event::GA4Value::Str("42".to_string()))
+        );
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_drain_and_stop_worker() -> Result<(), AnalyticsError> {
+        let dir = create_tmp_metrics_dir()?;
+        write_opt_in_status(&dir, true)?;
+        write_app_status(&dir, &APP_NAME, true)?;
+        let mut ms = test_metrics_svc(
+            &dir,
+            String::from(APP_NAME),
+            String::from(BUILD_VERSION),
+            String::from(SDK_VERSION),
+            UNKNOWN_PROPERTY_ID.to_string(),
+            UNKNOWN_GA4_PRODUCT_CODE.to_string(),
+            UNKNOWN_GA4_KEY.to_string(),
+            false,
+        );
+        assert!(ms.worker.is_some());
+        ms.drain().await?;
+        assert!(ms.worker.is_none());
+
+        ms.start_worker()?;
+        assert!(ms.worker.is_some());
+        ms.stop_worker();
+        assert!(ms.worker.is_none());
 
         drop(dir);
         Ok(())

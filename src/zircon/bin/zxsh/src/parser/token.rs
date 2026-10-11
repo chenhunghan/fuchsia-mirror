@@ -24,6 +24,7 @@ pub enum Token {
     RedirectOutClobber(Option<i32>), // [fd]>|
     RedirectAppend(Option<i32>),     // [fd]>>
     RedirectIn(Option<i32>),         // [fd]<
+    RedirectReadWrite(Option<i32>),  // [fd]<>
     RedirectDupOut(Option<i32>),     // [fd]>&
     RedirectDupIn(Option<i32>),      // [fd]<&
     LParen,                          // (

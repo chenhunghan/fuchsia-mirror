@@ -169,7 +169,7 @@ void platform_panic_start(PanicStartHaltOtherCpus option = PanicStartHaltOtherCp
 // bootstrap code that the cpu starts on. Most likely the context is a pointer
 // to a data structure or the stack for the cpu to set up.
 // NOTE: ARM specific at the moment with the inclusion of the notion of a mpid.
-zx_status_t platform_start_cpu(cpu_num_t cpu_id, uint64_t mpid, uint64_t context);
+extern "C" zx_status_t platform_start_cpu(cpu_num_t cpu_id, uint64_t mpid, uint64_t context);
 
 // Get the state of a CPU.
 zx::result<power_cpu_state> platform_get_cpu_state(cpu_num_t cpu_id);

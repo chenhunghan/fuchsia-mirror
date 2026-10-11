@@ -5,6 +5,7 @@
 
 
 #### CATEGORY=Build
+#### PREBUILTS=${FUCHSIA_DIR}/prebuilt/rsclient/${HOST_PLATFORM}/bin/rsproxy-wrap.sh
 ### Manage build ResultStore configuration.  ResultStore is a service
 ### for publishing and sharing build and test results (not artifacts).
 ### Fuchsia's results can be found at go/fxbtx (ResultStore UI).

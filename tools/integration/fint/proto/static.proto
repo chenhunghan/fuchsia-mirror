@@ -192,4 +192,7 @@ message Static {
 
   // Fuchsia targets and packages to add to the build.
   repeated string target_labels = 39;
+
+  // The experiments to enable in infra.
+  repeated string experiments = 40;
 }

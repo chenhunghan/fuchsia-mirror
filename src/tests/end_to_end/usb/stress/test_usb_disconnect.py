@@ -17,6 +17,7 @@ from usb_lib.link_speed import assert_link_speed
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 _DEFAULT_RECONNECT_TIMEOUT_SEC: int = 60
+_DEFAULT_TEST_CASE_PREFIX: str = "test_usb_disconnect"
 
 
 class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
@@ -41,6 +42,9 @@ class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
             retry, since ffx re-sends its mDNS query every 10s.
         expected_usb_link_speed (str, optional): When set, e.g. to "high",
             assert the USB link negotiated this speed after every reconnect.
+        test_case_prefix (str, optional): Prefix of the generated test case
+            names, which end in the iteration number. Defaults to
+            "test_usb_disconnect".
     """
 
     USB_POWER_HUB_REQUIRED: bool = True
@@ -235,7 +239,10 @@ class UsbDisconnectTest(usb_lib.UsbPowerHubBaseTest):
         Returns:
             Test case name
         """
-        return f"test_usb_disconnect_{iteration}"
+        prefix = self.user_params.get(
+            "test_case_prefix", _DEFAULT_TEST_CASE_PREFIX
+        )
+        return f"{prefix}_{iteration}"
 
 
 if __name__ == "__main__":

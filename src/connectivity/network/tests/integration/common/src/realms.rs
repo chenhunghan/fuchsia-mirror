@@ -16,7 +16,6 @@ use fidl_fuchsia_net_debug as fnet_debug;
 use fidl_fuchsia_net_dhcp as fnet_dhcp;
 use fidl_fuchsia_net_dhcpv6 as fnet_dhcpv6;
 use fidl_fuchsia_net_filter as fnet_filter;
-use fidl_fuchsia_net_filter_deprecated as fnet_filter_deprecated;
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
@@ -54,9 +53,7 @@ use crate::Result;
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[allow(missing_docs)]
 pub enum NetstackVersion {
-    Netstack2 { tracing: bool, fast_udp: bool },
     Netstack3,
-    ProdNetstack2,
     ProdNetstack3,
 }
 
@@ -64,14 +61,7 @@ impl NetstackVersion {
     /// Gets the Fuchsia URL for this Netstack component.
     pub fn get_url(&self) -> &'static str {
         match self {
-            NetstackVersion::Netstack2 { tracing, fast_udp } => match (tracing, fast_udp) {
-                (false, false) => "#meta/netstack-debug.cm",
-                (false, true) => "#meta/netstack-with-fast-udp-debug.cm",
-                (true, false) => "#meta/netstack-with-tracing.cm",
-                (true, true) => "#meta/netstack-with-fast-udp-tracing.cm",
-            },
             NetstackVersion::Netstack3 => "#meta/netstack3-debug.cm",
-            NetstackVersion::ProdNetstack2 => "#meta/netstack.cm",
             NetstackVersion::ProdNetstack3 => "#meta/netstack3.cm",
         }
     }
@@ -113,12 +103,6 @@ impl NetstackVersion {
             ($($name:expr),*,) => {common_services_and!($($name),*)}
         }
         match self {
-            NetstackVersion::Netstack2 { tracing: _, fast_udp: _ }
-            | NetstackVersion::ProdNetstack2 => &common_services_and!(
-                fnet_filter_deprecated::FilterMarker::PROTOCOL_NAME,
-                fnet_name::DnsServerWatcherMarker::PROTOCOL_NAME,
-                fnet_stack::LogMarker::PROTOCOL_NAME,
-            ),
             NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => &common_services_and!(
                 fnet_filter::ControlMarker::PROTOCOL_NAME,
                 fnet_filter::StateMarker::PROTOCOL_NAME,
@@ -130,14 +114,6 @@ impl NetstackVersion {
                 fnet_sockets::DiagnosticsMarker::PROTOCOL_NAME,
                 fnet_sockets::ControlMarker::PROTOCOL_NAME,
             ),
-        }
-    }
-
-    /// Returns true if this is a netstack3 version.
-    pub const fn is_netstack3(&self) -> bool {
-        match self {
-            Self::Netstack3 | Self::ProdNetstack3 => true,
-            Self::Netstack2 { .. } | Self::ProdNetstack2 => false,
         }
     }
 }
@@ -410,34 +386,15 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                     version.get_services().iter().map(|service| service.to_string()).collect(),
                 ),
                 uses: {
-                    let mut uses = vec![fnetemul::Capability::LogSink(fnetemul::Empty {})];
-                    match version {
-                        // NB: intentionally do not route SecureStore; it is
-                        // intentionally not available in all tests to
-                        // ensure that its absence is handled gracefully.
-                        // Note also that netstack-debug does not have a use
-                        // declaration for this protocol for the same
-                        // reason.
-                        NetstackVersion::Netstack2 { tracing: false, fast_udp: _ } => {}
-                        NetstackVersion::Netstack2 { tracing: true, fast_udp: _ } => {
-                            uses.push(fnetemul::Capability::TracingProvider(fnetemul::Empty));
-                        }
-                        NetstackVersion::ProdNetstack2 => {
-                            uses.push(fnetemul::Capability::ChildDep(protocol_dep::<
-                                fstash::SecureStoreMarker,
-                            >(
-                                constants::secure_stash::COMPONENT_NAME,
-                            )));
-                        }
-                        NetstackVersion::Netstack3 | NetstackVersion::ProdNetstack3 => {
-                            uses.push(fnetemul::Capability::TracingProvider(fnetemul::Empty));
-                            uses.push(fnetemul::Capability::StorageDep(fnetemul::StorageDep {
-                                variant: Some(fnetemul::StorageVariant::Data),
-                                path: Some("/data".to_string()),
-                                ..Default::default()
-                            }));
-                        }
-                    }
+                    let uses = vec![
+                        fnetemul::Capability::LogSink(fnetemul::Empty {}),
+                        fnetemul::Capability::TracingProvider(fnetemul::Empty),
+                        fnetemul::Capability::StorageDep(fnetemul::StorageDep {
+                            variant: Some(fnetemul::StorageVariant::Data),
+                            path: Some("/data".to_string()),
+                            ..Default::default()
+                        }),
+                    ];
                     Some(fnetemul::ChildUses::Capabilities(uses))
                 },
                 ..Default::default()
@@ -893,24 +850,6 @@ pub trait Netstack: Copy + Clone {
     const VERSION: NetstackVersion;
 }
 
-/// Uninstantiable type that represents Netstack2's implementation of a
-/// network stack.
-#[derive(Copy, Clone)]
-pub enum Netstack2 {}
-
-impl Netstack for Netstack2 {
-    const VERSION: NetstackVersion = NetstackVersion::Netstack2 { tracing: false, fast_udp: false };
-}
-
-/// Uninstantiable type that represents Netstack2's production implementation of
-/// a network stack.
-#[derive(Copy, Clone)]
-pub enum ProdNetstack2 {}
-
-impl Netstack for ProdNetstack2 {
-    const VERSION: NetstackVersion = NetstackVersion::ProdNetstack2;
-}
-
 /// Uninstantiable type that represents Netstack3's implementation of a
 /// network stack.
 #[derive(Copy, Clone)]
@@ -950,44 +889,6 @@ pub enum NetCfgAdvanced {}
 
 impl Manager for NetCfgAdvanced {
     const MANAGEMENT_AGENT: ManagementAgent = ManagementAgent::NetCfg(NetCfgVersion::Advanced);
-}
-
-pub use netemul::{DhcpClient, DhcpClientVersion, InStack, OutOfStack};
-
-/// A combination of Netstack and DhcpClient guaranteed to be compatible with
-/// each other.
-pub trait NetstackAndDhcpClient: Copy + Clone {
-    /// The netstack to be used.
-    type Netstack: Netstack;
-    /// The DHCP client to be used.
-    type DhcpClient: DhcpClient;
-}
-
-/// Netstack2 with the in-stack DHCP client.
-#[derive(Copy, Clone)]
-pub enum Netstack2AndInStackDhcpClient {}
-
-impl NetstackAndDhcpClient for Netstack2AndInStackDhcpClient {
-    type Netstack = Netstack2;
-    type DhcpClient = InStack;
-}
-
-/// Netstack2 with the out-of-stack DHCP client.
-#[derive(Copy, Clone)]
-pub enum Netstack2AndOutOfStackDhcpClient {}
-
-impl NetstackAndDhcpClient for Netstack2AndOutOfStackDhcpClient {
-    type Netstack = Netstack2;
-    type DhcpClient = OutOfStack;
-}
-
-/// Netstack3 with the out-of-stack DHCP client.
-#[derive(Copy, Clone)]
-pub enum Netstack3AndOutOfStackDhcpClient {}
-
-impl NetstackAndDhcpClient for Netstack3AndOutOfStackDhcpClient {
-    type Netstack = Netstack3;
-    type DhcpClient = OutOfStack;
 }
 
 /// Helpers for `netemul::TestSandbox`.

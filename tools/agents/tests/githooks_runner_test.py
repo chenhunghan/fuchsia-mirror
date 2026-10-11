@@ -47,9 +47,23 @@ class AgentDetectionTest(unittest.TestCase):
                 runner.is_invoked_by_agent(env={"ANTIGRAVITY_AGENT": val})
             )
 
+    def test_is_invoked_by_agent_force_hooks(self) -> None:
+        for val in ("1", "true", "yes", "y", "on"):
+            self.assertTrue(
+                runner.is_invoked_by_agent(env={"FUCHSIA_FORCE_HOOKS": val})
+            )
+        for val in ("0", "false", "no", "n", "off", ""):
+            self.assertFalse(
+                runner.is_invoked_by_agent(env={"FUCHSIA_FORCE_HOOKS": val})
+            )
+
 
 class RunnerTest(GitWorkspaceTestCase):
     """Unit tests for githooks runner."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.patch_environ(FUCHSIA_FORCE_HOOKS="1")
 
     def make_mock_reporter(
         self,
@@ -348,10 +362,44 @@ class RunnerTest(GitWorkspaceTestCase):
                 "agents.lib.git_staging.run_staged_pipeline",
                 return_value=git_staging.PipelineResult(success=True),
             ):
-                with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.dict(
+                    os.environ, {"FUCHSIA_FORCE_HOOKS": "1"}, clear=True
+                ):
                     ret = githooks.run_pre_commit_hook(repo_dir=self.test_dir)
                     self.assertEqual(ret, 0)
                     mock_create.assert_called_once_with()
+
+    def test_run_pre_commit_hook_skips_for_human(self) -> None:
+        mock_fmt = mock.MagicMock()
+        action = adapters.HookAction(
+            name="mock_fmt", action_fn=mock_fmt, is_mutating=True
+        )
+        reporter = mock.MagicMock(spec=ConsoleReporter)
+        ret = githooks.run_pre_commit_hook(
+            repo_dir=self.test_dir,
+            actions=[action],
+            reporter=reporter,
+            is_agent=False,
+        )
+        self.assertEqual(ret, 0)
+        mock_fmt.assert_not_called()
+        reporter.on_error.assert_not_called()
+
+    def test_run_pre_commit_hook_skips_when_not_invoked_by_agent(self) -> None:
+        self.patch_environ(clear=True)
+        mock_fmt = mock.MagicMock()
+        action = adapters.HookAction(
+            name="mock_fmt", action_fn=mock_fmt, is_mutating=True
+        )
+        reporter = mock.MagicMock(spec=ConsoleReporter)
+        ret = githooks.run_pre_commit_hook(
+            repo_dir=self.test_dir,
+            actions=[action],
+            reporter=reporter,
+        )
+        self.assertEqual(ret, 0)
+        mock_fmt.assert_not_called()
+        reporter.on_error.assert_not_called()
 
     def test_run_pre_commit_hook_forwards_reporter_to_format_code_action(
         self,
@@ -605,14 +653,145 @@ class RunnerTest(GitWorkspaceTestCase):
             self.assertEqual(ret, 0)
             mock_pre.assert_called_once()
 
+        with mock.patch(
+            "agents.lib.githooks.runner.run_pre_push_hook"
+        ) as mock_push:
+            mock_push.return_value = 0
+            ret = githooks.main(
+                ["pre-push", "origin", "https://example.com/repo"]
+            )
+            self.assertEqual(ret, 0)
+            mock_push.assert_called_once()
+            self.assertEqual(
+                mock_push.call_args.kwargs["remote_name"], "origin"
+            )
+            self.assertEqual(
+                mock_push.call_args.kwargs["remote_location"],
+                "https://example.com/repo",
+            )
+
+        # Pre-push with extra unknown flags should be tolerated by parse_known_args
+        with mock.patch(
+            "agents.lib.githooks.runner.run_pre_push_hook"
+        ) as mock_push:
+            mock_push.return_value = 0
+            ret = githooks.main(
+                ["pre-push", "origin", "https://example.com/repo", "--extra"]
+            )
+            self.assertEqual(ret, 0)
+            mock_push.assert_called_once()
+
         # Bypass env var
         with mock.patch.dict(os.environ, {"FUCHSIA_SKIP_HOOKS": "1"}):
             self.assertEqual(githooks.main(["pre-commit"]), 0)
+            self.assertEqual(githooks.main(["pre-push"]), 0)
 
         # Invalid subcommand returns 1 or 2 per standard argparse
         with mock.patch("sys.stderr", new_callable=io.StringIO):
             self.assertIn(githooks.main(["unknown-cmd"]), (1, 2))
             self.assertIn(githooks.main([]), (1, 2))
+
+    def test_run_pre_push_hook_skip_env(self) -> None:
+        for val in ("1", "true", "yes", "on"):
+            with mock.patch.dict(os.environ, {"FUCHSIA_SKIP_HOOKS": val}):
+                self.assertEqual(githooks.run_pre_push_hook(), 0)
+
+    def test_run_pre_push_hook_skips_for_human(self) -> None:
+        action_called = False
+
+        def mock_action(
+            ctx: adapters.HookContext, files: Sequence[str]
+        ) -> bool:
+            nonlocal action_called
+            action_called = True
+            return True
+
+        action = adapters.HookAction(
+            name="mock_act", action_fn=mock_action, is_mutating=False
+        )
+        reporter = ConsoleReporter(
+            stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
+        )
+
+        ret = githooks.run_pre_push_hook(
+            repo_dir=self.test_dir,
+            actions=[action],
+            reporter=reporter,
+            is_agent=False,
+        )
+        self.assertEqual(ret, 0)
+        self.assertFalse(action_called)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            ret = githooks.run_pre_push_hook(
+                repo_dir=self.test_dir,
+                actions=[action],
+                reporter=reporter,
+            )
+            self.assertEqual(ret, 0)
+            self.assertFalse(action_called)
+
+    def test_run_pre_push_hook_runs_for_agent(self) -> None:
+        self.commit_file("foo.py", "x = 1\n")
+
+        action_files: list[str] = []
+
+        def mock_action(
+            ctx: adapters.HookContext, files: Sequence[str]
+        ) -> bool:
+            action_files.extend(files)
+            return True
+
+        action = adapters.HookAction(
+            name="mock_act", action_fn=mock_action, is_mutating=False
+        )
+        reporter = ConsoleReporter(
+            stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
+        )
+
+        ret = githooks.run_pre_push_hook(
+            repo_dir=self.test_dir,
+            actions=[action],
+            reporter=reporter,
+            is_agent=True,
+            stdin_lines=[],
+        )
+        self.assertEqual(ret, 0)
+
+    def test_run_pre_push_hook_action_failure(self) -> None:
+        self.commit_file("foo.py", "x = 1\n")
+
+        def failing_action(
+            ctx: adapters.HookContext, files: Sequence[str]
+        ) -> bool:
+            return False
+
+        action = adapters.HookAction(
+            name="failing_act", action_fn=failing_action, is_mutating=False
+        )
+        reporter = ConsoleReporter(
+            stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
+        )
+
+        ret = githooks.run_pre_push_hook(
+            repo_dir=self.test_dir,
+            actions=[action],
+            reporter=reporter,
+            is_agent=True,
+            stdin_lines=[],
+        )
+        self.assertEqual(ret, 1)
+        self.assertIn("Action 'failing_act' failed.", reporter.errors)
+
+    def test_run_pre_push_hook_not_in_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as non_git:
+            reporter = ConsoleReporter(
+                stdout_stream=io.StringIO(), stderr_stream=io.StringIO()
+            )
+            ret = githooks.run_pre_push_hook(
+                repo_dir=Path(non_git), reporter=reporter
+            )
+            self.assertEqual(ret, 1)
 
     def test_run_commit_msg_hook_passes_is_agent_to_context(self) -> None:
         msg_file = self.test_dir / "COMMIT_EDITMSG"

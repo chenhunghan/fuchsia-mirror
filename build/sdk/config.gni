@@ -24,8 +24,9 @@ declare_args() {
   # Can be true for any API level, including "PLATFORM", and CPU architecture.
   sdk_inside_sub_build = false
 
-  # When enable_jobserver is not set, this provides an upper bound on the
-  # maximum number of subbuilds that may be running at the same time.
+  # When enable_jobserver is not set or cxx_rbe_enable is false, this provides
+  # an upper bound on the maximum number of subbuilds that may be running at the
+  # same time.
   # A larger number means these good things:
   # - Better parallelization of the inherently single-threaded parts of GN and
   #   ninja.

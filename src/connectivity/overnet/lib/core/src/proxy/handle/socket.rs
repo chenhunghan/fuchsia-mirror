@@ -179,7 +179,7 @@ mod tests {
         .detach();
 
         let mut data = vec![0u8; EXPECTED_LEN];
-        let mut rx = fuchsia_async::Socket::from_socket(rx);
+        let mut rx = fidl::AsyncSocket::from_socket(rx);
         rx.read_exact(&mut data).await.expect("read from socket");
         assert_eq!(data, vec![EXPECTED_DATA; EXPECTED_LEN]);
     }

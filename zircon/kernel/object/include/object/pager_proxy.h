@@ -14,6 +14,13 @@
 #include <object/port_dispatcher.h>
 #include <vm/page_source.h>
 
+class PagerProxy;
+
+extern "C" {
+void cpp_pager_proxy_set_page_source_unchecked(PagerProxy* proxy, PageSource* src);
+void cpp_pager_proxy_on_dispatcher_close(PagerProxy* proxy);
+}
+
 // Page provider implementation that talks to a userspace pager service.
 //
 // The lifecycle of this class is a little complicated because the pager dispatcher's port
@@ -37,6 +44,8 @@ class PagerProxy : public PageProvider,
 
  private:
   friend PagerDispatcher;
+  friend void ::cpp_pager_proxy_set_page_source_unchecked(PagerProxy* proxy, PageSource* src);
+  friend void ::cpp_pager_proxy_on_dispatcher_close(PagerProxy* proxy);
 
   // PortAllocator methods.
   PortPacket* Alloc() final {

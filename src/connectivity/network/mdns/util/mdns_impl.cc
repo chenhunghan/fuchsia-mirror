@@ -515,6 +515,8 @@ void MdnsImpl::PublishInstance(const std::string& instance_name, const std::stri
                         << " responder channel disconnected unexpectedly, "
                         << zx_status_get_string(status) << "\n";
 
+              ShowInput();
+
               if (proxy_host_name.empty()) {
                 service_instance_publication_responders_by_instance_full_name_.erase(
                     instance_full_name);
@@ -524,8 +526,6 @@ void MdnsImpl::PublishInstance(const std::string& instance_name, const std::stri
                   iter->second->RemoveResponder(instance_full_name);
                 }
               }
-
-              ShowInput();
             });
 
         ShowInput();

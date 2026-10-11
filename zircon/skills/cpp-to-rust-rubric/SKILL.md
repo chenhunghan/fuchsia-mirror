@@ -18,18 +18,27 @@ the port and **Reviewer agents** evaluating the port.
 
 ## 1. Core Principles
 
-1.  **Direct Translation & API Parity**: Translate C++ code to Rust using
-    equivalent data structures and algorithms. The Rust API must expose all
-    public functions, methods, constructors, and configurations present in the
-    C++ version.
+1.  **Direct Translation, Control-Flow Fidelity, & API Parity**: Translate C++
+    code to Rust using equivalent data structures, algorithms, and control flow.
+    The Rust API must expose all public functions, methods, constructors, and
+    configurations present in the C++ version, and function bodies should
+    preserve the structure and check ordering of the C++ original rather than
+    restructuring control flow or inventing local helper types without cause.
+    When C++ calls a specific method or overload on a collaborating object, call
+    the corresponding method on the Rust type (adding it if missing) rather than
+    re-implementing its logic inline at the call site.
 2.  **Exact Memory Layout & Alignment Parity**: Rust structs shared across FFI
     or replacing C++ objects must match the memory layout, alignment, and size
     of corresponding C++ objects exactly. Verify with compile-time static
     assertions (`zr::static_assert!`).
-3.  **Test & Fuzz Parity**: Rust test and fuzz coverage must equal or exceed C++
-    coverage. Match every C++ unit test case with a Rust test case. If C++ code
-    has fuzz tests, implement equivalent Rust fuzzers (`rustc_fuzzer` +
-    `arbitrary`).
+3.  **Test & Fuzz Parity**: Rust test and fuzz coverage must equal C++ coverage.
+    Match every C++ unit test case with a Rust test case. If C++ code has fuzz
+    tests, implement equivalent Rust fuzzers (`rustc_fuzzer` + `arbitrary`). Add
+    a test with no C++ counterpart only when it covers behavior nothing else
+    tests, and say what it covers in the CL description; tests that re-check
+    language or library behavior, or that duplicate core tests, are noise.
+    Kernel unit tests must be hermetic: they must not change global or per-CPU
+    kernel state.
 4.  **Fallible Allocation**: All allocations in kernel mode (`is_kernel`) must
     be explicit and fallible via `kalloc::Box`. Panics on Out-Of-Memory (OOM)
     are strictly unacceptable in kernel code.
@@ -52,13 +61,20 @@ the port and **Reviewer agents** evaluating the port.
       preserved in the corresponding Rust code, updating identifiers that have
       changed names to make sense in Rust.
 8.  **Ergonomic Design & DRY**: Apply idiomatic Rust practices (derive macros,
-    `Deref`/`DerefMut`, `Default`, `Option`/`Result`, `?` operator) without
-    breaking layout or safety requirements. Keep visibility as tight as possible
-    (`pub(crate)` or file-private). Preserve named constants.
+    `Deref`/`DerefMut`, `Default`, `Option`/`Result`, `?` operator, returning
+    values via `Option<T>` or `Result<T, Status>` instead of C-style
+    out-parameters) without breaking layout or safety requirements. Keep
+    visibility as tight as possible (`pub(crate)` or file-private). Preserve
+    named constants. Apply idioms within the C++ structure: keep function
+    boundaries, helpers and control-flow shape so the port can be compared side
+    by side. Do not inline helpers, merge or split functions, or unroll macros
+    unless the C++ shape cannot be expressed in Rust.
 9.  **Cross-Language FFI Interoperability**: FFI shims must be minimal and
-    declarative, with no business logic. C++ helper functions exposed to Rust
-    must be prefixed with `cpp_` and declared in C++ header files. Rust
-    functions exposed to C++ must be prefixed with `rust_`.
+    declarative 1:1 forwards with zero business logic, branching, or sub-object
+    chaining. Facade methods for unported C++ classes must correspond 1:1 to
+    actual methods on the C++ class. C++ helper functions exposed to Rust must
+    be prefixed with `cpp_` and declared in C++ header files. Rust functions
+    exposed to C++ must be prefixed with `rust_`.
 10.  **Allocation Tier & Stack Parity**: Respect the original C++ memory
      placement (heap, static, intrusive, or stack). Because kernel thread stacks
      are constrained, do not shift heap or static storage onto the stack.
@@ -188,6 +204,18 @@ pub fn get_slice(mapped_addr: usize, size: usize) -> &'static [u8] {
 - Locks support different policies when acquiring, this is most notable of
   spinlocks that can save or not save IRQs when acquired. Ensure that the
   correctly matching policy is used in the Rust lock acquisition as the C++.
+- **Lock Parity Audit**: Count lock acquisitions and thread-safety annotations
+  (`Guard<`, `TA_REQ`, `TA_GUARDED`, `TA_EXCL`) in the C++ and their
+  counterparts in the port. A dropped lock compiles and usually boots.
+- Acquire each lock before any read the C++ performs under it, and do not add
+  locks the C++ does not have.
+- Preserve lockdep options (`CallUntracked`, lock flags) and give each Rust lock
+  the same lock class as its C++ counterpart.
+- Translate a C++ `TA_REQ(lock)` on a function into a `LockToken` parameter, or
+  into a safety obligation, documented under `# Safety`, that names the lock.
+- Inline `asm!` must not use `options(nomem)` or `options(readonly)` where the
+  C++ uses `asm volatile` with a memory clobber; those options let the compiler
+  reorder memory accesses around the instruction.
 
 ```rust
 #[guarded]
@@ -215,6 +243,25 @@ let fields = guard.as_mut().fields_mut();
 - Cross-Language Lifecycles: Implement `Recyclable` (or
   `#[derive(Recyclable)]`). Provide an FFI callback (e.g. `rust_recycle_<type>`)
   on C++ side that invokes `Recyclable::recycle_ffi`.
+- Unported C++ `fbl::RefCounted` Types (`Opaque<bindings::T>` vs
+  `fbl::impl_opaque_ref_counted_facade!`):
+  - **Bindgen-Backed Types** (e.g., `VmObject`, `VmCowPages`, `PageSource`):
+    When `bindgen` generates a struct (`bindings::T`) for a C++
+    `fbl::RefCounted` type, **do NOT use
+    `fbl::impl_opaque_ref_counted_facade!`**. That macro replaces the struct
+    body with a zero-sized `OpaqueRefCountedFacade<T>`, losing the true C++
+    size/alignment (`size_of::<T>() == 0`) and creating a pointer-type mismatch
+    between `*mut Self` and `*mut bindings::T`. Instead, keep `raw:
+    Opaque<bindings::T>` (with `phantom: PhantomData<PhantomPinned>`), define
+    `as_raw(&self) -> *mut bindings::T { self.raw.get() }`, and manually
+    implement `fbl::HasRefCount` and `fbl::Recyclable` delegating to
+    `bindings::cpp_<type>_get_ref_counted(self.as_raw())` and
+    `bindings::cpp_<type>_free(ptr.as_ptr().cast())`.
+  - **Non-Bindgen (`extern "C"`) Facade Types** (e.g., `VmMapping`,
+    `VmAddressRegion`, `Bti`, `Pmt`): Only use
+    `fbl::impl_opaque_ref_counted_facade!` when there is no `bindgen`-generated
+    struct and hand-written `extern "C"` declarations take `*mut Self` / `&Self`
+    directly.
 - Intrusive Containers: Derive `DoublyLinkedListContainable`,
   `SinglyLinkedListContainable`, or `WavlTreeContainable`. Annotate node fields
   with `#[dll_node]`, `#[sll_node]`, or `#[wavl_node]`. Use `tag = ...` for
@@ -243,6 +290,9 @@ pin_init!(Self {
 - Do **not** re-define `zx_status_t` or `ZX_ERR_*` constants locally.
 - Use `Result<T, Status>` as return type for fallible operations and leverage
   `?` for error propagation.
+- Keep `Status` at FFI boundaries instead of collapsing it to `i32`.
+- Use the kernel's Rust newtypes for times, durations, deadlines, rights and
+  clocks instead of bare integers. Kernel durations are signed (`i64`).
 
 ### 3.8. Testing & Fuzz Testing Parity
 - **Kernel Mode (`zircon/kernel/`) vs Userspace**:
@@ -289,10 +339,33 @@ pin_init!(Self {
 - Preserve `dprintf` using the `dprintf!` macro from `//zircon/kernel/lib/debug`
 - Use `kprint` and `kprintln!` from `//src/lib/kprint` to replace `printf`.
 
-### 3.10. Code Organization, Ergonomics, & Visibility
+### 3.10. Code Organization, Control Flow, Ergonomics, & Visibility
 - **File Structure Parity**: Organize Rust modules matching C++ header/source
   files. Re-export public types at root level (`pub use`) to preserve flat C++
   header APIs.
+- **Control-Flow & Structural Fidelity**: Preserve the control flow, variable
+  structure, and sequence of checks within function and method bodies from the
+  C++ original (e.g., shared post-branch validation checks or extracting a
+  common target reference across `if`/`else if` branches) unless Rust's borrow
+  checker or safety rules strictly require restructuring. Do not invent local
+  helper enums or duplicate branch checks when the C++ control flow can be
+  expressed directly in Rust.
+- **Exact Collaborator Method / Overload Parity**: When C++ calls a specific
+  method or overload on a collaborating object (for example, a lookup method
+  that both validates required preconditions/rights and returns outputs, or a
+  lookup method that requires no rights), call the corresponding method on the
+  Rust type (adding the missing method or variant to that type if needed) rather
+  than calling a lower-level method and re-implementing the check inline at the
+  call site.
+- **Idiomatic Return Values Instead of Out-Parameters**: When a C++ method or
+  function returns `bool` or `zx_status_t` and populates one or more
+  out-parameters (`T* out`) by value (where the caller does not need to provide
+  pre-allocated backing storage or pinned in-place memory), the Rust method MUST
+  return the value directly via `Option<T>`, `Result<T, Status>`, or a tuple
+  `Result<(T, U), Status>` rather than taking `&mut T` out-parameters. If C++
+  callers still invoke the method via a `rust_*` FFI trampoline, perform the
+  out-parameter adaptation inside the FFI trampoline, not on the Rust method
+  itself.
 - **Tight Visibility**: Keep items private or `pub(crate)`. Functions, types, or
   helpers used only within a single file MUST NOT be marked `pub` or
   `pub(crate)`.
@@ -313,6 +386,11 @@ pin_init!(Self {
   3.  See if there is a similar Rust struct / method impl, taking into account
       common naming differences, e.g. for functions C++ tends to use
       UpperCamelCase where as Rust uses lower_snake_case.
+- Before writing a helper, search for an existing one: status conversions
+  (`zx_status::Status` methods such as `result_into_raw`), the rights-checking
+  handle lookups, `pin_init!`, `kernel_oops!`, `zerocopy`, and `core` methods.
+- Never call a `cpp_*` function directly where a Rust facade for that object
+  already exists; use the facade.
 
 ### 3.12. Copyright Modernization & Preservation
 - Keep existing copyright headers and dates if the converted file is not
@@ -320,17 +398,36 @@ pin_init!(Self {
   year when porting code that is largely a direct translation or maintains the
   original architecture. Maintain the original copyright authors and dates from
   the C++ file.
+- A truly new file with no C++ original starts with `Copyright 2026 The Fuchsia
+  Authors`. Code under `zircon/kernel/` uses the MIT-style license header;
+  elsewhere, copy the license lines from neighboring files in the same
+  directory.
 
-### 3.13. FFI Interoperability
-- Minimal Shims: FFI functions (`*_ffi.cc`/`*_ffi.rs`) should be purely
-  declarative with zero logic.
+### 3.13. FFI Interoperability & Facade Method Parity
+- Minimal Shims: Isolate FFI functions in `*_ffi.cc` / `*_ffi.rs`; they should
+  be purely declarative with zero logic.
+- Shim Existing APIs: Expose the C++ methods the original code calls. Do not add
+  new C++ methods for the port's convenience. Where a shim would only forward to
+  a simple C++ free function, giving that function `extern "C"` linkage and
+  declaring it in a Rust `unsafe extern "C"` block is an alternative to a
+  `cpp_*` shim.
+- **Strict 1:1 Parity for Facade Methods & `cpp_*` FFI Shims**:
+  - Every method added to a Rust facade for an unported C++ class MUST
+    correspond 1:1 to an actual method on that C++ class. Never invent synthetic
+    convenience or composite methods on a facade that do not exist on the C++
+    class.
+  - Every `cpp_*` FFI function (`*_ffi.cc` / `*_ffi.rs`) must be a single direct
+    forwarding call to one C++ method or function with zero business logic.
+    Never encode branching logic (`if`/`else`) or chain across sub-objects
+    (`obj->sub_obj()->Method()`) inside a `cpp_*` FFI function. If C++ accesses
+    a sub-object or helper class (`sub_obj()`), define a Rust facade for that
+    sub-object type as well and expose each method 1:1.
 - Consistent Naming:
   - C++ exported to Rust: `cpp_$namespace_$classname_$functionname`
   - Rust exported to C++: `rust_$modpath_$struct_$functionname`
 - Prototype Declarations in C++ Headers: All C++ FFI helper functions defined in
   `.cc` files (`cpp_*`) MUST have prototype declarations in an included C++
-  header file enclosed in `extern "C"` blocks to prevent GCC
-  `-Werror=missing-declarations`.
+  header file enclosed in `extern "C"` blocks.
 - Prefer References in FFI Trampolines: FFI trampolines callable from C++ that
   receive non-null pointers to initialized objects should prefer taking
   `&<Type>` or `&mut <State>` directly in Rust signatures rather than raw
@@ -384,7 +481,7 @@ Ok(())
   in-body implementation comments.
 - **Preserve Comments Documenting Behavior**: Preserve all inline comments (`//
   ...`) from C++ source and header files (`.cc` and `.h`) documenting behavior
-  in the corresponding Rust code—it does not matter what behavior is being
+  in the corresponding Rust code; it does not matter what behavior is being
   described; if it documents behavior, preserve it.
 - **Adapt Identifiers for Rust**: Update ported comments so they make sense with
   the Rust port of the code. Identifiers that have changed names (e.g., methods
@@ -394,6 +491,65 @@ Ok(())
 - **Side-by-Side Audit**: Coders and reviewers MUST conduct a side-by-side audit
   of C++ source and header files (`.cc` and `.h`) against the corresponding
   `.rs` files to ensure complete inline comment parity.
+- **Copied and Narrating Comments**: Do not copy a neighboring block's comment
+  onto different code, or add comments noting where code was ported from.
+  Comments on new Rust code are fine where they explain something the code does
+  not make obvious, such as why an `unsafe` block is sound or why the code
+  departs from the C++.
+
+### 3.16. Code Formatting & Line Length Limits
+- **100-Character Line Limit**: All lines in Rust (`.rs`) and C++ (`.cc`, `.h`)
+  files MUST be 100 characters or fewer.
+- **`fx format-code` Limitations**: Note that `fx format-code` (`rustfmt`) does
+  **not** fix or wrap comments (`//` and `///`), string literals, or code inside
+  macros (such as `pin_init!`, `ksync::lock!`, `unittest::expect_*!`,
+  `debug_assert!`, `ltracef!`, `impl_dispatcher_facade!`, or
+  `impl_dispatcher_facade_with_state!`).
+- **Manual Wrapping & Re-formatting**: You must manually wrap comments, strings,
+  and macro arguments to stay within 100 characters, and **always re-run `fx
+  format-code` after manual edits** so `rustfmt` and `shac` formatting checks
+  pass cleanly.
+
+### 3.17. Behavior Parity
+- **Error Precedence**: Keep the C++ order of validation and error checks so the
+  same input returns the same status. Do not hoist a length or argument check
+  above a policy, rights or peer-state check.
+- **Conditions and Arguments**: Check every condition's polarity and every
+  argument against the C++ call it replaces.
+- **No Added Semantics**: Do not add validation, error returns, panics or locks
+  that the C++ lacks, and do not turn a C++ `ASSERT` into a silent return.
+  Deliberate behavior changes belong in a separate CL from the port.
+- **Side Effects in Assertions**: Never place a call with side effects inside
+  `debug_assert!`; release builds drop it.
+- **Early Returns**: Every early return must release what the C++ releases on
+  that path. Use RAII (`RefPtr`, guards, `zr::defer`) so an error path cannot
+  leak a reference.
+
+### 3.18. Soundness at the FFI Boundary
+- **Shared Mutable State**: Memory that C++ code or another CPU can write must
+  be reached through `UnsafeCell` or atomics, never through a plain `&T`.
+- **Exclusive References**: Never hold a `&mut` across a call that can reach the
+  same object again, such as a C++ getter returning the state already borrowed.
+- **Guards Before UB**: A `debug_assert!` is never the only check standing
+  between a safe function and undefined behavior.
+- **Unsafe Traits and Functions**: A trait whose correct implementation the
+  code's soundness depends on is an `unsafe trait`. A function whose callers
+  must uphold preconditions is an `unsafe fn` with a `# Safety` section.
+- **Lifetimes**: Derive a returned reference's lifetime from a `LockToken` or an
+  owning object, never from a raw pointer.
+- **Send and Sync**: `unsafe impl Send`/`Sync` must carry the bounds that make
+  it true.
+- **Address Sensitivity**: C++ objects whose address others hold (intrusive
+  container members, objects registered by pointer) are `!Unpin`
+  (`PhantomPinned`).
+- **Casts**: Do not use `.cast()` or `as` to convert between unrelated types.
+  Route FFI pointer conversions through audited `as_ffi`/`from_ffi` helpers.
+- **Minimal Unsafe**: Use the safe form where one exists, and scope each
+  `unsafe` block to the single operation that needs it.
+- **SAFETY Comments**: A `// SAFETY:` comment states why the operation is sound,
+  meaning the obligation and the fact that discharges it, not what the code
+  does. It names any lock the caller must hold. It never asserts a check or
+  caller guarantee the author has not verified.
 
 ---
 
@@ -408,8 +564,9 @@ Reviewers and Coders must audit code against this checklist:
     pollute user-facing statistics counters.
 3.  [ ] **Hardcoded Constants**: Named constants in C++ are preserved as `pub
     const` in Rust rather than literal numbers.
-4.  [ ] **Lock Safety Comment Accuracy**: `// SAFETY:` comments on lock-free or
-    generic lock options accurately reflect conditionally held locks.
+4.  [ ] **Safety Comment Accuracy**: `// SAFETY:` comments explain why each
+    operation is sound, name the locks the caller must hold, accurately reflect
+    conditionally held locks, and claim no unverified checks.
 5.  [ ] **Manual Trait Implementations**: `SinglyLinkedListContainable`,
     `DoublyLinkedListContainable`, and `Recyclable` use derive macros rather
     than manual implementations.
@@ -481,6 +638,60 @@ Reviewers and Coders must audit code against this checklist:
      `MaybeUninit`/`UnsafeCell`/`AtomicPtr` statics.  Note also when `LazyInit`
      implements `Deref` and avoid introducing redundant `get_foo()` wrappers in
      those cases.
+31.  [ ] **Mixing `impl_opaque_ref_counted_facade!` with Bindgen Types**: C++
+     `fbl::RefCounted` types with a `bindgen`-generated struct (`bindings::T`)
+     do not use `fbl::impl_opaque_ref_counted_facade!` (which makes the Rust
+     type zero-sized and mismatches `*mut Self` vs `*mut bindings::T`); they
+     wrap `Opaque<bindings::T>` and implement `HasRefCount` and `Recyclable`
+     directly.
+32.  [ ] **Lines Exceeding 100 Characters or Unformatted Macros/Comments**: All
+     lines (including comments, string literals, and code inside macros, which
+     `fx format-code` does not touch) are `<= 100` characters, and `fx
+     format-code` is re-run after any manual line wrapping.
+33.  [ ] **Error Precedence**: Validation and error checks run in the C++ order,
+     so each input returns the same status as before.
+34.  [ ] **Added or Inverted Logic**: No validation, error returns, panics or
+     locks absent from the C++; every condition and argument matches the C++.
+35.  [ ] **Side Effects in `debug_assert!`**: No call with side effects is
+     placed inside a debug-only assertion.
+36.  [ ] **Error-Path Leaks**: Early returns release every reference and
+     resource the C++ releases on the same path.
+37.  [ ] **Lock Parity**: Lock acquisitions, lockdep options and lock classes
+     match the C++, and locks are taken before the reads the C++ does under
+     them.
+38.  [ ] **Shared State Behind `&T`**: State that C++ or other CPUs mutate is
+     reached through `UnsafeCell` or atomics.
+39.  [ ] **Debug-Only UB Guards**: No safe function relies on `debug_assert!`
+     alone to prevent undefined behavior.
+40.  [ ] **Unsafe Traits and Functions**: Traits and functions with soundness
+     obligations are declared `unsafe` and document them.
+41.  [ ] **Invented Lifetimes**: No reference lifetime is derived from a raw
+     pointer; lifetimes come from tokens or owners.
+42.  [ ] **Blind Casts**: No `.cast()` or `as` between unrelated pointer types.
+43.  [ ] **Inline Assembly Options**: `asm!` options are no weaker than the C++
+     `asm volatile` and clobbers.
+44.  [ ] **Invented Tests**: Tests without a C++ counterpart cover behavior
+     nothing else tests, and no kernel test changes global state.
+45.  [ ] **Restructured Control Flow**: Function boundaries, helpers and control
+     flow follow the C++ shape.
+46.  [ ] **Invented C++ Methods**: FFI shims expose existing C++ methods rather
+     than new ones added for the port.
+47.  [ ] **Copied and Narrating Comments**: No comment copied from a neighboring
+     block onto different code, and no "ported from" notes.
+48.  [ ] **C-Style Out-Parameters on Rust Methods**: Rust methods do not retain
+     C-style `&mut T` out-parameters paired with `bool` or `Status` returns when
+     returning `Option<T>` or `Result<T, Status>` by value is possible (any
+     out-pointer adaptation belongs only in `rust_*` FFI trampolines).
+49.  [ ] **Unnecessary Control-Flow Divergence or Ad-Hoc Caller Checks**: Ported
+     functions and syscalls preserve the C++ control flow and call the exact
+     corresponding methods/overloads on collaborating types rather than
+     inventing local enums, duplicating branch checks, or re-implementing checks
+     inline at the call site.
+50.  [ ] **Synthetic Facade Methods or Non-Trivial `cpp_*` FFI Shims**: Rust
+     facades for unported C++ types only expose methods that actually exist on
+     the C++ class, and `cpp_*` FFI shims are strict 1:1 single-call forwards
+     without branching (`if`/`else`) or sub-object method chaining
+     (`a->b()->c()`).
 
 ---
 
@@ -499,12 +710,35 @@ Reviewers and Coders must audit code against this checklist:
     (`.cc` and `.h`) documenting behavior into the corresponding `.rs` functions
     during implementation, updating identifiers that have changed names so the
     comments make sense in the Rust code.
-4.  **Verify Build & Format**: Run `fx build` to confirm compilation, and run
-    `fx test` (or `k ut`) to verify test execution. Run `fx format-code`.
+4.  **Verify Build, Line Length, & Format**: Run `fx build` to confirm
+    compilation, and run `fx test` (or `k ut`) to verify test execution.
+    Manually wrap any comments, strings, or macro bodies exceeding 100
+    characters (since `fx format-code` does not format them), and then run `fx
+    format-code`. Run `fx format-code` and `fx clippy` on the files of every
+    commit in the change, not only the final state. Confirm that every function
+    declared in a Rust `extern` block has a C++ definition in the kernel. The
+    default build does not cover the `lk_debug_level` variant toolchains, CFI or
+    LTO, which caused many CQ failures and most reverts of port CLs. When a
+    change adds GN dependencies between kernel targets, C callbacks implemented
+    in Rust, or crate-level attributes, say so in the report so the first CQ dry
+    run includes those builders.
 5.  **Self-Check**: Audit your implementation against Section 4 (Common
     Pitfalls) before reporting back, including a side-by-side verification of
     inline implementation comments against C++ source and header files (`.cc`
     and `.h`) and verifying that changed identifier names have been updated.
+6.  **Run `babeldiff`**: Build and run `babeldiff`
+    (`zircon/skills/babeldiff/SKILL.md`) on your changes, starting with
+    `--summary --issues-only` and following up with `--layout stacked
+    --issues-only -U 3` for the flagged functions. Fix every `!` finding or
+    state in your report why the divergence is intended. Use `babeldiff` as a
+    tool: during the port, do not read or debug its source under
+    `zircon/skills/babeldiff/tool`. If a finding looks wrong, say so in your
+    report and move on.
+7.  **Report Accurately**: The report and any commit message describe only what
+    the change contains; do not claim tests or fixes that are not in the diff.
+    After a rebase, check that fixes from earlier review rounds are still
+    present. Draft replies to Gerrit review comments for the human to post; do
+    not post them yourself.
 
 ### 5.2. Guidelines for Reviewer Subagent (`cpp-to-rust-reviewer`)
 1.  **Audit Real In-Tree Files**: You MUST inspect the actual modified files in
@@ -513,17 +747,26 @@ Reviewers and Coders must audit code against this checklist:
     created or modified in the workspace, reject the review immediately.
 2.  **Analyze C++ & Rust Implementations**: Conduct a side-by-side audit of
     APIs, data structures, safety, locking, test coverage, and fuzzing.
-3.  **Audit In-Body Inline Comment Parity**: Perform a side-by-side comparative
+3.  **Triage `babeldiff` Findings**: The review request includes `babeldiff`
+    output for the change (`zircon/skills/babeldiff/SKILL.md`). Check each `!`
+    finding (comments, error paths, locks, control flow, asserts, traces, rubric
+    lints) against the C++ and either confirm it as a gap or accept the coder's
+    stated justification. Treat `babeldiff` as a starting point, not a
+    substitute for the side-by-side audit. During the review, do not read or
+    debug `babeldiff`'s source; note any finding that looks wrong in the report.
+4.  **Audit In-Body Inline Comment Parity**: Perform a side-by-side comparative
     audit of C++ source and header files (`.cc` and `.h`) against the
     corresponding `.rs` files to verify that all inline comments documenting
     behavior are preserved and that identifiers that have changed names are
     updated to match the Rust code. Public Rustdoc alone does NOT satisfy
     comment parity.
-4.  **Scrutinize Unsafe**: Actively question every `unsafe` block. Insist on
+5.  **Scrutinize Unsafe**: Actively question every `unsafe` block. Insist on
     safe Rust alternatives if possible. Ensure `// SAFETY:` comments are
     complete and accurate.
-5.  **Evaluate against Rubric**: Verify every item in Section 3 and Section 4.
-6.  **Generate Structured Review Report**: Produce a report with the following
+6.  **Evaluate against Rubric & Formatting**: Verify every item in Section 3 and
+    Section 4, including checking for lines exceeding 100 characters in
+    comments, strings, or macros.
+7.  **Generate Structured Review Report**: Produce a report with the following
     format:
 
 ```markdown

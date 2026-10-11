@@ -10,6 +10,7 @@ use fake_pdev::FakePDev;
 use fake_pin::FakePinStates;
 use fake_powerdomain::FakePowerDomain;
 use fake_reset::FakeReset;
+use fdf_component::Driver;
 use fdf_component::testing::harness::TestHarness;
 use fdf_fidl;
 use fidl::Serializable;
@@ -312,7 +313,7 @@ async fn test_vmo_registration() {
     let range = fmem::natural::Range { vmo: vmo, offset: 0, size: 4096 };
     let res =
         client.register_vmo(0, 1, range, SharedVmoRight::READ).await.expect("FIDL call failed");
-    assert_eq!(res.unwrap_err(), Err(zx::Status::ALREADY_EXISTS));
+    assert_eq!(res.unwrap_err(), zx::Status::ALREADY_EXISTS);
 
     // Unregister the VMO and make sure it's the same one we registered.
     let unreg_vmo = client
@@ -325,7 +326,7 @@ async fn test_vmo_registration() {
 
     // Unregistering again should fail.
     let res = client.unregister_vmo(0, 1).await.expect("FIDL call failed");
-    assert_eq!(res.unwrap_err(), Err(zx::Status::NOT_FOUND));
+    assert_eq!(res.unwrap_err(), zx::Status::NOT_FOUND);
 
     let vmo = Vmo::create(4096).unwrap();
     let range = fmem::natural::Range { vmo: vmo, offset: 0, size: 4096 };
@@ -347,10 +348,10 @@ async fn test_vmo_registration() {
     client.release_registered_vmos(0).await.unwrap();
 
     let res = client.unregister_vmo(0, 2).await.expect("FIDL call failed");
-    assert_eq!(res.unwrap_err(), Err(zx::Status::NOT_FOUND));
+    assert_eq!(res.unwrap_err(), zx::Status::NOT_FOUND);
 
     let res = client.unregister_vmo(0, 3).await.expect("FIDL call failed");
-    assert_eq!(res.unwrap_err(), Err(zx::Status::NOT_FOUND));
+    assert_eq!(res.unwrap_err(), zx::Status::NOT_FOUND);
 
     started_driver.stop_driver().await;
 }
@@ -813,18 +814,18 @@ async fn test_vmo_validation() {
     // Invalid VMO ID
     let buffer = fsharedmemory::natural::SharedVmoBuffer { vmo_id: 99, offset: 0, size: 5 };
     let res = client.transmit_vmo(0, buffer).await.unwrap();
-    assert_eq!(res.unwrap_err(), Err(zx::Status::NOT_FOUND));
+    assert_eq!(res.unwrap_err(), zx::Status::NOT_FOUND);
 
     // Out of range (offset + size > registered size)
     let buffer = fsharedmemory::natural::SharedVmoBuffer { vmo_id: 1, offset: 1020, size: 10 };
     let res = client.transmit_vmo(0, buffer).await.unwrap();
-    assert_eq!(res.unwrap_err(), Err(zx::Status::OUT_OF_RANGE));
+    assert_eq!(res.unwrap_err(), zx::Status::OUT_OF_RANGE);
 
     // Out of range (overflow)
     let buffer =
         fsharedmemory::natural::SharedVmoBuffer { vmo_id: 1, offset: u64::MAX - 2, size: 10 };
     let res = client.transmit_vmo(0, buffer).await.unwrap();
-    assert_eq!(res.unwrap_err(), Err(zx::Status::OUT_OF_RANGE));
+    assert_eq!(res.unwrap_err(), zx::Status::OUT_OF_RANGE);
 
     started_driver.stop_driver().await;
 }
@@ -958,4 +959,143 @@ async fn perform_transfer(
     let ctrlr0 = read_u32(0x0);
     assert_eq!(registers::CtrlR0::from_raw(ctrlr0).srl(), expected_srl);
     assert_eq!(gpio.buffer_mode(), fgpio::BufferMode::OutputHigh);
+}
+
+#[fuchsia::test]
+async fn test_suspend_and_resume() {
+    let mut service_fs = ServiceFs::new();
+    let scope = fasync::Scope::new_with_name("test_suspend_resume");
+
+    let pdev = FakePDev::new();
+
+    let entries = vec![fmetadata::DictionaryEntry {
+        key: "dw_spi_rx_sample_delay_ns".to_string(),
+        value: fmetadata::DictionaryValue::Int64(25),
+    }];
+    let dict = fmetadata::Dictionary { entries: Some(entries), ..Default::default() };
+    let serialized_config = fidl::persist(&dict).expect("Failed to serialize config");
+    pdev.add_metadata("fuchsia.driver.metadata.Dictionary", serialized_config);
+
+    let metadata = fspi_businfo::SpiBusMetadata {
+        channels: Some(vec![fspi_businfo::SpiChannel {
+            cs: Some(0),
+            max_frequency_hz: Some(20_000_000),
+            ..Default::default()
+        }]),
+        bus_id: Some(0),
+        ..Default::default()
+    };
+    let serialized_metadata = fidl::persist(&metadata).expect("Failed to serialize metadata");
+    pdev.add_metadata(fspi_businfo::SpiBusMetadata::SERIALIZABLE_NAME, serialized_metadata);
+
+    let vmo = Vmo::create(0x100).expect("Failed to create VMO");
+    vmo.set_cache_policy(zx::CachePolicy::UnCachedDevice).expect("Failed to set cache policy");
+    let mapping = mapped_vmo::Mapping::create_from_vmo(
+        &vmo,
+        0x100,
+        zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE,
+    )
+    .expect("Failed to map VMO");
+
+    let dup = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("Failed to duplicate VMO");
+    let irq = zx::VirtualInterrupt::create_virtual().expect("Failed to create virtual interrupt");
+    let irq_dup =
+        irq.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("Failed to duplicate interrupt");
+
+    let mut pdev_config: fake_pdev::Config = Default::default();
+    let mmio = fdevice::natural::Mmio { offset: Some(0), size: Some(0x100), vmo: Some(dup) };
+    pdev_config.mmios.insert(0, mmio);
+    pdev_config.irqs.insert(0, zx::Interrupt::from(irq.into_handle()));
+    pdev.set_config(pdev_config);
+
+    let powerdomain = FakePowerDomain::new();
+    let clock_bus = FakeClock::new();
+    clock_bus.set_rate(200_000_000);
+    let clock_regs = FakeClock::new();
+    let mut reset = FakeReset::new();
+    let pin_states = FakePinStates::new();
+    let gpio = FakeGpio::default();
+
+    let mut harness = TestHarness::<DwSpiDriver>::new()
+        .add_offer(pdev.serve(&mut service_fs, scope.to_handle(), "pdev"))
+        .add_offer(powerdomain.serve(&mut service_fs, scope.to_handle(), "power-domain"))
+        .add_offer(clock_bus.serve(&mut service_fs, scope.to_handle(), "bus"))
+        .add_offer(clock_regs.serve(&mut service_fs, scope.to_handle(), "registers"))
+        .add_offer(reset.serve(&mut service_fs, scope.to_handle(), "reset"))
+        .add_offer(pin_states.serve(&mut service_fs, scope.to_handle(), "pin-states-0"))
+        .add_offer(gpio.serve(&mut service_fs, scope.to_handle(), "cs-0"))
+        .set_driver_incoming(service_fs);
+
+    let dispatcher = fdf_fidl::FidlExecutor::from(harness.dispatcher().clone());
+    let started_driver = harness.start_driver().await.expect("Failed to start driver");
+    let driver = started_driver.get_driver().expect("Failed to get driver instance");
+
+    let read_u32 = |offset: usize| -> u32 {
+        let mut bytes = [0u8; 4];
+        mapping.read_at(offset, &mut bytes);
+        u32::from_le_bytes(bytes)
+    };
+    let write_u32 = |offset: usize, value: u32| {
+        mapping.write_at(offset, &value.to_le_bytes());
+    };
+
+    // Verify startup resource state and registers.
+    assert!(powerdomain.enabled());
+    assert!(clock_bus.enabled());
+    assert!(clock_regs.enabled());
+    assert!(reset.take_toggled());
+    assert!(!reset.asserted());
+    assert_eq!(pin_states.current_state(), "default");
+    assert_eq!(read_u32(0x00), 0x7); // CTRLR0
+    assert_eq!(read_u32(0x14), 0xa); // BAUDR
+    assert_eq!(read_u32(0xf0), 0x5); // RX_SAMPLE_DLY
+    assert_eq!(read_u32(0x2c), 0x0); // IMR
+    assert_eq!(read_u32(0x18), 0x80); // TXFTLR
+    assert_eq!(read_u32(0x08), 0x1); // SSIENR
+
+    // Trigger system_suspend() and verify resource states and register values.
+    driver.system_suspend().await.expect("system_suspend failed");
+
+    assert!(!powerdomain.enabled());
+    assert!(!clock_bus.enabled());
+    assert!(!clock_regs.enabled());
+    assert!(!reset.take_toggled());
+    assert!(!reset.asserted());
+    assert_eq!(pin_states.current_state(), "sleep");
+    assert_eq!(read_u32(0x08), 0x0); // SSIENR disabled
+    assert_eq!(read_u32(0x14), 0x0); // BAUDR cleared
+
+    // Simulate volatile register state loss when power domain is turned off.
+    write_u32(0x00, 0x0); // CTRLR0
+    write_u32(0x14, 0x0); // BAUDR
+    write_u32(0x18, 0x0); // TXFTLR
+    write_u32(0xf0, 0x0); // RX_SAMPLE_DLY
+    write_u32(0x08, 0x0); // SSIENR
+
+    // Trigger system_resume() and verify resource states and reinitialized registers.
+    driver.system_resume(None).await.expect("system_resume failed");
+
+    assert!(powerdomain.enabled());
+    assert!(clock_bus.enabled());
+    assert!(clock_regs.enabled());
+    assert!(reset.take_toggled());
+    assert_eq!(pin_states.current_state(), "default");
+
+    assert_eq!(read_u32(0x00), 0x7); // CTRLR0
+    assert_eq!(read_u32(0x14), 0xa); // BAUDR
+    assert_eq!(read_u32(0xf0), 0x5); // RX_SAMPLE_DLY
+    assert_eq!(read_u32(0x2c), 0x0); // IMR
+    assert_eq!(read_u32(0x18), 0x80); // TXFTLR
+    assert_eq!(read_u32(0x08), 0x1); // SSIENR
+
+    // Verify a full SPI transfer succeeds after resume.
+    let spi_service: fdf_component::ServiceInstance<fspiimpl::Service> =
+        started_driver.driver_outgoing().service().connect_next().unwrap();
+    let (client_end, server_end) = fdf_fidl::create_channel();
+    spi_service.device(server_end).unwrap();
+    let client = client_end.spawn_on(&dispatcher);
+
+    perform_transfer(&client, &irq_dup, &gpio, &mapping, 0).await;
+
+    started_driver.stop_driver().await;
 }

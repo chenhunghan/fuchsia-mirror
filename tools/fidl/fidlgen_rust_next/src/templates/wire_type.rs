@@ -123,11 +123,17 @@ impl fmt::Display for WireTypeTemplate<'_> {
                 if matches!(subtype, PrimSubtype::Int32)
                     && self.from_alias.is_some_and(|from_alias| {
                         let decl_name = from_alias.name.decl_name().non_canonical();
-                        from_alias.name.library() == "zx"
-                            && (decl_name == "Status" || decl_name == "Result")
+                        from_alias.name.library() == "zx" && decl_name == "Result"
                     })
                 {
                     write!(f, "::fidl_next::wire::fuchsia::StatusResult")?;
+                } else if matches!(subtype, PrimSubtype::Int32)
+                    && self.from_alias.is_some_and(|from_alias| {
+                        let decl_name = from_alias.name.decl_name().non_canonical();
+                        from_alias.name.library() == "zx" && decl_name == "Status"
+                    })
+                {
+                    write!(f, "::fidl_next::wire::fuchsia::Status")?;
                 } else {
                     write!(f, "{}", self.wire_prim(*subtype))?;
                 }

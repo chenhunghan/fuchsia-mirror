@@ -127,7 +127,7 @@ impl TryConvert for String {
     fn try_convert(value: ConfigValue) -> Result<Self, ConfigError> {
         let inner = value.value.ok_or(ConfigError::NoValueSet("String"))?;
         let conversion = inner.as_str().map(|s| s.to_string());
-        conversion.ok_or(ConfigError::ConversionFailed { to: "String", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "String", value: inner, key: None })
     }
 }
 
@@ -154,7 +154,7 @@ impl TryConvert for usize {
             .as_u64()
             .and_then(|v| usize::try_from(v).ok())
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None });
-        conversion.ok_or(ConfigError::ConversionFailed { to: "usize", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "usize", value: inner, key: None })
     }
 }
 
@@ -166,7 +166,7 @@ impl TryConvert for u64 {
         let conversion = inner
             .as_u64()
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None });
-        conversion.ok_or(ConfigError::ConversionFailed { to: "u64", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "u64", value: inner, key: None })
     }
 }
 
@@ -187,7 +187,7 @@ impl TryConvert for u16 {
             .as_u64()
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None })
             .and_then(|v| u16::try_from(v).ok());
-        conversion.ok_or(ConfigError::ConversionFailed { to: "u16", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "u16", value: inner, key: None })
     }
 }
 
@@ -199,7 +199,7 @@ impl TryConvert for i64 {
         let conversion = inner
             .as_i64()
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None });
-        conversion.ok_or(ConfigError::ConversionFailed { to: "i64", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "i64", value: inner, key: None })
     }
 }
 
@@ -211,7 +211,7 @@ impl TryConvert for bool {
         let conversion = inner
             .as_bool()
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None });
-        conversion.ok_or(ConfigError::ConversionFailed { to: "bool", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "bool", value: inner, key: None })
     }
 }
 
@@ -229,7 +229,7 @@ impl TryConvert for PathBuf {
     fn try_convert(value: ConfigValue) -> Result<Self, ConfigError> {
         let inner = value.value.ok_or(ConfigError::NoValueSet("PathBuf"))?;
         let conversion = inner.as_str().map(|s| PathBuf::from(s.to_string()));
-        conversion.ok_or(ConfigError::ConversionFailed { to: "PathBuf", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "PathBuf", value: inner, key: None })
     }
 }
 
@@ -273,7 +273,7 @@ impl TryConvert for f64 {
         let conversion = inner
             .as_f64()
             .or_else(|| if let Value::String(ref s) = inner { s.parse().ok() } else { None });
-        conversion.ok_or(ConfigError::ConversionFailed { to: "f64", value: inner })
+        conversion.ok_or(ConfigError::ConversionFailed { to: "f64", value: inner, key: None })
     }
 }
 
@@ -360,7 +360,7 @@ mod tests {
         let result = Vec::<usize>::try_convert(value);
         assert!(result.is_err());
         match result.unwrap_err() {
-            ConfigError::ConversionFailed { to, .. } => assert_eq!(to, "usize"),
+            ConfigError::ConversionFailed { to, value: _, key: _ } => assert_eq!(to, "usize"),
             _ => panic!("Expected ConversionFailed"),
         }
     }

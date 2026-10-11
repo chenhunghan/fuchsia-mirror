@@ -23,7 +23,6 @@ inline constexpr std::string_view kPathSystem = "/system";
 inline constexpr std::string_view kPathBlob = "/blob";
 inline constexpr std::string_view kPathFactory = "/factory";
 inline constexpr std::string_view kPathVolume = "/volume";
-inline constexpr std::string_view kPathDevBlock = "/dev/class/block";
 
 // Format the provided device with a requested disk format.
 zx_status_t Mkfs(const char* device_path, FsComponent& component, const MkfsOptions& options);

@@ -189,8 +189,12 @@ fn channel_read<R: ReadHandles>(
     );
 
     let proc = ProcessDispatcher::get_current();
-    let channel = proc
-        .get_dispatcher_with_rights::<ChannelDispatcher>(handle_value, zx_types::ZX_RIGHT_READ)?;
+    let handle_table = proc.handle_table();
+    let channel = handle_table.get_dispatcher_with_rights::<ChannelDispatcher>(
+        &proc,
+        handle_value,
+        zx_types::ZX_RIGHT_READ,
+    )?;
 
     // Currently MAY_DISCARD is the only allowable option.
     if (options & !ZX_CHANNEL_READ_MAY_DISCARD) != 0 {
@@ -198,7 +202,7 @@ fn channel_read<R: ReadHandles>(
     }
 
     let read_result = channel.read(
-        proc.handle_table_koid(),
+        handle_table.get_koid(),
         &mut num_bytes,
         &mut num_handles,
         (options & ZX_CHANNEL_READ_MAY_DISCARD) != 0,
@@ -290,7 +294,9 @@ fn prepare_write<W: WriteHandles>(
         return Err(Status::INVALID_ARGS);
     }
 
-    let channel = proc.get_dispatcher_with_rights::<ChannelDispatcher>(handle, rights)?;
+    let handle_table = proc.handle_table();
+    let channel =
+        handle_table.get_dispatcher_with_rights::<ChannelDispatcher>(proc, handle, rights)?;
     // Prepare a MessagePacket for writing.
     let mut msg = if (options & ZX_CHANNEL_WRITE_USE_IOVEC) != 0 {
         MessagePacket::create_from_iovecs(
@@ -314,7 +320,7 @@ fn prepare_write<W: WriteHandles>(
         handles.put_handles(proc, &channel, &mut msg)?;
     }
 
-    Ok((channel, proc.handle_table_koid(), msg))
+    Ok((channel, handle_table.get_koid(), msg))
 }
 
 fn channel_write<W: WriteHandles>(

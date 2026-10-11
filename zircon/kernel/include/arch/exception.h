@@ -15,12 +15,12 @@ struct Thread;
 typedef struct arch_exception_context arch_exception_context_t;
 typedef struct zx_exception_report zx_exception_report_t;
 
+extern "C" {
 // Called by arch code when it cannot handle an exception.
 // |context| is architecture-specific, and can be dumped to the console
 // using arch_dump_exception_context(). Implemented by non-arch code.
 zx_status_t dispatch_user_exception(uint exception_type, const arch_exception_context_t* context);
 
-extern "C" {
 // Dispatches an exception that was raised by a syscall using
 // thread_signal_policy_exception() (see <kernel/thread.h>), causing
 // dispatch_user_exception() to be called with the current context. Implemented

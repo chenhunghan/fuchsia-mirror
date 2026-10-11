@@ -56,6 +56,16 @@ where
     }
 }
 
+impl<const N: u32, Layout> Default for Cr<N, Layout>
+where
+    CrIo<N>: ControlRegister,
+    Layout: LayoutOver<u64>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Example usage:
 /// ```
 /// use regio::x86::Xcr;
@@ -74,6 +84,16 @@ where
     pub const fn new() -> Self {
         // Safety: There is nothing unsafe about XcrIo construction.
         unsafe { Self::from_io(XcrIo {}) }
+    }
+}
+
+impl<const N: u32, Layout> Default for Xcr<N, Layout>
+where
+    XcrIo<N>: ControlRegister,
+    Layout: LayoutOver<u64>,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 

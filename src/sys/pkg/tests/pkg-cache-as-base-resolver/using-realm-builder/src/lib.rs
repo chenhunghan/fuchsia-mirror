@@ -126,6 +126,7 @@ impl TestEnvBuilder {
                     .capability(Capability::configuration(
                         "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                     ))
+                    .capability(Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging"))
                     .from(Ref::void())
                     .to(&pkg_cache),
             )
@@ -196,6 +197,23 @@ impl TestEnvBuilder {
                     .capability(Capability::protocol::<fidl_fuchsia_fxfs::BlobReaderMarker>().path(
                         format!("/blob-svc/{}", fidl_fuchsia_fxfs::BlobReaderMarker::PROTOCOL_NAME),
                     ))
+                    .capability(
+                        Capability::protocol::<
+                            fidl_fuchsia_storage_mapping::MappingProviderMarker,
+                        >()
+                        .path(format!(
+                            "/blob-svc/{}",
+                            fidl_fuchsia_storage_mapping::MappingProviderMarker::PROTOCOL_NAME
+                        )),
+                    )
+                    .capability(
+                        Capability::protocol::<fidl_fuchsia_storage_block::MapperMarker>().path(
+                            format!(
+                                "/blob-svc/{}",
+                                fidl_fuchsia_storage_block::MapperMarker::PROTOCOL_NAME
+                            ),
+                        ),
+                    )
                     .from(&service_reflector)
                     .to(&pkg_cache),
             )

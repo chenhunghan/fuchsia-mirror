@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:transformer=file_paths
+_ZXTEST_SRCS = [
+    "assertion.cc",
+    "c-wrappers.cc",
+    "event-broadcaster.cc",
+    "file-log-sink.cc",
+    "json-reporter.cc",
+    "message.cc",
+    "reporter.cc",
+    "runner.cc",
+    "runner-options.cc",
+    "test.cc",
+    "test-case.cc",
+    "test-info.cc",
+    "timer.cc",
+    "zxtest-main.cc",
+] + select({
+    "@platforms//os:fuchsia": ["death-statement.cc"],
+    "//conditions:default": [],
+})
+
+# @bazel2gn:transformer=file_paths
+_ZXTEST_HDRS = [
+    "include/zxtest/base/assertion.h",
+    "include/zxtest/base/death-statement.h",
+    "include/zxtest/base/environment.h",
+    "include/zxtest/base/event-broadcaster.h",
+    "include/zxtest/base/json-reporter.h",
+    "include/zxtest/base/log-sink.h",
+    "include/zxtest/base/message.h",
+    "include/zxtest/base/observer.h",
+    "include/zxtest/base/parameterized-value.h",
+    "include/zxtest/base/parameterized-value-impl.h",
+    "include/zxtest/base/reporter.h",
+    "include/zxtest/base/runner.h",
+    "include/zxtest/base/test.h",
+    "include/zxtest/base/test-case.h",
+    "include/zxtest/base/test-driver.h",
+    "include/zxtest/base/test-info.h",
+    "include/zxtest/base/test-internal.h",
+    "include/zxtest/base/timer.h",
+    "include/zxtest/base/types.h",
+    "include/zxtest/base/values.h",
+    "include/zxtest/c/zxtest.h",
+    "include/zxtest/cpp/assert.h",
+    "include/zxtest/cpp/assert_streams.h",
+    "include/zxtest/cpp/internal.h",
+    "include/zxtest/cpp/scoped_trace.h",
+    "include/zxtest/cpp/zxtest.h",
+    "include/zxtest/zxtest.h",
+]
+
+# @bazel2gn:transformer=deps
+_ZXTEST_DEPS = [
+    "//sdk/lib/fit",
+    "//src/zircon/lib/zircon",
+    "//third_party/rapidjson",
+    "//zircon/system/ulib/fbl",
+] + select({
+    "@platforms//os:fuchsia": [
+        ":zxtest_runner_shard",
+        "//zircon/system/ulib/zx",
+    ],
+    "//conditions:default": [],
+})
+
+# Makes the test manifests that GN generates use the zxtest runner. Bazel
+# doesn't have this mechanism yet, so Bazel tests that want the zxtest runner
+# must include the shard explicitly.
+expect_includes(
+    name = "zxtest_runner_shard",
+    enforce = False,
+    includes = ["//src/sys/test_runners/gtest/zxtest.shard.cml"],
+    visibility = ["//visibility:private"],
+)
+
+fx_cc_library(
+    name = "zxtest",
+    srcs = _ZXTEST_SRCS,
+    hdrs = _ZXTEST_HDRS,
+    # TODO(https://fxbug.dev/42085293): zxtest uses VLAs. GN suppresses the
+    # warning for every dependent through a public config, but Bazel copts
+    # don't propagate, so dependents that use the zxtest macros need this too.
+    copts = ["-Wno-vla-cxx-extension"],
+    includes = ["include"],
+    public_configs = [
+        ":prod_config",
+        "//build/config:Wno-vla-cxx-extension",
+    ],
+    # Used by tests across the tree.
+    visibility = ["//:__subpackages__"],
+    deps = _ZXTEST_DEPS,
+)
+
+fx_cc_library(
+    name = "zxtest-streams",
+    srcs = _ZXTEST_SRCS,
+    hdrs = _ZXTEST_HDRS,
+    copts = ["-Wno-vla-cxx-extension"],
+    defines = ["ZXTEST_USE_STREAMABLE_MACROS"],
+    includes = ["include"],
+    public_configs = [
+        ":prod_config",
+        ":zxtest_enable_streamable_assertions",
+        "//build/config:Wno-vla-cxx-extension",
+    ],
+    # Used by tests across the tree.
+    visibility = ["//:__subpackages__"],
+    deps = _ZXTEST_DEPS,
+)

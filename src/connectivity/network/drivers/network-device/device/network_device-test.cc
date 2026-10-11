@@ -3334,6 +3334,67 @@ TEST_F(NetworkDeviceTest, CanUpdatePortStatusWithinSetActive) {
   }
 }
 
+// Regression test for https://fxbug.dev/520619984.
+//
+// The port dispatcher is unsynchronized, so a pending SetActive task and the port teardown task can
+// run concurrently on different threads. If the teardown task wins, the DevicePort is destroyed
+// before the SetActive task runs. This test models that interleaving deterministically by driving
+// the port's tasks from a loop that is only run after the port has been destroyed. The pending
+// SetActive task must not touch the destroyed port.
+TEST_F(NetworkDeviceTest, PendingSetActiveAfterPortDestroyedIsNoop) {
+  ASSERT_OK(CreateDevice());
+  auto* dev_iface = static_cast<internal::DeviceInterface*>(device_.get());
+
+  // Stands in for the port dispatcher so the test controls when tasks posted by the port run.
+  async::Loop port_loop(&kAsyncLoopConfigNeverAttachToThread);
+
+  zx::result endpoints = fdf::CreateEndpoints<netdriver::NetworkPort>();
+  ASSERT_OK(endpoints);
+  FakeNetworkPortImpl port_impl;
+  // The binding references port_impl from impl_dispatcher_, so port_impl must not be destroyed
+  // until the binding is gone. The binding unbinds once the port, which owns the client, is
+  // destroyed.
+  libsync::Completion port_impl_unbound;
+  fdf::BindServer(
+      impl_dispatcher_.get(), std::move(endpoints->server), &port_impl,
+      [&port_impl_unbound](fdf::WireServer<netdriver::NetworkPort>*, fidl::UnbindInfo,
+                           fdf::ServerEnd<netdriver::NetworkPort>) { port_impl_unbound.Signal(); });
+  auto wait_for_unbind = fit::defer([&port_impl_unbound]() { port_impl_unbound.Wait(); });
+  fdf::WireSharedClient<netdriver::NetworkPort> port_client(std::move(endpoints->client),
+                                                            port_dispatcher_.get());
+
+  libsync::Completion created;
+  std::shared_ptr<internal::DevicePort> port;
+  internal::DevicePort::Create(
+      dev_iface, port_loop.dispatcher(), {.base = kPort13, .salt = 0}, std::move(port_client),
+      impl_dispatcher_.get(), [](internal::DevicePort&) {},
+      [&port, &created](zx::result<std::shared_ptr<internal::DevicePort>> result) {
+        EXPECT_OK(result);
+        if (result.is_ok()) {
+          port = std::move(result.value());
+        }
+        created.Signal();
+      });
+  created.Wait();
+  ASSERT_NE(port, nullptr);
+
+  // Queue a SetActive task on the port's dispatcher.
+  port->SessionAttached();
+
+  // Destroy the port before the SetActive task runs, as the teardown task would when it wins the
+  // race on another dispatcher thread.
+  port = nullptr;
+  port_impl.WaitForPortRemoval();
+
+  // Run the pending SetActive task. Prior to the fix this dereferenced the destroyed port.
+  ASSERT_OK(port_loop.RunUntilIdle());
+
+  // SetActive must never reach the port implementation after the port was removed.
+  ASSERT_STATUS(WaitPortActiveChanged(port_impl, zx::deadline_after(kPollInterval)),
+                ZX_ERR_TIMED_OUT);
+  EXPECT_FALSE(port_impl.active());
+}
+
 // This test guards against a regression where a dangling session would prevent device teardown from
 // completing.
 TEST_F(NetworkDeviceTest, DeadSessionsDontPreventTeardown) {

@@ -17,11 +17,6 @@ type Format = strict enum {
     /// Schema specifications.
     @available(added=HEAD)
     CBOR = 3;
-    /// Dump read results per the legacy Diagnostics FXT
-    /// Schema specifications. This is only supported
-    /// for logs.
-    @available(added=HEAD)
-    LEGACY_FXT = 4;
     /// Dump read results per the Diagnostics FXT
     /// Schema specifications. This is only supported
     /// for logs.

@@ -131,20 +131,6 @@ open protocol WlanPhy {
         1: ps_mode fuchsia.wlan.common.PowerSaveType;
     }) error zx.Status;
 
-    /// Power up/down/reset the wlan chip.
-    /// If supported, PowerDown will power down the wlan chip if it is currently powered on.
-    /// Any existing interfaces should have already been deleted before making this call or else the
-    /// driver will fail the call with error code ZX_ERR_INTERNAL.
-    /// Other possible error codes are: \
-    /// ZX_ERR_NOT_SUPPORTED: the feature is not supported by the driver.
-    /// ZX_ERR_BAD_STATE: the wlan chip is already powered down.
-    flexible PowerDown() -> () error zx.Status;
-
-    /// If supported, PowerUp will power up the wlan chip if it is currently powered down.
-    /// Possible error codes are: \
-    /// ZX_ERR_NOT_SUPPORTED: the feature is not supported by the driver.
-    /// ZX_ERR_BAD_STATE: the wlan chip is already powered up.
-    flexible PowerUp() -> () error zx.Status;
 
     /// If supported, Reset functionality implements PowerDown then PowerUp in an attempt to
     /// recover from an error state. For example, if an interface gets into a bad state or if

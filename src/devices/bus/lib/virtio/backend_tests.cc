@@ -262,12 +262,11 @@ class VirtioTests : public zxtest::Test {
     bars_[kModernBar]->Write(msix_config_val, common_cfg_cap.offset + msix_offset);
   }
 
-  void SetUpLegacyBar() {
+  void SetUpLegacyBar(bool is_mmio = false) {
     zx::vmo vmo{};
     size_t bar_size = 0x64;  // Matches the bar size on GCE for Bar0.
-    async_.SyncCall([&](AsyncState* async) {
-      async->fake_pci.CreateBar(kLegacyBar, bar_size, /*is_mmio=*/false);
-    });
+    async_.SyncCall(
+        [&](AsyncState* async) { async->fake_pci.CreateBar(kLegacyBar, bar_size, is_mmio); });
 
     // Legacy BARs identified as IO in PCI cannot be mapped by pci::MapMmio, so we need to do it
     // by hand.
@@ -626,6 +625,36 @@ TEST_F(VirtioTests, LegacyIoBackendSuccess) {
   ASSERT_OK(device->Init());
   // Owned by the framework now.
   [[maybe_unused]] auto ptr = device.release();
+}
+
+TEST_F(VirtioTests, LegacyMmioBackendSuccess) {
+  SetUpProtocol();
+  SetUpLegacyBar(/*is_mmio=*/true);
+  SetUpLegacyQueue();
+  bars()[kLegacyBar]->Write(uint8_t{0xff}, VIRTIO_PCI_DEVICE_STATUS);
+  bars()[kLegacyBar]->Write(uint8_t{0xaa}, VIRTIO_PCI_ISR_STATUS);
+  async_state().SyncCall([&](AsyncState* async) { async->fake_pci.AddLegacyInterrupt(); });
+
+  zx::result pci = ddk::Device<void>::DdkConnectFidlProtocol<fuchsia_hardware_pci::Service::Device>(
+      fake_parent_.get());
+  ASSERT_TRUE(pci.is_ok());
+  auto info = fidl::Call(*pci)->GetDeviceInfo();
+  ASSERT_TRUE(info.is_ok());
+  zx::bti bti{};
+  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+
+  auto backend = std::make_unique<virtio::PciLegacyBackend>(std::move(*pci), info->info());
+  ASSERT_OK(backend->Bind());
+  backend->DeviceReset();
+
+  auto device =
+      std::make_unique<TestVirtioDevice>(fake_parent_.get(), std::move(bti), std::move(backend));
+  ASSERT_OK(device->Init());
+  // Owned by the framework now.
+  [[maybe_unused]] auto ptr = device.release();
+
+  EXPECT_EQ(bars()[kLegacyBar]->Read8(VIRTIO_PCI_DEVICE_STATUS), 0u);
+  EXPECT_EQ(bars()[kLegacyBar]->Read8(VIRTIO_PCI_ISR_STATUS), 0xaau);
 }
 
 TEST_F(VirtioTests, AssertZeroInitializedRingLegacy) {

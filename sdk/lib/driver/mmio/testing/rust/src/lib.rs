@@ -8,10 +8,17 @@
 //!
 //! See the [`inject`] module for details on the dependency-injection patterns
 //! provided by this crate.
+//!
+//! [`FakeMmioDevice`] provides a wrapper to implement device-side fakes based
+//! on side-effects on a shared VMO.
 
+mod atomic;
 mod cached_vmo;
+mod device;
 pub mod inject;
 mod operand;
 
+pub use atomic::AtomicMmio;
 pub use cached_vmo::CachedVmoMemory;
+pub use device::FakeMmioDevice;
 pub use operand::MmioOperand;

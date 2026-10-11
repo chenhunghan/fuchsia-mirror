@@ -322,6 +322,7 @@ mod ebpf_test {
         sk_family: u32,
         sk_state: u32,
         socket_uid: u32,
+        pkt_type: u32,
     }
 
     #[repr(C)]
@@ -896,6 +897,7 @@ mod ebpf_test {
         assert_eq!(test_result.sk_type, kind.sk_type());
         assert_eq!(test_result.sk_protocol, kind.protocol());
         assert_eq!(test_result.sk_family, socket_family.family() as u32);
+        assert_eq!(test_result.pkt_type, linux_uapi::PACKET_OUTGOING);
 
         // SAFETY: `getuid()` is always safe to call.
         let uid = unsafe { libc::getuid() };
@@ -1052,6 +1054,13 @@ mod ebpf_test {
         assert_eq!(test_result.sk_type, kind.sk_type());
         assert_eq!(test_result.sk_protocol, kind.protocol());
         assert_eq!(test_result.sk_family, socket_family.family() as u32);
+        let expected_pkt_type = match kind {
+            SocketTestKind::UdpMulticast => linux_uapi::PACKET_LOOPBACK,
+            SocketTestKind::Udp | SocketTestKind::TcpListener | SocketTestKind::TcpConnected => {
+                linux_uapi::PACKET_HOST
+            }
+        };
+        assert_eq!(test_result.pkt_type, expected_pkt_type);
 
         // SAFETY: `getuid()` is always safe to call.
         let uid = unsafe { libc::getuid() };

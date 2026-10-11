@@ -8,21 +8,19 @@ files and replacing the corresponding targets in BUILD.gn.
 
 ### To migrate new targets from foo/bar/BUILD.gn to Bazel
 
-NOTE: Don't forget step 5 in the process, to make sure your targets are
-continuously validated in CQ.
-
 1. Create foo/bar/BUILD.bazel if it doesn't exist already.
 2. Implement the target you want to migrate in foo/bar/BUILD.bazel.
 3. Run `fx bazel2gn -d foo/bar` to sync the targets defined in
    foo/bar/BUILD.bazel to foo/bar/BUILD.gn.
 4. Remove old GN targets you've migrated from foo/bar/BUILD.gn.
-5. Add `//foo/bar:verify_bazel2gn` to the `deps` of
-   `//build:bazel2gn_verifications` in `//build/BUILD.gn`.
+
+BUILD.gn files containing the `bazel2gn` sentinel are automatically verified to
+be in sync with their BUILD.bazel files by `shac` (`fx lint` and CQ).
 
 ### To re-sync targets managed by `bazel2gn`
 
-* Run `fx bazel2gn`, which will sync your target if it's a dep in
-  `//build:bazel2gn_verifications`, plus all other deps of that group.
+* Run `fx bazel2gn`, which automatically discovers and syncs all BUILD.gn
+  files containing the `bazel2gn` sentinel.
 * Or, run `fx bazel2gn -d path/to/dir`, if you only want to sync targets in a
   specific directory.
 
@@ -60,6 +58,12 @@ while maintaining backward compatibility, because:
 * The build team owns most of the GN templates, making them easier to change;
 * We'll eventually remove the GN targets, so it's better to keep Bazel targets
     as idiomatic as possible.
+
+For example, `rules_rust` only allows Rust targets in `deps`, and native
+(e.g. C/C++) libraries linked into Rust targets go in `link_deps` instead.
+The GN `rustc_*` templates accept `link_deps` too (with the same semantics as
+`deps`), so `bazel2gn` passes the attribute through unchanged, applying the
+same label translations it applies to `deps`.
 
 ### Starlark vs GN
 
@@ -255,9 +259,15 @@ source_set("foo") {
 This annotation tells `bazel2gn` to apply a transformer to the annotated
 statement. It is useful for controlling the conversion process.
 
+`bazel2gn` knows which attributes of a target hold labels or file paths, but it
+can't tell what a top-level variable holds, so it copies variables verbatim.
+Annotate shared lists of deps or sources with a transformer so that `bazel2gn`
+converts them the same way it would convert the attribute directly.
+
 **Example:**
 
 ```bzl
+# @bazel2gn:transformer=deps
 COMMON_DEPS = ["//third_party/rust_crates/vendor:lock_api"]
 ```
 

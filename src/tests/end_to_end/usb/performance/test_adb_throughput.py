@@ -14,6 +14,7 @@ import typing
 import fuchsia_base_test
 import perf_publish.publish as publish
 import test_data
+from honeydew.device_classes import android_device
 from mobly import asserts, signals, test_runner
 from reporting import metrics
 from trace_processing import trace_importing
@@ -36,9 +37,12 @@ _BOOT_SETTLE_DELAY_SECONDS: float = 10.0
 class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
     """Measures ADB push and pull throughput over USB using both storage-isolated and storage-backed transfers."""
 
+    dut: android_device.AndroidDevice
+
     async def setup_class(self) -> None:
         """Reads build-time test parameters for transfer sizes."""
         await super().setup_class()
+        assert isinstance(self.dut, android_device.AndroidDevice)
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         _ = self.dut.adb

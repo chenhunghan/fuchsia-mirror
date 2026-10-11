@@ -13,7 +13,18 @@ const WRAP_WIDTH: usize = 80;
 
 /// Write command names and descriptions to an output string.
 pub(crate) fn write_description(out: &mut String, name: &str, description: &str) {
-    let mut current_line = INDENT.to_string();
+    write_description_with_indent(out, name, description, 0);
+}
+
+/// Write command names and descriptions to an output string with a specific depth of indentation.
+pub(crate) fn write_description_with_indent(
+    out: &mut String,
+    name: &str,
+    description: &str,
+    depth: usize,
+) {
+    let indent = INDENT.repeat(depth + 1);
+    let mut current_line = indent;
     current_line.push_str(&name);
 
     if description.is_empty() {

@@ -62,12 +62,12 @@ class SocketTests(unittest.IsolatedAsyncioTestCase):
         async_sock_in = AsyncSocket(sock_in)
         bytes_in = bytearray([1, 2, 3])
 
-        async def slow_write(sock: Socket, b: bytes) -> None:
+        async def slow_write() -> None:
             await asyncio.sleep(1)
-            sock.write(b)
+            sock_out.write(bytes_in)
 
         loop = asyncio.get_running_loop()
-        write_task = loop.create_task(slow_write(sock_out, bytes_in))
+        write_task = loop.create_task(slow_write())
         read_task = loop.create_task(async_sock_in.read())
         done, _ = await asyncio.wait([write_task, read_task])
         self.assertEqual(len(done), 2)

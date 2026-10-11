@@ -198,13 +198,20 @@ While supporting both machine and human-readable output is the default expectati
     }
     ```
 * **Querying Configuration via `EnvironmentContext`**:
-  * Use `self.context.get::<T, _>("key.path")` or `self.context.get_optional::<T, _>("key.path")` for direct typed lookups, or `self.context.query("key.path")` (`ConfigQueryBuilder`) when specifying a `ConfigLevel` or `SelectMode`.
+  * Use `self.context.get::<T, _>(KEY_CONST)` or `self.context.get_optional::<T, _>(KEY_CONST)` for direct typed lookups, or `self.context.query(KEY_CONST)` (`ConfigQueryBuilder`) when specifying a `ConfigLevel` or `SelectMode`.
   * For structured config-backed types, use `#[derive(FfxConfigBacked)]` (`//src/developer/ffx/config/macro`) with `#[ffx_config_default(key = "...", default = "...")]` attributes, or implement `ffx_config::TryFromEnvContext`.
+* **Define Configuration Keys in `//src/developer/ffx/config/src/keys.rs` & Use Constants for Defaults**:
+  * **No Inline Config Key Strings**: Never pass raw string literals (e.g., `context.get("discovery.fastboot.timeout")`) directly at call sites. Place shared or global configuration keys in `//src/developer/ffx/config/src/keys.rs` (`ffx_config::keys::*`), or define a named `const` at the module/crate level if a key is strictly internal to a single subtool.
+  * **No Magic Default Values**: Never pass hardcoded numeric or string literals directly to `.unwrap_or(...)` when falling back to a default configuration value (e.g., avoid `.unwrap_or(500)`). Define a descriptive named `const` (e.g., `const DEFAULT_FASTBOOT_DISCOVERY_TIMEOUT_MS: u64 = 500;`) and/or register the default in `//src/developer/ffx/data/config.json`.
 * **Support `ffx --strict`**: Avoid assuming ambient host state or implicit user/build config files exist. Any required settings in strict mode must be resolvable via explicit CLI flags or `-c` runtime config overrides (`EnvironmentContext::is_strict()`).
 
 ---
 
 ## 7. Testing Guidelines
+
+### Use `#[fuchsia::test]` for All Unit Tests
+* **Always annotate unit tests with `#[fuchsia::test]`**: Use `#[fuchsia::test]` for both synchronous and `async` unit tests across `ffx` libraries and subtools.
+* **Do not use legacy or runtime-specific test macros**: Avoid `#[fuchsia_async::run_singlethreaded(test)]` (or `#[fasync::run_singlethreaded(test)]`), `#[tokio::test]`, and bare `#[test]`. `#[fuchsia::test]` automatically configures the single-threaded `fuchsia_async` executor for `async fn` tests and initializes test logging consistently.
 
 ### Keep `#[cfg(test)]` Confined to the `test` / `tests` Module
 * **Avoid scattering `#[cfg(test)]` in production code**: Do not place `#[cfg(test)]` attributes on individual functions, methods, struct fields, imports, or `impl` blocks inside non-test modules.

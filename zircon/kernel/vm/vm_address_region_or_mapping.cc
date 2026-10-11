@@ -46,9 +46,45 @@ zx_status_t VmAddressRegionOrMapping::Destroy() {
 VmAddressRegionOrMapping::~VmAddressRegionOrMapping() {
   LTRACEF("%p\n", this);
 
-  if (state_ == LifeCycleState::ALIVE) {
-    Destroy();
-  }
+  ASSERT(state_ != LifeCycleState::ALIVE);
 
   DEBUG_ASSERT(memory_priority_ == MemoryPriority::DEFAULT);
+}
+
+zx_status_t VmAddressRegionOrMapping::DestroyLocked() {
+  if (is_mapping_) {
+    return static_cast<VmMapping*>(this)->DestroyLockedImpl();
+  }
+  return static_cast<VmAddressRegion*>(this)->DestroyLockedImpl();
+}
+
+zx_status_t VmAddressRegionOrMapping::Activate() {
+  if (is_mapping_) {
+    return static_cast<VmMapping*>(this)->ActivateImpl();
+  }
+  return static_cast<VmAddressRegion*>(this)->ActivateImpl();
+}
+
+void VmAddressRegionOrMapping::DumpLocked(uint depth, bool verbose) const {
+  if (is_mapping_) {
+    static_cast<const VmMapping*>(this)->DumpLockedImpl(depth, verbose);
+  } else {
+    static_cast<const VmAddressRegion*>(this)->DumpLockedImpl(depth, verbose);
+  }
+}
+
+void VmAddressRegionOrMapping::CommitHighMemoryPriority() {
+  if (is_mapping_) {
+    static_cast<VmMapping*>(this)->CommitHighMemoryPriorityImpl();
+  } else {
+    static_cast<VmAddressRegion*>(this)->CommitHighMemoryPriorityImpl();
+  }
+}
+
+void VmAddressRegionOrMapping::fbl_recycle() {
+  if (is_mapping_) {
+    delete static_cast<VmMapping*>(this);
+  } else {
+    delete static_cast<VmAddressRegion*>(this);
+  }
 }

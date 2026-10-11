@@ -58,6 +58,9 @@
             from: "#role_manager",
             to: [ "#fshost" ],
         },
+
+        // Needed for kms_stateless (/dev/class/tee) and so component_manager stops #fshost before
+        // #devfs (which triggers boot driver shutdown and zx_system_powerctl).
         {
             directory: "dev-topological",
             from: "#devfs",
@@ -103,7 +106,6 @@
                 "fuchsia.fshost.ProvisionFxfs",
                 "fuchsia.fshost.RamdiskImage",
                 "fuchsia.fshost.StarnixVolumeName",
-                "fuchsia.fshost.WatchDeprecatedV1Drivers",
             ],
             from: "parent",
             to: "#fshost",

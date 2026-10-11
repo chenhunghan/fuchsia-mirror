@@ -7,7 +7,6 @@ use ffx_config::{ConfigError, EnvironmentContext};
 use ffx_target_remove_args::RemoveCommand;
 use ffx_writer::{ToolIO as _, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool, Result, bug, return_bug, return_user_error};
-use fidl_fuchsia_developer_ffx as ffx;
 use manual_targets::{Config, ManualTargets, ManualTargetsError};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -96,64 +95,6 @@ impl RemoveTool {
         } else {
             return_user_error!("need to specify a target name or address or use the --all option")
         }
-    }
-    #[allow(dead_code)]
-    async fn remove_impl(
-        context: &EnvironmentContext,
-        target_collection: ffx::TargetCollectionProxy,
-        cmd: RemoveCommand,
-        writer: &mut <Self as FfxMain>::Writer,
-    ) -> Result<String> {
-        if cmd.all {
-            let cfg = Config::new_from_context(context);
-            Self::remove_all_targets(writer, &target_collection, &cfg).await
-        } else if let Some(name_or_addr) = cmd.name_or_addr {
-            if target_collection
-                .remove_target(&name_or_addr)
-                .await
-                .map_err(|e| bug!("Cannot remove target: {e}"))?
-            {
-                Ok("Removed.".to_string())
-            } else {
-                Ok("No matching target found.".to_string())
-            }
-        } else {
-            return_user_error!("need to specify a target name or address or use the --all option")
-        }
-    }
-
-    #[allow(dead_code)]
-    async fn remove_all_targets(
-        writer: &mut <Self as FfxMain>::Writer,
-        target_collection: &ffx::TargetCollectionProxy,
-        cfg: &Config,
-    ) -> Result<String> {
-        let list = match cfg.storage_get().await {
-            Ok(v) => v,
-            Err(ManualTargetsError::Config(ConfigError::NoValueSet(_))) => {
-                return Ok("No manual targets found.".into());
-            }
-            Err(e) => return_bug!(e),
-        };
-
-        if let Some(arr) = list.as_object() {
-            for (k, _) in arr {
-                if target_collection
-                    .remove_target(&k)
-                    .await
-                    .map_err(|e| bug!("Cannot remove target: {e}"))?
-                {
-                    writeln!(writer.stderr(), "Removed {k}").map_err(|e| bug!(e))?;
-                } else {
-                    // This most likely happens when the daemon is restarted when running
-                    // this command and the manual target collection has not been loaded yet.
-                    // It will work the second time.
-                    writeln!(writer.stderr(),"No matching target for {k} found. {}",
-                     "This is most likely because the daemon just started. Please run this command again.").map_err(|e| bug!(e))?;
-                }
-            }
-        }
-        Ok(String::from(""))
     }
 }
 

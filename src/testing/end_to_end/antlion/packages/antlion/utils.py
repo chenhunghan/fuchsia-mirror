@@ -6,25 +6,18 @@
 
 from __future__ import annotations
 
-import concurrent.futures
-import datetime
 import ipaddress
-import json
 import logging
-import os
 import platform
 import random
 import re
-import signal
 import socket
 import string
 import subprocess
 import time
-import traceback
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import fuchsia_async_extension
 from libs.proc import job
@@ -32,13 +25,8 @@ from libs.proc.runner import CalledProcessError, Runner
 from mobly import signals
 
 if TYPE_CHECKING:
-    from antlion.controllers.android_device import AndroidDevice
     from antlion.controllers.fuchsia_device import FuchsiaDevice
     from libs.ssh.connection import SshConnection
-
-# File name length is limited to 255 chars on some OS, so we need to make sure
-# the file names we output fits within the limit.
-MAX_FILENAME_LEN = 255
 
 # All Fuchsia devices use this suffix for link-local mDNS host names.
 FUCHSIA_MDNS_TYPE = "_fuchsia._udp.local."
@@ -48,80 +36,6 @@ FUCHSIA_MDNS_TYPE = "_fuchsia._udp.local."
 DAD_TIMEOUT_SEC = 30
 
 
-class ActsUtilsError(Exception):
-    """Generic error raised for exceptions in ACTS utils."""
-
-
-ascii_letters_and_digits = string.ascii_letters + string.digits
-valid_filename_chars = f"-_.{ascii_letters_and_digits}"
-
-models = (
-    "sprout",
-    "occam",
-    "hammerhead",
-    "bullhead",
-    "razor",
-    "razorg",
-    "shamu",
-    "angler",
-    "volantis",
-    "volantisg",
-    "mantaray",
-    "fugu",
-    "ryu",
-    "marlin",
-    "sailfish",
-)
-
-manufacture_name_to_model = {
-    "flo": "razor",
-    "flo_lte": "razorg",
-    "flounder": "volantis",
-    "flounder_lte": "volantisg",
-    "dragon": "ryu",
-}
-
-GMT_to_olson = {
-    "GMT-9": "America/Anchorage",
-    "GMT-8": "US/Pacific",
-    "GMT-7": "US/Mountain",
-    "GMT-6": "US/Central",
-    "GMT-5": "US/Eastern",
-    "GMT-4": "America/Barbados",
-    "GMT-3": "America/Buenos_Aires",
-    "GMT-2": "Atlantic/South_Georgia",
-    "GMT-1": "Atlantic/Azores",
-    "GMT+0": "Africa/Casablanca",
-    "GMT+1": "Europe/Amsterdam",
-    "GMT+2": "Europe/Athens",
-    "GMT+3": "Europe/Moscow",
-    "GMT+4": "Asia/Baku",
-    "GMT+5": "Asia/Oral",
-    "GMT+6": "Asia/Almaty",
-    "GMT+7": "Asia/Bangkok",
-    "GMT+8": "Asia/Hong_Kong",
-    "GMT+9": "Asia/Tokyo",
-    "GMT+10": "Pacific/Guam",
-    "GMT+11": "Pacific/Noumea",
-    "GMT+12": "Pacific/Fiji",
-    "GMT+13": "Pacific/Tongatapu",
-    "GMT-11": "Pacific/Midway",
-    "GMT-10": "Pacific/Honolulu",
-}
-
-
-def abs_path(path: str) -> str:
-    """Resolve the '.' and '~' in a path to get the absolute path.
-
-    Args:
-        path: The path to expand.
-
-    Returns:
-        The absolute path of the input path.
-    """
-    return os.path.abspath(os.path.expanduser(path))
-
-
 def get_current_epoch_time() -> int:
     """Current epoch time in milliseconds.
 
@@ -129,81 +43,6 @@ def get_current_epoch_time() -> int:
         An integer representing the current epoch time in milliseconds.
     """
     return int(round(time.time() * 1000))
-
-
-def get_current_human_time() -> str:
-    """Returns the current time in human readable format.
-
-    Returns:
-        The current time stamp in Month-Day-Year Hour:Min:Sec format.
-    """
-    return time.strftime("%m-%d-%Y %H:%M:%S ")
-
-
-def epoch_to_human_time(epoch_time: int) -> str | None:
-    """Converts an epoch timestamp to human readable time.
-
-    This essentially converts an output of get_current_epoch_time to an output
-    of get_current_human_time
-
-    Args:
-        epoch_time: An integer representing an epoch timestamp in milliseconds.
-
-    Returns:
-        A time string representing the input time.
-        None if input param is invalid.
-    """
-    if isinstance(epoch_time, int):
-        try:
-            d = datetime.datetime.fromtimestamp(epoch_time / 1000)
-            return d.strftime("%m-%d-%Y %H:%M:%S ")
-        except ValueError:
-            return None
-
-
-def get_timezone_olson_id() -> str:
-    """Return the Olson ID of the local (non-DST) timezone.
-
-    Returns:
-        A string representing one of the Olson IDs of the local (non-DST)
-        timezone.
-    """
-    tzoffset = int(time.timezone / 3600)
-    gmt = None
-    if tzoffset <= 0:
-        gmt = f"GMT+{-tzoffset}"
-    else:
-        gmt = f"GMT-{tzoffset}"
-    return GMT_to_olson[gmt]
-
-
-def load_config(file_full_path: str, log_errors: bool = True) -> Any:
-    """Loads a JSON config file.
-
-    Returns:
-        A JSON object.
-    """
-    with open(file_full_path, "r") as f:
-        try:
-            return json.load(f)
-        except Exception as e:
-            if log_errors:
-                logging.error("Exception error to load %s: %s", f, e)
-            raise
-
-
-def rand_ascii_str(length: int) -> str:
-    """Generates a random string of specified length, composed of ascii letters
-    and digits.
-
-    Args:
-        length: The number of characters in the string.
-
-    Returns:
-        The random string generated.
-    """
-    letters = [random.choice(ascii_letters_and_digits) for i in range(length)]
-    return "".join(letters)
 
 
 def rand_hex_str(length: int) -> str:
@@ -217,373 +56,6 @@ def rand_hex_str(length: int) -> str:
     """
     letters = [random.choice(string.hexdigits) for i in range(length)]
     return "".join(letters)
-
-
-# Thead/Process related functions.
-def concurrent_exec(func: Any, param_list: Any) -> list[Any]:
-    """Executes a function with different parameters pseudo-concurrently.
-
-    This is basically a map function. Each element (should be an iterable) in
-    the param_list is unpacked and passed into the function. Due to Python's
-    GIL, there's no true concurrency. This is suited for IO-bound tasks.
-
-    Args:
-        func: The function that parforms a task.
-        param_list: A list of iterables, each being a set of params to be
-            passed into the function.
-
-    Returns:
-        A list of return values from each function execution. If an execution
-        caused an exception, the exception object will be the corresponding
-        result.
-    """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-        # Start the load operations and mark each future with its params
-        future_to_params = {executor.submit(func, *p): p for p in param_list}
-        return_vals = []
-        for future in concurrent.futures.as_completed(future_to_params):
-            params = future_to_params[future]
-            try:
-                return_vals.append(future.result())
-            except Exception as exc:
-                print(
-                    f"{params} generated an exception: {traceback.format_exc()}"
-                )
-                return_vals.append(exc)
-        return return_vals
-
-
-def exe_cmd(*cmds: Any) -> bytes:
-    """Executes commands in a new shell.
-
-    Args:
-        cmds: A sequence of commands and arguments.
-
-    Returns:
-        The output of the command run.
-
-    Raises:
-        OSError is raised if an error occurred during the command execution.
-    """
-    cmd = " ".join(cmds)
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
-    )
-    (out, err) = proc.communicate()
-    if not err:
-        return out
-    raise OSError(err)
-
-
-def require_sl4a(android_devices: list[AndroidDevice]) -> None:
-    """Makes sure sl4a connection is established on the given AndroidDevice
-    objects.
-
-    Args:
-        android_devices: A list of AndroidDevice objects.
-
-    Raises:
-        AssertionError is raised if any given android device does not have SL4A
-        connection established.
-    """
-    for ad in android_devices:
-        msg = f"SL4A connection not established properly on {ad.serial}."
-        assert ad.droid, msg
-
-
-def _assert_subprocess_running(proc: subprocess.Popen[bytes]) -> None:
-    """Checks if a subprocess has terminated on its own.
-
-    Args:
-        proc: A subprocess returned by subprocess.Popen.
-
-    Raises:
-        ActsUtilsError is raised if the subprocess has stopped.
-    """
-    ret = proc.poll()
-    if ret is not None:
-        out, err = proc.communicate()
-        raise ActsUtilsError(
-            "Process %d has terminated. ret: %d, stderr: %s,"
-            " stdout: %s" % (proc.pid, ret, str(err), str(out))
-        )
-
-
-def start_standing_subprocess(
-    cmd: str, check_health_delay: int = 0, shell: bool = True
-) -> subprocess.Popen[bytes]:
-    """Starts a long-running subprocess.
-
-    This is not a blocking call and the subprocess started by it should be
-    explicitly terminated with stop_standing_subprocess.
-
-    For short-running commands, you should use exe_cmd, which blocks.
-
-    You can specify a health check after the subprocess is started to make sure
-    it did not stop prematurely.
-
-    Args:
-        cmd: string, the command to start the subprocess with.
-        check_health_delay: float, the number of seconds to wait after the
-                            subprocess starts to check its health. Default is 0,
-                            which means no check.
-
-    Returns:
-        The subprocess that got started.
-    """
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=shell,
-        preexec_fn=os.setpgrp,
-    )
-    logging.debug("Start standing subprocess with cmd: %s", cmd)
-    if check_health_delay > 0:
-        time.sleep(check_health_delay)
-        _assert_subprocess_running(proc)
-    return proc
-
-
-def stop_standing_subprocess(
-    proc: subprocess.Popen[bytes], kill_signal: signal.Signals = signal.SIGTERM
-) -> None:
-    """Stops a subprocess started by start_standing_subprocess.
-
-    Before killing the process, we check if the process is running, if it has
-    terminated, ActsUtilsError is raised.
-
-    Catches and ignores the PermissionError which only happens on Macs.
-
-    Args:
-        proc: Subprocess to terminate.
-    """
-    pid = proc.pid
-    logging.debug("Stop standing subprocess %d", pid)
-    _assert_subprocess_running(proc)
-    try:
-        os.killpg(pid, kill_signal)
-    except PermissionError:
-        pass
-
-
-def wait_for_standing_subprocess(
-    proc: subprocess.Popen[bytes], timeout: int | None = None
-) -> None:
-    """Waits for a subprocess started by start_standing_subprocess to finish
-    or times out.
-
-    Propagates the exception raised by the subprocess.wait(.) function.
-    The subprocess.TimeoutExpired exception is raised if the process timed-out
-    rather then terminating.
-
-    If no exception is raised: the subprocess terminated on its own. No need
-    to call stop_standing_subprocess() to kill it.
-
-    If an exception is raised: the subprocess is still alive - it did not
-    terminate. Either call stop_standing_subprocess() to kill it, or call
-    wait_for_standing_subprocess() to keep waiting for it to terminate on its
-    own.
-
-    Args:
-        p: Subprocess to wait for.
-        timeout: An integer number of seconds to wait before timing out.
-    """
-    proc.wait(timeout)
-
-
-def sync_device_time(
-    ad: AndroidDevice,
-) -> None:
-    """Sync the time of an android device with the current system time.
-
-    Both epoch time and the timezone will be synced.
-
-    Args:
-        ad: The android device to sync time on.
-    """
-    ad.adb.shell("settings put global auto_time 0", ignore_status=True)
-    ad.adb.shell("settings put global auto_time_zone 0", ignore_status=True)
-    droid = ad.droid
-    if not droid:
-        raise signals.ControllerError("missing ad.droid")
-    droid.setTimeZone(get_timezone_olson_id())
-    droid.setTime(get_current_epoch_time())
-
-
-def set_ambient_display(ad: AndroidDevice, new_state: bool) -> None:
-    """Set "Ambient Display" in Settings->Display
-
-    Args:
-        ad: android device object.
-        new_state: new state for "Ambient Display". True or False.
-    """
-    ad.adb.shell(f"settings put secure doze_enabled {1 if new_state else 0}")
-
-
-def set_location_service(ad: AndroidDevice, new_state: bool) -> None:
-    """Set Location service on/off in Settings->Location
-
-    Args:
-        ad: android device object.
-        new_state: new state for "Location service".
-            If new_state is False, turn off location service.
-            If new_state if True, set location service to "High accuracy".
-    """
-    ad.adb.shell(
-        "content insert --uri "
-        " content://com.google.settings/partner --bind "
-        "name:s:network_location_opt_in --bind value:s:1"
-    )
-    ad.adb.shell(
-        "content insert --uri "
-        " content://com.google.settings/partner --bind "
-        "name:s:use_location_for_services --bind value:s:1"
-    )
-    if new_state:
-        ad.adb.shell("settings put secure location_mode 3")
-    else:
-        ad.adb.shell("settings put secure location_mode 0")
-
-
-def parse_ping_ouput(
-    ad: AndroidDevice, count: int, out: str, loss_tolerance: int = 20
-) -> bool:
-    """Ping Parsing util.
-
-    Args:
-        ad: Android Device Object.
-        count: Number of ICMP packets sent
-        out: shell output text of ping operation
-        loss_tolerance: Threshold after which flag test as false
-    Returns:
-        False: if packet loss is more than loss_tolerance%
-        True: if all good
-    """
-    result = re.search(
-        r"(\d+) packets transmitted, (\d+) received, (\d+)% packet loss", out
-    )
-    if not result:
-        ad.log.info("Ping failed with %s", out)
-        return False
-
-    packet_loss = int(result.group(3))
-    packet_xmit = int(result.group(1))
-    packet_rcvd = int(result.group(2))
-    min_packet_xmit_rcvd = (100 - loss_tolerance) * 0.01
-    if (
-        packet_loss > loss_tolerance
-        or packet_xmit < count * min_packet_xmit_rcvd
-        or packet_rcvd < count * min_packet_xmit_rcvd
-    ):
-        ad.log.error(
-            "%s, ping failed with loss more than tolerance %s%%",
-            result.group(0),
-            loss_tolerance,
-        )
-        return False
-    ad.log.info("Ping succeed with %s", result.group(0))
-    return True
-
-
-def adb_shell_ping(
-    ad: AndroidDevice,
-    dest_ip: str,
-    count: int = 120,
-    timeout: int = 200,
-    loss_tolerance: int = 20,
-) -> bool:
-    """Ping utility using adb shell.
-
-    Args:
-        ad: Android Device Object.
-        count: Number of ICMP packets to send
-        dest_ip: hostname or IP address
-                 default www.google.com
-        timeout: timeout for icmp pings to complete.
-    """
-    ping_cmd = "ping -W 1"
-    if count:
-        ping_cmd += f" -c {count}"
-    if dest_ip:
-        ping_cmd += f" {dest_ip}"
-    try:
-        ad.log.info(
-            "Starting ping test to %s using adb command %s", dest_ip, ping_cmd
-        )
-        out = str(ad.adb.shell(ping_cmd, timeout=timeout, ignore_status=True))
-        if not parse_ping_ouput(ad, count, out, loss_tolerance):
-            return False
-        return True
-    except Exception as e:
-        ad.log.warning("Ping Test to %s failed with exception %s", dest_ip, e)
-        return False
-
-
-def zip_directory(zip_name: str, src_dir: str) -> None:
-    """Compress a directory to a .zip file.
-
-    This implementation is thread-safe.
-
-    Args:
-        zip_name: str, name of the generated archive
-        src_dir: str, path to the source directory
-    """
-    with zipfile.ZipFile(zip_name, "w", zipfile.ZIP_DEFLATED) as zip:
-        for root, dirs, files in os.walk(src_dir):
-            for file in files:
-                path = os.path.join(root, file)
-                zip.write(path, os.path.relpath(path, src_dir))
-
-
-def unzip_maintain_permissions(zip_path: str, extract_location: str) -> None:
-    """Unzip a .zip file while maintaining permissions.
-
-    Args:
-        zip_path: The path to the zipped file.
-        extract_location: the directory to extract to.
-    """
-    with zipfile.ZipFile(zip_path, "r") as zip_file:
-        for info in zip_file.infolist():
-            _extract_file(zip_file, info, extract_location)
-
-
-def _extract_file(
-    zip_file: zipfile.ZipFile, zip_info: zipfile.ZipInfo, extract_location: str
-) -> None:
-    """Extracts a single entry from a ZipFile while maintaining permissions.
-
-    Args:
-        zip_file: A zipfile.ZipFile.
-        zip_info: A ZipInfo object from zip_file.
-        extract_location: The directory to extract to.
-    """
-    out_path = zip_file.extract(zip_info.filename, path=extract_location)
-    perm = zip_info.external_attr >> 16
-    os.chmod(out_path, perm)
-
-
-def get_command_uptime(command_regex: str) -> str:
-    """Returns the uptime for a given command.
-
-    Args:
-        command_regex: A regex that matches the command line given. Must be
-            pgrep compatible.
-    """
-    pid = job.run(f"pgrep -f {command_regex}").stdout.decode("utf-8")
-    runtime = ""
-    if pid:
-        runtime = job.run(f'ps -o etime= -p "{pid}"').stdout.decode("utf-8")
-    return runtime
-
-
-def get_device_process_uptime(adb: Any, process: str | int) -> Any:
-    """Returns the uptime of a device process."""
-    pid = adb.shell(f"pidof {process}", ignore_status=True)
-    runtime = ""
-    if pid:
-        runtime = adb.shell(f'ps -o etime= -p "{pid}"')
-    return runtime
 
 
 def is_valid_ipv4_address(address: str) -> bool:
@@ -612,15 +84,15 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_interface_ip_addresses(
-    comm_channel: AndroidDevice | SshConnection | FuchsiaDevice,
+    comm_channel: SshConnection | FuchsiaDevice,
     interface: str,
 ) -> dict[str, list[str]]:
     """Gets all of the ip addresses, ipv4 and ipv6, associated with a
        particular interface name.
 
     Args:
-        comm_channel: How to send commands to a device.  Can be ssh, adb serial,
-            etc.  Must have the run function implemented.
+        comm_channel: How to send commands to a device.  Can be ssh, etc.
+            Must have the run function implemented.
         interface: The interface name on the device, ie eth0
 
     Returns:
@@ -632,19 +104,12 @@ def get_interface_ip_addresses(
             ipv6_public: Any publicly routable addresses
     """
     # Local imports are used here to prevent cyclic dependency.
-    from antlion.controllers.android_device import AndroidDevice
     from antlion.controllers.fuchsia_device import FuchsiaDevice
     from libs.ssh.connection import SshConnection
 
     addrs: list[str] = []
 
-    if isinstance(comm_channel, AndroidDevice):
-        addrs = str(
-            comm_channel.adb.shell(
-                f'ip -o addr show {interface} | awk \'{{gsub("/", " "); print $4}}\''
-            )
-        ).splitlines()
-    elif isinstance(comm_channel, SshConnection):
+    if isinstance(comm_channel, SshConnection):
         ip = comm_channel.run(["ip", "-o", "addr", "show", interface])
         addrs = [
             addr.replace("/", " ").split()[3]
@@ -710,7 +175,7 @@ class MultipleAddresses(signals.TestError):
 
 
 def get_addr(
-    comm_channel: AndroidDevice | SshConnection | FuchsiaDevice,
+    comm_channel: SshConnection | FuchsiaDevice,
     interface: str,
     addr_type: str = "ipv4_private",
     timeout_sec: int | None = None,
@@ -806,9 +271,9 @@ def renew_linux_ip_address(runner: Runner, interface: str) -> None:
     except CalledProcessError:
         # No prior dhclient process or lease to release.
         pass
-    # Flush existing IP addresses to ensure stale leases from previous networks
+    # Flush existing IPv4 addresses to ensure stale leases from previous networks
     # are removed, preventing MultipleAddresses errors when a new lease is assigned.
-    runner.run(f"sudo ip addr flush dev {interface}")
+    runner.run(f"sudo ip -4 addr flush dev {interface}")
     # Negotiate a fresh lease for the current network scope and start a new daemon.
     runner.run(f"sudo dhclient {interface}")
 
@@ -1017,21 +482,6 @@ def ip_in_subnet(ip: str, subnet: str) -> bool:
         True, if ip in subnet, else False
     """
     return ipaddress.ip_address(ip) in ipaddress.ip_network(subnet)
-
-
-def mac_address_list_to_str(mac_addr_list: bytes) -> str:
-    """Converts list of decimal octets representing mac address to string.
-
-    Args:
-        mac_addr_list: list, representing mac address octets in decimal
-            e.g. [18, 52, 86, 120, 154, 188]
-
-    Returns:
-        string, mac address
-            e.g. '12:34:56:78:9a:bc'
-    """
-    # Print each octet as hex, right justified, width of 2, and fill with "0".
-    return ":".join([f"{octet:0>2x}" for octet in mac_addr_list])
 
 
 def get_fuchsia_mdns_ipv6_address(device_mdns_name: str) -> None | str:

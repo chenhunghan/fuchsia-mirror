@@ -16,8 +16,6 @@ from abc import ABC, abstractmethod
 
 from antlion import context
 from antlion.capabilities.ssh import SSHConfig
-from antlion.controllers.adb_lib.error import AdbCommandError
-from antlion.controllers.android_device import AndroidDevice
 from antlion.controllers.fuchsia_lib.ssh import SSHProvider
 from libs.commands.date import LinuxDateCommand
 from libs.types import ControllerConfig, Json
@@ -26,20 +24,21 @@ from libs.validation import MapValidator
 MOBLY_CONTROLLER_CONFIG_NAME: str = "IPerfClient"
 
 
-class IPerfError(Exception):
-    """Raised on execution errors of iPerf."""
-
-
 def create(configs: list[ControllerConfig]) -> list[IPerfClientBase]:
     """Factory method for iperf clients.
 
-    The function creates iperf clients based on at least one config.
+    The function creates iperf clients based on config.
     If configs contain ssh settings, remote iperf clients
-    will be started on those devices, otherwise, the client will run on the
-    local machine.
+    over ssh will be started on those devices.
 
     Args:
-        configs: config parameters for the iperf server
+        configs: config parameters for the iperf client
+
+    Returns:
+        A list of iperf client objects connected over SSH.
+
+    Raises:
+        ValueError: If a config entry is missing 'ssh_config'.
     """
     results: list[IPerfClientBase] = []
     for config in configs:
@@ -55,7 +54,9 @@ def create(configs: list[ControllerConfig]) -> list[IPerfClientBase]:
                 )
             )
         else:
-            results.append(IPerfClient())
+            raise ValueError(
+                f"Config entry {config} in {configs} is missing 'ssh_config'."
+            )
     return results
 
 
@@ -66,10 +67,6 @@ def destroy(objects: list[IPerfClientBase]) -> None:
 
 def get_info(objects: list[IPerfClientBase]) -> list[Json]:
     return []
-
-
-class RouteNotFound(ConnectionError):
-    """Failed to find a route to the iperf server."""
 
 
 class IPerfClientBase(ABC):
@@ -138,59 +135,13 @@ class IPerfClientBase(ABC):
                 client. Eg: iperf_args = "-t 10 -p 5001 -w 512k/-u -b 200M -J".
             tag: A string to further identify iperf results file
             timeout: the maximum amount of time the iperf client can run.
-            iperf_binary: Location of iperf3 binary. If none, it is assumed the
+            iperf_binary: Location of iperf3 binary. If none, it is assumed
                 the binary is in the path.
 
         Returns:
             full_out_path: iperf result path.
         """
         raise NotImplementedError("start() must be implemented.")
-
-
-class IPerfClient(IPerfClientBase):
-    """Class that handles iperf3 client operations."""
-
-    @property
-    def test_interface(self) -> str | None:
-        return None
-
-    def start(
-        self,
-        ip: str,
-        iperf_args: str,
-        tag: str,
-        timeout: int = 3600,
-        iperf_binary: str | None = None,
-    ) -> str:
-        """Starts iperf client, and waits for completion.
-
-        Args:
-            ip: iperf server ip address.
-            iperf_args: A string representing arguments to start iperf
-            client. Eg: iperf_args = "-t 10 -p 5001 -w 512k/-u -b 200M -J".
-            tag: tag to further identify iperf results file
-            timeout: unused.
-            iperf_binary: Location of iperf3 binary. If none, it is assumed the
-                the binary is in the path.
-
-        Returns:
-            full_out_path: iperf result path.
-        """
-        if not iperf_binary:
-            logging.debug(
-                "No iperf3 binary specified.  "
-                "Assuming iperf3 is in the path."
-            )
-            iperf_binary = "iperf3"
-        else:
-            logging.debug(f"Using iperf3 binary located at {iperf_binary}")
-        iperf_cmd = [str(iperf_binary), "-c", ip] + iperf_args.split(" ")
-        full_out_path = self._get_full_file_path(tag)
-
-        with open(full_out_path, "w") as out_file:
-            subprocess.call(iperf_cmd, stdout=out_file)
-
-        return full_out_path
 
 
 class IPerfClientOverSsh(IPerfClientBase):
@@ -230,7 +181,7 @@ class IPerfClientOverSsh(IPerfClientBase):
             client. Eg: iperf_args = "-t 10 -p 5001 -w 512k/-u -b 200M -J".
             tag: tag to further identify iperf results file
             timeout: the maximum amount of time to allow the iperf client to run
-            iperf_binary: Location of iperf3 binary. If none, it is assumed the
+            iperf_binary: Location of iperf3 binary. If none, it is assumed
                 the binary is in the path.
 
         Returns:
@@ -264,77 +215,5 @@ class IPerfClientOverSsh(IPerfClientBase):
 
         with open(full_out_path, "wb") as out_file:
             out_file.write(stdout)
-
-        return full_out_path
-
-
-class IPerfClientOverAdb(IPerfClientBase):
-    """Class that handles iperf3 operations over ADB devices."""
-
-    def __init__(
-        self, android_device: AndroidDevice, test_interface: str | None = None
-    ):
-        """Creates a new IPerfClientOverAdb object.
-
-        Args:
-            android_device_or_serial: Either an AndroidDevice object, or the
-                serial that corresponds to the AndroidDevice. Note that the
-                serial must be present in an AndroidDevice entry in the ACTS
-                config.
-            test_interface: The network interface that will be used to send
-                traffic to the iperf server.
-        """
-        self._android_device = android_device
-        self._test_interface = test_interface
-
-    @property
-    def test_interface(self) -> str | None:
-        return self._test_interface
-
-    def start(
-        self,
-        ip: str,
-        iperf_args: str,
-        tag: str,
-        timeout: int = 3600,
-        iperf_binary: str | None = None,
-    ) -> str:
-        """Starts iperf client, and waits for completion.
-
-        Args:
-            ip: iperf server ip address.
-            iperf_args: A string representing arguments to start iperf
-            client. Eg: iperf_args = "-t 10 -p 5001 -w 512k/-u -b 200M -J".
-            tag: tag to further identify iperf results file
-            timeout: the maximum amount of time to allow the iperf client to run
-            iperf_binary: Location of iperf3 binary. If none, it is assumed the
-                the binary is in the path.
-
-        Returns:
-            The iperf result file path.
-        """
-        clean_out = ""
-        try:
-            if not iperf_binary:
-                logging.debug(
-                    "No iperf3 binary specified.  "
-                    "Assuming iperf3 is in the path."
-                )
-                iperf_binary = "iperf3"
-            else:
-                logging.debug(f"Using iperf3 binary located at {iperf_binary}")
-            iperf_cmd = f"{iperf_binary} -c {ip} {iperf_args}"
-            out = self._android_device.adb.shell(
-                str(iperf_cmd), timeout=timeout
-            )
-            clean_out = out.split("\n")
-            if "error" in clean_out[0].lower():
-                raise IPerfError(clean_out)
-        except (subprocess.TimeoutExpired, AdbCommandError):
-            logging.warning("TimeoutError: Iperf measurement failed.")
-
-        full_out_path = self._get_full_file_path(tag)
-        with open(full_out_path, "w") as out_file:
-            out_file.write("\n".join(clean_out))
 
         return full_out_path

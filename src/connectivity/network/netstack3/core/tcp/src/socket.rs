@@ -63,7 +63,7 @@ use netstack3_base::{
     TimerBindingsTypes, TimerContext, TxMetadataBindingsTypes, WeakDeviceIdentifier,
     ZonedAddressError,
 };
-use netstack3_filter::{FilterIpExt, SocketOpsFilterBindingContext, Tuple};
+use netstack3_filter::{FilterIpExt, SocketOpsFilterBindingContext, TransportTuple, Tuple};
 use netstack3_hashmap::{HashMap, hash_map};
 use netstack3_ip::socket::{
     DeviceIpSocketHandler, IpSock, IpSockCreateAndSendError, IpSockCreationError, IpSocketArgs,
@@ -4350,11 +4350,12 @@ where
                 let (local_addr, local_port) = local;
                 let (remote_addr, remote_port) = remote;
                 Tuple {
-                    protocol: IpProto::Tcp.into(),
                     src_addr: local_addr.addr(),
                     dst_addr: remote_addr.addr(),
-                    src_port_or_id: local_port.get(),
-                    dst_port_or_id: remote_port.get(),
+                    transport: TransportTuple::Tcp {
+                        src_port: local_port.get(),
+                        dst_port: remote_port.get(),
+                    },
                 }
             }
 

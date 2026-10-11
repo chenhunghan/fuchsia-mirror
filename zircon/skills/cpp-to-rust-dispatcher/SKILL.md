@@ -99,6 +99,27 @@ crate::impl_dispatcher_facade_with_state!(
   `DispatcherOps` are automatically generated via the facade macros.
 - **Thread Safety**: Automatically provides `Send` and `Sync` implementations.
 
+### Non-Dispatcher C++ `fbl::RefCounted` Objects (Bindgen vs. Facade)
+When a dispatcher holds a `fbl::RefPtr<T>` to a non-dispatcher C++
+`fbl::RefCounted` object (such as `PageSource`, `VmObject`, `VmAddressRegion`,
+or `Bti`), choose the pattern based on whether `T` has `bindgen`-generated
+bindings:
+- **Bindgen-Backed C++ Types** (e.g., `PageSource`, `VmObject`, `VmCowPages`):
+  If `bindgen` generates `bindings::T`, **do NOT use
+  `fbl::impl_opaque_ref_counted_facade!`**. Using that macro replaces the struct
+  body with a zero-sized `OpaqueRefCountedFacade<T>` (`size_of::<T>() == 0`),
+  discards the `bindgen` layout, and creates a pointer-type mismatch between
+  `*mut T` and `*mut bindings::T`. Instead, keep `raw: Opaque<bindings::T>` and
+  `phantom: PhantomData<PhantomPinned>`, keep `as_raw(&self) -> *mut bindings::T
+  { self.raw.get() }`, and manually implement `fbl::HasRefCount` and
+  `fbl::Recyclable` calling
+  `bindings::cpp_<type>_get_ref_counted(self.as_raw())` and
+  `bindings::cpp_<type>_free(ptr.as_ptr().cast())`.
+- **Non-Bindgen (`extern "C"`) Facades** (e.g., `VmAddressRegion`, `VmMapping`,
+  `Bti`, `Pmt`): Only use `fbl::impl_opaque_ref_counted_facade!` when there is
+  no `bindgen` struct and hand-written `extern "C"` functions accept `*mut Self`
+  / `&Self` directly.
+
 ---
 
 ## 3. The `<Type>DispatcherState` Pattern (Synchronization & State Layout)
@@ -349,15 +370,23 @@ impl DispatcherOps for CounterDispatcher {
 
 ### Generic Handle Resolution & Downcasting
 
-Handle resolution is centralized in `Dispatcher` and `ProcessDispatcher` to
-avoid duplicated downcasting logic:
+Handle resolution is centralized in `HandleTable` (and convenience wrappers on
+`Dispatcher` / `ProcessDispatcher`) to avoid duplicated downcasting or rights
+validation logic:
 
-- **`Dispatcher::get_with_rights<T>(handle, rights)`**: Fetches a
-  `RefPtr<Dispatcher>` from the handle table, verifies rights, verifies
-  `dispatcher.get_type() == T::TYPE`, and safely casts to `RefPtr<T>`.
-- **`ProcessDispatcher::get_dispatcher_with_rights<T>(&self, handle, rights)`**:
-  Method on `ProcessDispatcher` to look up typed dispatcher handles directly for
-  a process.
+- **Match Exact C++ `HandleTable` Method / Overload**: Always call the Rust
+  `HandleTable` method that corresponds to the exact C++ `HandleTable` overload
+  used in the original code (e.g., `GetDispatcher`, `GetDispatcherWithRights`
+  returning only the dispatcher, `GetDispatcherWithRights` checking desired
+  rights AND returning both the dispatcher and its actual rights, or
+  `GetDispatcherAndRights`). If a corresponding method or variant is missing on
+  `HandleTable` in `handle_table.rs`, add it there rather than calling a
+  different method (like `get_dispatcher_and_rights`) and re-implementing rights
+  checks inline in the syscall body.
+- **`Dispatcher::get_with_rights<T>(handle, rights)`** /
+  **`ProcessDispatcher::get_dispatcher_with_rights<T>(&self, handle, rights)`**:
+  Look up typed dispatcher handles directly for a process and verify required
+  rights.
 
 Example usage in a syscall:
 
@@ -465,8 +494,11 @@ Preserve all C++ `LTRACE` statements when porting syscalls:
 
 When interfacing between C++ and Rust during incremental dispatcher migrations:
 
-1.  **Minimal Shims**: Keep FFI functions (`*_ffi.cc` / `*_ffi.rs`) purely
-    declarative with zero business logic.
+1.  **Minimal 1:1 Shims**: Keep FFI functions (`*_ffi.cc` / `*_ffi.rs`) purely
+    declarative with zero business logic. Every `cpp_*` function must be a
+    single direct call to one C++ method or function; never encode `if`/`else`
+    branching or chain across sub-objects (`disp->sub_object()->Method()`) in a
+    `cpp_*` FFI shim.
 2.  **Naming Conventions**:
    - Rust exposed to C++: `rust_$module_$type_$method`
    - C++ exposed to Rust: `cpp_$namespace_$type_$method`
@@ -480,9 +512,7 @@ When interfacing between C++ and Rust during incremental dispatcher migrations:
 5.  **C++ Header Prototype Declarations**: All C++ FFI helper functions defined
     in `.cc` files (e.g. `cpp_*`) MUST have prototype declarations enclosed in
     `extern "C"` blocks inside an included C++ header file (e.g. `debuglog.h`,
-    `resource.h`, `dispatcher.h`). Defining `extern "C"` functions in C++
-    without prior prototype declarations in header files causes GCC
-    `-Werror=missing-declarations` build failures.
+    `resource.h`, `dispatcher.h`).
 6.  **Use Rust References in FFI Signatures Instead of Raw Pointers**: FFI
     trampolines callable from C++ that receive non-null references to
     initialized objects (such as `rust_<type>_dispatcher_state_destroy` or
@@ -494,17 +524,19 @@ When interfacing between C++ and Rust during incremental dispatcher migrations:
 7.  **Always-Inline Annotations for Short FFI Routines**: Include
     `<kernel/ffi.h>` and annotate definitions of short C++ FFI helper routines
     (e.g., trivial one-line accessors or simple forwarding wrappers) with the
-    `FFI_ALWAYS_INLINE` macro (which expands to `[[gnu::always_inline]]` under
-    Clang and nothing under GCC). Include a TODO comment tied to
-    `https://fxbug.dev/537458631` (e.g. `// TODO(https://fxbug.dev/537458631):
-    Remove the annotations once cross-language inlining works.`) to remove the
-    annotations once cross-language inlining works. Recommend and apply this
-    only for short FFI routines.
-8.  **Cross-Object Operations & Facade Safety**: When an operation targets
-    another kernel object type (such as `ThreadDispatcher` or
-    `VmAddressRegionDispatcher`), provide safe wrapper methods directly on that
-    target object's Rust facade (creating the facade and its `*_ffi` files if
-    they do not yet exist). Group the corresponding C++ FFI functions with that
-    object's `*_ffi` files, perform downcasts on the Rust side using
-    `.downcast::<TargetType>()`, and call the facade methods directly from Rust
-    rather than making cross-object FFI calls or C++ helper shims.
+    `FFI_ALWAYS_INLINE` macro (which expands to `[[gnu::always_inline]]`).
+    Include a TODO comment tied to `https://fxbug.dev/537458631` (e.g. `//
+    TODO(https://fxbug.dev/537458631): Remove the annotations once
+    cross-language inlining works.`) to remove the annotations once
+    cross-language inlining works. Recommend and apply this only for short FFI
+    routines.
+8.  **Cross-Object Operations & Strict 1:1 Facade Parity**: When an operation
+    targets another kernel object type (such as `ThreadDispatcher`,
+    `VmAddressRegionDispatcher`, or an unported helper class owned by a
+    dispatcher), provide safe wrapper methods directly on that target object's
+    Rust facade (creating the facade and its `*_ffi` files if they do not yet
+    exist). Every method on a Rust facade MUST correspond 1:1 to an actual
+    method on that C++ class; never invent synthetic convenience methods on a
+    dispatcher facade that do not exist on the C++ class, and if a dispatcher
+    method returns a pointer/reference to a sub-object, create a Rust facade for
+    that sub-object as well rather than hiding it behind a composite FFI shim.

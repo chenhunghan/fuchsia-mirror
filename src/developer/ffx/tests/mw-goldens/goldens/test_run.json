@@ -1,0 +1,93 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "TestToolMessage",
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "cannot_create_directory": {
+                    "type": "object",
+                    "properties": {
+                        "err": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "err"
+                    ]
+                }
+            },
+            "required": [
+                "cannot_create_directory"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "properties": {
+                "list_tests": {
+                    "type": "object",
+                    "properties": {
+                        "tests": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/TestName"
+                            }
+                        }
+                    },
+                    "required": [
+                        "tests"
+                    ]
+                }
+            },
+            "required": [
+                "list_tests"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "properties": {
+                "test_results": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "test_results"
+            ],
+            "additionalProperties": false
+        }
+    ],
+    "definitions": {
+        "TestName": {
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": [
+                        "no_name_given"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "test": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "name"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "test"
+                    ],
+                    "additionalProperties": false
+                }
+            ]
+        }
+    }
+}

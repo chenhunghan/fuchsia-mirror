@@ -9,6 +9,7 @@
     program: {
         runner: "elf",
         binary: "bin/hwinfo",
+        lifecycle: { stop_event: "notify" },
     },
     capabilities: [
         {
@@ -17,6 +18,7 @@
                 "fuchsia.hwinfo.Device",
                 "fuchsia.hwinfo.Product",
             ],
+            delivery: "on_readable",
         },
     ],
     use: [
@@ -25,6 +27,21 @@
             availability: "optional",
         },
         { protocol: "fuchsia.boot.Items" },
+        {
+            protocol: "fuchsia.hwinfo.Board",
+            from: "self",
+            path: "/escrow/fuchsia.hwinfo.Board",
+        },
+        {
+            protocol: "fuchsia.hwinfo.Device",
+            from: "self",
+            path: "/escrow/fuchsia.hwinfo.Device",
+        },
+        {
+            protocol: "fuchsia.hwinfo.Product",
+            from: "self",
+            path: "/escrow/fuchsia.hwinfo.Product",
+        },
         {
             directory: "config-data",
             rights: [ "r*" ],

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{connect, Overnet};
+use super::{Overnet, connect};
 
-use anyhow::{format_err, Error};
-use fuchsia_async::OnSignalsRef;
+use anyhow::{Error, format_err};
+use fidl::OnSignalsRef;
 use futures::prelude::*;
 use overnet_core::NodeIdGenerator;
 use std::pin::pin;

@@ -37,11 +37,6 @@ from typing import (
     get_origin,
 )
 
-_PYTHON_3_12 = sys.version_info >= (
-    3,
-    12,
-)
-
 
 class Undefined(Enum):
     """Missing fields always fails. Added for API compatibility."""
@@ -70,7 +65,7 @@ def _identity(x: Any) -> Any:
     return x
 
 
-def _default_decoder(cls: type, field_type: type) -> Callable[[Any], Any]:
+def _default_decoder(cls: type, field_type: Any) -> Callable[[Any], Any]:
     origin = get_origin(field_type)
     if origin is list or origin is abc.Sequence:
         inner_types = get_args(field_type)
@@ -88,21 +83,19 @@ def _default_decoder(cls: type, field_type: type) -> Callable[[Any], Any]:
         )
         return field_type.from_dict
     elif isinstance(field_type, ForwardRef):
-        resolved_decoder = None
+        resolved_decoder: Optional[Callable[[Any], Any]] = None
 
-        def decode_forward_ref(x):
+        def decode_forward_ref(x: Any) -> Any:
             nonlocal resolved_decoder
             if resolved_decoder:
                 return resolved_decoder(x)
-            evaluate_kwargs = dict()
-            if _PYTHON_3_12:
-                evaluate_kwargs["recursive_guard"] = frozenset()
-            resolved_decoder = field_type._evaluate(
-                sys.modules.get(cls.__module__).__dict__,
+            module = sys.modules.get(cls.__module__)
+            resolved_decoder = eval(
+                field_type.__forward_code__,
+                module.__dict__ if module else None,
                 vars(cls),
-                set(),
-                **evaluate_kwargs,
             ).from_dict
+            assert resolved_decoder is not None
             return resolved_decoder(x)
 
         return decode_forward_ref

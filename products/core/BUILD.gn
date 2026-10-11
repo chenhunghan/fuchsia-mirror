@@ -11,6 +11,9 @@ assert(
     "Product definitions and assemblies should only be defined in the fuchsia toolchain")
 
 _bazel_inputs = core_bazel_inputs
+if (target_cpu == "riscv64") {
+  not_needed([ "_bazel_inputs" ])
+}
 
 group("core") {
   testonly = true

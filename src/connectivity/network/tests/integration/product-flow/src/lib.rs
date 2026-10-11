@@ -30,7 +30,7 @@ use net_declare::{fidl_subnet, std_ip};
 use net_types::ip::IpVersion;
 
 use assert_matches::assert_matches;
-use netemul::{InStack, RealmTcpListener as _, RealmTcpStream as _, RealmUdpSocket as _};
+use netemul::{RealmTcpListener as _, RealmTcpStream as _, RealmUdpSocket as _};
 use netstack_testing_common::constants::ipv6 as ipv6_consts;
 use netstack_testing_common::realms::{KnownServiceProvider, Netstack3, TestSandboxExt as _};
 use netstack_testing_common::{dhcpv4, interfaces, ndp};
@@ -63,7 +63,10 @@ async fn interface_disruption(name: &str, ip_supported: IpSupported) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
 
     let client_realm = sandbox
-        .create_netstack_realm::<Netstack3, _>(format!("{}_client", name))
+        .create_netstack_realm_with::<Netstack3, _, _>(
+            format!("{}_client", name),
+            &[KnownServiceProvider::DhcpClient],
+        )
         .expect("failed to create client netstack realm");
     let server_realm = sandbox
         .create_netstack_realm_with::<Netstack3, _, _>(
@@ -169,7 +172,7 @@ async fn interface_disruption(name: &str, ip_supported: IpSupported) {
         }
     };
 
-    client_if.start_dhcp::<InStack>().await.expect("start DHCPv4 client");
+    client_if.start_dhcp().await.expect("start DHCPv4 client");
 
     let server_v4 = {
         let dhcpv4::TestConfig { server_addr: fnet::Ipv4Address { addr }, managed_addrs: _ } =
@@ -391,9 +394,7 @@ async fn interface_disruption(name: &str, ip_supported: IpSupported) {
                 let got = client_udp.send_to(message.as_bytes(), server_sockaddr).await;
 
                 assert_matches!(got, Err(e) => {
-                    // TODO(https://github.com/rust-lang/rust/issues/86442): once
-                    // std::io::ErrorKind::HostUnreachable is stable, we should use that instead.
-                    assert_eq!(e.raw_os_error(), Some(libc::EHOSTUNREACH));
+                    assert_eq!(e.kind(), std::io::ErrorKind::NetworkUnreachable);
                 });
             },
             async {

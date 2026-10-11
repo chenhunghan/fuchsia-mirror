@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "restricted_trampoline",
+    srcs = select({
+        "@platforms//cpu:arm64": ["src/trampoline_arm64.S"],
+        "@platforms//cpu:riscv64": ["src/trampoline_riscv64.S"],
+        "@platforms//cpu:x86_64": ["src/trampoline_x64.S"],
+    }),
+    implementation_deps = ["//src/starnix/lib/asm_utils"],
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
+)

@@ -191,6 +191,14 @@ async fn main() {
     bench::<ProdNetstack3, Ipv4>("bench", protocol, message_size, flows, true /* bench */).await;
 }
 
+/// UDP socket buffer size to request from iperf3.
+///
+/// The netstack charges each queued datagram its in-memory overhead in
+/// addition to its payload, so with the default buffer the receiver can drop
+/// small datagrams under an unthrottled sender. Use a larger buffer to leave
+/// more headroom.
+const UDP_WINDOW: &str = "1M";
+
 async fn bench<N: Netstack, I: TestIpExt>(
     name: &str,
     protocol: Protocol,
@@ -234,8 +242,12 @@ async fn bench<N: Netstack, I: TestIpExt>(
                                 if bench { "-t5" } else { "-n1" },
                             ]
                             .into_iter()
-                            .chain((protocol == Protocol::Udp).then_some("-u"))
                             .collect();
+                            if protocol == Protocol::Udp {
+                                // iperf3 forwards the window to the server,
+                                // which applies it to its receiving socket.
+                                client_args.extend(["-u", "--window", UDP_WINDOW]);
+                            }
 
                             if bench {
                                 server_args.extend(&["--logfile", &server_output_file]);

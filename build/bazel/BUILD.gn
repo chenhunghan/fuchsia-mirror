@@ -40,7 +40,7 @@ generated_file("bazel_content_hashes_json") {
 #
 # These will be used to trigger new runs of the bazel_sdk_test_xxx targets
 # if the content of these directory changes. And the
-# //build/bazel_sdk/tests/script/bazel_test.py script will ensure that their
+# //build/bazel_sdk/tests/scripts/run_tests.py script will ensure that their
 # values are passed to the test workspace.
 #
 generate_prebuilt_dir_content_hash(prebuilt_content_hash_targets.python) {
@@ -364,24 +364,22 @@ generated_file("gn_build_variables_for_bazel") {
 
   # LINT.ThenChange(//build/rust/config.gni)
 
-  deps = [ ":test_environments_for_bazel($default_toolchain)" ]
+  # LINT.IfChange(experimental_cxx_version)
+  declaration = "//build/config/fuchsia_cxx_version.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "experimental_cxx_version"
+      value = experimental_cxx_version
+      type = "string_or_false"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/fuchsia_cxx_version.gni:experimental_cxx_version)
 }
 
 if (current_toolchain == default_toolchain) {
-  # Generates a JSON file containing all Fuchsia target test environment
-  # definitions from //build/testing/environments.gni. It is used by
-  # `generate_fuchsia_build_info()` to generate
-  # `@fuchsia_build_info//:environments.bzl`.
-  generated_file("test_environments_for_bazel") {
-    # LINT.IfChange(test_environments_for_bazel_path)
-    outputs = [ "$root_build_dir/test_environments_for_bazel.json" ]
-
-    # LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:test_environments_for_bazel_path)
-    output_conversion = "json"
-    contents = {
-      import("//build/testing/environments.gni")
-    }
-  }
   group("bazel_args_json") {
     deps = [
       "//build/bazel/config:bazel_args_json($default_toolchain)",

@@ -283,8 +283,8 @@ fuchsia::sysmem::BufferCollectionConstraints CodecAdapterLc3Decoder::BufferColle
   } else {
     c.min_buffer_count_for_camping = kMinOutputBufferCountForCamping;
 
-    ZX_ASSERT(codec_params_.has_value());
-    c.buffer_memory_constraints.min_size_bytes = static_cast<uint32_t>(MinOutputBufferSize());
+    ZX_ASSERT(min_output_buffer_size_.has_value());
+    c.buffer_memory_constraints.min_size_bytes = *min_output_buffer_size_;
     c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;  // arbitrary value.
   }
 

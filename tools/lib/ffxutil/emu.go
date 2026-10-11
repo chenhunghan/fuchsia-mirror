@@ -107,6 +107,7 @@ func (f *FFXInstance) EmuStartConsole(ctx context.Context, sdkRoot, name string,
 	dryRunCommand := append(args, "--dry-run")
 	if err := f.EmuStart(dryRunCommand...).run(ctx); err != nil {
 		logger.Debugf(ctx, "failed to run dry-run command: %s", err)
+		return nil, err
 	}
 	return f.EmuStart(args...).cmd(), nil
 }

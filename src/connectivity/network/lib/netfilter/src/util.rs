@@ -4,7 +4,7 @@
 
 use pest::iterators::Pair;
 
-use fidl_fuchsia_net as net;
+use flex_fuchsia_net as net;
 
 use crate::grammar::{Error, Rule};
 

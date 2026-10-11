@@ -95,3 +95,32 @@ def load(build_dir: Path) -> RbeSettings:
 def exists(build_dir: Path) -> bool:
     """Returns True if the RBE settings file exists in the specified build directory."""
     return (build_dir / _SETTINGS_FILE).is_file()
+
+
+def fake(**overrides: Any) -> RbeSettings:
+    """Returns a valid in-memory RbeSettings instance for unit tests."""
+    defaults: dict[str, Any] = {
+        "bazel_enable": False,
+        "bazel_exec_strategy": "",
+        "bazel_download_outputs": "all",
+        "cxx_download_objects": True,
+        "cxx_enable": False,
+        "cxx_exec_strategy": "",
+        "cxx_minimalist_wrapper": True,
+        "link_download_unstripped_outputs": True,
+        "link_enable": False,
+        "link_exec_strategy": "",
+        "rust_download_rlibs": True,
+        "rust_download_unstripped_binaries": True,
+        "rust_enable": False,
+        "rust_exec_strategy": "",
+        "needs_reproxy": False,
+        "needs_auth": False,
+    }
+    unknown_keys = set(overrides) - set(defaults)
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown RbeSettings field(s) in overrides: {sorted(unknown_keys)}"
+        )
+    defaults.update(overrides)
+    return RbeSettings.from_dict(defaults)

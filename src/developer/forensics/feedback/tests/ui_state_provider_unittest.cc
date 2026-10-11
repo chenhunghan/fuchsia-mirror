@@ -5,7 +5,6 @@
 #include "src/developer/forensics/feedback/annotations/ui_state_provider.h"
 
 #include <fidl/fuchsia.ui.activity/cpp/fidl.h>
-#include <fuchsia/ui/activity/cpp/fidl.h>
 #include <lib/async-testing/test_loop.h>
 #include <lib/zx/time.h>
 
@@ -97,11 +96,71 @@ TEST_F(UIStateProviderTest, GetOnUpdate) {
                                {Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("idle"))}));
 }
 
-TEST_F(UIStateProviderTest, OnStateChangedExecutesCallback) {
-  bool acknowledgement = false;
-  ui_state_provider_->OnStateChanged(fuchsia::ui::activity::State::ACTIVE, zx::sec(1).get(),
-                                     [&acknowledgement]() { acknowledgement = true; });
-  EXPECT_TRUE(acknowledgement);
+TEST_F(UIStateProviderTest, DoesNotReconnectIfNotFound) {
+  Annotations annotations;
+
+  ui_state_provider_->GetOnUpdate(
+      [&annotations](const Annotations& cached_annotations) { annotations = cached_annotations; });
+
+  EXPECT_THAT(annotations, IsEmpty());
+
+  RunLoopUntilIdle();
+  EXPECT_THAT(annotations, UnorderedElementsAreArray({
+                               Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("unknown")),
+                           }));
+
+  server_.CloseConnection(ZX_ERR_NOT_FOUND);
+  ASSERT_FALSE(server_.IsBound());
+
+  server_.SetState(fuchsia_ui_activity::State::kActive, zx::time_monotonic(0));
+
+  // Run past backoff.
+  RunLoopFor(zx::sec(2));
+  EXPECT_FALSE(server_.IsBound());
+
+  EXPECT_THAT(
+      annotations,
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentStateKey, ErrorOrString(Error::kNotAvailableInProduct)),
+      }));
+  EXPECT_THAT(
+      ui_state_provider_->Get(),
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString(Error::kNotAvailableInProduct)),
+      }));
+}
+
+TEST_F(UIStateProviderTest, DoesNotReconnectIfNotFoundAfterListenerDisconnect) {
+  Annotations annotations;
+
+  ui_state_provider_->GetOnUpdate(
+      [&annotations](const Annotations& cached_annotations) { annotations = cached_annotations; });
+
+  RunLoopUntilIdle();
+  EXPECT_THAT(annotations, UnorderedElementsAreArray({
+                               Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("unknown")),
+                           }));
+
+  // Simulates fuchsia.ui.activity.Provider being unavailable, where the listener client end is
+  // dropped at the same time the provider channel is closed with ZX_ERR_NOT_FOUND.
+  server_.UnbindListener();
+  server_.CloseConnection(ZX_ERR_NOT_FOUND);
+  ASSERT_FALSE(server_.IsBound());
+
+  // Run past monotonic backoff.
+  RunLoopFor(zx::sec(2));
+  EXPECT_FALSE(server_.IsBound());
+
+  EXPECT_THAT(
+      annotations,
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentStateKey, ErrorOrString(Error::kNotAvailableInProduct)),
+      }));
+  EXPECT_THAT(
+      ui_state_provider_->Get(),
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString(Error::kNotAvailableInProduct)),
+      }));
 }
 
 TEST_F(UIStateProviderTest, ReconnectsOnProviderDisconnect) {
@@ -161,9 +220,10 @@ TEST_F(UIStateProviderTest, ReconnectsOnListenerDisconnect) {
   server_.UnbindListener();
   server_.SetState(fuchsia_ui_activity::State::kActive, zx::time_monotonic(0));
 
-  // Connection should stay closed until Backoff allows it to reconnect
+  // Listener should stay closed until Backoff allows it to reconnect. The provider connection is
+  // left open so that a concurrent ZX_ERR_NOT_FOUND epitaph on it isn't missed.
   RunLoopUntilIdle();
-  ASSERT_FALSE(server_.IsBound());
+  ASSERT_TRUE(server_.IsBound());
   EXPECT_THAT(annotations,
               UnorderedElementsAreArray({
                   Pair(kSystemUserActivityCurrentStateKey, ErrorOrString(Error::kConnectionError)),
@@ -177,6 +237,72 @@ TEST_F(UIStateProviderTest, ReconnectsOnListenerDisconnect) {
   ASSERT_TRUE(server_.IsBound());
   EXPECT_THAT(annotations, UnorderedElementsAreArray({
                                Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("active")),
+                           }));
+  EXPECT_THAT(ui_state_provider_->Get(),
+              UnorderedElementsAreArray({
+                  Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString("000d00h00m01s")),
+              }));
+}
+
+TEST_F(UIStateProviderTest, ResetsBackoffOnSuccess) {
+  Annotations annotations;
+
+  ui_state_provider_->GetOnUpdate(
+      [&annotations](const Annotations& cached_annotations) { annotations = cached_annotations; });
+
+  RunLoopUntilIdle();
+  EXPECT_THAT(annotations, UnorderedElementsAreArray({
+                               Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("unknown")),
+                           }));
+
+  server_.CloseConnection(ZX_ERR_PEER_CLOSED);
+  ASSERT_FALSE(server_.IsBound());
+
+  server_.SetState(fuchsia_ui_activity::State::kActive, zx::time_monotonic(0));
+
+  RunLoopUntilIdle();
+  EXPECT_THAT(annotations,
+              UnorderedElementsAreArray({
+                  Pair(kSystemUserActivityCurrentStateKey, ErrorOrString(Error::kConnectionError)),
+              }));
+  EXPECT_THAT(
+      ui_state_provider_->Get(),
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString(Error::kConnectionError)),
+      }));
+
+  RunLoopFor(zx::sec(1));
+  ASSERT_TRUE(server_.IsBound());
+  EXPECT_THAT(annotations, UnorderedElementsAreArray({
+                               Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("active")),
+                           }));
+  EXPECT_THAT(ui_state_provider_->Get(),
+              UnorderedElementsAreArray({
+                  Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString("000d00h00m01s")),
+              }));
+
+  server_.CloseConnection(ZX_ERR_PEER_CLOSED);
+  ASSERT_FALSE(server_.IsBound());
+
+  server_.SetState(fuchsia_ui_activity::State::kIdle, zx::time_monotonic(zx::sec(1).get()));
+
+  // Backoff should have been reset after the previous successful connection, so it should reconnect
+  // after 1s instead of 2s.
+  RunLoopUntilIdle();
+  EXPECT_THAT(annotations,
+              UnorderedElementsAreArray({
+                  Pair(kSystemUserActivityCurrentStateKey, ErrorOrString(Error::kConnectionError)),
+              }));
+  EXPECT_THAT(
+      ui_state_provider_->Get(),
+      UnorderedElementsAreArray({
+          Pair(kSystemUserActivityCurrentDurationKey, ErrorOrString(Error::kConnectionError)),
+      }));
+
+  RunLoopFor(zx::sec(1));
+  ASSERT_TRUE(server_.IsBound());
+  EXPECT_THAT(annotations, UnorderedElementsAreArray({
+                               Pair(kSystemUserActivityCurrentStateKey, ErrorOrString("idle")),
                            }));
   EXPECT_THAT(ui_state_provider_->Get(),
               UnorderedElementsAreArray({

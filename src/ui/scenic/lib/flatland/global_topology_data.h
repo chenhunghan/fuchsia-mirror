@@ -7,6 +7,10 @@
 
 #include <lib/trace/event.h>
 
+#include <memory_resource>
+#include <unordered_map>
+#include <vector>
+
 #include "src/ui/scenic/lib/flatland/transform_handle.h"
 #include "src/ui/scenic/lib/flatland/uber_struct.h"
 #include "src/ui/scenic/lib/view_tree/snapshot_types.h"
@@ -32,7 +36,12 @@ struct GlobalTopologyData {
   // is declared because while this map is created by the LinkSystem, it is only ever consumed
   // by ComputeGlobalTopologyData().
   // Link handle acts as the key and child view watcher handle as the value.
-  using LinkTopologyMap = std::unordered_map<TransformHandle, TransformHandle>;
+  using LinkTopologyMap = std::pmr::unordered_map<TransformHandle, TransformHandle>;
+
+  // Mapping from the `child_transform_handle` of each `LinkSystem::LinkToParent` to the
+  // corresponding `parent_transform_handle` from each `LinkSystem::LinkToChild`. Created by
+  // `LinkSystem::GetLinkChildToParentTransformMap()` and consumed by `GenerateViewTreeSnapshot()`.
+  using ChildToParentTransformMap = std::pmr::unordered_map<TransformHandle, TransformHandle>;
 
   // The list of transforms reachable from a particular root, sorted in topological (i.e.,
   // depth-first) order. This vector may contain TransformHandles from multiple TransformGraphs,
@@ -51,9 +60,6 @@ struct GlobalTopologyData {
 
   // Clear all fields without freeing memory, so that it avoid reallocation when reused.
   void Clear();
-
-  // Return true if all fields are cleared/empty.
-  bool IsCleared() const;
 
   // The list of direct child counts for each entry in the |topology_vector|.
   using ChildCountVector = std::vector<uint64_t>;
@@ -91,7 +97,7 @@ struct GlobalTopologyData {
       // Acquired from |LinkSystem::GetLinkChildToParentTransformMap|. Used to get the
       // TransformHandle of the parent end of a Link using the child's TransformHandle, in order to
       // fetch its clip region.
-      const std::unordered_map<TransformHandle, TransformHandle>& child_to_parent_transform_map);
+      const ChildToParentTransformMap& child_to_parent_transform_map);
 };
 
 }  // namespace flatland

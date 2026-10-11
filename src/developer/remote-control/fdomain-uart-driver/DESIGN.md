@@ -8,12 +8,12 @@ Fuchsia target device and bridges a physical or virtual serial port
 (`/dev/class/serial`) to the Remote Control Service
 (`fuchsia.developer.remotecontrol.connector/Connector`).
 
-The wire framing, Fletcher-16 checksum verification, handshake state machine,
-and sliding-window Go-Back-N (`ProtocolId::ResendSP`) reliability layer are
-shared with the host via `//src/lib/uart_fpl` and documented in
-[`//src/developer/ffx/tools/uart_driver/DESIGN.md`][host-design]. This document
-describes the target component's lifecycle, task pipeline, and target-specific
-architectural choices.
+The wire framing, CRC-8 header and CRC-32 payload checksum verification,
+handshake state machine, and sliding-window Go-Back-N (`ProtocolId::ResendSP`)
+reliability layer are shared with the host via `//src/developer/lib/uart_fpl`
+and documented in [`//src/developer/ffx/tools/uart_driver/DESIGN.md`][host-design].
+This document describes the target component's lifecycle, task pipeline, and
+target-specific architectural choices.
 
 ---
 
@@ -112,7 +112,7 @@ outgoing `FrameType::Data` frames causes two problems under load:
    already known wastes UART bandwidth.
 
 Instead, `receiver_task` and `writer_task` share an `AckTracker`
-(`//src/lib/uart_fpl`):
+(`//src/developer/lib/uart_fpl`):
 * `AckTracker` is a single-slot latest-value register (`Option<(u32, u8)>`)
   paired with a `futures::task::AtomicWaker`. Calling
   `ack_tracker.set_ack(session_id, seq)` overwrites any unsent older ACK in

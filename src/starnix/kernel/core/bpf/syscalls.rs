@@ -336,6 +336,7 @@ pub fn sys_bpf(
             };
             let name = validate_bpf_name(prog_attr.prog_name.as_bytes())?;
             let info = ProgramInfo::try_from(&prog_attr)?;
+            Program::check_load_access(current_task, &info)?;
             let program_type = info.program_type;
             let program = Program::new(current_task, info, &mut log_buffer, code);
             let program_or_stub = match (program, program_type) {

@@ -134,6 +134,19 @@ impl Name {
     }
 }
 
+impl LongName {
+    /// Converts this [`LongName`] into a [`Name`] without reallocating.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the length of the name exceeds [`MAX_NAME_LENGTH`].
+    #[inline]
+    pub fn to_short_infallible(self) -> Name {
+        assert!(self.0.len() <= MAX_NAME_LENGTH, "long name does not fit in short name");
+        BoundedName(self.0)
+    }
+}
+
 impl<const N: usize> BoundedName<N> {
     /// Creates a `BoundedName` from a `&str` slice, returning an `Err` if the string
     /// fails validation. The string must be non-empty, no more than `N`

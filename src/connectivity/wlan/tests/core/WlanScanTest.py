@@ -10,11 +10,11 @@ from datetime import datetime
 import fidl_fuchsia_wlan_internal as f_wlan_internal
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion.controllers.access_point import AccessPoint, setup_ap
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.access_point import AccessPoint, setup_ap
+from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     SecurityMode as DeprecatedSecurityMode,
 )
 from mobly import asserts, test_runner

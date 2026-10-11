@@ -7,12 +7,8 @@ import("//build/dist/resource.gni")
 import("//build/rust/rustc_library.gni")
 
 lib_deps = [
-  "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-  "//sdk/rust/zx-status",
   "//src/lib/buf-read-ext",
   "//src/lib/collections/packed",
-  "//src/lib/fidl/rust/fidl",
-  "//src/lib/fuchsia-fs",
   "//src/lib/fuchsia-url",
   "//src/lib/tempfile-ext",
   "//src/lib/utf8_path",
@@ -61,6 +57,15 @@ lib_sources = [
   "src/test.rs",
 ]
 
+if (is_fuchsia) {
+  target_deps = [
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/rust/zx-status",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-fs",
+  ]
+}
+
 rustc_library("fuchsia-pkg") {
   version = "0.1.0"
   edition = "2024"
@@ -69,6 +74,9 @@ rustc_library("fuchsia-pkg") {
   assert_no_deps = [ "//src/lib/assembly/*" ]
 
   deps = lib_deps
+  if (is_fuchsia) {
+    deps += target_deps
+  }
   sources = lib_sources
   configs += [ "//build/config/rust/lints:clippy_warn_all" ]
 }
@@ -95,7 +103,7 @@ if (is_fuchsia) {
   rustc_test("lib_test") {
     edition = "2024"
     output_name = "fuchsia_pkg_lib_test"
-    deps = lib_deps + test_deps
+    deps = lib_deps + test_deps + target_deps
     sources = lib_sources
   }
 

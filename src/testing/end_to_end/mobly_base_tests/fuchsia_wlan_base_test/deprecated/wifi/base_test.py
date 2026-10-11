@@ -8,21 +8,21 @@ Base Class for Defining Common WiFi Test Functionality
 """
 
 import logging
-from typing import TypedDict, TypeVar
+from typing import Protocol, TypedDict, TypeVar
 
 import fuchsia_async_extension
 import openwrt_access_point
 from antlion import context, controllers
-from antlion.controllers.access_point import AccessPoint
-from antlion.controllers.ap_lib.hostapd_security import SecurityMode
 from antlion.controllers.attenuator import Attenuator
 from antlion.controllers.fuchsia_device import FuchsiaDevice
 from antlion.controllers.pdu import PduDevice
 from antlion.test_utils.abstract_devices.wlan_device import FuchsiaWlanDevice
-from antlion.types import Controller
 from honeydew.typing import custom_types
 from iperf.iperf_client import IPerfClientBase
 from iperf.iperf_server import IPerfServer, IPerfServerOverSsh
+from legacy_access_point.access_point import AccessPoint
+from legacy_access_point.ap_lib.hostapd_security import SecurityMode
+from libs.types import ControllerConfig, Json
 from mobly import signals
 from mobly.base_test import BaseTestClass
 from mobly.config_parser import TestRunConfig
@@ -55,6 +55,52 @@ class NetworkUpdate(TypedDict, total=False):
 NetworkList = dict[str, Network]
 
 _T = TypeVar("_T")
+
+
+class Controller(Protocol[_T]):
+    MOBLY_CONTROLLER_CONFIG_NAME: str
+    """Key used to get this controller's config from the Mobly config."""
+
+    def create(self, configs: list[ControllerConfig]) -> list[_T]:
+        """Create controller objects from configurations.
+
+        Args:
+            configs: A list of serialized data like string/dict. Each element of
+                the list is a configuration for a controller object.
+
+        Returns:
+          A list of controller objects.
+        """
+
+    def destroy(self, objects: list[_T]) -> None:
+        """Destroys controller objects.
+
+        Each controller object shall be properly cleaned up and all the
+        resources held should be released, e.g. memory allocation, sockets, file
+        handlers etc.
+
+        Args:
+            objects: A list of controller objects created by the create
+                function.
+        """
+
+    def get_info(self, objects: list[_T]) -> list[Json]:
+        """Gets info from the controller objects.
+
+        The info will be included in test_summary.yaml under the key
+        'ControllerInfo'. Such information could include unique ID, version, or
+        anything that could be useful for describing the test bed and debugging.
+
+        Args:
+            objects: A list of controller objects created by the create
+                function.
+
+        Returns:
+            A list of json serializable objects: each represents the info of a
+            controller object. The order of the info object should follow that
+            of the input objects.
+        """
+        return []
 
 
 class WifiBaseTest(BaseTestClass):

@@ -58,6 +58,7 @@ use mmio::MmioExt;
 use mmio::region::{MmioRegion, UnsafeMmio};
 use mmio::vmo::VmoMapper;
 
+use crate::atomic::{AtomicMmioPtr, AtomicOperand};
 use crate::cached_vmo::CachedVmoMemory;
 use crate::operand::MmioOperand;
 
@@ -66,6 +67,8 @@ mod dispatch;
 mod offset;
 mod passthrough;
 mod range_override;
+mod registry;
+mod w1c;
 
 pub use after_store::AfterStore;
 pub use dispatch::{
@@ -75,6 +78,8 @@ pub use dispatch::{
 pub use offset::Offset;
 pub use passthrough::Passthrough;
 pub use range_override::{MaybeVmoMemoryHandler, RangeOverride};
+pub use registry::{BaseRegistry, Registry, RegistryHandler, ScopedRegistry, StrictRegistry};
+pub use w1c::WriteOneToClear;
 
 #[cfg(test)]
 use range_override::MockMaybeVmoMemoryHandler;
@@ -264,6 +269,12 @@ impl<H: VmoMemoryHandler> UnsafeMmio for VmoMemory<H> {
     #[inline]
     fn write_barrier(&self) {
         self.vmo.write_barrier();
+    }
+}
+
+impl<H> AtomicMmioPtr for VmoMemory<H> {
+    fn ptr<T: AtomicOperand>(&self, offset: usize) -> std::ptr::NonNull<T> {
+        self.vmo.ptr(offset)
     }
 }
 

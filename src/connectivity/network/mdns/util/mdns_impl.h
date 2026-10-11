@@ -24,6 +24,8 @@ class MdnsImpl {
 
   ~MdnsImpl() = default;
 
+  void ExecuteCommand(const Command& command);
+
  private:
   class HostNameSubscriptionListener : public fuchsia::net::mdns::HostNameSubscriptionListener {
    public:
@@ -121,8 +123,6 @@ class MdnsImpl {
     std::unordered_map<std::string, std::unique_ptr<ServiceInstancePublicationResponder>>
         service_instance_publication_responders_by_instance_full_name_;
   };
-
-  void ExecuteCommand(const Command& command);
 
   void WaitForKeystroke();
 

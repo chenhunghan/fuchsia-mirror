@@ -11,7 +11,7 @@ use crate::tests::utils::{
 use fdomain_fuchsia_diagnostics::{
     ClientSelectorConfiguration, DataType, StreamMode, StreamParameters,
 };
-use ffx_writer::{Format, MachineWriter, TestBuffers};
+use ffx_writer::{Format, TestBuffers, VerifiedMachineWriter};
 use iquery_fdomain::commands::ListCommand;
 use std::rc::Rc;
 
@@ -26,7 +26,7 @@ async fn test_list_empty() {
     };
     let expected_responses = Rc::new(vec![]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = ListCommand { component: None, with_url: false, accessor: None };
     let client = fdomain_local::local_client_empty();
     let rcs_proxy = setup_fake_rcs(client.clone(), vec![]);
@@ -53,7 +53,7 @@ async fn test_list_with_data() {
     let value = serde_json::to_string(&lifecycles).unwrap();
     let expected_responses = Rc::new(vec![FakeArchiveIteratorResponse::new_with_value(value)]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = ListCommand { component: None, with_url: false, accessor: None };
     let client = fdomain_local::local_client_empty();
     let rcs_proxy = setup_fake_rcs(client.clone(), vec![]);
@@ -83,7 +83,7 @@ async fn test_list_with_data_with_url() {
     let value = serde_json::to_string(&lifecycles).unwrap();
     let expected_responses = Rc::new(vec![FakeArchiveIteratorResponse::new_with_value(value)]);
     let test_buffers = TestBuffers::default();
-    let mut writer = MachineWriter::new_test(Some(Format::Json), &test_buffers);
+    let mut writer = VerifiedMachineWriter::new_test(Some(Format::Json), &test_buffers);
     let cmd = ListCommand { component: None, with_url: true, accessor: None };
     let client = fdomain_local::local_client_empty();
     let rcs_proxy = setup_fake_rcs(client.clone(), vec![]);

@@ -30,10 +30,7 @@ use std::io::Read;
 const TRANSFER_CHUNK_SIZE: usize = 8192;
 
 async fn copy<W: std::io::Write>(source: Socket, mut sink: W) -> Result<()> {
-    #[cfg(not(feature = "fdomain"))]
-    let mut source = fuchsia_async::Socket::from_socket(source);
-    #[cfg(feature = "fdomain")]
-    let mut source = source;
+    let mut source = flex_client::socket_to_async(source);
     let mut buf = [0u8; TRANSFER_CHUNK_SIZE];
     loop {
         let bytes_read = source.read(&mut buf).await?;

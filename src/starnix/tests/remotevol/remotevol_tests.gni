@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
+import("//src/starnix/build/starnix_container_config_component.gni")
 
 # Defines a fuchsia_test_package for remotevol tests.
 #
@@ -12,6 +13,9 @@ import("//build/components.gni")
 #     Default: false
 #   kernel_base_manifest (required)
 #     Path to the base kernel manifest to build the test package.
+#   container_config (optional)
+#     Scope containing container configuration options.
+#     Default: {}
 #   test_specs (optional)
 #     The test_specs gets forwarded as-is.
 template("remotevol_test_package") {
@@ -23,6 +27,31 @@ template("remotevol_test_package") {
   assert(defined(invoker.kernel_base_manifest),
          "kernel_base_manifest must be defined")
   _kernel_base_manifest = invoker.kernel_base_manifest
+
+  _container_config = {
+  }
+  if (defined(invoker.container_config)) {
+    _container_config = invoker.container_config
+  }
+
+  _container_config_component = "${target_name}_config"
+
+  starnix_container_config_component(_container_config_component) {
+    config = _container_config
+  }
+
+  _container_config_shard_label = "${_container_config_component}_shard"
+  _container_config_shard =
+      "${target_gen_dir}/${_container_config_shard_label}.cml"
+
+  starnix_container_config_offers(_container_config_shard_label) {
+    output = _container_config_shard
+    offer_from = "#config"
+    offer_to = [
+      "#debian_container",
+      "#kernel",
+    ]
+  }
 
   # Generate a debian container shard with or without inline encryption that
   # will be used to build the kernel component manifest.
@@ -45,6 +74,10 @@ template("remotevol_test_package") {
           url = "debian#meta/${_debian_container_component_name}.cm"
           environment = "#starnix_kernel_env"
         },
+        {
+          name = "config"
+          url = "#meta/${_container_config_component}.cm"
+        },
       ]
     }
   }
@@ -61,9 +94,13 @@ template("remotevol_test_package") {
       include = [
         rebase_path(_kernel_base_manifest, root_build_dir),
         rebase_path(_debian_container_shard_file, root_build_dir),
+        rebase_path(_container_config_shard, root_build_dir),
       ]
     }
-    deps = [ ":${_debian_container_shard_label}" ]
+    deps = [
+      ":${_container_config_shard_label}",
+      ":${_debian_container_shard_label}",
+    ]
   }
 
   _kernel_component_target = "${target_name}_kernel_with_container"
@@ -81,14 +118,17 @@ template("remotevol_test_package") {
     forward_variables_from(invoker,
                            "*",
                            [
-                             "use_inline_encryption",
+                             "container_config",
                              "kernel_base_manifest",
-                             "test_specs",
+                             "use_inline_encryption",
                            ])
     if (!defined(deps)) {
       deps = []
     }
-    deps += [ ":${_kernel_component_target}" ]
+    deps += [
+      ":${_container_config_component}",
+      ":${_kernel_component_target}",
+    ]
   }
 }
 

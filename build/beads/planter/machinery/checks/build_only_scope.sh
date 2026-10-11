@@ -17,7 +17,7 @@ set -euo pipefail
 #   - BUILD.gn, BUILD.bazel, BUILD, *.BUILD.bazel, *.BUILD (any directory, including
 #     workspace/repo root build files such as build/bazel/toplevel.BUILD.bazel)
 #   - *.gni, *.bzl (build registration lists / macros, e.g. verification lists)
-#   - MODULE.bazel, WORKSPACE*, *.bazelrc
+#   - MODULE.bazel, *.MODULE.bazel, WORKSPACE*, *.bazelrc
 #   - a newly added (not modified) test component manifest `.cml` that an
 #     `fx_component_manifest` of the nearest BUILD.bazel uses as `manifest` next to an
 #     `fx_test_component` (it replaces the manifest GN's fuchsia_unittest_package generated;
@@ -38,7 +38,7 @@ workdir = os.path.abspath(sys.argv[1])
 target_dir = sys.argv[2].strip().strip("/")
 
 ALLOWED_BASENAMES = {"BUILD.gn", "BUILD.bazel", "BUILD", "MODULE.bazel"}
-ALLOWED_SUFFIXES = (".gni", ".bzl", ".bazelrc", ".BUILD.bazel", ".BUILD")
+ALLOWED_SUFFIXES = (".gni", ".bzl", ".bazelrc", ".BUILD.bazel", ".BUILD", ".MODULE.bazel")
 ALLOWED_PREFIX_BASENAMES = ("WORKSPACE",)
 
 

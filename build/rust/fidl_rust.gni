@@ -125,6 +125,7 @@ template("_fidl_rust_crate") {
         deps += [ "//sdk/rust/zx" ]
       }
 
+      # LINT.IfChange
       # TODO(https://fxbug.dev/42055130): Avoid this suppression. At the time of
       # writing it is needed because this target might depend on another FIDL
       # library *only* for type aliases; the generated Rust code will not
@@ -132,6 +133,8 @@ template("_fidl_rust_crate") {
       # cannot know here whether that's the case or not, so we just suppress
       # the warning.
       configs += [ "//build/config/rust/lints:allow_unused_crate_dependencies" ]
+
+      # LINT.ThenChange(//build/bazel/rules/fidl/fidl_rust_library.bzl)
 
       if (defined(invoker.public_deps)) {
         foreach(dep, invoker.public_deps) {

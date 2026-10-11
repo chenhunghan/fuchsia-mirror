@@ -171,9 +171,14 @@ mod tests {
         let json = serde_json::from_str(&stdout).expect(&err);
         let err = format!("json must adhere to schema: {json}");
         <PublishTool<ErrFakeTools> as FfxMain>::Writer::verify_schema(&json).expect(&err);
-        assert_eq!(
-            json,
-            serde_json::json!({"unexpected_error" :{"message": "BUG: An internal command error occurred.\nError: general error"}})
-        );
+        match serde_json::from_value::<CommandStatus>(json) {
+            Ok(CommandStatus::UnexpectedError { message }) => {
+                assert_eq!(
+                    message.split("\n\nStack backtrace:\n").next().unwrap(),
+                    "BUG: An internal command error occurred.\nError: general error"
+                );
+            }
+            other => panic!("Unexpected status: {other:?}"),
+        }
     }
 }

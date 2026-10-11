@@ -564,8 +564,8 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
   fbl::AutoLock lock(&state_lock_);
   //  If we have never attempted to load our language ID table, do so now.
   if (!lang_ids_.has_value()) {
-    usb_langid_desc_t id_desc;
-    size_t actual;
+    usb_langid_desc_t id_desc = {};
+    size_t actual = 0;
     auto result = GetDescriptor(fdescriptor::DescriptorType::kString, 0, 0, &id_desc,
                                 sizeof(id_desc), &actual);
     if (result == ZX_ERR_IO_REFUSED || result == ZX_ERR_IO_INVALID) {
@@ -574,16 +574,20 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
              zx_status_get_string(result));
       // some devices do not support fetching language list
       // in that case assume US English (0x0409)
-      result = hci_.ResetEndpoint(device_id_, 0);
-      zxlogf(INFO, "Reset endpoint complete with status %s", zx_status_get_string(result));
+      zx_status_t reset_result = hci_.ResetEndpoint(device_id_, 0);
+      if (reset_result != ZX_OK) {
+        zxlogf(ERROR, "failed to reset endpoint, err: %d", reset_result);
+        return result;
+      }
+      zxlogf(INFO, "Reset endpoint complete with status %s", zx_status_get_string(reset_result));
       id_desc.b_length = 4;
       id_desc.w_lang_ids[0] = htole16(0x0409);
       actual = 4;
-    } else if ((result == ZX_OK) &&
-               ((actual < 4) || (actual != id_desc.b_length) || (actual & 0x1))) {
-      return ZX_ERR_INTERNAL;
     } else if (result != ZX_OK) {
       return result;
+    } else if ((actual < 4) || (actual > sizeof(id_desc)) || (actual != id_desc.b_length) ||
+               (actual & 0x1)) {
+      return ZX_ERR_INTERNAL;
     }
 
     // So, if we have managed to fetch/synthesize a language ID table,
@@ -591,14 +595,12 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
     // valid number of entries in the table, and fixup the endianness of
     // all the entries in the table.  Then, attempt to swap in the new
     // language ID table.
-    if (result == ZX_OK) {
-      id_desc.b_length = static_cast<uint8_t>((id_desc.b_length - 2) >> 1);
+    id_desc.b_length = static_cast<uint8_t>((id_desc.b_length - 2) >> 1);
 #if BYTE_ORDER != LITTLE_ENDIAN
-      for (uint8_t i = 0; i < id_desc.b_length; ++i) {
-        id_desc.w_lang_ids[i] = letoh16(id_desc.w_lang_ids[i]);
-      }
-#endif
+    for (uint8_t i = 0; i < id_desc.b_length; ++i) {
+      id_desc.w_lang_ids[i] = letoh16(id_desc.w_lang_ids[i]);
     }
+#endif
     lang_ids_ = id_desc;
   }
 
@@ -625,9 +627,9 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
     lang_id = lang_ids_->w_lang_ids[0];
   }
 
-  usb_string_desc_t string_desc;
+  usb_string_desc_t string_desc = {};
   zxlogf(DEBUG, "Fetching string descriptor with lang_id %u", lang_id);
-  size_t actual;
+  size_t actual = 0;
   auto result = GetDescriptor(fdescriptor::DescriptorType::kString, desc_id, le16toh(lang_id),
                               &string_desc, sizeof(string_desc), &actual);
 
@@ -656,7 +658,7 @@ zx_status_t UsbDevice::UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id,
     return result;
   }
 
-  if ((actual < 2) || (actual != string_desc.b_length)) {
+  if ((actual < 2) || (actual > sizeof(string_desc)) || (actual != string_desc.b_length)) {
     result = ZX_ERR_INTERNAL;
   } else {
     // Success! Convert this result from UTF16LE to UTF8 and store the

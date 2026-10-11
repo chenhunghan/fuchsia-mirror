@@ -75,6 +75,24 @@ void LogMemory() {
 int TestMain(void* bootloader_data, ktl::optional<EarlyBootZbi> zbi, arch::EarlyTicks ticks) {
   MainSymbolize symbolize("phys-memory-test");
 
+#if defined(__riscv)
+  // TODO(https://fxbug.dev/571663247): Re-enable on riscv64.
+  //
+  // This test overwrites all of RAM with memset.  Under QEMU TCG, a hot loop
+  // whose code straddles a 4 KiB page boundary runs ~8-11x slower because
+  // TCG can't directly chain translation blocks across guest pages.  Whether
+  // memset's store loop straddles a page depends on the size of all the code
+  // linked before it, so unrelated changes can push this test from ~12s to
+  // ~95s and past its timeout.
+  constexpr bool kSkipTest = true;
+#else
+  constexpr bool kSkipTest = false;
+#endif
+  if (kSkipTest) {
+    printf("phys-memory-test: SKIPPED on this architecture.\n");
+    return 0;
+  }
+
   printf("Initializing memory...\n");
 
   // Initialize memory for allocation/free.

@@ -156,7 +156,6 @@ zx_status_t IsolatedDevmgr::Create(Args* args, IsolatedDevmgr* out) {
       Config{.name = "fuchsia.fshost.StarnixVolumeName"},
       Config{.name = "fuchsia.fshost.InlineCrypto"},
       Config{.name = "fuchsia.fshost.ProvisionFxfs"},
-      Config{.name = "fuchsia.fshost.WatchDeprecatedV1Drivers"},
   };
 
   if (!args->fshost_config.empty()) {
@@ -252,11 +251,6 @@ zx_status_t IsolatedDevmgr::Create(Args* args, IsolatedDevmgr* out) {
 
   realm_builder.AddRoute(Route{
       .capabilities = {Directory{.name = "dev-topological", .rights = fuchsia::io::R_STAR_DIR}},
-      .source = {ChildRef{"driver_test_realm"}},
-      .targets = {ChildRef{"fshost"}},
-  });
-  realm_builder.AddRoute(Route{
-      .capabilities = {Directory{.name = "dev-class", .rights = fuchsia::io::R_STAR_DIR}},
       .source = {ChildRef{"driver_test_realm"}},
       .targets = {ChildRef{"fshost"}},
   });

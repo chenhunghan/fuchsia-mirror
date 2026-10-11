@@ -143,7 +143,7 @@ class ScreenshotImage:
                 data = ScreenshotImage._swap_rgba_and_bgra(data)
                 return ScreenshotImage(ui_types.Size(width, height), data)
             case ScreenshotImageType.PNG:
-                (width, height, rows, _) = png.Reader(bytes=data).asRGBA8()
+                (width, height, rows, _) = png.Reader(bytes=data).asRGBA()
                 # Flatten 2d array in a 1d array:
                 image_data = bytearray()
                 for row in rows:

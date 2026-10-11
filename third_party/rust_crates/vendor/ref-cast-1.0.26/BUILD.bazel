@@ -81,7 +81,7 @@ rust_library(
     }),
     version = "1.0.26",
     deps = [
-        "//third_party/rust_crates/vendor/ref-cast-1.0.26:build_script_build",
+        ":build_script_build",
     ],
 )
 
@@ -119,6 +119,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "ref-cast",
     rustc_flags = [
         "--cap-lints=allow",

@@ -12,9 +12,9 @@ import fidl_fuchsia_wlan_wlanix as fidl_wlanix
 import fuchsia_base_test
 import openwrt_access_point
 from antlion import controllers
-from antlion.controllers.access_point import AccessPoint
 from antlion.controllers.pdu import PduDevice
 from honeydew.typing.custom_types import FidlEndpoint
+from legacy_access_point.access_point import AccessPoint
 from mobly import signals
 from mobly.asserts import assert_equal, fail
 from mobly.records import TestResultRecord

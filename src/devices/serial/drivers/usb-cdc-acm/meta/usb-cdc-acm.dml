@@ -3,16 +3,15 @@
 // found in the LICENSE file.
 {
     name: "usb-cdc-acm",
-    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
+    include: [ "driver_component/driver.shard.cml" ],
     program: {
         colocate: "true",
-        compat: "driver/usb-cdc-acm.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
-        requirements: {
+        bind: {
             protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE",
-            rules: {
-                "fuchsia.BIND_USB_CLASS": "fuchsia.usb.BIND_USB_CLASS.COMM",
-                "fuchsia.BIND_USB_SUBCLASS": "fuchsia.usb.comm.BIND_USB_SUBCLASS.ABSTRACT",
+            usb: {
+                class: "fuchsia.usb.BIND_USB_CLASS.COMM",
+                subclass: "fuchsia.usb.comm.BIND_USB_SUBCLASS.ABSTRACT",
             },
         },
     },

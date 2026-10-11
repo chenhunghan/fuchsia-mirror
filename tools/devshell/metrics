@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Other
+#### PREBUILTS=${PREBUILT_JQ} ${PREBUILT_PYTHON3}
 ### manage collection of metrics in fx tools
 
 ## usage:

@@ -74,6 +74,29 @@ enum BuiltinType {
     Wait,
 }
 
+impl BuiltinType {
+    const fn is_special(self) -> bool {
+        matches!(
+            self,
+            Self::Colon
+                | Self::Dot
+                | Self::Break
+                | Self::Continue
+                | Self::Eval
+                | Self::Exec
+                | Self::Exit
+                | Self::Export
+                | Self::Readonly
+                | Self::Return
+                | Self::Set
+                | Self::Shift
+                | Self::Times
+                | Self::Trap
+                | Self::Unset
+        )
+    }
+}
+
 struct BuiltinEntry {
     name: [u8; 18],
     len: u8,
@@ -146,12 +169,21 @@ static BUILTINS: &[BuiltinEntry] = &[
     make_entry(b"wait", BuiltinType::Wait),
 ];
 
-/// Checks if the given command name corresponds to an internal shell builtin.
-pub fn is_builtin(name: impl VarName) -> bool {
-    let name = name.to_bstr();
+fn lookup_builtin(name: &bstr::BStr) -> Option<&'static BuiltinEntry> {
     BUILTINS
         .binary_search_by_key(&name.as_bytes(), |entry| &entry.name[..entry.len as usize])
-        .is_ok()
+        .ok()
+        .map(|idx| &BUILTINS[idx])
+}
+
+/// Checks if the given command name corresponds to an internal shell builtin.
+pub fn is_builtin(name: impl VarName) -> bool {
+    lookup_builtin(name.to_bstr()).is_some()
+}
+
+/// Checks if the given command name corresponds to a POSIX special builtin.
+pub fn is_special_builtin(name: impl VarName) -> bool {
+    lookup_builtin(name.to_bstr()).is_some_and(|entry| entry.func.is_special())
 }
 
 fn with_io(
@@ -199,12 +231,9 @@ fn run_builtin_impl(
     state: &mut ShellState,
     ctx: &mut ExecutionContext,
 ) -> Result<EvalOutcome, String> {
-    let name = name.to_bstr();
-    let idx = BUILTINS
-        .binary_search_by_key(&name.as_bytes(), |entry| &entry.name[..entry.len as usize])
-        .map_err(|_| format!("builtin not found: {}", name))?;
+    let entry = lookup_builtin(name).ok_or_else(|| format!("builtin not found: {}", name))?;
 
-    match BUILTINS[idx].func {
+    match entry.func {
         BuiltinType::Alias => with_io(ctx, args, state, essential::builtin_alias),
         BuiltinType::Bg => with_io(ctx, args, state, essential::builtin_bg),
         BuiltinType::Break => essential::builtin_break(args, state, ctx),
@@ -222,7 +251,7 @@ fn run_builtin_impl(
         BuiltinType::Exit => essential::builtin_exit(args, state, ctx),
         BuiltinType::Export => with_io(ctx, args, state, essential::builtin_export),
         BuiltinType::False => Ok(EvalOutcome::Code(EXIT_FAILURE)),
-        BuiltinType::Fg => with_io(ctx, args, state, essential::builtin_fg),
+        BuiltinType::Fg => essential::builtin_fg(args, state, ctx),
         BuiltinType::Getopts => with_io(ctx, args, state, essential::builtin_getopts),
         BuiltinType::Hash => with_io(ctx, args, state, essential::builtin_hash),
         BuiltinType::Jobs => with_io(ctx, args, state, essential::builtin_jobs),
@@ -251,7 +280,7 @@ fn run_builtin_impl(
         BuiltinType::Umask => with_io(ctx, args, state, essential::builtin_umask),
         BuiltinType::Unalias => with_io(ctx, args, state, essential::builtin_unalias),
         BuiltinType::Unset => with_io(ctx, args, state, essential::builtin_unset),
-        BuiltinType::Wait => with_io(ctx, args, state, essential::builtin_wait),
+        BuiltinType::Wait => essential::builtin_wait(args, state, ctx),
     }
 }
 

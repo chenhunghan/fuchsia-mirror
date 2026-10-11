@@ -28,6 +28,7 @@ mod filter;
 pub mod fxt_streamer;
 mod log_formatter;
 mod log_socket_stream;
+pub use filter::{FuzzyMatchWarning, LogFilterCriteria, disambiguate_queried_monikers};
 pub use log_formatter::{
     BootTimeAccessor, DefaultLogFormatter, FormatterError, LogData, LogEntry, Symbolize,
     TIMESTAMP_FORMAT, Timestamp, WriterContainer, dump_logs_from_socket,
@@ -998,6 +999,7 @@ impl LogCommand {
         for (moniker, selector) in selectors {
             // Attempt to translate to a single instance
             let instances = realm_query.get_monikers_from_query(moniker.as_str()).await?;
+            let instances = disambiguate_queried_monikers(moniker.as_str(), instances);
             // If exactly one match, perform rewrite
             if instances.len() == 1 {
                 let mut translated_selector = selector.clone();
@@ -1327,6 +1329,47 @@ ffx log --force-set-severity.
                 Some(vec![
                     parse_log_interest_selector("core/some/ambiguous_selector#INFO").unwrap()
                 ])
+            );
+        }));
+        while scheduler.next().await.is_some() {}
+        drop(scheduler);
+        assert_matches!(set_interest_result, Some(Ok(())));
+    }
+
+    #[fuchsia::test]
+    async fn logger_translates_selector_disambiguating_subcomponents() {
+        let cmd = LogCommand {
+            sub_command: Some(LogSubCommand::Dump(RawDumpCommand::default())),
+            set_severity: vec![OneOrMany::One(
+                parse_log_interest_selector("archivist#INFO").unwrap(),
+            )],
+            ..LogCommand::default()
+        };
+        let mut set_interest_result = None;
+        let getter = FakeInstanceGetter {
+            expected_selector: Some("archivist".into()),
+            output: vec![
+                Moniker::try_from("bootstrap/archivist").unwrap(),
+                Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+            ],
+        };
+        let mut scheduler = FuturesUnordered::new();
+        let (settings_proxy, settings_server) = create_proxy::<LogSettingsMarker>();
+        scheduler.push(Either::Left(async {
+            set_interest_result = Some(cmd.maybe_set_interest(&settings_proxy, &getter).await);
+            drop(settings_proxy);
+        }));
+        scheduler.push(Either::Right(async {
+            let request = settings_server.into_stream().next().await;
+            let (payload, responder) = assert_matches!(
+                request,
+                Some(Ok(LogSettingsRequest::SetComponentInterest { payload, responder })) =>
+                (payload, responder)
+            );
+            responder.send().unwrap();
+            assert_eq!(
+                payload.selectors,
+                Some(vec![parse_log_interest_selector("bootstrap/archivist#INFO").unwrap()])
             );
         }));
         while scheduler.next().await.is_some() {}

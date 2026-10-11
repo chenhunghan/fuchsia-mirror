@@ -140,17 +140,6 @@ closed protocol DeviceMonitor {
         resp GetPowerSaveModeResponse;
     }) error int32;
 
-    /// All interfaces should be deleted before calling this method. If supported, the
-    /// wlan driver will power down the wlan chip. Refer to wlan.phyimpl fidl for more details.
-    strict PowerDown(struct {
-        phy_id uint16;
-    }) -> () error zx.Status;
-
-    /// If supported, the wlan driver will power up the wlan chip. Refer to wlan.phyimpl fidl
-    /// for more details.
-    strict PowerUp(struct {
-        phy_id uint16;
-    }) -> () error zx.Status;
 
     /// If supported, the wlan driver will reset the wlan chip. An attempt is made to delete
     /// any existing interfaces. Refer to wlan.phyimpl fidl for more details.
@@ -207,7 +196,8 @@ closed protocol DeviceMonitor {
         ///
         /// Excluding this field or providing a MAC address with all zeroes
         /// will result in the driver assigning a MAC address that may
-        /// or may not be randomized.
+        /// or may not be randomized. Any non-zero MAC address must be a
+        /// locally administered unicast address.
         3: sta_address ieee80211.MacAddr;
     }) -> (table {
         1: iface_id uint16;

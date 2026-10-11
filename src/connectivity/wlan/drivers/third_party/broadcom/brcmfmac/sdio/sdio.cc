@@ -475,7 +475,8 @@ static void frame_align_data(wlan::drivers::components::Frame& frame, uint32_t h
                              uint32_t alignment) {
   uintptr_t padding = brcmf_sdio_align_pad<uintptr_t>(
       reinterpret_cast<uintptr_t>(frame.Data()) + headroom, alignment);
-  frame.ShrinkHead(padding);
+  // The padding can't be larger than the alignment, and the alignment is uint32_t so this is safe.
+  frame.ShrinkHead(static_cast<uint32_t>(padding));
 }
 
 // Align the data pointer in |frame| to |align|, also align |length| to SDIOD_SIZE_ALIGNMENT and
@@ -1248,7 +1249,7 @@ static zx_status_t brcmf_sdio_hdparse(struct brcmf_sdio* bus, uint8_t* header,
 static inline void brcmf_sdio_update_hwhdr(uint8_t* header, uint16_t frm_length) {
   auto hw_hdr = reinterpret_cast<uint16_t*>(header);
   hw_hdr[0] = frm_length;
-  hw_hdr[1] = ~frm_length;
+  hw_hdr[1] = static_cast<uint16_t>(~frm_length);
 }
 
 static void brcmf_sdio_hdpack(struct brcmf_sdio* bus, uint8_t* header,
@@ -1367,7 +1368,7 @@ static zx_status_t brcmf_sdio_prepare_rxglom_frames(struct brcmf_sdio* bus) {
   return ZX_OK;
 }
 
-static uint8_t brcmf_sdio_rxglom_frames(struct brcmf_sdio* bus, uint8_t rxseq) {
+static uint32_t brcmf_sdio_rxglom_frames(struct brcmf_sdio* bus, uint8_t rxseq) {
   TRACE_DURATION("brcmfmac:isr", "sdio_rxglom_frames");
 
   if (bus->rx_glom->glom_desc.Size() > 0) {
@@ -1403,9 +1404,17 @@ static uint8_t brcmf_sdio_rxglom_frames(struct brcmf_sdio* bus, uint8_t rxseq) {
     return 0;
   }
 
+  if (bus->rx_glom->glom_size > std::numeric_limits<uint16_t>::max()) [[unlikely]] {
+    BRCMF_ERR("Glom size %zu exceeds maximum size %u", bus->rx_glom->glom_size,
+              std::numeric_limits<uint16_t>::max());
+    brcmf_sdio_rxfail(bus, true, false);
+    ++bus->sdcnt.rxglomfail;
+    return 0;
+  }
+
   struct brcmf_sdio_hdrinfo updated_rd;
   updated_rd.seq_num = rxseq;
-  updated_rd.len = bus->rx_glom->glom_size;
+  updated_rd.len = static_cast<uint16_t>(bus->rx_glom->glom_size);
   err = brcmf_sdio_hdparse(bus, glom_frames.begin()->Data(), &updated_rd, BRCMF_SDIO_FT_SUPER);
   if (err != ZX_OK) {
     BRCMF_ERR("Failed to parse superframe header: %s", zx_status_get_string(err));
@@ -1424,8 +1433,18 @@ static uint8_t brcmf_sdio_rxglom_frames(struct brcmf_sdio* bus, uint8_t rxseq) {
   uint32_t count = 0;
   for (auto frame = glom_frames.begin(); frame != glom_frames.end(); ++count, ++frame) {
     uint8_t* const data = frame->Data();
+    const uint32_t size = frame->Size();
 
-    updated_rd.len = frame->Size();
+    if (size > std::numeric_limits<uint16_t>::max()) [[unlikely]] {
+      BRCMF_ERR("Frame size %u exceeds maximum size %u", size,
+                std::numeric_limits<uint16_t>::max());
+      brcmf_sdio_rxfail(bus, true, false);
+      ++bus->sdcnt.rxglomfail;
+      bus->cur_read.len = 0;
+      return 0;
+    }
+
+    updated_rd.len = static_cast<uint16_t>(size);
     updated_rd.seq_num = rxseq++;
     err = brcmf_sdio_hdparse(bus, data, &updated_rd, BRCMF_SDIO_FT_SUB);
     if (err != ZX_OK) {
@@ -1735,7 +1754,7 @@ static uint32_t brcmf_sdio_read_frames(struct brcmf_sdio* bus, uint32_t max_fram
         brcmf_sdio_rxfail(bus, false, false);
       }
       // Prepare the descriptor for the next read.
-      rd->len = rd->len_nxtfrm << 4;
+      rd->len = static_cast<uint16_t>(rd->len_nxtfrm << 4u);
       rd->len_nxtfrm = 0;
       // Treat all packets as events if we don't know.
       rd->channel = SDPCM_EVENT_CHANNEL;
@@ -1782,7 +1801,7 @@ static zx_status_t brcmf_sdio_tx_frame_hdr_align(struct brcmf_sdio* bus,
 
   uintptr_t head_pad = reinterpret_cast<uintptr_t>(data) % bus->head_align;
   if (head_pad > 0) {
-    frame.GrowHead(head_pad);
+    frame.GrowHead(static_cast<uint32_t>(head_pad));
     data = frame.Data();
   }
 
@@ -1792,12 +1811,13 @@ static zx_status_t brcmf_sdio_tx_frame_hdr_align(struct brcmf_sdio* bus,
   return ZX_OK;
 }
 
-static uint16_t brcmf_sdio_compute_tail_pad(struct brcmf_sdio* bus, uint32_t frame_size,
-                                            bool last_frame, uint32_t total_size) {
-  uint32_t alignment = last_frame ? bus->sdiodev->func2->blocksize : bus->sgentry_align;
+static uint16_t brcmf_sdio_compute_tail_pad(struct brcmf_sdio* bus, size_t frame_size,
+                                            bool last_frame, size_t total_size) {
+  const uint16_t alignment = last_frame ? bus->sdiodev->func2->blocksize : bus->sgentry_align;
   // For individual frames we align the frame size, for the last frame we align the entire chain
-  uint32_t size = last_frame ? total_size : frame_size;
-  return brcmf_sdio_align_pad(size, alignment);
+  const size_t size = last_frame ? total_size : frame_size;
+  // The pad can't be larger than the alignment, since the alignment is uint16_t the pad must fit.
+  return static_cast<uint16_t>(brcmf_sdio_align_pad<size_t>(size, alignment));
 }
 
 static zx_status_t brcmf_sdio_tx_frames_prep(struct brcmf_sdio* bus,
@@ -1895,7 +1915,7 @@ static zx_status_t brcmf_sdio_tx_frames(struct brcmf_sdio* bus,
 static zx_status_t brcmf_sdio_send_tx_queue(struct brcmf_sdio* bus, uint32_t frame_count) {
   TRACE_DURATION("brcmfmac:isr", "send_tx_queue", "frame_count", frame_count);
 
-  const uint8_t allowed_precedences = ~bus->flowcontrol;
+  const uint8_t allowed_precedences = static_cast<uint8_t>(~bus->flowcontrol);
 
   const uint32_t allowed = static_cast<uint8_t>(bus->tx_max - bus->tx_seq);
   const uint32_t num_frames = std::min(frame_count, allowed);
@@ -2080,7 +2100,7 @@ static zx_status_t brcmf_sdio_intr_rstatus(struct brcmf_sdio* bus) {
 
 static bool brcmf_sdio_have_txq(struct brcmf_sdio* bus) {
   std::lock_guard lock(bus->tx_queue->txq_lock);
-  return bus->tx_queue->tx_queue.size(~bus->flowcontrol) > 0;
+  return bus->tx_queue->tx_queue.size(static_cast<uint8_t>(~bus->flowcontrol)) > 0;
 }
 
 static bool brcmf_sdio_dpc_has_more_work(struct brcmf_sdio* bus) {
@@ -2433,8 +2453,8 @@ static inline wlan::drivers::components::FrameContainer brcmf_sdio_acquire_tx_sp
   return brcmf_sdio_acquire_tx_space(bus->bus_priv.sdio->bus, count);
 }
 
-static uint32_t PriorityToPrecedence(uint8_t priority) {
-  static constexpr uint32_t kLookup[] = {2, 1, 0, 3, 4, 5, 6, 7};
+static uint8_t PriorityToPrecedence(uint8_t priority) {
+  static constexpr uint8_t kLookup[] = {2, 1, 0, 3, 4, 5, 6, 7};
   return kLookup[priority];
 }
 
@@ -2689,7 +2709,7 @@ static zx_status_t brcmf_sdio_checkdied(struct brcmf_sdio* bus) {
 static zx_status_t brcmf_sdio_bus_rxctl(brcmf_bus* bus_if, unsigned char* msg, uint msglen,
                                         int* rxlen_out) {
   bool timeout;
-  uint rxlen = 0;
+  int rxlen = 0;
   bool pending;
   struct brcmf_sdio_dev* sdiodev = bus_if->bus_priv.sdio;
   struct brcmf_sdio* bus = sdiodev->bus;
@@ -2704,9 +2724,11 @@ static zx_status_t brcmf_sdio_bus_rxctl(brcmf_bus* bus_if, unsigned char* msg, u
 
   // spin_lock_bh(&bus->rxctl_lock);
   sdiodev->drvr->irq_callback_lock.lock();
-  rxlen = bus->rx_ctl_frame.size();
+
+  ZX_ASSERT(bus->rx_ctl_frame.size() < std::numeric_limits<int>::max());
+  rxlen = static_cast<int>(bus->rx_ctl_frame.size());
   if (rxlen) {
-    memcpy(msg, bus->rx_ctl_frame.data(), std::min(rxlen, msglen));
+    memcpy(msg, bus->rx_ctl_frame.data(), std::min<uint>(rxlen, msglen));
     bus->rx_ctl_frame.clear();
   }
   // spin_unlock_bh(&bus->rxctl_lock);
@@ -3008,7 +3030,12 @@ static zx_status_t brcmf_sdio_bus_preinit(brcmf_bus* bus_if) {
     bus->tx_hdrlen += SDPCM_HWEXT_LEN;
   }
 
-  brcmf_bus_add_txhdrlen(sdiodev->drvr, bus->tx_hdrlen);
+  // Only increment drvr->hdrlen on startup. drvr->hdrlen does not get reinitialized during a
+  // firmware recovery or phy reset, so this prevents drvr->hdrlen from getting larger after each
+  // recovery/reset.
+  if (!sdiodev->drvr->drvr_resetting.load()) {
+    brcmf_bus_add_txhdrlen(sdiodev->drvr, bus->tx_hdrlen);
+  }
   bus_if->always_use_fws_queue = false;
 
 done:
@@ -3262,25 +3289,24 @@ zx_status_t brcmf_sdio_recovery(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_ANALY
 
   if ((error = brcmf_sdio_request_card_reset(sdiod)) != ZX_OK) {
     BRCMF_ERR("Failed to reset sdio - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
+    drvr->fw_reloading.unlock();
     return error;
   }
 
   if ((error = brcmf_sdiod_probe(sdiod, true)) != ZX_OK) {
     BRCMF_ERR("Failed to probe sdio - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
+    drvr->fw_reloading.unlock();
     return error;
   }
 
+  // brcmf_sdio_load_files() will unlock drvr->fw_reloading.
   if ((error = brcmf_sdio_load_files(drvr, true)) != ZX_OK) {
     BRCMF_ERR("Failed to reload images - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
     return error;
   }
 
   if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
     BRCMF_ERR("Initialization after bus started failed.");
-    brcmf_proto_bcdc_detach(drvr);
     return error;
   }
 
@@ -3834,7 +3860,7 @@ static zx_status_t brcmf_sdio_suspend(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY
 
   if ((error = brcmf_sdio_request_card_reset(sdiod)) != ZX_OK) {
     BRCMF_ERR("Failed to reset sdio - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
+    drvr->fw_reloading.unlock();
     return error;
   }
   return ZX_OK;
@@ -3847,19 +3873,19 @@ static zx_status_t brcmf_sdio_resume(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_
 
   if ((error = brcmf_sdiod_probe(sdiod, true)) != ZX_OK) {
     BRCMF_ERR("Failed to probe sdio - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
+    // This was locked in the call to brcmf_sdio_suspend().
+    drvr->fw_reloading.unlock();
     return error;
   }
 
+  // drvr->fw_reloading will be unlocked by brcmf_sdio_load_files.
   if ((error = brcmf_sdio_load_files(drvr, true)) != ZX_OK) {
     BRCMF_ERR("Failed to reload images - error: %s", zx_status_get_string(error));
-    brcmf_proto_bcdc_detach(drvr);
     return error;
   }
 
   if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
     BRCMF_ERR("Initialization after bus started failed.");
-    brcmf_proto_bcdc_detach(drvr);
     return error;
   }
 
@@ -4380,7 +4406,9 @@ static wlan::drivers::components::FrameContainer acquire_to_size(
   wlan::drivers::components::FrameContainer frames = storage.Acquire(num_frames);
   // Adjust size of the last frame so that the total size matches the requested size
   size_t last_frame_size = size - ((num_frames - 1) * frame_size);
-  frames.back().SetSize(last_frame_size);
+  // The cast to uint32_t has to be safe here because last_frame_size must basically be modulo
+  // frame_size, which is an uint32_t.
+  frames.back().SetSize(static_cast<uint32_t>(last_frame_size));
   return frames;
 }
 
@@ -4441,9 +4469,9 @@ wlan::drivers::components::FrameContainer brcmf_sdio_acquire_and_fill_tx_space(
   size_t remaining = size;
   size_t offset = 0;
   for (auto frame = frames.begin(); remaining > 0 && frame != frames.end(); ++frame) {
-    const uint32_t size_to_copy = std::min<size_t>(remaining, frame->Size());
+    const size_t size_to_copy = std::min<size_t>(remaining, frame->Size());
     memcpy(frame->Data(), reinterpret_cast<const uint8_t*>(data) + offset, size_to_copy);
-    frame->SetSize(size_to_copy);
+    frame->SetSize(static_cast<uint32_t>(size_to_copy));
     offset += size_to_copy;
     remaining -= size_to_copy;
   }

@@ -1,0 +1,144 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fuchsia-bluetooth",
+    srcs = [
+        "src/assigned_numbers.rs",
+        "src/assigned_numbers/constants.rs",
+        "src/assigned_numbers/ltv.rs",
+        "src/constants.rs",
+        "src/detachable_map.rs",
+        "src/error.rs",
+        "src/expectation.rs",
+        "src/expectation/asynchronous.rs",
+        "src/expectation/host_driver.rs",
+        "src/expectation/peer.rs",
+        "src/expectation/test.rs",
+        "src/inspect.rs",
+        "src/lib.rs",
+        "src/profile.rs",
+        "src/profile/avrcp.rs",
+        "src/types.rs",
+        "src/types/address.rs",
+        "src/types/bonding_data.rs",
+        "src/types/channel.rs",
+        "src/types/channel/fidl_client.rs",
+        "src/types/channel/fidl_server.rs",
+        "src/types/channel/socket.rs",
+        "src/types/host_info.rs",
+        "src/types/id.rs",
+        "src/types/io_capabilities.rs",
+        "src/types/le.rs",
+        "src/types/pairing_options.rs",
+        "src/types/peer.rs",
+        "src/types/uuid.rs",
+        "src/util.rs",
+    ],
+    edition = "2024",
+    rustc_flags = ["-Dunused_results"],
+    # @bazel2gn:skip
+    test_deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    visibility = [
+        "//src/connectivity/bluetooth:__subpackages__",
+        "//src/developer/ffx/tools/bluetooth:__subpackages__",
+        "//src/media/stream_processors/test:__pkg__",
+        "//src/testing/sl4f:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+    # TODO(armansito): Split out testing code into a separate library and move
+    # test-specific dependencies out.
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.le:fuchsia.bluetooth.le_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl_table_validation",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:pretty",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:uuid",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//sdk/rust/zx-status-ext",
+            "//src/lib/async-utils",
+            "//src/lib/diagnostics/inspect/contrib/rust",
+            "//src/lib/diagnostics/inspect/derive",
+            "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+            "//src/lib/fuchsia-async",
+            "//third_party/rust_crates/vendor:futures",
+            "//third_party/rust_crates/vendor:slab",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "fuchsia-bluetooth_test_packaged_bin",
+    testonly = True,
+    binary = ":fuchsia-bluetooth_test",
+    binary_name = "fuchsia_bluetooth_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "bluetooth-crate-tests-manifest",
+    testonly = True,
+    component_name = "bluetooth-crate-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/bluetooth_crate_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "bluetooth-crate-tests-component",
+    compiled_manifest = ":bluetooth-crate-tests-manifest",
+    component_name = "bluetooth-crate-tests",
+    deps = [":fuchsia-bluetooth_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "bluetooth-crate-tests-package",
+    package_name = "bluetooth-crate-tests",
+    test_components = [":bluetooth-crate-tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "bluetooth-crate-tests",
+    package = ":bluetooth-crate-tests-package",
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)

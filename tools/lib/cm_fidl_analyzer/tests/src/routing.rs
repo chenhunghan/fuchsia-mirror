@@ -34,7 +34,7 @@ use moniker::Moniker;
 use router_error::Explain;
 use routing::component_instance::ComponentInstanceInterface;
 use routing::debug_route_sandbox_path;
-use routing::error::{PrettyPrintRef, RouteVerb, RoutingError};
+use routing::error::{RouteVerb, RoutingError};
 use routing_test_helpers::{
     CheckUse, ComponentEventRoute, ExpectedResult, RoutingTestModel, RoutingTestModelBuilder,
     ServiceInstance,
@@ -1099,7 +1099,7 @@ mod tests {
                     && moniker == *b_component.moniker()
                     && capability_type == CapabilityTypeName::Runner
                     && verb == RouteVerb::Use
-                    && source == PrettyPrintRef::Environment
+                    && source == GenericRef::Environment
         );
     }
 
@@ -2050,7 +2050,7 @@ mod tests {
                     moniker: "b".parse().unwrap(),
                     verb: RouteVerb::Expose,
                     counter_verb: RouteVerb::Expose,
-                    source: PrettyPrintRef::Child("c".parse().unwrap()),
+                    source: GenericRef::Child("c".parse().unwrap()),
                     capability_type: CapabilityTypeName::Protocol,
                     capability_name: RelativePath::new("bad_protocol").unwrap(),
                 })),
@@ -2192,7 +2192,7 @@ mod tests {
                             moniker: "b".parse().unwrap(),
                             verb: RouteVerb::Offer,
                             counter_verb: RouteVerb::Offer,
-                            source: PrettyPrintRef::Parent,
+                            source: GenericRef::Parent,
                             capability_type: CapabilityTypeName::Protocol,
                             capability_name: RelativePath::new("protocol_not_exists").unwrap(),
                         }
@@ -2280,7 +2280,7 @@ mod tests {
                             moniker: "b".parse().unwrap(),
                             verb: RouteVerb::Offer,
                             counter_verb: RouteVerb::Offer,
-                            source: PrettyPrintRef::Parent,
+                            source: GenericRef::Parent,
                             capability_type: CapabilityTypeName::Dictionary,
                             capability_name: RelativePath::new("dict_not_exists").unwrap(),
                         }

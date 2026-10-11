@@ -12,8 +12,8 @@ import time
 from enum import IntEnum, unique
 from typing import Protocol
 
-from antlion.types import ControllerConfig, Json
-from antlion.validation import MapValidator
+from libs.types import ControllerConfig, Json
+from libs.validation import MapValidator
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "PduDevice"
 

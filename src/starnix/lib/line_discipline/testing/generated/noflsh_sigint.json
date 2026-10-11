@@ -21,15 +21,20 @@
     "events": [
         {
             "type": "write_to_master",
-            "data": "foo"
+            "data": "foo",
+            "signals": []
         },
         {
             "type": "write_to_master",
-            "data": "\u0003"
+            "data": "\u0003",
+            "signals": [
+                "SIGINT"
+            ]
         },
         {
             "type": "write_to_master",
-            "data": "\n"
+            "data": "\n",
+            "signals": []
         },
         {
             "type": "read_from_master",

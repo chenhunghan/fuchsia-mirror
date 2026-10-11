@@ -6,9 +6,9 @@
                 // Peer connection event (ID 11)
                 {
                     event_codes: [
-                        0, // LE
-                        0, // Success
-                        1, // Incoming
+                        "LE",
+                        "Success",
+                        "Incoming",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -16,9 +16,9 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        1, // Failure
-                        1, // Incoming
+                        "LE",
+                        "Failure",
+                        "Incoming",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -26,9 +26,9 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        0, // Success
-                        2, // Outgoing
+                        "LE",
+                        "Success",
+                        "Outgoing",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -36,9 +36,9 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        1, // Failure
-                        2, // Outgoing
+                        "LE",
+                        "Failure",
+                        "Outgoing",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -46,9 +46,9 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        0, // Success
-                        1, // Incoming
+                        "BrEdr",
+                        "Success",
+                        "Incoming",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -56,9 +56,9 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        1, // Failure
-                        1, // Incoming
+                        "BrEdr",
+                        "Failure",
+                        "Incoming",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -66,9 +66,9 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        0, // Success
-                        2, // Outgoing
+                        "BrEdr",
+                        "Success",
+                        "Outgoing",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -76,9 +76,9 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        1, // Failure
-                        2, // Outgoing
+                        "BrEdr",
+                        "Failure",
+                        "Outgoing",
                     ],
                     metric_name: "bt_host_peer_connection_event",
                     metric_type: "Occurrence",
@@ -88,7 +88,7 @@
                 // LE peer disconnection event (ID 18)
                 {
                     event_codes: [
-                        1, // ExplicitDisconnect
+                        "ExplictDisconnect",
                     ],
                     metric_name: "bt_host_le_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -96,7 +96,7 @@
                 },
                 {
                     event_codes: [
-                        2, // LinkError
+                        "LinkError",
                     ],
                     metric_name: "bt_host_le_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -104,7 +104,7 @@
                 },
                 {
                     event_codes: [
-                        3, // ZeroRef
+                        "ZeroRef",
                     ],
                     metric_name: "bt_host_le_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -112,7 +112,7 @@
                 },
                 {
                     event_codes: [
-                        4, // RemoteDisconnection
+                        "RemoteDisconnection",
                     ],
                     metric_name: "bt_host_le_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -120,7 +120,7 @@
                 },
                 {
                     event_codes: [
-                        5, // GattDiscoveryFailure
+                        "GattDiscoveryFailure",
                     ],
                     metric_name: "bt_host_le_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -130,7 +130,7 @@
                 // BR/EDR peer disconnection event (ID 19)
                 {
                     event_codes: [
-                        1, // ApiRequest
+                        "ApiRequest",
                     ],
                     metric_name: "bt_host_bredr_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -138,7 +138,7 @@
                 },
                 {
                     event_codes: [
-                        2, // InterrogationFailed
+                        "InterrogationFailed",
                     ],
                     metric_name: "bt_host_bredr_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -146,7 +146,7 @@
                 },
                 {
                     event_codes: [
-                        3, // PairingFailed
+                        "PairingFailed",
                     ],
                     metric_name: "bt_host_bredr_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -154,7 +154,7 @@
                 },
                 {
                     event_codes: [
-                        4, // AclLinkError
+                        "AclLinkError",
                     ],
                     metric_name: "bt_host_bredr_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -162,7 +162,7 @@
                 },
                 {
                     event_codes: [
-                        5, // PeerDisconnection
+                        "PeerDisconnection",
                     ],
                     metric_name: "bt_host_bredr_peer_disconnection_event",
                     metric_type: "Occurrence",
@@ -172,8 +172,8 @@
                 // Peer bonding event (ID 10)
                 {
                     event_codes: [
-                        0, // LE
-                        0, // Success
+                        "LE",
+                        "Success",
                     ],
                     metric_name: "bt_host_peer_bonding_event",
                     metric_type: "Occurrence",
@@ -181,8 +181,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        1, // Failure
+                        "LE",
+                        "Failure",
                     ],
                     metric_name: "bt_host_peer_bonding_event",
                     metric_type: "Occurrence",
@@ -190,8 +190,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        0, // Success
+                        "BrEdr",
+                        "Success",
                     ],
                     metric_name: "bt_host_peer_bonding_event",
                     metric_type: "Occurrence",
@@ -199,8 +199,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        1, // Failure
+                        "BrEdr",
+                        "Failure",
                     ],
                     metric_name: "bt_host_peer_bonding_event",
                     metric_type: "Occurrence",
@@ -210,8 +210,8 @@
                 // Adapter event (ID 9)
                 {
                     event_codes: [
-                        0, // LE
-                        0, // OpenL2capChannelRequest
+                        "LE",
+                        "OpenL2capChannelRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -219,8 +219,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        1, // OutgoingConnectionRequest
+                        "LE",
+                        "OutgoingConnectionRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -228,8 +228,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        2, // PairRequest
+                        "LE",
+                        "PairRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -237,8 +237,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        7, // StartAdvertising
+                        "LE",
+                        "StartAdvertising",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -246,8 +246,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        8, // StopAdvertising
+                        "LE",
+                        "StopAdvertising",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -255,8 +255,8 @@
                 },
                 {
                     event_codes: [
-                        0, // LE
-                        9, // StartDiscovery
+                        "LE",
+                        "StartDiscovery",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -264,8 +264,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        0, // OpenL2capChannelRequest
+                        "BrEdr",
+                        "OpenL2capChannelRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -273,8 +273,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        1, // OutgoingConnectionRequest
+                        "BrEdr",
+                        "OutgoingConnectionRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -282,8 +282,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        2, // PairRequest
+                        "BrEdr",
+                        "PairRequest",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -291,8 +291,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        3, // RequestDiscoverable
+                        "BrEdr",
+                        "RequestDiscoverable",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -300,8 +300,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        4, // RequestDiscovery
+                        "BrEdr",
+                        "RequestDiscovery",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -309,8 +309,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        5, // SetConnectableTrue
+                        "BrEdr",
+                        "SetConnectableTrue",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -318,8 +318,8 @@
                 },
                 {
                     event_codes: [
-                        1, // BrEdr
-                        6, // SetConnectableFalse
+                        "BrEdr",
+                        "SetConnectableFalse",
                     ],
                     metric_name: "bt_host_adapter_event",
                     metric_type: "Occurrence",
@@ -329,7 +329,7 @@
                 // Pairing result (ID 105)
                 {
                     event_codes: [
-                        12, // ErrorCentralLmpTransactionCollision
+                        "ErrorCentralLmpTransactionCollision",
                     ],
                     metric_name: "pairing_result_migrated",
                     metric_type: "Occurrence",
@@ -340,7 +340,7 @@
                 },
                 {
                     event_codes: [
-                        13, // ErrorCentralDifferentTransactionCollision
+                        "ErrorCentralDifferentTransactionCollision",
                     ],
                     metric_name: "pairing_result_migrated",
                     metric_type: "Occurrence",
@@ -351,7 +351,7 @@
                 },
                 {
                     event_codes: [
-                        14, // ErrorPeripheralLmpTransactionCollision
+                        "ErrorPeripheralLmpTransactionCollision",
                     ],
                     metric_name: "pairing_result_migrated",
                     metric_type: "Occurrence",
@@ -362,7 +362,7 @@
                 },
                 {
                     event_codes: [
-                        15, // ErrorPeripheralDifferentTransactionCollision
+                        "ErrorPeripheralDifferentTransactionCollision",
                     ],
                     metric_name: "pairing_result_migrated",
                     metric_type: "Occurrence",

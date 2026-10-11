@@ -159,7 +159,6 @@ inline constexpr std::string_view kCreateThreadSymbolsDriversAllowlist[] = {
     "#meta/usb-adb-function.cm",
     "#meta/usb-audio.cm",
     "#meta/usb-bus.cm",
-    "#meta/usb-cdc-acm.cm",
     "#meta/usb-cdc-ecm.cm",
     "#meta/usb-cdc-function.cm",
     "#meta/usb-hci-test-driver.cm",

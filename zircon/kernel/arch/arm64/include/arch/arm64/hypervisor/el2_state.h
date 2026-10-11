@@ -45,7 +45,9 @@
 #define SS_ELR_EL1          (SS_CSSELR_EL1 + 8)
 #define SS_ESR_EL1          (SS_ELR_EL1 + 8)
 #define SS_FAR_EL1          (SS_ESR_EL1 + 8)
-#define SS_MAIR_EL1         (SS_FAR_EL1 + 8)
+#define SS_AFSR0_EL1        (SS_FAR_EL1 + 8)
+#define SS_AFSR1_EL1        (SS_AFSR0_EL1 + 8)
+#define SS_MAIR_EL1         (SS_AFSR1_EL1 + 8)
 #define SS_MDSCR_EL1        (SS_MAIR_EL1 + 8)
 #define SS_PAR_EL1          (SS_MDSCR_EL1 + 8)
 #define SS_SCTLR_EL1        (SS_PAR_EL1 + 8)
@@ -56,8 +58,14 @@
 #define SS_TTBR0_EL1        (SS_TPIDR_EL1 + 8)
 #define SS_TTBR1_EL1        (SS_TTBR0_EL1 + 8)
 #define SS_VBAR_EL1         (SS_TTBR1_EL1 + 8)
-#define SS_ELR_EL2          (SS_VBAR_EL1 + 8)
+#define SS_AMAIR_EL1        (SS_VBAR_EL1 + 8)
+#define SS_ELR_EL2          (SS_AMAIR_EL1 + 8)
 #define SS_SPSR_EL2         (SS_ELR_EL2 + 8)
+
+#define HSS_TPIDR_EL0       0
+#define HSS_TPIDRRO_EL0     (HSS_TPIDR_EL0 + 8)
+#define HSS_MDSCR_EL1       (HSS_TPIDRRO_EL0 + 8)
+#define HSS_TPIDR_EL1       (HSS_MDSCR_EL1 + 8)
 
 #define ES_RESUME           0
 
@@ -73,12 +81,12 @@
 #define GS_HPFAR_EL2        (GS_FAR_EL2 + 8)
 #define GS_VMPIDR_EL2       (GS_HPFAR_EL2 + 8)
 
-#define HS_XREGS            (GS_VMPIDR_EL2 + 16)
+#define HS_XREGS            (GS_VMPIDR_EL2 + 8)
 // NOTE(abdulla): This differs from GS_X in that it calculates a value relative
 // to host_state.x, and not relative to El2State.
 #define HS_X(num)           ((num) * 8)
-#define HS_NUM_REGS         14
-#define HS_FP_STATE         (HS_XREGS + HS_X(HS_NUM_REGS))
+#define HS_NUM_REGS         13
+#define HS_FP_STATE         (HS_XREGS + HS_X(HS_NUM_REGS) + 8)
 #define HS_SYSTEM_STATE     (HS_FP_STATE + FS_FPCR + 8)
 
 #define IS_NUM_APRS         0
@@ -115,27 +123,37 @@ struct SystemState {
   uint64_t tpidr_el0;
   uint64_t tpidrro_el0;
 
-  algn32_t cntkctl_el1;
-  algn32_t contextidr_el1;
-  algn32_t cpacr_el1;
-  algn32_t csselr_el1;
+  uint64_t cntkctl_el1;
+  uint64_t contextidr_el1;
+  uint64_t cpacr_el1;
+  uint64_t csselr_el1;
   uint64_t elr_el1;
-  algn32_t esr_el1;
+  uint64_t esr_el1;
   uint64_t far_el1;
+  uint64_t afsr0_el1;
+  uint64_t afsr1_el1;
   uint64_t mair_el1;
-  algn32_t mdscr_el1;
+  uint64_t mdscr_el1;
   uint64_t par_el1;
-  algn32_t sctlr_el1;
+  uint64_t sctlr_el1;
   uint64_t sp_el1;
-  algn32_t spsr_el1;
+  uint64_t spsr_el1;
   uint64_t tcr_el1;
   uint64_t tpidr_el1;
   uint64_t ttbr0_el1;
   uint64_t ttbr1_el1;
   uint64_t vbar_el1;
+  uint64_t amair_el1;
 
   uint64_t elr_el2;
-  algn32_t spsr_el2;
+  uint64_t spsr_el2;
+};
+
+struct HostSystemState {
+  uint64_t tpidr_el0;
+  uint64_t tpidrro_el0;
+  uint64_t mdscr_el1;
+  uint64_t tpidr_el1;
 };
 
 struct GuestState {
@@ -155,15 +173,15 @@ struct GuestState {
   //
   // We only expect guests to be running in EL0 or EL1, though the
   // status bits support up to EL2.
-  uint32_t el() const { return BITS_SHIFT(system_state.spsr_el2, 3, 2); }
+  uint32_t el() const { return static_cast<uint32_t>(BITS_SHIFT(system_state.spsr_el2, 3, 2)); }
 };
 
 struct HostState {
-  // We only save X15, X18..X30 from the host, as the host is making an explicit
+  // We only save X18..X30 from the host, as the host is making an explicit
   // call into the hypervisor, and therefore is saving the rest of its state.
   uint64_t x[HS_NUM_REGS];
   FpState fp_state;
-  SystemState system_state;
+  HostSystemState system_state;
 };
 
 struct IchState {
@@ -200,6 +218,8 @@ static_assert(offsetof(SystemState, csselr_el1) == SS_CSSELR_EL1);
 static_assert(offsetof(SystemState, elr_el1) == SS_ELR_EL1);
 static_assert(offsetof(SystemState, esr_el1) == SS_ESR_EL1);
 static_assert(offsetof(SystemState, far_el1) == SS_FAR_EL1);
+static_assert(offsetof(SystemState, afsr0_el1) == SS_AFSR0_EL1);
+static_assert(offsetof(SystemState, afsr1_el1) == SS_AFSR1_EL1);
 static_assert(offsetof(SystemState, mair_el1) == SS_MAIR_EL1);
 static_assert(offsetof(SystemState, mdscr_el1) == SS_MDSCR_EL1);
 static_assert(offsetof(SystemState, par_el1) == SS_PAR_EL1);
@@ -211,8 +231,14 @@ static_assert(offsetof(SystemState, tpidr_el1) == SS_TPIDR_EL1);
 static_assert(offsetof(SystemState, ttbr0_el1) == SS_TTBR0_EL1);
 static_assert(offsetof(SystemState, ttbr1_el1) == SS_TTBR1_EL1);
 static_assert(offsetof(SystemState, vbar_el1) == SS_VBAR_EL1);
+static_assert(offsetof(SystemState, amair_el1) == SS_AMAIR_EL1);
 static_assert(offsetof(SystemState, elr_el2) == SS_ELR_EL2);
 static_assert(offsetof(SystemState, spsr_el2) == SS_SPSR_EL2);
+
+static_assert(offsetof(HostSystemState, tpidr_el0) == HSS_TPIDR_EL0);
+static_assert(offsetof(HostSystemState, tpidrro_el0) == HSS_TPIDRRO_EL0);
+static_assert(offsetof(HostSystemState, mdscr_el1) == HSS_MDSCR_EL1);
+static_assert(offsetof(HostSystemState, tpidr_el1) == HSS_TPIDR_EL1);
 
 static_assert(offsetof(El2State, resume) == ES_RESUME);
 
@@ -248,15 +274,9 @@ static_assert(offsetof(IchState, lr[IS_MAX_LRS - 1]) == IS_LR(IS_MAX_LRS - 1));
 
 __BEGIN_CDECLS
 
-extern zx_status_t arm64_el2_on(zx_paddr_t ttbr0, zx_paddr_t stack_top, uint64_t tcr,
-                                uint64_t vtcr);
-extern zx_status_t arm64_el2_off();
 extern zx_status_t arm64_el2_tlbi_ipa(uint64_t vttbr, zx_vaddr_t addr, bool terminal);
 extern zx_status_t arm64_el2_tlbi_vmid(uint64_t vttbr);
-extern zx_status_t arm64_el2_enter(uint64_t vttbr, zx_paddr_t state, uint64_t hcr);
-
-// Invalidate all TLB entries in EL2.
-extern zx_status_t arm64_el2_tlbi_el2();
+extern zx_status_t arm64_el2_enter(uint64_t vttbr, El2State* state, uint64_t hcr);
 
 __END_CDECLS
 

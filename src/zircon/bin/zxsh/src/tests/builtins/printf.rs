@@ -284,3 +284,107 @@ fn test_printf_number_and_float_edge_cases() {
     );
     assert_eq!(code, 1);
 }
+
+#[test]
+fn test_printf_options_and_double_dash() {
+    let mut state = ShellState::new();
+
+    // 1. `printf -- "-hello\n"` treats "-hello\n" as format string
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = builtin_printf(
+        &[BString::from("--"), BString::from(r"-hello\n")],
+        &mut state,
+        &mut std::io::empty(),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty());
+    assert_eq!(stdout, b"-hello\n");
+
+    // 2. `printf --` with no format operand fails with usage
+    stdout.clear();
+    stderr.clear();
+    let code = builtin_printf(
+        &[BString::from("--")],
+        &mut state,
+        &mut std::io::empty(),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 1);
+    assert_eq!(
+        String::from_utf8(stderr.clone()).unwrap(),
+        "printf: usage: printf format [arg ...]\n"
+    );
+
+    // 3. `printf -x "hello"` fails with invalid option
+    stdout.clear();
+    stderr.clear();
+    let code = builtin_printf(
+        &[BString::from("-x"), BString::from("hello")],
+        &mut state,
+        &mut std::io::empty(),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 1);
+    assert!(String::from_utf8(stderr.clone()).unwrap().contains("invalid option -- 'x'"));
+
+    // 4. Single "-" is treated as format string
+    stdout.clear();
+    stderr.clear();
+    let code = builtin_printf(
+        &[BString::from("-")],
+        &mut state,
+        &mut std::io::empty(),
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, b"-");
+}
+
+#[test]
+fn test_printf_float_g_and_a_formatting() {
+    let run = |args: &[&str]| -> String {
+        let mut state = ShellState::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let bargs: Vec<BString> = args.iter().map(|&s| BString::from(s)).collect();
+        let code =
+            builtin_printf(&bargs, &mut state, &mut std::io::empty(), &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        String::from_utf8(stdout).unwrap()
+    };
+
+    // %e / %E with 2-digit signed exponent and # flag
+    assert_eq!(
+        run(&["%e|%E|%#.0e|%#.0f", "1.5", "1.5", "1.5", "1.0"]),
+        "1.500000e+00|1.500000E+00|2.e+00|1."
+    );
+
+    // %g / %G: small, large, significant digits, and # flag
+    assert_eq!(
+        run(&["%g|%g|%g|%G", "0.00001", "0.0001", "1000000", "1000000"]),
+        "1e-05|0.0001|1e+06|1E+06"
+    );
+    assert_eq!(
+        run(&["%.3g|%.2g|%#.4g|%#.2g|%#.2g", "1.234", "123.4", "1.5", "10", "1000000"]),
+        "1.23|1.2e+02|1.500|10.|1.0e+06"
+    );
+
+    // %a / %A: 0.0, 1.5, -2.25, 0.125, precision, # flag, and 0-padding
+    assert_eq!(
+        run(&["%a|%A|%a|%a", "0", "1.5", "-2.25", "0.125"]),
+        "0x0p+0|0X1.8P+0|-0x1.2p+1|0x1p-3"
+    );
+    assert_eq!(
+        run(&["%.2a|%.0a|%#.0a|%#a|%012a", "1.5", "1.5", "1.0", "1.0", "1.5"]),
+        "0x1.80p+0|0x2p+0|0x1.p+0|0x1.p+0|0x00001.8p+0"
+    );
+
+    // inf / nan
+    assert_eq!(run(&["%f|%F|%g|%G", "inf", "-inf", "nan", "nan"]), "inf|-INF|nan|NAN");
+}

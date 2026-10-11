@@ -688,9 +688,16 @@ impl BlobPagerAndVerifier {
                 .open(key, identifier)
                 .await
                 .context("FIDL error calling MappingSession.Open")?
-                .map_err(|e| anyhow!("MappingSession.Open failed for blob: {e:?}"))?;
+                .map_err(|e| {
+                    Error::from(zx::Status::err_from_raw(e))
+                        .context("MappingSession.Open failed for blob")
+                })?;
 
             let vmo = self.pager.create_vmo(zx::VmoOptions::empty(), &self.port, key, size)?;
+            let vmo_name = format!("blob-{}", &Hash::from(*identifier).to_string()[..8]);
+            if let Ok(name) = zx::Name::new(&vmo_name) {
+                let _ = vmo.set_name(&name);
+            }
 
             // Create the initial child. We vend children of this VMO to clients so we can track
             // when all children are dropped to evict the blob from cache.
@@ -993,6 +1000,10 @@ mod tests {
         let hash3: [u8; 32] = [0x33; 32];
 
         let vmo1 = pager_and_verifier.create_vmo(&hash1).await.expect("create_vmo 1 failed");
+        assert_eq!(
+            vmo1.get_name().expect("get_name failed"),
+            zx::Name::new("blob-11111111").expect("zx::Name::new failed")
+        );
         let vmo2 = pager_and_verifier.create_vmo(&hash2).await.expect("create_vmo 2 failed");
         let vmo3 = pager_and_verifier.create_vmo(&hash3).await.expect("create_vmo 3 failed");
 
@@ -1201,8 +1212,10 @@ mod tests {
         // Allow Fxfs to reply with an error to the primary caller.
         reply_tx.send(()).expect("reply_tx send failed");
 
-        // Both callers must return an error and complete without hanging on abandoned state.
-        assert!(primary_future.await.is_err());
+        // Both callers must return an error and complete without hanging on abandoned state, and
+        // the primary caller must preserve the underlying zx::Status::NOT_FOUND.
+        let primary_err = primary_future.await.expect_err("expected primary create_vmo to fail");
+        assert_eq!(primary_err.downcast_ref::<zx::Status>(), Some(&zx::Status::NOT_FOUND));
         assert!(secondary_future.await.is_err());
 
         // Cache should be empty.

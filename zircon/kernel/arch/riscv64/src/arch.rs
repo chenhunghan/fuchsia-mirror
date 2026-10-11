@@ -59,6 +59,8 @@ pub const RISCV64_CSR_SSTATUS_UXL_64BIT: u64 = 2 << 32;
 const RISCV64_CSR_SSTATUS_UXL_128BIT: u64 = 3 << 32;
 pub const RISCV64_CSR_SSTATUS_SD: u64 = 1 << 63;
 
+pub const RISCV64_CSR_VTYPE_VILL: u64 = 1 << 63;
+
 const RISCV64_CSR_SIE_SSIE: u64 = 1 << 1;
 pub const RISCV64_CSR_SIE_STIE: u64 = 1 << 5;
 const RISCV64_CSR_SIE_SEIE: u64 = 1 << 9;

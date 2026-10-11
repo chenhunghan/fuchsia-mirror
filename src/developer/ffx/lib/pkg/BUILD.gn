@@ -85,16 +85,6 @@ host_test_data("empty-repo-metadata") {
 
 ffx_pkg_lib("pkg") {
   deps = [
-    "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_flex",
-    "//sdk/fidl/fuchsia.pkg.rewrite:fuchsia.pkg.rewrite_rust_flex",
-    "//sdk/rust/zx-status",
-    "//src/lib/fdomain/client:flex_fidl",
-    "//src/sys/lib/fidl-fuchsia-pkg-rewrite-ext",
-  ]
-}
-
-ffx_pkg_lib("pkg_fdomain") {
-  deps = [
     "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_fdomain_flex",
     "//sdk/fidl/fuchsia.pkg.rewrite:fuchsia.pkg.rewrite_rust_fdomain_flex",
     "//sdk/rust/zx-status",
@@ -102,6 +92,10 @@ ffx_pkg_lib("pkg_fdomain") {
     "//src/sys/lib/fidl-fuchsia-pkg-rewrite-ext:fidl-fuchsia-pkg-rewrite-ext_fdomain",
   ]
   features = [ "fdomain" ]
+}
+
+group("pkg_fdomain") {
+  public_deps = [ ":pkg" ]
 }
 
 group("tests") {

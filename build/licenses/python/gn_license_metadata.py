@@ -62,7 +62,7 @@ class GnApplicableLicensesMetadata:
     """Metadata produced by the GN `applicable_licenses` template parameter"""
 
     target_label: GnLabel
-    target_type: str
+    target_type: str | None
     license_labels: tuple[GnLabel, ...]
     third_party_resources: tuple[GnLabel, ...]
 

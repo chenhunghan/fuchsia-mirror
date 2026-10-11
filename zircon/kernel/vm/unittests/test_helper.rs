@@ -280,7 +280,7 @@ pub fn alloc_user(
         VmObjectPaged::into_vm_object(vmo),
         0,
         ARCH_RW_USER_FLAGS,
-        name,
+        name.to_bytes(),
     )?;
 
     Ok(UserInOutPtr::new(ptr::with_exposed_provenance_mut(mapping.base)))

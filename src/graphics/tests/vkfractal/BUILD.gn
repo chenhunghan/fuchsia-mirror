@@ -1,0 +1,97 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/compiled_action.gni")
+import("//build/components.gni")
+import("//src/graphics/lib/magma/gnbuild/magma.gni")
+
+# Each variant compiles a shader to SPIR-V and emits a C header containing a
+# uint32_t array named <name>_spv. glslangValidator infers the stage from the
+# source file's extension.
+_shader_variants = [
+  {
+    name = "fullscreen_vert"
+    source = "shaders/fullscreen.vert"
+  },
+  {
+    name = "mandelbrot_frag"
+    source = "shaders/mandelbrot.frag"
+  },
+  {
+    name = "scale_vert"
+    source = "shaders/scale.vert"
+  },
+  {
+    name = "scale_frag"
+    source = "shaders/scale.frag"
+  },
+]
+
+_shader_targets = []
+foreach(variant, _shader_variants) {
+  compiled_action("shader_${variant.name}") {
+    tool = "//third_party/glslang/src:glslang_validator"
+    _output = "$target_gen_dir/shaders/${variant.name}_spv.h"
+    inputs = [ variant.source ]
+    outputs = [ _output ]
+    args = [
+      "-V",
+      "--target-env",
+      "vulkan1.1",
+      "--vn",
+      "${variant.name}_spv",
+      "-o",
+      rebase_path(_output, root_build_dir),
+      rebase_path(variant.source, root_build_dir),
+    ]
+  }
+  _shader_targets += [ ":shader_${variant.name}" ]
+}
+
+executable("bin") {
+  output_name = "vkfractal"
+  testonly = true
+
+  sources = [ "vkfractal.cc" ]
+  defines = [
+    "VULKAN_HPP_NO_EXCEPTIONS",
+
+    # Don't assert on unsuccessful results: with VULKAN_HPP_NO_EXCEPTIONS, every
+    # call that can fail returns its vk::Result as [[nodiscard]], and vkfractal
+    # checks and reports each one.
+    "VULKAN_HPP_ASSERT_ON_RESULT=(void)",
+  ]
+  include_dirs = [ target_gen_dir ]
+
+  deps = _shader_targets + [
+           "//src/lib/fxl:fxl_cli",
+           "//src/lib/vulkan",
+         ]
+}
+
+fuchsia_test_component("vkfractal-cmp") {
+  component_name = "vkfractal"
+  manifest = "meta/vkfractal.cml"
+  deps = [
+    ":bin",
+    "//src/lib/vulkan/swapchain:image_pipe_swapchain_fb_layer",
+    "//src/lib/vulkan/validation_layers",
+  ]
+  test_type = "system"
+}
+
+fuchsia_test_package("vkfractal") {
+  test_components = [ ":vkfractal-cmp" ]
+  test_specs = {
+    # Real GPUs only: lavapipe and goldfish are too slow for this workload.
+    environments = magma_libvulkan_hardware_envs
+
+    # Allow ERROR logs, as other Vulkan hardware tests do (e.g. vkloop). Vulkan
+    # validation errors still fail the test: vkfractal counts them through its
+    # debug messenger.
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}

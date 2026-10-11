@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Source tree
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### view commits not yet published to global integration
 
 import argparse

@@ -53,11 +53,22 @@ impl QueuedRequest {
 
     /// Returns true if the request's channels can be fulfilled by the given SME request
     fn channels_match(&self, sme_request: &fidl_sme::ScanRequest) -> bool {
-        match sme_request {
-            fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { .. }) => true,
-            fidl_sme::ScanRequest::Active(active_req) => {
-                self.channels.iter().all(|chan| active_req.channels.contains(&chan.primary))
-            }
+        let sme_channels = match sme_request {
+            fidl_sme::ScanRequest::Passive(passive_req) => &passive_req.channels,
+            fidl_sme::ScanRequest::Active(active_req) => &active_req.channels,
+        };
+
+        // If the SME request specifies no channels, it scans all supported channels.
+        // An all-channel scan fulfills any channel requirement.
+        if sme_channels.is_empty() {
+            true
+        // If the SME scan only scanned specific channels, a request for all channels
+        // (empty channels list) cannot be fulfilled.
+        } else if self.channels.is_empty() {
+            false
+        // Otherwise, all requested channels must be included in the SME scan.
+        } else {
+            self.channels.iter().all(|chan| sme_channels.contains(&chan.primary))
         }
     }
 
@@ -338,16 +349,31 @@ mod tests {
         assert_eq!(matches, req_with_ssids.ssids_match(&sme_request));
     }
 
-    // Request has no channels, fulfilled by passive SME scan
+    // Request has no channels, fulfilled by passive SME scan (all channels)
     #[test_case(true, vec![], passive_sme_req())]
     // Request has channels, passive scan fulfills all channels
     #[test_case(true, vec![1], passive_sme_req())]
-    // Request has no channels, fulfilled by active SME scan with no channels
+    // Request has no channels, fulfilled by active SME scan with no channels (all channels)
     #[test_case(true, vec![], active_sme_req(vec!["bar"], vec![]))]
+    // Request has channels, fulfilled by active SME scan with no channels (all channels)
+    #[test_case(true, vec![1], active_sme_req(vec!["bar"], vec![]))]
+    #[test_case(true, vec![1, 2], active_sme_req(vec!["bar"], vec![]))]
     // Request has channels, fulfilled by active SME scan with matching channels
+    #[test_case(true, vec![1, 2], active_sme_req(vec![], vec![1, 2]))]
     #[test_case(true, vec![1, 2], active_sme_req(vec![], vec![1, 2, 55]))]
+    #[test_case(true, vec![36, 40], active_sme_req(vec![], vec![36, 40, 44]))]
+    // Doesn't match: Request has no channels (all channels), active SME scan with specific channels
+    #[test_case(false, vec![], active_sme_req(vec![], vec![1]))]
+    #[test_case(false, vec![], active_sme_req(vec![], vec![1, 2]))]
     // Doesn't match: Request has channels, SME scan with non-matching channels
     #[test_case(false, vec![1, 2], active_sme_req(vec![], vec![1, 5, 55]))]
+    #[test_case(false, vec![36, 40], active_sme_req(vec![], vec![36, 48]))]
+    // Passive SME scan with specific channels
+    #[test_case(true, vec![1], fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { channels: vec![1, 2] }))]
+    #[test_case(true, vec![1, 2], fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { channels: vec![1, 2] }))]
+    #[test_case(true, vec![1, 2], fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { channels: vec![1, 2, 3] }))]
+    #[test_case(false, vec![], fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { channels: vec![1] }))]
+    #[test_case(false, vec![1, 2], fidl_sme::ScanRequest::Passive(fidl_sme::PassiveScanRequest { channels: vec![1] }))]
     #[fuchsia::test(add_test_attr = false)]
     fn channels_match(matches: bool, req_channels: Vec<u8>, sme_request: fidl_sme::ScanRequest) {
         let req = QueuedRequest {
@@ -419,6 +445,154 @@ mod tests {
             assert_matches!(event, ScanQueueStatistics {
                 fulfilled_requests: 1,
                 remaining_requests: 1,
+            });
+        });
+    }
+
+    #[fuchsia::test]
+    fn handle_completed_sme_scan_channel_matching() {
+        let initial_time = zx::MonotonicInstant::from_nanos(123);
+        // Completed active SME scan on channel 1 only for SSID "foo"
+        let sme_req = active_sme_req(vec!["foo"], vec![1]);
+
+        // Request 1: wants SSID "foo" on channel 1 -> should match
+        let (ch1_sender, mut ch1_receiver) = oneshot::channel();
+        let ch1_req = QueuedRequest {
+            reason: ScanReason::BssSelectionAugmentation,
+            ssids: vec![generate_ssid("foo")],
+            channels: vec![generate_channel(1, fidl_fuchsia_wlan_ieee80211::WlanBand::TwoGhz)],
+            responder: ch1_sender,
+            received_at: initial_time,
+        };
+
+        // Request 2: wants SSID "foo" on all channels -> should NOT match (information suppression bug)
+        let (all_ch_sender, mut all_ch_receiver) = oneshot::channel();
+        let all_ch_req = QueuedRequest {
+            reason: ScanReason::BssSelectionAugmentation,
+            ssids: vec![generate_ssid("foo")],
+            channels: vec![],
+            responder: all_ch_sender,
+            received_at: initial_time,
+        };
+
+        // Request 3: wants SSID "foo" on channel 2 -> should NOT match
+        let (ch2_sender, mut ch2_receiver) = oneshot::channel();
+        let ch2_req = QueuedRequest {
+            reason: ScanReason::BssSelectionAugmentation,
+            ssids: vec![generate_ssid("foo")],
+            channels: vec![generate_channel(2, fidl_fuchsia_wlan_ieee80211::WlanBand::TwoGhz)],
+            responder: ch2_sender,
+            received_at: initial_time,
+        };
+
+        let (mut queue, mut telemetry_receiver) = setup_queue();
+        queue.queue.push(ch1_req);
+        queue.queue.push(all_ch_req);
+        queue.queue.push(ch2_req);
+
+        let scan_results = Ok(vec![]);
+        queue.handle_completed_sme_scan(
+            sme_req,
+            scan_results.clone(),
+            initial_time + zx::MonotonicDuration::from_seconds(1),
+        );
+
+        // Only the channel 1 request should be fulfilled
+        assert_eq!(ch1_receiver.try_recv(), Ok(Some(scan_results)));
+        assert_eq!(all_ch_receiver.try_recv(), Ok(None));
+        assert_eq!(ch2_receiver.try_recv(), Ok(None));
+        assert_eq!(queue.queue.len(), 2);
+
+        // Verify telemetry for first scan
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanRequestFulfillmentTime {
+                duration,
+                reason: ScanReason::BssSelectionAugmentation
+            } => assert_eq!(duration, zx::MonotonicDuration::from_seconds(1)));
+        });
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanQueueStatistics {
+                fulfilled_requests: 1,
+                remaining_requests: 2,
+            });
+        });
+
+        // Now an all-channel active SME scan completes for SSID "foo"
+        let all_ch_sme_req = active_sme_req(vec!["foo"], vec![]);
+        let scan_results_2 = Ok(vec![]);
+        queue.handle_completed_sme_scan(
+            all_ch_sme_req,
+            scan_results_2.clone(),
+            initial_time + zx::MonotonicDuration::from_seconds(2),
+        );
+
+        // Both remaining requests (all channels and channel 2) are now fulfilled
+        assert_eq!(all_ch_receiver.try_recv(), Ok(Some(scan_results_2.clone())));
+        assert_eq!(ch2_receiver.try_recv(), Ok(Some(scan_results_2)));
+        assert_eq!(queue.queue.len(), 0);
+
+        // Verify telemetry for both remaining requests
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanRequestFulfillmentTime {
+                duration,
+                reason: ScanReason::BssSelectionAugmentation
+            } => assert_eq!(duration, zx::MonotonicDuration::from_seconds(2)));
+        });
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanRequestFulfillmentTime {
+                duration,
+                reason: ScanReason::BssSelectionAugmentation
+            } => assert_eq!(duration, zx::MonotonicDuration::from_seconds(2)));
+        });
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanQueueStatistics {
+                fulfilled_requests: 2,
+                remaining_requests: 0,
+            });
+        });
+    }
+
+    #[fuchsia::test]
+    fn handle_completed_sme_scan_all_channel_active_fulfills_specific_channel() {
+        let initial_time = zx::MonotonicInstant::from_nanos(123);
+        // Completed active SME scan on all channels (empty channels list) for SSID "foo"
+        let sme_req = active_sme_req(vec!["foo"], vec![]);
+
+        // Request: wants SSID "foo" on channel 1 -> should match (inefficient scheduling bug)
+        let (ch1_sender, mut ch1_receiver) = oneshot::channel();
+        let ch1_req = QueuedRequest {
+            reason: ScanReason::BssSelectionAugmentation,
+            ssids: vec![generate_ssid("foo")],
+            channels: vec![generate_channel(1, fidl_fuchsia_wlan_ieee80211::WlanBand::TwoGhz)],
+            responder: ch1_sender,
+            received_at: initial_time,
+        };
+
+        let (mut queue, mut telemetry_receiver) = setup_queue();
+        queue.queue.push(ch1_req);
+
+        let scan_results = Ok(vec![]);
+        queue.handle_completed_sme_scan(
+            sme_req,
+            scan_results.clone(),
+            initial_time + zx::MonotonicDuration::from_seconds(1),
+        );
+
+        // Request for channel 1 should be fulfilled by the all-channel scan
+        assert_eq!(ch1_receiver.try_recv(), Ok(Some(scan_results)));
+        assert_eq!(queue.queue.len(), 0);
+
+        // Verify telemetry
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanRequestFulfillmentTime {
+                duration,
+                reason: ScanReason::BssSelectionAugmentation
+            } => assert_eq!(duration, zx::MonotonicDuration::from_seconds(1)));
+        });
+        assert_matches!(telemetry_receiver.try_recv(), Ok(event) => {
+            assert_matches!(event, ScanQueueStatistics {
+                fulfilled_requests: 1,
+                remaining_requests: 0,
             });
         });
     }

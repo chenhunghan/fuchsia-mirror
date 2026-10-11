@@ -7,7 +7,9 @@ use crate::process::{BinderProcess, BinderProcessGuard};
 
 use starnix_core::mm::{MemoryAccessor, MemoryAccessorExt};
 
-use starnix_core::task::{EventHandler, Kernel, SimpleWaiter, WaitCanceler, WaitQueue, Waiter};
+use starnix_core::task::{
+    EventHandler, Kernel, Pid, SimpleWaiter, Task, WaitCanceler, WaitQueue, Waiter,
+};
 
 use starnix_logging::{log_trace, log_warn};
 use starnix_sync::{
@@ -35,7 +37,7 @@ use starnix_uapi::{
     binder_driver_return_protocol_BR_TRANSACTION_COMPLETE,
     binder_driver_return_protocol_BR_TRANSACTION_PENDING_FROZEN,
     binder_driver_return_protocol_BR_TRANSACTION_SEC_CTX, binder_frozen_state_info,
-    binder_ptr_cookie, binder_transaction_data, binder_uintptr_t, errno, error, pid_t,
+    binder_ptr_cookie, binder_transaction_data, binder_uintptr_t, error,
 };
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
@@ -74,6 +76,15 @@ impl CommandQueueWithWaitQueue {
         self.commands.is_empty()
     }
 
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+
+    pub fn front(&self) -> Option<&QueuedCommand> {
+        self.commands.front()
+    }
+
     pub fn pop_front(&mut self) -> Option<QueuedCommand> {
         let queued = self.commands.pop_front()?;
         crate::trace::on_command_dequeued(&queued.command, queued.trace_id);
@@ -84,6 +95,15 @@ impl CommandQueueWithWaitQueue {
         crate::trace::on_command_enqueued(&command.command, command.trace_id);
         self.commands.push_back(command);
         self.waiters.notify_fd_events_count(FdEvents::POLLIN, 1);
+    }
+
+    /// Puts a dequeued command back at the front of the queue, so that it is dequeued next.
+    ///
+    /// Unlike `push_back`, this does not notify waiters: only the thread owning the queue dequeues
+    /// from it, and it only puts back commands while reading, so it is not waiting for them.
+    pub fn push_front(&mut self, command: QueuedCommand) {
+        crate::trace::on_command_enqueued(&command.command, command.trace_id);
+        self.commands.push_front(command);
     }
 
     pub fn retain<F>(&mut self, mut f: F)
@@ -121,7 +141,7 @@ impl CommandQueueWithWaitQueue {
 pub(crate) fn generate_dead_replies(
     commands: impl IntoIterator<Item = QueuedCommand>,
     target_proc: u64,
-    target_thread: Option<i32>,
+    target_thread: Option<&Pid>,
 ) {
     // Notify all callers that had transactions scheduled for this process that the recipient is
     // dead.
@@ -149,7 +169,7 @@ pub(crate) fn generate_dead_replies(
 pub(crate) fn generate_dead_replies_for_transactions(
     sender_thread: &mut BinderThreadState,
     target_proc: u64,
-    target_thread: Option<i32>,
+    target_thread: Option<&Pid>,
 ) {
     if let Some((top_transaction, remaining_transactions)) =
         sender_thread.transactions.split_last_mut()
@@ -181,7 +201,7 @@ pub struct BinderThread {
     /// Weak reference to self.
     pub weak_self: WeakRef<BinderThread>,
 
-    pub tid: pid_t,
+    pub tid: Pid,
 
     // The underlying Zircon thread which backs this binder thread.
     pub thread: Arc<zx::Thread>,
@@ -209,10 +229,10 @@ pub struct BinderThread {
 impl BinderThread {
     pub fn new(
         binder_proc: &BinderProcessGuard<'_>,
-        tid: pid_t,
+        tid: Pid,
         thread: Arc<zx::Thread>,
     ) -> OwnedRef<Self> {
-        let inner_state = BinderThreadState::new(tid, binder_proc.base.identifier);
+        let inner_state = BinderThreadState::new(tid.clone(), binder_proc.base.identifier);
         let command_queue_waiters = inner_state.command_queue.waiters.clone();
         let available_threads = binder_proc.base.available_threads.clone();
         let state = inner_state.into();
@@ -240,6 +260,12 @@ impl BinderThread {
     ) -> (BinderThreadGuard<'a>, BinderThreadGuard<'a>) {
         let (g1, g2) = ordered_lock(&t1.state, &t2.state);
         (BinderThreadGuard { guard: g1, thread: t1 }, BinderThreadGuard { guard: g2, thread: t2 })
+    }
+
+    /// Returns the task associated with this thread, if it is running and has an intact file
+    /// table.
+    pub fn get_task(&self) -> Option<Arc<Task>> {
+        self.tid.get_task().ok().filter(|task| task.is_running() && task.files().is_ok())
     }
 }
 
@@ -273,7 +299,7 @@ impl Releasable for BinderThread {
 /// The mutable state of a binder thread.
 #[derive(Debug)]
 pub struct BinderThreadState {
-    pub tid: pid_t,
+    pub tid: Pid,
 
     /// The process identifier of the `BinderProcess` to which this thread belongs. Note that this
     /// is not the same as the actual `pid` of the process.
@@ -324,7 +350,7 @@ impl Drop for BinderThreadGuard<'_> {
 }
 
 impl BinderThreadState {
-    pub fn new(tid: pid_t, process_identifier: u64) -> Self {
+    pub fn new(tid: Pid, process_identifier: u64) -> Self {
         Self {
             tid,
             process_identifier,
@@ -388,30 +414,55 @@ impl BinderThreadState {
         self.command_queue.push_back(command);
     }
 
-    /// Get the binder process and thread to reply to, or fail if there is no ongoing transaction or
-    /// the calling process/thread are dead.
+    /// Pops the transaction this thread is replying to, and returns the peer that sent it, which
+    /// may be dead. Fails if this thread is not handling a transaction.
     pub fn pop_transaction_caller(
         &mut self,
-    ) -> Result<
-        (TempRef<'static, BinderProcess>, TempRef<'static, BinderThread>, fuchsia_trace::Id),
-        TransactionError,
-    > {
-        let transaction = self.transactions.pop().ok_or_else(|| errno!(EINVAL))?;
-        match transaction {
-            TransactionRole::Receiver { peer, trace_id } => {
+    ) -> Result<(WeakBinderPeer, fuchsia_trace::Id), TransactionError> {
+        match self.transactions.pop() {
+            Some(TransactionRole::Receiver { peer, trace_id }) => {
                 log_trace!(
                     "binder transaction popped from thread {} for peer {:?}",
                     self.tid,
                     peer
                 );
-                let (process, thread) = peer.upgrade().ok_or(TransactionError::Dead)?;
-                Ok((process, thread, trace_id))
+                Ok((peer, trace_id))
             }
-            TransactionRole::Sender(_) => {
+            Some(transaction @ TransactionRole::Sender(_)) => {
+                // The thread is waiting for the reply to its own transaction, which must stay on
+                // its transaction stack.
+                self.transactions.push(transaction);
                 log_warn!("caller got confused, nothing to reply to!");
                 error!(EINVAL)?
             }
+            None => error!(EINVAL)?,
         }
+    }
+
+    /// Notifies this thread that the reply to the transaction it sent to `target_proc` could not
+    /// be delivered because of `error`, and pops that transaction from its transaction stack.
+    ///
+    /// Does nothing if this thread is not waiting for the reply to a transaction sent to
+    /// `target_proc`, e.g. if the transaction already completed with a `DeadReply`.
+    pub fn deliver_failed_reply(
+        &mut self,
+        target_proc: u64,
+        error: &TransactionError,
+        trace_id: fuchsia_trace::Id,
+    ) {
+        if !matches!(
+            self.transactions.last(),
+            Some(TransactionRole::Sender(sender)) if sender.target_proc == target_proc
+        ) {
+            log_trace!(
+                "binder thread {} is not waiting for a reply from process {}",
+                self.tid,
+                target_proc
+            );
+            return;
+        }
+        self.transactions.pop();
+        self.enqueue_command(QueuedCommand::new(error.to_command(), trace_id));
     }
 
     pub fn has_pending_transactions(&self) -> bool {
@@ -427,7 +478,7 @@ impl Releasable for BinderThreadState {
         // If there are any transactions queued, we need to tell the caller that this thread is now
         // dead.
         let command_queue = self.command_queue.commands;
-        generate_dead_replies(command_queue, self.process_identifier, Some(self.tid));
+        generate_dead_replies(command_queue, self.process_identifier, Some(&self.tid));
 
         // If there are any transactions that this thread was processing, we need to tell the caller
         // that this thread is now dead and to not expect a reply.
@@ -438,7 +489,7 @@ impl Releasable for BinderThreadState {
                     generate_dead_replies_for_transactions(
                         sender_thread,
                         self.process_identifier,
-                        Some(self.tid),
+                        Some(&self.tid),
                     );
                 }
             }
@@ -611,6 +662,43 @@ impl Command {
         }
     }
 
+    /// Returns the minimum buffer size in bytes required to write this command into memory.
+    pub fn required_buffer_size(&self) -> usize {
+        // The size of the parameters of a command is encoded in its return code, which
+        // `write_command` asserts.
+        std::mem::size_of::<binder_driver_return_protocol>() + ioc_size(self.driver_return_code())
+    }
+
+    /// Returns true if this command terminates a read batch in `handle_thread_read`: a terminal
+    /// command is only read as the first command of a batch, and ends it.
+    ///
+    /// After a `TwoWayTransactionComplete`, `handle_thread_read` may still wait for the outcome of
+    /// the transaction and return it in the same read, as the first command of a new batch.
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Transaction { .. }
+            | Self::Reply(..)
+            | Self::TransactionComplete
+            | Self::TwoWayTransactionComplete
+            | Self::OnewayTransaction(..)
+            | Self::OnewayTransactionComplete
+            | Self::PendingFrozen
+            | Self::DeadReply
+            | Self::FailedReply
+            | Self::FrozenReply
+            | Self::DeadBinder(..)
+            | Self::FrozenBinder(..)
+            | Self::SpawnLooper
+            | Self::Error(..) => true,
+            Self::AcquireRef(..)
+            | Self::ReleaseRef(..)
+            | Self::IncRef(..)
+            | Self::DecRef(..)
+            | Self::ClearDeathNotificationDone(..)
+            | Self::ClearFreezeNotificationDone(..) => false,
+        }
+    }
+
     /// Serializes and writes the command into userspace memory at `buffer`.
     pub fn write_to_memory(
         &self,
@@ -724,7 +812,7 @@ pub struct TransactionSender {
     /// The target thread of the transaction. Used to determine whether or not this transaction is
     /// still alive. If `None`, the transaction will be marked dead when the handling thread in
     /// `target_proc` is released.
-    pub target_thread: Option<i32>,
+    pub target_thread: Option<Pid>,
 
     /// Whether or not the target of this transaction is still alive. Used to determine whether or
     /// not a `DeadReply` should be inserted into the command queue when a thread is waiting for
@@ -741,7 +829,7 @@ pub struct TransactionSender {
 
 impl TransactionRole {
     /// Marks the transaction as dead if it is a `Sender` targeting `thread` or `process`.
-    fn mark_dead(&mut self, process: u64, thread: Option<i32>) -> bool {
+    fn mark_dead(&mut self, process: u64, thread: Option<&Pid>) -> bool {
         match (thread, self) {
             (
                 // If a thread is provided to `mark_dead`, it means that the transaction should
@@ -752,7 +840,7 @@ impl TransactionRole {
                     is_alive,
                     ..
                 }),
-            ) if *target == thread => {
+            ) if target == thread => {
                 *is_alive = false;
                 true
             }
@@ -800,35 +888,27 @@ impl TransactionError {
     /// Dispatches the error, by potentially queueing a command to `binder_thread` and/or returning
     /// an error.
     pub fn dispatch(&self, binder_thread: &BinderThread) -> Result<(), Errno> {
-        self.dispatch_with_trace_id(binder_thread, fuchsia_trace::Id::new())
+        log_trace!("Dispatching transaction error {:?} for thread {}", self, binder_thread.tid);
+        if let TransactionError::Malformed(err) = self {
+            log_warn!(
+                "binder thread {} sent a malformed transaction: {:?}",
+                binder_thread.tid,
+                &err
+            );
+        }
+        binder_thread.lock().enqueue_command(self.to_command().into());
+        Ok(())
     }
 
-    /// Dispatches the error with a specific `trace_id`.
-    pub fn dispatch_with_trace_id(
-        &self,
-        binder_thread: &BinderThread,
-        trace_id: fuchsia_trace::Id,
-    ) -> Result<(), Errno> {
-        log_trace!("Dispatching transaction error {:?} for thread {}", self, binder_thread.tid);
-        binder_thread.lock().enqueue_command(QueuedCommand::new(
-            match self {
-                TransactionError::Malformed(err) => {
-                    log_warn!(
-                        "binder thread {} sent a malformed transaction: {:?}",
-                        binder_thread.tid,
-                        &err
-                    );
-                    // Negate the value, as the binder runtime assumes error values are already
-                    // negative.
-                    Command::Error(err.return_value() as i32)
-                }
-                TransactionError::Failure => Command::FailedReply,
-                TransactionError::Dead => Command::DeadReply,
-                TransactionError::Frozen => Command::FrozenReply,
-            },
-            trace_id,
-        ));
-        Ok(())
+    /// Returns the command that notifies a binder thread of the error.
+    fn to_command(&self) -> Command {
+        match self {
+            // Negate the value, as the binder runtime assumes error values are already negative.
+            TransactionError::Malformed(err) => Command::Error(err.return_value() as i32),
+            TransactionError::Failure => Command::FailedReply,
+            TransactionError::Dead => Command::DeadReply,
+            TransactionError::Frozen => Command::FrozenReply,
+        }
     }
 }
 

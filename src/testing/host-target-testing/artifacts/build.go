@@ -31,12 +31,52 @@ import (
 type BlobFetchMode int
 
 const (
+	// Unspecified indicates that no blob fetch mode was explicitly specified.
+	Unspecified BlobFetchMode = iota
+
 	// PrefetchBlobs will download all the blobs from a build when `GetPackageRepository()` is called.
-	PrefetchBlobs BlobFetchMode = iota
+	PrefetchBlobs
 
 	// LazilyFetchBlobs will only download blobs when they are accessed.
 	LazilyFetchBlobs
+)
 
+func (m BlobFetchMode) String() string {
+	switch m {
+	case Unspecified:
+		return "unspecified"
+	case PrefetchBlobs:
+		return "prefetch"
+	case LazilyFetchBlobs:
+		return "lazy"
+	default:
+		return fmt.Sprintf("BlobFetchMode(%d)", m)
+	}
+}
+
+func (m *BlobFetchMode) Set(s string) error {
+	mode, err := ParseBlobFetchMode(s)
+	if err != nil {
+		return err
+	}
+	*m = mode
+	return nil
+}
+
+func ParseBlobFetchMode(s string) (BlobFetchMode, error) {
+	switch strings.ToLower(s) {
+	case "unspecified":
+		return Unspecified, nil
+	case "prefetch":
+		return PrefetchBlobs, nil
+	case "lazy":
+		return LazilyFetchBlobs, nil
+	default:
+		return Unspecified, fmt.Errorf("invalid blob fetch mode %q, must be 'prefetch' or 'lazy'", s)
+	}
+}
+
+const (
 	// Product Bundle manifest which is used to locate VBmeta
 	ProductBundleManifest = "product_bundle.json"
 
@@ -96,8 +136,9 @@ type Build interface {
 }
 
 type BuildWithVersion struct {
-	Build   Build
-	Version ffx.FfxVersionPolicy
+	Build         Build
+	Version       ffx.FfxVersionPolicy
+	BlobFetchMode BlobFetchMode
 }
 
 // ArtifactsBuild represents the build artifacts for a specific build.

@@ -12,15 +12,13 @@ import (
 	"go.starlark.net/syntax"
 )
 
-// Parse takes a path to a starlark file and returns a parsed AST.
-//
-// This delegates to the starlark parser library we are using.
-// Create a function wrapper here to capture the settings and modes we use during parsing.
-func Parse(path string) (*syntax.File, error) {
+// ParseBytes parses the given Starlark source content in memory. `path` is
+// only used for error reporting.
+func ParseBytes(path string, src []byte) (*syntax.File, error) {
 	opts := syntax.FileOptions{
 		// Empty means default file-level settings for parsing.
 	}
-	return opts.Parse(path, nil, syntax.RetainComments)
+	return opts.Parse(path, src, syntax.RetainComments)
 }
 
 // indent indents input lines by input levels.
@@ -363,6 +361,27 @@ func hasClearAnnotation(expr syntax.Expr) bool {
 	return false
 }
 
+// disableInstrumentationToGN converts the value of a Bazel
+// `disable_instrumentation` attribute to GN.
+//
+// `disable_instrumentation = True` becomes
+// `exclude_toolchain_tags = [ "instrumented" ]`, and `False` produces nothing.
+// Only literal booleans are supported.
+func disableInstrumentationToGN(expr syntax.Expr) ([]string, error) {
+	ident, ok := unwrapParenExpr(expr).(*syntax.Ident)
+	if !ok {
+		return nil, fmt.Errorf("%s must be set to True or False, got %T", disableInstrumentationAttr, expr)
+	}
+	switch ident.Name {
+	case "True":
+		return []string{disableInstrumentationGN}, nil
+	case "False":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s must be set to True or False, got %s", disableInstrumentationAttr, ident.Name)
+	}
+}
+
 // attrAssignmentToGN converts a Bazel assignment [0] to GN. These assignments
 // are used to assign values to fields during target definitions in Bazel.
 //
@@ -384,7 +403,7 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, er
 	//
 	// This requires determining which assignment operator to use now even though
 	// we may not end up using it.
-	op, ok := attrGNAssignmentOps[attrName]
+	op, ok := bazelAttrToGNAssignmentOps[lhs.Name]
 	if !ok {
 		op = "="
 	}
@@ -407,6 +426,12 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, er
 	// or wrapping (implemented below) will be performed.
 	if raw, ok := overwrittenRaw(expr); ok {
 		return []string{fmt.Sprintf("%s %s %s", attrName, op, raw)}, nil
+	}
+
+	// `disable_instrumentation = True` has no direct GN equivalent attribute, it
+	// becomes an `exclude_toolchain_tags` assignment.
+	if lhs.Name == disableInstrumentationAttr {
+		return disableInstrumentationToGN(expr.Y)
 	}
 
 	// Intercept genrule cmd assignment and convert it directly.
@@ -434,7 +459,7 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, er
 	switch attrName {
 	case "visibility":
 		transformers = append(transformers, bazelVisibilityToGN)
-	case "deps", "test_deps", "proc_macro_deps", "args_deps", "plugin_deps":
+	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps":
 		transformers = append(transformers, bazelDepToGN)
 	case "public_deps":
 		transformers = append(transformers, bazelDepToGN)
@@ -443,7 +468,12 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, er
 			transformers = append(transformers, bazelExprToGNList)
 		}
 	case "configs":
-		transformers = append(transformers, bazelCOptToGNConfig)
+		if _, ok := buildFlagsAttrMap[lhs.Name]; ok {
+			// `build_flags()` labels are the same as their GN `config()` labels.
+			transformers = append(transformers, bazelDepToGN)
+		} else {
+			transformers = append(transformers, bazelCOptToGNConfig)
+		}
 	case "api", "outputs", "sources", "inputs", "args_sources":
 		transformers = append(transformers, bazelFilePathsToGN)
 	case "ldflags":

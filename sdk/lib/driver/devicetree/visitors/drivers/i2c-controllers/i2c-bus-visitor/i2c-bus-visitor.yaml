@@ -9,6 +9,11 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 
 title: I2C bus visitor
 
+description: |
+  Child nodes of an I2C bus node get an I2C channel parent, unless another node
+  references them in an `i2c-channels` property. In that case the referencing
+  node gets the parent instead, see i2c-consumer.yaml.
+
 maintainers:
   - Puneetha Ramachandra (puneetha@google.com)
   - Sarah Chan (spqchan@google.com)

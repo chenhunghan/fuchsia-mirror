@@ -24,6 +24,8 @@ use fidl_fuchsia_pkg as fpkg;
 use fidl_fuchsia_pkg_http as fpkg_http;
 use fidl_fuchsia_pkg_internal as fpkg_internal;
 use fidl_fuchsia_pkg_resolution as fpkg_resolution;
+use fidl_fuchsia_storage_block as fstorage_block;
+use fidl_fuchsia_storage_mapping as fstorage_mapping;
 use fidl_fuchsia_update::CommitStatusProviderMarker;
 use fuchsia_async as fasync;
 use fuchsia_async::Task;
@@ -56,7 +58,7 @@ mod retained_packages_service;
 mod root_dir;
 mod upgradable_packages;
 
-use root_dir::{RootDir, RootDirCache, RootDirFactory};
+use root_dir::{CachedRootDir, RootDir, RootDirCache, RootDirFactory};
 
 #[cfg(test)]
 mod test_utils;
@@ -121,6 +123,39 @@ pub fn main() -> Result<(), Error> {
     })
 }
 
+struct DriverBlobReader(blob_pager_and_verifier::BlobPagerAndVerifier);
+
+impl std::fmt::Debug for DriverBlobReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DriverBlobReader").finish_non_exhaustive()
+    }
+}
+
+impl blobfs::BlobReader for DriverBlobReader {
+    fn get_vmo<'a>(
+        &'a self,
+        blob: &'a fuchsia_hash::Hash,
+    ) -> futures::future::BoxFuture<'a, Result<zx::Vmo, blobfs::GetBlobVmoError>> {
+        async move {
+            self.0.create_vmo(blob).await.map_err(|e| {
+                error!(blob:%, error:? = e; "DriverBlobReader failed to get VMO");
+                if let Some(&status) = e.root_cause().downcast_ref::<zx::Status>() {
+                    blobfs::GetBlobVmoError::GetVmo(status)
+                } else {
+                    blobfs::GetBlobVmoError::GetVmo(zx::Status::INTERNAL)
+                }
+            })
+        }
+        .boxed()
+    }
+}
+
+impl blobfs::IntoBlobReader for DriverBlobReader {
+    fn into_blob_reader(self) -> Arc<dyn blobfs::BlobReader> {
+        Arc::new(self)
+    }
+}
+
 async fn main_inner() -> Result<(), Error> {
     info!("starting package cache service");
     let inspector = finspect::Inspector::default();
@@ -140,14 +175,41 @@ async fn main_inner() -> Result<(), Error> {
         blob_network_header_timeout_seconds,
         blob_network_body_timeout_seconds,
         blob_download_resumption_attempts_limit,
+        use_driver_blob_paging,
     } = config;
-    let blobfs = blobfs::Client::builder()
-        .readable()
-        .writable()
-        .executable()
-        .build()
-        .await
-        .context("error opening blobfs")?;
+    let mut blobfs_builder = blobfs::Client::builder().readable().writable().executable();
+    let mut driver_blob_paging_active = false;
+    if use_driver_blob_paging {
+        let verifier_result: Result<blob_pager_and_verifier::BlobPagerAndVerifier, Error> = async {
+            let mapping_provider = connect_to_protocol::<fstorage_mapping::MappingProviderMarker>()
+                .context("error connecting to fuchsia.storage.mapping.MappingProvider")?;
+            let mapper = connect_to_protocol::<fstorage_block::MapperMarker>()
+                .context("error connecting to fuchsia.storage.block.Mapper")?;
+            blob_pager_and_verifier::BlobPagerAndVerifier::new(&mapping_provider, &mapper)
+                .await
+                .context("error initializing BlobPagerAndVerifier")
+        }
+        .await;
+
+        match verifier_result {
+            Ok(verifier) => {
+                info!("Using driver blob paging");
+                inspector.root().record_string("driver_blob_paging_status", "active");
+                blobfs_builder = blobfs_builder.reader(DriverBlobReader(verifier));
+                driver_blob_paging_active = true;
+            }
+            Err(error) => {
+                error!(
+                    error:?;
+                    "Failed to initialize driver blob paging, falling back to Fxfs BlobReader"
+                );
+                inspector.root().record_string("driver_blob_paging_status", "fallback");
+            }
+        }
+    } else {
+        inspector.root().record_string("driver_blob_paging_status", "disabled");
+    }
+    let blobfs = blobfs_builder.build().await.context("error opening blobfs")?;
 
     let authenticator = context_authenticator::ContextAuthenticator::new();
 
@@ -271,6 +333,12 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.pkg/PackageCache to /svc")?;
     }
+    let () = svc_dir
+        .add_entry(
+            ffxfs::BlobReaderMarker::PROTOCOL_NAME,
+            get_blob_reader_handler(driver_blob_paging_active, &blobfs),
+        )
+        .context("adding fuchsia.fxfs/BlobReader to /svc")?;
     {
         let package_index = Arc::clone(&package_index);
         let blobfs = blobfs.clone();
@@ -343,23 +411,6 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.pkg.garbagecollector/Manager to /svc")?;
     }
-    // Forward fuchsia.fxfs.BlobReader connections directly to fshost, establishing pkg-cache as the
-    // intermediary for blob reading requests.
-    {
-        let () = svc_dir
-            .add_entry(
-                ffxfs::BlobReaderMarker::PROTOCOL_NAME,
-                vfs::service::endpoint(|_scope, channel| {
-                    if let Err(error) = fuchsia_component::client::connect_channel_to_protocol::<
-                        ffxfs::BlobReaderMarker,
-                    >(channel.into_zx_channel())
-                    {
-                        error!(error:?; "Failed to forward fuchsia.fxfs/BlobReader to fshost");
-                    }
-                }),
-            )
-            .context("adding fuchsia.fxfs/BlobReader proxy to /svc")?;
-    }
     let base_package_resolver = base_package_resolver::Resolver::new(
         Arc::clone(&base_index),
         authenticator.clone(),
@@ -412,6 +463,7 @@ async fn main_inner() -> Result<(), Error> {
             .build(),
         blobfs.clone(),
         fidl_connector::ServiceReconnector::<fpkg_http::ClientMarker>::new(),
+        inspector.root().create_child("blob_fetcher"),
     );
     let blob_fetcher_fut = Task::spawn(blob_fetcher_fut);
     {
@@ -572,7 +624,11 @@ async fn serve_base_package_if_present(
     resolver: &base_package_resolver::Resolver,
 ) -> anyhow::Result<fio::DirectoryProxy> {
     let (proxy, server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-    match resolver.resolve_and_serve(&url, server).await.map(|_: fpkg::ResolutionContext| ()) {
+    match resolver
+        .resolve_and_serve(&url, server)
+        .await
+        .map(|(_, _): (fpkg::ResolutionContext, Arc<CachedRootDir>)| ())
+    {
         Ok(()) => (),
         Err(base_package_resolver::Error::PackageNotInIndex) => {
             log::warn!(url:%; "package not in base, so exposed directory will close connections")
@@ -580,4 +636,65 @@ async fn serve_base_package_if_present(
         Err(e) => Err(e).context("resolving specific base package")?,
     }
     Ok(proxy)
+}
+
+fn get_blob_reader_handler(
+    driver_blob_paging_active: bool,
+    blobfs: &blobfs::Client,
+) -> Arc<vfs::service::Service> {
+    if driver_blob_paging_active {
+        let blobfs = blobfs.clone();
+        vfs::service::host(move |stream: ffxfs::BlobReaderRequestStream| {
+            let blobfs = blobfs.clone();
+            stream
+                .try_for_each_concurrent(None, move |request| {
+                    let blobfs = blobfs.clone();
+                    async move {
+                        match request {
+                            ffxfs::BlobReaderRequest::GetVmo { blob_hash, responder } => {
+                                let res = blobfs.get_blob_vmo(&blob_hash.into()).await.map_err(
+                                    |e| match e {
+                                        blobfs::GetBlobVmoError::GetVmo(s) => s.into_raw(),
+                                        blobfs::GetBlobVmoError::OpenBlob(
+                                            fuchsia_fs::node::OpenError::OpenError(s),
+                                        ) => s.into_raw(),
+                                        blobfs::GetBlobVmoError::OpenBlob(_)
+                                        | blobfs::GetBlobVmoError::Fidl(_) => {
+                                            zx::Status::INTERNAL.into_raw()
+                                        }
+                                    },
+                                );
+                                let _ = responder.send(res);
+                            }
+                        }
+                        Ok(())
+                    }
+                })
+                .unwrap_or_else(|error| error!(error:?; "serving fuchsia.fxfs/BlobReader"))
+        })
+    } else {
+        vfs::service::endpoint(|_scope, channel| {
+            if let Err(error) = fuchsia_component::client::connect_channel_to_protocol::<
+                ffxfs::BlobReaderMarker,
+            >(channel.into_zx_channel())
+            {
+                error!(error:?; "Failed to forward fuchsia.fxfs/BlobReader");
+            }
+        })
+    }
+}
+
+// Replicates `format!("{:#}", anyhow!(err))` but without consuming `err` or converting it into an
+// `anyhow::Error`, so that the original, un-type-erased error can be propagated.
+// Normally errors should either be propagated XOR logged, but there are some instances in which we
+// are duplicating errors into an inspect history so that they will be available when debugging an
+// OTA even after they have fallen out of the syslog history.
+fn stringify_error(mut err: &dyn std::error::Error) -> String {
+    let mut result = err.to_string();
+    while let Some(source) = err.source() {
+        use std::fmt::Write as _;
+        let _ = write!(result, ": {source}");
+        err = source;
+    }
+    result
 }

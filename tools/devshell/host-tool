@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Run, Inspect and Debug
+#### PREBUILTS=${PREBUILT_CLANG_DIR}
 ### run a host tool produced by the build
 
 ## usage: fx host-tool [--no-build] TOOLNAME [TOOL_ARGS...]
@@ -64,6 +65,11 @@ shift
 
 # list-build-artifacts fails with a reasonable error message if tool is unknown
 toolpath="$(fx-command-run list-build-artifacts --name "${toolname}" --expect-one tools)"
+
+resolved_tool="$(realpath -m "${FUCHSIA_BUILD_DIR}/${toolpath}")"
+if [[ "${resolved_tool}" == "${FUCHSIA_DIR}/prebuilt/"* ]]; then
+  fx-ensure-prebuilt "${resolved_tool}"
+fi
 
 if [[ ! -f "${FUCHSIA_BUILD_DIR}/${toolpath}" ]]; then
   tool_label="$(fx-command-run list-build-artifacts --show-label --name "${toolname}" --expect-one tools)"

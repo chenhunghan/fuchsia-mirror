@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 use crate::security::selinux_hooks::{
-    CommonFsNodePermission, FileClass, KernelPermission, PermissionCheck, ProcessPermission,
-    build_permission_check, check_permission, check_self_permission, current_task_state,
-    fs_node_effective_sid_and_class, fs_node_ensure_class, fs_node_set_label_with_task,
-    has_file_permissions, is_internal_operation, permissions_from_flags, task_consistent_attrs,
+    CommonFsNodePermission, FileClass, KernelPermission, PermissionCheck, PermissionFlagsVec,
+    ProcessPermission, build_permission_check, check_permission, check_self_permission,
+    current_task_state, fs_node_effective_sid_and_class, fs_node_ensure_class,
+    fs_node_set_label_with_task, has_file_permissions, is_internal_operation,
+    permissions_from_flags, task_consistent_attrs,
 };
 use crate::security::{Arc, Auditable, ProcAttr, SecurityId, SecurityServer};
 use crate::task::loader::ResolvedProgram;
@@ -14,8 +15,8 @@ use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsNode, FsStr, NamespaceNode};
 use selinux::{
     Cap2Class, CapClass, CommonCap2Permission, CommonCapPermission, FilePermission, ForClass,
-    InitialSid, KernelClass, NullessByteStr, PolicyCap, Process2Permission, SystemPermission,
-    TaskAttrs,
+    InitialSid, KernelClass, KeyPermission, NullessByteStr, PolicyCap, Process2Permission,
+    SystemPermission, TaskAttrs,
 };
 use starnix_uapi::auth::{
     Credentials, PTRACE_MODE_ATTACH, PTRACE_MODE_NOAUDIT, PTRACE_MODE_READ, PtraceAccessMode,
@@ -93,10 +94,14 @@ fn close_inaccessible_file_descriptors(
     // `[child-process] [fd-from-child-fd-table]:fd { use }`,
     // or for any of the file permissions associated with the file mode and flags.
     current_task.files().remap(current_task, |file| {
-        let permissions = permissions_from_flags(
-            file.flags().into(),
-            fs_node_effective_sid_and_class(file.node()).class,
-        );
+        let permissions = if file.node().is_private() {
+            PermissionFlagsVec::new()
+        } else {
+            permissions_from_flags(
+                file.flags().into(),
+                fs_node_effective_sid_and_class(file.node()).class,
+            )
+        };
         let permission_result = has_file_permissions(
             &permission_check,
             current_task,
@@ -757,12 +762,13 @@ fn permission_from_capability(capability: starnix_uapi::auth::Capabilities) -> K
     }
 }
 
-pub(in crate::security) fn is_task_capable_noaudit(
+pub(in crate::security) fn is_creds_capable_noaudit(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
+    creds: &Credentials,
     capability: starnix_uapi::auth::Capabilities,
 ) -> bool {
-    let sid = current_task_state(current_task).current_sid;
+    let sid = creds.security_state.current_sid;
     let permission = permission_from_capability(capability);
     is_internal_operation(current_task)
         || permission_check.has_permission(sid, sid, permission).permit()
@@ -1010,6 +1016,18 @@ pub(in crate::security) fn set_procattr(
                 ProcessPermission::SetKeyCreate,
                 audit_context,
             )?;
+
+            // Permission to create keys with the new Context is also required.
+            if let Some(new_sid) = sid {
+                check_permission(
+                    &permission_check,
+                    current_task,
+                    current_sid,
+                    new_sid,
+                    KeyPermission::Create,
+                    audit_context,
+                )?;
+            }
             creds.security_state.keycreate_sid = sid;
         }
         ProcAttr::SockCreate => {

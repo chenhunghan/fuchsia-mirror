@@ -62,6 +62,11 @@ FUNCTION(mexec_asm)
     cmp     boot_el, #2
     b.lt    .Lcopypage  // We booted in EL1, no need to transition
 
+// If we are already running in EL2, skip the HVC transition.
+    mrs     tmp, CurrentEL
+    cmp     tmp, #(2 << 2)
+    b.eq    1f
+
 // Transition to EL2. We call the hypervisor, which will branch to the address
 // in x0.
     adr     x0, 1f
@@ -70,6 +75,11 @@ FUNCTION(mexec_asm)
 1:
 // We're now running EL2. Just like we did above, mask all interrupts before going further.
     msr     daifset, 0xf
+
+// Ensure HCR_EL2 has E2H=0 and TGE=0 for the next kernel.
+    mov     tmp, #HCR_EL2_RW
+    msr     hcr_el2, tmp
+    isb
 
 // Reset SCTLR_EL2 to default state, turning off caches and MMU.
     movlit  tmp, SCTLR_EL2_RES1

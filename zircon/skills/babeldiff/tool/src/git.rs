@@ -113,6 +113,42 @@ impl Git {
                 }
             }
         }
+        // Load unchanged companion headers included by modified C++ source
+        // files so `extern-signature` can verify `cpp_*` header prototypes.
+        let include_re = regex::Regex::new(r#"(?m)^\s*#\s*include\s*[<"]([^>"]+)[>"]"#).unwrap();
+        let mut extra_headers = Vec::new();
+        for v in &cs.cpp_new {
+            if !(v.path.ends_with(".cc") || v.path.ends_with(".cpp")) {
+                continue;
+            }
+            let want = stem(&v.path);
+            for cap in include_re.captures_iter(&v.text) {
+                let inc = &cap[1];
+                if stem(inc) != want {
+                    continue;
+                }
+                let mut dir = v.path.as_str();
+                while let Some((parent, _)) = dir.rsplit_once('/') {
+                    dir = parent;
+                    for cand in [format!("{dir}/include/{inc}"), format!("{dir}/{inc}")] {
+                        if cs.cpp_new.iter().any(|x| x.path == cand)
+                            || extra_headers.iter().any(|x: &Version| x.path == cand)
+                        {
+                            continue;
+                        }
+                        if let Some(text) = self.show(head, &cand) {
+                            extra_headers.push(Version {
+                                path: cand,
+                                text,
+                                changed: Some(std::collections::BTreeSet::new()),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        cs.cpp_new.extend(extra_headers);
         Ok(cs)
     }
 }

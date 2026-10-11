@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Run, inspect and debug
+#### PREBUILTS=${PREBUILT_QEMU_DIR} ${PREBUILT_LIBSPARSE_DIR}/simg2img
 ### start fuchsia in qemu with a FVM disk
 ## start fuchsia in qemu with a FVM disk
 ##

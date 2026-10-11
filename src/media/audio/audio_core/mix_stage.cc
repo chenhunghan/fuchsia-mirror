@@ -258,6 +258,8 @@ void MixStage::ForEachSource(TaskType task_type, Fixed dest_frame) {
       source.stream->Trim(source_frame);
     }
   }
+
+  for_each_source_.clear();
 }
 
 void MixStage::MixStream(Mixer& mixer, ReadableStream& stream) {

@@ -4,17 +4,19 @@
 
 use async_trait::async_trait;
 use errors::ModelError;
+use fuchsia_inspect as inspect;
+use fuchsia_inspect_contrib as inspect_contrib;
 use fuchsia_sync::Mutex;
-use hooks::{Event, EventPayload, EventType, HasEventType, Hook, HooksRegistration};
+use hooks::{Event, EventPayload, EventType, HasEventType, Hook, HooksRegistration, StartReason};
 use moniker::Moniker;
 use std::sync::{Arc, Weak};
-use {fuchsia_inspect as inspect, fuchsia_inspect_contrib as inspect_contrib};
 
 const MAX_NUMBER_OF_LIFECYCLE_EVENTS: usize = 150;
 const MONIKER: &str = "moniker";
 const TYPE: &str = "type";
 const STARTED: &str = "started";
 const STOPPED: &str = "stopped";
+const START_REASON: &str = "start_reason";
 const TIME: &str = "time";
 const EARLY: &str = "early";
 const LATE: &str = "late";
@@ -46,13 +48,22 @@ impl Inner {
         Self { early, late }
     }
 
-    fn add_entry(&mut self, moniker: &Moniker, kind: &str, time: zx::BootInstant) {
+    fn add_entry(
+        &mut self,
+        moniker: &Moniker,
+        kind: &str,
+        time: zx::BootInstant,
+        start_reason: Option<&StartReason>,
+    ) {
         let node =
             if self.early.len() < self.early.capacity() { &mut self.early } else { &mut self.late };
         node.add_entry(|node| {
             node.record_string(MONIKER, moniker.to_string());
             node.record_string(TYPE, kind);
             node.record_int(TIME, time.into_nanos());
+            if let Some(start_reason) = start_reason {
+                node.record_string(START_REASON, start_reason.as_str());
+            }
         });
     }
 }
@@ -74,12 +85,17 @@ impl ComponentLifecycleTimeStats {
         )]
     }
 
-    fn on_component_started(self: &Arc<Self>, moniker: &Moniker, start_time: zx::BootInstant) {
-        self.inner.lock().add_entry(moniker, STARTED, start_time);
+    fn on_component_started(
+        self: &Arc<Self>,
+        moniker: &Moniker,
+        start_time: zx::BootInstant,
+        start_reason: &StartReason,
+    ) {
+        self.inner.lock().add_entry(moniker, STARTED, start_time, Some(start_reason));
     }
 
     fn on_component_stopped(self: &Arc<Self>, moniker: &Moniker, stop_time: zx::BootInstant) {
-        self.inner.lock().add_entry(moniker, STOPPED, stop_time);
+        self.inner.lock().add_entry(moniker, STOPPED, stop_time, None);
     }
 }
 
@@ -92,7 +108,11 @@ impl Hook for ComponentLifecycleTimeStats {
         match event.event_type() {
             EventType::Started => {
                 if let EventPayload::Started { runtime, .. } = &event.payload {
-                    self.on_component_started(target_moniker, runtime.start_time);
+                    self.on_component_started(
+                        target_moniker,
+                        runtime.start_time,
+                        &runtime.start_reason,
+                    );
                 }
             }
             EventType::Stopped => {
@@ -124,6 +144,7 @@ mod tests {
             stats.on_component_started(
                 &Moniker::new(&[ChildName::parse(format!("{}", i)).unwrap()]),
                 zx::BootInstant::from_nanos(i as i64),
+                &StartReason::Root,
             );
         }
 
@@ -147,6 +168,7 @@ mod tests {
             stats.on_component_started(
                 &Moniker::new(&[ChildName::parse(format!("{}", i)).unwrap()]),
                 zx::BootInstant::from_nanos(i as i64),
+                &StartReason::Root,
             );
         }
 
@@ -164,6 +186,7 @@ mod tests {
             "0": contains {
                 moniker: "150",
                 "type": "started",
+                start_reason: "Instance is the root",
             }
         });
     }
@@ -178,6 +201,7 @@ mod tests {
             stats.on_component_started(
                 &Moniker::new(&[ChildName::parse(format!("{}", i)).unwrap()]),
                 zx::BootInstant::from_nanos(i as i64),
+                &StartReason::Root,
             );
         }
 

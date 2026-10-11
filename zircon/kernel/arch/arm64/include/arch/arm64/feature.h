@@ -64,7 +64,7 @@ enum arm64_microarch {
   QEMU_TCG,
 };
 
-enum arm64_microarch midr_to_microarch(uint64_t midr);
+extern "C" enum arm64_microarch midr_to_microarch(uint64_t midr);
 
 extern uint32_t arm64_isa_features;
 extern bool feat_pmuv3_enabled;
@@ -133,14 +133,14 @@ inline enum arm64_asid_width arm64_vmid_width() {
 }
 
 // call on every cpu to initialize the feature set
-void arm64_feature_init();
+extern "C" void arm64_feature_init();
 
 // dump the feature set
-void arm64_feature_debug(bool full);
+extern "C" void arm64_feature_debug(bool full);
 
 // Returns true if the current CPU is the first member of a cluster according to
 // MPIDR.
-bool arm64_feature_current_is_first_in_cluster();
+extern "C" bool arm64_feature_current_is_first_in_cluster();
 
 void arm64_print_midr_cpu_name(FILE*);
 

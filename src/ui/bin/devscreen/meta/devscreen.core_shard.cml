@@ -1,0 +1,89 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Core realm shard that starts devscreen eagerly at boot. Added to the core
+// realm by the `devscreen` assembly input bundle.
+{
+    children: [
+        {
+            name: "devscreen",
+            url: "fuchsia-pkg://fuchsia.com/devscreen#meta/devscreen.cm",
+            startup: "eager",
+        },
+    ],
+    offer: [
+        {
+            dictionary: "diagnostics",
+            from: "parent",
+            to: "#devscreen",
+        },
+        {
+            protocol: [
+                "fuchsia.device.NameProvider",
+                "fuchsia.hardware.power.statecontrol.Admin",
+                "fuchsia.kernel.Stats",
+                "fuchsia.sysmem.Allocator",
+                "fuchsia.sysmem2.Allocator",
+            ],
+            from: "parent",
+            to: "#devscreen",
+        },
+        {
+            protocol: "fuchsia.buildinfo.Provider",
+            from: "#build-info",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.hwinfo.Device",
+            from: "#hwinfo",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.net.interfaces.State",
+            from: "#network",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            protocol: [
+                "fuchsia.feedback.DataProvider",
+                "fuchsia.feedback.LastRebootInfoProvider",
+            ],
+            from: "#feedback",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.wlan.device.service.DeviceMonitor",
+            from: "#wlandevicemonitor",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.wlan.policy.ClientProvider",
+            from: "#wlancfg",
+            to: "#devscreen",
+            source_availability: "unknown",
+        },
+        {
+            storage: "data",
+            from: "self",
+            to: "#devscreen",
+        },
+        {
+            service: [
+                "fuchsia.hardware.cpu.ctrl.Service",
+                "fuchsia.hardware.display.Service",
+                "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.charger.Service",
+                "fuchsia.hardware.temperature.Service",
+                "fuchsia.input.report.Service",
+            ],
+            from: "parent",
+            to: "#devscreen",
+        },
+    ],
+}

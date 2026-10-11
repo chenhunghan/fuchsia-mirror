@@ -210,7 +210,7 @@ pub extern "C" fn apic_vm_init() {
             )
         };
         if let Err(res) = res {
-            panic!("Could not allocate APIC management page: {:?}\n", res);
+            panic!("Could not allocate APIC management page: {:?}", res);
         }
         // SAFETY: Storing mapped virtual address.
         unsafe {
@@ -602,7 +602,7 @@ pub extern "C" fn apic_error_interrupt_handler() {
     // This write doesn't effect the subsequent read, but is required prior to
     // reading.
     lapic_reg_write(LAPIC_REG_ERROR_STATUS, 0);
-    panic!("APIC error detected: {}\n", lapic_reg_read(LAPIC_REG_ERROR_STATUS));
+    panic!("APIC error detected: {}", lapic_reg_read(LAPIC_REG_ERROR_STATUS));
 }
 
 #[cfg(console_enabled)]

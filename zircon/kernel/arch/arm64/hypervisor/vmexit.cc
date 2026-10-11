@@ -6,6 +6,7 @@
 
 #include <bits.h>
 #include <lib/affine/ratio.h>
+#include <lib/arch/arm64/feature.h>
 #include <lib/arch/cache.h>
 #include <lib/page/size.h>
 #include <platform.h>
@@ -34,6 +35,18 @@
     LTRACEF("guest " #sysreg ": %#lx\n", guest_state->system_state.sysreg); \
     next_pc(guest_state);                                                   \
     return zx::ok();                                                        \
+  }
+
+#define READ_SYSREG(val)                     \
+  {                                          \
+    if (!si.read) {                          \
+      return zx::error(ZX_ERR_INVALID_ARGS); \
+    }                                        \
+    if (si.xt < GS_NUM_REGS) {               \
+      guest_state->x[si.xt] = (val);         \
+    }                                        \
+    next_pc(guest_state);                    \
+    return zx::ok();                         \
   }
 
 namespace {
@@ -117,8 +130,9 @@ zx::result<> handle_smc_instruction(uint32_t iss, GuestState* guest_state,
       memset(packet, 0, sizeof(*packet));
       packet->type = ZX_PKT_TYPE_GUEST_VCPU;
       packet->guest_vcpu.type = ZX_PKT_GUEST_VCPU_STARTUP;
-      packet->guest_vcpu.startup.id = guest_state->x[1];
+      packet->guest_vcpu.startup.target = guest_state->x[1];
       packet->guest_vcpu.startup.entry = guest_state->x[2];
+      packet->guest_vcpu.startup.context = guest_state->x[3];
       guest_state->x[0] = PSCI_SUCCESS;
       return zx::error(ZX_ERR_NEXT);
     case PSCI64_CPU_OFF:
@@ -162,18 +176,23 @@ void clean_invalidate_cache(zx_paddr_t table, size_t index_shift) {
       clean_invalidate_cache(paddr, index_shift - adjust_shift);
     }
   }
-
-  // Invalidate guest i-cache,
-  arch::InvalidateGlobalInstructionCache();
 }
 
 zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* guest_state,
                                        hypervisor::GuestPhysicalAspace* gpa,
                                        zx_port_packet_t* packet) {
   const SystemInstruction si(iss);
-  const uint64_t reg = guest_state->x[si.xt];
+  const uint64_t reg = si.xt < GS_NUM_REGS ? guest_state->x[si.xt] : 0;
 
   switch (si.sysreg) {
+    case SystemRegister::AFSR0_EL1:
+      SET_SYSREG(afsr0_el1);
+    case SystemRegister::AFSR1_EL1:
+      SET_SYSREG(afsr1_el1);
+    case SystemRegister::ESR_EL1:
+      SET_SYSREG(esr_el1);
+    case SystemRegister::FAR_EL1:
+      SET_SYSREG(far_el1);
     case SystemRegister::MAIR_EL1:
       SET_SYSREG(mair_el1);
     case SystemRegister::SCTLR_EL1: {
@@ -181,7 +200,7 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
         return zx::error(ZX_ERR_NOT_SUPPORTED);
       }
 
-      uint32_t sctlr_el1 = reg & UINT32_MAX;
+      uint64_t sctlr_el1 = reg;
 
       // When the MMU and caches are off the HCR_EL2.DC control is used to force caching on. This
       // ensures that there are not conflicts due to the guest performing uncached accesses to
@@ -199,7 +218,7 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
         hcr &= ~(HCR_EL2_TVM | HCR_EL2_DC);
       }
 
-      LTRACEF("guest sctlr_el1: %#x\n", sctlr_el1);
+      LTRACEF("guest sctlr_el1: %#lx\n", sctlr_el1);
       LTRACEF("guest hcr_el2: %#lx\n", hcr);
 
       guest_state->system_state.sctlr_el1 = sctlr_el1;
@@ -212,13 +231,17 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
       SET_SYSREG(ttbr0_el1);
     case SystemRegister::TTBR1_EL1:
       SET_SYSREG(ttbr1_el1);
+    case SystemRegister::CONTEXTIDR_EL1:
+      SET_SYSREG(contextidr_el1);
+    case SystemRegister::AMAIR_EL1:
+      SET_SYSREG(amair_el1);
     case SystemRegister::OSLAR_EL1:
     case SystemRegister::OSLSR_EL1:
     case SystemRegister::OSDLR_EL1:
     case SystemRegister::DBGPRCR_EL1:
       next_pc(guest_state);
       // These registers are RAZ/WI. Their state is dictated by the host.
-      if (si.read) {
+      if (si.read && si.xt < GS_NUM_REGS) {
         guest_state->x[si.xt] = 0;
       }
       return zx::ok();
@@ -262,6 +285,10 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
       uint64_t set_way = BITS_SHIFT(reg, 31, 4);
       if (set_way == 0) {
         clean_invalidate_cache(gpa->arch_aspace().arch_table_phys(), MMU_GUEST_TOP_SHIFT);
+        // Invalidate the guest i-cache once after the recursive page table walk
+        // in clean_invalidate_cache completes, rather than at every level of the
+        // recursion.
+        arch::InvalidateGlobalInstructionCache();
       }
 
       // If the MMU or caches are off, start monitoring guest SCTLR register
@@ -275,7 +302,7 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
       // We (the host) can't guarantee that the we won't inadvertently cause
       // the cache lines to load again (e.g., through speculative CPU
       // accesses). Instead, we force caching on using the DC control.
-      uint32_t sctlr_el1 = guest_state->system_state.sctlr_el1;
+      uint64_t sctlr_el1 = guest_state->system_state.sctlr_el1;
       bool mmu_enabled = (sctlr_el1 & SCTLR_ELX_M) != 0;
       bool dcaches_enabled = (sctlr_el1 & SCTLR_ELX_C) != 0;
       if (!mmu_enabled || !dcaches_enabled) {
@@ -285,10 +312,60 @@ zx::result<> handle_system_instruction(uint32_t iss, uint64_t& hcr, GuestState* 
       next_pc(guest_state);
       return zx::ok();
     }
-    default:
-      dprintf(CRITICAL, "hypervisor: Unhandled guest system register %#x access\n",
-              static_cast<uint16_t>(si.sysreg));
+    case SystemRegister::ID_AA64PFR0_EL1:
+      // Disable SCXTNUM_EL0/EL1 (HCR_EL2.ENSCXT = 0), SVE, AMU, and MPAM.
+      READ_SYSREG(arch::ArmIdAa64Pfr0El1::Read()
+                      .set_csv2(arch::ArmIdAa64Pfr0El1::Csv2::kNone)
+                      .set_amu(arch::ArmIdAa64Pfr0El1::Amu::kNone)
+                      .set_mpam(arch::ArmIdAa64Pfr0El1::Mpam::kNone)
+                      .set_sve(arch::ArmIdAa64Pfr0El1::Sve::kNone)
+                      .reg_value());
+    case SystemRegister::ID_AA64PFR1_EL1:
+      // Disable MTE (HCR_EL2.ATA = 0), SCXTNUM_EL0/EL1 (HCR_EL2.ENSCXT = 0), SME, GCS, and THE.
+      READ_SYSREG(arch::ArmIdAa64Pfr1El1::Read()
+                      .set_mtex(arch::ArmIdAa64Pfr1El1::Mtex::kNone)
+                      .set_the(arch::ArmIdAa64Pfr1El1::The::kNone)
+                      .set_gcs(arch::ArmIdAa64Pfr1El1::Gcs::kNone)
+                      .set_mte_frac(arch::ArmIdAa64Pfr1El1::Mte_frac::kNone)
+                      .set_csv2_frac(arch::ArmIdAa64Pfr1El1::Csv2_frac::kNone)
+                      .set_sme(arch::ArmIdAa64Pfr1El1::Sme::kNone)
+                      .set_mte(arch::ArmIdAa64Pfr1El1::Mte::kNone)
+                      .reg_value());
+    case SystemRegister::ID_AA64DFR0_EL1:
+      READ_SYSREG(__arm_rsr64("id_aa64dfr0_el1"));
+    case SystemRegister::ID_AA64ISAR0_EL1:
+      READ_SYSREG(arch::ArmIdAa64IsaR0El1::Read().reg_value());
+    case SystemRegister::ID_AA64ISAR1_EL1:
+      // Disable Pointer Authentication (HCR_EL2.APK = 0, HCR_EL2.API = 0).
+      READ_SYSREG(arch::ArmIdAa64IsaR1El1::Read()
+                      .set_gpi(arch::ArmIdAa64IsaR1El1::Gpi::kNone)
+                      .set_gpa(arch::ArmIdAa64IsaR1El1::Gpa::kNone)
+                      .set_api(arch::ArmIdAa64IsaR1El1::Pauth::kNone)
+                      .set_apa(arch::ArmIdAa64IsaR1El1::Pauth::kNone)
+                      .reg_value());
+    case SystemRegister::ID_AA64ISAR2_EL1:
+      // Disable Pointer Authentication (HCR_EL2.APK = 0, HCR_EL2.API = 0).
+      READ_SYSREG(arch::ArmIdAa64IsaR2El1::Read()
+                      .set_pac_frac(arch::ArmIdAa64IsaR2El1::Pac_frac::kNone)
+                      .set_apa3(arch::ArmIdAa64IsaR2El1::Apa3::kNone)
+                      .set_gpa3(arch::ArmIdAa64IsaR2El1::Gpa3::kNone)
+                      .reg_value());
+    case SystemRegister::ID_AA64MMFR0_EL1:
+      READ_SYSREG(arch::ArmIdAa64Mmfr0El1::Read().reg_value());
+    case SystemRegister::ID_AA64MMFR1_EL1:
+      READ_SYSREG(arch::ArmIdAa64Mmfr1El1::Read().reg_value());
+    case SystemRegister::ID_AA64MMFR2_EL1:
+      READ_SYSREG(arch::ArmIdAa64Mmfr2El1::Read().reg_value());
+    default: {
+      // Other Group 3 ID registers trapped by HCR_EL2.TID3 (Op0=3, Op1=0, CRn=0, CRm=1..7)
+      // are Read-As-Zero (RAZ).
+      const uint16_t raw = static_cast<uint16_t>(si.sysreg);
+      if ((raw & 0xc7f0) == 0xc000 && (raw & 0x000f) >= 1 && (raw & 0x000f) <= 7) {
+        READ_SYSREG(0);
+      }
+      dprintf(CRITICAL, "hypervisor: Unhandled guest system register %#x access\n", raw);
       return zx::error(ZX_ERR_NOT_SUPPORTED);
+    }
   }
 }
 
@@ -385,7 +462,7 @@ zx::result<> handle_data_abort(uint32_t iss, GuestState* guest_state,
       packet->guest_mem.xt = data_abort.xt;
       packet->guest_mem.read = data_abort.read;
       if (!data_abort.read) {
-        packet->guest_mem.data = guest_state->x[data_abort.xt];
+        packet->guest_mem.data = data_abort.xt < GS_NUM_REGS ? guest_state->x[data_abort.xt] : 0;
       }
       return zx::error(ZX_ERR_NEXT);
     default:
@@ -490,10 +567,10 @@ void timer_maybe_interrupt(GuestState* guest_state, GichState* gich_state) {
 zx::result<> vmexit_handler(uint64_t* hcr, GuestState* guest_state, GichState* gich_state,
                             hypervisor::GuestPhysicalAspace* gpa, hypervisor::TrapMap* traps,
                             zx_port_packet_t* packet) {
-  LTRACEF("guest esr_el1: %#x\n", guest_state->system_state.esr_el1);
+  LTRACEF("guest esr_el1: %#lx\n", guest_state->system_state.esr_el1);
   LTRACEF("guest esr_el2: %#x\n", guest_state->esr_el2);
   LTRACEF("guest elr_el2: %#lx\n", guest_state->system_state.elr_el2);
-  LTRACEF("guest spsr_el2: %#x\n", guest_state->system_state.spsr_el2);
+  LTRACEF("guest spsr_el2: %#lx\n", guest_state->system_state.spsr_el2);
 
   ExceptionSyndrome syndrome(guest_state->esr_el2);
   zx::result<> result = zx::ok();

@@ -10,7 +10,6 @@ from datetime import timedelta
 from typing import Any
 
 import fuchsia_async_extension
-from antlion.controllers.ap_lib.hostapd_security import SecurityMode
 from antlion.controllers.fuchsia_device import FuchsiaDevice
 from antlion.controllers.pdu import PduDevice
 from antlion.utils import PingResult
@@ -23,6 +22,7 @@ from honeydew.affordances.connectivity.wlan.utils.errors import (
 )
 from iperf import iperf_client
 from iperf.iperf_client import IPerfClientBase
+from legacy_access_point.ap_lib.hostapd_security import SecurityMode
 from mobly.records import TestResultRecord
 
 DEFAULT_ASSOCIATE_TIMEOUT = timedelta(seconds=30)
@@ -166,12 +166,20 @@ class FuchsiaWlanDevice:
 
     def is_connected(self, ssid: str | None = None) -> bool:
         async def _status() -> Any:
-            iface = await self._get_client_iface()
-            return await iface.status()
+            phy = await self.device.honeydew_fd.wlan_core.ensure_single_phy()
+            client_ifaces = await phy.get_client_ifaces()
+            if not client_ifaces:
+                return None
+            return await client_ifaces[0].status()
 
         result = fuchsia_async_extension.get_loop().run_until_complete(
             _status()
         )
+        if result is None:
+            self.device.log.info(
+                "Client status disconnected (no client interface)"
+            )
+            return False
         if result.idle:
             self.device.log.info("Client status idle")
             return False

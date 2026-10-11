@@ -84,26 +84,21 @@ without a matching test name will fail.
 
 ### The `#[netstack_test]` Macro
 
-This macro automates the creation of test variants for different Netstack
-versions or IP versions.
+This macro automates the creation of test variants, for example over IP
+versions.
 
-- `#[variant(N, Netstack)]`: Permutes the test for `Netstack2` and `Netstack3`.
-  The macro appends `_ns2` or `_ns3` to the test case name.
 - `#[variant(I, Ip)]`: Permutes the test for `Ipv4` and `Ipv6`. The macro
   appends `_v4` or `_v6` to the test case name.
 
 Example:
 ```rust
 #[netstack_test]
-#[variant(N, Netstack)]
 #[variant(I, Ip)]
-async fn test_ping<N: Netstack, I: Ip>(name: &str) { ... }
+async fn test_ping<I: Ip>(name: &str) { ... }
 ```
-This expands into four distinct tests:
-- `test_ping_ns2_v4`
-- `test_ping_ns2_v6`
-- `test_ping_ns3_v4`
-- `test_ping_ns3_v6`
+This expands into two distinct tests:
+- `test_ping_v4`
+- `test_ping_v6`
 
 If you don't use `#[variant]`, you must still use `#[netstack_test]` to receive
 the test name as the first argument (e.g. `name: &str`), which is useful for
@@ -112,7 +107,7 @@ creating unique realm names.
 To run a specific variant, use the `--test-filter` flag:
 
 ```bash
-./scripts/fx test netstack-socket-integration-test-no-err-logs --test-filter '*test_udp_socket_ns3*'
+./scripts/fx test netstack-socket-integration-test-no-err-logs --test-filter '*broadcast_send_v4*'
 ```
 
 ### Test Sharding
@@ -154,7 +149,7 @@ they will have zero matching tests:
 
 ```bash
 # THIS WILL FAIL (other shards will fail with "No test cases match")
-./scripts/fx test netstack-socket-integration-test-no-err-logs --test-filter 'test_udp_socket_ns3::synchronous_protocol_not_mapped_to_ipv6'
+./scripts/fx test netstack-socket-integration-test-no-err-logs --test-filter 'udp::broadcast_send_v4'
 ```
 
 To work around this, you must target the specific shard component directly:
@@ -162,7 +157,7 @@ To work around this, you must target the specific shard component directly:
 Target the specific shard component directly: If you know which shard contains
 the test case (e.g., from a previous run), you can run only that shard:
 ```bash
-./scripts/fx test netstack-socket-integration-test-no-err-logs_shard_2_of_10 --test-filter 'test_udp_socket_ns3::synchronous_protocol_not_mapped_to_ipv6'
+./scripts/fx test netstack-socket-integration-test-no-err-logs_shard_7_of_10 --test-filter 'udp::broadcast_send_v4'
 ```
 
 Note: Passing the filter to the underlying test runner using `--` (i.e., `fx
@@ -264,9 +259,8 @@ While integration tests in `src/connectivity/network/tests/integration/` focus
 on end-to-end scenarios and network traffic, FIDL compatibility tests live under
 `src/connectivity/network/tests/fidl/`.
 
-These tests verify that Netstack3 (and Netstack2, where applicable) correctly
-implements Fuchsia network FIDL protocols, particularly for "userspace" control
-and state query APIs.
+These tests verify that Netstack3 correctly implements Fuchsia network FIDL
+protocols, particularly for "userspace" control and state query APIs.
 
 Key areas tested here include:
 - `interfaces`: Verifying `fuchsia.net.interfaces/State` and `Watcher` behavior
@@ -408,21 +402,21 @@ Example expectation file:
         {
             type: "expect_failure_with_err_logs",
             matchers: [
-                "udp_recv_msg_postflight_fidl_ns3*",
+                "udp_send_recv_v4",
             ],
         },
         {
             type: "skip",
             matchers: [
-                "tcp_connect_bound_to_device_ns2",
+                "tcp_connect_bound_to_device*",
             ],
         },
     ],
 }
 ```
 
-If you add a test that is known to fail on a specific netstack variant (e.g.
-Netstack2 because it lacks a feature), you should add it to the expectations
+If you add a test that is known to fail (e.g. because Netstack3 does not
+implement the feature yet), you should add it to the expectations
 file rather than disabling it in code.
 
 ## Best Practices & Common Pitfalls

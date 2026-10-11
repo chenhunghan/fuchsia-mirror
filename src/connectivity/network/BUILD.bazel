@@ -2,6 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -17,3 +20,23 @@ exports_files(
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
 )
+
+# This is a single definition for the optimization configuration of crates used
+# by networking components that are performance sensitive.
+#
+# This roughly follows the same shape as
+# src/connectivity/network/netstack3:netstack3_configs, but we intentionally
+# define it as a separate target for split evolution if necessary.
+# LINT.IfChange(performance_critical_rust_crate)
+build_flags(
+    name = "performance_critical_rust_crate",
+    rustflags = select({
+        "@platforms//os:fuchsia": ["-Copt-level=3"],
+        "//conditions:default": [],
+    }) if is_release else [],
+    visibility = [
+        "//src/connectivity/lib:__subpackages__",
+        "//src/lib/network/packet:__pkg__",
+    ],
+)
+# LINT.ThenChange(//src/connectivity/network/BUILD.gn:performance_critical_rust_crate)

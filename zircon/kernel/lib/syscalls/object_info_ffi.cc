@@ -41,9 +41,7 @@
 #include <object/resource_dispatcher.h>
 #include <object/stream_dispatcher.h>
 #include <object/thread_dispatcher.h>
-#include <object/vcpu_dispatcher.h>
 #include <object/vm_address_region_dispatcher.h>
-#include <object/vm_object_dispatcher.h>
 #include <vm/compression.h>
 #include <vm/discardable_vmo_tracker.h>
 #include <vm/memory_stats.h>
@@ -353,7 +351,6 @@ zx_status_t object_get_info_cpp(ProcessDispatcher* up, zx_handle_t handle,
   OB_GET_INFO_SR(ZX_INFO_MEMORY_STALL, ZX_RSRC_SYSTEM_STALL_BASE, GetStallStats);
   OB_GET_INFO(ZX_INFO_RESOURCE, ResourceDispatcher, GetInfo);
   OB_GET_INFO(ZX_INFO_STREAM, StreamDispatcher, GetInfo);
-  OB_GET_INFO(ZX_INFO_VCPU, VcpuDispatcher, GetInfo);
   OB_GET_INFO(ZX_INFO_IOB, IoBufferDispatcher, GetInfo);
   OB_GET_INFO(ZX_INFO_INTERRUPT, InterruptDispatcher, GetInfo);
 
@@ -588,8 +585,6 @@ zx_status_t cpp_object_get_info_cpp_types(zx_handle_t handle, uint32_t topic, vo
     case ZX_INFO_STREAM:
       return object_get_info_cpp<ZX_INFO_STREAM>(up, handle, dst_buffer, buffer_size, actual,
                                                  avail);
-    case ZX_INFO_VCPU:
-      return object_get_info_cpp<ZX_INFO_VCPU>(up, handle, dst_buffer, buffer_size, actual, avail);
     case ZX_INFO_IOB:
       return object_get_info_cpp<ZX_INFO_IOB>(up, handle, dst_buffer, buffer_size, actual, avail);
     case ZX_INFO_IOB_REGIONS: {

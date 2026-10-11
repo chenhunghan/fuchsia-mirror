@@ -24,7 +24,6 @@ unsafe extern "C" {
     fn cpp_mp_mbx_generic_irq();
     fn cpp_mp_mbx_interrupt_irq();
     fn cpp_mp_is_cpu_online(cpu_id: cpu_num_t) -> bool;
-    fn cpp_riscv64_start_cpu(cpu_id: cpu_num_t, hart_id: hart_id_t) -> Result<(), Status>;
     fn cpp_platform_halt_cpu();
 }
 
@@ -118,7 +117,7 @@ unsafe fn write_percpu_u32<const OFFSET: usize>(val: u32) {
 
 /// Get the maximum number of detected CPUs.
 #[inline(always)]
-fn arch_max_num_cpus() -> u32 {
+pub fn arch_max_num_cpus() -> u32 {
     // SAFETY: `riscv64_num_cpus` is the C++ global defined in mp.cc. It is written
     // once during topology discovery on the boot CPU, before any secondary hart is
     // started, and only read afterwards -- the same unsynchronized access the C++
@@ -424,7 +423,16 @@ pub extern "C" fn arch_mp_cpu_hotplug(cpu_id: u32) -> Result<(), Status> {
         return Err(Status::BAD_STATE);
     }
     let hart_id = arch_cpu_num_to_hart_id(cpu_id);
-    // SAFETY: both arguments are plain integers, and `cpu_id` was bounds-checked
-    // against `arch_max_num_cpus()` above.
-    unsafe { cpp_riscv64_start_cpu(cpu_id, hart_id) }
+    riscv64_start_cpu(cpu_id, hart_id)
+}
+
+/// Start the secondary CPU `cpu_num` on hart `hart_id`: allocates its bootstrap
+/// thread and stack and asks the SEE to start the hart.  Returns once the hart
+/// has been asked to start, not once it is up.
+pub fn riscv64_start_cpu(cpu_num: cpu_num_t, hart_id: hart_id_t) -> Result<(), Status> {
+    unsafe extern "C" {
+        fn riscv64_start_cpu(cpu_num: cpu_num_t, hart_id: hart_id_t) -> Result<(), Status>;
+    }
+    // SAFETY: both arguments are plain integers; the C++ validates them itself.
+    unsafe { riscv64_start_cpu(cpu_num, hart_id) }
 }

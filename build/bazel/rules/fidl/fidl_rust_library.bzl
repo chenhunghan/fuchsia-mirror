@@ -4,7 +4,7 @@
 
 """A rust_library backed by a FIDL library."""
 
-load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 visibility("private")
 
@@ -18,10 +18,10 @@ def fidl_rust_library(
         testonly,
         visibility):
     """
-    Generates a `rust_library()` providing the generated Rust bindings for a given FIDL library.
+    Generates a `rustc_library()` providing the generated Rust bindings for a given FIDL library.
 
     Args:
-        name: String base name of the `rust_library()` target.
+        name: String base name of the `rustc_library()` target.
         fidl_library_name: String name of the FIDL library for which bindings are generated.
         fidl_ir_json: `Label` pointing to a single file containing the FIDL IR
             representation of the `fidl_library_name` library.
@@ -131,12 +131,21 @@ def _fidl_rust_library_flavor(flavor, name, fidl_library_name, fidl_ir_json, dep
         "//conditions:default": [],
     })
 
-    rust_library(
+    rustc_library(
         name = flavor_label,
         crate_name = _fidl_rust_flavor_crate_name(fidl_library_name, flavor),
         srcs = [fidlgen_label],
         deps = library_deps,
         edition = "2018",
+        disable_clippy = True,
+        build_flags = [
+            # LINT.IfChange
+            # TODO(https://fxbug.dev/42055130): Avoid this suppression. Keep in
+            # sync with //build/rust/fidl_rust.gni.
+            "//build/config/rust/lints:allow_unused_crate_dependencies",
+            # LINT.ThenChange(//build/rust/fidl_rust.gni)
+            "//build/config/rust/lints:deny_unused_results",
+        ],
         tags = ["noclippy"],
         testonly = testonly,
         visibility = visibility,
@@ -162,12 +171,16 @@ def _fidl_rust_library_flex(flavor, name, fidl_library_name, testonly, visibilit
         visibility = ["//visibility:private"],
     )
 
-    rust_library(
+    rustc_library(
         name = flex_label,
         crate_name = flex_crate_name,
         srcs = [flex_generate_label],
         deps = [":" + original_label],
         edition = "2024",
+        disable_clippy = True,
+        build_flags = [
+            "//build/config/rust/lints:deny_unused_results",
+        ],
         tags = ["noclippy"],
         testonly = testonly,
         visibility = visibility,

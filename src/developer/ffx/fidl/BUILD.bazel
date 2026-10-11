@@ -12,7 +12,6 @@ fidl_library(
         "echo.fidl",
         "overview.fidl",
         "target.fidl",
-        "tunnel.fidl",
     ],
     visibility = [
         "//build/sdk/meta:__pkg__",
@@ -24,10 +23,6 @@ fidl_library(
         "//vendor/google/tools:__subpackages__",
     ],
     deps = [
-        "//sdk/fidl/fuchsia.buildinfo",
-        "//sdk/fidl/fuchsia.developer.remotecontrol",
-        "//sdk/fidl/fuchsia.io",
         "//sdk/fidl/fuchsia.net",
-        "//zircon/vdso/zx",
     ],
 )

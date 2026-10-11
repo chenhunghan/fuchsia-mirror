@@ -35,31 +35,34 @@ zx_status_t MemoryStallEventDispatcher::Create(zx_system_memory_stall_type_t kin
                                                zx_duration_mono_t window,
                                                KernelHandle<EventDispatcher>* handle,
                                                zx_rights_t* rights) {
+  // Validate `kind` before allocating anything, so that there is nothing to clean up if it is
+  // unrecognized.
+  if (kind != ZX_SYSTEM_MEMORY_STALL_SOME && kind != ZX_SYSTEM_MEMORY_STALL_FULL) {
+    return ZX_ERR_INVALID_ARGS;
+  }
+
   fbl::AllocChecker ac;
   KernelHandle dispatcher(fbl::AdoptRef(new (&ac) MemoryStallEventDispatcher(kind)));
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }
 
-  zx::result<ktl::unique_ptr<StallObserver>> observer =
+  zx::result<StallObserver*> observer =
       StallObserver::Create(threshold, window, dispatcher.dispatcher().get());
   if (observer.is_error()) {
     return observer.error_value();
   }
 
-  StallAggregator* aggregator = StallAggregator::GetStallAggregator();
   switch (kind) {
     case ZX_SYSTEM_MEMORY_STALL_SOME:
-      aggregator->AddObserverSome((*observer).get());
+      StallAggregator::AddObserverSome(*observer);
       break;
     case ZX_SYSTEM_MEMORY_STALL_FULL:
-      aggregator->AddObserverFull((*observer).get());
+      StallAggregator::AddObserverFull(*observer);
       break;
-    default:
-      return ZX_ERR_INVALID_ARGS;
   }
 
-  dispatcher.dispatcher()->observer_ = ktl::move(*observer);
+  dispatcher.dispatcher()->observer_ = *observer;
 
   *rights = ZX_DEFAULT_SYSTEM_MEMORY_STALL_EVENT_RIGHTS;
   *handle = ktl::move(dispatcher);
@@ -71,17 +74,20 @@ MemoryStallEventDispatcher::~MemoryStallEventDispatcher() {
     return;
   }
 
-  StallAggregator* aggregator = StallAggregator::GetStallAggregator();
+  // Unregistering has to happen before the observer is destroyed: it is what guarantees that the
+  // sampling thread is not part way through one of our callbacks.
   switch (kind_) {
     case ZX_SYSTEM_MEMORY_STALL_SOME:
-      aggregator->RemoveObserverSome(observer_.get());
+      StallAggregator::RemoveObserverSome(observer_);
       break;
     case ZX_SYSTEM_MEMORY_STALL_FULL:
-      aggregator->RemoveObserverFull(observer_.get());
+      StallAggregator::RemoveObserverFull(observer_);
       break;
     default:
       ZX_PANIC("Impossible stall kind value");
   }
+
+  StallObserver::Destroy(observer_);
 }
 
 MemoryStallEventDispatcher::MemoryStallEventDispatcher(zx_system_memory_stall_type_t kind)

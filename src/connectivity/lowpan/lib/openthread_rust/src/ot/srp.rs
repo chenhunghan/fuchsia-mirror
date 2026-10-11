@@ -132,6 +132,10 @@ impl SrpServerHost {
             let addresses_ptr =
                 otSrpServerHostGetAddresses(self.as_ot_ptr(), &mut addresses_len as *mut u8);
 
+            if addresses_ptr.is_null() || addresses_len == 0 {
+                return &[];
+            }
+
             std::slice::from_raw_parts(addresses_ptr as *const Ip6Address, addresses_len as usize)
         }
     }
@@ -292,6 +296,10 @@ impl SrpServerService {
         unsafe {
             let txt_data_ptr =
                 otSrpServerServiceGetTxtData(self.as_ot_ptr(), &mut txt_data_len as *mut u16);
+
+            if txt_data_ptr.is_null() || txt_data_len == 0 {
+                return &[];
+            }
 
             std::slice::from_raw_parts(txt_data_ptr, txt_data_len as usize)
         }

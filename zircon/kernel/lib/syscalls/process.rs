@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{Dispatcher, HandleValue, JobDispatcher, ProcessDispatcher, ThreadDispatcher};
+use crate::object::{HandleValue, JobDispatcher, ProcessDispatcher, ThreadDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use crate::userabi::VDso;
 use crate::vm::vm_object::VmObjectReadWriteOptions;
@@ -47,7 +47,13 @@ pub fn sys_process_create(
     let sp = name_ptr.copy_user_string(name_len, &mut buf)?;
     ltracef!("name {}\n", zr::from_utf8_lossy(sp));
 
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(job_handle, ZX_RIGHT_MANAGE_PROCESS)?;
+    let job = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+            up,
+            job_handle,
+            ZX_RIGHT_MANAGE_PROCESS,
+        )
+    })?;
     let (new_proc, proc_rights, new_vmar, vmar_rights) =
         ProcessDispatcher::create(job, sp, options)?;
 
@@ -100,10 +106,13 @@ pub fn sys_process_create_shared(
     ltracef!("name {}\n", zr::from_utf8_lossy(sp));
 
     // create a new process dispatcher
-    let shared_proc = Dispatcher::get_with_rights::<ProcessDispatcher>(
-        shared_proc_handle,
-        ZX_RIGHT_MANAGE_PROCESS | ZX_RIGHT_GET_PROPERTY,
-    )?;
+    let shared_proc = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+            up,
+            shared_proc_handle,
+            ZX_RIGHT_MANAGE_PROCESS | ZX_RIGHT_GET_PROPERTY,
+        )
+    })?;
 
     let (new_proc, proc_rights, new_vmar, vmar_rights) =
         ProcessDispatcher::create_shared(shared_proc, sp, options)?;
@@ -155,30 +164,44 @@ pub fn sys_process_start(
         arg2
     );
 
-    let process =
-        match Dispatcher::get_with_rights::<ProcessDispatcher>(process_handle, ZX_RIGHT_WRITE) {
-            Ok(proc) => proc,
-            Err(err) => {
-                if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
-                    let _ = ProcessDispatcher::with_current(|up| up.remove_handle(arg1_handle));
-                }
-                return Err(err);
+    let process = match ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+            up,
+            process_handle,
+            ZX_RIGHT_WRITE,
+        )
+    }) {
+        Ok(proc) => proc,
+        Err(err) => {
+            if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
+                let _ = ProcessDispatcher::with_current(|up| {
+                    up.handle_table().remove_handle(up, arg1_handle)
+                });
             }
-        };
+            return Err(err);
+        }
+    };
 
-    let thread =
-        match Dispatcher::get_with_rights::<ThreadDispatcher>(thread_handle, ZX_RIGHT_WRITE) {
-            Ok(t) => t,
-            Err(err) => {
-                if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
-                    let _ = ProcessDispatcher::with_current(|up| up.remove_handle(arg1_handle));
-                }
-                return Err(err);
+    let thread = match ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(
+            up,
+            thread_handle,
+            ZX_RIGHT_WRITE,
+        )
+    }) {
+        Ok(t) => t,
+        Err(err) => {
+            if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
+                let _ = ProcessDispatcher::with_current(|up| {
+                    up.handle_table().remove_handle(up, arg1_handle)
+                });
             }
-        };
+            return Err(err);
+        }
+    };
 
     let arg_handle = if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
-        ProcessDispatcher::with_current(|up| up.remove_handle(arg1_handle))
+        ProcessDispatcher::with_current(|up| up.handle_table().remove_handle(up, arg1_handle))
     } else {
         None
     };
@@ -207,8 +230,13 @@ pub fn sys_process_read_memory(
         return Err(Status::INVALID_ARGS);
     }
 
-    let process =
-        Dispatcher::get_with_rights::<ProcessDispatcher>(handle, ZX_RIGHT_READ | ZX_RIGHT_WRITE)?;
+    let process = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_READ | ZX_RIGHT_WRITE,
+        )
+    })?;
 
     let aspace = process.aspace_at(vaddr).ok_or(Status::BAD_STATE)?;
 
@@ -253,7 +281,13 @@ pub fn sys_process_write_memory(
         return Err(Status::INVALID_ARGS);
     }
 
-    let process = Dispatcher::get_with_rights::<ProcessDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let process = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     let aspace = process.aspace_at(vaddr).ok_or(Status::BAD_STATE)?;
 

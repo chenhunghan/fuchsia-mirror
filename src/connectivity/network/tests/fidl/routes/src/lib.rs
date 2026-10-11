@@ -23,7 +23,7 @@ use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersion, Ipv4, Ipv4Addr, Ipv
 use netemul::InterfaceConfig;
 use netstack_testing_common::interfaces::{self, TestInterfaceExt as _};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack3, OutOfStack, TestRealmExt as _, TestSandboxExt as _,
+    KnownServiceProvider, Netstack3, TestRealmExt as _, TestSandboxExt as _,
 };
 use netstack_testing_macros::netstack_test;
 use packet_formats::icmp::ndp::options::{NdpOptionBuilder, PrefixInformation, RouteInformation};
@@ -209,7 +209,7 @@ async fn resolve_default_route_while_dhcp_is_running(name: &str) {
         .expect("failed to create client realm");
 
     let ep = realm.join_network(&net, "host").await.expect("host failed to join network");
-    ep.start_dhcp::<OutOfStack>().await.expect("failed to start DHCP");
+    ep.start_dhcp().await.expect("failed to start DHCP");
 
     let routes = realm
         .connect_to_protocol::<fidl_fuchsia_net_routes::StateMarker>()

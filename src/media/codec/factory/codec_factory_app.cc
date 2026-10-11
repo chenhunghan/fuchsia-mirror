@@ -52,18 +52,26 @@ struct SwVideoDecoderInfo {
   uint32_t max_height;
   std::string codec_specifier;
 };
-const std::vector<SwVideoDecoderInfo> kSwVideoDecoderInfos = {
-    {
-        .mime_type = "video/h264",  // VIDEO_ENCODING_H264
-        .profile = fuchsia::media::CodecProfile::H264PROFILE_HIGH,
-        .min_width = 32,
-        .min_height = 32,
-        // The decode performance will likely not be realtime at these dimensions.
-        .max_width = 3840,
-        .max_height = 2160,
-        .codec_specifier = CreateRandomCodecSpecifier(),
-    },
-};
+
+const std::vector<SwVideoDecoderInfo>& GetSwVideoDecoderInfos() {
+  static const std::vector<SwVideoDecoderInfo> kSwVideoDecoderInfos = [] {
+    std::vector<SwVideoDecoderInfo> infos;
+    if (access("/pkg/meta/codec_runner_sw_ffmpeg.cm", F_OK) == 0) {
+      infos.push_back({
+          .mime_type = "video/h264",  // VIDEO_ENCODING_H264
+          .profile = fuchsia::media::CodecProfile::H264PROFILE_HIGH,
+          .min_width = 32,
+          .min_height = 32,
+          // The decode performance will likely not be realtime at these dimensions.
+          .max_width = 3840,
+          .max_height = 2160,
+          .codec_specifier = GetSwFfmpegH264CodecSpecifier(),
+      });
+    }
+    return infos;
+  }();
+  return kSwVideoDecoderInfos;
+}
 
 const char* CodecProfileToString(fuchsia::media::CodecProfile profile) {
   switch (profile) {
@@ -222,7 +230,7 @@ void CodecFactoryApp::PublishService() {
 std::vector<fuchsia::mediacodec::CodecDescription> CodecFactoryApp::MakeCodecList() const {
   std::vector<fuchsia::mediacodec::CodecDescription> codecs;
 
-  for (const auto& info : kSwVideoDecoderInfos) {
+  for (const auto& info : GetSwVideoDecoderInfos()) {
     codecs.push_back({
         .codec_type = fuchsia::mediacodec::CodecType::DECODER,
         .mime_type = info.mime_type,
@@ -254,7 +262,7 @@ std::vector<fuchsia::mediacodec::DetailedCodecDescription>
 CodecFactoryApp::MakeDetailedCodecDescriptions() const {
   std::vector<fuchsia::mediacodec::DetailedCodecDescription> codec_descriptions;
 
-  for (const auto& info : kSwVideoDecoderInfos) {
+  for (const auto& info : GetSwVideoDecoderInfos()) {
     fuchsia::mediacodec::DetailedCodecDescription description;
     description.set_codec_type(fuchsia::mediacodec::CodecType::DECODER);
     description.set_mime_type(info.mime_type);
@@ -264,8 +272,8 @@ CodecFactoryApp::MakeDetailedCodecDescriptions() const {
     description.set_codec_specifier(info.codec_specifier);
     fuchsia::mediacodec::DecoderProfileDescription profile_description;
     profile_description.set_profile(info.profile);
-    profile_description.set_min_image_size({info.min_width, info.min_height});
-    profile_description.set_max_image_size({info.max_width, info.max_height});
+    profile_description.set_min_image_size({.width = info.min_width, .height = info.min_height});
+    profile_description.set_max_image_size({.width = info.max_width, .height = info.max_height});
     // We leave the rest of the fields un-set intentionally, since clients must accept a non-set
     // field and know that means what the comments on the field in the FIDL file say it means (no
     // programmatic field defaults).

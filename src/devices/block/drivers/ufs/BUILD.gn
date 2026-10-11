@@ -5,6 +5,7 @@
 import("//build/bind/bind.gni")
 import("//build/components.gni")
 import("//build/drivers.gni")
+import("//build/rust/rustc_library.gni")
 import("//build/test.gni")
 import("//build/testing/environments.gni")
 
@@ -39,6 +40,7 @@ group("tests") {
     ":ufs-pci-bind_test",
     ":ufs-pdev-bind_test",
     ":ufs-tests",
+    ":ufs_rust_tests",
   ]
 }
 
@@ -250,5 +252,38 @@ fuchsia_unittest_package("ufs-tests") {
       emu_env,
       iris_env,
     ]
+  }
+}
+
+rustc_library("ufs_rust") {
+  with_unit_tests = true
+  edition = "2024"
+  sources = [
+    "src/descriptors.rs",
+    "src/lib.rs",
+    "src/query.rs",
+    "src/registers.rs",
+    "src/scsi.rs",
+    "src/transfer.rs",
+    "src/upiu.rs",
+  ]
+  deps = [
+    "//sdk/lib/driver/mmio/rust:mmio",
+    "//sdk/rust/zx",
+    "//third_party/rust_crates:bitfield",
+    "//third_party/rust_crates:static_assertions",
+    "//third_party/rust_crates:thiserror",
+    "//third_party/rust_crates:zerocopy",
+  ]
+  test_deps = [ "//src/lib/fuchsia" ]
+}
+
+fuchsia_unittest_package("ufs_rust_tests") {
+  package_name = "ufs_rust_test"
+  deps = [ ":ufs_rust_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
   }
 }

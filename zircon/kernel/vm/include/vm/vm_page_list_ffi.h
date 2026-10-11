@@ -22,15 +22,20 @@ using VmPageListBtree = btree::BTree<uint64_t, VmPlnOwner>;
 static_assert(sizeof(VmPageListBtree) == sizeof(VmPageList));
 
 // Represents a node and its key in the VmPageList B-Tree (key first, value second).
-typedef struct VmPageListBtreeNodeEntry {
+struct VmPageListBtreeNodeEntry {
   uint64_t offset;
   void* node;
-} VmPageListBtreeNodeEntry;
+};
 
-typedef struct VmPageListBtreeConstNodeEntry {
+struct VmPageListBtreeConstNodeEntry {
   uint64_t offset;
   const void* node;
-} VmPageListBtreeConstNodeEntry;
+};
+
+struct VmPageListBtreeUtilization {
+  uint64_t nodes_in_bytes;
+  uint64_t stored_values;
+};
 
 // Cursor types for iterating over B-Tree nodes in ascending order.
 struct VmPageListBtreeCursor {
@@ -111,6 +116,12 @@ void cpp_vm_page_list_btree_const_cursor_init(VmPageListBtreeConstCursor* cursor
                                               const VmPageListBtree* tree);
 VmPageListBtreeConstNodeEntry cpp_vm_page_list_btree_const_cursor_next(
     VmPageListBtreeConstCursor* cursor);
+
+// Returns the utilization of the B-Tree.
+//
+// This walks the entire tree and so is not a constant time operation.
+VmPageListBtreeUtilization cpp_vm_page_list_btree_calculate_utilization_slow(
+    const VmPageListBtree* tree);
 
 __END_CDECLS
 

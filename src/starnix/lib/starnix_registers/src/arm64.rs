@@ -25,10 +25,6 @@ pub struct RegisterState<T: RegisterStorage> {
     /// important to store, as the return value of a syscall overwrites `x0`, making it impossible
     /// to recover the original `x0` value in the case of syscall restart and strace output.
     pub orig_x0: u64,
-
-    /// The contents of the Exception Link Register. This register is used to jump to a code
-    /// location in restricted mode, as arm64 does not allow the PC to be set directly.
-    pub elr: u64,
 }
 
 impl<T: RegisterStorage> ArchSpecific for RegisterState<T> {
@@ -67,7 +63,7 @@ impl<T: RegisterStorage> RegisterState<T> {
         }
         self.sp = regs.sp;
         self.pc = regs.pc;
-        self.cpsr = regs.pstate as u32;
+        self.cpsr = (regs.pstate as u32) & !(zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
     }
 
     pub fn from_user_regs_struct_arch32(&mut self, regs: &starnix_uapi::arch32::user_regs_struct) {
@@ -81,7 +77,7 @@ impl<T: RegisterStorage> RegisterState<T> {
         self.r[14] = self.r[30];
         self.pc = regs.regs[15] as u64;
         self.r[15] = self.pc;
-        self.cpsr = regs.regs[16];
+        self.cpsr = regs.regs[16] | (zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
         self.orig_x0 = regs.regs[17] as u64;
     }
 
@@ -91,8 +87,10 @@ impl<T: RegisterStorage> RegisterState<T> {
         (self.cpsr as u64) & IS_THUMB_MASK == IS_THUMB_MASK
     }
 
-    /// Saves any register state required to restart `syscall`.
-    pub fn save_registers_for_restart(&mut self, _syscall_number: u64) {
+    /// Saves any register state required to restart the syscall.
+    ///
+    /// Must be called at syscall entry, before `set_return_register` clobbers `x0`.
+    pub fn save_registers_for_restart(&mut self) {
         // The x0 register may be clobbered during syscall handling (for the return value), but is
         // needed when restarting a syscall.
         self.orig_x0 = self.r[0];
@@ -200,9 +198,13 @@ impl<T: RegisterStorage> RegisterState<T> {
 
     /// Resets the register that contains the application status flags.
     pub fn reset_flags(&mut self) {
-        // Reset all the flags except the aarch32 and thumb bits.
-        self.cpsr = self.cpsr
-            & (zx::sys::ZX_REG_CPSR_ARCH_32_MASK | zx::sys::ZX_REG_CPSR_THUMB_MASK) as u32;
+        // Reset all the flags except the aarch32 and (in aarch32 mode) thumb bits.
+        if self.is_arch32() {
+            self.cpsr &=
+                (zx::sys::ZX_REG_CPSR_ARCH_32_MASK | zx::sys::ZX_REG_CPSR_THUMB_MASK) as u32;
+        } else {
+            self.cpsr = 0;
+        }
     }
 
     /// Executes the given predicate on the register.
@@ -245,10 +247,16 @@ impl<T: RegisterStorage> RegisterState<T> {
             if is_arch32 {
                 self.r[15] = self.pc;
             }
-        } else if offset == memoffset::offset_of!(user_regs_struct, pstate) {
+        } else if offset == memoffset::offset_of!(user_regs_struct, pstate)
+            || (offset == reg_offset(16) && is_arch32)
+        {
             let mut cpsr = self.cpsr as u64;
             final_f(&mut cpsr);
-            self.cpsr = cpsr as u32;
+            if is_arch32 {
+                self.cpsr = (cpsr as u32) | (zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
+            } else {
+                self.cpsr = (cpsr as u32) & !(zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
+            }
         } else if offset == reg_offset(30) || (offset == reg_offset(14) && is_arch32) {
             // The 30th register is stored as lr in self.real_registers
             final_f(&mut self.r[30]);
@@ -271,6 +279,12 @@ impl<T: RegisterStorage> RegisterState<T> {
         self.sync_stack_ptr();
     }
 
+    /// Copies the restricted state and the orig_x0 bookkeeping register.
+    pub fn copy_from<O: RegisterStorage>(&mut self, other: &RegisterState<O>) {
+        self.load(*other.real_registers);
+        self.orig_x0 = other.orig_x0;
+    }
+
     pub fn sync_stack_ptr(&mut self) {
         // We should synchronize the stack pointer with the aarch32 registers.
         if self.cpsr & zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32 != 0 {
@@ -281,8 +295,6 @@ impl<T: RegisterStorage> RegisterState<T> {
             // done in zircon.
             self.r[15] = self.pc;
         }
-        self.orig_x0 = self.r[0];
-        self.elr = 0;
     }
 }
 
@@ -291,7 +303,6 @@ impl<T: RegisterStorage> std::fmt::Debug for RegisterState<T> {
         f.debug_struct("RegisterState")
             .field("real_registers", &self.real_registers)
             .field("orig_x0", &format_args!("{:#x}", &self.orig_x0))
-            .field("elr", &format_args!("{:#x}", &self.elr))
             .finish()
     }
 }
@@ -312,12 +323,12 @@ impl<T: RegisterStorage> std::ops::DerefMut for RegisterState<T> {
 
 impl From<RegisterState<HeapRegs>> for RegisterState<RegisterStorageEnum> {
     fn from(regs: RegisterState<HeapRegs>) -> Self {
-        Self { real_registers: regs.real_registers.into(), orig_x0: regs.orig_x0, elr: regs.elr }
+        Self { real_registers: regs.real_registers.into(), orig_x0: regs.orig_x0 }
     }
 }
 
 impl From<RegisterState<RegisterStorageEnum>> for RegisterState<HeapRegs> {
     fn from(regs: RegisterState<RegisterStorageEnum>) -> Self {
-        Self { real_registers: regs.real_registers.into(), orig_x0: regs.orig_x0, elr: regs.elr }
+        Self { real_registers: regs.real_registers.into(), orig_x0: regs.orig_x0 }
     }
 }

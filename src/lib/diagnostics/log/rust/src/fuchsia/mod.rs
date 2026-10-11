@@ -591,20 +591,25 @@ pub fn get_now() -> i64 {
 /// of an atomic.
 #[macro_export]
 macro_rules! log_every_n_seconds {
-    ($seconds:expr, $severity:expr, $($arg:tt)*) => {
-        use std::{time::Duration, sync::atomic::{Ordering, AtomicI64}};
-        use $crate::{paste, fuchsia::get_now};
+    ($seconds:expr, $severity:expr, $($arg:tt)*) => {{
+        use std::{
+            sync::atomic::{AtomicI64, Ordering},
+            time::Duration,
+        };
+        use $crate::{get_now, paste};
 
         let now = get_now();
 
         static LAST_LOG_TIMESTAMP: AtomicI64 = AtomicI64::new(0);
-        if now - LAST_LOG_TIMESTAMP.load(Ordering::Acquire) >= Duration::from_secs($seconds).as_nanos() as i64 {
+        if now - LAST_LOG_TIMESTAMP.load(Ordering::Acquire)
+            >= Duration::from_secs($seconds).as_nanos() as i64
+        {
             paste! {
                 log::[< $severity:lower >]!($($arg)*);
             }
             LAST_LOG_TIMESTAMP.store(now, Ordering::Release);
         }
-    }
+    }};
 }
 
 #[cfg(test)]

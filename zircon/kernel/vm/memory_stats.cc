@@ -254,7 +254,7 @@ zx_info_kmem_stats_compression_t GetCompressionStats() {
 }
 
 zx_info_memory_stall_t GetStallStats() {
-  StallAggregator::Stats stats = StallAggregator::GetStallAggregator()->ReadStats();
+  StallAggregator::Stats stats = StallAggregator::ReadStats();
   zx_info_memory_stall_t info = {
       .stall_time_some = stats.stalled_time_some,
       .stall_time_full = stats.stalled_time_full,

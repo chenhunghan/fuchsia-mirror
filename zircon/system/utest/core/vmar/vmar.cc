@@ -73,6 +73,8 @@ TEST(Vmar, DestroyTest) {
                               &vmar),
             ZX_OK);
 
+  EXPECT_EQ(zx_vmar_destroy(vmar), ZX_ERR_NOT_SUPPORTED);
+
   zx_handle_t sub_vmar;
   uintptr_t sub_region_addr;
   ASSERT_EQ(zx_vmar_allocate(vmar, ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_WRITE, 0,
@@ -960,6 +962,12 @@ TEST(Vmar, InvalidArgsTest) {
   EXPECT_EQ(zx_vmar_map(vmar, ZX_VM_PERM_READ | ZX_VM_PERM_WRITE | (1 << 31), 0, vmo, 0,
                         4 * zx_system_get_page_size(), &map_addr),
             ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(
+      zx_vmar_map(vmar, ZX_VM_PERM_EXECUTE, 0, vmo, 0, 4 * zx_system_get_page_size(), &map_addr),
+      ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(zx_vmar_map(vmar, ZX_VM_PERM_WRITE | ZX_VM_PERM_EXECUTE, 0, vmo, 0,
+                        4 * zx_system_get_page_size(), &map_addr),
+            ZX_ERR_INVALID_ARGS);
   EXPECT_EQ(zx_vmar_map(vmar, ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0,
                         4 * zx_system_get_page_size(), &map_addr),
             ZX_OK);
@@ -969,6 +977,11 @@ TEST(Vmar, InvalidArgsTest) {
   EXPECT_EQ(
       zx_vmar_protect(vmar, ZX_VM_PERM_READ | (1 << 31), map_addr, 4 * zx_system_get_page_size()),
       ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(zx_vmar_protect(vmar, ZX_VM_PERM_EXECUTE, map_addr, 4 * zx_system_get_page_size()),
+            ZX_ERR_INVALID_ARGS);
+  EXPECT_EQ(zx_vmar_protect(vmar, ZX_VM_PERM_WRITE | ZX_VM_PERM_EXECUTE, map_addr,
+                            4 * zx_system_get_page_size()),
+            ZX_ERR_INVALID_ARGS);
   EXPECT_EQ(zx_vmar_unmap(vmar, map_addr, 4 * zx_system_get_page_size()), ZX_OK);
 
   EXPECT_EQ(zx_handle_close(vmo), ZX_OK);

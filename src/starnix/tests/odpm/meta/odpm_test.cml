@@ -1,0 +1,37 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/starnix/tests/run_as_root.shard.cml",
+        "//src/starnix/tests/starnix_test.shard.cml",
+    ],
+    program: {
+        binary: "data/tests/odpm_test_bin",
+        test_type: "syscall_libtest",
+    },
+    children: [
+        {
+            name: "container",
+            url: "#meta/odpm_container.cm",
+            environment: "#starnix_runner_env",
+        },
+        {
+            name: "fake_odpm",
+            url: "#meta/fake_odpm.cm",
+        },
+    ],
+    use: [
+        {
+            protocol: "fuchsia.component.runner.ComponentRunner",
+            from: "#container",
+        },
+    ],
+    offer: [
+        {
+            service: "fuchsia.hardware.google.odpm.Service",
+            from: "#fake_odpm",
+            to: "#kernel",
+        },
+    ],
+}

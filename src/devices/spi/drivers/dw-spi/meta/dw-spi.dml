@@ -3,9 +3,13 @@
 // found in the LICENSE file.
 {
     name: "dw-spi",
-    include: [ "driver/platform-device.shard.cml" ],
+    include: [
+        "driver/platform-device.shard.cml",
+        "driver_component/power_managed_dispatchers.shard.cml",
+    ],
     program: {
         binary: "driver/dw-spi.so",
+        default_dispatcher_scheduler_role: "fuchsia.devices.spi.drivers.spi.bus",
     },
     capabilities: [
         { service: "fuchsia.hardware.spiimpl.Service" },

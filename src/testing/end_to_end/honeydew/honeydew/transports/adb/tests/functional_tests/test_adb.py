@@ -5,6 +5,7 @@
 """Mobly test for ADB transport."""
 
 import fuchsia_base_test
+from honeydew.device_classes import android_device
 from honeydew.transports.adb import adb as adb_transport
 from mobly import asserts, test_runner
 
@@ -12,11 +13,13 @@ from mobly import asserts, test_runner
 class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
     """ADB transport functional tests."""
 
+    dut: android_device.AndroidDevice
     adb: adb_transport.Adb
 
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
+        assert isinstance(self.dut, android_device.AndroidDevice)
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         self.adb = self.dut.adb

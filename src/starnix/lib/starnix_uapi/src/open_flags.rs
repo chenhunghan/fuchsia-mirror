@@ -47,12 +47,25 @@ mod inner_flags {
     }
 
     impl OpenFlags {
+        /// Returns whether the flags allow reading from the open file.
+        ///
+        /// Returns `false` when [`Self::PATH`] is set, as `O_PATH` file descriptors are not opened
+        /// for reading even though `O_RDONLY` is zero.
         pub fn can_read(&self) -> bool {
+            if self.contains(Self::PATH) {
+                return false;
+            }
             let access_mode = self.bits() & Self::ACCESS_MASK.bits();
             access_mode == uapi::O_RDONLY || access_mode == uapi::O_RDWR
         }
 
+        /// Returns whether the flags allow writing to the open file.
+        ///
+        /// Returns `false` when [`Self::PATH`] is set.
         pub fn can_write(&self) -> bool {
+            if self.contains(Self::PATH) {
+                return false;
+            }
             let access_mode = self.bits() & Self::ACCESS_MASK.bits();
             access_mode == uapi::O_WRONLY || access_mode == uapi::O_RDWR
         }
@@ -60,3 +73,26 @@ mod inner_flags {
 }
 
 pub use inner_flags::{AtomicOpenFlags, OpenFlags};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::fuchsia::test]
+    fn test_can_read_and_can_write() {
+        assert!(OpenFlags::RDONLY.can_read());
+        assert!(!OpenFlags::RDONLY.can_write());
+
+        assert!(!OpenFlags::WRONLY.can_read());
+        assert!(OpenFlags::WRONLY.can_write());
+
+        assert!(OpenFlags::RDWR.can_read());
+        assert!(OpenFlags::RDWR.can_write());
+
+        for mode in [OpenFlags::RDONLY, OpenFlags::WRONLY, OpenFlags::RDWR] {
+            let flags = OpenFlags::PATH | mode;
+            assert!(!flags.can_read(), "{flags:?} should not be readable");
+            assert!(!flags.can_write(), "{flags:?} should not be writable");
+        }
+    }
+}

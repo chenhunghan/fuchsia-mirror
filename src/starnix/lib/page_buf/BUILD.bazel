@@ -2,7 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -21,6 +29,7 @@ rustc_library(
 # The unit tests are declared separately instead of with `with_unit_tests`
 # because Bazel would apply the library's `lint_config`, which includes the
 # production-only lints, to the test code as well.
+# @bazel2gn:skip
 rustc_test(
     name = "page_buf_lib_test",
     srcs = ["src/lib.rs"],
@@ -31,4 +40,50 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-runtime",
     ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "page_buf_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":page_buf_lib_test",
+    binary_name = "page_buf_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "page_buf_tests-manifest",
+    testonly = True,
+    component_name = "page_buf_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard.cml",
+        "//sdk/lib/syslog:offer.shard.cml",
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/page_buf_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "page_buf_tests-component",
+    compiled_manifest = ":page_buf_tests-manifest",
+    component_name = "page_buf_tests",
+    # Runs in the Starnix test realm, which provides the
+    # `starnix_unit_test_runner` used by `unit_test.shard.cml`.
+    test_type = "starnix",
+    deps = [":page_buf_lib_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "page_buf_tests-package",
+    package_name = "page_buf_tests",
+    test_components = [":page_buf_tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "page_buf_tests",
+    package = ":page_buf_tests-package",
 )

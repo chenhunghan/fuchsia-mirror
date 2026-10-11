@@ -210,7 +210,7 @@ source_set("time_provider") {
     "//src/lib/timekeeper",
   ]
 
-  deps = [ "//sdk/fidl/fuchsia.time:fuchsia.time_hlcpp" ]
+  deps = [ "//sdk/fidl/fuchsia.time:fuchsia.time_cpp" ]
 }
 
 source_set("ui_state_provider") {
@@ -220,7 +220,20 @@ source_set("ui_state_provider") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.ui.activity:fuchsia.ui.activity_hlcpp",
+    "//sdk/fidl/fuchsia.ui.activity:fuchsia.ui.activity_cpp",
+    "//sdk/lib/async",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/fit",
+    "//sdk/lib/sys/cpp",
     "//src/developer/forensics/feedback/annotations",
+    "//src/lib/backoff",
+    "//src/lib/timekeeper",
+  ]
+
+  deps = [
+    ":fidl_provider",
+    "//sdk/lib/syslog/cpp",
+    "//src/developer/forensics/utils:errors",
+    "//src/developer/forensics/utils:time",
   ]
 }

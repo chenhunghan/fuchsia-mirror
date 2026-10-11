@@ -32,7 +32,6 @@ rustc_library(
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fidl/rust/fidl_message",
-        "//src/lib/fuchsia-async",
         "//src/lib/replace-with",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:pin-project",
@@ -40,6 +39,7 @@ rustc_library(
     ] + select({
         "@platforms//os:fuchsia": [
             "//sdk/rust/zx",
+            "//src/lib/fuchsia-async",
         ],
         "//conditions:default": [],
     }),

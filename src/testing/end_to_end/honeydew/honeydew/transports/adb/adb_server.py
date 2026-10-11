@@ -4,10 +4,14 @@
 """Provides a wrapper for running an isolated adb server process."""
 
 import atexit
+import ctypes
+import ctypes.util
 import logging
 import os
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -16,6 +20,23 @@ from pathlib import Path
 from honeydew.transports.adb import errors as adb_errors
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+_PR_SET_PDEATHSIG = 1
+
+_LIBC: ctypes.CDLL | None = None
+if sys.platform == "linux":
+    _LIBC = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+
+
+def _set_pdeathsig() -> None:
+    """Sets the parent-death signal of the calling process to SIGKILL on Linux.
+
+    Note that PR_SET_PDEATHSIG is bound to the thread that calls fork(). This is
+    safe here because subprocess.Popen is called from a dedicated thread that
+    immediately blocks on process.wait() for the lifetime of the child process.
+    """
+    if _LIBC:
+        _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
 class AdbServer:
@@ -237,9 +258,10 @@ class AdbServer:
         time.sleep(5)
 
     def _check_for_conflicting_adb_servers(self) -> None:
-        """Checks for conflicting adb server processes.
+        """Checks for and terminates conflicting adb server processes.
 
-        If a conflicting adb server is found, logs an error.
+        If a conflicting adb server is found, logs an error and kills the
+        conflicting process so it releases any exclusive USB interface claim.
         A conflicting server is defined as one that:
         1. Does not specify --one-device
         2. Specifies --one-device with our target serial ID
@@ -264,11 +286,24 @@ class AdbServer:
             )
             return
 
+        own_pids: set[int] = {os.getpid()}
+        with self._lock:
+            if self._process and self._process.pid:
+                own_pids.add(self._process.pid)
+
+        killed_pids: list[int] = []
         for line in result.stdout.splitlines():
             parts = line.split(maxsplit=1)
             if len(parts) < 2:
                 continue
-            pid, cmd = parts
+            pid_str, cmd = parts
+            try:
+                pid = int(pid_str)
+            except ValueError:
+                continue
+
+            if pid in own_pids:
+                continue
 
             cmd_args = cmd.split()
             if "server" not in cmd_args and "fork-server" not in cmd_args:
@@ -293,6 +328,32 @@ class AdbServer:
                     f"Found conflicting ADB server process (PID: {pid}): {cmd}"
                 )
                 _LOGGER.error(error_msg)
+                try:
+                    _LOGGER.info(
+                        f"Killing conflicting ADB server process (PID: {pid})..."
+                    )
+                    os.kill(pid, signal.SIGKILL)
+                    killed_pids.append(pid)
+                except OSError as e:
+                    _LOGGER.warning(
+                        f"Failed to kill conflicting ADB server process (PID: {pid}): {e}"
+                    )
+
+        if killed_pids:
+            deadline = time.monotonic() + 2.0
+            while killed_pids and time.monotonic() < deadline:
+                remaining_pids: list[int] = []
+                for pid in killed_pids:
+                    try:
+                        os.kill(pid, 0)
+                        remaining_pids.append(pid)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        remaining_pids.append(pid)
+                killed_pids = remaining_pids
+                if killed_pids:
+                    time.sleep(0.05)
 
     def _run_one_server(self, server_name: str) -> None:
         """Runs a server and waits on the process.
@@ -363,6 +424,9 @@ class AdbServer:
                         stdout=output_file,
                         stderr=subprocess.STDOUT,
                         text=True,
+                        preexec_fn=_set_pdeathsig
+                        if sys.platform == "linux"
+                        else None,
                     )
                 finally:
                     output_file.close()

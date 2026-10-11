@@ -125,3 +125,58 @@ impl AccessorError {
         control.shutdown_with_epitaph(epitaph);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_matches::assert_matches;
+    use fidl::endpoints::{RequestStream, create_proxy_and_stream};
+    use fidl_fuchsia_diagnostics::BatchIteratorMarker;
+    use futures::StreamExt;
+
+    #[fuchsia::test]
+    async fn close_epitaph_mapping() {
+        let cases = [
+            (ZxStatus::INVALID_ARGS, AccessorError::DuplicateBatchTimeout),
+            (ZxStatus::INVALID_ARGS, AccessorError::MissingDataType),
+            (ZxStatus::INVALID_ARGS, AccessorError::EmptySelectors),
+            (ZxStatus::INVALID_ARGS, AccessorError::MissingSelectors),
+            (ZxStatus::INVALID_ARGS, AccessorError::InvalidSelectors("test")),
+            (ZxStatus::INVALID_ARGS, AccessorError::InvalidLogSelector),
+            (
+                ZxStatus::INVALID_ARGS,
+                AccessorError::ParseSelectors(selectors::Error::NonFlatDirectory),
+            ),
+            (ZxStatus::INVALID_ARGS, AccessorError::MissingFormat),
+            (ZxStatus::INVALID_ARGS, AccessorError::MissingMode),
+            (ZxStatus::NO_MEMORY, AccessorError::VmoCreate(ZxStatus::NO_MEMORY)),
+            (ZxStatus::BUFFER_TOO_SMALL, AccessorError::VmoWrite(ZxStatus::BUFFER_TOO_SMALL)),
+            (ZxStatus::BAD_HANDLE, AccessorError::VmoSize(ZxStatus::BAD_HANDLE)),
+            (ZxStatus::WRONG_TYPE, AccessorError::UnsupportedFormat),
+            (ZxStatus::WRONG_TYPE, AccessorError::UnsupportedMode),
+            (
+                ZxStatus::BAD_STATE,
+                AccessorError::Serialization(serde_json::from_str::<i32>("invalid").unwrap_err()),
+            ),
+            (ZxStatus::BAD_STATE, AccessorError::CborSerialization(anyhow::anyhow!("cbor fail"))),
+            (ZxStatus::IO, AccessorError::Ipc { source: fidl::Error::ExtraBytes }),
+            (
+                ZxStatus::IO,
+                AccessorError::Stream { source: StreamError::Io(std::io::Error::other("test")) },
+            ),
+            (ZxStatus::IO, AccessorError::Io(std::io::Error::other("test"))),
+        ];
+
+        for (expected, err) in cases {
+            let (proxy, stream) = create_proxy_and_stream::<BatchIteratorMarker>();
+            err.close(stream.control_handle());
+            assert_matches!(
+                proxy.take_event_stream().next().await,
+                Some(Err(fidl::Error::ClientChannelClosed {
+                    epitaph: fidl::Epitaph::Explicit(Err(status)),
+                    ..
+                })) if status == expected
+            );
+        }
+    }
+}

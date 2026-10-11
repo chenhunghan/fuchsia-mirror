@@ -8,15 +8,27 @@ use crate::error::{Result, TargetDriverError};
 use futures::channel::mpsc;
 use futures::prelude::*;
 use std::pin::Pin;
-use uart_fpl::{AckOutcome, DEFAULT_RETRANSMISSION_TIMEOUT, FrameType, ResendSender};
+use uart_fpl::{
+    AckOutcome, DEFAULT_RETRANSMISSION_TIMEOUT, FrameType, MAX_PAYLOAD_SIZE, ResendSender,
+};
 
 /// Outgoing channel messages queued by the coordinator for [`sender_task`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SenderMessage {
     /// Outgoing payload bytes for a multiplexed FDomain channel.
     Data { channel_id: u16, payload: Vec<u8> },
-    /// Local close notification for a multiplexed FDomain channel.
-    Close { channel_id: u16 },
+    /// Local close notification for a multiplexed FDomain channel, carrying an
+    /// optional diagnostic error reason when the channel closed abnormally.
+    Close { channel_id: u16, reason: Option<String> },
+}
+
+/// Truncates `s` to at most `max_bytes` on a valid UTF-8 character boundary.
+fn truncate_utf8_bytes(s: &str, max_bytes: usize) -> Vec<u8> {
+    if s.len() <= max_bytes {
+        return s.as_bytes().to_vec();
+    }
+    let end = s.floor_char_boundary(max_bytes);
+    s.as_bytes()[..end].to_vec()
 }
 
 /// Processes a cumulative ACK from `receiver_task` and updates the retransmission timer.
@@ -112,7 +124,11 @@ async fn send_next_in_flight(
     };
     let (frame_type, channel_id, payload) = match msg {
         SenderMessage::Data { channel_id, payload } => (FrameType::Data, channel_id, payload),
-        SenderMessage::Close { channel_id } => (FrameType::Close, channel_id, Vec::new()),
+        SenderMessage::Close { channel_id, reason } => {
+            let payload =
+                reason.map(|r| truncate_utf8_bytes(&r, MAX_PAYLOAD_SIZE)).unwrap_or_default();
+            (FrameType::Close, channel_id, payload)
+        }
     };
     let (_seq, frame) = sender.enqueue_frame(session_id, channel_id, frame_type, &payload)?;
     if sender.in_flight() == 1 {
@@ -231,11 +247,26 @@ mod tests {
         let tx_handle = fuchsia_async::Task::spawn(async move {
             sender_task(sender_rx, outgoing_tx, ack_rx, session_id).await
         });
-        sender_tx.send(SenderMessage::Close { channel_id: 7 }).await.unwrap();
+        sender_tx.send(SenderMessage::Close { channel_id: 7, reason: None }).await.unwrap();
         let frame = outgoing_rx.next().await.unwrap();
         let expected_frame = encode_frame(session_id, 7, 0, FrameType::Close, &[]).unwrap();
         assert_eq!(frame, expected_frame);
         ack_tx.send(0).await.unwrap();
+
+        sender_tx
+            .send(SenderMessage::Close {
+                channel_id: 8,
+                reason: Some("RCS socket read error: PEER_CLOSED".to_string()),
+            })
+            .await
+            .unwrap();
+        let err_frame = outgoing_rx.next().await.unwrap();
+        let expected_err_frame =
+            encode_frame(session_id, 8, 1, FrameType::Close, b"RCS socket read error: PEER_CLOSED")
+                .unwrap();
+        assert_eq!(err_frame, expected_err_frame);
+        ack_tx.send(1).await.unwrap();
+
         drop(sender_tx);
         assert!(tx_handle.await.is_ok());
     }

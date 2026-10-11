@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 use anyhow::Context as _;
-use fidl::endpoints::Proxy as _;
 use fidl_fuchsia_component_decl as fcomponent_decl;
 use fidl_fuchsia_component_resolution as fcomponent_resolution;
 use fidl_fuchsia_io as fio;
+use fidl_fuchsia_mem as fmem;
 use fidl_fuchsia_pkg as fpkg;
 use fuchsia_url::fuchsia_pkg::{AbsolutePackageUrl, ComponentUrl, PackageUrl};
 use futures::stream::TryStreamExt as _;
@@ -25,14 +25,14 @@ pub(crate) trait PackageResolver {
         &self,
         url: &AbsolutePackageUrl,
         dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Self::Error>;
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Self::Error>;
 
     async fn resolve_with_context_and_serve(
         &self,
         url: &PackageUrl,
         context: fpkg::ResolutionContext,
         dir: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Self::Error>;
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Self::Error>;
 }
 
 /// This is just `impl Into<fcomponent_resolution::ResolverError> for &Self`, except the bound can
@@ -112,8 +112,8 @@ async fn resolve(
     package_resolver: &impl PackageResolver,
 ) -> Result<fcomponent_resolution::Component, Error> {
     let url = ComponentUrl::parse(url).map_err(Error::InvalidUrl)?;
-    let (package, server_end) = fidl::endpoints::create_proxy();
-    let context = package_resolver
+    let (package_dir, server_end) = fidl::endpoints::create_endpoints();
+    let (context, root_dir) = package_resolver
         .resolve_and_serve(
             match url.package_url() {
                 PackageUrl::Absolute(url) => url,
@@ -123,8 +123,13 @@ async fn resolve(
         )
         .await
         .map_err(|e| Error::PackageResolve(e.to_fidl_error(), anyhow::anyhow!(e)))?;
-    resolve_from_package(&url, package, fcomponent_resolution::Context { bytes: context.bytes })
-        .await
+    resolve_from_package(
+        &url,
+        &root_dir,
+        package_dir,
+        fcomponent_resolution::Context { bytes: context.bytes },
+    )
+    .await
 }
 
 async fn resolve_with_context(
@@ -133,8 +138,8 @@ async fn resolve_with_context(
     package_resolver: &impl PackageResolver,
 ) -> Result<fcomponent_resolution::Component, Error> {
     let url = ComponentUrl::parse(url).map_err(Error::InvalidUrl)?;
-    let (package, server_end) = fidl::endpoints::create_proxy();
-    let context = package_resolver
+    let (package_dir, server_end) = fidl::endpoints::create_endpoints();
+    let (context, root_dir) = package_resolver
         .resolve_with_context_and_serve(
             url.package_url(),
             fpkg::ResolutionContext { bytes: context.bytes },
@@ -142,14 +147,19 @@ async fn resolve_with_context(
         )
         .await
         .map_err(|e| Error::PackageResolve(e.to_fidl_error(), anyhow::anyhow!(e)))?;
-    resolve_from_package(&url, package, fcomponent_resolution::Context { bytes: context.bytes })
-        .await
+    resolve_from_package(
+        &url,
+        &root_dir,
+        package_dir,
+        fcomponent_resolution::Context { bytes: context.bytes },
+    )
+    .await
 }
 
 async fn load_config(
     decl: &fcomponent_decl::Component,
-    package: &fio::DirectoryProxy,
-) -> Result<Option<fidl_fuchsia_mem::Data>, Error> {
+    root_dir: &crate::root_dir::RootDir,
+) -> Result<Option<fmem::Data>, Error> {
     let Some(config_decl) = decl.config.as_ref() else {
         return Ok(None);
     };
@@ -160,43 +170,39 @@ async fn load_config(
         other => return Err(Error::UnsupportedConfigSource(other.to_owned())),
     };
 
-    Ok(Some(
-        mem_util::open_file_data(package, config_path)
-            .await
-            .map_err(Error::ConfigValuesNotFound)?,
-    ))
+    let (vmo, size) =
+        root_dir.get_file_vmo(config_path).await.map_err(Error::ConfigValuesNotFound)?;
+    Ok(Some(fmem::Data::Buffer(fmem::Buffer { vmo, size })))
 }
 
-// TODO(https://fxbug.dev/548131664): Read manifest, etc. directly from the root_dir, not the proxy.
 async fn resolve_from_package(
     url: &ComponentUrl,
-    package: fio::DirectoryProxy,
+    root_dir: &crate::root_dir::RootDir,
+    package_dir: fidl::endpoints::ClientEnd<fio::DirectoryMarker>,
     outgoing_context: fcomponent_resolution::Context,
 ) -> Result<fcomponent_resolution::Component, Error> {
-    let data = mem_util::open_file_data(&package, url.resource())
-        .await
-        .map_err(Error::ComponentNotFound)?;
+    let (cm_vmo, cm_size) =
+        root_dir.get_file_vmo(url.resource()).await.map_err(Error::ComponentNotFound)?;
+    let cm_bytes = cm_vmo.read_to_vec(0, cm_size).map_err(Error::ReadManifest)?;
     let decl: fcomponent_decl::Component =
-        fidl::unpersist(mem_util::bytes_from_data(&data).map_err(Error::ReadManifest)?.as_ref())
-            .map_err(Error::ParsingManifest)?;
-    let config_values = load_config(&decl, &package).await?;
-    let abi_revision =
-        fidl_fuchsia_component_abi_ext::read_abi_revision_optional(&package, AbiRevision::PATH)
-            .await
-            .map_err(Error::AbiRevision)?;
+        fidl::unpersist(&cm_bytes).map_err(Error::ParsingManifest)?;
+    let config_values = load_config(&decl, root_dir).await?;
+    let abi_revision = match root_dir.read_file(AbiRevision::PATH).await {
+        Ok(bytes) => {
+            let bytes: [u8; 8] =
+                bytes.try_into().map_err(|bytes: Vec<u8>| Error::AbiRevisionDecode(bytes.len()))?;
+            Some(AbiRevision::from_bytes(bytes))
+        }
+        Err(package_directory::ReadFileError::NoFileAtPath { .. }) => None,
+        Err(e) => return Err(Error::AbiRevisionRead(e)),
+    };
     Ok(fcomponent_resolution::Component {
         url: Some(url.to_string()),
         resolution_context: Some(outgoing_context),
-        decl: Some(data),
+        decl: Some(fmem::Data::Buffer(fmem::Buffer { vmo: cm_vmo, size: cm_size })),
         package: Some(fcomponent_resolution::Package {
             url: Some(url.package_url().to_string()),
-            directory: Some(
-                package
-                    .into_channel()
-                    .map_err(|_| Error::ConvertProxyToChannel)?
-                    .into_zx_channel()
-                    .into(),
-            ),
+            directory: Some(package_dir),
             ..Default::default()
         }),
         config_values,
@@ -211,13 +217,13 @@ pub(crate) enum Error {
     InvalidUrl(#[source] fuchsia_url::errors::ParseError),
 
     #[error("component not found")]
-    ComponentNotFound(#[source] mem_util::FileError),
+    ComponentNotFound(#[source] package_directory::ReadFileError),
 
     #[error("couldn't parse component manifest")]
     ParsingManifest(#[source] fidl::Error),
 
     #[error("couldn't find config values")]
-    ConfigValuesNotFound(#[source] mem_util::FileError),
+    ConfigValuesNotFound(#[source] package_directory::ReadFileError),
 
     #[error("config source missing or invalid")]
     InvalidConfigSource,
@@ -229,16 +235,16 @@ pub(crate) enum Error {
     UnsupportedConfigSource(fcomponent_decl::ConfigValueSource),
 
     #[error("failed to read the manifest")]
-    ReadManifest(#[source] mem_util::DataError),
+    ReadManifest(#[source] zx::Status),
 
     #[error("failed to read abi revision")]
-    AbiRevision(#[source] fidl_fuchsia_component_abi_ext::AbiRevisionFileError),
+    AbiRevisionRead(#[source] package_directory::ReadFileError),
+
+    #[error("failed to decode abi revision, expected 8 bytes found {0}")]
+    AbiRevisionDecode(usize),
 
     #[error("resolve must be called with an absolute (not relative) url")]
     AbsoluteUrlRequired,
-
-    #[error("failed to convert proxy to channel")]
-    ConvertProxyToChannel,
 }
 
 impl From<&Error> for fcomponent_resolution::ResolverError {
@@ -254,8 +260,7 @@ impl From<&Error> for fcomponent_resolution::ResolverError {
                 ferror::InvalidManifest
             }
             ReadManifest(_) => ferror::Io,
-            ConvertProxyToChannel => ferror::Internal,
-            AbiRevision(_) => ferror::InvalidAbiRevision,
+            AbiRevisionRead(_) | AbiRevisionDecode(_) => ferror::InvalidAbiRevision,
         }
     }
 }
@@ -287,7 +292,10 @@ mod tests {
             &self,
             _: &AbsolutePackageUrl,
             _: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        ) -> Result<fpkg::ResolutionContext, BrokenPackageResolverError> {
+        ) -> Result<
+            (fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>),
+            BrokenPackageResolverError,
+        > {
             unimplemented!();
         }
 
@@ -296,7 +304,10 @@ mod tests {
             _: &PackageUrl,
             _: fpkg::ResolutionContext,
             _: fidl::endpoints::ServerEnd<fio::DirectoryMarker>,
-        ) -> Result<fpkg::ResolutionContext, BrokenPackageResolverError> {
+        ) -> Result<
+            (fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>),
+            BrokenPackageResolverError,
+        > {
             unimplemented!();
         }
     }

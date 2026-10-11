@@ -53,7 +53,7 @@ void FakeWlanix::handle_unknown_method(
 
 void FakeWlanix::RegisterEventCallback(
     fuchsia_wlan_wlanix::wire::WifiRegisterEventCallbackRequest* request,
-    RegisterEventCallbackCompleter::Sync& completer) {
+    fidl::WireServer<fuchsia_wlan_wlanix::Wifi>::RegisterEventCallbackCompleter::Sync& completer) {
   AppendCommand(Command{.tag = CommandTag::kWifiRegisterEventCallback});
 }
 
@@ -249,6 +249,13 @@ void FakeWlanix::handle_unknown_method(
   AppendCommand(Command{.tag = CommandTag::kWifiChipUnknownMethod});
 }
 
+void FakeWlanix::RegisterEventCallback(
+    fuchsia_wlan_wlanix::wire::WifiStaIfaceRegisterEventCallbackRequest* request,
+    fidl::WireServer<fuchsia_wlan_wlanix::WifiStaIface>::RegisterEventCallbackCompleter::Sync&
+        completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceRegisterEventCallback});
+}
+
 void FakeWlanix::GetName(GetNameCompleter::Sync& completer) {
   AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceGetName});
   fidl::Arena arena;
@@ -307,6 +314,29 @@ void FakeWlanix::GetLinkLayerStats(GetLinkLayerStatsCompleter::Sync& completer) 
   builder.stats(stats);
   auto response = builder.Build();
   completer.Reply(fit::ok(&response));
+}
+
+void FakeWlanix::GetFeatureSet(GetFeatureSetCompleter::Sync& completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceGetFeatureSet});
+  fidl::Arena arena;
+  auto builder = fuchsia_wlan_wlanix::wire::WifiStaIfaceGetFeatureSetResponse::Builder(arena);
+  builder.rssi_monitor_supported(true);
+  auto response = builder.Build();
+  completer.Reply(fit::ok(&response));
+}
+
+void FakeWlanix::StartRssiMonitoring(
+    fuchsia_wlan_wlanix::wire::WifiStaIfaceStartRssiMonitoringRequest* request,
+    StartRssiMonitoringCompleter::Sync& completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceStartRssiMonitoring});
+  completer.Reply(fit::ok());
+}
+
+void FakeWlanix::StopRssiMonitoring(
+    fuchsia_wlan_wlanix::wire::WifiStaIfaceStopRssiMonitoringRequest* request,
+    StopRssiMonitoringCompleter::Sync& completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceStopRssiMonitoring});
+  completer.Reply(fit::ok());
 }
 
 void FakeWlanix::handle_unknown_method(

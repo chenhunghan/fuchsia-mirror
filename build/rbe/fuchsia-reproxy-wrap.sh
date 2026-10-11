@@ -33,7 +33,7 @@ project_root_rel="$(relpath . "$project_root")"
 # defaults
 readonly default_config="$script_dir"/fuchsia-reproxy.cfg
 readonly gcertauth_config="$script_dir"/fuchsia-reproxy-gcertauth.cfg
-readonly check_loas_script="$project_root"/build/auth/check_loas_restrictions.sh
+readonly select_auth_script="$project_root"/build/auth/select_auth_method.py
 readonly build_summary_script="$script_dir"/build_summary.py
 
 # location of reclient binaries relative to output directory where build is run
@@ -45,7 +45,7 @@ readonly fx_build_metrics_config_old="$project_root_rel"/.fx-build-metrics-confi
 
 readonly jq="$project_root/prebuilt/third_party/jq/"$HOST_PLATFORM"/bin/jq"
 
-loas_type=auto
+auth_type=auto
 use_gce_machine_credentials=false
 
 SIGNAL_POLICY="relay"
@@ -69,9 +69,9 @@ options:
   --logdir DIR: unique reproxy log dir
   --tmpdir DIR: reproxy temp dir
   --use-machine-credentials: use GCE machine-credentials (bypasses LOAS/OAuth checks, takes absolute precedence)
-  --loas-type TYPE: {skip,auto,restricted,unrestricted}, default [$loas_type]
-    'skip' will bypass any preflight authentication checks
-    'auto' will attempt to detect as restricted or unrestricted.
+  --auth-type TYPE: {machine,none,auto,loas,oauth}, default [$auth_type]
+    'none' or 'machine' will bypass any preflight authentication checks
+    'auto' will attempt to detect the correct authentication method automatically.
   --async_reproxy_termination: shutdown reproxy in the background.
   --signal-policy {relay,relay-group,passive}: default [$SIGNAL_POLICY]
     relay: (RECOMMENDED) Isolate the child in a new process group and forward
@@ -142,8 +142,8 @@ do
     --tmpdir=*) reproxy_tmpdir="$optarg" ;;
     --tmpdir) prev_opt=reproxy_tmpdir ;;
     --use-machine-credentials) use_gce_machine_credentials=true ;;
-    --loas-type=*) loas_type="$optarg" ;;
-    --loas-type) prev_opt=loas_type ;;
+    --auth-type=*) auth_type="$optarg" ;;
+    --auth-type) prev_opt=auth_type ;;
     --signal-policy=*) SIGNAL_POLICY="$optarg" ;;
     --signal-policy) prev_opt=SIGNAL_POLICY ;;
     # Forward some options to shutdown.
@@ -220,10 +220,10 @@ mkdir -p "$_RBE_cache_dir"
 
 if [[ "$use_gce_machine_credentials" == "true" ]]
 then
-  loas_type="skip"
+  auth_type="machine"
 fi
 
-if [[ "$loas_type" != "skip" ]]
+if [[ "$auth_type" != "machine" && "$auth_type" != "none" ]]
 then
   [[ "${USER-NOT_SET}" != "NOT_SET" ]] || {
     echo "Error: USER must be set to authenticate using RBE."
@@ -305,17 +305,21 @@ rewrapper_env=(
 
 # Check authentication.
 # Same as 'fx rbe preflight', but re-implemented here to be standalone.
-[[ "$loas_type" != "auto" ]] || {
-  # Detect "restricted" or "unrestricted"
-  loas_type="$("$check_loas_script" | tail -n 1)" || {
-    echo "Error detecting LOAS certificate type"
+if [[ "$auth_type" == "auto" ]]; then
+  auth_type="${FX_BUILD_AUTH_TYPE:-"auto"}"
+fi
+
+[[ "$auth_type" != "auto" ]] || {
+  # Automatically select authentication type (loas, oauth, or machine)
+  auth_type="$("$python" -S "$select_auth_script" | tail -n 1)" || {
+    echo "Error selecting build authentication type"
     exit 1
   }
 }
 
-case "$loas_type" in
-  skip) ;;
-  unrestricted)
+case "$auth_type" in
+  machine|none) ;;
+  loas)
     # Eligible to use credential helper to refresh OAuth from LOAS.
     gcertstatus -check_ssh=false --check_remaining=2h > /dev/null || gcert || {
       echo "Please run gcert to get a valid LOAS certificate."
@@ -326,14 +330,7 @@ case "$loas_type" in
     # but concatenating configs together works.
     configs+=( "$gcertauth_config" )
     ;;
-  *)  # including 'restricted'
-    [[ "$loas_type" == restricted ]] || {
-      cat <<EOF
-Warning: Unexpected loas_type: '$loas_type'
-Proceeding as if type is "restricted".
-File a go/fuchsia-build-bug, including a go/paste link of: sh -x $check_loas_script
-EOF
-    }
+  *)  # including 'restricted' or 'oauth'
     # Can only use OAuth tokens directly, using gcloud authentication.
     gcloud="$(which gcloud)" || {
       cat <<EOF

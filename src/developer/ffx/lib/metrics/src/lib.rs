@@ -192,27 +192,25 @@ pub async fn add_ffx_launch_event(
         ("call_stack", call_stack.into()),
     ]);
     let mut metrics_svc = ga4_metrics().await?;
+    let mut events = Vec::with_capacity(2);
     if let Some(connection_mode) = connection_mode {
-        let _ = metrics_svc
-            .add_custom_event(
-                Some("ffx_connection_mode"),
-                Some(connection_mode),
-                None,
-                BTreeMap::new(),
-                Some("ffx_connection_mode"),
-            )
-            .await;
+        events.push(metrics_svc.make_custom_event(
+            Some("ffx_connection_mode"),
+            Some(connection_mode),
+            None,
+            BTreeMap::new(),
+            Some("ffx_connection_mode"),
+        ));
     }
-    metrics_svc
-        .add_custom_event(
-            None,
-            enhanced_args.as_ref().map(String::as_str),
-            None,
-            custom_dimensions,
-            Some("invoke"),
-        )
-        .await?;
-    metrics_svc.send_events().await?;
+    events.push(metrics_svc.make_custom_event(
+        None,
+        enhanced_args.as_ref().map(String::as_str),
+        None,
+        custom_dimensions,
+        Some("invoke"),
+    ));
+    metrics_svc.add_events(events).await?;
+    metrics_svc.drain().await?;
     Ok(())
 }
 

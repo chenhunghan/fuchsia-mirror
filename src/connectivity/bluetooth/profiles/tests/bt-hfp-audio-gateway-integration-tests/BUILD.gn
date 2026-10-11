@@ -61,9 +61,8 @@ fuchsia_test_package("bt-hfp-audio-gateway-integration-tests") {
   }
 
   deps = [
-    # The HFP component + the default configuration used by it.
+    # The HFP component.
     "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:component",
-    "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:default_config_values",
 
     # The RFCOMM component that is the intermediary for HFP and test driven
     # peers.

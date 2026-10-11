@@ -7,7 +7,7 @@ use crate::filesystem::FxFilesystem;
 use crate::log::*;
 use crate::lsm_tree::types::Item;
 use crate::object_handle::INVALID_OBJECT_ID;
-use crate::object_store::allocator::{AllocatorItem, Reservation};
+use crate::object_store::allocator::{AllocatorItem, Hold, Reservation};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
     BytesAndNodes, FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV56, ObjectItemV59, ObjectKey,
@@ -35,6 +35,75 @@ use std::sync::Arc;
 use std::task::{Poll, Waker};
 use std::{fmt, mem};
 
+/// How metadata and allocator reservations should be handled for a transaction.
+///
+/// A transaction consumes space in two different ways:
+///
+/// 1. The transaction will consume space in the journal and eventually in an LSM tree (the
+///    "metadata" cost of the transaction).
+/// 2. The transaction might also include additional allocations or deallocations.  These may come
+///    directly from the global allocator, or they might come from a Reservation object, depending
+///    on the context.  (See specific enum cases for details.)
+///
+/// The basic decision tree for which variant to use is as follows:
+///
+/// - Is there an existing reservation which the transaction should draw from?
+///   - YES: Use [`ReservationOptions::Hold`]
+///   -  NO: Is the transaction allocating or deallocating extents for internal filesystem metadata
+///          (e.g. LSM tree compaction, journal/superblock growth, or graveyard tombstoning in the
+///          root/root-parent stores)?
+///          - YES: Use [`ReservationOptions::BorrowedMetadataAndData`]
+///          -  NO: Is the transaction expected to be space-neutral or space-saving?
+///                 - YES: Use [`ReservationOptions::BorrowedMetadata`]
+///                 -  NO: Use [`ReservationOptions::New`]
+#[derive(Clone, Copy, Default)]
+pub enum ReservationOptions<'a> {
+    /// A new reservation is created to accommodate the metadata of a maximally-sized transaction,
+    /// and the transaction's metadata is paid for from this reservation.  Allocations and
+    /// deallocations within the transaction will go directly to the global allocator (and therefore
+    /// might fail if there's insufficient space).
+    ///
+    /// This should be the default case for most transactions which permit failure when there's no
+    /// space left in the global allocator.
+    #[default]
+    New,
+
+    /// Metadata space is borrowed directly from the global reservation held by the ObjectManager.
+    /// Deallocations in the transaction will be returned to the allocator, rather than to the
+    /// global reservation.
+    ///
+    /// This must be used for transactions which will either not affect net space usage after
+    /// compaction (e.g. setting attributes on an object), or will reduce space (e.g. unlinking a
+    /// file or deleting a range of extents).  By extension, this should not be used for
+    /// transactions which include allocations.
+    ///
+    /// When this is used appropriately, it is guaranteed that transactions will not fail due to
+    /// lack of space.
+    ///
+    /// When choosing between this and BorrowedMetadataAndData, the main consideration is whether
+    /// the freed space from a deallocation must go back to the global reservation, or whether it
+    /// can go back to the global pool.  An example of where it must go back to the global
+    /// reservation would be when purging a layer file during compaction; that space was borrowed
+    /// from the metadata reservation, so it needs to go back there as well (and in that case
+    /// BorrowedMetadataAndData should be used instead).
+    BorrowedMetadata,
+
+    /// Metadata space is borrowed directly from the global reservation held by the ObjectManager.
+    /// Allocations and deallocations in the transaction will be from the global reservation as
+    /// well.
+    ///
+    /// This must be used for transactions that allocate or deallocate extents for internal
+    /// filesystem metadata, such as journal and superblock growth, LSM tree compaction, and
+    /// graveyard tombstoning of objects in the root and root-parent stores.  These transactions
+    /// will never fail due to running out of space (barring any bugs resulting in a deficit in the
+    /// global reservation).
+    BorrowedMetadataAndData,
+
+    /// Use the specified reservation for the transaction's metadata (placing a hold on it) as well
+    /// as any allocations or deallocations in the transaction.
+    Hold(&'a Reservation),
+}
+
 /// This allows for special handling of certain transactions such as deletes and the
 /// extension of Journal extents. For most other use cases it is appropriate to use
 /// `default()` here.
@@ -44,17 +113,17 @@ pub struct Options<'a> {
     /// might alleviate journal space (i.e. compaction).
     pub skip_journal_checks: bool,
 
-    /// If true, borrow metadata space from the metadata reservation.  This setting should be set to
-    /// true for any transaction that will either not affect space usage after compaction
-    /// (e.g. setting attributes), or reduce space usage (e.g. unlinking).  Otherwise, a transaction
-    /// might fail with an out-of-space error.
-    pub borrow_metadata_space: bool,
+    /// How metadata and allocator reservations should be handled for the transaction.
+    pub reservation: ReservationOptions<'a>,
 
-    /// If specified, a reservation to be used with the transaction.  If not set, any allocations
-    /// that are part of this transaction will have to take their chances, and will fail if there is
-    /// no free space.  The intention is that this should be used for things like the journal which
-    /// require guaranteed space.
-    pub allocator_reservation: Option<&'a Reservation>,
+    /// If set, indicates that this transaction is nested within `parent_transaction` and shares
+    /// its in-flight transaction slot.  The use case for this is a nested transaction, where a
+    /// separate transaction must be committed while constructing another transaction (for example,
+    /// when rolling the object ID cipher).
+    ///
+    /// NOTE: The locks acquired by the nested transaction do not cooperate in any way with the
+    /// locks already held by parent_transaction, so care must still be taken to avoid deadlocks.
+    pub parent_transaction: Option<&'a Transaction<'a>>,
 }
 
 // This is the amount of space that we reserve for metadata when we are creating a new transaction.
@@ -634,19 +703,21 @@ impl Drop for ObjectMutationIterator<'_, '_> {
     }
 }
 
-pub enum MetadataReservation {
-    // The state after a transaction has been dropped.
-    None,
+pub enum MetadataReservation<'a> {
+    /// Metadata space for this transaction is being borrowed from ObjectManager's metadata
+    /// reservation, but allocations/deallocations in the transaction do not use it.
+    BorrowedMetadata,
 
-    // Metadata space for this transaction is being borrowed from ObjectManager's metadata
-    // reservation.
-    Borrowed,
+    /// Metadata space for this transaction is being borrowed from ObjectManager's metadata
+    /// reservation, and allocations/deallocations in the transaction also use ObjectManager's
+    /// metadata reservation.
+    BorrowedMetadataAndData,
 
-    // A metadata reservation was made when the transaction was created.
+    /// A metadata reservation was made when the transaction was created.
     Reservation(Reservation),
 
-    // The metadata space is being _held_ within `allocator_reservation`.
-    Hold(u64),
+    /// The metadata space is being _held_ within an existing reservation.
+    Hold(Hold<'a>),
 }
 
 /// A transaction groups mutation records to be committed as a group.
@@ -659,11 +730,8 @@ pub struct Transaction<'a> {
     // The locks that this transaction currently holds.
     txn_locks: LockKeys,
 
-    /// If set, an allocator reservation that should be used for allocations.
-    pub allocator_reservation: Option<&'a Reservation>,
-
     /// The reservation for the metadata for this transaction.
-    pub metadata_reservation: MetadataReservation,
+    pub metadata_reservation: MetadataReservation<'a>,
 
     // Keep track of objects explicitly created by this transaction. No locks are required for them.
     // Addressed by (owner_object_id, object_id).
@@ -674,6 +742,13 @@ pub struct Transaction<'a> {
 
     /// Set if this transaction contains data (i.e. includes any extent mutations).
     includes_write: bool,
+
+    /// If true, don't check for low journal space.
+    pub skip_journal_checks: bool,
+
+    /// If set, indicates that this transaction is nested within `parent_transaction` and shares
+    /// its in-flight transaction slot.
+    parent_transaction: Option<&'a Transaction<'a>>,
 }
 
 impl<'a> Transaction<'a> {
@@ -684,32 +759,69 @@ impl<'a> Transaction<'a> {
         options: Options<'a>,
         txn_locks: LockKeys,
     ) -> Result<Transaction<'a>, Error> {
-        fs.add_transaction(options.skip_journal_checks).await;
-        let fs_clone = fs.clone();
-        let guard = scopeguard::guard((), |_| fs_clone.sub_transaction());
-        let (metadata_reservation, allocator_reservation, hold) =
-            fs.reservation_for_transaction(options).await?;
-
-        let txn_locks = {
-            let lock_manager = fs.lock_manager();
-            let mut write_guard = lock_manager.txn_lock(txn_locks).await;
-            std::mem::take(&mut write_guard.0.lock_keys)
+        if options.parent_transaction.is_none() {
+            fs.add_transaction(options.skip_journal_checks).await;
+        }
+        // We support three options for metadata space reservation:
+        //
+        //   1. We can borrow from the filesystem's metadata reservation.  This should only be
+        //      be used on the understanding that eventually, potentially after a full compaction,
+        //      there should be no net increase in space used.  For example, unlinking an object
+        //      should eventually decrease the amount of space used and setting most attributes
+        //      should not result in any change.
+        //
+        //   2. A reservation is provided in which case we'll place a hold on some of it for
+        //      metadata.
+        //
+        //   3. No reservation is supplied, so we try and reserve space with the allocator now,
+        //      and will return NoSpace if that fails.
+        let metadata_reservation = if fs.options().image_builder_mode.is_some() {
+            MetadataReservation::BorrowedMetadata
+        } else {
+            match options.reservation {
+                ReservationOptions::New => {
+                    MetadataReservation::Reservation(fs.allocator().reserve(None, 0).unwrap())
+                }
+                ReservationOptions::BorrowedMetadata => MetadataReservation::BorrowedMetadata,
+                ReservationOptions::BorrowedMetadataAndData => {
+                    MetadataReservation::BorrowedMetadataAndData
+                }
+                ReservationOptions::Hold(reservation) => {
+                    MetadataReservation::Hold(reservation.reserve(0).unwrap())
+                }
+            }
         };
         let mut transaction = Transaction {
-            fs,
+            fs: fs.clone(),
             mutations: BTreeSet::new(),
-            txn_locks,
-            allocator_reservation: None,
+            txn_locks: LockKeys::default(),
             metadata_reservation,
             new_objects: BTreeSet::new(),
             checksums: Vec::new(),
             includes_write: false,
+            skip_journal_checks: options.skip_journal_checks,
+            parent_transaction: options.parent_transaction,
         };
+        fs.add_transaction_reservation(&mut transaction).await?;
 
-        ScopeGuard::into_inner(guard);
-        hold.map(|h| h.forget()); // Transaction takes ownership from here on.
-        transaction.allocator_reservation = allocator_reservation;
+        transaction.txn_locks = {
+            let lock_manager = fs.lock_manager();
+            let mut write_guard = lock_manager.txn_lock(txn_locks).await;
+            std::mem::take(&mut write_guard.0.lock_keys)
+        };
         Ok(transaction)
+    }
+
+    /// Returns the allocator reservation to be used for allocations and deallocations in this
+    /// transaction, if any.
+    pub fn allocator_reservation(&self) -> Option<&Reservation> {
+        match &self.metadata_reservation {
+            MetadataReservation::BorrowedMetadataAndData => {
+                Some(self.fs.object_manager().metadata_reservation())
+            }
+            MetadataReservation::Hold(hold) => Some(hold.owner()),
+            MetadataReservation::BorrowedMetadata | MetadataReservation::Reservation(_) => None,
+        }
     }
 
     pub fn mutations(&self) -> &BTreeSet<TxnMutation<'a>> {
@@ -808,21 +920,37 @@ impl<'a> Transaction<'a> {
         associated_object: AssocObj<'a>,
     ) -> Option<Mutation> {
         assert!(object_id != INVALID_OBJECT_ID);
-        if let Mutation::ObjectStore(ObjectStoreMutation {
-            item:
-                Item {
-                    key:
-                        ObjectKey { data: ObjectKeyData::Attribute(_, AttributeKey::Extent(_)), .. },
-                    ..
-                },
-            ..
-        }) = &mutation
-        {
-            self.includes_write = true;
+        let mut is_allocate = false;
+        match &mutation {
+            Mutation::ObjectStore(ObjectStoreMutation {
+                item:
+                    Item {
+                        key:
+                            ObjectKey {
+                                data: ObjectKeyData::Attribute(_, AttributeKey::Extent(_)), ..
+                            },
+                        ..
+                    },
+                ..
+            }) => {
+                self.includes_write = true;
+            }
+            Mutation::Allocator(AllocatorMutation::Allocate { .. }) => {
+                is_allocate = true;
+            }
+            _ => {}
         }
         let txn_mutation = TxnMutation { object_id, mutation, associated_object };
         self.verify_locks(&txn_mutation);
-        self.mutations.replace(txn_mutation).map(|m| m.mutation)
+        let old = self.mutations.replace(txn_mutation).map(|m| m.mutation);
+        if is_allocate {
+            assert!(
+                !matches!(self.metadata_reservation, MetadataReservation::BorrowedMetadata)
+                    || self.fs.options().image_builder_mode.is_some(),
+                "Allocations are not allowed in BorrowedMetadata transactions"
+            );
+        }
+        old
     }
 
     pub fn add_checksum(&mut self, range: Range<u64>, checksums: Vec<Checksum>, first_write: bool) {
@@ -1023,8 +1151,11 @@ impl<'a> Transaction<'a> {
         debug!(txn:? = self; "Commit");
         self.fs.clone().commit_transaction(self, |_| {}).await?;
         assert!(self.mutations.is_empty());
+        assert!(self.new_objects.is_empty());
+        assert!(self.checksums.is_empty());
+        self.includes_write = false;
         self.fs.lock_manager().downgrade_locks(&self.txn_locks);
-        Ok(())
+        self.fs.clone().add_transaction_reservation(self).await
     }
 
     /// Prepares to commit by upgrading transaction locks to write locks and waiting for active
@@ -1039,6 +1170,9 @@ impl Drop for Transaction<'_> {
         // Call the filesystem implementation of drop_transaction which should, as a minimum, call
         // LockManager's drop_transaction to ensure the locks are released.
         debug!(txn:? = &self; "Drop");
+        if self.parent_transaction.is_none() {
+            self.fs.sub_transaction();
+        }
         self.fs.clone().drop_transaction(self);
     }
 }
@@ -1048,7 +1182,7 @@ impl std::fmt::Debug for Transaction<'_> {
         f.debug_struct("Transaction")
             .field("mutations", &self.mutations)
             .field("txn_locks", &self.txn_locks)
-            .field("reservation", &self.allocator_reservation)
+            .field("reservation", &self.allocator_reservation())
             .finish()
     }
 }
@@ -1679,7 +1813,7 @@ impl<'a> From<&'a LockManager> for LockManagerRef<'a> {
 mod tests {
     use super::{
         AssocObj, AttributeId, LockKey, LockKeys, LockManager, LockState, Mutation,
-        ObjectMutationIterator, Options, TxnMutation,
+        ObjectMutationIterator, Options, ReservationOptions, TxnMutation,
     };
     use crate::filesystem::FxFilesystem;
     use crate::object_store::{BytesAndNodes, ObjectKey};
@@ -2302,5 +2436,116 @@ mod tests {
         // Calling with (0, 0) when no mutation exists is a no-op.
         t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 0, nodes: 0 });
         assert!(t.get_object_mutation(store_id, key.clone()).is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_commit_and_continue_checks_journal_space() {
+        use crate::filesystem::FxFilesystemBuilder;
+        use crate::hooks::Hooks;
+        use crate::object_store::journal::JournalOptions;
+        use crate::object_store::volume::root_volume;
+        use crate::object_store::{NewChildStoreOptions, ObjectKey, ObjectValue};
+        use storage_device::DeviceHolder;
+        use storage_device::fake_device::FakeDevice;
+
+        let reclaim_size = 65536;
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fs = FxFilesystemBuilder::new()
+            .hooks(fs_hooks)
+            .journal_options(JournalOptions { reclaim_size, ..Default::default() })
+            .format(true)
+            .open(device)
+            .await
+            .expect("open failed");
+
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.journal().pause_compactions().await;
+
+        let journal_clone = fs.journal().clone();
+        hooks.set_waiting_for_journal_space(move || {
+            journal_clone.resume_compactions();
+        });
+
+        // Reserve all remaining free space so the journal has no free space to grow into beyond
+        // the metadata reservation.
+        let _reservation = fs.allocator().reserve_with(None, |limit| limit);
+
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), 1000)],
+                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
+            )
+            .await
+            .expect("new_transaction failed");
+
+        // Repeatedly write mutations and call commit_and_continue so the journal must extend past
+        // its reserved space unless commit_and_continue checks for journal space and waits for
+        // compaction.
+        for _ in 0..64 {
+            for i in 0..16 {
+                transaction.add(
+                    store.store_object_id(),
+                    Mutation::replace_or_insert_object(
+                        ObjectKey::extended_attribute(1000, format!("attr_{i}").into_bytes()),
+                        ObjectValue::inline_extended_attribute(vec![0u8; 1024]),
+                    ),
+                );
+            }
+            transaction.commit_and_continue().await.expect("commit_and_continue failed");
+        }
+        transaction.commit().await.expect("commit failed");
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_commit_and_continue_resets_state() {
+        use crate::object_store::volume::root_volume;
+        use crate::object_store::{ExtentValue, NewChildStoreOptions, ObjectKey, ObjectValue};
+        use storage_device::DeviceHolder;
+        use storage_device::fake_device::FakeDevice;
+
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), 1000)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        assert!(!transaction.includes_write());
+        transaction.add(
+            store.store_object_id(),
+            Mutation::merge_object(
+                ObjectKey::extent(1000, AttributeId::DATA, 0..4096),
+                ObjectValue::Extent(ExtentValue::deleted_extent()),
+            ),
+        );
+        transaction.add_checksum(0..4096, vec![0], true);
+        assert!(transaction.includes_write());
+        assert!(!transaction.checksums().is_empty());
+
+        transaction.commit_and_continue().await.expect("commit_and_continue failed");
+
+        assert!(!transaction.includes_write());
+        assert!(transaction.checksums().is_empty());
+
+        transaction.commit().await.expect("commit failed");
+        fs.close().await.expect("close failed");
     }
 }

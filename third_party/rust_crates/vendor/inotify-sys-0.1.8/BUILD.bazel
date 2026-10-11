@@ -72,8 +72,8 @@ rust_library(
     }),
     version = "0.1.8",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/forks/libc-0.2.189:libc",
-        "//third_party/rust_crates/vendor/inotify-sys-0.1.8:build_script_build",
     ],
 )
 
@@ -111,6 +111,7 @@ cargo_build_script(
         ],
     ),
     edition = "2015",
+    emit_warnings = False,
     pkg_name = "inotify-sys",
     rustc_flags = [
         "--cap-lints=allow",

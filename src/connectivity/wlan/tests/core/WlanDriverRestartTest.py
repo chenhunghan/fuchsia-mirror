@@ -29,18 +29,21 @@ class WlanDriverRestartTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         logger.info("Restarting WLAN driver...")
         processes = self.dut.ffx.run_ssh_cmd("ps")
         wlan_driver_process = None
-        keywords = ["iwlwifi", "realtek", "brcmfmac"]
+        keywords = ["iwlwifi", "realtek", "brcmfmac", "bcmdhd"]
         for line in processes.splitlines():
             if any(k in line for k in keywords):
-                # The process name is exactly the last token, e.g. "iwlwifi.cm"
-                wlan_driver_process = line.split()[-1]
-                break
+                for token in line.split():
+                    if any(k in token for k in keywords):
+                        wlan_driver_process = token
+                        break
+                if wlan_driver_process:
+                    break
 
         if wlan_driver_process:
             logger.info(
                 f"Detected running DFv2 WLAN process: {wlan_driver_process}. Killing via SSH..."
             )
-            self.dut.ffx.run_ssh_cmd(f"killall {wlan_driver_process}")
+            self.dut.ffx.run_ssh_cmd(f'killall "{wlan_driver_process}*"')
         elif "driver-host-#wlan" in processes:
             logger.info("Detected legacy DFv1 driver host. Killing via SSH...")
             self.dut.ffx.run_ssh_cmd("killall driver-host-#wlan")

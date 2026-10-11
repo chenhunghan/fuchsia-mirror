@@ -67,6 +67,11 @@ impl FuchsiaPkgAbsoluteComponentUrl {
         &self.resource
     }
 
+    /// The file stem of the resource path of this URL, if present.
+    pub fn file_stem(&self) -> Option<&str> {
+        std::path::Path::new(self.resource.as_ref()).file_stem()?.to_str()
+    }
+
     /// The package URL of this URL (this URL without the resource path).
     pub fn package_url(&self) -> &FuchsiaPkgAbsolutePackageUrl {
         &self.package
@@ -288,5 +293,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(component.resource().as_ref(), "☺");
+    }
+
+    #[test]
+    fn file_stem() {
+        for (url, expected) in [
+            ("fuchsia-pkg://example.org/name#meta/comp.cm", Some("comp")),
+            ("fuchsia-pkg://example.org/name#meta/my.comp.cm", Some("my.comp")),
+            ("fuchsia-pkg://example.org/name#resource", Some("resource")),
+        ] {
+            let parsed = FuchsiaPkgAbsoluteComponentUrl::parse(url).unwrap();
+            assert_eq!(parsed.file_stem(), expected, "the url {:?}", url);
+        }
     }
 }

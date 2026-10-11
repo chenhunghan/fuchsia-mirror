@@ -15,22 +15,21 @@ from typing import Any, Iterator
 
 import fidl_fuchsia_wlan_wlanix as fidl_wlanix
 import wlanix_testing.base_test as base_test
-from antlion import utils
-from antlion.controllers.access_point import AccessPoint, setup_ap
-from antlion.controllers.ap_lib.hostapd_constants import (
+from common.utils.ies import read_ssid
+from fuchsia_controller_py import Channel
+from honeydew.utils.deadline import Deadline
+from legacy_access_point.access_point import AccessPoint, setup_ap
+from legacy_access_point.ap_lib.hostapd_constants import (
     AP_DEFAULT_CHANNEL_2G,
     AP_DEFAULT_CHANNEL_5G,
     AP_SSID_LENGTH_2G,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     SecurityMode,
 )
-from common.utils.ies import read_ssid
-from fuchsia_controller_py import Channel
-from honeydew.utils.deadline import Deadline
 from mobly import test_runner
 from mobly.asserts import assert_equal, assert_true, fail
 from openwrt_access_point import OpenWrtAP
@@ -205,7 +204,7 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
         ssid = (
             preset_ssid
             if preset_ssid
-            else utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+            else AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
         )
         security = DeprecatedSecurity(security_mode=SecurityMode.OPEN)
         ap_channel = (
@@ -561,8 +560,8 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
         )
 
     async def test_start_sched_scan_with_multiple_ssids(self) -> None:
-        ssid_a = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
-        ssid_b = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+        ssid_a = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
+        ssid_b = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
         logger.info(f"Setting up APs with SSIDs: {ssid_a} and {ssid_b}")
         ap = self.access_point()
         if isinstance(ap, OpenWrtAP):
@@ -668,16 +667,18 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
 
     async def test_start_sched_scan_with_scan_plans(self) -> None:
         """Verify that scan plans execute at the requested multi-tiered intervals."""
-        ssid = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+        ssid = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
         iface_index = await self._query_iface_index()
 
         match_attr = build_nla(
             NL80211_ATTR_SCHED_SCAN_MATCH, build_match_set(ssid)
         )
+        freq_nla = build_nla(1, struct.pack("<I", 2437))
+        freqs_attr = build_nla(NL80211_ATTR_SCAN_FREQUENCIES, freq_nla)
 
         plan_1_interval_sec = 3
         plan_1_iterations = 2
-        plan_2_interval_sec = 10
+        plan_2_interval_sec = 15
 
         plan_1_interval = build_nla(
             NL80211_SCHED_SCAN_PLAN_INTERVAL,
@@ -704,6 +705,7 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
             iface_index=iface_index,
             match_attr=match_attr,
             interval_ms=None,
+            freqs_attr=freqs_attr,
             plans_attr=plans_attr,
         )
 
@@ -749,12 +751,16 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
                 expected_discovery_time_sec,
             )
             self._setup_ap(preset_ssid=ssid)
+            ap_ready_elapsed = time.time() - start_time
+            logger.info(
+                f"AP setup completed at {ap_ready_elapsed:.2f} seconds after PNO start."
+            )
 
             event_received = False
             elapsed_at_match = 0.0
             while True:
                 msg = await asyncio.wait_for(
-                    scan_queue.get(), timeout=DEFAULT_MATCH_TIMEOUT_SEC
+                    scan_queue.get(), timeout=plan_2_interval_sec + 5.0
                 )
                 if msg.message and msg.message.payload:
                     cmd = msg.message.payload[0]
@@ -768,14 +774,14 @@ class SchedScanTest(base_test.ConnectionBaseTestClass):
                 f"Match received at {elapsed_at_match:.2f} seconds after PNO start."
             )
             assert_true(
-                11.5 < elapsed_at_match < 14.5,
+                16.0 < elapsed_at_match < 25.0,
                 f"Elapsed time {elapsed_at_match:.2f}s implies the firmware didn't respect the multi-tier scan plans!",
             )
 
     async def test_pno_multiple_ssids_match(self) -> None:
         """Verify that discovering a newly matched SSID triggers a scheduled scan event."""
-        ssid_a = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
-        ssid_b = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+        ssid_a = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
+        ssid_b = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
 
         # Setup SSID A
         logger.info(f"Setting up initial AP with SSID: {ssid_a}")

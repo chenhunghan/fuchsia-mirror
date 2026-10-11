@@ -10,12 +10,16 @@ use selinux::{BinderPermission, SecurityServer};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::errors::Errno;
 
-/// Returns the serialized Security Context associated with the given credentials.
+/// Returns the serialized, NUL-terminated Security Context associated with the given credentials.
 pub(in crate::security) fn binder_get_context(
     security_server: &SecurityServer,
     source_creds: &Credentials,
-) -> Option<Vec<u8>> {
-    security_server.sid_to_security_context_with_nul(source_creds.security_state.current_sid)
+) -> Vec<u8> {
+    // `selinux_hooks` are only invoked once a policy is loaded, at which point every SID resolves
+    // to a Security Context (falling back to the `unlabeled` context if invalidated).
+    security_server
+        .sid_to_security_context_with_nul(source_creds.security_state.current_sid)
+        .expect("SELinux policy is loaded")
 }
 
 /// Checks whether the given `current_task` can become the binder context manager.

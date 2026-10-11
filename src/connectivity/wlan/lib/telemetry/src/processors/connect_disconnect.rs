@@ -51,6 +51,7 @@ enum ConnectionState {
     Disconnected(DisconnectedState),
     ConnectFailed(ConnectFailedState),
     FailedToStart(FailedToStartState),
+    #[expect(dead_code)]
     FailedToStop(FailedToStopState),
     PnoScanFailedIdle(PnoScanFailedIdleState),
 }
@@ -640,10 +641,6 @@ impl ConnectDisconnectLogger {
     }
     pub async fn handle_client_connections_failed_to_start(&self) {
         self.update_connection_state(ConnectionState::FailedToStart(FailedToStartState {}));
-    }
-
-    pub async fn handle_client_connections_failed_to_stop(&self) {
-        self.update_connection_state(ConnectionState::FailedToStop(FailedToStopState {}));
     }
 }
 
@@ -2429,36 +2426,6 @@ mod tests {
         assert_matches!(*logger.connection_state.lock(), ConnectionState::FailedToStart(_));
     }
 
-    #[fuchsia::test]
-    fn test_wlan_connectivity_states_failed_to_stop() {
-        let mut test_helper = setup_test();
-        let logger = ConnectDisconnectLogger::new(
-            test_helper.filtered_cobalt_logger(),
-            &test_helper.inspect_node,
-            &test_helper.inspect_metadata_node,
-            &test_helper.inspect_metadata_path,
-            &test_helper.mock_time_matrix_client,
-            DeviceMobility::Mobile,
-        );
-
-        let mut test_fut = pin!(logger.handle_client_connections_failed_to_stop());
-        assert_eq!(
-            test_helper.run_until_stalled_drain_cobalt_events(&mut test_fut),
-            Poll::Ready(())
-        );
-
-        let mut time_matrix_calls = test_helper.mock_time_matrix_client.drain_calls();
-        assert_eq!(
-            &time_matrix_calls.drain::<u64>("wlan_connectivity_states")[..],
-            &[
-                TimeMatrixCall::Fold(Timed::now(1 << 0)), // Initialization
-                TimeMatrixCall::Fold(Timed::now(1 << 5)), // FailedToStop ID is 5 -> bit 1 << 5
-            ]
-        );
-
-        assert_matches!(*logger.connection_state.lock(), ConnectionState::FailedToStop(_));
-    }
-
     #[test_case(ConnectionState::Idle(IdleState {}))]
     #[test_case(ConnectionState::Disconnected(DisconnectedState {}))]
     #[test_case(ConnectionState::ConnectFailed(ConnectFailedState {}))]
@@ -2511,7 +2478,6 @@ mod tests {
         is_owe_transition: false,
     }))]
     #[test_case(ConnectionState::FailedToStart(FailedToStartState {}))]
-    #[test_case(ConnectionState::FailedToStop(FailedToStopState {}))]
     fn test_no_connectivity_state_transition_on_pno_scan_failure(initial_state: ConnectionState) {
         let mut test_helper = setup_test();
         let logger = ConnectDisconnectLogger::new(

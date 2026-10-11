@@ -16,12 +16,23 @@ int main(int argc, char** argv) {
       .Register<arch::ArmDaif>("DAIF_")
       .Register<arch::ArmDaifSetClr>("DAIFSETCLR_")
       .Register<arch::ArmCnthctlEl2NoEl2Host>("CNTHCTL_EL2_")
+      .Register<arch::ArmCnthctlEl2WithEl2Host>("CNTHCTL_EL2_E2H1_")
       .Register<arch::ArmCptrEl2NoEl2Host>("CPTR_EL2_")
+      .Register<arch::ArmCptrEl2WithEl2Host>("CPTR_EL2_E2H1_")
       // The CPTR bits unknown to hwreg are those intended to be reserved as one.
       .Macro("CPTR_EL2_RES1", "CPTR_EL2_UNKNOWN")
       .Register<arch::ArmCurrentEl>("CURRENT_EL_")
       .Register<arch::ArmHcrEl2>("HCR_EL2_")
       .Register<arch::ArmHcrxEl2>("HCRX_EL2_")
+      // Disables all fine-grained register read/write traps to EL2 by clearing
+      // positive-polarity trap bits [49:0] and setting negative-polarity (n*)
+      // trap bits in [63:50].
+      .Macro("HFGRTR_EL2_NO_TRAPS", 0xdff4000000000000)
+      .Macro("HFGWTR_EL2_NO_TRAPS", 0xdff4000000000000)
+      // Disables all fine-grained instruction traps to EL2 by clearing
+      // positive-polarity trap bits and setting negative-polarity (n*) trap
+      // bits (nGCSEPP, nBRBIALL, nBRBINJ).
+      .Macro("HFGITR_EL2_NO_TRAPS", 0x1a00000000000000)
       .Register<arch::ArmIccSreEl2>("ICC_SRE_EL2_")
       .Register<arch::ArmSctlrEl1>("SCTLR_EL1_")
       .Register<arch::ArmSctlrEl2>("SCTLR_EL2_")

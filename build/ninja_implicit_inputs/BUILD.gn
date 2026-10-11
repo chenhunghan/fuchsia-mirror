@@ -5,6 +5,7 @@
 import("//build/config/clang/clang_prefix.gni")
 import("//build/ninja_implicit_inputs/config.gni")
 import("//build/ninja_implicit_inputs/ninja_implicit_inputs.gni")
+import("//build/python/python_library.gni")
 
 # Generate a manifest that provides information about Ninja implicit
 # inputs for a set of root GN labels.
@@ -62,19 +63,35 @@ import("//build/ninja_implicit_inputs/ninja_implicit_inputs.gni")
 if (current_toolchain == default_toolchain) {
   # Generate the top-level manifest and its sub-manifests.
   generate_ninja_implicit_inputs_manifest("manifest") {
-    root_labels = ninja_implicit_inputs_root_labels + [
-                    # TODO(digit): Ensure only compile and link targets for host
-                    # Linux binaries depend on this.
-                    ":linux_sysroot",
+    root_labels =
+        ninja_implicit_inputs_root_labels + [
+          # TODO(digit): Ensure only compile and link targets for host
+          # Linux binaries depend on this.
+          ":linux_sysroot",
 
-                    # TODO(digit): Ensure only compile and link targets for C++
-                    # binaries depend on this.
-                    ":clang_toolchain",
+          # TODO(digit): Ensure only compile and link targets for C++
+          # binaries depend on this.
+          ":clang_toolchain",
 
-                    # TODO(digit): Ensure only compile and link targets for Go
-                    # host binaries depend on this.
-                    ":go_toolchain",
-                  ]
+          # The llvm libc sources are heavily used by the Fuchsia C library.
+          ":llvm_libc_sources",
+
+          # Preempt headers for llvm libc.
+          ":libc_preempt_headers",
+
+          # Scudo sources used by the Fuchsia C library.
+          ":scudo_sources",
+
+          # Musl internal sources used by the Fuchsia C library.
+          ":musl_sources",
+
+          # Zircon libc and libc++ stub libraries.
+          ":zircon_libc_stubs",
+
+          # TODO(digit): Ensure only compile and link targets for Go
+          # host binaries depend on this.
+          ":go_toolchain",
+        ]
   }
 
   # The Linux sysroot files are implicit inputs for any action that
@@ -95,6 +112,32 @@ if (current_toolchain == default_toolchain) {
     directories = [ "//third_party/llvm-libc/src" ]
   }
 
+  # The libc preempt headers used when building the C library.
+  ninja_implicit_directory_inputs("libc_preempt_headers") {
+    directories = [ "//sdk/lib/c/include-preempt" ]
+  }
+
+  # Scudo sources used by the C library.
+  ninja_implicit_directory_inputs("scudo_sources") {
+    directories = [
+      "//third_party/scudo/src",
+      "//third_party/scudo/gwp_asan",
+    ]
+  }
+
+  # Musl internal sources used by the C library.
+  ninja_implicit_directory_inputs("musl_sources") {
+    directories = [ "//zircon/third_party/ulib/musl" ]
+  }
+
+  # Zircon libc and libc++ stub libraries used by nolibc configs.
+  ninja_implicit_directory_inputs("zircon_libc_stubs") {
+    directories = [
+      "//build/config/zircon/libc-stub",
+      "//build/config/zircon/libc++-stub",
+    ]
+  }
+
   # The go toolchain files that are implicit inputs to actions that
   # compile and link go binaries.
   ninja_implicit_file_inputs("go_toolchain") {
@@ -103,6 +146,20 @@ if (current_toolchain == default_toolchain) {
       "${_go_base_dir}/bin/go",
       "${_go_base_dir}/makefuchsia/makefuchsia.go",
       "${_go_base_dir}/makeroot/makeroot.go",
+    ]
+  }
+}
+
+if (is_host) {
+  python_library("ninja_implicit_inputs") {
+    sources = [
+      "check_tool.py",
+      "ninja_implicit_inputs.py",
+    ]
+    library_deps = [
+      "//build/api:gn_labels",
+      "//build/api:gn_ninja_outputs",
+      "//build/bazel/scripts:build_utils",
     ]
   }
 }

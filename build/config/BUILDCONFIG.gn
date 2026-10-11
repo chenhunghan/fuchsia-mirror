@@ -1783,17 +1783,33 @@ foreach(_target_type, _built_in_target_types_with_internal_wrapper) {
             }
           }
         }
+
+        # On-demand prebuilt targets (`cipd_prebuilt()`) declare their source
+        # `//prebuilt/...` paths in `cipd_prebuilts` metadata rather than Ninja
+        # `inputs` (since those files may not exist prior to the fetch action).
+        if (defined(_metadata.cipd_prebuilts)) {
+          foreach(cipd_entry, _metadata.cipd_prebuilts) {
+            foreach(cipd_path, cipd_entry.paths) {
+              _resources += [ "//${cipd_path}" ]
+            }
+          }
+        }
       }
 
       _root_build_dir_filter =
           "//" + rebase_path(root_build_dir, "//", root_build_dir) + "/*"
 
       # Record all resources that have "third_party" or "prebuilt" in their name
-      # but ignore anything under out/default, because these are generated via
+      # but ignore anything under out/default (because these are generated via
       # an explicit dependency on a target which will have its own
-      # applicable_licenses metadata.
+      # applicable_licenses metadata) or under //build/prebuilt (1st-party
+      # build infrastructure scripts).
       _third_party_resources =
-          filter_include(filter_exclude(_resources, [ _root_build_dir_filter ]),
+          filter_include(filter_exclude(_resources,
+                                        [
+                                          _root_build_dir_filter,
+                                          "//build/prebuilt/*",
+                                        ]),
                          [
                            "*third_party*",
                            "*thirdparty*",
@@ -2085,6 +2101,11 @@ foreach(_target_type,
 
           # Bazel actions take care of their own hermeticity
           "//build/bazel/scripts/bazel_ninja_delayed_actions.py",
+
+          # Fetching on-demand CIPD prebuilts via `jiri fetch-package` reads
+          # Jiri metadata under `.jiri_root/` and populates `//prebuilt/`
+          # outside the build output directory.
+          "//build/prebuilt/fetch_cipd_prebuilt.sh",
         ]
 
         ignored_script =

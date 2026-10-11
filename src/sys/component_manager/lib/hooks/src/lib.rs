@@ -14,9 +14,64 @@ use futures::channel::oneshot;
 use log::warn;
 use moniker::{ExtendedMoniker, Moniker};
 use runtime_capabilities::{Connector, Receiver, WeakInstanceToken};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Weak};
+
+/// Describes the reason a component instance is being requested to start.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub enum StartReason {
+    /// Indicates that the target is starting the component because it wishes to access
+    /// the capability at path.
+    AccessCapability { target: Moniker, name: Name },
+    /// Indicates that the component is starting because of a request to its outgoing
+    /// directory.
+    OutgoingDirectory,
+    /// Indicates that the component is starting because it is in a single-run collection.
+    SingleRun,
+    /// Indicates that the component was explicitly started for debugging purposes.
+    Debug,
+    /// Indicates that the component was marked as eagerly starting by the parent.
+    // TODO(https://fxbug.dev/42127825): Include the parent StartReason.
+    // parent: ExtendedMoniker,
+    // parent_start_reason: Option<Arc<StartReason>>
+    Eager,
+    /// Indicates that this component is starting because it is the root component.
+    Root,
+    /// Storage administration is occurring on this component.
+    StorageAdmin,
+    /// Indicates that this component is starting because the client of a
+    /// `fuchsia.component.Controller` connection has called `Start()`
+    Controller,
+}
+
+impl StartReason {
+    pub fn as_str(&self) -> Cow<'static, str> {
+        match self {
+            StartReason::AccessCapability { target, name } => {
+                Cow::Owned(format!("'{}' requested capability '{}'", target, name))
+            }
+            StartReason::OutgoingDirectory => {
+                Cow::Borrowed("Instance started due to a request to its outgoing directory")
+            }
+            StartReason::SingleRun => Cow::Borrowed("Instance is in a single_run collection"),
+            StartReason::Debug => Cow::Borrowed("Instance was started from debugging workflow"),
+            StartReason::Eager => Cow::Borrowed("Instance is an eager child"),
+            StartReason::Root => Cow::Borrowed("Instance is the root"),
+            StartReason::StorageAdmin => Cow::Borrowed("Storage administration on instance"),
+            StartReason::Controller => {
+                Cow::Borrowed("Instructed to start with the fuchsia.component.Controller protocol")
+            }
+        }
+    }
+}
+
+impl fmt::Display for StartReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 pub trait HasEventType {
     fn event_type(&self) -> EventType;
@@ -250,6 +305,7 @@ pub struct RuntimeInfo {
     pub diagnostics_receiver: Arc<Mutex<Option<oneshot::Receiver<fcrunner::ComponentDiagnostics>>>>,
     pub start_time: zx::BootInstant,
     pub start_time_monotonic: zx::MonotonicInstant,
+    pub start_reason: StartReason,
 }
 
 impl RuntimeInfo {
@@ -257,12 +313,14 @@ impl RuntimeInfo {
         timestamp: zx::BootInstant,
         timestamp_monotonic: zx::MonotonicInstant,
         diagnostics_receiver: oneshot::Receiver<fcrunner::ComponentDiagnostics>,
+        start_reason: StartReason,
     ) -> Self {
         let diagnostics_receiver = Arc::new(Mutex::new(Some(diagnostics_receiver)));
         Self {
             diagnostics_receiver,
             start_time: timestamp,
             start_time_monotonic: timestamp_monotonic,
+            start_reason,
         }
     }
 }

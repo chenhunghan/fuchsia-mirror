@@ -40,7 +40,6 @@
                 "fuchsia.fshost.ProvisionFxfs",
                 "fuchsia.fshost.RamdiskImage",
                 "fuchsia.fshost.StarnixVolumeName",
-                "fuchsia.fshost.WatchDeprecatedV1Drivers",
             ],
             from: "#fshost_config",
             to: "#fshost",
@@ -55,13 +54,6 @@
             directory: "dev-topological",
             from: "#storage_driver_test_realm",
             to: "#fshost",
-        },
-        {
-            directory: "dev-class",
-            from: "#storage_driver_test_realm",
-            as: "dev-class-block",
-            to: "#fshost",
-            subdir: "block",
         },
     ],
 }

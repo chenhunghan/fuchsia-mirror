@@ -34,7 +34,9 @@ fbl::unique_fd GetUdevSocket() {
   memset(&address, 0x00, sizeof(struct sockaddr_nl));
   address.nl_family = AF_NETLINK;
   address.nl_pid = getpid();
-  address.nl_groups = -1;
+  // Multicast group 1 is KERNEL_EVENT. We only listen to kernel events and avoid
+  // receiving userspace udevd messages (multicast group 2).
+  address.nl_groups = 1;
   int result = bind(fd.get(), reinterpret_cast<struct sockaddr*>(&address), sizeof(address));
 
   if (result < 0) {
@@ -137,31 +139,47 @@ TEST(UdevTest, AddInput) {
   if (getuid() != 0) {
     GTEST_SKIP() << "Can only be run as root.";
   }
+
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "Non-Starnix has different sysfs layout, skipping.";
+  }
+
+  auto device = test_helper::ScopedUinputDevice::Create("Udev test device");
+  if (!device) {
+    return;
+  }
+
+  std::string event_node = device->event_node;
+  ASSERT_TRUE(event_node.starts_with("event")) << "Unexpected device node: " << event_node;
+  std::string minor_str = event_node.substr(std::string("event").length());
+  std::string devpath = "/devices/virtual/input/input" + minor_str + "/" + event_node;
+  std::string event_uevent_path = "/sys" + devpath + "/uevent";
+
+  fbl::unique_fd write_fd(open(event_uevent_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(write_fd.is_valid()) << "failed to open uevent: " << strerror(errno);
+
   auto fd = GetUdevSocket();
   ASSERT_TRUE(fd.is_valid());
 
-  // This path is based on values in `ueventd.rc`.
-  fbl::unique_fd write_fd(open("/sys/devices/virtual/input/event0/uevent", O_WRONLY));
-  ASSERT_TRUE(write_fd.is_valid());
   ASSERT_EQ(write(write_fd.get(), "add\n", 4), 4);
 
   std::string command;
   std::map<std::string, std::string> parameters;
   ASSERT_TRUE(read_next_uevent(fd.get(), &command, &parameters));
   // These values are compatible with `ueventd`.
-  ASSERT_EQ(command, "add@/devices/virtual/input/event0");
+  ASSERT_EQ(command, "add@" + devpath);
   ASSERT_EQ(parameters["ACTION"], "add");
-  ASSERT_EQ(parameters["DEVPATH"], "/devices/virtual/input/event0");
+  ASSERT_EQ(parameters["DEVPATH"], devpath);
   ASSERT_EQ(parameters["SUBSYSTEM"], "input");
   ASSERT_EQ(parameters["SYNTH_UUID"], "0");
   ASSERT_EQ(parameters["MAJOR"], "13");
-  ASSERT_EQ(parameters["MINOR"], "0");
-  ASSERT_EQ(parameters["DEVNAME"], "input/event0");
+  ASSERT_EQ(parameters["MINOR"], minor_str);
+  ASSERT_EQ(parameters["DEVNAME"], ("input/" + event_node));
   ASSERT_FALSE(parameters["SEQNUM"].empty());
 
   // Also ensure that uevents read from sysfs have the same relevant properties.
   std::string content;
-  ASSERT_TRUE(files::ReadFileToString("/sys/devices/virtual/input/event0/uevent", &content));
+  ASSERT_TRUE(files::ReadFileToString(event_uevent_path, &content));
   std::map<std::string, std::string> params;
   for (const auto& line :
        fxl::SplitString(content, "\n", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty)) {
@@ -172,12 +190,14 @@ TEST(UdevTest, AddInput) {
 
   ASSERT_TRUE(!params.contains("ACTION"));
   ASSERT_TRUE(!params.contains("SEQNUM"));
-  ASSERT_EQ(params["DEVPATH"], "/devices/virtual/input/event0");
+  ASSERT_EQ(params["DEVPATH"], devpath);
   ASSERT_EQ(params["SUBSYSTEM"], "input");
   ASSERT_EQ(params["SYNTH_UUID"], "0");
   ASSERT_EQ(params["MAJOR"], "13");
-  ASSERT_EQ(params["MINOR"], "0");
-  ASSERT_EQ(params["DEVNAME"], "input/event0");
+  ASSERT_EQ(params["MINOR"], minor_str);
+  ASSERT_EQ(params["DEVNAME"], ("input/" + event_node));
+
+  write_fd.reset();
 }
 
 }  // namespace

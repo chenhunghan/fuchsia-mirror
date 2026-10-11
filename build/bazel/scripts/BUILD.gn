@@ -80,8 +80,8 @@ if (is_host) {
   python_library("bazel_action_utils") {
     sources = [ "bazel_action_utils.py" ]
     library_deps = [
+      ":bazel_build_events",
       ":build_utils",
-      ":stdio_redirection",
       "//build/rbe:rbe_settings",
     ]
   }
@@ -89,6 +89,15 @@ if (is_host) {
   python_build_time_tests("bazel_action_utils_test") {
     tests = [ "bazel_action_utils_test.py" ]
     deps = [ ":bazel_action_utils" ]
+  }
+
+  python_library("bazel_build_events") {
+    sources = [ "bazel_build_events.py" ]
+  }
+
+  python_build_time_tests("bazel_build_events_test") {
+    tests = [ "bazel_build_events_test.py" ]
+    deps = [ ":bazel_build_events" ]
   }
 
   python_library("generate_host_test_wrapper") {
@@ -120,15 +129,6 @@ if (is_host) {
   python_build_time_tests("remote_services_utils_test") {
     tests = [ "remote_services_utils_test.py" ]
     deps = [ ":remote_services_utils" ]
-  }
-
-  python_library("starlark_utils") {
-    sources = [ "starlark_utils.py" ]
-  }
-
-  python_build_time_tests("starlark_utils_test") {
-    tests = [ "starlark_utils_test.py" ]
-    deps = [ ":starlark_utils" ]
   }
 
   python_library("workspace_utils") {
@@ -319,6 +319,15 @@ if (is_host) {
     tests = [ "bazel_repository_utils_test.py" ]
     deps = [ ":bazel_repository_utils" ]
   }
+
+  python_library("fetch_cipd_prebuilt") {
+    sources = [ "fetch_cipd_prebuilt.py" ]
+  }
+
+  python_build_time_tests("fetch_cipd_prebuilt_test") {
+    tests = [ "fetch_cipd_prebuilt_test.py" ]
+    deps = [ ":fetch_cipd_prebuilt" ]
+  }
 }
 
 group("tests") {
@@ -327,6 +336,7 @@ group("tests") {
     ":bazel_action_file_copy_utils_test($host_toolchain)",
     ":bazel_action_utils_test($host_toolchain)",
     ":bazel_build_args_test($host_toolchain)",
+    ":bazel_build_events_test($host_toolchain)",
     ":bazel_build_flags_test($host_toolchain)",
     ":bazel_compdb_utils_test($host_toolchain)",
     ":bazel_label_mapper_test($host_toolchain)",
@@ -337,13 +347,13 @@ group("tests") {
     ":bazel_tests_utils_test($host_toolchain)",
     ":build_utils_test($host_toolchain)",
     ":compute_content_hash_test($host_toolchain)",
+    ":fetch_cipd_prebuilt_test($host_toolchain)",
     ":generate_host_test_wrapper_test($host_toolchain)",
     ":generate_invocation_bazelrc_test($host_toolchain)",
     ":get_git_head_commit_test($host_toolchain)",
     ":minimal_workspace_test($host_toolchain)",
     ":remote_services_utils_test($host_toolchain)",
     ":runfiles_utils_test($host_toolchain)",
-    ":starlark_utils_test($host_toolchain)",
     ":stdio_redirection_test($host_toolchain)",
     ":workspace_utils_test($host_toolchain)",
   ]

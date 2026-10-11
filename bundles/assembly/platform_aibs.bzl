@@ -446,6 +446,7 @@ platform_aib_names = bringup_platform_aib_names + [
     "intel_hda",
 
     # Display development/debugging
+    "devscreen",
     "display_driver_development_tools",
 
     # Video development/debugging

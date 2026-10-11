@@ -37,6 +37,8 @@ wlancfg_tests_for_wlan_presubmit = [
 wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:beacon_loss_test",
   "//src/connectivity/wlan/tests/wlancfg:dhcpv4_duplicate_address_test",
+  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_basic_test",
+  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
   "//src/connectivity/wlan/tests/wlancfg:hidden_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:policy_scan_test",
@@ -55,12 +57,11 @@ wlancfg_tests_for_postsubmit = [
 # provide much of a safety net. Consider moving it to one of the blocking groups
 # above.
 wlancfg_tests_for_fyi = [
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_basic_test",
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
   "//src/connectivity/wlan/tests/wlancfg:saved_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_bss_transition_management_test",
   "//src/connectivity/wlan/tests/wlancfg:reboot_soft_test",
   "//src/connectivity/wlan/tests/wlancfg:reboot_hard_test",
+  "//src/connectivity/wlan/tests/wlancfg:suspend_resume_test",
 ]
 
 # Tests longer than ~20 minutes consume significant resources and significantly

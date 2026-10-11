@@ -10,6 +10,7 @@
 #include <lib/fxt/fields.h>
 #include <lib/fxt/interned_category.h>
 #include <lib/fxt/interned_string.h>
+#include <lib/io.h>
 #include <lib/ktrace.h>
 #include <lib/syscalls/zx-syscall-numbers.h>
 #include <lib/zircon-internal/thread_annotations.h>
@@ -25,6 +26,7 @@
 #include <kernel/ffi.h>
 #include <kernel/koid.h>
 #include <kernel/mp.h>
+#include <kernel/thread.h>
 #include <ktl/atomic.h>
 #include <ktl/iterator.h>
 #include <lk/init.h>
@@ -35,10 +37,43 @@
 #include <ktl/enforce.h>
 
 extern "C" {
-zx_status_t rust_ktrace_init(uint32_t num_buffers, void* state_ptr);
-zx_status_t rust_ktrace_init_cpu_buffer(uint32_t cpu_num, void* spsc_buffer_ptr,
+zx_status_t rust_ktrace_init(uint32_t num_buffers, const void* state_ptr, void** out_ktrace);
+zx_status_t rust_ktrace_init_cpu_buffer(void* ktrace_ptr, uint32_t cpu_num, void* spsc_buffer_ptr,
                                         void* drop_stats_ptr, uint64_t process_koid,
                                         uint64_t thread_koid, uint16_t cpu_ref_header_entry);
+void rust_ktrace_clear_cpu_buffers(void* ktrace_ptr);
+void rust_ktrace_free(void* ktrace_ptr);
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void* cpp_ktrace_get_active_instance() {
+#ifdef UNITTESTS_ENABLED
+  Thread* current = Thread::Current::Get();
+  if (likely(current != nullptr)) {
+    if (unlikely(current->rust_ktrace_override() != nullptr)) {
+      return current->rust_ktrace_override();
+    }
+  }
+#endif
+  return KTrace::GetInstance().rust_ktrace();
+}
+
+#ifdef UNITTESTS_ENABLED
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void* cpp_ktrace_get_thread_local_override() {
+  Thread* current = Thread::Current::Get();
+  if (likely(current != nullptr)) {
+    return current->rust_ktrace_override();
+  }
+  return nullptr;
+}
+
+void cpp_ktrace_set_thread_local_override(void* ktrace_ptr) {
+  Thread* current = Thread::Current::Get();
+  if (current) {
+    current->set_rust_ktrace_override(ktrace_ptr);
+  }
+}
+#endif
 }
 
 namespace {
@@ -155,6 +190,11 @@ zx_status_t KTrace::Start(uint32_t action, uint32_t categories) {
   Guard<Mutex> guard{&lock_};
 
   if (!percpu_buffers_) {
+    void* rust_ktrace = rust_ktrace_.load(ktl::memory_order_acquire);
+    if (rust_ktrace == nullptr) {
+      return ZX_ERR_NO_MEMORY;
+    }
+
     // Perform the allocations of the buffers here in the stack without any locks held as the
     // allocation process may need to block waiting for memory.
     uint32_t num_buffers = num_buffers_;
@@ -188,14 +228,18 @@ zx_status_t KTrace::Start(uint32_t action, uint32_t categories) {
     // May have raced with another call to Start, in which case we'll just drop the buffers we
     // allocated and use the new ones we found.
     if (!percpu_buffers_) {
-      percpu_buffers_ = ktl::move(buffers);
       for (uint32_t i = 0; i < num_buffers_; i++) {
         const auto& cpu_ref = cpu_context_map_.GetCpuRef(i);
-        rust_ktrace_init_cpu_buffer(i, percpu_buffers_[i].spsc_buffer(),
-                                    percpu_buffers_[i].drop_stats_ptr(), cpu_ref.process().koid,
-                                    cpu_ref.thread().koid,
-                                    static_cast<uint16_t>(cpu_ref.HeaderEntry()));
+        zx_status_t init_status = rust_ktrace_init_cpu_buffer(
+            rust_ktrace, i, buffers[i].spsc_buffer(), buffers[i].drop_stats_ptr(),
+            cpu_ref.process().koid, cpu_ref.thread().koid,
+            static_cast<uint16_t>(cpu_ref.HeaderEntry()));
+        if (init_status != ZX_OK) {
+          rust_ktrace_clear_cpu_buffers(rust_ktrace);
+          return init_status;
+        }
       }
+      percpu_buffers_ = ktl::move(buffers);
     }
   }
 
@@ -228,7 +272,16 @@ zx_status_t KTrace::Start(uint32_t action, uint32_t categories) {
   return ZX_OK;
 }
 
+KTrace::~KTrace() {
+  if (void* rust_ktrace = rust_ktrace_.exchange(nullptr, ktl::memory_order_acq_rel)) {
+    rust_ktrace_free(rust_ktrace);
+  }
+}
+
 void KTrace::Init(uint32_t bufsize, uint32_t initial_grpmask) {
+  if (bufsize == 0) {
+    return;
+  }
   {
     Guard<Mutex> guard{&lock_};
 
@@ -242,7 +295,13 @@ void KTrace::Init(uint32_t bufsize, uint32_t initial_grpmask) {
     DEBUG_ASSERT(raw_percpu_bufsize > 0);
     const int leading_zeros = __builtin_clz(raw_percpu_bufsize);
     buffer_size_ = 1u << (31 - leading_zeros);
-    rust_ktrace_init(num_buffers_, &state_);
+    void* rust_ktrace = nullptr;
+    zx_status_t status = rust_ktrace_init(num_buffers_, &state_, &rust_ktrace);
+    if (status == ZX_OK) {
+      rust_ktrace_.store(rust_ktrace, ktl::memory_order_release);
+    } else {
+      dprintf(INFO, "ktrace: rust init failed: %d\n", status);
+    }
   }
 
   // If the initial_grpmask was zero, then we can delay allocation of the KTrace buffer.
@@ -252,25 +311,6 @@ void KTrace::Init(uint32_t bufsize, uint32_t initial_grpmask) {
   // Otherwise, begin tracing immediately.
   Start(KTRACE_ACTION_START, initial_grpmask);
 }
-
-void KTrace::RestoreRustSingleton() {
-  Guard<Mutex> guard{&lock_};
-  if (num_buffers_ == 0) {
-    return;
-  }
-  rust_ktrace_init(num_buffers_, &state_);
-  if (percpu_buffers_) {
-    for (uint32_t i = 0; i < num_buffers_; i++) {
-      const auto& cpu_ref = cpu_context_map_.GetCpuRef(i);
-      rust_ktrace_init_cpu_buffer(i, percpu_buffers_[i].spsc_buffer(),
-                                  percpu_buffers_[i].drop_stats_ptr(), cpu_ref.process().koid,
-                                  cpu_ref.thread().koid,
-                                  static_cast<uint16_t>(cpu_ref.HeaderEntry()));
-    }
-  }
-}
-
-extern "C" void ktrace_restore_rust_singleton() { KTrace::GetInstance().RestoreRustSingleton(); }
 
 zx_status_t KTrace::Stop() {
   Guard<Mutex> guard{&lock_};

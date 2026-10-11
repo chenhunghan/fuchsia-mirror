@@ -83,7 +83,7 @@ use test_case::test_case;
 #[test_case(ManagerConfig::Empty, "eth"; "no_prefix")]
 #[test_case(ManagerConfig::IfacePrefix, "testeth"; "with_prefix")]
 async fn test_oir<M: Manager>(name: &str, config: ManagerConfig, prefix: &str) {
-    let if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let if_name = with_netcfg_owned_device::<M, _>(
         name,
         config,
         NetcfgOwnedDeviceArgs {
@@ -403,7 +403,7 @@ async fn test_install_only_no_provisioning<M: Manager>(name: &str) {
     const DHCPV6_SERVER_PORT: u16 = 546;
     const DHCPV6_CLIENT_PORT: u16 = 547;
 
-    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::AllDelegated,
         NetcfgOwnedDeviceArgs {
@@ -530,7 +530,7 @@ async fn test_install_with_local_table<M: Manager>(name: &str) {
             .expect("fidl error")
             .expect("failed to get local table");
     }
-    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::AllInterfaceLocalDelegated,
         NetcfgOwnedDeviceArgs {
@@ -1286,7 +1286,7 @@ async fn observes_stop_events<M: Manager>(name: &str) {
 #[netstack_test]
 #[variant(M, Manager)]
 async fn test_forwarding<M: Manager>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::Forwarding,
         NetcfgOwnedDeviceArgs {
@@ -1795,7 +1795,7 @@ mod dhcpv6_helper {
 #[netstack_test]
 #[variant(M, Manager)]
 async fn test_prefix_provider_full_integration<M: Manager>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
@@ -1922,7 +1922,7 @@ async fn test_prefix_provider_full_integration<M: Manager>(name: &str) {
 #[netstack_test]
 #[variant(M, Manager)]
 async fn disable_interface_while_having_dhcpv6_prefix<M: Manager>(name: &str) {
-    let _if_name: String = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name: String = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {
@@ -2613,7 +2613,7 @@ async fn test_masquerade_multiple_controllers<M: Manager>(name: &str, setup: Mas
 async fn dhcpv4_client_restarts_after_delay() {
     const SERVER_MAC: net_types::ethernet::Mac = net_declare::net_mac!("02:02:02:02:02:02");
 
-    let _name = with_netcfg_owned_device::<NetCfgBasic, Netstack3, _>(
+    let _name = with_netcfg_owned_device::<NetCfgBasic, _>(
         "dhcpv4_client_restarts_after_delay",
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {

@@ -207,6 +207,12 @@ supported:
 * `#### DEPRECATED`: deprecated subcommands are not listed by default on
   `fx help`.
 
+* `#### PREBUILTS=prebuilt_paths`: space-separated list of prebuilt binary or
+  directory paths under `//prebuilt` required by the subcommand before execution
+  begins (supports `${PREBUILT_*}` variables from `//tools/devshell/lib/platform.sh`,
+  `${FUCHSIA_DIR}`, and `${HOST_PLATFORM}`). Scripts with conditional runtime
+  dependencies on prebuilts can also call `fx-ensure-prebuilt <path>...` directly.
+
 Where possible, a subcommand can use `fx-command-help` to print out the
 long-form help (defined by `##` lines). Many subcommands implement `-h` and
 `--help` to invoke `fx-command-help` and this is recommended.

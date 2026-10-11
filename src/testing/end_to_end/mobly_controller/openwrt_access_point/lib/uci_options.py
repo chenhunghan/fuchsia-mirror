@@ -23,3 +23,11 @@ class VendorElements:
     ZERO_LENGTH_WITH_DATA = "dd0011223301"
     ZERO_LENGTH_WITHOUT_DATA = "dd00"
     SIMILAR_TO_WPA = "dd040050f203"
+
+
+class Country3:
+    ALL = "0x20"
+    OUTDOOR = "0x4f"
+    INDOOR = "0x49"
+    NONCOUNTRY = "0x58"
+    GLOBAL = "0x04"

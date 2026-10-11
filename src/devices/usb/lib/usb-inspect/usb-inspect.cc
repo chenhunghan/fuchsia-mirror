@@ -12,6 +12,7 @@
 // parse and serialize the descriptor tree in our lazy inspect callback.
 #include <fuchsia/hardware/usb/c/banjo.h>
 
+#include <algorithm>
 #include <format>
 
 namespace fdescriptor = fuchsia_hardware_usb_descriptor;
@@ -339,24 +340,65 @@ void FunctionInspect::Init(inspect::Node& parent, const std::string& name, uint8
     root.CreateUint("interface_protocol", interface_protocol_, &inspector);
 
     if (!descriptors_.empty()) {
-      const uint8_t* ptr = descriptors_.data();
-      const uint8_t* end = descriptors_.data() + descriptors_.size();
+      const uint8_t* desc_start = descriptors_.data();
+      const uint8_t* ptr = desc_start;
+      const uint8_t* end = desc_start + descriptors_.size();
       size_t interface_index = 0;
+      size_t malformed_descriptor_count = 0;
+      std::string descriptor_error;
       std::optional<inspect::Node> current_intf_node;
+      std::optional<inspect::Node> current_ep_node;
+
+      auto record_malformed = [&](std::string_view desc,
+                                  std::optional<uint8_t> type_code = std::nullopt,
+                                  std::optional<uint8_t> declared_length = std::nullopt,
+                                  std::optional<size_t> expected_min_length = std::nullopt) {
+        malformed_descriptor_count++;
+        size_t offset = ptr - desc_start;
+        if (type_code.has_value() && declared_length.has_value() &&
+            expected_min_length.has_value()) {
+          descriptor_error =
+              std::format("Truncated {} at offset {}: type 0x{:02x}, length {} < expected {}", desc,
+                          offset, *type_code, *declared_length, *expected_min_length);
+        } else if (type_code.has_value() && declared_length.has_value()) {
+          descriptor_error = std::format("Malformed {} at offset {}: type 0x{:02x}, length {}",
+                                         desc, offset, *type_code, *declared_length);
+        } else {
+          descriptor_error = std::format("Malformed {} at offset {}", desc, offset);
+        }
+      };
 
       while (ptr < end) {
+        if (ptr + sizeof(usb_descriptor_header_t) > end) {
+          record_malformed("truncated_header");
+          break;
+        }
         const usb_descriptor_header_t* header =
             reinterpret_cast<const usb_descriptor_header_t*>(ptr);
-        if (header->b_length == 0 || ptr + header->b_length > end) {
-          ZX_DEBUG_ASSERT_MSG(
-              false, "usb-inspect: Invalid descriptor header b_length=%d, ptr=%p, end=%p",
-              header->b_length, static_cast<const void*>(ptr), static_cast<const void*>(end));
+        if (header->b_length < sizeof(usb_descriptor_header_t)) {
+          record_malformed("invalid_header_length", static_cast<uint8_t>(header->b_descriptor_type),
+                           header->b_length, sizeof(usb_descriptor_header_t));
+          break;
+        }
+        if (ptr + header->b_length > end) {
+          record_malformed("buffer_overflow", static_cast<uint8_t>(header->b_descriptor_type),
+                           header->b_length);
           break;
         }
 
         if (header->b_descriptor_type == fdescriptor::DescriptorType::kInterface) {
+          if (header->b_length < sizeof(usb_interface_descriptor_t)) {
+            record_malformed("interface", static_cast<uint8_t>(header->b_descriptor_type),
+                             header->b_length, sizeof(usb_interface_descriptor_t));
+            break;
+          }
+          if (current_ep_node.has_value()) {
+            inspector.emplace(std::move(*current_ep_node));
+            current_ep_node.reset();
+          }
           if (current_intf_node.has_value()) {
             inspector.emplace(std::move(*current_intf_node));
+            current_intf_node.reset();
           }
 
           const usb_interface_descriptor_t* desc =
@@ -374,30 +416,141 @@ void FunctionInspect::Init(inspect::Node& parent, const std::string& name, uint8
                                         &inspector);
 
         } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kEndpoint) {
+          if (header->b_length < sizeof(usb_endpoint_descriptor_t)) {
+            record_malformed("endpoint", static_cast<uint8_t>(header->b_descriptor_type),
+                             header->b_length, sizeof(usb_endpoint_descriptor_t));
+            break;
+          }
+          if (current_ep_node.has_value()) {
+            inspector.emplace(std::move(*current_ep_node));
+            current_ep_node.reset();
+          }
           const usb_endpoint_descriptor_t* desc =
               reinterpret_cast<const usb_endpoint_descriptor_t*>(header);
           std::string ep_name = std::format("endpoint-0x{:02x}", desc->b_endpoint_address);
 
           if (!current_intf_node.has_value()) {
-            ZX_DEBUG_ASSERT_MSG(
-                false,
-                "usb-inspect: Endpoint descriptor (address=0x%02x) found before any interface descriptor!",
-                desc->b_endpoint_address);
+            record_malformed("endpoint_without_interface",
+                             static_cast<uint8_t>(header->b_descriptor_type), header->b_length);
             break;
           }
-          inspect::Node ep_node = current_intf_node->CreateChild(ep_name);
+          current_ep_node = current_intf_node->CreateChild(ep_name);
 
-          ep_node.CreateUint("endpoint_address", desc->b_endpoint_address, &inspector);
-          ep_node.CreateUint("attributes", desc->bm_attributes, &inspector);
-          ep_node.CreateUint("max_packet_size", le16toh(desc->w_max_packet_size), &inspector);
-          ep_node.CreateUint("interval", desc->b_interval, &inspector);
+          current_ep_node->CreateUint("endpoint_address", desc->b_endpoint_address, &inspector);
+          current_ep_node->CreateUint("attributes", desc->bm_attributes, &inspector);
+          current_ep_node->CreateUint("max_packet_size", le16toh(desc->w_max_packet_size),
+                                      &inspector);
+          current_ep_node->CreateUint("interval", desc->b_interval, &inspector);
 
-          inspector.emplace(std::move(ep_node));
+        } else if (header->b_descriptor_type ==
+                   fdescriptor::DescriptorType::kInterfaceAssociation) {
+          if (header->b_length < sizeof(usb_interface_assoc_descriptor_t)) {
+            record_malformed("interface_association",
+                             static_cast<uint8_t>(header->b_descriptor_type), header->b_length,
+                             sizeof(usb_interface_assoc_descriptor_t));
+            break;
+          }
+          if (current_ep_node.has_value()) {
+            inspector.emplace(std::move(*current_ep_node));
+            current_ep_node.reset();
+          }
+          if (current_intf_node.has_value()) {
+            inspector.emplace(std::move(*current_intf_node));
+            current_intf_node.reset();
+          }
+
+          const usb_interface_assoc_descriptor_t* desc =
+              reinterpret_cast<const usb_interface_assoc_descriptor_t*>(header);
+          std::string iad_name = std::format("iad-0x{:02x}", desc->b_first_interface);
+
+          inspect::Node iad_node = root.CreateChild(iad_name);
+          iad_node.CreateUint("first_interface", desc->b_first_interface, &inspector);
+          iad_node.CreateUint("interface_count", desc->b_interface_count, &inspector);
+          iad_node.CreateUint("function_class", desc->b_function_class, &inspector);
+          iad_node.CreateUint("function_subclass", desc->b_function_sub_class, &inspector);
+          iad_node.CreateUint("function_protocol", desc->b_function_protocol, &inspector);
+
+          inspector.emplace(std::move(iad_node));
+
+        } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kSsEpCompanion) {
+          if (header->b_length < sizeof(usb_ss_ep_comp_descriptor_t)) {
+            record_malformed("ss_companion", static_cast<uint8_t>(header->b_descriptor_type),
+                             header->b_length, sizeof(usb_ss_ep_comp_descriptor_t));
+            break;
+          }
+          if (!current_ep_node.has_value()) {
+            record_malformed("companion_without_endpoint",
+                             static_cast<uint8_t>(header->b_descriptor_type), header->b_length);
+            break;
+          }
+          const usb_ss_ep_comp_descriptor_t* desc =
+              reinterpret_cast<const usb_ss_ep_comp_descriptor_t*>(header);
+
+          inspect::Node comp_node = current_ep_node->CreateChild("ss_companion");
+          comp_node.CreateUint("max_burst", desc->b_max_burst, &inspector);
+          comp_node.CreateUint("attributes", desc->bm_attributes, &inspector);
+          comp_node.CreateUint("bytes_per_interval", le16toh(desc->w_bytes_per_interval),
+                               &inspector);
+          inspector.emplace(std::move(comp_node));
+        } else if (header->b_descriptor_type == fdescriptor::DescriptorType::kSsIsochEpCompanion) {
+          if (header->b_length < sizeof(usb_ss_isoch_ep_comp_descriptor_t)) {
+            record_malformed("ss_isoch_companion", static_cast<uint8_t>(header->b_descriptor_type),
+                             header->b_length, sizeof(usb_ss_isoch_ep_comp_descriptor_t));
+            break;
+          }
+          if (!current_ep_node.has_value()) {
+            record_malformed("isoch_companion_without_endpoint",
+                             static_cast<uint8_t>(header->b_descriptor_type), header->b_length);
+            break;
+          }
+          const usb_ss_isoch_ep_comp_descriptor_t* desc =
+              reinterpret_cast<const usb_ss_isoch_ep_comp_descriptor_t*>(header);
+
+          inspect::Node comp_node = current_ep_node->CreateChild("ss_isoch_companion");
+          comp_node.CreateUint("bytes_per_interval", le32toh(desc->dw_bytes_per_interval),
+                               &inspector);
+          inspector.emplace(std::move(comp_node));
+        } else {
+          inspect::Node* parent_node = &root;
+          if (current_ep_node.has_value()) {
+            parent_node = &(*current_ep_node);
+          } else if (current_intf_node.has_value()) {
+            parent_node = &(*current_intf_node);
+          }
+          std::string node_name =
+              std::format("descriptor-0x{:02x}", static_cast<uint8_t>(header->b_descriptor_type));
+          inspect::Node desc_node = parent_node->CreateChild(node_name);
+          desc_node.CreateUint("type_code", static_cast<uint8_t>(header->b_descriptor_type),
+                               &inspector);
+          desc_node.CreateUint("length", header->b_length, &inspector);
+          std::string payload_hex;
+          if (header->b_length > sizeof(usb_descriptor_header_t)) {
+            const uint8_t* payload_data =
+                reinterpret_cast<const uint8_t*>(header) + sizeof(usb_descriptor_header_t);
+            size_t payload_len = header->b_length - sizeof(usb_descriptor_header_t);
+            for (size_t i = 0; i < payload_len; ++i) {
+              if (i > 0) {
+                payload_hex += " ";
+              }
+              payload_hex += std::format("{:02x}", payload_data[i]);
+            }
+          }
+          desc_node.CreateString("hex_payload", payload_hex, &inspector);
+          inspector.emplace(std::move(desc_node));
         }
         ptr += header->b_length;
       }
+      if (current_ep_node.has_value()) {
+        inspector.emplace(std::move(*current_ep_node));
+      }
       if (current_intf_node.has_value()) {
         inspector.emplace(std::move(*current_intf_node));
+      }
+      if (malformed_descriptor_count > 0) {
+        root.CreateUint("malformed_descriptors", malformed_descriptor_count, &inspector);
+        if (!descriptor_error.empty()) {
+          root.CreateString("descriptor_error", descriptor_error, &inspector);
+        }
       }
     }
 

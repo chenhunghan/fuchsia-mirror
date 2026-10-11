@@ -279,16 +279,19 @@ mod tests {
                         moniker: ".",
                         time: root_timestamp,
                         "type": "started",
+                        start_reason: "Instance is the root",
                     },
                     "1": {
                         moniker: "a",
                         time: a_timestamp,
                         "type": "started",
+                        start_reason: "Instance is the root",
                     },
                     "2": {
                         moniker: "a/b",
                         time: b_timestamp,
                         "type": "started",
+                        start_reason: "Instance is the root",
                     },
                     "3": contains {
                         moniker: "a/b",

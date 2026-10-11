@@ -39,8 +39,6 @@ class WlanPhyDevice : public fidl::Server<fuchsia_wlan_phy::WlanPhy> {
   void SetPowerSaveMode(SetPowerSaveModeRequest& request,
                         SetPowerSaveModeCompleter::Sync& completer) override;
   void GetPowerSaveMode(GetPowerSaveModeCompleter::Sync& completer) override;
-  void PowerDown(PowerDownCompleter::Sync& completer) override;
-  void PowerUp(PowerUpCompleter::Sync& completer) override;
   void Reset(ResetCompleter::Sync& completer) override;
   void GetPowerState(GetPowerStateCompleter::Sync& completer) override;
   void SetBtCoexistenceMode(SetBtCoexistenceModeRequest& request,

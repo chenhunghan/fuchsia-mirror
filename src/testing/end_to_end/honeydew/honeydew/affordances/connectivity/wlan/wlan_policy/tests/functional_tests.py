@@ -8,12 +8,12 @@ from typing import AsyncIterator
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion.controllers import access_point
-from antlion.controllers.ap_lib import hostapd_constants
 from honeydew.affordances.connectivity.netstack.types import PortClass
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
+from legacy_access_point import access_point
+from legacy_access_point.ap_lib import hostapd_constants
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib.access_point_config import (
     DEFAULT_2G_CHANNEL,

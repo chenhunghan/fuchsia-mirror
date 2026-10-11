@@ -57,6 +57,42 @@ class TestLogOutput(unittest.IsolatedAsyncioTestCase):
             event.Message("Done testing", event.MessageLevel.INFO),
         )
 
+    async def test_gzip_writer_buffers_flushes_and_flushes_on_exit(
+        self,
+    ) -> None:
+        """Test that log.writer does not flush on every single line,
+        but flushes all buffered events when draining ends."""
+        recorder = event.EventRecorder()
+        mock_stream = mock.MagicMock(spec=io.StringIO)
+
+        log_task = asyncio.create_task(log.writer(recorder, mock_stream))
+        for _ in range(5):
+            recorder.emit_init()
+        await asyncio.sleep(0.01)
+        # With per-line flushing, call_count would be 5. With buffering it is < 5.
+        self.assertLess(mock_stream.flush.call_count, 5)
+
+        recorder.emit_end()
+        await log_task
+        # On stream end, flush must have been called at least once
+        self.assertGreaterEqual(mock_stream.flush.call_count, 1)
+
+    async def test_gzip_writer_flushes_on_task_cancellation(self) -> None:
+        """Test that log.writer flushes all buffered events even when cancelled."""
+        recorder = event.EventRecorder()
+        mock_stream = mock.MagicMock(spec=io.StringIO)
+
+        log_task = asyncio.create_task(log.writer(recorder, mock_stream))
+        recorder.emit_init()
+        await asyncio.sleep(0.01)
+        mock_stream.flush.reset_mock()
+
+        log_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await log_task
+
+        mock_stream.flush.assert_called_once()
+
     async def test_pretty_print(self) -> None:
         output = await self._write_test_logs()
         stdout = io.StringIO()

@@ -2,19 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::fs::sysfs::{build_cpu_class_directory, build_kernel_directory, build_power_directory};
+use crate::fs::sysfs::{build_kernel_directory, build_power_directory};
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
 use crate::vfs::pseudo::simple_file::BytesFile;
 use crate::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use crate::vfs::{
-    CacheMode, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsStr,
+    CacheMode, DirEntry, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsStr,
 };
-use starnix_logging::bug_ref;
+use starnix_logging::{Level, bug_ref, track_stub_log};
 use starnix_types::vfs::default_statfs;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
-use starnix_uapi::{SYSFS_MAGIC, statfs};
+use starnix_uapi::{SYSFS_MAGIC, errno, statfs};
 
 struct SysFs;
 impl FileSystemOps for SysFs {
@@ -24,6 +24,16 @@ impl FileSystemOps for SysFs {
     fn name(&self) -> &'static FsStr {
         "sysfs".into()
     }
+}
+
+/// Reports lookups of missing `/sys` entries via `track_stub_log!`, to surface sysfs nodes that
+/// userspace expects but which Starnix does not (yet) provide.
+///
+/// Each distinct missing path is logged once, and counted in the kernel's Inspect `stubs` node.
+fn sysfs_not_found_handler(entry: &DirEntry, name: &FsStr) -> Errno {
+    let message = format!("Looking for {name} in {entry:?}");
+    track_stub_log!(Level::Warn, TODO("https://fxbug.dev/493488790"), &message);
+    errno!(ENOENT, message)
 }
 
 impl SysFs {
@@ -37,6 +47,9 @@ impl SysFs {
         let registry = &kernel.device_registry;
         let root = &registry.objects.root;
         fs.create_root(fs.allocate_ino(), root.clone());
+        if kernel.features.log_sysfs_lookup_misses {
+            root.set_not_found_handler(sysfs_not_found_handler);
+        }
         let dir = SimpleDirectoryMutator::new(fs.clone(), root.clone());
 
         let dir_mode = 0o755;
@@ -50,44 +63,9 @@ impl SysFs {
             dir.subdir("pstore", dir_mode, empty_dir);
         });
 
-        dir.subdir("block", dir_mode, |dir| {
-            dir.subdir("zram0", dir_mode, |dir| {
-                dir.entry(
-                    "backing_dev",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o444),
-                );
-                dir.entry(
-                    "recomp_algorithm",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o444),
-                );
-                dir.entry(
-                    "recompress",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o444),
-                );
-            });
-        });
+        dir.subdir("block", dir_mode, empty_dir);
 
         dir.subdir("bus", dir_mode, |dir| {
-            dir.subdir("mmc", dir_mode, |dir| {
-                dir.subdir("devices", dir_mode, |dir| {
-                    dir.subdir("mmc0:0001", dir_mode, |dir| {
-                        dir.subdir("block", dir_mode, |dir| {
-                            dir.subdir("mmcblk0", dir_mode, |dir| {
-                                dir.entry(
-                                    "size",
-                                    StubEmptyFile::new_node(bug_ref!(
-                                        "https://fxbug.dev/452096300"
-                                    )),
-                                    mode!(IFREG, 0o444),
-                                );
-                            });
-                        });
-                    });
-                });
-            });
             dir.subdir("platform", dir_mode, |dir| {
                 dir.subdir("drivers", dir_mode, |dir| {
                     dir.entry(
@@ -100,90 +78,7 @@ impl SysFs {
         });
 
         dir.subdir("class", dir_mode, |dir| {
-            dir.subdir("backlight", dir_mode, |dir| {
-                dir.subdir("panel0-backlight", dir_mode, |dir| {
-                    dir.entry(
-                        "brightness",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-            });
-            dir.subdir("bdi", dir_mode, |dir| {
-                dir.subdir("0:80", dir_mode, |dir| {
-                    dir.entry(
-                        "max_ratio",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                    dir.entry(
-                        "read_ahead_kb",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-            });
-            dir.subdir("mmc_host", dir_mode, |dir| {
-                dir.subdir("mmc0", dir_mode, |dir| {
-                    dir.subdir("mmc0:0001", dir_mode, |dir| {
-                        dir.entry(
-                            "fwrev",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                        dir.entry(
-                            "hwrev",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                        dir.entry(
-                            "life_time",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                        dir.entry(
-                            "manfid",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                        dir.entry(
-                            "pre_eol_info",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                        dir.entry(
-                            "serial",
-                            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                            mode!(IFREG, 0o444),
-                        );
-                    });
-                });
-            });
-            dir.subdir("net", dir_mode, |dir| {
-                dir.subdir("eth0", dir_mode, |dir| {
-                    dir.entry(
-                        "address",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-                dir.subdir("sit0", dir_mode, |dir| {
-                    dir.entry(
-                        "address",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-                dir.subdir("wlan0", dir_mode, |dir| {
-                    dir.entry(
-                        "address",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-            });
-            dir.subdir("powercap", dir_mode, |_dir| {});
-            dir.subdir("udc", dir_mode, |_dir| {});
+            dir.subdir("net", dir_mode, empty_dir);
         });
         dir.subdir("dev", dir_mode, |dir| {
             dir.subdir("char", dir_mode, empty_dir);
@@ -290,71 +185,8 @@ impl SysFs {
             });
         });
 
-        // TODO(https://fxbug.dev/425942145): Correctly implement system filesystem in sysfs
         dir.subdir("devices", dir_mode, |dir| {
-            dir.subdir("system", dir_mode, |dir| {
-                dir.subdir("cpu", dir_mode, build_cpu_class_directory);
-            });
             dir.subdir("leds", dir_mode, |_dir| {});
-            dir.subdir("platform", dir_mode, |dir| {
-                dir.subdir("soc", dir_mode, |dir| {
-                    dir.subdir("1c40000.qcom,spmi", dir_mode, |dir| {
-                        dir.subdir("spmi-0", dir_mode, |dir| {
-                            dir.subdir("0-00", dir_mode, |dir| {
-                                dir.subdir(
-                                    "1c40000.qcom,spmi:qcom,pm5100@0:qpnp,qbg@4f00",
-                                    dir_mode,
-                                    |dir| {
-                                        dir.subdir("iio:device3", dir_mode, |dir| {
-                                            dir.entry(
-                                                "in_resistance_resistance_id_input",
-                                                StubEmptyFile::new_node(bug_ref!(
-                                                    "https://fxbug.dev/452096300"
-                                                )),
-                                                mode!(IFREG, 0o444),
-                                            );
-                                        });
-                                    },
-                                );
-                            });
-                        });
-                    });
-                    dir.subdir("5e00000.qcom,mdss_mdp", dir_mode, |dir| {
-                        dir.subdir("drm", dir_mode, |dir| {
-                            dir.subdir("card0", dir_mode, |dir| {
-                                dir.subdir("sde-conn-0-DSI-1", dir_mode, |dir| {
-                                    dir.entry(
-                                        "display_power_state",
-                                        StubEmptyFile::new_node(bug_ref!(
-                                            "https://fxbug.dev/452096300"
-                                        )),
-                                        mode!(IFREG, 0o644),
-                                    );
-                                    dir.entry(
-                                        "panel_power_state",
-                                        StubEmptyFile::new_node(bug_ref!(
-                                            "https://fxbug.dev/452096300"
-                                        )),
-                                        mode!(IFREG, 0o644),
-                                    );
-                                });
-                            });
-                        });
-                    });
-                });
-            });
-            dir.subdir("soc0", dir_mode, |dir| {
-                dir.entry(
-                    "revision",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o444),
-                );
-                dir.entry(
-                    "serial_number",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o444),
-                );
-            });
             dir.subdir("virtual", dir_mode, |dir| {
                 dir.subdir("leds", dir_mode, |_dir| {});
                 dir.subdir("power_supply", dir_mode, |dir| {
@@ -398,4 +230,143 @@ pub fn get_sysfs(kernel: &Kernel) -> FileSystemHandle {
         .get_or_init(|| SysFsHandle(SysFs::new_fs(kernel, FileSystemOptions::default())))
         .0
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::KernelFeatures;
+    use crate::testing::{spawn_kernel_and_run, spawn_kernel_with_features_and_run};
+    use crate::vfs::MountInfo;
+    use std::sync::Arc;
+
+    #[::fuchsia::test]
+    async fn sysfs_registers_platform_and_soc_devices() {
+        spawn_kernel_and_run(async |current_task| {
+            let objects = &current_task.kernel().device_registry.objects;
+            let root = &objects.root;
+
+            let soc_uevent = root
+                .lookup("devices/platform/soc/uevent".into())
+                .expect("soc uevent node should exist");
+            // Calling soc_device() again should return the cached Device without replacing its
+            // sysfs entries.
+            let _soc = objects.soc_device();
+            let soc_uevent_after = root
+                .lookup("devices/platform/soc/uevent".into())
+                .expect("soc uevent node should still exist");
+            assert!(Arc::ptr_eq(&soc_uevent, &soc_uevent_after));
+
+            assert!(root.lookup("devices/platform/uevent".into()).is_some());
+            assert!(root.lookup("bus/platform/devices/soc".into()).is_some());
+            assert!(root.lookup("bus/platform/devices/1c40000.qcom,spmi".into()).is_some());
+            assert!(root.lookup("bus/spmi/devices/spmi-0".into()).is_some());
+            assert!(root.lookup("bus/spmi/devices/0-00".into()).is_some());
+            assert!(root.lookup("bus/iio/devices/iio:device3".into()).is_some());
+            assert!(
+                root.lookup(
+                    "devices/platform/soc/1c40000.qcom,spmi/spmi-0/0-00/1c40000.qcom,spmi:qcom,pm5100@0:qpnp,qbg@4f00/iio:device3/in_resistance_resistance_id_input"
+                        .into(),
+                )
+                .is_some()
+            );
+            assert!(root.lookup("class/drm/card0".into()).is_some());
+            assert!(root.lookup("class/drm/sde-conn-0-DSI-1".into()).is_some());
+            assert!(
+                root.lookup(
+                    "devices/platform/soc/5e00000.qcom,mdss_mdp/drm/card0/sde-conn-0-DSI-1/display_power_state"
+                        .into(),
+                )
+                .is_some()
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_log_sysfs_lookup_misses() {
+        for (log_sysfs_lookup_misses, name) in
+            [(false, "missing_when_disabled"), (true, "missing_when_enabled")]
+        {
+            spawn_kernel_with_features_and_run(
+                async move |current_task| {
+                    let sysfs = get_sysfs(current_task.kernel());
+                    let res = sysfs.root().component_lookup(
+                        current_task,
+                        &MountInfo::detached(),
+                        name.into(),
+                    );
+                    assert_eq!(res.unwrap_err(), errno!(ENOENT));
+                },
+                KernelFeatures { log_sysfs_lookup_misses, ..Default::default() },
+            )
+            .await;
+
+            let inspector =
+                starnix_logging::track_stub_lazy_node_callback().await.expect("lazy node callback");
+            let hierarchy = fuchsia_inspect::reader::read(&inspector).await.expect("read inspect");
+            let expected =
+                format!(r#"Looking for {name} in DirEntry {{ fs: "sysfs", path: "/" }}"#);
+            assert_eq!(hierarchy.get_child(&expected).is_some(), log_sysfs_lookup_misses);
+        }
+    }
+
+    #[::fuchsia::test]
+    async fn sysfs_registers_stub_devices() {
+        spawn_kernel_and_run(async |current_task| {
+            let root = &current_task.kernel().device_registry.objects.root;
+
+            // Backlight, parented by the display controller.
+            assert!(root.lookup("class/backlight/panel0-backlight".into()).is_some());
+            assert!(
+                root.lookup(
+                    "devices/platform/soc/5e00000.qcom,mdss_mdp/backlight/panel0-backlight/brightness"
+                        .into(),
+                )
+                .is_some()
+            );
+
+            // eMMC host, card and block stub share a single device directory tree.
+            assert!(root.lookup("class/mmc_host/mmc0".into()).is_some());
+            assert!(root.lookup("bus/mmc/devices/mmc0:0001".into()).is_some());
+            assert!(root.lookup("devices/virtual/mmc_host/mmc0/uevent".into()).is_some());
+            assert!(
+                root.lookup("devices/virtual/mmc_host/mmc0/mmc0:0001/life_time".into()).is_some()
+            );
+            assert!(
+                root.lookup("devices/virtual/mmc_host/mmc0/mmc0:0001/block/mmcblk0/size".into())
+                    .is_some()
+            );
+
+            // SoC identification device.
+            assert!(root.lookup("bus/soc/devices/soc0".into()).is_some());
+            assert!(root.lookup("devices/soc0/revision".into()).is_some());
+            assert!(root.lookup("devices/soc0/uevent".into()).is_some());
+
+            // Backing device info.
+            assert!(root.lookup("class/bdi/0:80".into()).is_some());
+            assert!(root.lookup("devices/virtual/bdi/0:80/read_ahead_kb".into()).is_some());
+
+            // Device-less classes.
+            assert!(root.lookup("class/powercap".into()).is_some());
+            assert!(root.lookup("class/udc".into()).is_some());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn sysfs_registers_cpu_devices() {
+        spawn_kernel_and_run(async |current_task| {
+            let root = &current_task.kernel().device_registry.objects.root;
+
+            assert!(root.lookup("devices/system/cpu/uevent".into()).is_some());
+            assert!(root.lookup("devices/system/cpu/online".into()).is_some());
+            assert!(root.lookup("devices/system/cpu/possible".into()).is_some());
+            assert!(root.lookup("devices/system/cpu/cpufreq".into()).is_some());
+            assert!(root.lookup("devices/system/cpu/cpu0/uevent".into()).is_some());
+            assert!(root.lookup("devices/system/cpu/cpu0/topology".into()).is_some());
+            assert!(root.lookup("bus/cpu/devices/cpu0".into()).is_some());
+        })
+        .await;
+    }
 }

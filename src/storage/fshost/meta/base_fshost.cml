@@ -39,6 +39,8 @@
         },
     ],
     use: [
+        // Needed for kms_stateless (/dev/class/tee) and so component_manager stops #fshost before
+        // #devfs (which triggers boot driver shutdown).
         {
             directory: "dev-topological",
             rights: [ "r*" ],

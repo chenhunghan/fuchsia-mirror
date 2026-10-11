@@ -29,6 +29,7 @@ use starnix_uapi::auth::{CAP_FOWNER, Credentials};
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::{ENODATA, EOPNOTSUPP, Errno};
 use starnix_uapi::file_mode::FileMode;
+use starnix_uapi::inotify_mask::InotifyMask;
 use starnix_uapi::{XATTR_NAME_SELINUX, errno, error};
 use syncio::zxio_node_attr_has_t;
 
@@ -56,9 +57,7 @@ pub(in crate::security) fn fs_node_notify_security_context(
     fs_node: &FsNode,
     security_context: &FsStr,
 ) -> Result<(), Errno> {
-    if fs_node.is_private() {
-        return Ok(());
-    }
+    debug_assert!(!fs_node.is_private());
 
     let fs = fs_node.fs();
     if !fs.security_state.state.supports_xattr() {
@@ -81,6 +80,8 @@ pub(in crate::security) fn fs_node_init_with_dentry(
     dir_entry: &DirEntryHandle,
     read_xattr: bool,
 ) -> Result<(), Errno> {
+    debug_assert!(!dir_entry.node.is_private());
+
     // Attempt to derive a specific security class for the `FsNode`, based on its file mode.
     // TODO: This ensures a correct class for nodes with a wrong `FileMode` at
     // creation, but should not really be required.
@@ -93,9 +94,6 @@ pub(in crate::security) fn fs_node_init_with_dentry(
     if !matches!(label_class.label, FsNodeLabel::Uninitialized) {
         return Ok(());
     }
-
-    // Private nodes are currently only supported via `fs_node_init_anon()`.
-    debug_assert!(!&dir_entry.node.is_private());
 
     // If the parent has a from-task label then propagate it to the new node,  rather than applying
     // the filesystem's labeling scheme. This allows nodes in per-process and per-task directories
@@ -246,6 +244,7 @@ pub(in crate::security) fn fs_node_init_with_dentry(
 
 // TODO: https://fxbug.dev/455771186 - Clean up with-DirEntry initialization and remove this.
 pub(in crate::security) fn fs_node_init_with_dentry_deferred(dir_entry: &DirEntryHandle) {
+    debug_assert!(!dir_entry.node.is_private());
     // This API is only for use when creating artificial file-system nodes prior to policy-load /
     // filesystem label initialization.
     let fs = dir_entry.node.fs();
@@ -417,8 +416,8 @@ pub(in crate::security) fn fs_node_init_on_create(
     parent: Option<&FsNode>,
     name: &FsStr,
 ) -> Result<Option<FsNodeSecurityXattr>, Errno> {
-    // Private nodes are currently only supported via `fs_node_init_anon()`.
     debug_assert!(!new_node.is_private());
+    debug_assert!(parent.is_none_or(|parent| !parent.is_private()));
 
     // By definition this is a new `FsNode` so should not have already been labeled.
     let label_class = new_node.security_state.0.read();
@@ -504,14 +503,15 @@ pub fn dentry_create_files_as(
     Ok(())
 }
 
-/// Called to label file nodes not linked in any filesystem's directory structure, e.g.
-/// usereventfds, kernel-private sockets, etc.
+/// Labels [`FsNode`]s not linked into any filesystem directory structure (e.g., eventfds).
 pub(in crate::security) fn fs_node_init_anon(
     security_server: &SecurityServer,
     current_task: &CurrentTask,
     new_node: &FsNode,
     node_type: &str,
 ) -> Result<(), Errno> {
+    debug_assert!(!new_node.is_private());
+
     let (node_class, node_type): (FsNodeClass, _) = if node_type == "[memfd]" {
         // If the "memfd_class" policy capability is enabled then mem-FD nodes use the anon_inode
         // labeling scheme, but receive their own dedicated security class.
@@ -523,12 +523,8 @@ pub(in crate::security) fn fs_node_init_anon(
         (FileClass::AnonFsNode.into(), node_type)
     };
 
-    let is_private_node = new_node.is_private();
     // TODO: https://fxbug.dev/405062002 - Fold this into the `fs_node_init_with_dentry*()` logic?
-    let sid = if is_private_node {
-        // TODO: https://fxbug.dev/404773987 - Introduce a new `FsNode` labeling state for this?
-        InitialSid::Unlabeled.into()
-    } else if current_task.kernel().security_state.state.as_ref().unwrap().has_policy() {
+    let sid = if current_task.kernel().security_state.state.as_ref().unwrap().has_policy() {
         let task_sid = current_task_state(current_task).current_sid;
         let new_sid = build_permission_check(current_task, security_server)
             .compute_create_sid(task_sid, task_sid, node_class.into(), node_type.as_ref())
@@ -547,15 +543,7 @@ pub(in crate::security) fn fs_node_init_anon(
         InitialSid::Unlabeled.into()
     };
 
-    if is_private_node {
-        // TODO: https://fxbug.dev/364569157 - The class and label of kernel-private sockets are not
-        // used in access decisions since permissions are always allowed in this case. But we need
-        // to know the socket-like class before calling into `has_socket_permission()`, so don't
-        // overwrite the class for kernel-private sockets.
-        set_cached_sid(new_node, sid);
-    } else {
-        new_node.security_state.0.update(FsNodeLabel::SecurityId { sid }, node_class);
-    }
+    new_node.security_state.0.update(FsNodeLabel::SecurityId { sid }, node_class);
 
     Ok(())
 }
@@ -865,6 +853,7 @@ pub(in crate::security) fn check_fs_node_rename_access(
     debug_assert!(!old_parent.is_private());
     debug_assert!(!moving_node.is_private());
     debug_assert!(!new_parent.is_private());
+    debug_assert!(replaced_node.is_none_or(|node| !node.is_private()));
 
     let permission_check = build_permission_check(current_task, security_server);
     let current_sid = current_task_state(current_task).current_sid;
@@ -969,6 +958,7 @@ pub(in crate::security) fn check_fs_node_read_link_access(
     current_task: &CurrentTask,
     fs_node: &FsNode,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
     let current_sid = current_task_state(current_task).current_sid;
     has_fs_node_permissions(
         &build_permission_check(current_task, security_server),
@@ -1037,6 +1027,7 @@ pub(in crate::security) fn check_fs_node_getattr_access(
     current_task: &CurrentTask,
     fs_node: &FsNode,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
     let current_sid = current_task_state(current_task).current_sid;
     has_fs_node_permissions(
         &build_permission_check(current_task, security_server),
@@ -1048,6 +1039,55 @@ pub(in crate::security) fn check_fs_node_getattr_access(
     )
 }
 
+/// Checks whether `current_task` can set a watch on `fs_node`, to be notified of the events in
+/// `mask`.
+///
+/// Starnix only supports inotify, which only allows watches to be set on individual nodes. The
+/// "watch_mount", "watch_sb" and "watch_with_perm" permissions are only relevant to fanotify
+/// mount/superblock marks and permission events, so they are not checked here.
+pub(in crate::security) fn path_notify(
+    security_server: &SecurityServer,
+    current_task: &CurrentTask,
+    fs_node: &FsNode,
+    mask: InotifyMask,
+) -> Result<(), Errno> {
+    let FsNodeSidAndClass { sid: target_sid, class } = fs_node_effective_sid_and_class(fs_node);
+    let FsNodeClass::File(file_class) = class else {
+        // The "watch" permissions are only defined for file-like classes, but watches can still be
+        // requested on socket-like nodes, e.g. by watching "/proc/<pid>/fd/<n>". SELinux on Linux
+        // denies such watches unless permissions that are unrelated to watching (or undefined)
+        // happen to be granted on the socket class, so deny them.
+        return error!(EACCES);
+    };
+
+    let permission_check = build_permission_check(current_task, security_server);
+    let current_sid = current_task_state(current_task).current_sid;
+    let fs = fs_node.fs();
+    let audit_context = [current_task.into(), fs_node.into(), fs.as_ref().into()];
+    // The "watch" permission is required to set any watch, regardless of the events in `mask`.
+    check_permission(
+        &permission_check,
+        current_task,
+        current_sid,
+        target_sid,
+        CommonFilePermission::Watch.for_class(file_class),
+        (&audit_context).into(),
+    )?;
+    // Watches that will report read-exclusive events additionally require the "watch_reads"
+    // permission. `OPEN` is not read-exclusive, since files may also be opened for writing.
+    if mask.intersects(InotifyMask::ACCESS | InotifyMask::CLOSE_NOWRITE) {
+        check_permission(
+            &permission_check,
+            current_task,
+            current_sid,
+            target_sid,
+            CommonFilePermission::WatchReads.for_class(file_class),
+            (&audit_context).into(),
+        )?;
+    }
+    Ok(())
+}
+
 /// Checks whether `current_task` can set attributes on `node`.
 pub(in crate::security) fn check_fs_node_setattr_access(
     security_server: &SecurityServer,
@@ -1055,6 +1095,7 @@ pub(in crate::security) fn check_fs_node_setattr_access(
     fs_node: &FsNode,
     attributes: &zxio_node_attr_has_t,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
     let current_sid = current_task_state(current_task).current_sid;
 
     let permissions = if attributes.mode
@@ -1092,9 +1133,7 @@ pub(in crate::security) fn check_fs_node_setxattr_access(
     value: &FsStr,
     _op: XattrOp,
 ) -> Result<(), Errno> {
-    if fs_node.is_private() {
-        return Ok(());
-    }
+    debug_assert!(!fs_node.is_private());
 
     let current_sid = current_task_state(current_task).current_sid;
 
@@ -1180,6 +1219,7 @@ pub(in crate::security) fn check_fs_node_getxattr_access(
     fs_node: &FsNode,
     _name: &FsStr,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
     let current_sid = current_task_state(current_task).current_sid;
     has_fs_node_permissions(
         &build_permission_check(current_task, security_server),
@@ -1196,6 +1236,7 @@ pub(in crate::security) fn check_fs_node_listxattr_access(
     current_task: &CurrentTask,
     fs_node: &FsNode,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
     let current_sid = current_task_state(current_task).current_sid;
     has_fs_node_permissions(
         &build_permission_check(current_task, security_server),
@@ -1213,6 +1254,8 @@ pub(in crate::security) fn check_fs_node_removexattr_access(
     fs_node: &FsNode,
     name: &FsStr,
 ) -> Result<(), Errno> {
+    debug_assert!(!fs_node.is_private());
+
     // Removing the SELinux security label is not permitted.
     if name == XATTR_NAME_SELINUX.to_bytes() {
         return error!(EACCES);
@@ -1232,7 +1275,8 @@ pub(in crate::security) fn check_fs_node_removexattr_access(
 /// If `fs_node` is in a filesystem without xattr support, returns the xattr name for the security
 /// label (i.e. "security.selinux"). Otherwise returns None.
 pub(in crate::security) fn fs_node_listsecurity(fs_node: &FsNode) -> Option<FsString> {
-    if fs_node.fs().security_state.state.supports_xattr() && !fs_node.is_private() {
+    debug_assert!(!fs_node.is_private());
+    if fs_node.fs().security_state.state.supports_xattr() {
         None
     } else {
         Some(XATTR_NAME_SELINUX.to_bytes().into())
@@ -1248,9 +1292,9 @@ pub(in crate::security) fn fs_node_getsecurity(
     name: &FsStr,
     max_size: usize,
 ) -> Result<ValueOrSize<FsString>, Errno> {
-    // If the node is private or the xattr is not "security.selinux" then immediately fall back
-    // to `get_xattr()`.
-    if name != FsStr::new(XATTR_NAME_SELINUX.to_bytes()) || fs_node.is_private() {
+    debug_assert!(!fs_node.is_private());
+    // If the xattr is not "security.selinux" then immediately fall back to `get_xattr()`.
+    if name != FsStr::new(XATTR_NAME_SELINUX.to_bytes()) {
         return fs_node.ops().get_xattr(fs_node, current_task, name, max_size);
     }
 
@@ -1285,7 +1329,8 @@ pub(in crate::security) fn fs_node_setsecurity(
     value: &FsStr,
     op: XattrOp,
 ) -> Result<(), Errno> {
-    if name != FsStr::new(XATTR_NAME_SELINUX.to_bytes()) || fs_node.is_private() {
+    debug_assert!(!fs_node.is_private());
+    if name != FsStr::new(XATTR_NAME_SELINUX.to_bytes()) {
         return fs_node.ops().set_xattr(fs_node, current_task, name, value, op);
     }
 

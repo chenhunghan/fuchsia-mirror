@@ -6,6 +6,7 @@ use super::execution_context::ExecutionContext;
 use super::expand::parse_and_expand_modifier;
 use super::state::ShellState;
 use crate::collections::FlatSet;
+use crate::parser::QuoteMode;
 use bstr::{BStr, BString, ByteSlice};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,12 +60,38 @@ fn parse_arith_int(bytes: &[u8]) -> Option<i64> {
         b'+' => (false, &trimmed[1..]),
         _ => (false, trimmed),
     };
-    if digits.is_empty() || !digits.iter().all(|&b| b.is_ascii_digit()) {
+    if digits.is_empty() {
         return None;
     }
     let mut val: i64 = 0;
-    for &digit in digits {
-        val = val.wrapping_mul(10).wrapping_add((digit - b'0') as i64);
+    if digits.len() >= 2 && digits[0] == b'0' && (digits[1] == b'x' || digits[1] == b'X') {
+        let hex_digits = &digits[2..];
+        if hex_digits.is_empty() {
+            return None;
+        }
+        for &b in hex_digits {
+            let d = match b {
+                b'0'..=b'9' => (b - b'0') as i64,
+                b'a'..=b'f' => (b - b'a' + 10) as i64,
+                b'A'..=b'F' => (b - b'A' + 10) as i64,
+                _ => return None,
+            };
+            val = val.wrapping_mul(16).wrapping_add(d);
+        }
+    } else if digits[0] == b'0' {
+        for &b in digits {
+            if !(b'0'..=b'7').contains(&b) {
+                return None;
+            }
+            val = val.wrapping_mul(8).wrapping_add((b - b'0') as i64);
+        }
+    } else {
+        for &b in digits {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            val = val.wrapping_mul(10).wrapping_add((b - b'0') as i64);
+        }
     }
     Some(if negative { val.wrapping_neg() } else { val })
 }
@@ -229,9 +256,9 @@ fn tokenize_arith(input: &BStr) -> Result<Vec<ArithToken>, String> {
             }
             b if b.is_ascii_digit() => {
                 let mut num_bytes = Vec::new();
-                while let Some(&digit) = bytes.peek() {
-                    if digit.is_ascii_digit() {
-                        num_bytes.push(digit);
+                while let Some(&ch) = bytes.peek() {
+                    if ch.is_ascii_alphanumeric() || ch == b'_' {
+                        num_bytes.push(ch);
                         bytes.next();
                     } else {
                         break;
@@ -259,56 +286,92 @@ fn tokenize_arith(input: &BStr) -> Result<Vec<ArithToken>, String> {
     Ok(tokens)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvalMode {
+    Evaluate,
+    SkipSideEffects,
+}
+
+impl EvalMode {
+    fn and_if(self, cond: bool) -> Self {
+        if self == Self::Evaluate && cond { Self::Evaluate } else { Self::SkipSideEffects }
+    }
+}
+
 fn evaluate_assignment(
     tokens: &[ArithToken],
     pos: &mut usize,
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let start_pos = *pos;
-    let val = evaluate_conditional(tokens, pos, state, ctx, visited)?;
-    if *pos < tokens.len() {
-        let op = &tokens[*pos];
-        if is_assignment_operator(op) {
-            *pos += 1;
-            let var_name = match tokens.get(start_pos) {
-                Some(ArithToken::Var(name)) if start_pos + 1 == *pos - 1 => name.clone(),
-                _ => return Err("Left-hand side of assignment must be a variable".to_string()),
-            };
-            let right_val = evaluate_assignment(tokens, pos, state, ctx, visited)?;
-            let current_val = {
-                let val_str = state.get_var(&var_name).unwrap_or_default();
-                parse_arith_int(val_str.as_bytes()).unwrap_or(0)
-            };
-            let new_val = match op {
-                ArithToken::Assign => right_val,
-                ArithToken::AddAssign => current_val.wrapping_add(right_val),
-                ArithToken::SubAssign => current_val.wrapping_sub(right_val),
-                ArithToken::MulAssign => current_val.wrapping_mul(right_val),
-                ArithToken::DivAssign => {
-                    if right_val == 0 {
-                        return Err("Division by zero (/=)".to_string());
-                    }
-                    current_val.wrapping_div(right_val)
-                }
-                ArithToken::ModAssign => {
-                    if right_val == 0 {
-                        return Err("Modulo by zero (%=)".to_string());
-                    }
-                    current_val.wrapping_rem(right_val)
-                }
-                ArithToken::AndAssign => current_val & right_val,
-                ArithToken::OrAssign => current_val | right_val,
-                ArithToken::XorAssign => current_val ^ right_val,
-                ArithToken::ShlAssign => current_val.wrapping_shl(right_val as u32),
-                ArithToken::ShrAssign => current_val.wrapping_shr(right_val as u32),
-                _ => unreachable!(),
-            };
-            let new_val_str = new_val.to_string();
-            state.set_var(&var_name, new_val_str.as_bytes());
-            return Ok(new_val);
+    if let (Some(ArithToken::Var(var_name)), Some(op)) = (tokens.get(*pos), tokens.get(*pos + 1))
+        && is_assignment_operator(op)
+    {
+        let var_name = var_name.clone();
+        let op = op.clone();
+        *pos += 2;
+        if mode == EvalMode::SkipSideEffects {
+            return evaluate_assignment(
+                tokens,
+                pos,
+                state,
+                ctx,
+                visited,
+                EvalMode::SkipSideEffects,
+            );
         }
+        let current_val = if op == ArithToken::Assign {
+            0
+        } else {
+            if state.opt_nounset && state.get_var(var_name.as_bstr()).is_none() {
+                let msg = format!("{}: parameter not set", var_name);
+                ctx.print_err(&msg)?;
+                return Err(msg);
+            }
+            evaluate_variable_arithmetic_nested(var_name.as_bstr(), state, ctx, visited)?
+        };
+        let right_val = evaluate_assignment(tokens, pos, state, ctx, visited, EvalMode::Evaluate)?;
+        let new_val = match op {
+            ArithToken::Assign => right_val,
+            ArithToken::AddAssign => current_val.wrapping_add(right_val),
+            ArithToken::SubAssign => current_val.wrapping_sub(right_val),
+            ArithToken::MulAssign => current_val.wrapping_mul(right_val),
+            ArithToken::DivAssign => {
+                if right_val == 0 {
+                    return Err("Division by zero (/=)".to_string());
+                }
+                current_val.wrapping_div(right_val)
+            }
+            ArithToken::ModAssign => {
+                if right_val == 0 {
+                    return Err("Modulo by zero (%=)".to_string());
+                }
+                current_val.wrapping_rem(right_val)
+            }
+            ArithToken::AndAssign => current_val & right_val,
+            ArithToken::OrAssign => current_val | right_val,
+            ArithToken::XorAssign => current_val ^ right_val,
+            ArithToken::ShlAssign => current_val.wrapping_shl(right_val as u32),
+            ArithToken::ShrAssign => current_val.wrapping_shr(right_val as u32),
+            _ => unreachable!(),
+        };
+        if state.is_readonly(var_name.as_bstr()) {
+            let msg = format!("{}: is read only", var_name);
+            ctx.print_err(&msg)?;
+            return Err(msg);
+        }
+        let new_val_str = new_val.to_string();
+        state.set_var(var_name.as_bstr(), new_val_str.as_bytes());
+        return Ok(new_val);
+    }
+
+    let val = evaluate_conditional(tokens, pos, state, ctx, visited, mode)?;
+    if let Some(op) = tokens.get(*pos)
+        && is_assignment_operator(op)
+    {
+        return Err("Left-hand side of assignment must be a variable".to_string());
     }
     Ok(val)
 }
@@ -336,16 +399,19 @@ fn evaluate_conditional(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let cond = evaluate_logical_or(tokens, pos, state, ctx, visited)?;
+    let cond = evaluate_logical_or(tokens, pos, state, ctx, visited, mode)?;
     if *pos < tokens.len() && tokens[*pos] == ArithToken::Question {
         *pos += 1;
-        let true_expr = evaluate_assignment(tokens, pos, state, ctx, visited)?;
+        let true_expr =
+            evaluate_assignment(tokens, pos, state, ctx, visited, mode.and_if(cond != 0))?;
         if *pos >= tokens.len() || tokens[*pos] != ArithToken::Colon {
             return Err("Expected ':' in conditional expression".to_string());
         }
         *pos += 1;
-        let false_expr = evaluate_assignment(tokens, pos, state, ctx, visited)?;
+        let false_expr =
+            evaluate_assignment(tokens, pos, state, ctx, visited, mode.and_if(cond == 0))?;
         if cond != 0 { Ok(true_expr) } else { Ok(false_expr) }
     } else {
         Ok(cond)
@@ -358,11 +424,12 @@ fn evaluate_logical_or(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_logical_and(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_logical_and(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() && tokens[*pos] == ArithToken::LogOr {
         *pos += 1;
-        let right = evaluate_logical_and(tokens, pos, state, ctx, visited)?;
+        let right = evaluate_logical_and(tokens, pos, state, ctx, visited, mode.and_if(val == 0))?;
         val = if val != 0 || right != 0 { 1 } else { 0 };
     }
     Ok(val)
@@ -374,11 +441,12 @@ fn evaluate_logical_and(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_bitwise_or(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_bitwise_or(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() && tokens[*pos] == ArithToken::LogAnd {
         *pos += 1;
-        let right = evaluate_bitwise_or(tokens, pos, state, ctx, visited)?;
+        let right = evaluate_bitwise_or(tokens, pos, state, ctx, visited, mode.and_if(val != 0))?;
         val = if val != 0 && right != 0 { 1 } else { 0 };
     }
     Ok(val)
@@ -390,11 +458,12 @@ fn evaluate_bitwise_or(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_bitwise_xor(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_bitwise_xor(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() && tokens[*pos] == ArithToken::BitOr {
         *pos += 1;
-        let right = evaluate_bitwise_xor(tokens, pos, state, ctx, visited)?;
+        let right = evaluate_bitwise_xor(tokens, pos, state, ctx, visited, mode)?;
         val |= right;
     }
     Ok(val)
@@ -406,11 +475,12 @@ fn evaluate_bitwise_xor(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_bitwise_and(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_bitwise_and(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() && tokens[*pos] == ArithToken::BitXor {
         *pos += 1;
-        let right = evaluate_bitwise_and(tokens, pos, state, ctx, visited)?;
+        let right = evaluate_bitwise_and(tokens, pos, state, ctx, visited, mode)?;
         val ^= right;
     }
     Ok(val)
@@ -422,11 +492,12 @@ fn evaluate_bitwise_and(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_equality(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_equality(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() && tokens[*pos] == ArithToken::BitAnd {
         *pos += 1;
-        let right = evaluate_equality(tokens, pos, state, ctx, visited)?;
+        let right = evaluate_equality(tokens, pos, state, ctx, visited, mode)?;
         val &= right;
     }
     Ok(val)
@@ -438,17 +509,18 @@ fn evaluate_equality(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_relational(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_relational(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() {
         let op = &tokens[*pos];
         if op == &ArithToken::Eq {
             *pos += 1;
-            let right = evaluate_relational(tokens, pos, state, ctx, visited)?;
+            let right = evaluate_relational(tokens, pos, state, ctx, visited, mode)?;
             val = if val == right { 1 } else { 0 };
         } else if op == &ArithToken::Ne {
             *pos += 1;
-            let right = evaluate_relational(tokens, pos, state, ctx, visited)?;
+            let right = evaluate_relational(tokens, pos, state, ctx, visited, mode)?;
             val = if val != right { 1 } else { 0 };
         } else {
             break;
@@ -463,29 +535,30 @@ fn evaluate_relational(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_shift(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_shift(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() {
         let op = &tokens[*pos];
         match op {
             ArithToken::Lt => {
                 *pos += 1;
-                let right = evaluate_shift(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_shift(tokens, pos, state, ctx, visited, mode)?;
                 val = if val < right { 1 } else { 0 };
             }
             ArithToken::Le => {
                 *pos += 1;
-                let right = evaluate_shift(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_shift(tokens, pos, state, ctx, visited, mode)?;
                 val = if val <= right { 1 } else { 0 };
             }
             ArithToken::Gt => {
                 *pos += 1;
-                let right = evaluate_shift(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_shift(tokens, pos, state, ctx, visited, mode)?;
                 val = if val > right { 1 } else { 0 };
             }
             ArithToken::Ge => {
                 *pos += 1;
-                let right = evaluate_shift(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_shift(tokens, pos, state, ctx, visited, mode)?;
                 val = if val >= right { 1 } else { 0 };
             }
             _ => break,
@@ -500,19 +573,20 @@ fn evaluate_shift(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_additive(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_additive(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() {
         let op = &tokens[*pos];
         match op {
             ArithToken::Shl => {
                 *pos += 1;
-                let right = evaluate_additive(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_additive(tokens, pos, state, ctx, visited, mode)?;
                 val = val.wrapping_shl(right as u32);
             }
             ArithToken::Shr => {
                 *pos += 1;
-                let right = evaluate_additive(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_additive(tokens, pos, state, ctx, visited, mode)?;
                 val = val.wrapping_shr(right as u32);
             }
             _ => break,
@@ -527,18 +601,19 @@ fn evaluate_additive(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_multiplicative(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_multiplicative(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() {
         match tokens[*pos] {
             ArithToken::Plus => {
                 *pos += 1;
-                let right = evaluate_multiplicative(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_multiplicative(tokens, pos, state, ctx, visited, mode)?;
                 val = val.wrapping_add(right);
             }
             ArithToken::Minus => {
                 *pos += 1;
-                let right = evaluate_multiplicative(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_multiplicative(tokens, pos, state, ctx, visited, mode)?;
                 val = val.wrapping_sub(right);
             }
             _ => break,
@@ -553,30 +628,35 @@ fn evaluate_multiplicative(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
-    let mut val = evaluate_unary(tokens, pos, state, ctx, visited)?;
+    let mut val = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
     while *pos < tokens.len() {
         match tokens[*pos] {
             ArithToken::Mul => {
                 *pos += 1;
-                let right = evaluate_unary(tokens, pos, state, ctx, visited)?;
+                let right = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
                 val = val.wrapping_mul(right);
             }
             ArithToken::Div => {
                 *pos += 1;
-                let right = evaluate_unary(tokens, pos, state, ctx, visited)?;
-                if right == 0 {
-                    return Err("Division by zero".to_string());
+                let right = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
+                if mode == EvalMode::Evaluate {
+                    if right == 0 {
+                        return Err("Division by zero".to_string());
+                    }
+                    val = val.wrapping_div(right);
                 }
-                val = val.wrapping_div(right);
             }
             ArithToken::Mod => {
                 *pos += 1;
-                let right = evaluate_unary(tokens, pos, state, ctx, visited)?;
-                if right == 0 {
-                    return Err("Modulo by zero".to_string());
+                let right = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
+                if mode == EvalMode::Evaluate {
+                    if right == 0 {
+                        return Err("Modulo by zero".to_string());
+                    }
+                    val = val.wrapping_rem(right);
                 }
-                val = val.wrapping_rem(right);
             }
             _ => break,
         }
@@ -590,6 +670,7 @@ fn evaluate_unary(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
     if *pos >= tokens.len() {
         return Err("Unexpected end of expression".to_string());
@@ -597,24 +678,24 @@ fn evaluate_unary(
     match &tokens[*pos] {
         ArithToken::Plus => {
             *pos += 1;
-            evaluate_unary(tokens, pos, state, ctx, visited)
+            evaluate_unary(tokens, pos, state, ctx, visited, mode)
         }
         ArithToken::Minus => {
             *pos += 1;
-            let val = evaluate_unary(tokens, pos, state, ctx, visited)?;
+            let val = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
             Ok(val.wrapping_neg())
         }
         ArithToken::BitNot => {
             *pos += 1;
-            let val = evaluate_unary(tokens, pos, state, ctx, visited)?;
+            let val = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
             Ok(!val)
         }
         ArithToken::LogNot => {
             *pos += 1;
-            let val = evaluate_unary(tokens, pos, state, ctx, visited)?;
+            let val = evaluate_unary(tokens, pos, state, ctx, visited, mode)?;
             Ok(if val == 0 { 1 } else { 0 })
         }
-        _ => evaluate_factor(tokens, pos, state, ctx, visited),
+        _ => evaluate_factor(tokens, pos, state, ctx, visited, mode),
     }
 }
 
@@ -624,6 +705,7 @@ fn evaluate_factor(
     state: &mut ShellState,
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
+    mode: EvalMode,
 ) -> Result<i64, String> {
     if *pos >= tokens.len() {
         return Err("Unexpected end of expression".to_string());
@@ -635,6 +717,9 @@ fn evaluate_factor(
         }
         ArithToken::Var(name) => {
             *pos += 1;
+            if mode == EvalMode::SkipSideEffects {
+                return Ok(0);
+            }
             let var_name = name.as_bstr();
             if state.opt_nounset && state.get_var(var_name).is_none() {
                 let msg = format!("{}: parameter not set", name);
@@ -645,7 +730,7 @@ fn evaluate_factor(
         }
         ArithToken::LParen => {
             *pos += 1;
-            let val = evaluate_assignment(tokens, pos, state, ctx, visited)?;
+            let val = evaluate_assignment(tokens, pos, state, ctx, visited, mode)?;
             if *pos >= tokens.len() || tokens[*pos] != ArithToken::RParen {
                 return Err("Expected matching ')' in arithmetic expression".to_string());
             }
@@ -712,9 +797,16 @@ fn evaluate_arithmetic_recursive(
     ctx: &ExecutionContext,
     visited: &mut FlatSet<BString>,
 ) -> Result<i64, String> {
-    let expanded = parse_and_expand_modifier(expr, state, ctx)?;
+    let expanded = parse_and_expand_modifier(expr, QuoteMode::DoubleQuoted, state, ctx)?;
     let trimmed = expanded.trim_ascii();
     let tokens = tokenize_arith(trimmed.as_bstr())?;
+    if tokens.is_empty() {
+        return Ok(0);
+    }
     let mut pos = 0;
-    evaluate_assignment(&tokens, &mut pos, state, ctx, visited)
+    let val = evaluate_assignment(&tokens, &mut pos, state, ctx, visited, EvalMode::Evaluate)?;
+    if pos < tokens.len() {
+        return Err(format!("Unexpected token in arithmetic expression: {:?}", tokens[pos]));
+    }
+    Ok(val)
 }

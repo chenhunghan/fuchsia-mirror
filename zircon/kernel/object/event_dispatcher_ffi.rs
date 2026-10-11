@@ -21,7 +21,8 @@ unsafe extern "C" {
         handle_out: *mut MaybeUninit<KernelHandle<EventDispatcher>>,
     ) -> zx_status_t;
 
-    /// Retrieves a reference to the kernel-owned memory pressure event dispatcher for the given kind.
+    /// Retrieves a reference to the kernel-owned memory pressure event dispatcher for the given
+    /// kind.
     ///
     /// # Safety
     ///
@@ -43,6 +44,17 @@ unsafe extern "C" {
         window: zx_duration_mono_t,
         out_handle: *mut MaybeUninit<KernelHandle<EventDispatcher>>,
         out_rights: *mut MaybeUninit<zx_rights_t>,
+    ) -> zx_status_t;
+
+    /// Calls into C++ implementation to signal an event dispatcher.
+    ///
+    /// # Safety
+    ///
+    /// `event` must point to a valid `EventDispatcher`.
+    pub(crate) fn cpp_event_dispatcher_user_signal_self(
+        event: *mut EventDispatcher,
+        clear_mask: u32,
+        set_mask: u32,
     ) -> zx_status_t;
 }
 

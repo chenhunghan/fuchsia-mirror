@@ -110,7 +110,7 @@ def diagnose_dns(host: str) -> Optional[DnsResult]:
             # Use getaddrinfo as it is modern and protocol-agnostic (IPv4 & IPv6)
             addr_info = socket.getaddrinfo(host, None)
             family = addr_info[0][0]
-            ip = addr_info[0][4][0]
+            ip = str(addr_info[0][4][0])
         if dns.duration > WARN_THRESHOLD_DNS:
             print_status(
                 Status.WARN,

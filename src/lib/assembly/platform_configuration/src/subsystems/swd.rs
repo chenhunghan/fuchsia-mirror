@@ -10,6 +10,7 @@ use assembly_config_schema::platform_settings::swd_config::{
     VerificationFailureAction,
 };
 use assembly_constants::FileEntry;
+use assembly_images_config::VolumeConfig;
 use camino::Utf8PathBuf;
 use std::fs::File;
 
@@ -51,14 +52,15 @@ impl PolicyLabelDetails {
 }
 
 pub(crate) struct SwdSubsystemConfig;
-impl DefineSubsystemConfiguration<SwdConfig> for SwdSubsystemConfig {
+impl DefineSubsystemConfiguration<(&SwdConfig, &VolumeConfig)> for SwdSubsystemConfig {
     /// Configures the SWD system. If a specific field is not specified, a
     /// default will be used based on the feature set level and the build type.
     fn define_configuration(
         context: &ConfigurationContext<'_>,
-        subsystem_config: &SwdConfig,
+        configs: &(&SwdConfig, &VolumeConfig),
         builder: &mut dyn ConfigurationBuilder,
     ) -> anyhow::Result<()> {
+        let (subsystem_config, volume_config) = *configs;
         match &subsystem_config.update_checker {
             // The product set a specific update checker. Use that one.
             Some(update_checker) => {
@@ -113,6 +115,12 @@ impl DefineSubsystemConfiguration<SwdConfig> for SwdSubsystemConfig {
         builder.set_config_capability(
             "fuchsia.pkgcache.EnableUpgradablePackages",
             Config::new(ConfigValueType::Bool, subsystem_config.enable_upgradable_packages.into()),
+        )?;
+        let use_driver_blob_paging =
+            matches!(volume_config, VolumeConfig::Fxfs) && subsystem_config.use_driver_blob_paging;
+        builder.set_config_capability(
+            "fuchsia.pkgcache.UseDriverBlobPaging",
+            Config::new(ConfigValueType::Bool, use_driver_blob_paging.into()),
         )?;
 
         let manifest_public_keys = if subsystem_config.ota_manifest_public_keys.is_empty()
@@ -430,7 +438,11 @@ mod tests {
         {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config = SwdConfig::default();
-            let result = SwdSubsystemConfig::define_configuration(&context, &config, &mut builder);
+            let result = SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            );
             assert!(result.is_ok());
             let completed_config = builder.build();
             assert!(completed_config.bundles.contains("swd_trust_store_public"));
@@ -441,7 +453,11 @@ mod tests {
         {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config = SwdConfig { trust_store: SwdTrustStore::Restricted, ..Default::default() };
-            let result = SwdSubsystemConfig::define_configuration(&context, &config, &mut builder);
+            let result = SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            );
             assert!(result.is_ok());
             let completed_config = builder.build();
             assert!(completed_config.bundles.contains("swd_trust_store_restricted"));
@@ -452,7 +468,11 @@ mod tests {
         {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config = SwdConfig { trust_store: SwdTrustStore::Public, ..Default::default() };
-            let result = SwdSubsystemConfig::define_configuration(&context, &config, &mut builder);
+            let result = SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            );
             assert!(result.is_ok());
             let completed_config = builder.build();
             assert!(completed_config.bundles.contains("swd_trust_store_public"));
@@ -477,7 +497,12 @@ mod tests {
         {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config = SwdConfig::default();
-            SwdSubsystemConfig::define_configuration(&context, &config, &mut builder).unwrap();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
             let completed_config = builder.build();
             assert_eq!(
                 completed_config
@@ -492,7 +517,12 @@ mod tests {
             let mut builder: ConfigurationBuilderImpl = Default::default();
             let config =
                 SwdConfig { excessive_update_duration_seconds: Some(3600), ..Default::default() };
-            SwdSubsystemConfig::define_configuration(&context, &config, &mut builder).unwrap();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
             let completed_config = builder.build();
             assert_eq!(
                 completed_config

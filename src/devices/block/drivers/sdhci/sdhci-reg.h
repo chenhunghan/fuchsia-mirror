@@ -391,6 +391,32 @@ class CryptoNonQueueDun : public hwreg::RegisterBase<CryptoNonQueueDun, uint32_t
   DEF_FIELD(31, 0, dun);
 };
 
+class CryptoNonQueueInterruptStatus
+    : public hwreg::RegisterBase<CryptoNonQueueInterruptStatus, uint32_t> {
+ public:
+  static auto Get() { return hwreg::RegisterAddr<CryptoNonQueueInterruptStatus>(0x78); }
+
+  bool ErrorInterrupt() const { return invalid_crypto_config_error() || general_crypto_error(); }
+
+  DEF_FIELD(31, 2, reserved);
+  DEF_BIT(1, invalid_crypto_config_error);
+  DEF_BIT(0, general_crypto_error);
+};
+
+class CryptoNonQueueInterruptEnable
+    : public hwreg::RegisterBase<CryptoNonQueueInterruptEnable, uint32_t> {
+ public:
+  static auto Get() { return hwreg::RegisterAddr<CryptoNonQueueInterruptEnable>(0x7C); }
+
+  auto& EnableErrorInterrupts() {
+    return set_invalid_crypto_config_error(1).set_general_crypto_error(1);
+  }
+
+  DEF_FIELD(31, 2, reserved);
+  DEF_BIT(1, invalid_crypto_config_error);
+  DEF_BIT(0, general_crypto_error);
+};
+
 }  // namespace sdhci
 
 #endif  // SRC_DEVICES_BLOCK_DRIVERS_SDHCI_SDHCI_REG_H_

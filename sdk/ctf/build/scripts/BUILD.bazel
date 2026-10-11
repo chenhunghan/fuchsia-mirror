@@ -2,18 +2,34 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-py_binary(
-    name = "fidl_api_compatibility_test",
+py_library(
+    name = "fidl_api_compatibility_test_lib",
     srcs = [
         "fidl_api_compatibility_test.py",
         "plasa_differ.py",
     ],
     imports = ["."],
+    visibility = ["//visibility:private"],
+)
+
+py_binary(
+    name = "fidl_api_compatibility_test",
+    srcs = ["fidl_api_compatibility_test.py"],
+    imports = ["."],
     legacy_create_init = False,
     main = "fidl_api_compatibility_test.py",
     visibility = ["//visibility:public"],
+    deps = [":fidl_api_compatibility_test_lib"],
+)
+
+py_test(
+    name = "fidl_api_compatibility_test_test",
+    srcs = ["fidl_api_compatibility_test_test.py"],
+    imports = ["."],
+    main = "fidl_api_compatibility_test_test.py",
+    deps = [":fidl_api_compatibility_test_lib"],
 )

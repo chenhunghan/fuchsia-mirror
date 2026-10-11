@@ -19,13 +19,18 @@ pub struct Link {
 
     /// The previous node in the list.
     ///
+    /// Poisoned (`std::ptr::dangling_mut()`) when the node is unattached, null when the node is
+    /// the head of a list, and points to the previous node's `Link` otherwise.
+    ///
     /// This pointer cannot be used without external synchronization.
     prev: RcuPtr<Link>,
 }
 
 impl Default for Link {
     fn default() -> Self {
-        Self { next: RcuPtr::null(), prev: RcuPtr::null() }
+        // Initialize `prev` to the poisoned (dangling) state so newly created unattached
+        // links match links detached via `remove` or `clear`.
+        Self { next: RcuPtr::null(), prev: RcuPtr::new(std::ptr::dangling_mut()) }
     }
 }
 
@@ -113,19 +118,44 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
         Self { head, tail, _marker: std::marker::PhantomData }
     }
 
+    /// Returns whether the list is currently empty without dereferencing any node links.
+    pub fn is_empty(&self, scope: &RcuReadScope) -> bool {
+        self.head.read(scope).is_null()
+    }
+
     /// Pushes a new element to the front of the list.
+    ///
+    /// Properly initializes `link.prev` to null and `link.next` to the former head (or null
+    /// if the list was empty) before publishing the node to `head`. This ensures that nodes
+    /// previously removed from other lists do not retain poisoned or stale pointers.
+    ///
+    /// Note: Re-inserting a previously removed node overwrites its `link.next` pointer. List
+    /// iteration and re-insertion must be synchronized (e.g., via an external lock or by waiting
+    /// for an RCU grace period after removal); otherwise a concurrent iterator still visiting the
+    /// node may observe wrong results (such as skipping/repeating elements or continuing into the
+    /// destination list).
     ///
     /// # Safety
     ///
-    /// Requires external synchronization to exclude concurrent writers.
+    /// - Requires external synchronization to exclude concurrent writers.
+    /// - `data` must be non-null, properly aligned, and point to a valid, initialized `T` that
+    ///   outlives its membership in the list and any subsequent RCU reader grace period.
+    /// - `data` must not currently be attached to any list.
     pub unsafe fn push_front<'a>(&self, scope: &'a RcuReadScope, data: RcuPtrRef<'a, T>) {
         let link_ptr = A::to_link(data);
         let link = link_ptr.as_ref().unwrap();
-        let head_ptr = self.head.read(&scope);
+        let head_ptr = self.head.read(scope);
+        debug_assert_eq!(
+            link.prev.read(scope).as_ptr(),
+            std::ptr::dangling(),
+            "Attempted to insert a node that is already attached to a list"
+        );
+        link.prev.assign(std::ptr::null_mut());
         if let Some(head) = head_ptr.as_ref() {
-            head.prev.assign_ptr(link_ptr);
             link.next.assign_ptr(head_ptr);
+            head.prev.assign_ptr(link_ptr);
         } else {
+            link.next.assign(std::ptr::null_mut());
             self.tail.assign_ptr(link_ptr);
         }
         self.head.assign_ptr(link_ptr);
@@ -133,17 +163,37 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
 
     /// Pushes a new element to the back of the list.
     ///
+    /// Properly initializes `link.next` to null and `link.prev` to the former tail (or null
+    /// if the list was empty) before publishing the node. This ensures that nodes
+    /// previously removed from other lists do not retain poisoned or stale pointers.
+    ///
+    /// Note: Re-inserting a previously removed node overwrites its `link.next` pointer. List
+    /// iteration and re-insertion must be synchronized (e.g., via an external lock or by waiting
+    /// for an RCU grace period after removal); otherwise a concurrent iterator still visiting the
+    /// node may observe wrong results (such as skipping/repeating elements or continuing into the
+    /// destination list).
+    ///
     /// # Safety
     ///
-    /// Requires external synchronization to exclude concurrent writers.
-    pub unsafe fn push_back<'a>(&self, scope: &RcuReadScope, data: RcuPtrRef<'a, T>) {
+    /// - Requires external synchronization to exclude concurrent writers.
+    /// - `data` must be non-null, properly aligned, and point to a valid, initialized `T` that
+    ///   outlives its membership in the list and any subsequent RCU reader grace period.
+    /// - `data` must not currently be attached to any list.
+    pub unsafe fn push_back<'a>(&self, scope: &'a RcuReadScope, data: RcuPtrRef<'a, T>) {
         let link_ptr = A::to_link(data);
         let link = link_ptr.as_ref().unwrap();
-        let tail_ptr = self.tail.read(&scope);
+        let tail_ptr = self.tail.read(scope);
+        debug_assert_eq!(
+            link.prev.read(scope).as_ptr(),
+            std::ptr::dangling(),
+            "Attempted to insert a node that is already attached to a list"
+        );
+        link.next.assign(std::ptr::null_mut());
         if let Some(tail) = tail_ptr.as_ref() {
             link.prev.assign_ptr(tail_ptr);
             tail.next.assign_ptr(link_ptr);
         } else {
+            link.prev.assign(std::ptr::null_mut());
             self.head.assign_ptr(link_ptr);
         }
         self.tail.assign_ptr(link_ptr);
@@ -155,16 +205,20 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
     ///
     /// Requires external synchronization to exclude concurrent writers.
     pub unsafe fn append(&self, scope: &RcuReadScope, other: Self) {
-        let other_head_ptr = other.head.read(&scope);
+        let other_head_ptr = other.head.read(scope);
         if let Some(other_head) = other_head_ptr.as_ref() {
-            let tail_ptr = self.tail.read(&scope);
+            debug_assert!(
+                other_head.prev.read(scope).is_null(),
+                "Head of appended list must have a null prev pointer"
+            );
+            let tail_ptr = self.tail.read(scope);
             if let Some(tail) = tail_ptr.as_ref() {
                 tail.next.assign_ptr(other_head_ptr);
                 other_head.prev.assign_ptr(tail_ptr);
             } else {
                 self.head.assign_ptr(other_head_ptr);
             }
-            let other_tail_ptr = other.tail.read(&scope);
+            let other_tail_ptr = other.tail.read(scope);
             assert!(!other_tail_ptr.is_null());
             self.tail.assign_ptr(other_tail_ptr);
         }
@@ -176,9 +230,19 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
     ///
     /// Returns the link of the next node in the list, if any.
     ///
+    /// Concurrent readers may continue to see this entry in the list until the RCU state machine
+    /// has made sufficient progress to ensure that no concurrent readers are holding read guards.
+    /// If the removed `node` is re-inserted into a list, list iteration and re-insertion must be
+    /// synchronized; otherwise concurrent iterators still visiting `node` may observe wrong
+    /// results.
+    ///
     /// # Safety
     ///
-    /// Requires external synchronization to exclude concurrent writers.
+    /// - Requires external synchronization to exclude concurrent writers.
+    /// - `node` must be non-null, properly aligned, and point to a valid, initialized `T`
+    ///   currently attached to `self`.
+    /// - The removed `node` must not be dropped while concurrent RCU readers may still be visiting
+    ///   it (e.g., wait for an RCU grace period before dropping).
     pub unsafe fn remove<'a>(
         &self,
         scope: &'a RcuReadScope,
@@ -189,6 +253,22 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
 
         let prev = link.prev.read(scope);
         let next = link.next.read(scope);
+
+        debug_assert_ne!(
+            prev.as_ptr(),
+            std::ptr::dangling(),
+            "Attempted to remove a node whose Link::prev is poisoned (unattached or already removed)"
+        );
+        debug_assert!(
+            prev.as_ref().is_some_and(|p| p.next.read(scope).as_ptr() == link_ptr.as_ptr())
+                || (prev.is_null() && self.head.read(scope).as_ptr() == link_ptr.as_ptr()),
+            "Attempted to remove a node not attached to this RcuIntrusiveList"
+        );
+        debug_assert!(
+            next.as_ref().is_some_and(|n| n.prev.read(scope).as_ptr() == link_ptr.as_ptr())
+                || (next.is_null() && self.tail.read(scope).as_ptr() == link_ptr.as_ptr()),
+            "Attempted to remove a node not attached to this RcuIntrusiveList"
+        );
 
         if let Some(next) = next.as_ref() {
             next.prev.assign_ptr(prev);
@@ -216,34 +296,40 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
     ///
     /// Requires external synchronization to exclude concurrent writers.
     pub unsafe fn split_off(&self, scope: &RcuReadScope, pos: usize) -> Self {
-        // If we're splitting at the front, just return the entire list and
-        // clear the list.
+        // If splitting at the front, return the entire list and clear the list.
         if pos == 0 {
             let head = RcuPtr::new(self.head.replace(std::ptr::null_mut()));
             let tail = RcuPtr::new(self.tail.replace(std::ptr::null_mut()));
             return Self::new(head, tail);
         }
         let mut i = 1;
-        let mut prev_ptr = self.head.read(&scope);
+        let mut prev_ptr = self.head.read(scope);
         while let Some(prev) = prev_ptr.as_ref() {
             if i == pos {
-                let head = prev.next.replace(std::ptr::null_mut());
-                if head.is_null() {
+                let head_ptr = prev.next.swap(scope, std::ptr::null_mut());
+                let Some(head) = head_ptr.as_ref() else {
                     // There are no elements after the split point, so return an empty list.
                     break;
-                }
-                let tail = self.tail.read(&scope);
+                };
+                let tail = self.tail.read(scope);
                 self.tail.assign_ptr(prev_ptr);
-                return Self::new(RcuPtr::new(head), RcuPtr::new(tail.as_mut_ptr()));
+                head.prev.assign(std::ptr::null_mut());
+                return Self::new(
+                    RcuPtr::new(head_ptr.as_mut_ptr()),
+                    RcuPtr::new(tail.as_mut_ptr()),
+                );
             }
-            prev_ptr = prev.next.read(&scope);
+            prev_ptr = prev.next.read(scope);
             i += 1;
         }
-        // We reached the end of the list, so return an empty list.
+        // End of list reached, return an empty list.
         Self::default()
     }
 
     /// Updates the list with the contents of another list.
+    ///
+    /// Any elements previously in `self` are replaced in place without poisoning their `Link::prev`
+    /// pointers; call `clear` first if those elements need to be re-attached to a list later.
     ///
     /// # Safety
     ///
@@ -260,10 +346,15 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
     ///
     /// Concurrent readers may continue to see the old value of the list until the RCU state machine
     /// has made sufficient progress to ensure that no concurrent readers are holding read guards.
+    /// If removed elements are re-inserted into a list, list iteration and re-insertion must be
+    /// synchronized; otherwise concurrent iterators still visiting those elements may observe
+    /// wrong results.
     ///
     /// # Safety
     ///
-    /// Requires external synchronization to exclude concurrent writers.
+    /// - Requires external synchronization to exclude concurrent writers.
+    /// - Removed elements must not be dropped while concurrent RCU readers may still be visiting
+    ///   them (e.g., wait for an RCU grace period before dropping).
     pub unsafe fn clear<'a>(&self, scope: &'a RcuReadScope, callback: impl Fn(RcuPtrRef<'a, T>))
     where
         T: 'static,
@@ -282,11 +373,6 @@ impl<T, A: RcuListAdapter<T>> RcuIntrusiveList<T, A> {
             callback(A::from_link(current));
             current = next;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self, scope: &RcuReadScope) -> bool {
-        self.head.read(scope).is_null()
     }
 
     /// Returns a cursor that can be used to traverse and modify the list.
@@ -340,18 +426,24 @@ impl<'a, T, A: RcuListAdapter<T>> RcuIntrusiveListCursor<'a, T, A> {
     ///
     /// Concurrent readers may continue to see this entry in the list until the RCU state machine
     /// has made sufficient progress to ensure that no concurrent readers are holding read guards.
+    /// If the removed element is re-inserted into a list, list iteration and re-insertion must be
+    /// synchronized; otherwise concurrent iterators still visiting the element may observe wrong
+    /// results.
     ///
     /// # Safety
     ///
-    /// Requires external synchronization to exclude concurrent writers.
+    /// - Requires external synchronization to exclude concurrent writers.
+    /// - The removed element must not be dropped while concurrent RCU readers may still be
+    ///   visiting it (e.g., wait for an RCU grace period before dropping).
     pub unsafe fn remove(&mut self) -> RcuPtrRef<'a, T> {
         if self.current.is_null() {
             return RcuPtrRef::null();
         }
         let removed_node = A::from_link(self.current);
-        // SAFETY: The caller promises to exclude concurrent writers.
+        // SAFETY: The caller promises to exclude concurrent writers, and `self.current` is a
+        // valid non-null node currently attached to `self.list`.
         unsafe {
-            self.current = self.list.remove(&self.scope, removed_node);
+            self.current = self.list.remove(self.scope, removed_node);
         }
         removed_node
     }

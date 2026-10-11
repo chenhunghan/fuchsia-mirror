@@ -85,12 +85,17 @@ static void brcmf_feat_iovar_int_get(struct brcmf_if* ifp, enum brcmf_feat_id id
  */
 static void brcmf_feat_iovar_data_get(struct brcmf_if* ifp, enum brcmf_feat_id id, const char* name,
                                       size_t len) {
+  if (len > std::numeric_limits<uint32_t>::max()) {
+    BRCMF_ERR("Invalid iovar length %zu", len);
+    return;
+  }
   void* data = std::malloc(len);
   if (data == nullptr) {
     BRCMF_DBG(TRACE, "%s feature check failed: malloc failed", brcmf_feat_names[id]);
     return;
   }
-  const auto status = brcmf_fil_iovar_data_get(ifp, name, data, len, nullptr);
+  const auto status =
+      brcmf_fil_iovar_data_get(ifp, name, data, static_cast<uint32_t>(len), nullptr);
   if (status == ZX_OK) {
     BRCMF_DBG(FEAT, "enabling feature: %s", brcmf_feat_names[id]);
     ifp->drvr->feat_flags |= BIT(id);
@@ -104,7 +109,12 @@ static void brcmf_feat_iovar_data_set(struct brcmf_if* ifp, enum brcmf_feat_id i
                                       const void* data, size_t len, bcme_status_t* fwerr_ptr) {
   zx_status_t err;
 
-  err = brcmf_fil_iovar_data_set(ifp, name, data, len, fwerr_ptr);
+  if (len > std::numeric_limits<uint32_t>::max()) {
+    BRCMF_ERR("Invalid iovar length %zu", len);
+    return;
+  }
+
+  err = brcmf_fil_iovar_data_set(ifp, name, data, static_cast<uint32_t>(len), fwerr_ptr);
   if (err == ZX_OK) {
     BRCMF_DBG(FEAT, "enabling feature: %s", brcmf_feat_names[id]);
     ifp->drvr->feat_flags |= BIT(id);

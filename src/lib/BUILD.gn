@@ -135,6 +135,7 @@ group("tests") {
     "webpki-roots-fuchsia:webpki-roots-fuchsia_tests",
     "windowed-stats:tests",
     "zbitl:tests",
+    "zr:tests",
     "zxc:tests",
     "zxdump:tests",
   ]

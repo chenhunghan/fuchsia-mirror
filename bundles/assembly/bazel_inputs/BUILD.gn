@@ -446,7 +446,6 @@ fuchsia_package("bootstrap_eng.bootfs_files_package") {
     "//src/ui/backlight/bin/backlight:bootfs",
     "//src/ui/input/bin/hid:bootfs",
     "//src/ui/tools/print-input-report:bootfs",
-    "//src/ui/tools/print-input-report-new:bootfs",
     "//src/zircon/tests/evil:bootfs",
   ]
 }
@@ -527,6 +526,10 @@ group("ptysvc") {
 
 group("virtcon") {
   deps = [ "//bundles/assembly/bazel_inputs/src/bringup/bin/virtcon:package" ]
+}
+
+group("devscreen") {
+  deps = [ "//bundles/assembly/bazel_inputs/src/ui/bin/devscreen" ]
 }
 
 group("netsvc") {
@@ -669,6 +672,7 @@ group("core_realm_eng") {
   testonly = true
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlancfg/tool:donut",
+    "//bundles/assembly/bazel_inputs/src/devices/bin/driver_debug",
     "//bundles/assembly/bazel_inputs/src/storage/bin:fs_realm_tools",
     "//bundles/assembly/bazel_inputs/src/storage/fs_realm",
     "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver:pkg-resolver-eng",
@@ -761,7 +765,6 @@ group("development_support_tools_connectivity_networking") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/network/mdns/util:mdns-util",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/net-cli",
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/tools/nc",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/tools/sockscripter:package",
     "//bundles/assembly/bazel_inputs/third_party/iperf:iperf3_pkg",
     "//bundles/assembly/bazel_inputs/third_party/tcpdump",

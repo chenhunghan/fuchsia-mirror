@@ -40,6 +40,10 @@ zx_status_t FakeHci::UsbHciCancelAll(uint32_t device_id, uint8_t ep_address) {
 void FakeHci::UsbHciRequestQueue(usb_request_t* usb_request_,
                                  const usb_request_complete_callback_t* complete_cb_) {
   usb::BorrowedRequest<void> request(usb_request_, *complete_cb_, sizeof(usb_request_t));
+  if (error_state_ != ZX_OK) {
+    request.Complete(error_state_, 0);
+    return;
+  }
   if (should_return_empty_) {
     request.Complete(ZX_OK, 0);
     return;

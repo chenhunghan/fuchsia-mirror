@@ -120,6 +120,7 @@ class FakeHci : public ddk::UsbHciProtocol<FakeHci>,
                           GetMaxTransferSizeCompleter::Sync& completer) override;
 
   void SetEmptyState(bool should_return_empty) { should_return_empty_ = should_return_empty; }
+  void SetErrorState(zx_status_t error) { error_state_ = error; }
 
   const usb_hci_protocol_t* proto() { return &proto_; }
   uint8_t configuration() { return selected_configuration_; }
@@ -143,6 +144,7 @@ class FakeHci : public ddk::UsbHciProtocol<FakeHci>,
  private:
   async_dispatcher_t* dispatcher_;
   bool should_return_empty_ = false;
+  zx_status_t error_state_ = ZX_OK;
   bool device_reset_ = false;
   bool custom_control_ = false;
   uint8_t selected_configuration_ = 0;

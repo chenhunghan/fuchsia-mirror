@@ -1,5 +1,6 @@
 {
     "name": "flush_sigint_after_newline_separate_writes",
+    "capture_signals": true,
     "initial_termios": {
         "c_iflag": [
             "ICRNL"
@@ -23,7 +24,8 @@
         },
         {
             "action": "write_to_master",
-            "data": "bar\u0003"
+            "data": "bar\u0003",
+            "expect_signal": true
         },
         {
             "action": "write_to_master",

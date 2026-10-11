@@ -7,6 +7,8 @@
 use mmio::region::{MmioRegion, UnsafeMmio};
 use mmio::vmo::{VmoMapping, VmoMemory};
 
+use crate::atomic::{AtomicMmioPtr, AtomicOperand};
+
 /// A wrapper around [`VmoMemory`] guaranteed to be mapped with cached memory
 /// policy.
 pub struct CachedVmoMemory(VmoMemory);
@@ -93,5 +95,11 @@ impl UnsafeMmio for CachedVmoMemory {
 
     fn write_barrier(&self) {
         self.0.write_barrier()
+    }
+}
+
+impl AtomicMmioPtr for CachedVmoMemory {
+    fn ptr<T: AtomicOperand>(&self, offset: usize) -> std::ptr::NonNull<T> {
+        self.0.ptr(offset)
     }
 }

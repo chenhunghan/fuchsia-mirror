@@ -261,6 +261,30 @@ TEST_F(SysctlTest, DropCaches) {
   EXPECT_EQ(errno, EINVAL);
 }
 
+TEST_F(SysctlTest, Swappiness) {
+  if (!test_helper::HasCapability(CAP_SYS_ADMIN)) {
+    GTEST_SKIP() << "Need CAP_SYS_ADMIN to run Swappiness";
+  }
+  const char kSwappiness[] = "/proc/sys/vm/swappiness";
+  std::string original;
+  ASSERT_TRUE(files::ReadFileToString(kSwappiness, &original)) << strerror(errno);
+
+  for (const char *value : {"0", "21", "200"}) {
+    const std::string to_write = std::format("{}\n", value);
+    EXPECT_TRUE(files::WriteFile(kSwappiness, to_write)) << value << ": " << strerror(errno);
+    std::string to_read;
+    EXPECT_TRUE(files::ReadFileToString(kSwappiness, &to_read)) << strerror(errno);
+    EXPECT_EQ(to_read, to_write);
+  }
+
+  for (const char *value : {"201", "-1", "invalid"}) {
+    EXPECT_FALSE(files::WriteFile(kSwappiness, value)) << value;
+    EXPECT_EQ(errno, EINVAL) << value;
+  }
+
+  EXPECT_TRUE(files::WriteFile(kSwappiness, original)) << strerror(errno);
+}
+
 struct SysctlTestReadBackParam {
   std::string path;
   const char *value;
@@ -541,6 +565,7 @@ const SysctlNodeParam kSysctlNodePaths[] = {
     {"vm/mmap_rnd_compat_bits"},
     {"vm/overcommit_memory"},
     {"vm/page-cluster"},
+    {"vm/swappiness"},
     {"vm/watermark_scale_factor"},
 };
 

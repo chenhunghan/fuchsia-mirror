@@ -4,6 +4,7 @@
 
 """Rules for verifying the outputs and providers of Bazel test rules."""
 
+load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("//build/bazel/rules/testing:fx_test.bzl", "FuchsiaTestInfo")
 
 def _verify_file_path_impl(ctx):
@@ -103,5 +104,26 @@ verify_fx_test_realms = rule(
             doc = "Map of `component_name` to expected `realm` moniker (or empty string if hermetic).",
             mandatory = True,
         ),
+    },
+)
+
+def _analysis_failure_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(env, ctx.attr.expected_message)
+
+    # analysistest normally reports failures only when the test is run, but
+    # these tests are built rather than run (see `build_only_tests`), so fail
+    # analysis directly instead.
+    if env.failures:
+        fail("\n".join(env.failures))
+    return analysistest.end(env)
+
+analysis_failure_test = analysistest.make(
+    _analysis_failure_test_impl,
+    doc = "Verifies that `target_under_test` fails analysis with an error containing `expected_message`. " +
+          "The target under test should be tagged `manual` so that wildcard builds skip it.",
+    expect_failure = True,
+    attrs = {
+        "expected_message": attr.string(mandatory = True),
     },
 )

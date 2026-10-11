@@ -14,6 +14,7 @@ static_library("crashlog") {
 
   sources = [
     "crashlog.cc",
+    "crashlog_ffi.cc",
     "panic_buffer.cc",
   ]
   deps = [

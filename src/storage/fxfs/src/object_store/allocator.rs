@@ -102,7 +102,8 @@ use crate::lsm_tree::{LSMTree, Query, compact_with_iterator, layer_from_handle, 
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
 use crate::object_store::object_manager::ReservationUpdate;
 use crate::object_store::transaction::{
-    AllocatorMutation, AssocObj, LockKey, Mutation, Options, Transaction, WriteGuard, lock_keys,
+    AllocatorMutation, AssocObj, LockKey, Mutation, Options, ReservationOptions, Transaction,
+    WriteGuard, lock_keys,
 };
 use crate::object_store::{
     DataObjectHandle, DirectWriter, Extent, HandleOptions, ObjectStore, ReservedId, tree,
@@ -179,6 +180,10 @@ impl<T: Borrow<U> + Clone + Send + Sync, U: ReservationOwner + ?Sized> Reservati
             inner: Mutex::new(ReservationInner { amount, reserved: 0 }),
             phantom: PhantomData,
         }
+    }
+
+    pub fn owner(&self) -> &T {
+        &self.owner
     }
 
     pub fn owner_object_id(&self) -> Option<u64> {
@@ -1363,7 +1368,7 @@ impl Allocator {
         let requested_len = len;
 
         // Make sure we have space reserved before we try and find the space.
-        let reservation = if let Some(reservation) = transaction.allocator_reservation {
+        let reservation = if let Some(reservation) = transaction.allocator_reservation() {
             match reservation.owner_object_id {
                 // If there is no owner, this must be a system store that we're allocating for.
                 None => assert!(self.is_system_store(owner_object_id)),
@@ -1391,7 +1396,7 @@ impl Allocator {
         };
 
         if len == 0 {
-            if let Some(reservation) = transaction.allocator_reservation {
+            if let Some(reservation) = transaction.allocator_reservation() {
                 bail!(anyhow!(FxfsError::NoSpace).context(format!(
                     "Failed to allocate {} bytes for owner {} from {}",
                     requested_len,
@@ -1607,7 +1612,7 @@ impl Allocator {
                     self.device_size
                 ))
             );
-            if let Some(reservation) = &mut transaction.allocator_reservation {
+            if let Some(reservation) = transaction.allocator_reservation() {
                 // The transaction takes ownership of this hold.
                 reservation
                     .reserve(len)
@@ -1918,7 +1923,7 @@ impl JournalingObject for Allocator {
                     // a Vec that can be applied later when we hold the lock (See comment on
                     // `dropped_temporary_allocations` above).
                     inner.dropped_temporary_allocations.push(device_range.0);
-                    if let Some(reservation) = transaction.allocator_reservation {
+                    if let Some(reservation) = transaction.allocator_reservation() {
                         reservation.commit(len);
                     }
                 }
@@ -1949,10 +1954,8 @@ impl JournalingObject for Allocator {
                             owner_object_id,
                         });
                     }
-                    if let ApplyMode::Live(Transaction {
-                        allocator_reservation: Some(reservation),
-                        ..
-                    }) = context.mode
+                    if let ApplyMode::Live(transaction) = context.mode
+                        && let Some(reservation) = transaction.allocator_reservation()
                     {
                         inner.add_reservation(reservation.owner_object_id(), len);
                         reservation.add(len);
@@ -1993,7 +1996,7 @@ impl JournalingObject for Allocator {
                     .entry(owner_object_id)
                     .or_default()
                     .uncommitted_allocated_bytes -= len;
-                if let Some(reservation) = transaction.allocator_reservation {
+                if let Some(reservation) = transaction.allocator_reservation() {
                     let res_owner = reservation.owner_object_id();
                     inner.add_reservation(res_owner, len);
                     reservation.release_reservation(res_owner, len);
@@ -2092,21 +2095,17 @@ impl<'a> Flusher<'a> {
         Self { allocator, fs, _guard: fs.lock_manager().write_lock(keys).await }
     }
 
-    fn txn_options(allocator_reservation: &Reservation) -> Options<'_> {
+    fn txn_options() -> Options<'static> {
         Options {
             skip_journal_checks: true,
-            borrow_metadata_space: true,
-            allocator_reservation: Some(allocator_reservation),
+            reservation: ReservationOptions::BorrowedMetadataAndData,
             ..Default::default()
         }
     }
 
     async fn start(&mut self) -> Result<(DataObjectHandle<ObjectStore>, AllocatorInfo), Error> {
-        let object_manager = self.fs.object_manager();
         let root_store = self.fs.root_store();
-        let mut transaction = root_store
-            .new_transaction(lock_keys![], Self::txn_options(object_manager.metadata_reservation()))
-            .await?;
+        let mut transaction = root_store.new_transaction(lock_keys![], Self::txn_options()).await?;
         let layer_object_handle = ObjectStore::create_object(
             &root_store,
             &mut transaction,
@@ -2137,8 +2136,7 @@ impl<'a> Flusher<'a> {
         layer_object_handle: DataObjectHandle<ObjectStore>,
         mut info: AllocatorInfo,
     ) -> Result<Version, Error> {
-        let object_manager = self.fs.object_manager();
-        let txn_options = Self::txn_options(object_manager.metadata_reservation());
+        let txn_options = Self::txn_options();
 
         let layer_set = self.allocator.tree.immutable_layer_set();
         let total_len = layer_set.sum_len();
@@ -2270,7 +2268,9 @@ mod tests {
         Allocator, AllocatorKey, AllocatorValue, CoalescingIterator, EXTENT_HASH_BUCKET_SIZE,
     };
     use crate::object_store::extent::MIN_BLOCK_SIZE;
-    use crate::object_store::transaction::{Options, TRANSACTION_METADATA_MAX_AMOUNT, lock_keys};
+    use crate::object_store::transaction::{
+        Options, ReservationOptions, TRANSACTION_METADATA_MAX_AMOUNT, lock_keys,
+    };
     use crate::object_store::volume::root_volume;
     use crate::object_store::{Directory, FxfsError, LockKey, NewChildStoreOptions, ObjectStore};
     use crate::range::RangeExt;
@@ -2795,15 +2795,15 @@ mod tests {
         let buffer = file.allocate_buffer(size).await;
 
         // Append some data to it.
-        let mut transaction = file
-            .new_transaction_with_options(Options {
-                borrow_metadata_space: true,
-                ..Default::default()
-            })
-            .await
-            .expect("new_transaction_with_options failed");
-        file.txn_write(&mut transaction, 0, buffer.as_ref()).await.expect("txn_write failed");
-        transaction.commit().await.expect("commit failed");
+        const CHUNK_SIZE: usize = 1_048_576;
+        for offset in (0..size).step_by(CHUNK_SIZE) {
+            let len = std::cmp::min(CHUNK_SIZE, size - offset);
+            let mut transaction = file.new_transaction().await.expect("new_transaction failed");
+            file.txn_write(&mut transaction, offset as u64, buffer.subslice(offset..offset + len))
+                .await
+                .expect("txn_write failed");
+            transaction.commit().await.expect("commit failed");
+        }
     }
 
     #[fuchsia::test]
@@ -2847,7 +2847,10 @@ mod tests {
                             ),
                             LockKey::flush(store_id)
                         ],
-                        Options { borrow_metadata_space: true, ..Default::default() },
+                        Options {
+                            reservation: ReservationOptions::BorrowedMetadata,
+                            ..Default::default()
+                        },
                     )
                     .await
                     .expect("new_transaction failed");
@@ -2920,7 +2923,10 @@ mod tests {
                         ),
                         LockKey::flush(store.store_object_id())
                     ],
-                    Options { borrow_metadata_space: true, ..Default::default() },
+                    Options {
+                        reservation: ReservationOptions::BorrowedMetadata,
+                        ..Default::default()
+                    },
                 )
                 .await
                 .expect("new_transaction failed");
@@ -2964,7 +2970,10 @@ mod tests {
                             ),
                             LockKey::flush(store.store_object_id())
                         ],
-                        Options { borrow_metadata_space: true, ..Default::default() },
+                        Options {
+                            reservation: ReservationOptions::BorrowedMetadata,
+                            ..Default::default()
+                        },
                     )
                     .await
                     .expect("new_transaction failed");
@@ -3459,7 +3468,10 @@ mod tests {
             .root_store()
             .new_transaction(
                 lock_keys![],
-                Options { allocator_reservation: Some(&reservation), ..Options::default() },
+                Options {
+                    reservation: ReservationOptions::Hold(&reservation),
+                    ..Options::default()
+                },
             )
             .await
             .expect("new failed");

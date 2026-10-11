@@ -1,0 +1,106 @@
+{
+    "name": "werase_punctuation_and_no_echoe",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "foo_bar...   \u0017x\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "foo---bar\u0017\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "abc\u007f\u0017\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL",
+                    "IUTF8"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOK",
+                    "ECHOCTL",
+                    "ECHOKE",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "foo \u00e9\u0017\n\u00e9abc\u0017\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

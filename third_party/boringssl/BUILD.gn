@@ -313,7 +313,7 @@ if (!is_kernel) {
     fuchsia_test_package("boringssl_tests") {
       test_components = crypto_test_components + [ ":ssl_test_component" ]
       deps = [
-        "//src/connectivity/network/netstack:component",
+        "//src/connectivity/network/netstack3:component-for-tests",
         "//src/sys/stash:stash_secure_v2",
       ]
       deps += test_data_deps
@@ -434,7 +434,10 @@ config("boringssl_config") {
     "-Wno-unused-function",
   ]
 
-  cflags_cc = [ "-Wno-deprecated-copy" ]
+  cflags_cc = [
+    "-Wno-deprecated-copy",
+    "-Wno-deprecated-volatile",
+  ]
 
   if (is_gcc) {
     cflags_cc += [ "-Wno-extra-semi" ]

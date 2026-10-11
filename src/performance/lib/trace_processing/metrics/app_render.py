@@ -6,6 +6,7 @@
 
 import logging
 import statistics
+import typing
 from collections.abc import MutableSequence
 
 from reporting import metrics
@@ -45,6 +46,7 @@ class AppRenderLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
         self._aggregates_only: bool = aggregates_only
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         return {
             _PRESENT_EVENT_NAME.format(self._debug_name),
@@ -52,10 +54,12 @@ class AppRenderLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
         }
 
     @property
+    @typing.override
     def category_names(self) -> set[str]:
         """This processor follows a flow with many parts across `gfx`."""
         return {_EVENT_CATEGORY}
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

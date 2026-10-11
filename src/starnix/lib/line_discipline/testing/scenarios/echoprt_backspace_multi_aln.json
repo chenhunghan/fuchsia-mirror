@@ -33,9 +33,6 @@
         },
         {
             "action": "read_from_master"
-        },
-        {
-            "action": "read_from_slave"
         }
     ]
 }

@@ -40,7 +40,7 @@ def compiler_build_flags(
         c_family_flags: Flags added to cflags and ldflags. (Note that
             asmflags is not supported by Bazel build_flags()).
         llvm_flags: LLVM specific flags, each one will be added as
-            `-mllvm <arg>` to cflags and ldflags, and as
+            `-mllvm <arg>` to cflags, and as
             `-Cllvm-args=<arg>` to rustflags.
         rust_llvm_flags: Rust-only LLVM specific flags, each one will be
             added as `-Cllvm-args=<arg>` to rustflags.
@@ -64,7 +64,6 @@ def compiler_build_flags(
 
     for arg in llvm_flags:
         cflags += ["-mllvm", arg]
-        ldflags += ["-mllvm", arg]
 
     rustflags = _get_flag_list(kwargs, "rustflags")
     for arg in llvm_flags + rust_llvm_flags:

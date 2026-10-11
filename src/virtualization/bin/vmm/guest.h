@@ -28,10 +28,10 @@ enum class TrapType {
 class Guest {
  public:
 #if __aarch64__
-  // hypervisor::IdAllocator<uint16_t, 8>
+  // id_allocator::IdAllocator<uint16_t, 8, 0>
   static constexpr size_t kMaxVcpus = 8u;
 #elif __x86_64__
-  // hypervisor::IdAllocator<uint16_t, 64>
+  // id_allocator::IdAllocator<uint16_t, 65, 1>
   static constexpr size_t kMaxVcpus = 64u;
 #else
 #error Unknown architecture.

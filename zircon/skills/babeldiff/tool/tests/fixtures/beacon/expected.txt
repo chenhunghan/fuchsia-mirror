@@ -93,7 +93,7 @@ legend: = same  ~ note  ! issue  < only in C++  > only in Rust
   locks    same
            C++:  lock
            Rust: lock
-  flow     switch 4, return 2
+  flow     switch 1, case 3, return 2
   comments 0 C++ comments: 0 identical, 0 reworded, 0 missing in Rust
 
 ==== BeaconDispatcher::CheckMode  <->  BeaconDispatcher::check_mode

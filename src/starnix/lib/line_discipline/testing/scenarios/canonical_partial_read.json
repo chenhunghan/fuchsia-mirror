@@ -1,0 +1,42 @@
+{
+    "name": "canonical_partial_read",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "abcdef\nxyz\n"
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 3
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 10
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 10
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 10,
+            "expect_block": true
+        },
+        {
+            "action": "read_from_master"
+        }
+    ]
+}

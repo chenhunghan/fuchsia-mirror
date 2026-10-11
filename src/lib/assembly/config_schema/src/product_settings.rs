@@ -492,7 +492,7 @@ pub struct GlobalPlatformTee {
 
 /// A configuration for a component which depends on TEE-based protocols.
 /// Examples include components which implement DRM, or authentication services.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, WalkPaths, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, WalkPaths, PartialEq)]
 pub struct GlobalPlatformTeeClient {
     /// The URL of the component.
     pub component_url: String,
@@ -506,8 +506,14 @@ pub struct GlobalPlatformTeeClient {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Capabilities provided by this component that are ONLY routed to sibling TEE
+    /// clients in the tee-clients realm, and NEVER exposed to parent or the
+    /// tee-client-capabilities dictionary.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sibling_capabilities: Vec<String>,
     /// Additional protocols which are required for this component to work, and
-    /// which will be routed from 'parent'
+    /// which will be routed from 'parent' or a sibling TEE client providing it.
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub additional_required_protocols: Vec<String>,

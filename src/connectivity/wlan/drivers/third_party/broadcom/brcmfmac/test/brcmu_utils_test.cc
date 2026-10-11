@@ -104,4 +104,64 @@ TEST(BrcmuUtils, SetRxRateHistogram) {
   EXPECT_THAT(rx_rate, ElementsAreArray(expected_rx_rate));
 }
 
+TEST(BrcmuUtils, ClampToType) {
+  // Verify clamping to signed types
+  EXPECT_EQ(clamp_to_type<int8_t>(255), std::numeric_limits<int8_t>::max());
+  EXPECT_EQ(clamp_to_type<int16_t>(2555), 2555);
+  EXPECT_EQ(clamp_to_type<int16_t>(std::numeric_limits<int32_t>::max()),
+            std::numeric_limits<int16_t>::max());
+  EXPECT_EQ(clamp_to_type<int32_t>(255255), 255255);
+  EXPECT_EQ(clamp_to_type<int32_t>(std::numeric_limits<int64_t>::max()),
+            std::numeric_limits<int32_t>::max());
+
+  // Verify clamping to unsigned types
+  EXPECT_EQ(clamp_to_type<uint8_t>(-255), std::numeric_limits<uint8_t>::min());
+  EXPECT_EQ(clamp_to_type<uint16_t>(-2555), std::numeric_limits<uint16_t>::min());
+  EXPECT_EQ(clamp_to_type<uint16_t>(std::numeric_limits<uint64_t>::max()),
+            std::numeric_limits<uint16_t>::max());
+  EXPECT_EQ(clamp_to_type<uint32_t>(-1), std::numeric_limits<uint32_t>::min());
+  EXPECT_EQ(clamp_to_type<uint32_t>(std::numeric_limits<uint64_t>::max()),
+            std::numeric_limits<uint32_t>::max());
+  EXPECT_EQ(clamp_to_type<uint64_t>(-1LL), std::numeric_limits<uint64_t>::min());
+
+  // Verify custom limits
+  EXPECT_EQ(clamp_to_type<int16_t>(255, 12, 199), 199);
+  EXPECT_EQ(clamp_to_type<int16_t>(5, 12, 199), 12);
+  EXPECT_EQ(clamp_to_type<int32_t>(255, 12, 199), 199);
+  EXPECT_EQ(clamp_to_type<int32_t>(2, 12, 199), 12);
+
+  // Ensure the clamped values are of the correct type, regardless of the input type.
+  static_assert(std::is_same_v<int8_t, decltype(clamp_to_type<int8_t>(
+                                           std::numeric_limits<uint16_t>::max()))>);
+  static_assert(std::is_same_v<int16_t, decltype(clamp_to_type<int16_t>(
+                                            std::numeric_limits<uint32_t>::max()))>);
+  static_assert(std::is_same_v<uint16_t, decltype(clamp_to_type<uint16_t>(
+                                             std::numeric_limits<uint16_t>::max()))>);
+  static_assert(std::is_same_v<int32_t, decltype(clamp_to_type<int32_t>(
+                                            std::numeric_limits<uint32_t>::max()))>);
+  static_assert(std::is_same_v<uint64_t, decltype(clamp_to_type<uint64_t>(
+                                             std::numeric_limits<int64_t>::min()))>);
+}
+
+TEST(BrcmuUtils, ClampToTypeFromUnsignedSource) {
+  // Clamping into a signed type must work regardless of the signedness of the source type. These
+  // values are all well within the range of the destination type, so they must be returned as-is.
+  const uint32_t small_u32 = 5;
+  EXPECT_EQ(clamp_to_type<int8_t>(small_u32), 5);
+  const size_t small_size = 100;
+  EXPECT_EQ(clamp_to_type<int16_t>(small_size), 100);
+
+  // Source values outside the range of the destination type must saturate at the destination's
+  // limits, not wrap around.
+  const uint32_t large_u32 = 1000;
+  EXPECT_EQ(clamp_to_type<int8_t>(large_u32), std::numeric_limits<int8_t>::max());
+  EXPECT_EQ(clamp_to_type<int32_t>(std::numeric_limits<uint64_t>::max()),
+            std::numeric_limits<int32_t>::max());
+
+  // The same must hold when custom limits are provided.
+  const uint32_t above_high_u32 = 200;
+  EXPECT_EQ(clamp_to_type<int8_t>(above_high_u32, -100, 100), 100);
+  EXPECT_EQ(clamp_to_type<int8_t>(small_u32, -100, 100), 5);
+}
+
 }  // namespace

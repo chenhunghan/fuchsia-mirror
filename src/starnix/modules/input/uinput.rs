@@ -2,27 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::InputEventsRelayHandle;
 use crate::uinput::vfs::{CloseFreeSafe, NamespaceNode};
-use crate::{InputEventsRelayHandle, InputFile, OpenedFiles};
+
 use bit_vec::BitVec;
 use fidl_fuchsia_ui_test_input::{
     self as futinput, CoordinateUnit, DisplayDimensions, KeyboardSimulateKeyEventRequest,
     RegistryRegisterKeyboardAndGetDeviceInfoRequest,
     RegistryRegisterTouchScreenAndGetDeviceInfoRequest,
 };
-use fuchsia_inspect;
-use starnix_core::device::kobject::{Device, DeviceMetadata};
+
+use starnix_core::device::kobject::DeviceMetadata;
 use starnix_core::device::{DeviceMode, DeviceOps};
 use starnix_core::fileops_impl_seekless;
 use starnix_core::mm::MemoryAccessorExt;
 use starnix_core::task::{CurrentTask, Kernel};
-use starnix_core::vfs::{self, FileObject, FileOps, FsString, fileops_impl_noop_sync};
+use starnix_core::vfs::{self, FileObject, FileOps, fileops_impl_noop_sync};
 use starnix_logging::log_warn;
 use starnix_modules_input_event_conversion::key_linux_to_fuchsia::LinuxKeyboardEventParser;
 use starnix_modules_input_event_conversion::touch_linux_to_fuchsia::LinuxTouchEventParser;
 use starnix_sync::{LockDepMutex, UinputDeviceStateLock};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
-use starnix_uapi::device_id::INPUT_MAJOR;
+
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{MultiArchUserRef, UserRef};
@@ -34,22 +35,25 @@ use std::sync::atomic::{AtomicI32, Ordering};
 // supports UI_DEV_SETUP.
 const UINPUT_VERSION: u32 = 5;
 
+const DEFAULT_TOUCHSCREEN_WIDTH: i32 = 1280;
+const DEFAULT_TOUCHSCREEN_HEIGHT: i32 = 800;
+const DEFAULT_UINPUT_DEVICE_NAME: &str = "starnix_uinput";
+
 type InputEventPtr = MultiArchUserRef<uapi::input_event, uapi::arch32::input_event>;
 
 #[derive(Clone)]
 enum DeviceId {
     Keyboard,
-    Touchscreen(i32, i32),
+    Touchscreen,
 }
 
 pub fn register_uinput_device(
     kernel: &Kernel,
-    input_event_relay_handle: Arc<InputEventsRelayHandle>,
+    input_relay_handle: Arc<InputEventsRelayHandle>,
 ) -> Result<(), Errno> {
     let registry = &kernel.device_registry;
     let misc_class = registry.objects.misc_class();
-    let inspect_node = Arc::new(kernel.inspect_node.create_child("uinput"));
-    let device = UinputDevice::new(input_event_relay_handle, inspect_node);
+    let device = UinputDevice::new(input_relay_handle);
     registry.register_device(
         kernel,
         "uinput".into(),
@@ -59,42 +63,14 @@ pub fn register_uinput_device(
     )?;
     Ok(())
 }
-
-fn add_and_register_input_device(
-    system_task: &CurrentTask,
-    dev_ops: impl DeviceOps,
-    device_id: u32,
-) -> Result<Device, Errno> {
-    let kernel = system_task.kernel();
-    let registry = &kernel.device_registry;
-
-    let input_class = registry.objects.input_class();
-
-    registry.register_device(
-        system_task.kernel(),
-        FsString::from(format!("event{}", device_id)).as_ref(),
-        DeviceMetadata::new(
-            format!("input/event{}", device_id).into(),
-            starnix_uapi::device_id::DeviceId::new(INPUT_MAJOR, device_id),
-            DeviceMode::Char,
-        ),
-        input_class,
-        dev_ops,
-    )
-}
-
 #[derive(Clone)]
 struct UinputDevice {
-    input_event_relay: Arc<InputEventsRelayHandle>,
-    inspect_node: Arc<fuchsia_inspect::Node>,
+    input_relay_handle: Arc<InputEventsRelayHandle>,
 }
 
 impl UinputDevice {
-    pub fn new(
-        input_event_relay: Arc<InputEventsRelayHandle>,
-        inspect_node: Arc<fuchsia_inspect::Node>,
-    ) -> Self {
-        Self { input_event_relay, inspect_node }
+    pub fn new(input_relay_handle: Arc<InputEventsRelayHandle>) -> Self {
+        Self { input_relay_handle }
     }
 }
 
@@ -106,10 +82,7 @@ impl DeviceOps for UinputDevice {
         _node: &NamespaceNode,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        Ok(Box::new(UinputDeviceFile::new(
-            self.input_event_relay.clone(),
-            self.inspect_node.clone(),
-        )))
+        Ok(Box::new(UinputDeviceFile::new(self.input_relay_handle.clone())))
     }
 }
 
@@ -120,6 +93,7 @@ enum CreatedDevice {
     Touchscreen(futinput::TouchScreenSynchronousProxy, Box<LinuxTouchEventParser>),
 }
 
+#[derive(Clone, Copy)]
 struct Range {
     min: i32,
     max: i32,
@@ -127,9 +101,8 @@ struct Range {
 struct UinputDeviceMutableState {
     enabled_evbits: BitVec,
     input_id: Option<uapi::input_id>,
+    name: Option<String>,
     created_device: CreatedDevice,
-    k_device: Option<Device>,
-    device_id: Option<u32>,
     x_range: Option<Range>,
     y_range: Option<Range>,
 }
@@ -143,51 +116,42 @@ impl UinputDeviceMutableState {
         // Currently only support Keyboard and Touchscreen, if evbits contains
         // EV_ABS, consider it is Touchscreen. This need to be revisit when we
         // want to support more device types.
-        let device_type = match self.enabled_evbits.clone().get(uapi::EV_ABS as usize) {
-            Some(true) => {
-                // TODO(b/304595635): Check if screen size is required.
-                let mut touchscreen_width = 1000;
-                let mut touchscreen_height = 1000;
-
-                if self.x_range.is_some() && self.y_range.is_some() {
-                    let x_range = self.x_range.as_ref().unwrap();
-                    let y_range = self.y_range.as_ref().unwrap();
-                    touchscreen_width = x_range.max - x_range.min;
-                    touchscreen_height = y_range.max - y_range.min;
-                }
-                DeviceId::Touchscreen(touchscreen_width, touchscreen_height)
-            }
+        let device_type = match self.enabled_evbits.get(uapi::EV_ABS as usize) {
+            Some(true) => DeviceId::Touchscreen,
             Some(false) | None => DeviceId::Keyboard,
         };
 
         Some((input_id, device_type))
     }
+
+    fn teardown_device(&mut self) -> bool {
+        if matches!(self.created_device, CreatedDevice::None) {
+            return false;
+        }
+        self.created_device = CreatedDevice::None;
+        destroy_device();
+        true
+    }
 }
 
 struct UinputDeviceFile {
-    input_event_relay: Arc<InputEventsRelayHandle>,
     inner: LockDepMutex<UinputDeviceMutableState, UinputDeviceStateLock>,
-    inspect_node: Arc<fuchsia_inspect::Node>,
+    input_relay_handle: Arc<InputEventsRelayHandle>,
 }
 
 impl UinputDeviceFile {
-    pub fn new(
-        input_event_relay: Arc<InputEventsRelayHandle>,
-        inspect_node: Arc<fuchsia_inspect::Node>,
-    ) -> Self {
+    pub fn new(input_relay_handle: Arc<InputEventsRelayHandle>) -> Self {
         Self {
-            input_event_relay,
             inner: UinputDeviceMutableState {
                 enabled_evbits: BitVec::from_elem(uapi::EV_CNT as usize, false),
                 input_id: None,
+                name: None,
                 created_device: CreatedDevice::None,
-                k_device: None,
-                device_id: None,
                 x_range: None,
                 y_range: None,
             }
             .into(),
-            inspect_node,
+            input_relay_handle,
         }
     }
 
@@ -197,7 +161,11 @@ impl UinputDeviceFile {
         let evbit: u32 = arg.into();
         match evbit {
             uapi::EV_KEY | uapi::EV_ABS => {
-                self.inner.lock().enabled_evbits.set(evbit as usize, true);
+                let mut inner = self.inner.lock();
+                if !matches!(inner.created_device, CreatedDevice::None) {
+                    return error!(EINVAL);
+                }
+                inner.enabled_evbits.set(evbit as usize, true);
                 Ok(SUCCESS)
             }
             _ => {
@@ -215,14 +183,25 @@ impl UinputDeviceFile {
         abs_setup: UserRef<starnix_uapi::uinput_abs_setup>,
     ) -> Result<SyscallResult, Errno> {
         let setup: starnix_uapi::uinput_abs_setup = current_task.read_object(abs_setup)?;
+        if setup.absinfo.minimum >= setup.absinfo.maximum {
+            return error!(EINVAL);
+        }
         let code: u32 = setup.code.into();
         match code {
             uapi::ABS_MT_POSITION_X => {
-                self.inner.lock().x_range =
+                let mut inner = self.inner.lock();
+                if !matches!(inner.created_device, CreatedDevice::None) {
+                    return error!(EINVAL);
+                }
+                inner.x_range =
                     Some(Range { min: setup.absinfo.minimum, max: setup.absinfo.maximum });
             }
             uapi::ABS_MT_POSITION_Y => {
-                self.inner.lock().y_range =
+                let mut inner = self.inner.lock();
+                if !matches!(inner.created_device, CreatedDevice::None) {
+                    return error!(EINVAL);
+                }
+                inner.y_range =
                     Some(Range { min: setup.absinfo.minimum, max: setup.absinfo.maximum });
             }
             _ => {
@@ -253,11 +232,34 @@ impl UinputDeviceFile {
         user_uinput_setup: UserRef<uapi::uinput_setup>,
     ) -> Result<SyscallResult, Errno> {
         let uinput_setup = current_task.read_object(user_uinput_setup)?;
-        self.inner.lock().input_id = Some(uinput_setup.id);
+        let mut inner = self.inner.lock();
+        if !matches!(inner.created_device, CreatedDevice::None) {
+            return error!(EINVAL);
+        }
+        inner.input_id = Some(uinput_setup.id);
+        // Parse name from null-terminated C string in uinput_setup.name
+        let name_bytes: &[u8] = zerocopy::IntoBytes::as_bytes(&uinput_setup.name);
+        let name_len = name_bytes.iter().position(|&c| c == 0).unwrap_or(name_bytes.len());
+        let name = std::str::from_utf8(&name_bytes[..name_len])
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| DEFAULT_UINPUT_DEVICE_NAME.to_string());
+        inner.name = Some(name);
         Ok(SUCCESS)
     }
 
-    fn ui_dev_create(&self, current_task: &CurrentTask) -> Result<SyscallResult, Errno> {
+    fn ui_dev_create(&self, _current_task: &CurrentTask) -> Result<SyscallResult, Errno> {
+        {
+            let inner = self.inner.lock();
+            if !matches!(inner.created_device, CreatedDevice::None) {
+                return error!(EINVAL);
+            }
+            if inner.get_id_and_device_type().is_none() {
+                return error!(EINVAL);
+            }
+        }
+
         // Only eng and userdebug builds include the `fuchsia.ui.test.input` service.
         let registry = match fuchsia_component::client::connect_to_protocol_sync::<
             futinput::RegistryMarker,
@@ -268,184 +270,177 @@ impl UinputDeviceFile {
                 None
             }
         };
-        self.ui_dev_create_inner(current_task, registry)
+        self.ui_dev_create_inner(registry)
     }
 
     /// UI_DEV_CREATE calls create the uinput device with given information
     /// from previous ioctl() calls.
     fn ui_dev_create_inner(
         &self,
-        current_task: &CurrentTask,
         // Takes `registry` arg so we can manually inject a mock registry in unit tests.
         registry: Option<futinput::RegistrySynchronousProxy>,
     ) -> Result<SyscallResult, Errno> {
-        match registry {
-            Some(proxy) => {
-                let mut inner = self.inner.lock();
-                let (input_id, device_type) = match inner.get_id_and_device_type() {
-                    Some((id, dev)) => (id, dev),
-                    None => return error!(EINVAL),
-                };
-
-                let open_files: OpenedFiles = Default::default();
-
-                let (registered_device_id, inspect_status) = match device_type {
-                    DeviceId::Keyboard => {
-                        let (key_client, key_server) =
-                            fidl::endpoints::create_sync_proxy::<futinput::KeyboardMarker>();
-                        inner.created_device =
-                            CreatedDevice::Keyboard(key_client, LinuxKeyboardEventParser::create());
-
-                        // Register a keyboard
-                        let register_res = proxy.register_keyboard_and_get_device_info(
-                            RegistryRegisterKeyboardAndGetDeviceInfoRequest {
-                                device: Some(key_server),
-                                ..Default::default()
-                            },
-                            zx::MonotonicInstant::INFINITE,
-                        );
-
-                        match register_res {
-                            Ok(resp) => match resp.device_id {
-                                Some(device_id) => {
-                                    inner.device_id = Some(device_id);
-                                    let node = self
-                                        .inspect_node
-                                        .create_child(format!("uinput_device_{}", device_id));
-                                    let inspect_status = crate::InputDeviceStatus::new(node);
-                                    self.input_event_relay.add_keyboard_device(
-                                        device_id,
-                                        open_files.clone(),
-                                        Some(inspect_status.clone()),
-                                    );
-                                    (device_id, inspect_status)
-                                }
-                                None => {
-                                    log_warn!(
-                                        "register_keyboard_and_get_device_info response does not include a device_id"
-                                    );
-                                    return error!(EPERM);
-                                }
-                            },
-                            Err(e) => {
-                                log_warn!(
-                                    "Uinput could not register Keyboard device to Registry: {:?}",
-                                    e
-                                );
-                                return error!(EPERM);
-                            }
-                        }
-                    }
-                    DeviceId::Touchscreen(_width, _height) => {
-                        let (touch_client, touch_server) =
-                            fidl::endpoints::create_sync_proxy::<futinput::TouchScreenMarker>();
-                        inner.created_device = CreatedDevice::Touchscreen(
-                            touch_client,
-                            Box::new(LinuxTouchEventParser::create()),
-                        );
-
-                        let mut request = RegistryRegisterTouchScreenAndGetDeviceInfoRequest {
-                            device: Some(touch_server),
-                            coordinate_unit: Some(CoordinateUnit::PhysicalPixels),
-                            ..Default::default()
-                        };
-
-                        if inner.x_range.is_some() && inner.y_range.is_some() {
-                            request.coordinate_unit = Some(CoordinateUnit::RegisteredDimensions);
-                            let x_range = inner.x_range.as_ref().unwrap();
-                            let y_range = inner.y_range.as_ref().unwrap();
-                            request.display_dimensions = Some(DisplayDimensions {
-                                min_x: x_range.min.into(),
-                                max_x: x_range.max.into(),
-                                min_y: y_range.min.into(),
-                                max_y: y_range.max.into(),
-                            });
-                        }
-
-                        // Register a touchscreen
-                        let register_res = proxy.register_touch_screen_and_get_device_info(
-                            request,
-                            zx::Instant::INFINITE,
-                        );
-
-                        match register_res {
-                            Ok(resp) => match resp.device_id {
-                                Some(device_id) => {
-                                    inner.device_id = Some(device_id);
-                                    let node = self
-                                        .inspect_node
-                                        .create_child(format!("uinput_device_{}", device_id));
-                                    let inspect_status = crate::InputDeviceStatus::new(node);
-                                    self.input_event_relay.add_touch_device(
-                                        device_id,
-                                        open_files.clone(),
-                                        Some(inspect_status.clone()),
-                                    );
-                                    (device_id, inspect_status)
-                                }
-                                None => {
-                                    log_warn!(
-                                        "register_touch_screen_and_get_device_info response does not include a device_id"
-                                    );
-                                    return error!(EPERM);
-                                }
-                            },
-                            Err(e) => {
-                                log_warn!(
-                                    "Uinput could not register Keyboard device to Registry: {:?}",
-                                    e
-                                );
-                                return error!(EPERM);
-                            }
-                        }
-                    }
-                };
-
-                let device = add_and_register_input_device(
-                    current_task,
-                    VirtualDevice { input_id, devt: device_type, open_files, inspect_status },
-                    registered_device_id,
-                )?;
-                inner.k_device = Some(device);
-
-                new_device();
-
-                Ok(SUCCESS)
+        let (input_id, device_type, name, x_range, y_range) = {
+            let inner = self.inner.lock();
+            if !matches!(inner.created_device, CreatedDevice::None) {
+                return error!(EINVAL);
             }
+
+            let (input_id, device_type) = match inner.get_id_and_device_type() {
+                Some((id, dev)) => (id, dev),
+                None => return error!(EINVAL),
+            };
+            let name = inner.name.clone().unwrap_or_else(|| DEFAULT_UINPUT_DEVICE_NAME.to_string());
+            (input_id, device_type, name, inner.x_range, inner.y_range)
+        };
+
+        let proxy = match registry {
+            Some(proxy) => proxy,
             None => {
                 log_warn!("No Registry available for Uinput.");
-                error!(EPERM)
-            }
-        }
-    }
-
-    fn ui_dev_destroy(&self, current_task: &CurrentTask) -> Result<SyscallResult, Errno> {
-        let mut inner = self.inner.lock();
-        match inner.device_id {
-            Some(device_id) => {
-                self.input_event_relay.remove_device(device_id);
-            }
-            None => {
-                // This is possible if caller does not call create device but calls destroy.
-                // No cleanup is needed for input event relay in this case.
-            }
-        }
-
-        match inner.k_device.clone() {
-            Some(device) => {
-                let kernel = current_task.kernel();
-                kernel.device_registry.remove_device(current_task, device);
-            }
-            None => {
-                log_warn!("UI_DEV_DESTROY kHandle not found");
                 return error!(EPERM);
             }
+        };
+
+        let (created_device, device_id) = match device_type {
+            DeviceId::Keyboard => {
+                let (key_client, key_server) =
+                    fidl::endpoints::create_sync_proxy::<futinput::KeyboardMarker>();
+
+                // Register a keyboard
+                let register_res = proxy.register_keyboard_and_get_device_info(
+                    RegistryRegisterKeyboardAndGetDeviceInfoRequest {
+                        device: Some(key_server),
+                        ..Default::default()
+                    },
+                    zx::MonotonicInstant::INFINITE,
+                );
+
+                match register_res {
+                    Ok(resp) => match resp.device_id {
+                        Some(device_id) => {
+                            let created_device = CreatedDevice::Keyboard(
+                                key_client,
+                                LinuxKeyboardEventParser::create(),
+                            );
+                            Ok((created_device, device_id))
+                        }
+                        None => {
+                            log_warn!(
+                                "register_keyboard_and_get_device_info response does not include a device_id"
+                            );
+                            error!(EPERM)
+                        }
+                    },
+                    Err(e) => {
+                        log_warn!("Uinput could not register Keyboard device to Registry: {:?}", e);
+                        error!(EPERM)
+                    }
+                }
+            }
+            DeviceId::Touchscreen => {
+                let (touch_client, touch_server) =
+                    fidl::endpoints::create_sync_proxy::<futinput::TouchScreenMarker>();
+
+                let (display_width, display_height) =
+                    (*self.input_relay_handle.display_size.lock())
+                        .filter(|&(w, h)| w > 0 && h > 0)
+                        .unwrap_or((DEFAULT_TOUCHSCREEN_WIDTH, DEFAULT_TOUCHSCREEN_HEIGHT));
+                let (min_x, max_x) = x_range.map(|r| (r.min, r.max)).unwrap_or((0, display_width));
+                let (min_y, max_y) = y_range.map(|r| (r.min, r.max)).unwrap_or((0, display_height));
+                if min_x >= max_x || min_y >= max_y {
+                    return error!(EINVAL);
+                }
+
+                let request = RegistryRegisterTouchScreenAndGetDeviceInfoRequest {
+                    device: Some(touch_server),
+                    coordinate_unit: Some(CoordinateUnit::RegisteredDimensions),
+                    display_dimensions: Some(DisplayDimensions {
+                        min_x: min_x.into(),
+                        max_x: max_x.into(),
+                        min_y: min_y.into(),
+                        max_y: max_y.into(),
+                    }),
+                    ..Default::default()
+                };
+
+                // Register a touchscreen
+                let register_res = proxy.register_touch_screen_and_get_device_info(
+                    request,
+                    zx::MonotonicInstant::INFINITE,
+                );
+
+                match register_res {
+                    Ok(resp) => match resp.device_id {
+                        Some(device_id) => {
+                            let created_device = CreatedDevice::Touchscreen(
+                                touch_client,
+                                Box::new(LinuxTouchEventParser::create()),
+                            );
+                            Ok((created_device, device_id))
+                        }
+                        None => {
+                            log_warn!(
+                                "register_touch_screen_and_get_device_info response does not include a device_id"
+                            );
+                            error!(EPERM)
+                        }
+                    },
+                    Err(e) => {
+                        log_warn!(
+                            "Uinput could not register TouchScreen device to Registry: {:?}",
+                            e
+                        );
+                        error!(EPERM)
+                    }
+                }
+            }
+        }?;
+
+        {
+            let mut inner = self.inner.lock();
+            if !matches!(inner.created_device, CreatedDevice::None) {
+                return error!(EINVAL);
+            }
+            inner.created_device = created_device;
         }
-        inner.k_device = None;
-        inner.created_device = CreatedDevice::None;
 
-        destroy_device();
+        // NOTE: The UI test registry often broadcasts `OnDeviceChanged(Added)` to
+        // `input_event_relay.rs` before `register_*_and_get_device_info` returns
+        // `device_id` here. When this happens, `register_and_add_device` initializes
+        // `/dev/input/eventX` and broadcasts the `KOBJECT_ADD` uevent with fallback IDs
+        // (`TOUCH_INPUT_ID` / `KEYBOARD_INPUT_ID` and `"starnix_touch"` / `"starnix_buttons"`).
+        //
+        // This is safe for synchronous callers that open the device node after `UI_DEV_CREATE`
+        // returns, because both paths share an `Arc<LockDepMutex<InputDeviceInfo, ...>>`,
+        // allowing `update_uinput_device` to overwrite those fallbacks before userspace opens
+        // the device node.
+        //
+        // However, there is a race window for asynchronous watchers (such as `ueventd`,
+        // `libinput`, or Android's `EventHub` reacting directly to the `KOBJECT_ADD` uevent
+        // or an inotify event on `/dev/input`): if they open `/dev/input/eventX` and query
+        // `EVIOCGID` or `EVIOCGNAME` before `update_uinput_device` executes below, they may
+        // observe the fallback IDs and names.
+        //
+        // TODO(https://fxbug.dev/502662433): Update `fuchsia.ui.test.input.Registry` so that
+        // caller-provided device metadata (e.g. name, input_id) can be passed during initial
+        // registration. This will allow `OnDeviceChanged(Added)` to immediately carry the
+        // correct metadata and eliminate the race window for asynchronous uevent watchers.
+        //
+        // Device metadata in `device_infos` remains alive until the device is removed via
+        // `OnDeviceChanged(Removed)`, preventing race conditions where an early `UI_DEV_DESTROY`
+        // could cause an in-flight addition to lose its metadata.
+        self.input_relay_handle.update_uinput_device(device_id, input_id, name);
+        new_device();
 
+        Ok(SUCCESS)
+    }
+
+    fn ui_dev_destroy(&self, _current_task: &CurrentTask) -> Result<SyscallResult, Errno> {
+        let mut inner = self.inner.lock();
+        if !inner.teardown_device() {
+            return error!(EPERM);
+        }
         Ok(SUCCESS)
     }
 }
@@ -467,6 +462,14 @@ pub fn uinput_running() -> bool {
 
 /// `UinputDeviceFile` doesn't implement the `close` method.
 impl CloseFreeSafe for UinputDeviceFile {}
+
+impl Drop for UinputDeviceFile {
+    fn drop(&mut self) {
+        let inner = self.inner.get_mut();
+        inner.teardown_device();
+    }
+}
+
 impl FileOps for UinputDeviceFile {
     fileops_impl_seekless!();
     fileops_impl_noop_sync!();
@@ -568,63 +571,27 @@ impl FileOps for UinputDeviceFile {
     }
 }
 
-#[derive(Clone)]
-pub struct VirtualDevice {
-    input_id: uapi::input_id,
-    devt: DeviceId,
-    open_files: OpenedFiles,
-    inspect_status: Arc<crate::InputDeviceStatus>,
-}
-
-impl DeviceOps for VirtualDevice {
-    fn open(
-        &self,
-        _current_task: &CurrentTask,
-        _id: device_id::DeviceId,
-        _node: &NamespaceNode,
-        _flags: OpenFlags,
-    ) -> Result<Box<dyn FileOps>, Errno> {
-        let mut file_nodes = self.inspect_status.file_nodes.lock();
-        let child_node =
-            self.inspect_status.node.create_child(format!("file_{}", file_nodes.len()));
-        let input_file = match &self.devt {
-            DeviceId::Keyboard => {
-                Arc::new(InputFile::new_keyboard(self.input_id, "starnix_buttons", &child_node))
-            }
-            DeviceId::Touchscreen(width, height) => Arc::new(InputFile::new_touch(
-                self.input_id,
-                "starnix_touch",
-                width.clone(),
-                height.clone(),
-                &child_node,
-            )),
-        };
-
-        file_nodes.push(child_node);
-        input_file.init_inspect_status();
-        self.open_files.lock().push(Arc::downgrade(&input_file));
-
-        Ok(Box::new(crate::input_file::ArcInputFile(input_file)))
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{EventProxyMode, start_input_relays_for_test};
-    use starnix_core::testing::spawn_kernel_and_run;
+    use futures::TryStreamExt;
+    use starnix_core::testing::{map_memory, spawn_kernel_and_run};
     use starnix_core::vfs::FileHandle;
+    use starnix_uapi::user_address::UserAddress;
     use std::sync::Arc;
     use test_case::test_case;
+
+    static UINPUT_RUNNING_LOCK: starnix_sync::Mutex<()> = starnix_sync::Mutex::new(());
+
+    fn ensure_uinput_running_lock() -> starnix_sync::MutexGuard<'static, ()> {
+        UINPUT_RUNNING_LOCK.lock()
+    }
 
     async fn new_kernel_objects(current_task: &CurrentTask) -> (Arc<UinputDeviceFile>, FileHandle) {
         let (input_relay_handle, _, _, _, _, _, _, _, _, _, _, _) =
             start_input_relays_for_test(current_task, EventProxyMode::None).await;
-        let inspector = fuchsia_inspect::Inspector::default();
-        let dev = Arc::new(UinputDeviceFile::new(
-            input_relay_handle,
-            Arc::new(inspector.root().create_child("uinput")),
-        ));
+        let dev = Arc::new(UinputDeviceFile::new(input_relay_handle));
 
         let root_namespace_node = current_task
             .lookup_path_from_root(".".into())
@@ -755,6 +722,612 @@ mod test {
                 SyscallArg::from(uapi::INPUT_PROP_DIRECT as u64),
             );
             assert_eq!(r, Ok(SUCCESS));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_destroy_uncreated() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+            let r =
+                dev.ioctl(&file_object, current_task, uapi::UI_DEV_DESTROY, SyscallArg::from(0u64));
+            assert_eq!(r, error!(EPERM));
+            assert!(!uinput_running());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_updates_existing_device_info() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, _file_object) = new_kernel_objects(current_task).await;
+            let device_id = 42;
+            let initial_input_id = uapi::input_id { bustype: 1, vendor: 2, product: 3, version: 4 };
+            let initial_info =
+                crate::InputDeviceInfo::new(initial_input_id, "initial_name".to_string());
+            dev.input_relay_handle.device_infos.lock().insert(device_id, initial_info.clone());
+
+            let updated_input_id =
+                uapi::input_id { bustype: 10, vendor: 20, product: 30, version: 40 };
+            let updated_name = "updated_uinput_device".to_string();
+
+            // Exercise update_uinput_device without holding dev.inner.lock(), matching
+            // the updated lock ordering in ui_dev_create_inner where inner lock is dropped before
+            // updating uinput device metadata.
+            dev.input_relay_handle.update_uinput_device(
+                device_id,
+                updated_input_id,
+                updated_name.clone(),
+            );
+
+            // Verify that the existing InputDeviceInfoHandle was updated in-place without LockDep panic.
+            let locked_info = initial_info.lock();
+            assert_eq!(locked_info.input_id, updated_input_id);
+            assert_eq!(locked_info.name, updated_name);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_setup_name_parsing() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+
+            // 1. Normal null-terminated string
+            let mut setup = uapi::uinput_setup::default();
+            setup.id = uapi::input_id { bustype: 3, vendor: 0x1234, product: 0x5678, version: 1 };
+            let name_bytes = b"my_uinput_touch\0";
+            for (i, &b) in name_bytes.iter().enumerate() {
+                setup.name[i] = b as _;
+            }
+
+            let user_setup = map_memory(
+                current_task,
+                UserAddress::default(),
+                std::mem::size_of::<uapi::uinput_setup>() as u64,
+            );
+            current_task.write_object(UserRef::new(user_setup), &setup).expect("write_object");
+
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_DEV_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, Ok(SUCCESS));
+
+            {
+                let inner = dev.inner.lock();
+                assert_eq!(inner.input_id, Some(setup.id));
+                assert_eq!(inner.name, Some("my_uinput_touch".to_string()));
+            }
+
+            // 2. Non-null terminated (full buffer)
+            let mut setup_full = uapi::uinput_setup::default();
+            setup_full.id = setup.id;
+            setup_full.name.fill(b'a' as _);
+            current_task.write_object(UserRef::new(user_setup), &setup_full).expect("write_object");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_DEV_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, Ok(SUCCESS));
+            {
+                let inner = dev.inner.lock();
+                assert_eq!(inner.name, Some("a".repeat(setup_full.name.len())));
+            }
+
+            // 3. Invalid UTF-8 bytes before null terminator fallback to "starnix_uinput"
+            let mut setup_invalid = uapi::uinput_setup::default();
+            setup_invalid.id = setup.id;
+            setup_invalid.name[0] = 0xff as u8 as _;
+            setup_invalid.name[1] = 0;
+            current_task
+                .write_object(UserRef::new(user_setup), &setup_invalid)
+                .expect("write_object");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_DEV_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, Ok(SUCCESS));
+            {
+                let inner = dev.inner.lock();
+                assert_eq!(inner.name, Some(DEFAULT_UINPUT_DEVICE_NAME.to_string()));
+            }
+
+            // 4. Empty name (first byte is 0) fallback to "starnix_uinput"
+            let mut setup_empty = uapi::uinput_setup::default();
+            setup_empty.id = setup.id;
+            setup_empty.name[0] = 0;
+            current_task
+                .write_object(UserRef::new(user_setup), &setup_empty)
+                .expect("write_object");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_DEV_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, Ok(SUCCESS));
+            {
+                let inner = dev.inner.lock();
+                assert_eq!(inner.name, Some(DEFAULT_UINPUT_DEVICE_NAME.to_string()));
+            }
+        })
+        .await;
+    }
+
+    fn spawn_mock_registry() -> (
+        futinput::RegistrySynchronousProxy,
+        std::thread::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<starnix_sync::Mutex<Option<DisplayDimensions>>>,
+    ) {
+        let (client, server) = fidl::endpoints::create_endpoints::<futinput::RegistryMarker>();
+        let proxy = client.into_sync_proxy();
+        let received_request = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let received_flag = received_request.clone();
+        let captured_display_dimensions = Arc::new(starnix_sync::Mutex::new(None));
+        let dimensions_slot = captured_display_dimensions.clone();
+        let handle = std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server.into_stream();
+                while let Ok(Some(request)) = stream.try_next().await {
+                    received_flag.store(true, Ordering::SeqCst);
+                    match request {
+                        futinput::RegistryRequest::RegisterTouchScreenAndGetDeviceInfo {
+                            payload,
+                            responder,
+                        } => {
+                            assert_eq!(
+                                payload.coordinate_unit,
+                                Some(CoordinateUnit::RegisteredDimensions)
+                            );
+                            *dimensions_slot.lock() = payload.display_dimensions;
+                            let _ = responder.send(
+                                futinput::RegistryRegisterTouchScreenAndGetDeviceInfoResponse {
+                                    device_id: Some(101),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        futinput::RegistryRequest::RegisterKeyboardAndGetDeviceInfo {
+                            responder,
+                            ..
+                        } => {
+                            let _ = responder.send(
+                                futinput::RegistryRegisterKeyboardAndGetDeviceInfoResponse {
+                                    device_id: Some(102),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+        (proxy, handle, received_request, captured_display_dimensions)
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_keyboard_and_destroy() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+            let (proxy, join_handle, received, _) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 1, product: 2, version: 3 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("test_keyboard".to_string());
+                inner.enabled_evbits.set(uapi::EV_KEY as usize, true);
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(uinput_running());
+            assert!(received.load(Ordering::SeqCst));
+
+            // Verify device was updated in relay handle
+            {
+                let device_infos = dev.input_relay_handle.device_infos.lock();
+                let info = device_infos.get(&102).expect("device info found").lock();
+                assert_eq!(info.name, "test_keyboard");
+                assert_eq!(info.input_id, input_id);
+            }
+
+            // Destroy device via ioctl
+            let r =
+                dev.ioctl(&file_object, current_task, uapi::UI_DEV_DESTROY, SyscallArg::from(0u64));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(!uinput_running());
+            // Device metadata remains in device_infos until removed via OnDeviceChanged(Removed)
+            assert!(dev.input_relay_handle.device_infos.lock().get(&102).is_some());
+
+            // A second UI_DEV_DESTROY returns EPERM
+            let r =
+                dev.ioctl(&file_object, current_task, uapi::UI_DEV_DESTROY, SyscallArg::from(0u64));
+            assert_eq!(r, error!(EPERM));
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_touchscreen_display_size_fallback_and_drop_cleanup() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (input_relay_handle, _, _, _, _, _, _, _, _, _, _, _) =
+                start_input_relays_for_test(current_task, EventProxyMode::None).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+
+            // Pre-set display_size to (0, 0) to ensure zero display sizes are filtered
+            // out and fall back to DEFAULT_TOUCHSCREEN_WIDTH and HEIGHT without panicking.
+            *input_relay_handle.display_size.lock() = Some((0, 0));
+
+            let dev = Arc::new(UinputDeviceFile::new(input_relay_handle.clone()));
+            let (proxy, join_handle, received, captured_dimensions) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 5, product: 6, version: 7 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("test_touchscreen".to_string());
+                inner.enabled_evbits.set(uapi::EV_ABS as usize, true);
+                // Leave x_range and y_range as None to trigger fallback to display_size
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(uinput_running());
+            assert!(received.load(Ordering::SeqCst));
+            assert_eq!(
+                *captured_dimensions.lock(),
+                Some(DisplayDimensions {
+                    min_x: 0,
+                    max_x: DEFAULT_TOUCHSCREEN_WIDTH.into(),
+                    min_y: 0,
+                    max_y: DEFAULT_TOUCHSCREEN_HEIGHT.into(),
+                })
+            );
+
+            // Verify device info was inserted
+            assert!(input_relay_handle.device_infos.lock().get(&101).is_some());
+
+            // Dropping dev should trigger Drop::drop and clean up the device and running count
+            std::mem::drop(dev);
+            assert!(!uinput_running());
+            // Device metadata remains in device_infos until removed via OnDeviceChanged(Removed)
+            assert!(input_relay_handle.device_infos.lock().get(&101).is_some());
+
+            let _ = join_handle.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_touchscreen_explicit_ranges() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+            let (proxy, join_handle, _, captured_dimensions) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 10, product: 20, version: 30 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("touch_ranges".to_string());
+                inner.enabled_evbits.set(uapi::EV_ABS as usize, true);
+                inner.x_range = Some(Range { min: 100, max: 2000 });
+                inner.y_range = Some(Range { min: 50, max: 1000 });
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(uinput_running());
+            assert_eq!(
+                *captured_dimensions.lock(),
+                Some(DisplayDimensions { min_x: 100, max_x: 2000, min_y: 50, max_y: 1000 })
+            );
+            assert!(dev.input_relay_handle.device_infos.lock().get(&101).is_some());
+
+            // Destroy and verify clean
+            let r = dev.ui_dev_destroy(current_task);
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(!uinput_running());
+            // Device metadata remains in device_infos until removed via OnDeviceChanged(Removed)
+            assert!(dev.input_relay_handle.device_infos.lock().get(&101).is_some());
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_already_created_returns_einval() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+            let (proxy, join_handle, _, _) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 1, product: 2, version: 3 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("test_keyboard".to_string());
+                inner.enabled_evbits.set(uapi::EV_KEY as usize, true);
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(uinput_running());
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 1);
+
+            // Second UI_DEV_CREATE on same fd must return EINVAL and not increment device count
+            let (proxy2, join_handle2, _, _) = spawn_mock_registry();
+            let r = dev.ui_dev_create_inner(Some(proxy2));
+            assert_eq!(r, error!(EINVAL));
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 1);
+
+            // Destroy and verify clean
+            let r = dev.ui_dev_destroy(current_task);
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(!uinput_running());
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 0);
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
+            let _ = join_handle2.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_abs_setup_validates_ranges() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let user_setup = map_memory(
+                current_task,
+                UserAddress::default(),
+                std::mem::size_of::<starnix_uapi::uinput_abs_setup>() as u64,
+            );
+
+            // Valid range
+            let valid_setup = starnix_uapi::uinput_abs_setup {
+                code: uapi::ABS_MT_POSITION_X as u16,
+                absinfo: uapi::input_absinfo { minimum: 0, maximum: 1080, ..Default::default() },
+                ..Default::default()
+            };
+            current_task.write_object(UserRef::new(user_setup), &valid_setup).expect("write");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_ABS_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, Ok(SUCCESS));
+
+            // Invalid range where minimum >= maximum
+            let invalid_setup = starnix_uapi::uinput_abs_setup {
+                code: uapi::ABS_MT_POSITION_X as u16,
+                absinfo: uapi::input_absinfo { minimum: 100, maximum: 100, ..Default::default() },
+                ..Default::default()
+            };
+            current_task.write_object(UserRef::new(user_setup), &invalid_setup).expect("write");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_ABS_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, error!(EINVAL));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_touchscreen_invalid_ranges_returns_einval() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            let (proxy, join_handle, _, _) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 10, product: 20, version: 30 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("touch_invalid_ranges".to_string());
+                inner.enabled_evbits.set(uapi::EV_ABS as usize, true);
+                // Invalid ranges min >= max
+                inner.x_range = Some(Range { min: 2000, max: 100 });
+                inner.y_range = Some(Range { min: 50, max: 1000 });
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, error!(EINVAL));
+            assert!(!uinput_running());
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_failure_preserves_running_count_and_state() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 0);
+            assert!(!uinput_running());
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 1, product: 2, version: 3 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("test_keyboard".to_string());
+                inner.enabled_evbits.set(uapi::EV_KEY as usize, true);
+            }
+
+            // Attempting to create the device when no registry is available (None) must fail.
+            let r = dev.ui_dev_create_inner(None);
+            assert_eq!(r, error!(EPERM));
+
+            // Verify created_device remains None and COUNT_OF_UINPUT_DEVICE was not incremented.
+            assert!(matches!(dev.inner.lock().created_device, CreatedDevice::None));
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 0);
+            assert!(!uinput_running());
+
+            // Dropping dev must not decrement COUNT_OF_UINPUT_DEVICE.
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            assert_eq!(COUNT_OF_UINPUT_DEVICE.load(Ordering::SeqCst), 0);
+            assert!(!uinput_running());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_before_setup_returns_einval() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+
+            // Calling UI_DEV_CREATE before UI_DEV_SETUP without registry must return EINVAL (not EPERM).
+            let r = dev.ui_dev_create_inner(None);
+            assert_eq!(r, error!(EINVAL));
+
+            // Also verify calling via ioctl directly returns EINVAL without attempting registry connection.
+            let r =
+                dev.ioctl(&file_object, current_task, uapi::UI_DEV_CREATE, SyscallArg::from(0u64));
+            assert_eq!(r, error!(EINVAL));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_dev_create_touchscreen_single_axis_range_fallback() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            assert!(!uinput_running());
+            let (proxy, join_handle, _, captured_dimensions) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 10, product: 20, version: 30 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("touch_single_axis".to_string());
+                inner.enabled_evbits.set(uapi::EV_ABS as usize, true);
+                // Only configure X axis, leave Y axis as None to fallback to display height
+                inner.x_range = Some(Range { min: 100, max: 2000 });
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+            assert!(uinput_running());
+            assert_eq!(
+                *captured_dimensions.lock(),
+                Some(DisplayDimensions { min_x: 100, max_x: 2000, min_y: 0, max_y: 1200 })
+            );
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn ui_setup_after_create_returns_einval() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (dev, file_object) = new_kernel_objects(current_task).await;
+            let _guard = ensure_uinput_running_lock();
+            let (proxy, join_handle, _, _) = spawn_mock_registry();
+
+            let input_id = uapi::input_id { bustype: 3, vendor: 10, product: 20, version: 30 };
+            {
+                let mut inner = dev.inner.lock();
+                inner.input_id = Some(input_id);
+                inner.name = Some("created_dev".to_string());
+                inner.enabled_evbits.set(uapi::EV_KEY as usize, true);
+            }
+
+            let r = dev.ui_dev_create_inner(Some(proxy));
+            assert_eq!(r, Ok(SUCCESS));
+
+            // UI_SET_EVBIT after create must return EINVAL.
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_SET_EVBIT,
+                SyscallArg::from(uapi::EV_KEY as u64),
+            );
+            assert_eq!(r, error!(EINVAL));
+
+            // UI_ABS_SETUP after create must return EINVAL.
+            let user_setup = map_memory(
+                current_task,
+                UserAddress::default(),
+                std::mem::size_of::<starnix_uapi::uinput_abs_setup>() as u64,
+            );
+            let valid_setup = starnix_uapi::uinput_abs_setup {
+                code: uapi::ABS_MT_POSITION_X as u16,
+                absinfo: uapi::input_absinfo { minimum: 0, maximum: 100, ..Default::default() },
+                ..Default::default()
+            };
+            current_task.write_object(UserRef::new(user_setup), &valid_setup).expect("write");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_ABS_SETUP,
+                SyscallArg::from(user_setup.ptr() as u64),
+            );
+            assert_eq!(r, error!(EINVAL));
+
+            // UI_DEV_SETUP after create must return EINVAL.
+            let user_dev_setup = map_memory(
+                current_task,
+                UserAddress::default(),
+                std::mem::size_of::<uapi::uinput_setup>() as u64,
+            );
+            let dev_setup = uapi::uinput_setup {
+                id: uapi::input_id { bustype: 3, vendor: 1, product: 2, version: 3 },
+                ..Default::default()
+            };
+            current_task.write_object(UserRef::new(user_dev_setup), &dev_setup).expect("write");
+            let r = dev.ioctl(
+                &file_object,
+                current_task,
+                uapi::UI_DEV_SETUP,
+                SyscallArg::from(user_dev_setup.ptr() as u64),
+            );
+            assert_eq!(r, error!(EINVAL));
+
+            std::mem::drop(dev);
+            std::mem::drop(file_object);
+            let _ = join_handle.join();
         })
         .await;
     }

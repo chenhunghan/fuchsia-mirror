@@ -9,14 +9,14 @@ use crate::kernel::thread::{FxtRef, ThreadPtr};
 pub use crate::kernel::types::Koid;
 pub use crate::platform_rs::timer::InstantBootTicks;
 use crate::platform_rs::timer::timer_current_boot_ticks;
-use core::cell::UnsafeCell;
-use core::mem::{MaybeUninit, size_of};
+use core::mem::size_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use core::{ffi, ptr, slice};
 pub use fxt_layout::{
-    ArgumentHeader, ArgumentType, EventRecordHeader, EventType, KernelObjectRecordHeader,
-    LargeRecordHeader, RecordHeader, RecordType, StringRefHeader,
+    ArgumentHeader, ArgumentType, ContextSwitchRecordHeader, EventRecordHeader, EventType,
+    KernelObjectRecordHeader, LargeRecordHeader, RecordHeader, RecordType, SchedulerEventType,
+    StringRefHeader, ThreadWakeupRecordHeader,
 };
 use kalloc::Box;
 use kstring::interned_category::InternedCategory;
@@ -51,11 +51,35 @@ pub struct KTraceState {
 const _: () = assert!(size_of::<KTraceState>() == 8);
 // LINT.ThenChange(//zircon/kernel/include/lib/ktrace.h:KTraceState)
 
+impl KTraceState {
+    pub const fn new() -> Self {
+        Self { categories_bitmask: AtomicU32::new(0), writes_enabled: AtomicBool::new(false) }
+    }
+
+    #[inline]
+    pub fn is_category_enabled(&self, category: &InternedCategory) -> bool {
+        let category_index = category.index();
+        if category_index == InternedCategory::INVALID_INDEX {
+            return false;
+        }
+        let bitmask = self.categories_bitmask.load(Ordering::Acquire);
+        (bitmask & (1 << category_index)) != 0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub static GLOBAL_KTRACE_STATE: KTraceState = KTraceState::new();
+
 declare_interned_category!(META_CAT, "kernel:meta", extern);
 declare_interned_string!(DROP_STATS_REF, "drop_stats", extern);
 declare_interned_string!(NUM_RECORDS_REF, "num_records", extern);
 declare_interned_string!(NUM_BYTES_REF, "num_bytes", extern);
 
+unsafe extern "C" {
+    fn cpp_ktrace_get_active_instance() -> *mut ffi::c_void;
+    #[cfg(ktest)]
+    fn cpp_ktrace_get_thread_local_override() -> *mut ffi::c_void;
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Thread = 0,
@@ -63,6 +87,7 @@ pub enum Context {
 }
 
 /// The value of a trace argument.
+#[derive(Clone, Copy)]
 pub enum ArgValue<'a> {
     Null,
     Bool(bool),
@@ -123,7 +148,6 @@ impl<'a> From<&'static InternedString> for ArgValue<'a> {
         ArgValue::InternedString(v)
     }
 }
-
 /// A wrapper for KOID values passed as trace arguments.
 impl<'a> From<Koid> for ArgValue<'a> {
     fn from(v: Koid) -> Self {
@@ -196,7 +220,7 @@ impl<'a> StringRef<'a> {
         }
     }
 }
-
+#[derive(Clone, Copy)]
 pub struct Argument<'a> {
     name: &'static InternedString,
     value: ArgValue<'a>,
@@ -314,6 +338,7 @@ pub struct KTraceScope<'a, const N: usize> {
     timestamp: InstantBootTicks,
     context: Context,
     args: [Argument<'a>; N],
+    ended: bool,
 }
 
 impl<'a, const N: usize> KTraceScope<'a, N> {
@@ -326,25 +351,58 @@ impl<'a, const N: usize> KTraceScope<'a, N> {
         args: [Argument<'a>; N],
     ) -> Self {
         let timestamp = KTrace::timestamp();
-        Self { category, name, timestamp, context, args }
+        Self { category, name, timestamp, context, args, ended: false }
+    }
+
+    #[inline]
+    pub const fn is_ended(&self) -> bool {
+        self.ended
+    }
+
+    #[inline]
+    pub fn end(&mut self) {
+        self.end_with_args(&[]);
+    }
+
+    #[inline(never)]
+    #[cold]
+    pub fn end_with_args(&mut self, end_args: &[Argument<'_>]) {
+        if !self.ended {
+            if KTrace::category_enabled(self.category) {
+                let end_time = KTrace::timestamp();
+                KTrace::emit_event(
+                    EventType::DurationComplete,
+                    self.category,
+                    self.name,
+                    self.timestamp,
+                    self.context,
+                    Some(end_time.0 as u64),
+                    &self.args,
+                    end_args,
+                );
+            }
+            self.ended = true;
+        }
     }
 }
 
 impl<'a, const N: usize> Drop for KTraceScope<'a, N> {
-    #[inline(never)]
-    #[cold]
+    #[inline]
     fn drop(&mut self) {
-        let end_time = KTrace::timestamp();
-        let ktrace = KTrace::get_instance();
-        ktrace.emit_event(
-            EventType::DurationComplete,
-            self.category,
-            self.name,
-            self.timestamp,
-            self.context,
-            Some(end_time.0 as u64),
-            &self.args,
-        );
+        self.end_with_args(&[]);
+    }
+}
+
+/// Type-erased interface for ending a `KTraceScope<'a, N>` early across function boundaries
+/// without monomorphizing the callee over the argument count `N` (used by the scheduler to end
+/// an outer trace scope before context switching).
+pub trait ErasedScope {
+    fn end(&mut self);
+}
+
+impl<'a, const N: usize> ErasedScope for KTraceScope<'a, N> {
+    fn end(&mut self) {
+        KTraceScope::end(self);
     }
 }
 
@@ -626,33 +684,77 @@ impl<'a> KTraceReservation<'a> {
 
 /// A pure Rust implementation of KTrace.
 pub struct KTrace {
-    /// Reference to the shared C++ KTraceState.
+    /// Pointer to the shared C++ KTraceState.
+    ///
+    /// We use `NonNull` rather than `&'static KTraceState` because test instances created via
+    /// `rust_ktrace_init` may point to stack-allocated state that lives only until the matching
+    /// `rust_ktrace_free` call.
     // TODO(https://fxbug.dev/517305548): This should be made a direct allocation, and not a
-    // reference, once the C++ implementation is removed.
-    state: &'static KTraceState,
+    // pointer, once the C++ implementation is removed.
+    state: NonNull<KTraceState>,
 
     /// A heap-allocated slice of atomic pointers to per-CPU buffers.
-    /// Allocated once at boot time, and accessed completely lock-free on the hot path by CPU ID.
+    /// Allocated once at initialization time, and accessed completely lock-free on the hot path
+    /// by CPU ID.
     buffers: Box<[AtomicPtr<KTraceBuffer>]>,
 }
 
-// SAFETY: KTrace is a global singleton. Access to the per-CPU buffers is synchronized.
+// SAFETY: KTrace state fields are accessed via atomics and remain valid for the lifetime of the
+// KTrace instance. Access to the per-CPU buffers is synchronized via atomic pointers and
+// interrupt-disabled critical sections.
 unsafe impl Sync for KTrace {}
 unsafe impl Send for KTrace {}
 
-#[repr(transparent)]
-struct KTraceSingleton(UnsafeCell<MaybeUninit<KTrace>>);
-
-unsafe impl Sync for KTraceSingleton {}
-unsafe impl Send for KTraceSingleton {}
-
-static INSTANCE: KTraceSingleton = KTraceSingleton(UnsafeCell::new(MaybeUninit::uninit()));
-
 impl KTrace {
-    /// Retrieve the global instance of KTrace.
-    pub fn get_instance() -> &'static Self {
-        // SAFETY: KTrace must be initialized during kernel boot.
-        unsafe { &*INSTANCE.0.get().cast::<KTrace>() }
+    /// Executes `f` with a reference to the active instance of KTrace, if initialized.
+    ///
+    /// Passing a closure rather than returning `&'static Self` ensures the reference cannot
+    /// escape the scope in which the active instance (including any thread-local test override)
+    /// is guaranteed to remain alive.
+    #[inline]
+    pub fn with_instance<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        // SAFETY: FFI call returns the active KTrace instance pointer (either the global
+        // singleton or a thread-local test override).
+        let ptr = unsafe { cpp_ktrace_get_active_instance() };
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: The pointer returned by `cpp_ktrace_get_active_instance` points to a
+            // valid `KTrace` instance that remains alive for the duration of this call.
+            Some(f(unsafe { &*ptr.cast::<Self>() }))
+        }
+    }
+
+    #[cfg(ktest)]
+    #[inline]
+    fn with_override<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        // SAFETY: FFI call returns the current thread's test override KTrace pointer, or null.
+        let ptr = unsafe { cpp_ktrace_get_thread_local_override() };
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
+            // valid `KTrace` instance that remains alive for the duration of this call on the
+            // current thread.
+            Some(f(unsafe { &*ptr.cast::<Self>() }))
+        }
+    }
+
+    /// Returns true if the given category is enabled in the active KTrace state.
+    #[inline]
+    pub fn category_enabled(category: &InternedCategory) -> bool {
+        #[cfg(ktest)]
+        if let Some(enabled) = Self::with_override(|ktrace| ktrace.is_category_enabled(category)) {
+            return enabled;
+        }
+        GLOBAL_KTRACE_STATE.is_category_enabled(category)
+    }
+
+    #[inline(always)]
+    fn state(&self) -> &KTraceState {
+        // SAFETY: `self.state` is guaranteed by `rust_ktrace_init` to point to a valid
+        // `KTraceState` that outlives this `KTrace` instance.
+        unsafe { self.state.as_ref() }
     }
 
     /// Returns the current timestamp from the ktrace clock source.
@@ -687,34 +789,30 @@ impl KTrace {
             return Err(Status::BAD_STATE);
         }
 
+        // SAFETY: ptr is non-null and points to a valid KTraceBuffer for curr_cpu.
         let buf = unsafe { &mut *ptr };
         buf.reserve(header)
     }
 
     /// Returns true if writes are currently enabled.
     pub fn writes_enabled(&self) -> bool {
-        self.state.writes_enabled.load(Ordering::Acquire)
+        self.state().writes_enabled.load(Ordering::Acquire)
     }
 
     /// Returns the categories bitmask.
     pub fn categories_bitmask(&self) -> u32 {
-        self.state.categories_bitmask.load(Ordering::Acquire)
+        self.state().categories_bitmask.load(Ordering::Acquire)
     }
 
     /// Returns true if the given category is enabled.
     pub fn is_category_enabled(&self, category: &InternedCategory) -> bool {
-        let category_index = category.index();
-        if category_index == InternedCategory::INVALID_INDEX {
-            return false;
-        }
-        let bitmask = self.categories_bitmask();
-        (bitmask & (1 << category_index)) != 0
+        self.state().is_category_enabled(category)
     }
 
-    /// Reads up to `len` bytes from the ktrace buffer starting at `offset` into `ptr`.
+    /// Reads up to `len` bytes from the global ktrace buffer starting at `offset` into `ptr`.
     ///
     /// Returns the number of bytes actually read.
-    pub fn read_user(&self, ptr: UserOutPtr<u8>, offset: u32, len: usize) -> Result<usize, Status> {
+    pub fn read_user(ptr: UserOutPtr<u8>, offset: u32, len: usize) -> Result<usize, Status> {
         let mut actual = 0usize;
         // SAFETY: `cpp_ktrace_read_user` reads trace data from the global ktrace buffer into the
         // user buffer represented by `ptr` and writes the actual count into `actual`.
@@ -723,8 +821,8 @@ impl KTrace {
         Ok(actual)
     }
 
-    /// Performs a control operation on the ktrace subsystem.
-    pub fn control(&self, action: u32, options: u32) -> Result<(), Status> {
+    /// Performs a control operation on the global ktrace subsystem.
+    pub fn control(action: u32, options: u32) -> Result<(), Status> {
         // SAFETY: `cpp_ktrace_control` starts, stops, or rewinds tracing using validated action/options.
         let status = unsafe { cpp_ktrace_control(action, options) };
         Status::ok(status)
@@ -736,44 +834,45 @@ impl KTrace {
     #[inline(never)]
     #[cold]
     pub fn emit_kernel_object_outlined<'a>(
-        &self,
         koid: u64,
         obj_type: u32,
         name: impl Into<StringRef<'a>>,
         args: &[Argument<'_>],
     ) {
-        let _guard = InterruptDisableGuard::new();
-        if !self.writes_enabled() {
-            return;
-        }
-
-        let name = name.into();
-        let base_size = 2; // Header, KOID
-        let name_size = name.payload_words();
-        let args = if args.len() > 15 { &args[..15] } else { args };
-        let args_size: usize = args.iter().map(|a| a.size_words()).sum();
-        let total_size_words = base_size + name_size + args_size;
-
-        if total_size_words > 0xfff {
-            return;
-        }
-
-        let mut header = KernelObjectRecordHeader::default();
-        header
-            .set_record_size(total_size_words as u16)
-            .set_obj_type(obj_type as u8)
-            .set_name_ref(name.header_entry())
-            .set_arg_count(args.len() as u8);
-
-        // SAFETY: Interrupts are disabled by `_guard`, guaranteeing mutual exclusion during reservation.
-        if let Ok(mut res) = unsafe { self.reserve(header.bits()) } {
-            let _ = res.write_word(koid);
-            let _ = name.write(&mut res);
-            for arg in args {
-                let _ = arg.write(&mut res);
+        let _ = Self::with_instance(|ktrace| {
+            let _guard = InterruptDisableGuard::new();
+            if !ktrace.writes_enabled() {
+                return;
             }
-            let _ = res.commit();
-        }
+
+            let name = name.into();
+            let base_size = 2; // Header, KOID
+            let name_size = name.payload_words();
+            let args = if args.len() > 15 { &args[..15] } else { args };
+            let args_size: usize = args.iter().map(|a| a.size_words()).sum();
+            let total_size_words = base_size + name_size + args_size;
+
+            if total_size_words > 0xfff {
+                return;
+            }
+
+            let mut header = KernelObjectRecordHeader::default();
+            header
+                .set_record_size(total_size_words as u16)
+                .set_obj_type(obj_type as u8)
+                .set_name_ref(name.header_entry())
+                .set_arg_count(args.len() as u8);
+
+            // SAFETY: Interrupts are disabled by `_guard`, guaranteeing mutual exclusion during reservation.
+            if let Ok(mut res) = unsafe { ktrace.reserve(header.bits()) } {
+                let _ = res.write_word(koid);
+                let _ = name.write(&mut res);
+                for arg in args {
+                    let _ = arg.write(&mut res);
+                }
+                let _ = res.commit();
+            }
+        });
     }
 
     /// Low-level helper to write a generic FXT event record.
@@ -783,95 +882,202 @@ impl KTrace {
     #[inline(never)]
     #[cold]
     pub fn emit_event(
-        &self,
         event_type: EventType,
         category: &InternedCategory,
         name: &InternedString,
         timestamp: InstantBootTicks,
         context: Context,
         content: Option<u64>,
+        args1: &[Argument<'_>],
+        args2: &[Argument<'_>],
+    ) {
+        let _ = Self::with_instance(|ktrace| {
+            let _guard = InterruptDisableGuard::new();
+            if !ktrace.writes_enabled() {
+                return;
+            }
+
+            // 1. Get the process/thread KOIDs for the context.
+            let (process_koid, thread_koid) = match context {
+                Context::Thread => {
+                    // SAFETY: ktrace is initialized and running after threading has been initialized.
+                    let FxtRef { pid, tid } = unsafe { ThreadPtr::current().fxt_ref() };
+                    (pid, tid)
+                }
+                Context::Cpu => {
+                    let cpu = curr_cpu_num() as usize;
+                    if cpu >= ktrace.buffers.len() {
+                        return;
+                    }
+                    let ptr = ktrace.buffers[cpu].load(Ordering::Acquire);
+                    if ptr.is_null() {
+                        return;
+                    }
+                    // SAFETY: ptr is non-null and points to a valid KTraceBuffer.
+                    let buf = unsafe { &*ptr };
+                    (buf.process_koid, buf.thread_koid)
+                }
+            };
+
+            // 2. Calculate the record size.
+            let base_size = 4; // Header, Timestamp, Process KOID, Thread KOID
+            let content_size = if content.is_some() { 1 } else { 0 };
+            let args1_take = args1.len().min(15);
+            let args2_take = (15 - args1_take).min(args2.len());
+            let args1 = &args1[..args1_take];
+            let args2 = &args2[..args2_take];
+            let total_args_count = args1.len() + args2.len();
+            let args_size: usize = args1.iter().map(|a| a.size_words()).sum::<usize>()
+                + args2.iter().map(|a| a.size_words()).sum::<usize>();
+            let total_size_words = base_size + content_size + args_size;
+
+            if total_size_words > 0xfff {
+                return;
+            }
+
+            // 3. Construct the header.
+            let mut header = EventRecordHeader::default();
+            header
+                .set_record_size(total_size_words as u16)
+                .set_event_type(event_type)
+                .set_arg_count(total_args_count as u8)
+                .set_category_ref(category.label().id())
+                .set_name_ref(name.id());
+
+            // 4. Reserve space and write the record.
+            // SAFETY: Interrupts are disabled by InterruptDisableGuard.
+            if let Ok(mut res) = unsafe { ktrace.reserve(header.bits()) } {
+                let _ = res.write_word(timestamp.0 as u64);
+                let _ = res.write_word(process_koid);
+                let _ = res.write_word(thread_koid);
+
+                for arg in args1 {
+                    let _ = arg.write(&mut res);
+                }
+                for arg in args2 {
+                    let _ = arg.write(&mut res);
+                }
+
+                if let Some(c) = content {
+                    let _ = res.write_word(c);
+                }
+
+                let _ = res.commit();
+            }
+        });
+    }
+
+    /// Low-level helper to write an FXT context switch record.
+    ///
+    /// This is not inlined to reduce code size at the instrumentation sites.
+    #[inline(never)]
+    #[cold]
+    pub fn emit_context_switch(
+        cpu: u16,
+        outgoing_thread_state: u32,
+        outgoing_tid: u64,
+        incoming_tid: u64,
         args: &[Argument<'_>],
     ) {
-        let _guard = InterruptDisableGuard::new();
-        if !self.writes_enabled() {
-            return;
-        }
-
-        // 1. Get the process/thread KOIDs for the context.
-        let (process_koid, thread_koid) = match context {
-            Context::Thread => {
-                // SAFETY: ktrace is initialized and running after threading has been initialized.
-                let FxtRef { pid, tid } = unsafe { ThreadPtr::current().fxt_ref() };
-                (pid, tid)
+        let _ = Self::with_instance(|ktrace| {
+            let _guard = InterruptDisableGuard::new();
+            if !ktrace.writes_enabled() {
+                return;
             }
-            Context::Cpu => {
-                let cpu = curr_cpu_num() as usize;
-                if cpu >= self.buffers.len() {
-                    return;
+
+            let base_size = 4; // Header, Timestamp, Outgoing TID, Incoming TID
+            let args = if args.len() > 15 { &args[..15] } else { args };
+            let args_size: usize = args.iter().map(|a| a.size_words()).sum();
+            let total_size_words = base_size + args_size;
+
+            if total_size_words > 0xfff {
+                return;
+            }
+
+            let mut header = ContextSwitchRecordHeader::default();
+            header
+                .set_record_size(total_size_words as u16)
+                .set_arg_count(args.len() as u8)
+                .set_cpu_number(cpu)
+                .set_thread_state((outgoing_thread_state & 0xf) as u8);
+
+            let timestamp = KTrace::timestamp();
+            // SAFETY: Interrupts are disabled by InterruptDisableGuard.
+            if let Ok(mut res) = unsafe { ktrace.reserve(header.bits()) } {
+                let _ = res.write_word(timestamp.0 as u64);
+                let _ = res.write_word(outgoing_tid);
+                let _ = res.write_word(incoming_tid);
+                for arg in args {
+                    let _ = arg.write(&mut res);
                 }
-                let ptr = self.buffers[cpu].load(Ordering::Acquire);
-                if ptr.is_null() {
-                    return;
+                let _ = res.commit();
+            }
+        });
+    }
+
+    /// Low-level helper to write an FXT thread wakeup record.
+    ///
+    /// This is not inlined to reduce code size at the instrumentation sites.
+    #[inline(never)]
+    #[cold]
+    pub fn emit_thread_wakeup(cpu: u16, incoming_tid: u64, args: &[Argument<'_>]) {
+        let _ = Self::with_instance(|ktrace| {
+            let _guard = InterruptDisableGuard::new();
+            if !ktrace.writes_enabled() {
+                return;
+            }
+
+            let base_size = 3; // Header, Timestamp, Incoming TID
+            let args = if args.len() > 15 { &args[..15] } else { args };
+            let args_size: usize = args.iter().map(|a| a.size_words()).sum();
+            let total_size_words = base_size + args_size;
+
+            if total_size_words > 0xfff {
+                return;
+            }
+
+            let mut header = ThreadWakeupRecordHeader::default();
+            header
+                .set_record_size(total_size_words as u16)
+                .set_arg_count(args.len() as u8)
+                .set_cpu_number(cpu);
+
+            let timestamp = KTrace::timestamp();
+            // SAFETY: Interrupts are disabled by InterruptDisableGuard.
+            if let Ok(mut res) = unsafe { ktrace.reserve(header.bits()) } {
+                let _ = res.write_word(timestamp.0 as u64);
+                let _ = res.write_word(incoming_tid);
+                for arg in args {
+                    let _ = arg.write(&mut res);
                 }
-                let buf = unsafe { &*ptr };
-                (buf.process_koid, buf.thread_koid)
+                let _ = res.commit();
             }
-        };
-
-        // 2. Calculate the record size.
-        let base_size = 4; // Header, Timestamp, Process KOID, Thread KOID
-        let content_size = if content.is_some() { 1 } else { 0 };
-        let args = if args.len() > 15 { &args[..15] } else { args };
-        let args_size: usize = args.iter().map(|a| a.size_words()).sum();
-        let total_size_words = base_size + content_size + args_size;
-
-        if total_size_words > 0xfff {
-            return;
-        }
-
-        // 3. Construct the header.
-        let mut header = EventRecordHeader::default();
-        header
-            .set_record_size(total_size_words as u16)
-            .set_event_type(event_type)
-            .set_arg_count(args.len() as u8)
-            .set_category_ref(category.label().id())
-            .set_name_ref(name.id());
-
-        // 4. Reserve space and write the record.
-        if let Ok(mut res) = unsafe { self.reserve(header.bits()) } {
-            let _ = res.write_word(timestamp.0 as u64);
-            let _ = res.write_word(process_koid);
-            let _ = res.write_word(thread_koid);
-
-            for arg in args {
-                let _ = arg.write(&mut res);
-            }
-
-            if let Some(c) = content {
-                let _ = res.write_word(c);
-            }
-
-            let _ = res.commit();
-        }
+        });
     }
 }
 
-/// Initializes the global KTrace instance with the given number of CPU buffers.
+/// Initializes a KTrace instance with the given number of CPU buffers.
 ///
 /// # Safety
 ///
-/// This must be called at most once during kernel boot.
+/// - `state_ptr` must be non-null, properly aligned, and point to a valid `KTraceState` instance
+///   that remains alive and valid for concurrent atomic access until the initialized `KTrace`
+///   instance is freed via `rust_ktrace_free`.
+/// - `out_ktrace` must be non-null, properly aligned, and point to a writable `*mut ffi::c_void`
+///   slot exclusively available to receive ownership of the newly allocated `KTrace` instance
+///   pointer (which must eventually be freed via `rust_ktrace_free`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_ktrace_init(num_buffers: u32, state_ptr: *mut ffi::c_void) -> i32 {
-    if num_buffers == 0 || state_ptr.is_null() {
+pub unsafe extern "C" fn rust_ktrace_init(
+    num_buffers: u32,
+    state_ptr: *const ffi::c_void,
+    out_ktrace: *mut *mut ffi::c_void,
+) -> i32 {
+    if num_buffers == 0 || out_ktrace.is_null() {
         return Status::INVALID_ARGS.into_raw();
     }
-
-    // SAFETY: The caller guarantees that state_ptr points to a valid KTraceState instance
-    // which has static storage duration (lives forever) and is safe to access concurrently
-    // (since its fields are atomic).
-    let state = unsafe { &*state_ptr.cast::<KTraceState>() };
+    let Some(state) = NonNull::new(state_ptr.cast_mut().cast::<KTraceState>()) else {
+        return Status::INVALID_ARGS.into_raw();
+    };
 
     let buffers = match Box::<[AtomicPtr<KTraceBuffer>]>::try_new_zeroed_slice(num_buffers as usize)
     {
@@ -881,10 +1087,14 @@ pub unsafe extern "C" fn rust_ktrace_init(num_buffers: u32, state_ptr: *mut ffi:
 
     let ktrace = KTrace { state, buffers };
 
-    unsafe {
-        let slot = INSTANCE.0.get();
-        ptr::write(slot.cast::<KTrace>(), ktrace);
-    }
+    let boxed_ktrace = match Box::try_new(ktrace) {
+        Ok(b) => b,
+        Err(_) => return Status::NO_MEMORY.into_raw(),
+    };
+    let raw_ptr = Box::into_raw(boxed_ktrace);
+    // SAFETY: `out_ktrace` is non-null and the caller guarantees it points to a valid writable
+    // pointer slot.
+    unsafe { *out_ktrace = raw_ptr.cast::<ffi::c_void>() };
 
     zx_status::sys::ZX_OK
 }
@@ -893,10 +1103,16 @@ pub unsafe extern "C" fn rust_ktrace_init(num_buffers: u32, state_ptr: *mut ffi:
 ///
 /// # Safety
 ///
-/// - `spsc_buffer_ptr` must point to a valid C++ `SpscBuffer` instance
-///   which is binary-compatible with `spsc_buffer::Buffer<NoOpAllocator>`.
+/// - `ktrace_ptr` must be non-null and point to a live `KTrace` instance allocated by
+///   `rust_ktrace_init` that is not concurrently being freed.
+/// - `spsc_buffer_ptr` must point to a valid C++ `SpscBuffer` instance which is binary-compatible
+///   with `spsc_buffer::Buffer<NoOpAllocator>` and outlives the `KTrace` instance (or until
+///   replaced).
+/// - `drop_stats_ptr` must point to a valid `DroppedRecordStats` instance that outlives the
+///   `KTrace` instance (or until replaced).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_ktrace_init_cpu_buffer(
+    ktrace_ptr: *mut ffi::c_void,
     cpu_num: u32,
     spsc_buffer_ptr: *mut ffi::c_void,
     drop_stats_ptr: *mut ffi::c_void,
@@ -904,7 +1120,11 @@ pub unsafe extern "C" fn rust_ktrace_init_cpu_buffer(
     thread_koid: u64,
     cpu_ref_header_entry: u16,
 ) -> i32 {
-    let ktrace = KTrace::get_instance();
+    if ktrace_ptr.is_null() {
+        return Status::INVALID_ARGS.into_raw();
+    }
+    // SAFETY: ktrace_ptr points to a valid KTrace instance.
+    let ktrace = unsafe { &*ktrace_ptr.cast::<KTrace>() };
     if cpu_num >= ktrace.buffers.len() as u32 {
         return Status::INVALID_ARGS.into_raw();
     }
@@ -940,6 +1160,7 @@ pub unsafe extern "C" fn rust_ktrace_init_cpu_buffer(
     let old_ptr = ktrace.buffers[cpu_num as usize].swap(raw_ptr, Ordering::AcqRel);
     if !old_ptr.is_null() {
         // If there was a previous buffer, reclaim and drop it.
+        // SAFETY: old_ptr was previously allocated with Box::into_raw.
         unsafe {
             let _ = Box::from_raw(old_ptr);
         }
@@ -948,13 +1169,56 @@ pub unsafe extern "C" fn rust_ktrace_init_cpu_buffer(
     zx_status::sys::ZX_OK
 }
 
+/// Clears and frees all per-CPU buffers associated with a Rust `KTrace` instance without freeing
+/// the `KTrace` instance itself.
+///
+/// # Safety
+///
+/// `ktrace_ptr` must be null or point to a live `KTrace` instance allocated by `rust_ktrace_init`
+/// while writes are disabled and no concurrent readers or writers are accessing its CPU buffers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_ktrace_clear_cpu_buffers(ktrace_ptr: *mut ffi::c_void) {
+    if !ktrace_ptr.is_null() {
+        // SAFETY: ktrace_ptr points to a valid KTrace instance.
+        let ktrace = unsafe { &*ktrace_ptr.cast::<KTrace>() };
+        for ptr_atomic in ktrace.buffers.iter() {
+            let ptr = ptr_atomic.swap(ptr::null_mut(), Ordering::AcqRel);
+            if !ptr.is_null() {
+                // SAFETY: ptr was allocated with Box::into_raw.
+                unsafe {
+                    let _ = Box::from_raw(ptr);
+                }
+            }
+        }
+    }
+}
+
+/// Frees a Rust KTrace instance and all its associated CPU buffers.
+///
+/// # Safety
+///
+/// `ktrace_ptr` must be a pointer returned by `rust_ktrace_init` and must not be used after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_ktrace_free(ktrace_ptr: *mut ffi::c_void) {
+    if !ktrace_ptr.is_null() {
+        // SAFETY: ktrace_ptr is a valid KTrace instance being torn down.
+        unsafe { rust_ktrace_clear_cpu_buffers(ktrace_ptr) };
+        // SAFETY: ktrace_ptr was allocated with Box::into_raw.
+        let _ = unsafe { Box::from_raw(ktrace_ptr.cast::<KTrace>()) };
+    }
+}
+
 /// KTrace tests
 #[cfg(all(not(gcc), ktest))]
 #[unittest::suite(name = "ktrace_rust")]
 mod tests {
+    unsafe extern "C" {
+        fn cpp_ktrace_set_thread_local_override(ktrace_ptr: *mut ffi::c_void);
+    }
+
     use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num, max_num_cpus};
     use crate::kernel::thread::{FxtRef, ThreadPtr};
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::Ordering;
     use core::{ffi, ptr};
     use spsc_buffer::Buffer;
     use unittest::{
@@ -966,10 +1230,6 @@ mod tests {
     declare_interned_category!(CONTENTION_CAT, "kernel:contention", extern);
     declare_interned_category!(IPC_CAT, "kernel:ipc", extern);
     declare_interned_category!(IRQ_CAT, "kernel:irq", extern);
-
-    unsafe extern "C" {
-        fn ktrace_restore_rust_singleton();
-    }
 
     /// Initialization and size/metadata attributes.
     #[test]
@@ -998,27 +1258,44 @@ mod tests {
     fn invalid_buffer_guards() {
         let _guard = InterruptDisableGuard::new();
 
+        let local_state = KTraceState::new();
+        let local_state_ptr = ptr::from_ref(&local_state).cast::<ffi::c_void>();
+        let mut ktrace_ptr = ptr::null_mut();
+        let init_res = unsafe { rust_ktrace_init(1, local_state_ptr, &mut ktrace_ptr) };
+        expect_eq!(init_res, 0);
+        expect_false!(ktrace_ptr.is_null());
+
         // 1. rust_ktrace_init_cpu_buffer with null pointers.
         let mut stats = DroppedRecordStats::default();
         let stats_ptr = ptr::from_mut(&mut stats).cast::<ffi::c_void>();
-        let status_null_buf =
-            unsafe { rust_ktrace_init_cpu_buffer(0, ptr::null_mut(), stats_ptr, 100, 200, 1) };
+        let status_null_buf = unsafe {
+            rust_ktrace_init_cpu_buffer(ktrace_ptr, 0, ptr::null_mut(), stats_ptr, 100, 200, 1)
+        };
         expect_eq!(status_null_buf, Status::INVALID_ARGS.into_raw());
 
         let mut storage = [0u8; 256];
         let mut valid_inner =
             unsafe { Buffer::from_raw_parts(storage.as_mut_ptr(), storage.len()) };
         let valid_buf_ptr = ptr::from_mut(&mut valid_inner).cast::<ffi::c_void>();
-        let status_null_stats =
-            unsafe { rust_ktrace_init_cpu_buffer(0, valid_buf_ptr, ptr::null_mut(), 100, 200, 1) };
+        let status_null_stats = unsafe {
+            rust_ktrace_init_cpu_buffer(ktrace_ptr, 0, valid_buf_ptr, ptr::null_mut(), 100, 200, 1)
+        };
         expect_eq!(status_null_stats, Status::INVALID_ARGS.into_raw());
 
         // 2. rust_ktrace_init_cpu_buffer with invalid backing buffer (null storage / 0 size).
         let mut invalid_inner = Buffer::<NoOpAllocator>::empty();
         let invalid_buf_ptr = ptr::from_mut(&mut invalid_inner).cast::<ffi::c_void>();
-        let status_invalid =
-            unsafe { rust_ktrace_init_cpu_buffer(0, invalid_buf_ptr, stats_ptr, 100, 200, 1) };
+        let status_invalid = unsafe {
+            rust_ktrace_init_cpu_buffer(ktrace_ptr, 0, invalid_buf_ptr, stats_ptr, 100, 200, 1)
+        };
         expect_eq!(status_invalid, Status::BAD_STATE.into_raw());
+
+        let status_null_ktrace = unsafe {
+            rust_ktrace_init_cpu_buffer(ptr::null_mut(), 0, valid_buf_ptr, stats_ptr, 100, 200, 1)
+        };
+        expect_eq!(status_null_ktrace, Status::INVALID_ARGS.into_raw());
+
+        unsafe { rust_ktrace_free(ktrace_ptr) };
 
         // 3. Operating on KTraceBuffer wrapping an empty/invalid buffer with null storage.
         let mut kbuf = KTraceBuffer::new(
@@ -1238,15 +1515,15 @@ mod tests {
     /// Validate full global lifecycle.
     #[test]
     fn global_lifecycle() {
-        struct RestoreGuard;
-        impl Drop for RestoreGuard {
+        struct OverrideGuard(*mut ffi::c_void);
+        impl Drop for OverrideGuard {
             fn drop(&mut self) {
                 unsafe {
-                    ktrace_restore_rust_singleton();
+                    cpp_ktrace_set_thread_local_override(ptr::null_mut());
+                    rust_ktrace_free(self.0);
                 }
             }
         }
-        let _restore_guard = RestoreGuard;
         let _guard = InterruptDisableGuard::new();
 
         // Initialize indices of the categories we're testing.
@@ -1257,19 +1534,21 @@ mod tests {
         IPC_CAT.set_index(4, kstring::interned_category::InternedCategory::INVALID_INDEX);
         IRQ_CAT.set_index(5, kstring::interned_category::InternedCategory::INVALID_INDEX);
 
-        // 1. Initialize the global KTrace instance with the system CPU count buffers and a local
+        // 1. Initialize a test KTrace instance with the system CPU count buffers and a local
         // mock state.
         let num_cpus = max_num_cpus();
-        let mut local_state = KTraceState {
-            categories_bitmask: AtomicU32::new(0),
-            writes_enabled: AtomicBool::new(false),
-        };
-        let local_state_ptr = ptr::from_mut(&mut local_state).cast::<ffi::c_void>();
+        let local_state = KTraceState::new();
+        let local_state_ptr = ptr::from_ref(&local_state).cast::<ffi::c_void>();
 
-        let status = unsafe { rust_ktrace_init(num_cpus, local_state_ptr) };
+        let mut ktrace_ptr = ptr::null_mut();
+        let status = unsafe { rust_ktrace_init(num_cpus, local_state_ptr, &mut ktrace_ptr) };
         expect_eq!(status, 0);
+        expect_false!(ktrace_ptr.is_null());
+        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        let _override_guard = OverrideGuard(ktrace_ptr);
 
-        let ktrace = KTrace::get_instance();
+        let ktrace = unsafe { &*ktrace_ptr.cast::<KTrace>() };
+        expect_true!(KTrace::with_instance(|kt| ptr::eq(kt, ktrace)).unwrap_or(false));
 
         // 2. Verify initial states.
         expect_false!(ktrace.writes_enabled());
@@ -1304,6 +1583,7 @@ mod tests {
         let cpu = curr_cpu_num();
         let init_status = unsafe {
             rust_ktrace_init_cpu_buffer(
+                ktrace_ptr,
                 cpu, // cpu_num
                 inner_buf_ptr,
                 stats_ptr,
@@ -1654,8 +1934,32 @@ mod tests {
     /// A scope with arguments can be bound to a local variable.
     #[test]
     fn scope_owns_arguments() {
+        struct OverrideGuard(*mut ffi::c_void);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    cpp_ktrace_set_thread_local_override(ptr::null_mut());
+                    rust_ktrace_free(self.0);
+                }
+            }
+        }
+        let _guard = InterruptDisableGuard::new();
+        META_CAT.set_index(0, kstring::interned_category::InternedCategory::INVALID_INDEX);
+
+        let local_state = KTraceState::new();
+        let local_state_ptr = ptr::from_ref(&local_state).cast::<ffi::c_void>();
+        let mut ktrace_ptr = ptr::null_mut();
+        let status = unsafe { rust_ktrace_init(max_num_cpus(), local_state_ptr, &mut ktrace_ptr) };
+        expect_eq!(status, 0);
+        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        let _override_guard = OverrideGuard(ktrace_ptr);
+
         let value = KTrace::timestamp().0 as u64;
-        let scope = begin_scope!(META_CAT, "scope_owns_arguments", "val" => value);
+        expect_true!(begin_scope!(META_CAT, "scope_owns_arguments", "val" => value).is_none());
+
+        local_state.categories_bitmask.store(1 << META_CAT.index(), Ordering::Release);
+        let scope = begin_scope!(META_CAT, "scope_owns_arguments", "val" => value)
+            .expect("scope should be created when category is enabled");
 
         expect_ne!(scope.timestamp.0, 0);
         expect_eq!(scope.args.len(), 1);
@@ -1743,6 +2047,38 @@ mod tests {
         expect_eq!((ev_raw >> 24) & 0xff, 0);
         expect_eq!((ev_raw >> 32) & 0xffff, 10);
         expect_eq!((ev_raw >> 48) & 0xffff, 20);
+
+        // ContextSwitchRecordHeader
+        let mut cs = ContextSwitchRecordHeader::default();
+        cs.set_record_size(6).set_arg_count(2).set_cpu_number(0x1234).set_thread_state(3);
+        expect_eq!(cs.record_type(), RecordType::Scheduler);
+        expect_eq!(cs.record_size(), 6);
+        expect_eq!(cs.arg_count(), 2);
+        expect_eq!(cs.cpu_number(), 0x1234);
+        expect_eq!(cs.thread_state(), 3);
+        expect_eq!(cs.event_type(), SchedulerEventType::ContextSwitch);
+        let cs_raw = cs.bits();
+        expect_eq!(cs_raw & 0xf, 8);
+        expect_eq!((cs_raw >> 4) & 0xfff, 6);
+        expect_eq!((cs_raw >> 16) & 0xf, 2);
+        expect_eq!((cs_raw >> 20) & 0xffff, 0x1234);
+        expect_eq!((cs_raw >> 36) & 0xf, 3);
+        expect_eq!((cs_raw >> 60) & 0xf, 1);
+
+        // ThreadWakeupRecordHeader
+        let mut tw = ThreadWakeupRecordHeader::default();
+        tw.set_record_size(4).set_arg_count(1).set_cpu_number(0x5678);
+        expect_eq!(tw.record_type(), RecordType::Scheduler);
+        expect_eq!(tw.record_size(), 4);
+        expect_eq!(tw.arg_count(), 1);
+        expect_eq!(tw.cpu_number(), 0x5678);
+        expect_eq!(tw.event_type(), SchedulerEventType::ThreadWakeup);
+        let tw_raw = tw.bits();
+        expect_eq!(tw_raw & 0xf, 8);
+        expect_eq!((tw_raw >> 4) & 0xfff, 4);
+        expect_eq!((tw_raw >> 16) & 0xf, 1);
+        expect_eq!((tw_raw >> 20) & 0xffff, 0x5678);
+        expect_eq!((tw_raw >> 60) & 0xf, 2);
     }
 }
 
@@ -1757,8 +2093,16 @@ mod tests {
 /// This must be called with interrupts disabled.
 #[cfg(ktest)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_ktrace_test_interop(header: u64, val: u64) -> i32 {
-    let ktrace = KTrace::get_instance();
+pub unsafe extern "C" fn rust_ktrace_test_interop(
+    ktrace_ptr: *mut ffi::c_void,
+    header: u64,
+    val: u64,
+) -> i32 {
+    if ktrace_ptr.is_null() {
+        return -1;
+    }
+    // SAFETY: ktrace_ptr points to a valid KTrace instance.
+    let ktrace = unsafe { &*ktrace_ptr.cast::<KTrace>() };
     // SAFETY: The caller guarantees interrupts are disabled.
     if let Ok(mut res) = unsafe { ktrace.reserve(header) } {
         let _ = res.write_word(val);
@@ -1778,15 +2122,67 @@ pub unsafe extern "C" fn rust_ktrace_test_interop(header: u64, val: u64) -> i32 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_ktrace_test_macros() {
     // Exercise each macro. We'll write specific, distinguishable events.
-    instant!("kernel:meta", "rust_instant", Context::Thread, "val" => 101u32);
-    duration_begin!("kernel:meta", "rust_duration", Context::Thread, "val" => 102u32);
-    duration_end!("kernel:meta", "rust_duration", Context::Thread, "val" => 103u32);
+    instant!("kernel:meta", "rust_instant", crate::ktrace_rs::Context::Thread, "val" => 101u32);
+    duration_begin!(
+        "kernel:meta",
+        "rust_duration",
+        crate::ktrace_rs::Context::Thread,
+        "val" => 102u32
+    );
+    duration_end!(
+        "kernel:meta",
+        "rust_duration",
+        crate::ktrace_rs::Context::Thread,
+        "val" => 103u32
+    );
     counter!("kernel:meta", "rust_counter", 104u64, "val" => 105u32);
     flow_begin!("kernel:meta", "rust_flow", 106u64, "val" => 107u32);
     flow_step!("kernel:meta", "rust_flow", 106u64, "val" => 108u32);
     flow_end!("kernel:meta", "rust_flow", 106u64, "val" => 109u32);
-    complete!("kernel:meta", "rust_complete", InstantBootTicks(110i64), "val" => 111u32);
+    complete!(
+        "kernel:meta",
+        "rust_complete",
+        crate::ktrace_rs::InstantBootTicks(110i64),
+        crate::ktrace_rs::Context::Thread,
+        "val" => 111u32
+    );
     kernel_object!("kernel:meta", 112u64, 1u32, "rust_kernel_obj", "val" => 113u32);
     kernel_object_always!(114u64, 2u32, "rust_kernel_obj_always", "val" => 115u32);
     kernel_object!("kernel:meta", 116u64, 1u32, &b"dynamic_proc"[..], "job" => Koid(117u64));
+
+    let scope = cpu_begin_scope_cond!(true, "kernel:sched", "find_target", "cpu" => 0u32);
+    end_scope!(scope, "last_cpu" => 1u32, "target_cpu" => 2u32);
+
+    counter_timestamp!(
+        "kernel:meta",
+        "rust_counter_ts",
+        crate::ktrace_rs::InstantBootTicks(130i64),
+        131u64,
+        "val" => 132u32
+    );
+    cpu_counter!("kernel:sched", "rust_cpu_counter", 133u64, "val" => 134u32);
+    cpu_counter_timestamp!(
+        "kernel:sched",
+        "rust_cpu_counter_ts",
+        crate::ktrace_rs::InstantBootTicks(135i64),
+        136u64,
+        "val" => 137u32
+    );
+    cpu_flow_begin!("kernel:sched", "rust_cpu_flow", 138u64, "val" => 139u32);
+    cpu_flow_step!("kernel:sched", "rust_cpu_flow", 138u64, "val" => 140u32);
+    cpu_flow_end!("kernel:sched", "rust_cpu_flow", 138u64, "val" => 141u32);
+    {
+        let _cpu_scope = cpu_begin_scope!("kernel:sched", "rust_cpu_scope", "val" => 142u32);
+    }
+
+    context_switch!(
+        "kernel:sched",
+        2u16,
+        3u32,
+        120u64,
+        121u64,
+        "outgoing_weight" => 122u32,
+        "incoming_weight" => 123u32
+    );
+    thread_wakeup!("kernel:sched", 5u16, 124u64, "weight" => 125u32);
 }

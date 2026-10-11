@@ -18,28 +18,26 @@ use futures::{AsyncReadExt as _, FutureExt as _};
 
 use libc as _;
 use net_declare::fidl_subnet;
+use net_types::ip::{Ip, Ipv4, Ipv6};
 use netemul::{PacketCapture, TestEndpoint, TestNetwork};
 use netstack_testing_common::realms::{KnownServiceProvider, NetstackVersion};
 use netstack_testing_common::{devices, interfaces};
 
-trait IpExt {
+trait IpExt: Ip {
     const CLIENT_SUBNET: fnet::Subnet;
     const SERVER_SUBNET: fnet::Subnet;
-    const NAME: &'static str;
     const DOMAIN: fposix_socket::Domain;
 }
 
-impl IpExt for net_types::ip::Ipv4 {
+impl IpExt for Ipv4 {
     const CLIENT_SUBNET: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
     const SERVER_SUBNET: fnet::Subnet = fidl_subnet!("192.0.2.254/24");
-    const NAME: &'static str = "IPv4";
     const DOMAIN: fposix_socket::Domain = fposix_socket::Domain::Ipv4;
 }
 
-impl IpExt for net_types::ip::Ipv6 {
+impl IpExt for Ipv6 {
     const CLIENT_SUBNET: fnet::Subnet = fidl_subnet!("2001:0db8:abcd:efff::1/64");
     const SERVER_SUBNET: fnet::Subnet = fidl_subnet!("2001:0db8:abcd:efff:ffff:ffff:ffff:ffff/64");
-    const NAME: &'static str = "IPv6";
     const DOMAIN: fposix_socket::Domain = fposix_socket::Domain::Ipv6;
 }
 
@@ -178,16 +176,8 @@ async fn setup<'a>(
         InterfaceFidlProxies { _device_control: device_control, _control: control }
     }
     let (_client_if, _server_if) = futures::future::join(
-        install_interface(
-            &client_realm,
-            left_port,
-            [net_types::ip::Ipv4::CLIENT_SUBNET, net_types::ip::Ipv6::CLIENT_SUBNET],
-        ),
-        install_interface(
-            &server_realm,
-            right_port,
-            [net_types::ip::Ipv4::SERVER_SUBNET, net_types::ip::Ipv6::SERVER_SUBNET],
-        ),
+        install_interface(&client_realm, left_port, [Ipv4::CLIENT_SUBNET, Ipv6::CLIENT_SUBNET]),
+        install_interface(&server_realm, right_port, [Ipv4::SERVER_SUBNET, Ipv6::SERVER_SUBNET]),
     )
     .await;
 
@@ -202,105 +192,183 @@ fn format_byte_count(byte_count: usize) -> String {
     }
 }
 
+/// Connects a TCP socket in `client_realm` to a listener in `server_realm`,
+/// sizing the socket buffers for `transfer` bytes.
+async fn connect_tcp<'a, I: IpExt>(
+    client_realm: &netemul::TestRealm<'a>,
+    server_realm: &netemul::TestRealm<'a>,
+    transfer: usize,
+) -> (socket2::Socket, socket2::Socket) {
+    let (listen_sock, client_sock) = futures::future::join(
+        server_realm
+            .stream_socket(I::DOMAIN, fposix_socket::StreamSocketProtocol::Tcp)
+            .map(|r| r.expect("create listening socket")),
+        client_realm
+            .stream_socket(I::DOMAIN, fposix_socket::StreamSocketProtocol::Tcp)
+            .map(|r| r.expect("create client socket")),
+    )
+    .await;
+
+    // Since we want to avoid including the overhead of the async
+    // executor in the benchmarked read/write steps, intentionally keep
+    // the sockets non-async-aware and use `socket2` calls directly to
+    // connect the sockets.
+    let bind_sockaddr = {
+        let fnet_ext::IpAddress(listen_addr) = I::SERVER_SUBNET.addr.into();
+        socket2::SockAddr::from(std::net::SocketAddr::from((listen_addr, 0)))
+    };
+    listen_sock.bind(&bind_sockaddr).expect("bind");
+    listen_sock.listen(0).expect("listen");
+    let listen_sockaddr = listen_sock.local_addr().expect("local addr");
+
+    const BUFFER_SIZE_MULTIPLER: usize = 4;
+
+    // Set send buffer to a multiple of the transfer size to ensure we can
+    // write `transfer` bytes before reading it on the other end. The
+    // multiplier allows the receiver to delay acknowledgements but the
+    // transfer still proceeds. This is especially impactful for small
+    // transfer sizes.
+    client_sock
+        .set_send_buffer_size(transfer * BUFFER_SIZE_MULTIPLER)
+        .expect("set send buffer size");
+
+    // Also set the receive buffer size.
+    //
+    // We use the same multiplier on the transfer size so silly window
+    // avoidance doesn't kick in in-between test iterations which causes
+    // pollution in the results.
+    //
+    // This ensures fairness in the benchmark since TCP will base the window
+    // value on the available receive buffer size and different numbers will
+    // skew the test results.
+    listen_sock
+        .set_recv_buffer_size(transfer * BUFFER_SIZE_MULTIPLER)
+        .expect("set receive buffer size");
+
+    // Disable the Nagle algorithm, it introduces artificial
+    // latency that defeats this benchmark.
+    client_sock.set_tcp_nodelay(true).expect("set TCP NODELAY to true");
+    client_sock.connect(&listen_sockaddr).expect("connect");
+
+    let (server_sock, _): (_, socket2::SockAddr) = listen_sock.accept().expect("accept");
+
+    (client_sock, server_sock)
+}
+
+/// Writes all of `buf` to `sock`.
+fn write_all(mut sock: &socket2::Socket, buf: &[u8]) {
+    let mut transferred = 0;
+    while transferred < buf.len() {
+        fuchsia_trace::duration_begin!("tun_socket_benchmarks", "tcp_write");
+        let wrote = sock.write(&buf[transferred..]).expect("write failed");
+        fuchsia_trace::duration_end!(
+            "tun_socket_benchmarks", "tcp_write",
+            "bytes_written" => wrote as u64
+        );
+        transferred += wrote;
+    }
+}
+
+/// Fills `buf` from `sock`.
+fn read_exact(mut sock: &socket2::Socket, buf: &mut [u8]) {
+    let mut transferred = 0;
+    while transferred < buf.len() {
+        fuchsia_trace::duration_begin!("tun_socket_benchmarks", "tcp_read");
+        let read = sock.read(&mut buf[transferred..]).expect("read failed");
+        fuchsia_trace::duration_end!(
+            "tun_socket_benchmarks", "tcp_read",
+            "bytes_read" => read as u64
+        );
+        transferred += read;
+    }
+}
+
+/// Benchmarks transferring `transfer` bytes from `client_realm` to
+/// `server_realm`, split evenly across `flows` concurrent TCP connections.
+///
+/// Each iteration writes each connection's share of the transfer before
+/// reading any of it on the receiving end. With multiple connections, the
+/// shares are written concurrently from separate threads.
 async fn bench_tcp<'a, I: IpExt>(
     test_suite: &'static str,
     iter_count: usize,
     client_realm: &netemul::TestRealm<'a>,
     server_realm: &netemul::TestRealm<'a>,
     transfer: usize,
+    flows: usize,
     tun_or_network: &mut TunOrDebugNetwork<'a>,
 ) -> fuchsiaperf::FuchsiaPerfBenchmarkResult {
-    let label = format!("WriteRead/TCP/{}/{}", I::NAME, format_byte_count(transfer));
-    let _packet_capture = tun_or_network.start_capture(&label.replace("/", "-")).await;
-    let (mut client_sock, mut server_sock) = {
-        let (listen_sock, client_sock) = futures::future::join(
-            server_realm
-                .stream_socket(I::DOMAIN, fposix_socket::StreamSocketProtocol::Tcp)
-                .map(|r| r.expect("create listening socket")),
-            client_realm
-                .stream_socket(I::DOMAIN, fposix_socket::StreamSocketProtocol::Tcp)
-                .map(|r| r.expect("create client socket")),
-        )
-        .await;
+    assert_eq!(transfer % flows, 0, "transfer must divide evenly across flows");
+    let flow_transfer = transfer / flows;
 
-        // Since we want to avoid including the overhead of the async
-        // executor in the benchmarked read/write steps, intentionally keep
-        // the sockets non-async-aware and use `socket2` calls directly to
-        // connect the sockets.
-        let bind_sockaddr = {
-            let fnet_ext::IpAddress(listen_addr) = I::SERVER_SUBNET.addr.into();
-            socket2::SockAddr::from(std::net::SocketAddr::from((listen_addr, 0)))
-        };
-        listen_sock.bind(&bind_sockaddr).expect("bind");
-        listen_sock.listen(0).expect("listen");
-        let listen_sockaddr = listen_sock.local_addr().expect("local addr");
-
-        const BUFFER_SIZE_MULTIPLER: usize = 4;
-
-        // Set send buffer to a multiple of the transfer size to ensure we can
-        // write `transfer` bytes before reading it on the other end. The
-        // multiplier allows the receiver to delay acknowledgements but the
-        // transfer still proceeds. This is especially impactful for small
-        // transfer sizes.
-        client_sock
-            .set_send_buffer_size(transfer * BUFFER_SIZE_MULTIPLER)
-            .expect("set send buffer size");
-
-        // Also set the receive buffer size.
-        //
-        // We use the same multiplier on the transfer size so silly window
-        // avoidance doesn't kick in in-between test iterations which causes
-        // pollution in the results.
-        //
-        // This ensures fairness in the benchmark since TCP will base the window
-        // value on the available receive buffer size and different numbers will
-        // skew the test results.
-        listen_sock
-            .set_recv_buffer_size(transfer * BUFFER_SIZE_MULTIPLER)
-            .expect("set receive buffer size");
-
-        // Disable the Nagle algorithm, it introduces artificial
-        // latency that defeats this benchmark.
-        client_sock.set_tcp_nodelay(true).expect("set TCP NODELAY to true");
-        client_sock.connect(&listen_sockaddr).expect("connect");
-
-        let (server_sock, _): (_, socket2::SockAddr) = listen_sock.accept().expect("accept");
-
-        (client_sock, server_sock)
+    let label = if flows > 1 {
+        format!("WriteRead/TCP/{}/{}/{}Flows", I::NAME, format_byte_count(transfer), flows)
+    } else {
+        format!("WriteRead/TCP/{}/{}", I::NAME, format_byte_count(transfer))
     };
+    let _packet_capture = tun_or_network.start_capture(&label.replace("/", "-")).await;
+    let mut sockets = Vec::with_capacity(flows);
+    for _ in 0..flows {
+        sockets.push(connect_tcp::<I>(client_realm, server_realm, flow_transfer).await);
+    }
 
     fuchsia_trace::duration!("tun_socket_benchmarks", "test_group", "label" => &*label);
-    let values = (0..iter_count)
-        .map(|_| {
-            let (send_buf, mut recv_buf) = generate_send_recv_bufs(transfer);
+    let (client_socks, server_socks): (Vec<_>, Vec<_>) = sockets.into_iter().unzip();
+    // Every flow sends the same bytes, so they share a send buffer.
+    let (send_buf, recv_buf) = generate_send_recv_bufs(flow_transfer);
+    let send_buf = send_buf.as_slice();
+    // With multiple flows, each flow is written from its own thread so that
+    // the flows are written concurrently and their segments can be interleaved
+    // within a receive batch. The threads are spawned up front and synchronized
+    // with barriers to keep thread creation out of the measured duration.
+    //
+    // A single flow is written inline to avoid the synchronization overhead.
+    let barriers = (flows > 1).then(|| {
+        let start = std::sync::Barrier::new(flows + 1);
+        let done = std::sync::Barrier::new(flows + 1);
+        (start, done)
+    });
+    let values = std::thread::scope(|scope| {
+        if let Some((start, done)) = &barriers {
+            for client_sock in &client_socks {
+                let _: std::thread::ScopedJoinHandle<'_, ()> = scope.spawn(move || {
+                    for _ in 0..iter_count {
+                        let _: std::sync::BarrierWaitResult = start.wait();
+                        write_all(client_sock, send_buf);
+                        let _: std::sync::BarrierWaitResult = done.wait();
+                    }
+                });
+            }
+        }
 
-            fuchsia_trace::duration!("tun_socket_benchmarks", "test_case");
-            let now = std::time::Instant::now();
-            let mut transferred = 0;
-            while transferred < transfer {
-                fuchsia_trace::duration_begin!("tun_socket_benchmarks", "tcp_write");
-                let wrote = client_sock.write(&send_buf[transferred..]).expect("write failed");
-                fuchsia_trace::duration_end!(
-                    "tun_socket_benchmarks", "tcp_write",
-                    "bytes_written" => wrote as u64
-                );
-                transferred += wrote;
-            }
-            let mut transferred = 0;
-            while transferred < transfer {
-                fuchsia_trace::duration_begin!("tun_socket_benchmarks", "tcp_read");
-                let read = server_sock.read(&mut recv_buf[transferred..]).expect("read failed");
-                fuchsia_trace::duration_end!(
-                    "tun_socket_benchmarks", "tcp_read",
-                    "bytes_read" => read as u64
-                );
-                transferred += read;
-            }
-            let duration = now.elapsed().as_nanos() as f64;
-            assert_eq!(recv_buf, send_buf);
-            duration
-        })
-        .collect();
+        (0..iter_count)
+            .map(|_| {
+                let mut recv_bufs = vec![recv_buf.clone(); flows];
+
+                fuchsia_trace::duration!("tun_socket_benchmarks", "test_case");
+                let now = std::time::Instant::now();
+                match &barriers {
+                    Some((start, done)) => {
+                        let _: std::sync::BarrierWaitResult = start.wait();
+                        let _: std::sync::BarrierWaitResult = done.wait();
+                    }
+                    None => {
+                        for client_sock in &client_socks {
+                            write_all(client_sock, send_buf);
+                        }
+                    }
+                }
+                for (server_sock, recv_buf) in server_socks.iter().zip(recv_bufs.iter_mut()) {
+                    read_exact(server_sock, recv_buf);
+                }
+                let duration = now.elapsed().as_nanos() as f64;
+                for recv_buf in &recv_bufs {
+                    assert_eq!(recv_buf, send_buf);
+                }
+                duration
+            })
+            .collect()
+    });
 
     fuchsiaperf::FuchsiaPerfBenchmarkResult {
         test_suite: test_suite.into(),
@@ -501,27 +569,63 @@ async fn main() {
         let mut metrics = Vec::new();
         for transfer in [1 << 10, 10 << 10, 100 << 10, 500 << 10, 1000 << 10] {
             metrics.push(
-                bench_tcp::<net_types::ip::Ipv4>(
+                bench_tcp::<Ipv4>(
                     test_suite,
                     iter_count,
                     &client_realm,
                     &server_realm,
                     transfer,
+                    1,
                     &mut fidl_proxies.tun_or_network,
                 )
                 .await,
             );
             metrics.push(
-                bench_tcp::<net_types::ip::Ipv6>(
+                bench_tcp::<Ipv6>(
                     test_suite,
                     iter_count,
                     &client_realm,
                     &server_realm,
                     transfer,
+                    1,
                     &mut fidl_proxies.tun_or_network,
                 )
                 .await,
             );
+        }
+
+        // NB: The transfer size here is the total across all flows, so that
+        // results are comparable with the single-flow results of the same
+        // transfer size. Small transfer sizes are omitted since splitting them
+        // across flows leaves too little data per flow to meaningfully
+        // interleave.
+        for transfer in [100 << 10, 1000 << 10] {
+            for flows in [2, 4, 8] {
+                metrics.push(
+                    bench_tcp::<Ipv4>(
+                        test_suite,
+                        iter_count,
+                        &client_realm,
+                        &server_realm,
+                        transfer,
+                        flows,
+                        &mut fidl_proxies.tun_or_network,
+                    )
+                    .await,
+                );
+                metrics.push(
+                    bench_tcp::<Ipv6>(
+                        test_suite,
+                        iter_count,
+                        &client_realm,
+                        &server_realm,
+                        transfer,
+                        flows,
+                        &mut fidl_proxies.tun_or_network,
+                    )
+                    .await,
+                );
+            }
         }
 
         // NB: All of these message sizes are kept below the MTU of 1500 bytes

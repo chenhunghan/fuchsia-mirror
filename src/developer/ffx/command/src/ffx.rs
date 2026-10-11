@@ -82,6 +82,7 @@ impl FfxCommandLine {
         let arg0 = args.next().ok_or_else(|| bug!("No first argument in argument vector"))?;
         let args = Vec::from_iter(args);
         let args = Self::deduplicate_machine_flags(args);
+        let args = Self::reorder_help_flags(args);
         let command =
             wrapper_name.map_or_else(|| vec![Self::base_cmd(&arg0)], |s| s.split(" ").collect());
         let global =
@@ -232,6 +233,7 @@ impl FfxCommandLine {
         let mut args = argv.iter().map(AsRef::as_ref);
         let arg0 = args.next().ok_or_else(|| bug!("No first argument in argument vector"))?;
         let args = Vec::from_iter(args);
+        let args = Self::reorder_help_flags(args);
         let command =
             wrapper_name.map_or_else(|| vec![Self::base_cmd(&arg0)], |s| s.split(" ").collect());
         let global = Ffx::from_args_for_help(&args)?;
@@ -265,6 +267,65 @@ impl FfxCommandLine {
     /// Extract the base cmd from a path
     fn base_cmd(path: &str) -> &str {
         std::path::Path::new(path).file_name().map(|s| s.to_str()).flatten().unwrap_or(path)
+    }
+
+    /// Reorders help flags so that they don't block parsing of global flags,
+    /// or if a subcommand is present, moves them into the subcommand slice.
+    fn reorder_help_flags<'a>(args: Vec<&'a str>) -> Vec<&'a str> {
+        let mut help_flag = None;
+        let mut i = 0;
+        let mut global_flags = Vec::new();
+        while i < args.len() {
+            let item = args[i];
+            if item == "-h" || item == "--help" || item == "help" {
+                if help_flag.is_none() {
+                    help_flag = Some(item);
+                }
+                i += 1;
+                continue;
+            }
+            if item == "--" || (!item.starts_with("-") && item != "help") {
+                break;
+            }
+            global_flags.push(item);
+            if matches!(
+                item,
+                "-c" | "--config"
+                    | "-e"
+                    | "--env"
+                    | "--env-root"
+                    | "--machine"
+                    | "--stamp"
+                    | "-t"
+                    | "--target"
+                    | "--timeout"
+                    | "-l"
+                    | "--log-level"
+                    | "--isolate-dir"
+                    | "-o"
+                    | "--log-output"
+            ) {
+                if i + 1 < args.len() {
+                    global_flags.push(args[i + 1]);
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+
+        let mut subcommand = args[i..].to_vec();
+        if let Some(h) = help_flag {
+            if subcommand.is_empty() {
+                global_flags.push(h);
+            } else {
+                if !subcommand.iter().any(|&c| c == "-h" || c == "--help" || c == "help") {
+                    subcommand.push("--help");
+                }
+            }
+        }
+
+        global_flags.extend(subcommand);
+        global_flags
     }
 }
 
@@ -333,6 +394,10 @@ pub struct Ffx {
     #[argh(switch)]
     /// strict mode: no daemon/discovery, direct connect, RO config.
     pub strict: bool,
+
+    #[argh(switch, long = "strict-equivalent")]
+    /// prints the strict equivalent of the command
+    pub strict_equivalent: bool,
 
     #[argh(switch, short = 'd', long = "direct")]
     /// connect directly to the target. Unnecessary, as this is now the default.
@@ -493,9 +558,12 @@ impl Ffx {
 
         // If we're given an isolation setting, use that. Otherwise do a normal detection of the environment.
         match (self, env_vars.get("FFX_ISOLATE_DIR").map(PathBuf::from)) {
-            (Ffx { strict: true, .. }, _) => {
-                match EnvironmentContext::strict(exe_kind, runtime_args) {
+            (Ffx { strict: true, subcommand, .. }, _) => {
+                let has_help = subcommand.iter().any(|c| c == "help" || c == "--help" || c == "-h");
+                match EnvironmentContext::strict(exe_kind.clone(), runtime_args) {
                     Ok(env) => Ok(env),
+                    Err(_) if has_help => EnvironmentContext::strict(exe_kind, Default::default())
+                        .map_err(|e| anyhow::Error::from(e).into()),
                     // TODO(b/368047122): This is some unfortunately awkward error conversion code that
                     // can't be done inside the config library as implementing
                     // `From<ffx_command::Error>` would create a circular dependency. Ideally the
@@ -595,6 +663,7 @@ impl Ffx {
             log_destination: None,
             no_environment: false,
             strict: false,
+            strict_equivalent: false,
             direct: false,
         };
 
@@ -666,6 +735,9 @@ impl Ffx {
                 "--strict" => {
                     return_val.strict = true;
                 }
+                "--strict-equivalent" => {
+                    return_val.strict_equivalent = true;
+                }
                 "-d" | "--direct" => {
                     return_val.direct = true;
                 }
@@ -689,6 +761,69 @@ impl Ffx {
             _ => true,
         }
     }
+}
+
+pub fn build_strict_command(cmd: &FfxCommandLine, context: &EnvironmentContext) -> Option<String> {
+    if !context.get_direct_connection_mode() && !cmd.global.strict {
+        return None;
+    }
+
+    let mut args = cmd.command.clone();
+    args.push("--strict".to_string());
+
+    let mut configs = context.query_configs();
+
+    if let Some(target) = &cmd.global.target {
+        args.push("--target".to_string());
+        args.push(target.clone());
+        configs.remove("target.default");
+    } else if let Some(target) = configs.remove("target.default") {
+        if let serde_json::Value::String(s) = target {
+            args.push("--target".to_string());
+            args.push(s);
+        }
+    }
+
+    if let Some(machine) = &cmd.global.machine {
+        args.push("--machine".to_string());
+        let m = match machine {
+            crate::MachineFormat::Json => "json",
+            crate::MachineFormat::JsonPretty => "json-pretty",
+            crate::MachineFormat::Raw => "raw",
+        };
+        args.push(m.to_string());
+    } else {
+        args.push("--machine".to_string());
+        args.push("json".to_string());
+    }
+
+    if let Some(log_dest) = &cmd.global.log_destination {
+        args.push("--log-output".to_string());
+        args.push(log_dest.to_string());
+    } else if ffx_config::logging::is_enabled(context) {
+        args.push("--log-output".to_string());
+        args.push("stdout".to_string());
+    }
+
+    if let Some(log_level) = &cmd.global.log_level {
+        args.push("--log-level".to_string());
+        args.push(log_level.clone());
+    }
+
+    for (key, val) in configs {
+        let val_str = match val {
+            serde_json::Value::String(s) => s,
+            v => v.to_string(),
+        };
+        args.push("-c".to_string());
+        args.push(format!("{}={}", key, val_str));
+    }
+
+    for subcmd in &cmd.global.subcommand {
+        args.push(subcmd.clone());
+    }
+
+    Some(args.join(" "))
 }
 
 #[cfg(test)]
@@ -1364,5 +1499,91 @@ mod test {
         assert!(ffx.should_format());
         let ffx = Ffx { machine: Some(MachineFormat::JsonPretty), ..Default::default() };
         assert!(ffx.should_format());
+    }
+
+    #[fuchsia::test]
+    fn test_ffx_help_strict() {
+        let cmd = FfxCommandLine::from_args_for_help(&vec![
+            "ffx".to_string(),
+            "--help".to_string(),
+            "--strict".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cmd.global.strict, true);
+        assert_eq!(cmd.global.subcommand, vec!["--help"]);
+
+        let cmd = FfxCommandLine::from_args_for_help(&vec![
+            "ffx".to_string(),
+            "--strict".to_string(),
+            "--help".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cmd.global.strict, true);
+        assert_eq!(cmd.global.subcommand, vec!["--help"]);
+
+        let cmd = FfxCommandLine::from_args_for_help(&vec![
+            "ffx".to_string(),
+            "--strict".to_string(),
+            "--help".to_string(),
+            "emu".to_string(),
+            "start".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cmd.global.strict, true);
+        assert_eq!(cmd.global.subcommand, vec!["emu", "start", "--help"]);
+
+        let cmd = FfxCommandLine::from_args_for_help(&vec![
+            "ffx".to_string(),
+            "--help".to_string(),
+            "--strict".to_string(),
+            "emu".to_string(),
+            "start".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(cmd.global.strict, true);
+        assert_eq!(cmd.global.subcommand, vec!["emu", "start", "--help"]);
+    }
+
+    #[fuchsia::test]
+    fn test_load_context_strict_help_fallback() {
+        let cmd = FfxCommandLine::from_args_for_help(&vec![
+            "ffx".to_string(),
+            "--strict".to_string(),
+            "-c".to_string(),
+            "foo=$BAR".to_string(),
+            "--help".to_string(),
+            "emu".to_string(),
+        ])
+        .unwrap();
+        let env_vars = std::collections::HashMap::new();
+        let ctx = cmd.global.load_context_with_env(ExecutableKind::Test, env_vars);
+        assert!(ctx.is_ok());
+    }
+
+    #[fuchsia::test]
+    fn test_build_strict_command() {
+        let env_context = EnvironmentContext::default();
+        let cmd = FfxCommandLine::new(None, &["ffx", "target", "list"]).unwrap();
+
+        let strict_cmd = build_strict_command(&cmd, &env_context).unwrap();
+        assert!(strict_cmd.starts_with("ffx --strict"));
+        assert!(strict_cmd.contains("--machine json"));
+        assert!(strict_cmd.contains("--log-output stdout"));
+        assert!(strict_cmd.ends_with("target list"));
+
+        // Disable direct mode
+        let disabled_cmd = FfxCommandLine::new(
+            None,
+            &["ffx", "--no-environment", "-c", "connectivity.direct=false", "target", "list"],
+        )
+        .unwrap();
+        let disabled_context = disabled_cmd
+            .global
+            .load_context_with_env(
+                ffx_config::environment::ExecutableKind::Test,
+                std::collections::HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(build_strict_command(&disabled_cmd, &disabled_context), None);
     }
 }

@@ -151,7 +151,7 @@ class CodecAdapterVp9 : public AmlogicCodecAdapter, public Vp9Decoder::FrameData
   thrd_t input_processing_thread_ = 0;
   bool is_process_input_queued_ = false;
 
-  std::optional<ClosureQueue> shared_fidl_thread_closure_queue_;
+  std::optional<ClosureQueue> shared_fidl_sequence_closure_queue_;
 
   std::optional<DriverCodecDiagnostics> codec_diagnostics_;
 

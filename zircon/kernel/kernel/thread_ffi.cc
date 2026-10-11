@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 #include <assert.h>
+#include <lib/fxt/interned_string.h>
 #include <lib/kconcurrent/chainlock.h>
 #include <lib/kconcurrent/chainlock_transaction.h>
 #include <zircon/types.h>
@@ -16,6 +17,8 @@
 #include <kernel/restricted_state.h>
 #include <kernel/scheduler_state.h>
 #include <kernel/thread.h>
+#include <kernel/thread_ffi.h>
+#include <ktl/memory.h>
 #include <ktl/string_view.h>
 #include <vm/vm_object_paged.h>
 
@@ -61,24 +64,30 @@ FxtRef cpp_thread_fxt_ref(Thread* thread);
 bool cpp_thread_preempt_set_timeslice_extension(zx_duration_mono_t duration);
 void cpp_thread_preempt_clear_timeslice_extension();
 void cpp_thread_preempt_disable();
-void cpp_thread_preempt_enable();
+void cpp_thread_preempt_reenable();
+void cpp_thread_eager_resched_disable();
+void cpp_thread_eager_resched_reenable();
+uint32_t cpp_thread_preempt_disable_count();
+uint32_t cpp_thread_eager_resched_disable_count();
 void cpp_thread_preempt();
 zx_status_t cpp_thread_current_sleep_etc(const Deadline* deadline, Interruptible interruptible,
                                          zx_instant_mono_t now);
-zx_status_t cpp_thread_current_sleep(zx_instant_mono_t duration);
+zx_status_t cpp_thread_current_sleep(zx_instant_mono_t deadline);
 zx_status_t cpp_thread_current_sleep_relative(zx_duration_mono_t duration);
-zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t duration);
+zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t deadline);
 zx_status_t cpp_thread_current_soft_fault(vaddr_t va, uint flags);
-zx_status_t cpp_restricted_enter(uintptr_t vector_table_ptr, uintptr_t context);
 
 void* cpp_thread_get_arch(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS;
 vaddr_t cpp_thread_get_stack_top(Thread* thread);
 vaddr_t cpp_thread_get_shadow_call_base(Thread* thread);
 void cpp_thread_dump_current_stack();
-bool cpp_thread_is_user_state_saved(Thread* thread);
+bool cpp_thread_is_user_state_saved_locked(Thread* thread);
 bool cpp_thread_is_running(const Thread* thread);
 const char* cpp_thread_name(const Thread* thread);
+bool cpp_thread_is_user_thread(const Thread* thread);
+VmAspace* cpp_thread_active_aspace(Thread* thread);
 void cpp_thread_process_pending_signals(void* frame);
+VmAspace* cpp_thread_current_active_aspace();
 
 void cpp_thread_current_memory_allocation_state_enable();
 void cpp_thread_current_memory_allocation_state_disable();
@@ -145,6 +154,24 @@ bool cpp_thread_is_blocked(Thread* thread) {
   return thread->state() == THREAD_BLOCKED || thread->state() == THREAD_BLOCKED_READ_LOCK;
 }
 
+static_assert(sizeof(ffi::Uninitialized<ThreadLockGuard>) == sizeof(ThreadLockGuard));
+static_assert(alignof(ffi::Uninitialized<ThreadLockGuard>) == alignof(ThreadLockGuard));
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_lock_guard_init(ffi::Uninitialized<ThreadLockGuard>* guard,
+                                                  Thread* thread, const fxt::InternedString* label,
+                                                  uint32_t line) {
+  DEBUG_ASSERT(guard != nullptr);
+  DEBUG_ASSERT(thread != nullptr);
+  guard->Initialize(thread, ChainLockTransaction::CallsiteInfo{label, line});
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_lock_guard_destroy(ThreadLockGuard* guard) {
+  DEBUG_ASSERT(guard != nullptr);
+  ktl::destroy_at(guard);
+}
+
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE Thread* cpp_thread_current_get() { return Thread::Current::Get(); }
 
@@ -171,8 +198,28 @@ FFI_ALWAYS_INLINE void cpp_thread_preempt_disable() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_preempt_enable() {
+FFI_ALWAYS_INLINE void cpp_thread_preempt_reenable() {
   Thread::Current::preemption_state().PreemptReenable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_eager_resched_disable() {
+  Thread::Current::preemption_state().EagerReschedDisable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_eager_resched_reenable() {
+  Thread::Current::preemption_state().EagerReschedReenable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE uint32_t cpp_thread_preempt_disable_count() {
+  return Thread::Current::preemption_state().PreemptDisableCount();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE uint32_t cpp_thread_eager_resched_disable_count() {
+  return Thread::Current::preemption_state().EagerReschedDisableCount();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -187,8 +234,8 @@ FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_etc(const Deadline* deadl
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep(zx_instant_mono_t duration) {
-  return Thread::Current::Sleep(duration);
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep(zx_instant_mono_t deadline) {
+  return Thread::Current::Sleep(deadline);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -197,8 +244,8 @@ FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_relative(zx_duration_mono
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t duration) {
-  return Thread::Current::SleepInterruptible(duration);
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_current_sleep_interruptible(zx_instant_mono_t deadline) {
+  return Thread::Current::SleepInterruptible(deadline);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -230,7 +277,8 @@ FFI_ALWAYS_INLINE void cpp_thread_dump_current_stack() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_thread_is_user_state_saved(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
+FFI_ALWAYS_INLINE bool cpp_thread_is_user_state_saved_locked(Thread* thread)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
   return thread->IsUserStateSavedLocked();
 }
 
@@ -270,9 +318,21 @@ FFI_ALWAYS_INLINE bool cpp_thread_current_check_for_restricted_kick() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_thread_is_in_restricted_mode(Thread* thread) {
+FFI_ALWAYS_INLINE bool cpp_thread_in_restricted(Thread* thread) {
   DEBUG_ASSERT(thread != nullptr);
   return thread->in_restricted();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_thread_is_user_thread(const Thread* thread) {
+  DEBUG_ASSERT(thread != nullptr);
+  return thread->user_thread() != nullptr;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE VmAspace* cpp_thread_active_aspace(Thread* thread) {
+  DEBUG_ASSERT(thread != nullptr);
+  return thread->active_aspace();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.

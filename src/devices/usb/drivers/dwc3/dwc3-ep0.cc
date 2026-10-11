@@ -12,6 +12,7 @@
 
 #include <mutex>
 
+#include <fbl/algorithm.h>
 #include <usb/descriptors.h>
 
 #include "src/devices/usb/drivers/dwc3/dwc3.h"
@@ -55,6 +56,7 @@ void Dwc3::Ep0Start() {
 
 void Dwc3::Ep0QueueSetup() {
   TRACE_DURATION("dwc3", "Dwc3::Ep0QueueSetup");
+  ep0_.setup_generation++;
   if (is_active()) {
     for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
       if (ep->transfer_state == Endpoint::TransferState::kStartingSingle) {
@@ -146,9 +148,17 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
       // through the stack. For all in-type transfers, the stack generates in-data, and then
       // transfers it to the host.
       if (is_out) {
-        ep0_.cur_transfer_len = ep0_.buffer->size();
+        // The DWC3 controller requires OUT TRB lengths to be multiples of the endpoint's max
+        // packet size, and only retires an unchained OUT TRB when a short packet arrives or
+        // TRB_BUFSIZ reaches zero. Round w_length up to ep0_.out.max_packet_size so MPS-aligned
+        // transfers reach TRB_BUFSIZ == 0 while unaligned transfers remain MPS-aligned and retire
+        // on the final short packet.
+        ZX_DEBUG_ASSERT(ep0_.out.max_packet_size > 0);
+        ep0_.cur_transfer_len =
+            fbl::round_up<size_t>(ep0_.cur_setup.w_length, ep0_.out.max_packet_size);
+        ZX_DEBUG_ASSERT(ep0_.cur_transfer_len <= ep0_.buffer->size());
         EpStartTransfer(ep0_.out, ep0_.shared_fifo, TRB_TRBCTL_CONTROL_DATA, ep0_.buffer->phys(),
-                        ep0_.buffer->size());
+                        ep0_.cur_transfer_len);
         ep0_.state = Ep0::State::DataOut;
       } else {
         ep0_.state = Ep0::State::DataIn;
@@ -183,6 +193,21 @@ void Dwc3::HandleEp0TransferCompleteEvent(uint8_t ep_num) {
             expected, remaining);
       } else {
         received = expected - remaining;
+      }
+      if (received > ep0_.cur_setup.w_length) {
+        fdf::error(
+            "DataOut overflow: received {}, w_length {} "
+            "(cur_setup: req_type=0x{:02x}, req=0x{:02x}, val=0x{:04x}, idx=0x{:04x})",
+            received, ep0_.cur_setup.w_length, ep0_.cur_setup.bm_request_type,
+            ep0_.cur_setup.b_request, ep0_.cur_setup.w_value, ep0_.cur_setup.w_index);
+        metrics_.RecordEvent(std::format(
+            "ep0: Stalled DataOut overflow "
+            "[type=0x{:02x} req=0x{:02x} val=0x{:04x} idx=0x{:04x} len={} received={}]",
+            ep0_.cur_setup.bm_request_type, ep0_.cur_setup.b_request, ep0_.cur_setup.w_value,
+            ep0_.cur_setup.w_index, ep0_.cur_setup.w_length, received));
+        Ep0EndAndStall(ep0_.out);
+        Ep0QueueSetup();
+        break;
       }
       ep0_.out.total_transfers++;
       ep0_.out.total_bytes += received;
@@ -356,10 +381,11 @@ void Dwc3::HandleEp0Setup(size_t length) {
         SetDeviceAddress(setup.w_value);
         ep0_.state = Ep0::State::WaitHost;
         return;
-      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration):
+      case fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration): {
         ResetConfiguration();
-        WaitForAllUserEndpointsIdle([this, setup, length](bool idle) {
-          if (!idle || !power_on_ ||
+        const uint64_t setup_gen = ep0_.setup_generation;
+        WaitForAllUserEndpointsIdle([this, setup, length, setup_gen](bool idle) {
+          if (!idle || !power_on_ || ep0_.setup_generation != setup_gen ||
               (ep0_.state != Ep0::State::TwoStage && ep0_.state != Ep0::State::WaitFidl)) {
             return;
           }
@@ -367,6 +393,7 @@ void Dwc3::HandleEp0Setup(size_t length) {
           DoControlCall(setup, length);
         });
         return;
+      }
       default:
         // fall through to the common DoControlCall
         break;
@@ -411,14 +438,21 @@ void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
     }
   }
 
+  const uint64_t setup_gen = ep0_.setup_generation;
   dci_intf_.buffer(arena)
       ->Control(setup, out_payload)
-      .Then([this, is_out, fail, length,
-             setup](fidl::WireUnownedResult<fuchsia_hardware_usb_dci::UsbDciInterface::Control>&
-                        result) {
+      .Then([this, is_out, fail, length, setup,
+             setup_gen](fidl::WireUnownedResult<fuchsia_hardware_usb_dci::UsbDciInterface::Control>&
+                            result) {
         if (!power_on_ || !controller_started_) {
           // Return in case the core was powered off or disabled between the setup event and
           // the reply from our child.
+          return;
+        }
+
+        if (ep0_.setup_generation != setup_gen) {
+          fdf::warn("Ignoring stale Control() completion: gen {} != current {}", setup_gen,
+                    ep0_.setup_generation);
           return;
         }
 
@@ -467,13 +501,6 @@ void Dwc3::DoControlCall(fdescriptor::wire::UsbSetup setup, size_t length) {
             break;
           default:
             if (!is_out) {
-              if (ep0_.state == Ep0::State::None) {
-                fdf::error(
-                    "BUG TRIPPED: Async IN control callback handling None state! (CRASH IMMINENT)");
-                // Sleep to allow syslog to flush this to serial before the instant hardware
-                // lockup!
-                zx::nanosleep(zx::deadline_after(zx::msec(500)));
-              }
               // A lightweight byte-span is used to make it easier to process the read data.
               cpp20::span<uint8_t> read_data{result.value()->read.get()};
               // Don't blow out caller's buffer.

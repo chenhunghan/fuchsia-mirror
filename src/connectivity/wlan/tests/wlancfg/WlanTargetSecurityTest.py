@@ -6,19 +6,19 @@
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib.hostapd_constants import (
-    AP_DEFAULT_CHANNEL_5G,
-    AP_SSID_LENGTH_5G,
-)
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
+)
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib.hostapd_constants import (
+    AP_DEFAULT_CHANNEL_5G,
+    AP_SSID_LENGTH_5G,
+)
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
 )
 from mobly import asserts, signals, test_runner
 from openwrt_access_point.lib.access_point_config import (

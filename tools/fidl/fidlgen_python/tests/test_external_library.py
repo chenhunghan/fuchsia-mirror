@@ -31,7 +31,7 @@ class ExternalLibraryTestsuite(unittest.TestCase):
     def test_decode_external_struct_in_struct(self) -> None:
         handles: list[int] = []
         # fmt: off
-        encoded_bytes = bytearray([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00])
+        encoded_bytes = bytes([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00])
         # fmt: on
         value = test_python_struct.StructWithExternalStructField.decode(
             encoded_bytes, handles
@@ -54,7 +54,7 @@ class ExternalLibraryTestsuite(unittest.TestCase):
     def test_decode_external_non_imported_enum_in_struct(self) -> None:
         handles: list[int] = []
         # fmt: off
-        encoded_bytes = bytearray([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00])
+        encoded_bytes = bytes([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00])
         # fmt: on
         value = test_python_struct.StructWithExternalEnumField.decode(
             encoded_bytes, handles

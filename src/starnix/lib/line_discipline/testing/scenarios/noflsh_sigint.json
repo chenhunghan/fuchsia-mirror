@@ -1,5 +1,6 @@
 {
     "name": "noflsh_sigint",
+    "capture_signals": true,
     "initial_termios": {
         "c_iflag": [
             "ICRNL"
@@ -25,7 +26,8 @@
         },
         {
             "action": "write_to_master",
-            "data": "\u0003"
+            "data": "\u0003",
+            "expect_signal": true
         },
         {
             "action": "write_to_master",

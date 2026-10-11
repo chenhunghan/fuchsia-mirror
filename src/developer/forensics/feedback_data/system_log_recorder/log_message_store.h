@@ -7,8 +7,10 @@
 
 #include <fuchsia/logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
+#include <lib/zx/time.h>
 
 #include <deque>
+#include <optional>
 
 #include "src/developer/forensics/feedback_data/log_source.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/encoder.h"
@@ -47,9 +49,12 @@ class LogMessageStore : public LogSink {
   };
 
   LogMessageStore(StorageSize max_block_capacity, StorageSize max_buffer_capacity,
-                  RedactorBase* redactor, std::unique_ptr<Encoder> encoder);
+                  RedactorBase* redactor, std::unique_ptr<Encoder> encoder,
+                  std::optional<zx::time_boot> ignore_before_timestamp);
 
   // May add the encoded log message to the store:
+  // * The message is dropped if the message's timestamp is less than or equal to
+  //   |ignore_before_timestamp_|, returning false.
   // * The message is dropped if the store has reached its maximum capacity, returning false.
   // * The message is omitted if it is the same one as the previous one in the store.
   bool Add(LogSink::MessageOr message) override;
@@ -65,13 +70,20 @@ class LogMessageStore : public LogSink {
   // messages.
   void AppendToEnd(const std::string& str);
 
+  // Inserts |str| verbatim at the current position in the buffer, bypassing redaction, stats, rate
+  // limiting, and the timestamp filter. Any pending repeated-message warning is flushed before
+  // |str| and repeat tracking is reset, so the next message is never treated as a repeat of a
+  // message preceding |str|. Pending dropped-message warnings are still emitted at Consume(),
+  // after |str|.
+  void InsertRawMessage(const std::string& str);
+
   // Consumes the contents of the store and returns a ConsumeResult containing the log string, the
   // incremental block statistics, and a signal that notifies the end of the block (after the
   // returned string). Calling Consume will empty the store.
   ConsumeResult Consume();
 
-  // Clears the buffer, resets block and buffer stats, resets the encoder, and resets repeat
-  // tracking.
+  // Clears the buffer, resets block and buffer stats, resets the encoder, resets repeat tracking,
+  // and clears |ignore_before_timestamp_|.
   void Reset();
 
   void TurnOnRateLimiting() { buffer_rate_limit_ = true; }
@@ -109,6 +121,8 @@ class LogMessageStore : public LogSink {
   ContainerStats block_stats_;
 
   LogStats incremental_stats_;
+
+  std::optional<zx::time_boot> ignore_before_timestamp_;
 
   bool buffer_rate_limit_ = false;
   size_t num_messages_dropped_ = 0;

@@ -18,6 +18,7 @@
 
 #include <arch/ops.h>
 #include <fbl/alloc_checker.h>
+#include <fbl/array.h>
 #include <kernel/auto_preempt_disabler.h>
 #include <kernel/lockdep.h>
 #include <kernel/mutex.h>

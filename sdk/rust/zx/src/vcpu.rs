@@ -80,7 +80,7 @@ impl Vcpu {
 #[derive(Debug, Clone, Copy)]
 pub enum VcpuContents {
     Interrupt { mask: u64, vector: u8 },
-    Startup { id: u64, entry: sys::zx_gpaddr_t },
+    Startup { target: u64, entry: sys::zx_gpaddr_t, context: u64 },
 }
 
 #[cfg(test)]

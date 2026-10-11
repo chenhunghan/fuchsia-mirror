@@ -90,7 +90,10 @@ WLAN E2E flakes can sometimes be caused by hardware issues.
    Never rely solely on raw failure counts; a high number of failures on a bot may simply mean more runs were scheduled on it. Always validate:
    *   **Failure Rate**: Calculate `(bot_failures / bot_total_runs) * 100` using runs fetched without `-u`.
    *   **Fleet Baseline Comparison**: Compare the suspicious bot's failure rate against the fleet average (e.g. 70% vs. 1% baseline).
-   *   **Symptom Concentration**: Check if a specific symptom (e.g. `Network not found` or AP de-authentications) is localized to 1 or 2 specific bots. If so, it is almost certainly a hardware or AP broadcast issue on that testbed.
+   *   **Symptom Concentration**: Check if a specific symptom (e.g. `Network not found` or AP de-authentications) is localized to 1 or 2 specific bots.
+   *   **DUT / Board Bringup vs. Testbed Flake**: Before blaming the testbed, check if the failing bot(s) represent a new DUT/board type with a very small fleet (N=1 or 2):
+       *   *Do other bots with the same DUT pass?* -> Likely a testbed/AP hardware issue.
+       *   *Is this the only bot for this DUT, or do all bots of this DUT fail?* -> Likely a **DUT support / driver issue** (e.g. firmware crash, driver initialization bug, missing board support), NOT a testbed flake. Do not dismiss as a lab issue; proceed to Step 4/5.
 
 ### Step 4: Fetch & Parse Artifacts
 To root cause WLAN test failures, understand where artifacts are located in ResultDB's hierarchy:
@@ -186,6 +189,10 @@ When debugging a failure, follow this specific order of operations:
    *   `wlan-hw-sim` (Simulated environment)
 5. **Consult Fuchsia Source Code:**
    When you find suspicious logs (e.g. `AP Rejection status: 2` or `wlanif: interface destroyed`), use local Fuchsia code or `code_search` to find the relevant code in the Fuchsia platform to understand exactly what triggers that log.
+
+#### Guiding Principles for Fix Recommendations
+*   **Avoid Knee-Jerk Timeout Bumps**: Do not simply recommend increasing a timeout. Investigate *why* the operation took longer: check whether device-side behavior changed (e.g. regressions in scan, association, or DHCP latency, or retry loops) or if the test setup changed. Address the behavioral regression rather than masking it with longer timeouts.
+*   **Prefer Higher-Level Stack Changes Over Driver Fixes**: If proposing a change in a driver (e.g. `brcmfmac`, `iwlwifi`), consider whether the behavior should be shared across drivers. If it represents general Wi-Fi protocol handling, state management, or policy, address it higher up in the stack (`wlansoftmac`, `wlanif`, `wlancfg`) rather than duplicating driver-specific logic.
 
 ## Helper Scripts
 A Python script (`scripts/luci_triage.py`) automates extracting failure distributions by `swarming_bot_id`. It fetches both total runs and failures to accurately compute the failure rate.

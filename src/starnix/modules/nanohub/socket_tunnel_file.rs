@@ -127,8 +127,7 @@ pub fn register_socket_tunnel_device(
 ) {
     let registry = &kernel.device_registry;
 
-    let device_class =
-        registry.objects.get_or_create_class(dev_class_name, registry.objects.virtual_bus());
+    let device_class = registry.objects.get_or_create_class(dev_class_name);
 
     registry
         .register_dyn_device_with_dir(

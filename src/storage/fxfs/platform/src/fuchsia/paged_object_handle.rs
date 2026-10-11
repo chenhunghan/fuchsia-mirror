@@ -16,7 +16,7 @@ use fxfs::log::*;
 use fxfs::object_handle::{ObjectHandle, ObjectProperties, ReadObjectHandle};
 use fxfs::object_store::allocator::{Allocator, Reservation, ReservationOwner};
 use fxfs::object_store::transaction::{
-    LockKey, Options, TRANSACTION_METADATA_MAX_AMOUNT, Transaction, lock_keys,
+    LockKey, Options, ReservationOptions, TRANSACTION_METADATA_MAX_AMOUNT, Transaction, lock_keys,
 };
 use fxfs::object_store::{
     AttributeId, DataObjectHandle, ObjectStore, RangeType, StoreObjectHandle, Timestamp,
@@ -551,8 +551,8 @@ impl PagedObjectHandle {
                 )],
                 Options {
                     skip_journal_checks: false,
-                    borrow_metadata_space: reservation.is_none(),
-                    allocator_reservation: reservation,
+                    reservation: reservation
+                        .map_or(ReservationOptions::BorrowedMetadata, ReservationOptions::Hold),
                     ..Default::default()
                 },
             )

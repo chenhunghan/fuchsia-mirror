@@ -1415,8 +1415,9 @@ const ZxPacketGuestVcpuInterrupt* ZxPacketGuestVcpuInterrupt::GetClass() {
 
 // This is extracted from zx_packet_vcpu from zircon/system/public/zircon/syscalls/port.h
 struct zx_packet_guest_vcpu_startup {
-  uint64_t id;
+  uint64_t target;
   zx_gpaddr_t entry;
+  uint64_t context;
 };
 using zx_packet_guest_vcpu_startup_t = struct zx_packet_guest_vcpu_startup;
 
@@ -1424,15 +1425,18 @@ class ZxPacketGuestVcpuStartup : public Class<zx_packet_guest_vcpu_startup_t> {
  public:
   static const ZxPacketGuestVcpuStartup* GetClass();
 
-  static uint64_t id(const zx_packet_guest_vcpu_startup_t* from) { return from->id; }
+  static uint64_t target(const zx_packet_guest_vcpu_startup_t* from) { return from->target; }
   static zx_gpaddr_t entry(const zx_packet_guest_vcpu_startup_t* from) { return from->entry; }
+  static uint64_t context(const zx_packet_guest_vcpu_startup_t* from) { return from->context; }
 
  private:
   ZxPacketGuestVcpuStartup() : Class("zx_packet_guest_vcpu_startup_t") {
     AddField(std::make_unique<ClassField<zx_packet_guest_vcpu_startup_t, uint64_t>>(
-        "id", SyscallType::kUint64, id));
+        "target", SyscallType::kUint64, target));
     AddField(std::make_unique<ClassField<zx_packet_guest_vcpu_startup_t, zx_gpaddr_t>>(
         "entry", SyscallType::kGpAddr, entry));
+    AddField(std::make_unique<ClassField<zx_packet_guest_vcpu_startup_t, uint64_t>>(
+        "context", SyscallType::kUint64, context));
   }
   ZxPacketGuestVcpuStartup(const ZxPacketGuestVcpuStartup&) = delete;
   ZxPacketGuestVcpuStartup& operator=(const ZxPacketGuestVcpuStartup&) = delete;
@@ -1459,7 +1463,6 @@ class ZxPacketGuestVcpu : public Class<zx_packet_guest_vcpu_t> {
     return reinterpret_cast<const zx_packet_guest_vcpu_startup_t*>(&from->startup);
   }
   static uint32_t type(const zx_packet_guest_vcpu_t* from) { return from->type; }
-  static uint64_t reserved(const zx_packet_guest_vcpu_t* from) { return from->reserved; }
 
  private:
   ZxPacketGuestVcpu() : Class("zx_packet_guest_vcpu_t") {
@@ -1473,8 +1476,6 @@ class ZxPacketGuestVcpu : public Class<zx_packet_guest_vcpu_t> {
         std::make_unique<ClassClassField<zx_packet_guest_vcpu_t, zx_packet_guest_vcpu_startup_t>>(
             "startup", startup, ZxPacketGuestVcpuStartup::GetClass()))
         ->DisplayIfEqual(type_field, ZX_PKT_GUEST_VCPU_STARTUP);
-    AddField(std::make_unique<ClassField<zx_packet_guest_vcpu_t, uint64_t>>(
-        "reserved", SyscallType::kUint64, reserved));
   }
   ZxPacketGuestVcpu(const ZxPacketGuestVcpu&) = delete;
   ZxPacketGuestVcpu& operator=(const ZxPacketGuestVcpu&) = delete;

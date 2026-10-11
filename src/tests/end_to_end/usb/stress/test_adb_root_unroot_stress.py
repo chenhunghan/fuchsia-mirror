@@ -6,6 +6,7 @@
 import logging
 
 import fuchsia_base_test
+from honeydew.device_classes import android_device
 from mobly import asserts, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
     Required Mobly Test Params:
         num_iterations (int, optional): Defaults to 10.
     """
+
+    dut: android_device.AndroidDevice
 
     async def pre_run(self) -> None:
         """Mobly method used to generate the test cases at run time."""
@@ -35,6 +38,7 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
+        assert isinstance(self.dut, android_device.AndroidDevice)
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         _ = self.dut.adb

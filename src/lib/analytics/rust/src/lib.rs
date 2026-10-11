@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::ops::DerefMut;
 
 use crate::env_info::{is_analytics_disabled_by_env, migrate_legacy_folder};
-pub use crate::ga4_event::GA4Value;
+pub use crate::ga4_event::{Event, GA4Value};
 use crate::ga4_metrics_service::*;
 use crate::metrics_state::{MetricsState, UNKNOWN_VERSION};
 
@@ -181,8 +181,7 @@ pub fn redact_host_and_user_from(parameter: &str) -> String {
 /// TODO(https://fxbug.dev/42077438) remove this once we remove UA and update foxtrot
 pub async fn add_launch_event(args: Option<&str>) -> Result<(), AnalyticsError> {
     let mut ga4_svc = ga4_metrics().await?;
-    ga4_svc.add_launch_event(args).await?;
-    ga4_svc.send_events().await
+    ga4_svc.add_launch_event(args).await
 }
 
 /// Records an error event in the app.
@@ -193,11 +192,11 @@ pub async fn add_crash_event(
     fatal: Option<&bool>,
 ) -> Result<(), AnalyticsError> {
     let mut ga4_svc = ga4_metrics().await?;
-    ga4_svc.add_crash_event(description, fatal).await?;
-    ga4_svc.send_events().await
+    ga4_svc.add_crash_event(description, fatal).await
 }
 
 /// Records an event with an option to specify every parameter.
+/// Pushes the event onto the background worker queue.
 /// Returns an error if init has not been called.
 /// TODO(https://fxbug.dev/42077438) remove this when UA is removed.
 pub async fn add_custom_event(
@@ -207,6 +206,23 @@ pub async fn add_custom_event(
     custom_dimensions: BTreeMap<&str, GA4Value>,
 ) -> Result<(), AnalyticsError> {
     let mut ga4_svc = ga4_metrics().await?;
-    ga4_svc.add_custom_event(category, action, label, custom_dimensions, category).await?;
-    ga4_svc.send_events().await
+    ga4_svc.add_custom_event(category, action, label, custom_dimensions, category).await
+}
+
+/// Records a batch of events.
+/// Pushes the events onto the background worker queue.
+/// Returns an error if init has not been called.
+pub async fn add_events(events: Vec<Event>) -> Result<(), AnalyticsError> {
+    let mut ga4_svc = ga4_metrics().await?;
+    ga4_svc.add_events(events).await
+}
+
+/// Flushes pending analytics events without shutting down the background worker.
+pub async fn send_events() -> Result<(), AnalyticsError> {
+    if let Ok(mut ga4_svc) = ga4_metrics().await { ga4_svc.send_events().await } else { Ok(()) }
+}
+
+/// Flushes pending analytics events and waits for the background worker to drain its queue.
+pub async fn drain() -> Result<(), AnalyticsError> {
+    if let Ok(mut ga4_svc) = ga4_metrics().await { ga4_svc.drain().await } else { Ok(()) }
 }

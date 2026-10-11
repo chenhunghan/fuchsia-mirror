@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Code submission and review
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### Print the gerrit review URL and attempts to open it in the user's default browser.
 
 ## Usage: fx cl

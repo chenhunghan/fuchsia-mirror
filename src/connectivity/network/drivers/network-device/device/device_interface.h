@@ -332,7 +332,7 @@ class DeviceInterface : public fidl::WireServer<netdev::Device>,
   bool ContinueTeardown(TeardownState state) __TA_RELEASE(control_lock_)
       __TA_EXCLUDES(tx_lock_, rx_lock_);
 
-  // Calls f with a const std::unique_ptr<DevicePort>& to the DevicePort referenced by port_id
+  // Calls f with a const std::shared_ptr<DevicePort>& to the DevicePort referenced by port_id
   // or nullptr if no ports with that id are installed.
   //
   // Returns the value returned by the call to f.
@@ -341,7 +341,7 @@ class DeviceInterface : public fidl::WireServer<netdev::Device>,
   template <typename F>
   auto WithPort(uint8_t port_id, F f) __TA_REQUIRES_SHARED(control_lock_) {
     if (port_id >= ports_.size()) {
-      const std::unique_ptr<DevicePort> null_port;
+      const std::shared_ptr<DevicePort> null_port;
       return f(null_port);
     }
     return f(ports_[port_id].port);
@@ -369,7 +369,7 @@ class DeviceInterface : public fidl::WireServer<netdev::Device>,
   std::unique_ptr<Session> session_ __TA_GUARDED(control_lock_);
 
   struct PortSlot {
-    std::unique_ptr<DevicePort> port;
+    std::shared_ptr<DevicePort> port;
     uint8_t salt;
   };
   std::array<PortSlot, netdev::wire::kMaxPorts> ports_ __TA_GUARDED(control_lock_);

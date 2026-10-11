@@ -35,7 +35,7 @@ fx test <selection> --dry
 To list all individual test cases within matching suites and see the exact `fx`
 command needed to run each one individually:
 ```bash
-fx test <selection> --list
+fx -t <target> test <selection> --no-preflight --list
 ```
 
 > [!NOTE]
@@ -49,9 +49,20 @@ fx add-test //path/to/test:target_name
 ```
 
 ### 2. Run the test and save outputs
-Run the test directly using `fx test`. Always specify a temporary directory
-under `out/` to store logs and output artifacts, and use the `--simple` flag to
-minimize console verbosity.
+Before running device tests, follow these guidelines for fast execution:
+- **Always specify the target device (`fx -t <target>`)**: Always start your own
+  emulator and pass its name to `fx -t <target>`. If the test should run on a
+  different device, always pass that device name to `fx -t <target>`. This skips
+  per-run emulator startup and searching for available devices.
+- **Always pass `--no-preflight`**: Pass `--no-preflight` to `fx test`. This
+  skips the verbose preflight checks and runs faster.
+- **Strongly recommended - run `fx serve` in the background**: Start `fx serve`
+  in the background (`fx serve --background`), skipping package server check and
+  startup for `fx test` and shaving off another second or so from runtime.
+
+Run the test directly using `fx -t <target> test --no-preflight`. Always specify
+a temporary directory under `out/` to store logs and output artifacts, and use
+the `--simple` flag to minimize console verbosity.
 
 Define a unique temporary run directory and an empty subfolder for artifacts:
 ```bash
@@ -61,7 +72,7 @@ mkdir -p "$TEST_RUN_DIR/out"
 
 Then run `fx test` directing the log and output directory there:
 ```bash
-fx test <test_name_or_selector> --simple --outdir "$TEST_RUN_DIR/out" --logpath "$TEST_RUN_DIR/log.json.gz" [extra_flags]
+fx -t <target> test <test_name_or_selector> --no-preflight --simple --outdir "$TEST_RUN_DIR/out" --logpath "$TEST_RUN_DIR/log.json.gz" [extra_flags]
 ```
 
 > [!IMPORTANT]
@@ -72,6 +83,8 @@ fx test <test_name_or_selector> --simple --outdir "$TEST_RUN_DIR/out" --logpath 
 > empty.
 
 #### Common extra flags
+- `--no-preflight`: Always pass this flag to skip verbose preflight device and
+  emulator checks for faster execution.
 - `--no-build`: Skip the incremental build phase if you are positive the binary
   is already up-to-date.
 - `--test-filter <pattern>`: Run specific test cases within a test suite (for

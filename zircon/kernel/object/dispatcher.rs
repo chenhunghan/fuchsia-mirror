@@ -13,11 +13,9 @@ use super::dispatcher_ffi::{
     cpp_dispatcher_set_name, cpp_dispatcher_signals_state_locked, cpp_dispatcher_update_state,
     cpp_dispatcher_update_state_locked,
 };
-use super::handle::{HandleRef, HandleValue};
-use super::process_dispatcher_ffi::cpp_handle_table_get_dispatcher;
+use super::handle::HandleRef;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
 use fbl::{Recyclable, RefPtr, pin_make_ref_counted, ref_counted};
 use kalloc::AllocError;
 use ksync::{KMutex, LockToken, RawCriticalMutex, guarded};
@@ -581,91 +579,6 @@ impl Dispatcher {
             type_: self.get_type(),
             related_koid: self.get_related_koid(),
             ..Default::default()
-        }
-    }
-
-    /// Resolves a handle to a dispatcher of type T without requiring any rights.
-    ///
-    /// # Errors
-    ///
-    /// - `ZX_ERR_BAD_HANDLE` if `handle` is not valid.
-    /// - `ZX_ERR_WRONG_TYPE` if the dispatcher's type does not match `T::TYPE`.
-    pub fn get<T>(handle: HandleValue) -> Result<RefPtr<T>, Status>
-    where
-        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
-    {
-        Self::get_with_rights::<T>(handle, zx_types::ZX_RIGHT_NONE)
-    }
-
-    /// Resolves a handle to a dispatcher of type T with required rights.
-    ///
-    /// # Errors
-    ///
-    /// - `ZX_ERR_BAD_HANDLE` if `handle` is not valid.
-    /// - `ZX_ERR_WRONG_TYPE` if the dispatcher's type does not match `T::TYPE`.
-    /// - `ZX_ERR_ACCESS_DENIED` if `handle` lacks the requested `rights`.
-    pub fn get_with_rights<T>(handle: HandleValue, rights: zx_rights_t) -> Result<RefPtr<T>, Status>
-    where
-        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
-    {
-        let (dispatcher, _actual_rights) = Self::get_with_rights_and_actual::<T>(handle, rights)?;
-        Ok(dispatcher)
-    }
-
-    /// Resolves a handle to a dispatcher of type T with required rights and returns its actual rights.
-    ///
-    /// # Errors
-    ///
-    /// - `ZX_ERR_BAD_HANDLE` if `handle` is not valid.
-    /// - `ZX_ERR_WRONG_TYPE` if the dispatcher's type does not match `T::TYPE`.
-    /// - `ZX_ERR_ACCESS_DENIED` if `handle` lacks the requested `rights`.
-    pub fn get_with_rights_and_actual<T>(
-        handle: HandleValue,
-        rights: zx_rights_t,
-    ) -> Result<(RefPtr<T>, zx_rights_t), Status>
-    where
-        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
-    {
-        let (dispatcher, actual_rights) = Self::get_and_rights::<T>(handle)?;
-        if (actual_rights & rights) != rights {
-            return Err(Status::ACCESS_DENIED);
-        }
-        Ok((dispatcher, actual_rights))
-    }
-
-    /// Resolves a handle to a dispatcher of type T and returns its associated rights.
-    ///
-    /// # Errors
-    ///
-    /// - `ZX_ERR_BAD_HANDLE` if `handle` is not valid.
-    /// - `ZX_ERR_WRONG_TYPE` if the dispatcher's type does not match `T::TYPE`.
-    pub fn get_and_rights<T>(handle: HandleValue) -> Result<(RefPtr<T>, zx_rights_t), Status>
-    where
-        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
-    {
-        let (dispatcher, actual_rights) = Self::get_dispatcher_and_rights(handle)?;
-        if T::TYPE != zx_types::ZX_OBJ_TYPE_NONE && dispatcher.get_type() != T::TYPE {
-            return Err(Status::WRONG_TYPE);
-        }
-        // SAFETY: We verified the type of the dispatcher, so it is safe to cast.
-        unsafe { Ok((dispatcher.cast::<T>(), actual_rights)) }
-    }
-
-    /// Resolves a handle to a dispatcher and returns its associated rights.
-    pub fn get_dispatcher_and_rights(
-        handle: HandleValue,
-    ) -> Result<(fbl::RefPtr<Dispatcher>, zx_rights_t), Status> {
-        let mut ref_ptr = MaybeUninit::<fbl::RefPtr<Dispatcher>>::uninit();
-        let mut actual_rights = MaybeUninit::<zx_rights_t>::uninit();
-        // SAFETY: ref_ptr and actual_rights point to valid, writable uninitialized memory.
-        unsafe {
-            let status = cpp_handle_table_get_dispatcher(
-                handle,
-                ref_ptr.as_mut_ptr(),
-                actual_rights.as_mut_ptr(),
-            );
-            Status::ok(status)?;
-            Ok((ref_ptr.assume_init(), actual_rights.assume_init()))
         }
     }
 }

@@ -125,10 +125,11 @@ pub fn collect_log_files(root_dir: PathBuf) -> Result<Vec<PathBuf>> {
             }
         })
         .filter(|p| {
-            if p.extension().unwrap_or_default() == "log" {
+            let ext = p.extension().unwrap_or_default();
+            if ext == "log" || ext == "serial" {
                 true
             } else {
-                log::debug!("Skipping non .log extension {:?}", p);
+                log::debug!("Skipping non .log/.serial extension {:?}", p);
                 false
             }
         })
@@ -162,4 +163,33 @@ pub fn collect_log_files(root_dir: PathBuf) -> Result<Vec<PathBuf>> {
         })
         .collect();
     Ok(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[fuchsia::test]
+    async fn test_collect_log_files() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let temp_path = temp_dir.path();
+
+        let log_file = temp_path.join("ffx.log");
+        let serial_file = temp_path.join("emulator.log.serial");
+        let other_file = temp_path.join("test.txt");
+
+        File::create(&log_file)?;
+        File::create(&serial_file)?;
+        File::create(&other_file)?;
+
+        let collected = collect_log_files(temp_path.to_path_buf())?;
+        assert_eq!(collected.len(), 2);
+        assert!(collected.contains(&log_file));
+        assert!(collected.contains(&serial_file));
+        assert!(!collected.contains(&other_file));
+
+        Ok(())
+    }
 }

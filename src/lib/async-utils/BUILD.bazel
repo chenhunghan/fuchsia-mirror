@@ -1,0 +1,105 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "async-utils",
+    srcs = [
+        "src/async_once/mod.rs",
+        "src/channel.rs",
+        "src/event.rs",
+        "src/fold.rs",
+        "src/futures.rs",
+        "src/hanging_get/client.rs",
+        "src/hanging_get/error.rs",
+        "src/hanging_get/mod.rs",
+        "src/hanging_get/server.rs",
+        "src/hanging_get/test_util.rs",
+        "src/lib.rs",
+        "src/mutex_ticket.rs",
+        "src/stream.rs",
+        "src/stream/future_map.rs",
+        "src/stream/one_or_many.rs",
+        "src/stream/short_circuit.rs",
+        "src/stream/stream_map.rs",
+        "src/traits.rs",
+    ],
+    edition = "2024",
+    rustc_flags = ["-Dunused_results"],
+    # @bazel2gn:skip
+    test_deps = [
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures-lite",
+        "//third_party/rust_crates/vendor:futures-test",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+    visibility = ["//visibility:public"],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:once_cell",
+        "//third_party/rust_crates/vendor:pin-project",
+        "//third_party/rust_crates/vendor:slab",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "async-utils_test_packaged_bin",
+    testonly = True,
+    binary = ":async-utils_test",
+    binary_name = "async_utils_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "async-utils-tests-manifest",
+    testonly = True,
+    component_name = "async-utils-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/async_utils_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "async-utils-tests-component",
+    compiled_manifest = ":async-utils-tests-manifest",
+    component_name = "async-utils-tests",
+    deps = [":async-utils_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "async-utils-tests-package",
+    package_name = "async-utils-tests",
+    test_components = [":async-utils-tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "async-utils-tests",
+    package = ":async-utils-tests-package",
+)

@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/feedback/annotations/time_provider.h"
 
-#include <fuchsia/time/cpp/fidl.h>
+#include <fidl/fuchsia.time/cpp/fidl.h>
 #include <lib/zx/time.h>
 
 #include <memory>
@@ -36,7 +36,7 @@ class TimeProviderTest : public UnitTestFixture {
   void SignalLoggingQualityClock() {
     if (const zx_status_t status =
             clock_handle_.signal(/*clear_mask=*/0,
-                                 /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_LOGGING_QUALITY);
+                                 /*set_mask=*/fuchsia_time::kSignalUtcClockLoggingQuality);
         status != ZX_OK) {
       FX_PLOGS(FATAL, status) << "Failed to achieve logging quality clock";
     }
@@ -93,7 +93,7 @@ TEST_F(TimeProviderTest, Check_NotReadyOnClockSynchronized) {
   EXPECT_FALSE(time_provider_->Get().at(kDeviceUtcTimeKey).HasValue());
 
   ASSERT_EQ(clock_handle_.signal(
-                /*clear_mask=*/0, /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_SYNCHRONIZED),
+                /*clear_mask=*/0, /*set_mask=*/fuchsia_time::kSignalUtcClockSynchronized),
             ZX_OK);
   RunLoopUntilIdle();
 

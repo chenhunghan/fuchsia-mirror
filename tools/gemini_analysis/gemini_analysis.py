@@ -413,7 +413,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Analyze test failures with Gemini."
     )
-    parser.add_argument("--api-key", required=True, help="Gemini API key.")
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("GEMINI_API_KEY"),
+        required=False,
+        help="Gemini API key (defaults to GEMINI_API_KEY environment variable).",
+    )
     parser.add_argument(
         "--gemini-model",
         default="gemini-2.5-flash-lite",
@@ -427,6 +432,11 @@ def main() -> None:
         help="Verbosity level (1-3).",
     )
     args = parser.parse_args()
+
+    if not args.api_key:
+        parser.error(
+            "Gemini API key is required. Set GEMINI_API_KEY environment variable or pass --api-key."
+        )
 
     # set up logging to a persistent temporary file
     log_file = None

@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The unit tests stay hand-written in BUILD.gn, see the comment there.
+rustc_library(
+    name = "event_conversion",
+    srcs = [
+        "button_fuchsia_to_linux.rs",
+        "key_fuchsia_to_linux.rs",
+        "key_linux_to_fuchsia.rs",
+        "keymap.rs",
+        "lib.rs",
+        "mouse_fuchsia_to_linux.rs",
+        "touch_fuchsia_to_linux.rs",
+        "touch_linux_to_fuchsia.rs",
+    ],
+    crate_name = "starnix_modules_input_event_conversion",
+    crate_root = "lib.rs",
+    edition = "2024",
+    visibility = ["//src/starnix/modules/input:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/fidl/fuchsia.ui.pointer:fuchsia.ui.pointer_rust",
+        "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
+        "//sdk/rust/zx",
+        "//src/lib/collections/sorted-vec-map",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_types",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:bit-vec",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

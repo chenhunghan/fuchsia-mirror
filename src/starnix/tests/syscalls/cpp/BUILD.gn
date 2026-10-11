@@ -39,6 +39,7 @@ syscall_tests_without_deps = [
   "getrandom_test",
   "inotify_test",
   "io_uring_test",
+  "kcmp_test",
   "membarrier_test",
   "memfd_test",
   "mmap_test",
@@ -95,12 +96,6 @@ syscall_tests_etc = [
 
     # Test exit without running at_exit and this mislead sanitizers.
     disable_sanitizers_on_host = true
-  },
-  {
-    name = "input_test"
-    container_config = {
-      extra_features = [ "framebuffer" ]
-    }
   },
   {
     name = "ioctl_test"
@@ -225,8 +220,14 @@ syscall_tests_flaky = [
 
 if (target_cpu == "x64") {
   # TODO(https://fxbug.dev/42059962): arm64 emulator does not have Vulkan support yet.
-  # This test requires test-ui-stack.
+  # These tests require test-ui-stack.
   syscall_tests_etc += [
+    {
+      name = "input_test"
+      container_config = {
+        extra_features = [ "framebuffer" ]
+      }
+    },
     {
       name = "uinput_test"
       container_config = {
@@ -301,7 +302,6 @@ syscall_tests_migrated_to_machina = [
   "futex_test",
   "getrandom_test",
   "inotify_test",
-  "input_test",
   "io_uring_test",
   "ioctl_test",
   "loop_test",
@@ -363,7 +363,10 @@ syscall_tests_migrated_to_machina = [
 
 if (target_cpu == "x64") {
   # TODO(https://fxbug.dev/42059962): Join this with the normal inclusions.
-  syscall_tests_migrated_to_machina += [ "uinput_test" ]
+  syscall_tests_migrated_to_machina += [
+    "input_test",
+    "uinput_test",
+  ]
 }
 
 all_test_names = syscall_tests_without_deps

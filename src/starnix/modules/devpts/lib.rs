@@ -7,15 +7,15 @@
 use starnix_core::device::DeviceMode;
 use starnix_core::device::kobject::DeviceMetadata;
 pub use starnix_core::device::terminal::DEVPTS_COUNT;
-use starnix_core::device::terminal::{Terminal, TtyState, get_device_type_for_pts};
+use starnix_core::device::terminal::{Terminal, TerminalSide, TtyState, get_device_type_for_pts};
 use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::mm::MemoryAccessorExt;
 use starnix_core::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, Waiter};
 use starnix_core::vfs::buffers::{InputBuffer, OutputBuffer};
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
-    CacheMode, DirectoryEntryType, FdFlags, FileHandle, FileObject, FileObjectState, FileOps,
-    FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeHandle,
+    CacheMode, DirEntry, DirectoryEntryType, FdFlags, FileHandle, FileObject, FileObjectState,
+    FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeHandle,
     FsNodeInfo, FsNodeOps, FsStr, FsString, LookupContext, MountInfo, NamespaceNode, SpecialNode,
     SymlinkMode,
 };
@@ -144,6 +144,7 @@ pub fn tty_device_init(kernel: &Kernel) -> Result<(), Errno> {
         kernel,
         "tty".into(),
         DeviceMetadata::new("tty".into(), DeviceId::TTY, DeviceMode::Char),
+        /* parent = */ None,
         tty_class.clone(),
         build_device_directory,
     )?;
@@ -151,6 +152,7 @@ pub fn tty_device_init(kernel: &Kernel) -> Result<(), Errno> {
         kernel,
         "ptmx".into(),
         DeviceMetadata::new("ptmx".into(), DeviceId::PTMX, DeviceMode::Char),
+        /* parent = */ None,
         tty_class,
         build_device_directory,
     )?;
@@ -222,11 +224,11 @@ impl FsNodeOps for DevPtsRootDir {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let fs = node.fs();
+        let fs = entry.node.fs();
         let devptsfs =
             fs.downcast_ops::<DevPtsFs>().expect("DevPts should only handle `DevPtsFs`s");
         let name = std::str::from_utf8(name).map_err(|_| errno!(ENOENT))?;
@@ -286,19 +288,15 @@ fn open_dev_pts_device(
         }
         // /dev/tty
         DeviceId::TTY => {
-            let controlling_terminal = current_task
-                .thread_group()
-                .read()
-                .process_group
-                .session
-                .read()
-                .controlling_terminal
-                .clone();
+            let controlling_terminal = current_task.thread_group().controlling_terminal();
             if let Some(controlling_terminal) = controlling_terminal {
-                if controlling_terminal.is_main {
-                    Ok(Box::new(DevPtmxFile::new(controlling_terminal.terminal, None)))
-                } else {
-                    Ok(Box::new(TtyFile::new(controlling_terminal.terminal)))
+                match controlling_terminal.side {
+                    TerminalSide::Main => {
+                        Ok(Box::new(DevPtmxFile::new(controlling_terminal.terminal, None)))
+                    }
+                    TerminalSide::Replica => {
+                        Ok(Box::new(TtyFile::new(controlling_terminal.terminal)))
+                    }
                 }
             } else {
                 error!(ENXIO)
@@ -332,7 +330,7 @@ fn open_dev_pts_device(
                 let _ = current_task.thread_group().set_controlling_terminal(
                     current_task,
                     &terminal,
-                    false, /* is_main */
+                    TerminalSide::Replica,
                     false, /* steal */
                     flags.can_read(),
                 );
@@ -364,13 +362,7 @@ impl FileOps for DevPtmxFile {
     fileops_impl_noop_sync!();
 
     fn close(self: Box<Self>, _file: &FileObjectState, _current_task: &CurrentTask) {
-        let session = {
-            let terminal = self.terminal.read();
-            terminal.controller.as_ref().and_then(|c| c.session.upgrade())
-        };
-        if let Some(session) = session {
-            session.disassociate_controlling_terminal();
-        }
+        self.terminal.disassociate_controlling_session();
         self.terminal.main_close();
     }
 
@@ -569,7 +561,7 @@ fn shared_ioctl(
             current_task.thread_group().set_controlling_terminal(
                 current_task,
                 terminal,
-                is_main,
+                TerminalSide::from(is_main),
                 steal,
                 file.can_read(),
             )?;
@@ -580,7 +572,7 @@ fn shared_ioctl(
             current_task.thread_group().release_controlling_terminal(
                 current_task,
                 terminal,
-                is_main,
+                TerminalSide::from(is_main),
             )?;
             Ok(SUCCESS)
         }
@@ -622,13 +614,7 @@ fn shared_ioctl(
             terminal.write().line_discipline.window_size = new_winsize;
 
             // Send a SIGWINCH signal to the foreground process group.
-            let foreground_process_group =
-                terminal.read().controller.as_ref().and_then(|terminal_controller| {
-                    terminal_controller.get_foreground_process_group().ok()
-                });
-            if let Some(process_group) = foreground_process_group {
-                process_group.send_signals(&[SIGWINCH]);
-            }
+            terminal.send_signals(&[SIGWINCH]);
             Ok(SUCCESS)
         }
         TCGETA => {
@@ -1202,41 +1188,17 @@ mod tests {
             let fs = new_pts_fs(kernel);
             let _opened_main = open_ptmx_and_unlock(task, &fs).expect("ptmx");
             // Opening the main terminal should not set the terminal of the session.
-            assert!(
-                task.thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .is_none()
-            );
+            assert!(task.thread_group().controlling_terminal().is_none());
             // Opening the terminal should not set the terminal of the session with the NOCTTY flag.
             let _opened_replica2 =
                 open_file_with_flags(task, &fs, "0".into(), OpenFlags::RDWR | OpenFlags::NOCTTY)
                     .expect("open file");
-            assert!(
-                task.thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .is_none()
-            );
+            assert!(task.thread_group().controlling_terminal().is_none());
 
             // Opening the replica terminal should set the terminal of the session.
             let _opened_replica2 =
                 open_file_with_flags(task, &fs, "0".into(), OpenFlags::RDWR).expect("open file");
-            assert!(
-                task.thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .is_some()
-            );
+            assert!(task.thread_group().controlling_terminal().is_some());
         })
         .await;
     }
@@ -1259,7 +1221,7 @@ mod tests {
             set_controlling_terminal(task1, &opened_main, false).unwrap();
             assert_eq!(
                 ioctl::<i32>(task1, &opened_main, TIOCGPGRP, &0),
-                Ok(task1.thread_group().read().process_group.leader.id)
+                Ok(task1.thread_group().read().process_group.id)
             );
             assert_eq!(ioctl::<i32>(&task2, &opened_replica, TIOCGPGRP, &0), error!(ENOTTY));
 
@@ -1291,7 +1253,7 @@ mod tests {
 
             let opened_replica = open_file(&task2, &fs, "0".into()).expect("open file");
             // Task must be session leader for setting the terminal.
-            assert_eq!(set_controlling_terminal(&task2, &opened_replica, false), error!(EINVAL));
+            assert_eq!(set_controlling_terminal(&task2, &opened_replica, false), error!(EPERM));
 
             // Associate terminal to task1.
             set_controlling_terminal(task1, &opened_replica, false)
@@ -1316,16 +1278,17 @@ mod tests {
             set_controlling_terminal(&task2, &opened_replica, true)
                 .expect("Associate terminal to task2");
 
-            assert!(
-                task1
-                    .thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .is_none()
-            );
+            assert!(task1.thread_group().controlling_terminal().is_none());
+
+            // If task2 already owns a controlling terminal, attempting to steal a second
+            // terminal from task1 must fail with EPERM without disassociating task1's terminal.
+            let _opened_main2 = open_ptmx_and_unlock(task1, &fs).expect("ptmx 1");
+            let opened_replica2 = open_file(task1, &fs, "1".into()).expect("open file 1");
+            set_controlling_terminal(task1, &opened_replica2, false)
+                .expect("Associate second terminal to task1");
+            assert!(task1.thread_group().controlling_terminal().is_some());
+            assert_eq!(set_controlling_terminal(&task2, &opened_replica2, true), error!(EPERM));
+            assert!(task1.thread_group().controlling_terminal().is_some());
         })
         .await;
     }
@@ -1340,30 +1303,34 @@ mod tests {
             // access memory while running on this test thread.
             task1.running_state().mm.update(Some(init.mm().unwrap().clone()));
             task1.thread_group().setsid().expect("setsid");
-            let task2 = task1.clone_task_for_test(0, Some(SIGCHLD));
-            task2.running_state().mm.update(Some(init.mm().unwrap().clone()));
-            task2.thread_group().setpgid(&task2, &task2, &task2.pid).expect("setpgid");
-            let task2_pgid = task2.thread_group().read().process_group.leader.clone();
-
-            assert_ne!(task2_pgid, task1.thread_group().read().process_group.leader);
+            let pre_existing_task = task1.clone_task_for_test(0, Some(SIGCHLD));
 
             let fs = new_pts_fs(kernel);
             let _opened_main = open_ptmx_and_unlock(init, &fs).expect("ptmx");
-            let opened_replica = open_file(&task2, &fs, "0".into()).expect("open file");
+            let opened_replica = open_file(&pre_existing_task, &fs, "0".into()).expect("open file");
 
             // Cannot change the foreground process group if the terminal is not the controlling
-            // terminal
+            // terminal.
             assert_eq!(
-                ioctl::<i32>(&task2, &opened_replica, TIOCSPGRP, &task2_pgid.id),
+                ioctl::<i32>(&task1, &opened_replica, TIOCSPGRP, &task1.pid.id),
                 error!(ENOTTY)
             );
 
-            // Attach terminal to task1 and task2 session.
+            // Attach terminal to task1; pre-existing session members do not retroactively gain
+            // the controlling terminal, whereas newly cloned children inherit it.
             set_controlling_terminal(&task1, &opened_replica, false).unwrap();
+            assert!(pre_existing_task.thread_group().controlling_terminal().is_none());
+
+            let task2 = task1.clone_task_for_test(0, Some(SIGCHLD));
+            task2.running_state().mm.update(Some(init.mm().unwrap().clone()));
+            task2.thread_group().setpgid(&task2, &task2, &task2.pid).expect("setpgid");
+            let task2_pgid = task2.thread_group().read().process_group.clone();
+            assert_ne!(task2_pgid, task1.thread_group().read().process_group);
+
             // The foreground process group should be the one of task1
             assert_eq!(
                 ioctl::<i32>(&task1, &opened_replica, TIOCGPGRP, &0),
-                Ok(task1.thread_group().read().process_group.leader.id)
+                Ok(task1.thread_group().read().process_group.id)
             );
 
             // Cannot change the foreground process group to a negative pid.
@@ -1373,7 +1340,7 @@ mod tests {
             assert_eq!(ioctl::<i32>(&task2, &opened_replica, TIOCSPGRP, &255), error!(ESRCH));
 
             // Cannot change the foreground process group to a process group in another session.
-            let init_pgid = init.thread_group().read().process_group.leader.clone();
+            let init_pgid = init.thread_group().read().process_group.clone();
             assert_eq!(
                 ioctl::<i32>(&task2, &opened_replica, TIOCSPGRP, &init_pgid.id),
                 error!(EPERM)
@@ -1390,29 +1357,10 @@ mod tests {
             ioctl::<i32>(&task1, &opened_replica, TIOCSPGRP, &task2_pgid.id).unwrap();
 
             // Check that the foreground process has been changed.
-            let terminal = Arc::clone(
-                &task1
-                    .thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .as_ref()
-                    .unwrap()
-                    .terminal,
-            );
+            let terminal =
+                Arc::clone(&task1.thread_group().controlling_terminal().as_ref().unwrap().terminal);
             assert_eq!(
-                terminal
-                    .read()
-                    .controller
-                    .as_ref()
-                    .unwrap()
-                    .session
-                    .upgrade()
-                    .unwrap()
-                    .read()
-                    .get_foreground_process_group_leader(),
+                terminal.read().controlling_session.as_ref().unwrap().foreground_process_group(),
                 &task2_pgid
             );
         })
@@ -1437,21 +1385,31 @@ mod tests {
             set_controlling_terminal(&task2, &opened_replica, false)
                 .expect("set controlling terminal");
 
-            // Cannot detach the controlling terminal when not the session leader.
+            // Cannot detach the controlling terminal when not in the controlling session.
             assert_eq!(ioctl::<i32>(task1, &opened_replica, TIOCNOTTY, &0), error!(ENOTTY));
 
-            // Detach the terminal
-            ioctl::<i32>(&task2, &opened_replica, TIOCNOTTY, &0).expect("detach terminal");
-            assert!(
-                task2
-                    .thread_group()
-                    .read()
-                    .process_group
-                    .session
-                    .read()
-                    .controlling_terminal
-                    .is_none()
+            // A non-session-leader child in the same session can detach its own controlling
+            // terminal via TIOCNOTTY without detaching the session leader.
+            let task3 = task2.clone_task_for_test(0, Some(SIGCHLD));
+            task3.running_state().mm.update(Some(task1.mm().unwrap().clone()));
+            task2.running_state().mm.update(Some(task1.mm().unwrap().clone()));
+            assert!(task3.thread_group().controlling_terminal().is_some());
+            assert_eq!(ioctl::<i32>(&task3, &opened_replica, TIOCGPGRP, &0), Ok(task2.pid.id));
+
+            ioctl::<i32>(&task3, &opened_replica, TIOCNOTTY, &0)
+                .expect("non-leader detach terminal");
+            assert!(task3.thread_group().controlling_terminal().is_none());
+            assert!(task2.thread_group().controlling_terminal().is_some());
+            assert_eq!(ioctl::<i32>(&task3, &opened_replica, TIOCGPGRP, &0), error!(ENOTTY));
+            assert_eq!(
+                ioctl::<i32>(&task3, &opened_replica, TIOCSPGRP, &task2.pid.id),
+                error!(ENOTTY)
             );
+            assert_eq!(ioctl::<i32>(&task2, &opened_replica, TIOCGPGRP, &0), Ok(task2.pid.id));
+
+            // Detach the terminal from the session leader.
+            ioctl::<i32>(&task2, &opened_replica, TIOCNOTTY, &0).expect("detach terminal");
+            assert!(task2.thread_group().controlling_terminal().is_none());
         })
         .await;
     }

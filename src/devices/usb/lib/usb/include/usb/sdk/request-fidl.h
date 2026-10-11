@@ -28,8 +28,12 @@ inline dma_buffer::PhysIter FidlRequest::phys_iter(size_t idx, size_t max_length
   // PhysMap pins the sub-range and already offsets phys_list[0] by any sub-page offset,
   // so vmo_offset must be 0 to avoid double-offsetting.
   constexpr uint64_t vmo_offset = 0;
-  return dma_buffer::PhysIter{pinned_vmos_.at(idx).phys_list, pinned_vmos_.at(idx).phys_count,
-                              vmo_offset, length, max_length};
+  return dma_buffer::PhysIter{pinned_vmos_.at(idx).phys_list,
+                              pinned_vmos_.at(idx).phys_count,
+                              vmo_offset,
+                              length,
+                              max_length,
+                              /*merge=*/true};
 }
 
 }  // namespace usb

@@ -8,6 +8,8 @@
 toc:
 - title: "Using Inspect for drivers"
   path: /docs/development/drivers/diagnostics/inspect.md
+- title: "Driver Debugging"
+  path: /docs/development/drivers/diagnostics/driver_debugging.md
 - title: "Driver Logging"
   path: /docs/development/drivers/diagnostics/logging.md
 - title: "Add tracing to a driver"

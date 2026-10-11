@@ -202,7 +202,7 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   void QueueNextRequest(Endpoint* ep) __TA_REQUIRES(ep->lock);
   void StartTransfer(Endpoint* ep, uint32_t length) __TA_REQUIRES(ep->lock);
   void SoftDisconnect() __TA_REQUIRES(lock_);
-  uint32_t ReadTransfered(Endpoint* ep);
+  uint32_t ReadTransferred(Endpoint* ep);
 
   // Interrupt handlers
   void HandleReset() __TA_EXCLUDES(lock_);

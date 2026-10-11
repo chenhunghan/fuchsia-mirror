@@ -1,9 +1,16 @@
 ffx component destroy
+ffx component list
 ffx component show
+ffx component storage copy
+ffx component storage list
+ffx component storage make-directory
+ffx config get
+ffx config set
 ffx debug symbol-index list
 ffx debug symbol-index add
 ffx debug symbol-index remove
 ffx debug symbol-index clean
+ffx doctor
 ffx emu console
 ffx emu list
 ffx emu screenshot
@@ -20,7 +27,11 @@ ffx repository create
 ffx repository publish
 ffx repository server start
 ffx repository server stop
+ffx session launch
+ffx session restart
 ffx target add
+ffx target bootloader boot
+ffx target flash
 ffx target list
 ffx target remove
 ffx target repository register
@@ -29,3 +40,6 @@ ffx target screenshot
 ffx target show
 ffx target status
 ffx target wait
+ffx test run
+ffx wlan client batch-config dump
+ffx wlan client batch-config restore

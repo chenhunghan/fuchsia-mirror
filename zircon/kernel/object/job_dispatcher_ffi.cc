@@ -55,6 +55,11 @@ FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_get_root_job() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const Handle* cpp_job_dispatcher_get_root_job_handle() {
+  return &GetRootJobHandle();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_create_root_job() {
   auto root = JobDispatcher::CreateRootJob();
   return fbl::ExportToRawPtr(&root);
@@ -174,6 +179,18 @@ zx_status_t cpp_job_dispatcher_enumerate_children(const JobDispatcher* job, zx_k
   *out_count = sje.get_count();
   *out_avail = sje.get_avail();
   return ZX_OK;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Exceptionate* cpp_job_dispatcher_exceptionate(JobDispatcher* job) {
+  return job->exceptionate();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_job_dispatcher_create_debug_exceptionate(
+    JobDispatcher* job, KernelHandle<ChannelDispatcher>* channel, zx_rights_t thread_rights,
+    zx_rights_t process_rights) {
+  return job->CreateDebugExceptionate(ktl::move(*channel), thread_rights, process_rights);
 }
 
 }  // extern "C"

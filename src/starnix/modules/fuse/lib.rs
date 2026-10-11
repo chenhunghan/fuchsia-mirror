@@ -24,7 +24,7 @@ use starnix_core::vfs::{
     DirentSink, FallocMode, FdNumber, FileObject, FileObjectState, FileOps, FileSystem,
     FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode, FsNodeFlags,
     FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, NamespaceNode,
-    PeekBufferSegmentsCallback, RenameContext, SeekTarget, SymlinkTarget, ValueOrSize,
+    PeekBufferSegmentsCallback, RenameContext, SeekTarget, StatxFlags, SymlinkTarget, ValueOrSize,
     WeakFileHandle, XattrOp, default_eof_offset, default_fcntl, default_seek,
     fileops_impl_nonseekable, fileops_impl_noop_sync, fs_args, fs_node_impl_dir_readonly,
 };
@@ -422,7 +422,7 @@ impl FsNodeOps for FuseCtlConnectionsDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -438,7 +438,7 @@ impl FsNodeOps for FuseCtlConnectionsDirectory {
         let Some(connection) = connection else {
             return error!(ENOENT);
         };
-        let fs = node.fs();
+        let fs = entry.node.fs();
         let dir = SimpleDirectory::new();
         dir.edit(&fs, |dir| {
             dir.node(
@@ -1375,7 +1375,7 @@ impl FsNodeOps for FuseNode {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -1384,7 +1384,7 @@ impl FsNodeOps for FuseNode {
             self,
             FuseOperation::Lookup { name: name.to_owned() },
         )?;
-        self.fs_node_from_entry(node, name, response.entry().ok_or_else(|| errno!(EINVAL))?)
+        self.fs_node_from_entry(&entry.node, name, response.entry().ok_or_else(|| errno!(EINVAL))?)
     }
 
     fn mknod(
@@ -1620,7 +1620,11 @@ impl FsNodeOps for FuseNode {
         _node: &FsNode,
         current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
+        flags: StatxFlags,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
+        if flags.contains(StatxFlags::AT_STATX_DONT_SYNC) {
+            return Ok(info.read());
+        }
         // NOTE: Do not be tempted to always refresh information here; sadly, there are CTS tests
         // that rely on this only updating attributes if they have expired, and this matches what
         // Linux appears to do.

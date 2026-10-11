@@ -12,7 +12,6 @@ struct Scenario {
     name: String,
     initial_termios: TermiosConfig,
     events: Vec<Event>,
-    #[allow(dead_code)]
     final_termios: TermiosConfig,
 }
 
@@ -45,29 +44,82 @@ impl TraceData {
     }
 }
 
+fn default_read_size() -> usize {
+    4096
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 enum Event {
     #[serde(rename = "write_to_master")]
-    WriteToMaster { data: TraceData },
+    WriteToMaster {
+        data: TraceData,
+        #[serde(default)]
+        signals: Option<Vec<String>>,
+    },
+    #[serde(rename = "write_to_master_blocked")]
+    WriteToMasterBlocked { data: TraceData },
     #[serde(rename = "read_from_master")]
     ReadFromMaster { data: TraceData },
     #[serde(rename = "read_from_slave")]
-    ReadFromSlave { data: TraceData },
+    ReadFromSlave {
+        data: TraceData,
+        #[serde(default)]
+        signals: Option<Vec<String>>,
+    },
+    #[serde(rename = "read_once_from_master")]
+    ReadOnceFromMaster {
+        #[serde(default = "default_read_size")]
+        size: usize,
+        data: TraceData,
+    },
+    #[serde(rename = "read_once_from_master_blocked")]
+    ReadOnceFromMasterBlocked {
+        #[serde(default = "default_read_size")]
+        size: usize,
+    },
+    #[serde(rename = "read_once_from_master_eio")]
+    ReadOnceFromMasterEio {
+        #[serde(default = "default_read_size")]
+        size: usize,
+    },
+    #[serde(rename = "read_once_from_slave")]
+    ReadOnceFromSlave {
+        #[serde(default = "default_read_size")]
+        size: usize,
+        data: TraceData,
+        #[serde(default)]
+        signals: Option<Vec<String>>,
+    },
+    #[serde(rename = "read_once_from_slave_blocked")]
+    ReadOnceFromSlaveBlocked {
+        #[serde(default = "default_read_size")]
+        size: usize,
+    },
     #[serde(rename = "write_to_slave")]
     WriteToSlave { data: TraceData },
     #[serde(rename = "write_to_slave_blocked")]
     WriteToSlaveBlocked { data: TraceData },
-    #[serde(rename = "write_to_slave_unexpected_success")]
-    WriteToSlaveUnexpectedSuccess { data: TraceData },
+    #[serde(rename = "write_to_slave_eio")]
+    WriteToSlaveEio { data: TraceData },
     #[serde(rename = "set_packet_mode")]
     SetPacketMode { enabled: bool },
     #[serde(rename = "set_termios")]
-    SetTermios { termios: TermiosConfig },
+    SetTermios {
+        termios: TermiosConfig,
+        #[serde(default)]
+        signals: Option<Vec<String>>,
+    },
     #[serde(rename = "flush")]
     Flush { side: String, queue_selector: String },
     #[serde(rename = "wait_until_readable")]
     WaitUntilReadable { side: String },
+    #[serde(rename = "check_readable_size")]
+    CheckReadableSize { side: String, size: usize },
+    #[serde(rename = "check_poll")]
+    CheckPoll { side: String, events: Vec<String> },
+    #[serde(rename = "close")]
+    Close { side: String },
 }
 
 struct TestBuffer {
@@ -104,9 +156,34 @@ impl TestOutputBuffer {
 }
 
 impl OutputBuffer for TestOutputBuffer {
+    fn available(&self) -> usize {
+        usize::MAX
+    }
     fn write(&mut self, data: &[u8]) -> Result<usize, Errno> {
         self.data.extend_from_slice(data);
         Ok(data.len())
+    }
+}
+
+struct LimitedTestOutputBuffer {
+    data: Vec<u8>,
+    max_size: usize,
+}
+
+impl LimitedTestOutputBuffer {
+    fn new(max_size: usize) -> Self {
+        Self { data: vec![], max_size }
+    }
+}
+
+impl OutputBuffer for LimitedTestOutputBuffer {
+    fn available(&self) -> usize {
+        self.max_size.saturating_sub(self.data.len())
+    }
+    fn write(&mut self, data: &[u8]) -> Result<usize, Errno> {
+        let to_write = std::cmp::min(self.available(), data.len());
+        self.data.extend_from_slice(&data[..to_write]);
+        Ok(to_write)
     }
 }
 
@@ -173,6 +250,7 @@ fn get_lflag_mapping() -> Vec<(u32, &'static str)> {
         (starnix_uapi::TOSTOP, "TOSTOP"),
         (starnix_uapi::PENDIN, "PENDIN"),
         (starnix_uapi::IEXTEN, "IEXTEN"),
+        (starnix_uapi::EXTPROC, "EXTPROC"),
     ]
 }
 
@@ -197,12 +275,81 @@ fn get_cc_mapping() -> HashMap<&'static str, usize> {
     m
 }
 
+fn signal_to_name(sig: Signal) -> &'static str {
+    if sig == SIGINT {
+        "SIGINT"
+    } else if sig == SIGQUIT {
+        "SIGQUIT"
+    } else if sig == SIGTSTP {
+        "SIGTSTP"
+    } else {
+        panic!("Unexpected signal {:?}", sig);
+    }
+}
+
+fn check_signals(
+    pending_signals: PendingSignals,
+    expected_signals: Option<Vec<String>>,
+    event_name: &str,
+    scenario_name: &str,
+) {
+    let actual: Vec<String> =
+        pending_signals.signals().iter().map(|&s| signal_to_name(s).to_string()).collect();
+    let expected = expected_signals.unwrap_or_default();
+    assert_eq!(actual, expected, "{} signals mismatch in {}", event_name, scenario_name);
+}
+
+fn decompose_fd_events(events: FdEvents) -> Vec<String> {
+    let mut out = Vec::new();
+    if events.contains(FdEvents::POLLIN) {
+        out.push("POLLIN".to_string());
+    }
+    if events.contains(FdEvents::POLLOUT) {
+        out.push("POLLOUT".to_string());
+    }
+    if events.contains(FdEvents::POLLPRI) {
+        out.push("POLLPRI".to_string());
+    }
+    if events.contains(FdEvents::POLLERR) {
+        out.push("POLLERR".to_string());
+    }
+    if events.contains(FdEvents::POLLHUP) {
+        out.push("POLLHUP".to_string());
+    }
+    out
+}
+
 pub fn test_replay_trace(name: &str, json_data: &str) {
     println!("Running trace: {}", name);
     let scenario: Scenario = serde_json::from_str(json_data).unwrap_or_else(|e| {
         panic!("Failed to parse trace {}: {}", name, e);
     });
     run_scenario(scenario);
+}
+
+fn apply_termios_config(
+    mut termios: uapi::termios2,
+    config: &TermiosConfig,
+    iflags: &[(u32, &'static str)],
+    oflags: &[(u32, &'static str)],
+    lflags: &[(u32, &'static str)],
+) -> uapi::termios2 {
+    termios.c_iflag = parse_flags(&config.c_iflag, iflags);
+    termios.c_oflag = parse_flags(&config.c_oflag, oflags);
+    termios.c_lflag = parse_flags(&config.c_lflag, lflags);
+    if let Some(cc) = &config.c_cc {
+        let mapping = get_cc_mapping();
+        for (name, &val) in cc {
+            if let Some(&idx) = mapping.get(name.as_str()) {
+                if idx < termios.c_cc.len() {
+                    termios.c_cc[idx] = val;
+                }
+            } else {
+                panic!("Unknown c_cc name {}", name);
+            }
+        }
+    }
+    termios
 }
 
 fn run_scenario(scenario: Scenario) {
@@ -215,32 +362,34 @@ fn run_scenario(scenario: Scenario) {
     ld.replica_open();
 
     // Set initial termios
-    let mut termios = crate::get_default_termios();
-    termios.c_iflag = parse_flags(&scenario.initial_termios.c_iflag, &iflags);
-    termios.c_oflag = parse_flags(&scenario.initial_termios.c_oflag, &oflags);
-    termios.c_lflag = parse_flags(&scenario.initial_termios.c_lflag, &lflags);
-
-    if let Some(cc) = &scenario.initial_termios.c_cc {
-        let mapping = get_cc_mapping();
-        for (name, &val) in cc {
-            if let Some(&idx) = mapping.get(name.as_str()) {
-                if idx < termios.c_cc.len() {
-                    termios.c_cc[idx] = val;
-                }
-            } else {
-                // Decide if panic or warn. Let's panic for correctness.
-                panic!("Unknown c_cc name {}", name);
-            }
-        }
-    }
-
-    let _ = ld.set_termios(termios);
+    let termios =
+        apply_termios_config(*ld.termios(), &scenario.initial_termios, &iflags, &oflags, &lflags);
+    let initial_signals = ld.set_termios(termios);
+    assert!(initial_signals.signals().is_empty());
 
     for event in scenario.events {
         match event {
-            Event::WriteToMaster { data } => {
+            Event::WriteToMaster { data, signals: expected_signals } => {
+                let bytes = data.to_bytes();
+                let mut buffer = TestBuffer::new(bytes.clone());
+                let (written, pending_signals) =
+                    ld.main_write(&mut buffer).expect("main_write failed");
+                assert_eq!(
+                    written,
+                    bytes.len(),
+                    "WriteToMaster partial write in {}",
+                    scenario.name
+                );
+                check_signals(pending_signals, expected_signals, "WriteToMaster", &scenario.name);
+            }
+            Event::WriteToMasterBlocked { data } => {
                 let mut buffer = TestBuffer::new(data.to_bytes());
-                let _ = ld.main_write(&mut buffer).expect("main_write failed");
+                assert_eq!(
+                    ld.main_write(&mut buffer),
+                    error!(EAGAIN),
+                    "Expected main_write to return EAGAIN in {}",
+                    scenario.name
+                );
             }
             Event::ReadFromMaster { data } => {
                 let mut buffer = TestOutputBuffer::new();
@@ -254,33 +403,116 @@ fn run_scenario(scenario: Scenario) {
                     }
                 }
                 assert_eq!(
+                    buffer.data,
+                    data.to_bytes(),
+                    "ReadFromMaster mismatch in {} (actual={:?}, expected={:?})",
+                    scenario.name,
                     String::from_utf8_lossy(&buffer.data),
                     String::from_utf8_lossy(&data.to_bytes()),
-                    "ReadFromMaster mismatch in {}",
-                    scenario.name
                 );
             }
-            Event::ReadFromSlave { data } => {
+            Event::ReadFromSlave { data, signals: expected_signals } => {
                 let mut buffer = TestOutputBuffer::new();
+                let mut pending_signals = PendingSignals::new();
                 loop {
                     match ld.replica_read(&mut buffer) {
-                        Ok(_) => {}
+                        Ok((_, signals)) => pending_signals.append(signals),
                         Err(e) if e == (error!(EAGAIN) as Result<(), Errno>).unwrap_err() => {
                             break;
                         }
                         Err(e) => panic!("replica_read failed: {:?}", e),
                     }
                 }
+                check_signals(pending_signals, expected_signals, "ReadFromSlave", &scenario.name);
                 assert_eq!(
+                    buffer.data,
+                    data.to_bytes(),
+                    "ReadFromSlave mismatch in {} (actual={:?}, expected={:?})",
+                    scenario.name,
                     String::from_utf8_lossy(&buffer.data),
                     String::from_utf8_lossy(&data.to_bytes()),
-                    "ReadFromSlave mismatch in {}",
+                );
+            }
+            Event::ReadOnceFromMaster { size, data } => {
+                let mut buffer = LimitedTestOutputBuffer::new(size);
+                let expected = data.to_bytes();
+                let n = ld.main_read(&mut buffer).unwrap_or_else(|e| {
+                    panic!("ReadOnceFromMaster failed in {}: {:?}", scenario.name, e)
+                });
+                assert_eq!(
+                    n,
+                    expected.len(),
+                    "ReadOnceFromMaster length mismatch in {}",
+                    scenario.name
+                );
+                assert_eq!(
+                    buffer.data,
+                    expected,
+                    "ReadOnceFromMaster data mismatch in {} (actual={:?}, expected={:?})",
+                    scenario.name,
+                    String::from_utf8_lossy(&buffer.data),
+                    String::from_utf8_lossy(&expected),
+                );
+            }
+            Event::ReadOnceFromMasterBlocked { size } => {
+                let mut buffer = LimitedTestOutputBuffer::new(size);
+                assert_eq!(
+                    ld.main_read(&mut buffer),
+                    error!(EAGAIN),
+                    "Expected ReadOnceFromMaster to return EAGAIN in {}",
+                    scenario.name
+                );
+            }
+            Event::ReadOnceFromMasterEio { size } => {
+                let mut buffer = LimitedTestOutputBuffer::new(size);
+                assert_eq!(
+                    ld.main_read(&mut buffer),
+                    error!(EIO),
+                    "Expected ReadOnceFromMaster to return EIO in {}",
+                    scenario.name
+                );
+            }
+            Event::ReadOnceFromSlave { size, data, signals: expected_signals } => {
+                let mut buffer = LimitedTestOutputBuffer::new(size);
+                let expected = data.to_bytes();
+                let (n, pending_signals) = ld.replica_read(&mut buffer).unwrap_or_else(|e| {
+                    panic!("ReadOnceFromSlave failed in {}: {:?}", scenario.name, e)
+                });
+                check_signals(
+                    pending_signals,
+                    expected_signals,
+                    "ReadOnceFromSlave",
+                    &scenario.name,
+                );
+                assert_eq!(
+                    n,
+                    expected.len(),
+                    "ReadOnceFromSlave length mismatch in {}",
+                    scenario.name
+                );
+                assert_eq!(
+                    buffer.data,
+                    expected,
+                    "ReadOnceFromSlave data mismatch in {} (actual={:?}, expected={:?})",
+                    scenario.name,
+                    String::from_utf8_lossy(&buffer.data),
+                    String::from_utf8_lossy(&expected),
+                );
+            }
+            Event::ReadOnceFromSlaveBlocked { size } => {
+                let mut buffer = LimitedTestOutputBuffer::new(size);
+                assert_eq!(
+                    ld.replica_read(&mut buffer),
+                    error!(EAGAIN),
+                    "Expected ReadOnceFromSlave to return EAGAIN in {}",
                     scenario.name
                 );
             }
             Event::WriteToSlave { data } => {
-                let mut buffer = TestBuffer::new(data.to_bytes());
-                let _ = ld.replica_write(&mut buffer).expect("replica_write failed");
+                let bytes = data.to_bytes();
+                let mut buffer = TestBuffer::new(bytes.clone());
+                let written = ld.replica_write(&mut buffer).expect("replica_write failed");
+                assert_eq!(written, bytes.len(), "WriteToSlave partial write in {}", scenario.name);
             }
             Event::WriteToSlaveBlocked { data } => {
                 let mut buffer = TestBuffer::new(data.to_bytes());
@@ -292,40 +524,28 @@ fn run_scenario(scenario: Scenario) {
                 );
                 assert_eq!(result, error!(EAGAIN), "Expected EAGAIN in {}", scenario.name);
             }
-            Event::WriteToSlaveUnexpectedSuccess { data } => {
-                // This event means the trace generator expected it to block but it didn't.
-                // It effectively means "WriteToSlave".
-                // However, for strictness, maybe we should warn?
-                // But if it's in the trace as "Success", we replay it as success.
+            Event::WriteToSlaveEio { data } => {
                 let mut buffer = TestBuffer::new(data.to_bytes());
-                let _ = ld
-                    .replica_write(&mut buffer)
-                    .expect("replica_write failed (unexpected success case)");
+                assert_eq!(
+                    ld.replica_write(&mut buffer),
+                    error!(EIO),
+                    "Expected replica_write to return EIO in {}",
+                    scenario.name
+                );
             }
             Event::SetPacketMode { enabled } => {
                 ld.set_packet_mode(enabled);
             }
-            Event::SetTermios { termios: ref termios_config } => {
-                let mut termios = crate::get_default_termios();
-                termios.c_iflag = parse_flags(&termios_config.c_iflag, &iflags);
-                termios.c_oflag = parse_flags(&termios_config.c_oflag, &oflags);
-                termios.c_lflag = parse_flags(&termios_config.c_lflag, &lflags);
-                if let Some(cc) = &termios_config.c_cc {
-                    let mapping = get_cc_mapping();
-                    for (name, &val) in cc {
-                        if let Some(&idx) = mapping.get(name.as_str()) {
-                            if idx < termios.c_cc.len() {
-                                termios.c_cc[idx] = val;
-                            }
-                        }
-                    }
-                }
-                let _ = ld.set_termios(termios);
+            Event::SetTermios { termios: ref termios_config, signals: expected_signals } => {
+                let termios =
+                    apply_termios_config(*ld.termios(), termios_config, &iflags, &oflags, &lflags);
+                let pending_signals = ld.set_termios(termios);
+                check_signals(pending_signals, expected_signals, "SetTermios", &scenario.name);
             }
             Event::Flush { side, queue_selector } => {
-                let is_main = match side.as_str() {
-                    "main" => true,
-                    "replica" => false,
+                let side = match side.as_str() {
+                    "main" => TerminalSide::Main,
+                    "replica" => TerminalSide::Replica,
                     _ => panic!("Unknown side {}", side),
                 };
                 let queue_selector_val = match queue_selector.as_str() {
@@ -334,31 +554,74 @@ fn run_scenario(scenario: Scenario) {
                     "TCIOFLUSH" => starnix_uapi::TCIOFLUSH,
                     _ => panic!("Unknown queue_selector {}", queue_selector),
                 };
-                ld.flush(is_main, queue_selector_val).expect("flush failed");
+                ld.flush(side, queue_selector_val).expect("flush failed");
             }
             Event::WaitUntilReadable { side } => {
-                // Line discipline read and write operations are blocking, so once the write has
-                // returned, the data is already available in the read queue.
-                //
-                // Instead, we simply assert that there is data to read.
-                struct ZeroSizedBuffer {}
-                impl OutputBuffer for ZeroSizedBuffer {
-                    fn write(&mut self, _data: &[u8]) -> Result<usize, Errno> {
-                        Ok(0)
-                    }
-                }
-                let mut buf = ZeroSizedBuffer {};
-
-                match side.as_str() {
-                    "main" => {
-                        assert_eq!(Ok(0), ld.main_read(&mut buf));
-                    }
-                    "replica" => {
-                        assert_eq!(Ok(0), ld.replica_read(&mut buf));
-                    }
+                let events = match side.as_str() {
+                    "main" => ld.main_query_events(),
+                    "replica" => ld.replica_query_events(),
                     _ => panic!("Unknown side {}", side),
                 };
+                assert!(
+                    events.intersects(FdEvents::POLLIN | FdEvents::POLLHUP),
+                    "Expected {} to be readable in {}, got {:?}",
+                    side,
+                    scenario.name,
+                    events
+                );
             }
+            Event::CheckReadableSize { side, size } => {
+                let terminal_side = match side.as_str() {
+                    "main" => TerminalSide::Main,
+                    "replica" => TerminalSide::Replica,
+                    _ => panic!("Unknown side {}", side),
+                };
+                assert_eq!(
+                    ld.get_available_read_size(terminal_side),
+                    size,
+                    "CheckReadableSize ({}) mismatch in {}",
+                    side,
+                    scenario.name
+                );
+            }
+            Event::CheckPoll { side, events } => {
+                let actual_events = match side.as_str() {
+                    "main" => ld.main_query_events(),
+                    "replica" => ld.replica_query_events(),
+                    _ => panic!("Unknown side {}", side),
+                };
+                assert_eq!(
+                    decompose_fd_events(actual_events),
+                    events,
+                    "CheckPoll ({}) mismatch in {}",
+                    side,
+                    scenario.name
+                );
+            }
+            Event::Close { side } => match side.as_str() {
+                "main" => ld.main_close(),
+                "replica" => ld.replica_close(),
+                _ => panic!("Unknown side {}", side),
+            },
         }
     }
+
+    assert_eq!(
+        ld.termios().c_iflag,
+        parse_flags(&scenario.final_termios.c_iflag, &iflags),
+        "final_termios.c_iflag mismatch in {}",
+        scenario.name
+    );
+    assert_eq!(
+        ld.termios().c_oflag,
+        parse_flags(&scenario.final_termios.c_oflag, &oflags),
+        "final_termios.c_oflag mismatch in {}",
+        scenario.name
+    );
+    assert_eq!(
+        ld.termios().c_lflag,
+        parse_flags(&scenario.final_termios.c_lflag, &lflags),
+        "final_termios.c_lflag mismatch in {}",
+        scenario.name
+    );
 }

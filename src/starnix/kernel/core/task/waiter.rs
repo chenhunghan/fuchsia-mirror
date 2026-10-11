@@ -354,14 +354,11 @@ impl WaitCallback {
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct WaiterOptions: u8 {
-        /// The wait cannot be interrupted by signals.
-        const IGNORE_SIGNALS   = 1 << 0;
-
         /// The wait is not taking place at a safe point.
         ///
         /// For example, the caller might be holding a lock, which could cause a deadlock if the
         /// waiter triggers delayed releasers.
-        const UNSAFE_CALLSTACK = 1 << 1;
+        const UNSAFE_CALLSTACK = 1 << 0;
     }
 }
 
@@ -557,9 +554,6 @@ impl PortWaiter {
     }
 
     fn interrupt(&self) {
-        if self.options.contains(WaiterOptions::IGNORE_SIGNALS) {
-            return;
-        }
         self.port.notify(NotifyKind::Interrupt);
     }
 }
@@ -613,6 +607,20 @@ impl Waiter {
             }
             // Ignore spurious wakeups from the [`PortEvent.futex`]
         }
+    }
+
+    /// Stop the task until the waiter is woken up (e.g., by the tracer or SIGCONT).
+    ///
+    /// The wait can be aborted by SIGKILL.
+    pub fn stop(&self, current_task: &CurrentTask) {
+        // When run_state is RunState::TracingStopped and the deadline is INFINITE, wait_until only
+        // returns Err(EINTR) when CurrentTask::run_in_state has already observed
+        // state.has_signal_pending(SIGKILL)
+        let _ = self.inner.wait_until(
+            current_task,
+            RunState::TracingStopped,
+            zx::MonotonicInstant::INFINITE,
+        );
     }
 
     /// Wait until the waiter is woken up.
@@ -705,8 +713,6 @@ impl Waiter {
     /// Interrupt the waiter to deliver a signal. The wait operation will return EINTR, and a
     /// typical caller should then unwind to the syscall dispatch loop to let the signal be
     /// processed. See wait_until() for more details.
-    ///
-    /// Ignored if the waiter was created with new_ignoring_signals().
     pub fn interrupt(&self) {
         self.inner.interrupt();
     }
@@ -1184,7 +1190,7 @@ mod tests {
     use super::*;
     use crate::fs::fuchsia::create_fuchsia_pipe;
     use crate::signals::SignalInfo;
-    use crate::task::TaskFlags;
+    use crate::task::{TaskFlags, TaskStateCode};
     use crate::testing::{spawn_kernel_and_run, spawn_kernel_and_run_sync};
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use crate::vfs::eventfd::{EventFdType, new_eventfd};
@@ -1407,6 +1413,51 @@ mod tests {
                     unreachable!("callback should not be called")
                 });
             assert_eq!(output, error!(EINTR));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn tracing_stopped_with_pending_sigusr1() {
+        spawn_kernel_and_run(async |current_task| {
+            {
+                let mut task_state = current_task.task.write();
+                let siginfo = SignalInfo::kernel(SIGUSR1);
+                task_state.enqueue_signal(siginfo);
+            }
+
+            let task = Arc::clone(&current_task.task);
+            let output = current_task.run_in_state(RunState::TracingStopped, move || {
+                assert_eq!(task.state_code(), TaskStateCode::TracingStop);
+                Ok(())
+            });
+            assert_eq!(output, Ok(()));
+            assert_eq!(current_task.task.state_code(), TaskStateCode::Running);
+
+            let waiter = Waiter::new();
+            waiter.notify();
+            waiter.stop(&current_task);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn tracing_stopped_with_pending_sigkill() {
+        spawn_kernel_and_run(async |current_task| {
+            {
+                let mut task_state = current_task.task.write();
+                let siginfo = SignalInfo::kernel(SIGKILL);
+                task_state.enqueue_signal(siginfo);
+            }
+
+            let output: Result<(), _> = current_task
+                .run_in_state(RunState::TracingStopped, move || {
+                    unreachable!("callback should not be called")
+                });
+            assert_eq!(output, error!(EINTR));
+
+            let waiter = Waiter::new();
+            waiter.stop(&current_task);
         })
         .await;
     }

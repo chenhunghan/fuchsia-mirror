@@ -12,13 +12,17 @@ rustc_library("rust") {
   with_unit_tests = true
 
   sources = [
+    "src/atomic.rs",
     "src/cached_vmo.rs",
+    "src/device.rs",
     "src/inject.rs",
     "src/inject/after_store.rs",
     "src/inject/dispatch.rs",
     "src/inject/offset.rs",
     "src/inject/passthrough.rs",
     "src/inject/range_override.rs",
+    "src/inject/registry.rs",
+    "src/inject/w1c.rs",
     "src/lib.rs",
     "src/operand.rs",
   ]
@@ -35,6 +39,7 @@ rustc_library("rust") {
 
   test_deps = [
     "//src/lib/fuchsia",
+    "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:mockall",
   ]
 }

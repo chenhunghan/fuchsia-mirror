@@ -77,6 +77,27 @@ template("host_test_data") {
       }
     }
   } else {
+    # When `sources` references a staged path from `cipd_prebuilt()` under
+    # `${cipd_prebuilt_root}/prebuilt/...` without copying to explicit
+    # `outputs`, also include the underlying `//prebuilt/...` path in
+    # `test_runtime_deps`. Host tests (such as dual Bazel/GN targets) often open
+    # the runtime file at `//prebuilt/...` relative to `root_build_dir`
+    # (`../../prebuilt/...`), which exists in a local checkout but is only
+    # present in isolated Swarming sandboxes if listed in `test_runtime_deps`.
+    _runtime_deps = []
+    if (invoker.sources != []) {
+      _cipd_prebuilt_root =
+          get_label_info("//:default($default_toolchain)", "root_gen_dir")
+      foreach(_source, invoker.sources) {
+        _runtime_deps += [ _source ]
+        _rebased_cipd = rebase_path(_source, _cipd_prebuilt_root)
+        if (string_replace("##${_rebased_cipd}", "##prebuilt/", "") !=
+            "##${_rebased_cipd}") {
+          _runtime_deps += [ "//${_rebased_cipd}" ]
+        }
+      }
+    }
+
     # This group exists only to carry the `test_runtime_deps` metadata, which
     # is aggregated by test_spec().
     group(target_name) {
@@ -90,7 +111,7 @@ template("host_test_data") {
                                "visibility",
                              ])
       metadata = {
-        test_runtime_deps = invoker.sources
+        test_runtime_deps = _runtime_deps
         test_runtime_deps_barrier = []
       }
     }

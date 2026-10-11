@@ -21,7 +21,8 @@ use packet_formats::tcp::{MAX_OPTIONS_LEN, TcpParseArgs, TcpSegment, TcpSegmentR
 use static_assertions::const_assert;
 
 use netstack3_base::{
-    ChecksumRxOffloading, GsoInfo, Ipv4IdMode, MAX_GSO_PAYLOAD_LEN, NetworkParsingContext,
+    ChecksumRxOffloading, Counter, GsoInfo, Inspectable, Inspector, InspectorExt as _, Ipv4IdMode,
+    MAX_GSO_PAYLOAD_LEN, NetworkParsingContext,
 };
 
 /// The maximum length of a coalesced frame.
@@ -1025,6 +1026,44 @@ pub struct GroOutputItem<'a, B, T, O> {
     pub buffers: GroOutputBuffers<'a, B, O>,
 }
 
+/// Generic Receive Offload (GRO) counters.
+#[derive(Debug, Default)]
+#[cfg_attr(
+    any(test, feature = "testutils"),
+    derive(PartialEq, netstack3_macros::CounterCollection)
+)]
+pub struct GroCounters<C = Counter> {
+    /// The number of batches that entered GRO.
+    ///
+    /// GRO only merges frames within a batch, so a batch of `n` frames offers
+    /// at most `n - 1` merges and `input_frames - batches` is the number of
+    /// merge opportunities.
+    batches: C,
+    /// The number of frames that entered GRO.
+    input_frames: C,
+    /// The number of frames produced by GRO.
+    ///
+    /// `input_frames - output_frames` is the number of frames that were merged
+    /// into another frame.
+    output_frames: C,
+    /// The number of times the active flow was flushed early because a frame
+    /// belonging to a different flow arrived and replaced it.
+    ///
+    /// This indicates that flows were interleaved within a batch, costing
+    /// coalescing opportunities.
+    flow_evictions: C,
+}
+
+impl Inspectable for GroCounters {
+    fn record<I: Inspector>(&self, inspector: &mut I) {
+        let Self { batches, input_frames, output_frames, flow_evictions } = self;
+        inspector.record_counter("Batches", batches);
+        inspector.record_counter("InputFrames", input_frames);
+        inspector.record_counter("OutputFrames", output_frames);
+        inspector.record_counter("FlowEvictions", flow_evictions);
+    }
+}
+
 /// Persistent reusable buffer storage for GRO to save on per-batch allocations.
 #[derive(Debug, Derivative)]
 #[derivative(Default(bound = ""))]
@@ -1053,7 +1092,12 @@ impl<B> GroBufferStorage<B> {
 
 impl<B: MaybeContiguousBuffer> GroBufferStorage<B> {
     /// Adapts the provided iterator of packet buffers into a GRO iterator.
-    pub fn coalesce<I, T>(&mut self, iter: I, enable_tcp_gro: bool) -> GroIter<'_, I, B, T>
+    pub fn coalesce<'a, I, T>(
+        &'a mut self,
+        iter: I,
+        enable_tcp_gro: bool,
+        counters: &'a GroCounters,
+    ) -> GroIter<'a, I, B, T>
     where
         I: Iterator<Item = GroInputItem<B, T>>,
         T: GroBufferDestination,
@@ -1062,7 +1106,7 @@ impl<B: MaybeContiguousBuffer> GroBufferStorage<B> {
             (_, Some(1)) => false,
             _ => enable_tcp_gro,
         };
-        GroIter::new(iter, self, enable_tcp_gro)
+        GroIter::new(iter, self, counters, enable_tcp_gro)
     }
 
     fn build_output<'a, T: Eq>(
@@ -1219,6 +1263,7 @@ enum PendingItem<B, T> {
 pub struct GroIter<'a, I, B, T> {
     iter: I,
     storage: &'a mut GroBufferStorage<B>,
+    counters: &'a GroCounters,
     /// The active GRO flow that GRO is attempting to match.
     active_flow: Option<ActiveFlow<B, T>>,
     /// Item pending processing on next iteration.
@@ -1230,8 +1275,14 @@ impl<'a, I, B, T> GroIter<'a, I, B, T>
 where
     B: MaybeContiguousBuffer,
 {
-    fn new(iter: I, storage: &'a mut GroBufferStorage<B>, enable_tcp_gro: bool) -> Self {
-        Self { iter, storage, active_flow: None, pending_item: None, enable_tcp_gro }
+    fn new(
+        iter: I,
+        storage: &'a mut GroBufferStorage<B>,
+        counters: &'a GroCounters,
+        enable_tcp_gro: bool,
+    ) -> Self {
+        counters.batches.increment();
+        Self { iter, storage, counters, active_flow: None, pending_item: None, enable_tcp_gro }
     }
 }
 
@@ -1254,6 +1305,17 @@ where
 {
     /// Advances the iterator and returns the next GRO output item.
     pub fn next<'b>(&'b mut self) -> Option<GroOutputItem<'b, B, T, alloc::vec::Drain<'b, B>>> {
+        // Copy the counters reference out so it can be used while the returned
+        // item still borrows `self`.
+        let counters = self.counters;
+        let item = self.next_inner();
+        if item.is_some() {
+            counters.output_frames.increment();
+        }
+        item
+    }
+
+    fn next_inner<'b>(&'b mut self) -> Option<GroOutputItem<'b, B, T, alloc::vec::Drain<'b, B>>> {
         loop {
             if let Some(i) = self.pending_item.take() {
                 match self.process_pending(i) {
@@ -1339,9 +1401,10 @@ where
         &'b mut self,
         item: GroInputItem<B, T>,
     ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
-        let Self { storage, active_flow, pending_item, enable_tcp_gro, .. } = self;
+        let Self { storage, counters, active_flow, pending_item, enable_tcp_gro, .. } = self;
         let GroInputItem { mut buffer, target, checksum_offload } = item;
 
+        counters.input_frames.increment();
         storage.linearization_vec.clear();
         let buffer_slice = buffer
             .linearized(Some(&mut storage.linearization_vec))
@@ -1438,6 +1501,7 @@ where
                 return_single_buffer!(checksum_offload);
             }
 
+            counters.flow_evictions.increment();
             let seed_payload_end = parsed.payload_end();
             let flow = GroFlow::new(target, parsed, checksum_offload);
             let pending =
@@ -1489,7 +1553,7 @@ mod tests {
 
     use net_declare::{net_ip_v4, net_ip_v6, net_mac};
     use net_types::ip::{Ipv4, Ipv6};
-    use netstack3_base::NetworkSerializationContext;
+    use netstack3_base::{CounterCollection as _, NetworkSerializationContext};
     use packet::{Buf, InnerPacketBuilder, NestableSerializer as _, Serializer};
     use packet_formats::arp::{ArpOp, ArpPacketBuilder};
     use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
@@ -1593,9 +1657,10 @@ mod tests {
             },
         ];
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
         let mut output = Vec::new();
-        let mut gro = storage.coalesce(items.into_iter(), false);
+        let mut gro = storage.coalesce(items.into_iter(), false, &counters);
         while let Some(mut item) = gro.next() {
             output.push(item.buffers.slice_mut().to_vec());
         }
@@ -1778,13 +1843,52 @@ mod tests {
             .map(|spec| input_item(TrackedBuffer::new(spec.build(), spec.contiguous)))
             .collect();
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
         let mut output = Vec::new();
-        let mut gro = storage.coalesce(items.into_iter(), enable_tcp_gro);
+        let mut gro = storage.coalesce(items.into_iter(), enable_tcp_gro, &counters);
         while let Some(mut item) = gro.next() {
             output.push(item.buffers.slice_mut().to_vec());
         }
         output
+    }
+
+    #[test]
+    fn gro_counters() {
+        let frames = [
+            // Starts the active flow.
+            v4(100, b"a1"),
+            // Merged into the active flow.
+            v4(102, b"a2"),
+            // Evicts the active flow.
+            v6(200, b"b1"),
+            // Doesn't match the active flow but is flushed immediately since it
+            // carries no payload, so it doesn't evict the active flow.
+            v4(104, b""),
+            // Merged into the active flow.
+            v6(202, b"b2"),
+            // Evicts the active flow.
+            v4(104, b"a3"),
+        ];
+        let to_items = |frames: &[FrameSpec]| -> Vec<GroInputItem<TrackedBuffer, GroFrameType>> {
+            frames
+                .iter()
+                .map(|spec| input_item(TrackedBuffer::new(spec.build(), spec.contiguous)))
+                .collect()
+        };
+
+        let counters = GroCounters::default();
+        let mut storage = GroBufferStorage::new();
+        // A single-frame batch is counted even though GRO is skipped for it.
+        for batch in [to_items(&frames), to_items(&[v4(106, b"a4")])] {
+            let mut gro = storage.coalesce(batch.into_iter(), true, &counters);
+            while let Some(_item) = gro.next() {}
+        }
+
+        assert_eq!(
+            counters.cast::<u64>(),
+            GroCounters { batches: 2, input_frames: 7, output_frames: 5, flow_evictions: 2 }
+        );
     }
 
     /// Parses `frame` as a GRO packet, verifying its checksum.
@@ -2042,6 +2146,7 @@ mod tests {
 
     #[test]
     fn gro_gso_info_metadata() {
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
 
         // Consistent IPv4 IDs across the flow yield a fixed IP ID.
@@ -2055,7 +2160,7 @@ mod tests {
                 true,
             )),
         ];
-        let mut gro = storage.coalesce(items.into_iter(), true);
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
         let item = gro.next().unwrap();
         assert_eq!(
             item.gso_info,
@@ -2079,7 +2184,7 @@ mod tests {
                 true,
             )),
         ];
-        let mut gro = storage.coalesce(items.into_iter(), true);
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
         let item = gro.next().unwrap();
         assert_eq!(
             item.gso_info,
@@ -2097,7 +2202,7 @@ mod tests {
             input_item(TrackedBuffer::new(v6(100, b"first ").build(), true)),
             input_item(TrackedBuffer::new(v6(106, b"second").build(), true)),
         ];
-        let mut gro = storage.coalesce(items.into_iter(), true);
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
         let item = gro.next().unwrap();
         assert_eq!(
             item.gso_info,
@@ -2118,8 +2223,9 @@ mod tests {
         let dropped2 = buffer2.dropped();
         let items = vec![input_item(buffer1), input_item(buffer2)];
 
+        let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
-        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
 
         let item = gro.next();
         assert!(item.is_some());
@@ -2154,8 +2260,9 @@ mod tests {
             input_item(TrackedBuffer::new(second.clone(), true)),
         ];
 
+        let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
-        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
 
         for expected in [first, second] {
             let mut item = gro.next().expect("emits a frame");
@@ -2173,9 +2280,10 @@ mod tests {
         let dropped1 = buffer1.dropped();
         let items = vec![input_item(buffer1)];
 
+        let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
         {
-            let mut gro = gro_state.coalesce(items.into_iter(), true);
+            let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
             let item = gro.next();
             assert!(item.is_some());
             assert!(!dropped1.load(Ordering::SeqCst));
@@ -2208,9 +2316,10 @@ mod tests {
             },
         ];
 
+        let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
         let mut output_frames = Vec::new();
-        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
         while let Some(mut item) = gro.next() {
             output_frames.push(item.buffers.slice_mut().to_vec());
         }
@@ -2231,9 +2340,10 @@ mod tests {
         let count3 = buffer3.linearized_count();
         let items = vec![input_item(buffer1), input_item(buffer2), input_item(buffer3)];
 
+        let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
         let mut output_frames = Vec::new();
-        let mut gro = gro_state.coalesce(items.into_iter(), true);
+        let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
         while let Some(mut item) = gro.next() {
             output_frames.push(item.buffers.slice_mut().to_vec());
         }
@@ -2282,8 +2392,9 @@ mod tests {
         let dropped2 = buffer2.dropped();
         let items = vec![input_item(buffer1), input_item(buffer2)];
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
-        let mut gro = storage.coalesce(items.into_iter(), false);
+        let mut gro = storage.coalesce(items.into_iter(), false, &counters);
 
         let mut item1 = gro.next().unwrap();
         assert_eq!(item1.buffers.slice_mut(), &[1, 2, 3]);
@@ -2608,8 +2719,9 @@ mod tests {
             checksum_offload: ChecksumRxOffloading::default(),
         }];
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
-        let mut gro = GroIter::new(items.into_iter(), &mut storage, true);
+        let mut gro = GroIter::new(items.into_iter(), &mut storage, &counters, true);
         let item = gro.next().unwrap();
         assert_eq!(
             item.checksum_offload,
@@ -2642,8 +2754,9 @@ mod tests {
             checksum_offload: ChecksumRxOffloading::default(),
         }];
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
-        let mut gro = GroIter::new(items.into_iter(), &mut storage, true);
+        let mut gro = GroIter::new(items.into_iter(), &mut storage, &counters, true);
         let item = gro.next().unwrap();
         assert_eq!(item.checksum_offload, ChecksumRxOffloading::default());
     }
@@ -2664,8 +2777,9 @@ mod tests {
             checksum_offload: ChecksumRxOffloading::default(),
         }];
 
+        let counters = GroCounters::default();
         let mut storage = GroBufferStorage::new();
-        let mut gro = GroIter::new(items.into_iter(), &mut storage, true);
+        let mut gro = GroIter::new(items.into_iter(), &mut storage, &counters, true);
         let item = gro.next().unwrap();
         assert_eq!(item.checksum_offload, ChecksumRxOffloading::default());
     }

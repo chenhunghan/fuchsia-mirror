@@ -531,8 +531,8 @@ TEST(RebootReasonItemTest, BootconfigUnquotedWatchdogApc) {
   }));
 }
 
-// A known reason only matches on a ',' boundary.
-TEST(RebootReasonItemTest, PrefixRequiresSeparator) {
+// An item prefix only matches on a ',' boundary.
+TEST(RebootReasonItemTest, ItemPrefixRequiresSeparator) {
   constexpr std::string_view kBootconfigData = "androidboot.bootreason:=reboot,coldx\n";
 
   linux_boot_config::LinuxBootConfig bootconfig(kBootconfigData);

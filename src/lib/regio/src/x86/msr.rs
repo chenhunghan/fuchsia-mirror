@@ -25,6 +25,16 @@ where
     }
 }
 
+impl<const ID: u32, Layout, Access> Default for Msr<ID, Layout, Access>
+where
+    Layout: LayoutOver<u64>,
+    Access: Accessible,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A simple I/O backend for reading from and writing to MSRs.
 pub struct MsrIo<const ID: u32> {}
 

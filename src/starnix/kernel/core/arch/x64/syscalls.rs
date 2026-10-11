@@ -21,13 +21,14 @@ use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_HIGHEST_ADDRESS;
 use starnix_uapi::signals::{SIGCHLD, SigSet};
 use starnix_uapi::user_address::{UserAddress, UserCString, UserRef};
 use starnix_uapi::vfs::EpollEvent;
 use starnix_uapi::{
-    __kernel_time_t, ARCH_SET_FS, ARCH_SET_GS, AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, CLONE_VFORK,
-    CLONE_VM, CSIGNAL, ITIMER_REAL, clone_args, errno, error, gid_t, itimerval, pid_t, pollfd,
-    tid_t, uapi, uid_t,
+    __kernel_time_t, ARCH_GET_FS, ARCH_GET_GS, ARCH_SET_FS, ARCH_SET_GS, AT_REMOVEDIR,
+    AT_SYMLINK_NOFOLLOW, CLONE_VFORK, CLONE_VM, CSIGNAL, ITIMER_REAL, clone_args, errno, error,
+    gid_t, itimerval, pid_t, pollfd, tid_t, uapi, uid_t,
 };
 
 pub fn sys_access(
@@ -63,13 +64,31 @@ pub fn sys_arch_prctl(
     code: u32,
     addr: UserAddress,
 ) -> Result<(), Errno> {
+    // From `arch_prctl(2)`:
+    // EPERM: `addr` is outside the process address space.
     match code {
         ARCH_SET_FS => {
+            if addr.ptr() >= RESTRICTED_ASPACE_HIGHEST_ADDRESS {
+                return error!(EPERM);
+            }
             current_task.thread_state.registers.fs_base = addr.ptr() as u64;
             Ok(())
         }
         ARCH_SET_GS => {
+            if addr.ptr() >= RESTRICTED_ASPACE_HIGHEST_ADDRESS {
+                return error!(EPERM);
+            }
             current_task.thread_state.registers.gs_base = addr.ptr() as u64;
+            Ok(())
+        }
+        ARCH_GET_FS => {
+            current_task
+                .write_object(UserRef::new(addr), &current_task.thread_state.registers.fs_base)?;
+            Ok(())
+        }
+        ARCH_GET_GS => {
+            current_task
+                .write_object(UserRef::new(addr), &current_task.thread_state.registers.gs_base)?;
             Ok(())
         }
         _ => {
@@ -198,7 +217,7 @@ pub fn sys_getdents(
 }
 
 pub fn sys_getpgrp(current_task: &CurrentTask) -> Result<pid_t, Errno> {
-    Ok(current_task.thread_group().read().process_group.leader.id)
+    Ok(current_task.thread_group().read().process_group.id)
 }
 
 pub fn sys_lchown(

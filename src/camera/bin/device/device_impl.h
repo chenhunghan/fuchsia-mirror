@@ -10,8 +10,10 @@
 #include <fuchsia/sysmem/cpp/fidl.h>
 #include <fuchsia/ui/policy/cpp/fidl.h>
 #include <lib/fidl/cpp/binding.h>
+#include <lib/fpromise/barrier.h>
 #include <lib/fpromise/promise.h>
 #include <lib/fpromise/result.h>
+#include <lib/fpromise/scope.h>
 #include <lib/sys/cpp/component_context.h>
 #include <zircon/status.h>
 #include <zircon/types.h>
@@ -155,10 +157,19 @@ class DeviceImpl final : public fuchsia::ui::policy::MediaButtonsListener {
   uint32_t current_configuration_index_ = 0;
 
   std::vector<zx::eventpair> deallocation_events_;
-  std::vector<fpromise::promise<void, zx_status_t>> deallocation_promises_;
+  fpromise::barrier deallocation_barrier_;
+  bool deallocation_error_ = false;
   std::vector<std::unique_ptr<StreamImpl>> streams_;
+  std::vector<uint64_t> stream_generations_;
+  uint64_t stream_generation_next_ = 1;
   MuteState mute_state_;
   bool controller_streaming_ = true;
+
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+
+  // This should always be the last thing in the object so that the scope is destroyed first,
+  // cancelling any scheduled tasks on executor_ before the rest of the members are destroyed.
+  fpromise::scope scope_;
 
   friend class Client;
 };

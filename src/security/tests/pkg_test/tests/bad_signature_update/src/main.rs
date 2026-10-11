@@ -9,8 +9,8 @@ use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg::PackageUrl;
 use fidl_fuchsia_sys2::{StorageAdminMarker, StorageIteratorMarker};
 use fidl_fuchsia_update_installer::{
-    Initiator, InstallerMarker, MonitorMarker, MonitorRequest, Options, RebootControllerMarker,
-    State,
+    FailPrepareData, Initiator, InstallerMarker, MonitorMarker, MonitorRequest, Options,
+    PrepareFailureReason, RebootControllerMarker, State,
 };
 use fidl_test_security_pkg::PackageServer_Marker;
 use fuchsia_async::Task;
@@ -179,13 +179,27 @@ async fn bad_signature_update() {
 
     let update_result = attempt_update(&update_url).await.unwrap();
 
-    // Must not end in an "update complete" state.
-    assert!(match update_result {
-        State::WaitToReboot(_) | State::Reboot(_) | State::DeferReboot(_) | State::Complete(_) => {
-            false
+    // Update should fail to validate the TUF metadata during the "Prepare" state.
+    std::assert_matches!(
+        update_result,
+        State::FailPrepare(FailPrepareData { reason: Some(PrepareFailureReason::Internal), .. })
+    );
+
+    // Confirm that pkg-resolver failed due to the poisoned TUF metadata.
+    let mut logs = diagnostics_reader::ArchiveReader::logs()
+        .select_all_for_component("pkg-resolver")
+        .snapshot_then_subscribe()
+        .unwrap();
+    loop {
+        let log = futures::StreamExt::next(&mut logs).await.unwrap().unwrap();
+        if log.msg()
+            == Some(
+                "failed to update local TUF metadata for \"fuchsia-pkg://test.fuchsia.com\" \
+                 while getting merkle for TargetPath(\"update/0\") with error: rust tuf error: \
+                 Calculated hash did not match the required hash.",
+            )
+        {
+            break;
         }
-        _ => {
-            true
-        }
-    });
+    }
 }

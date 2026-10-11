@@ -177,6 +177,10 @@ type MediaButtonsEvent = table {
 
 @available(added=HEAD)
 type MediaButtonsEvent = resource table {
+    /// Net volume change direction: +1 when volume up is pressed, -1 when
+    /// volume down is pressed, and 0 when neither or both are pressed.
+    /// Prefer `volume_up` and `volume_down` when discrete button states are
+    /// needed (for example, to detect simultaneous presses).
     1: volume int8;
     2: mic_mute bool;
     3: pause bool;
@@ -190,6 +194,16 @@ type MediaButtonsEvent = resource table {
 
     /// Optional trace flow ID to connect the event flow.
     9: trace_flow_id uint64;
+
+    /// Whether the volume up button is pressed. Unlike `volume` (field 1),
+    /// which sums volume up (+1) and volume down (-1) and cancels out to 0
+    /// when both are pressed simultaneously, `volume_up` and `volume_down`
+    /// report each button's state independently.
+    10: volume_up bool;
+
+    /// Whether the volume down button is pressed. See `volume_up` and `volume`
+    /// (field 1) for how this relates to the net volume field.
+    11: volume_down bool;
 };
 
 @strict_audit(bug="https://fxbug.dev/467128273", state="PENDING_REVIEW")

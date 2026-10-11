@@ -105,7 +105,7 @@ fn main() {
         bench_write_read_log(b, Format::Json);
     });
     let _ = group.bench_function("LoggingE2E/WriteReadLog/Fxt", move |b| {
-        bench_write_read_log(b, Format::LegacyFxt);
+        bench_write_read_log(b, Format::Fxt);
     });
 
     group.finish();

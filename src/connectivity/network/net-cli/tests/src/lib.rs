@@ -189,7 +189,7 @@ async fn add_del_route(ip_version: IpVersion) {
         .expect("failed to connect to network test realm controller");
 
     network_test_realm
-        .start_hermetic_network_realm(fntr::Netstack::V3)
+        .start_hermetic_network_realm()
         .await
         .expect("start_hermetic_network_realm failed")
         .expect("start_hermetic_network_realm error");
@@ -344,7 +344,7 @@ async fn rule_list() {
         .expect("failed to connect to network test realm controller");
 
     network_test_realm
-        .start_hermetic_network_realm(fntr::Netstack::V3)
+        .start_hermetic_network_realm()
         .await
         .expect("start_hermetic_network_realm failed")
         .expect("start_hermetic_network_realm error");
@@ -525,7 +525,7 @@ async fn add_remove_blackhole() {
         .expect("failed to connect to network test realm controller");
 
     network_test_realm
-        .start_hermetic_network_realm(fntr::Netstack::V3)
+        .start_hermetic_network_realm()
         .await
         .expect("start_hermetic_network_realm failed")
         .expect("start_hermetic_network_realm error");

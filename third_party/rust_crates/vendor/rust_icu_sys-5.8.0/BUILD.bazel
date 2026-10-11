@@ -79,8 +79,8 @@ rust_library(
     }),
     version = "5.8.0",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/forks/libc-0.2.189:libc",
-        "//third_party/rust_crates/vendor/rust_icu_sys-5.8.0:build_script_build",
     ],
 )
 
@@ -122,6 +122,7 @@ cargo_build_script(
         ],
     ),
     edition = "2018",
+    emit_warnings = False,
     links = "icuuc",
     pkg_name = "rust_icu_sys",
     rustc_flags = [

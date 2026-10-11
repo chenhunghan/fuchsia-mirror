@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::bpf::BpfMapHandle;
 use crate::bpf::fs::get_bpf_object;
+use crate::bpf::{BpfMapHandle, check_cap_or_sys_admin};
 use crate::security;
 use crate::task::{CurrentTask, Kernel, register_delayed_release};
 use crate::vfs::{FdNumber, OutputBuffer};
@@ -18,7 +18,7 @@ use fidl_fuchsia_ebpf as febpf;
 use starnix_lifecycle::{AtomicCounter, ObjectReleaser, ReleaserAction};
 use starnix_logging::{log_warn, track_stub};
 use starnix_types::ownership::{Releasable, ReleaseGuard};
-use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON, CAP_SYS_ADMIN};
+use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{bpf_attr__bindgen_ty_4, errno, error};
 use std::sync::{Arc, Weak};
@@ -96,7 +96,6 @@ impl Program {
         logger: &mut dyn OutputBuffer,
         mut code: Vec<EbpfInstruction>,
     ) -> Result<ProgramHandle, Errno> {
-        Self::check_load_access(current_task, &info)?;
         let maps = link_maps_fds(current_task, &mut code)?;
         let maps_schema = maps.iter().map(|m| m.schema).collect();
         let mut logger = BufferVeriferLogger::new(logger);
@@ -152,16 +151,18 @@ impl Program {
         Ok(program)
     }
 
-    fn check_load_access(current_task: &CurrentTask, info: &ProgramInfo) -> Result<(), Errno> {
+    pub(super) fn check_load_access(
+        current_task: &CurrentTask,
+        info: &ProgramInfo,
+    ) -> Result<(), Errno> {
         if matches!(info.program_type, ProgramType::CgroupSkb | ProgramType::SocketFilter)
             && current_task.kernel().allow_unprivileged_bpf()
         {
             return Ok(());
         }
-        if security::is_task_capable_noaudit(current_task, CAP_SYS_ADMIN) {
-            return Ok(());
-        }
-        security::check_task_capable(current_task, CAP_BPF)?;
+
+        check_cap_or_sys_admin(current_task, CAP_BPF)?;
+
         match info.program_type {
             // Loading tracing program types additionally require the CAP_PERFMON capability.
             ProgramType::Kprobe
@@ -169,11 +170,10 @@ impl Program {
             | ProgramType::PerfEvent
             | ProgramType::RawTracepoint
             | ProgramType::RawTracepointWritable
-            | ProgramType::Tracing => security::check_task_capable(current_task, CAP_PERFMON),
+            | ProgramType::Tracing => check_cap_or_sys_admin(current_task, CAP_PERFMON),
 
             // Loading networking program types additionally require the CAP_NET_ADMIN capability.
-            ProgramType::SocketFilter
-            | ProgramType::SchedCls
+            ProgramType::SchedCls
             | ProgramType::SchedAct
             | ProgramType::Xdp
             | ProgramType::SockOps
@@ -182,7 +182,7 @@ impl Program {
             | ProgramType::SkLookup
             | ProgramType::SkReuseport
             | ProgramType::FlowDissector
-            | ProgramType::Netfilter => security::check_task_capable(current_task, CAP_NET_ADMIN),
+            | ProgramType::Netfilter => check_cap_or_sys_admin(current_task, CAP_NET_ADMIN),
 
             // No additional checks are necessary for other program types.
             ProgramType::CgroupDevice
@@ -198,6 +198,7 @@ impl Program {
             | ProgramType::LwtOut
             | ProgramType::LwtSeg6Local
             | ProgramType::LwtXmit
+            | ProgramType::SocketFilter
             | ProgramType::StructOps
             | ProgramType::Syscall
             | ProgramType::Unspec => Ok(()),

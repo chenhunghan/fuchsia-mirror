@@ -17,7 +17,9 @@
 #include <zircon/availability.h>
 
 #include <algorithm>
+#include <cinttypes>
 #include <map>
+#include <numeric>
 #include <set>
 
 #include <fbl/algorithm.h>
@@ -26,6 +28,8 @@
 using safemath::CheckAdd;
 using safemath::CheckDiv;
 using safemath::CheckedNumeric;
+using safemath::CheckMin;
+using safemath::CheckMod;
 using safemath::CheckMul;
 using safemath::CheckSub;
 
@@ -117,7 +121,10 @@ CheckedNumeric<T> CheckRoundUp(CheckedNumeric<T> val, CheckedNumeric<U> multiple
   static_assert(std::is_unsigned_v<T>);
   static_assert(std::is_unsigned_v<U>);
   static_assert(sizeof(T) >= sizeof(U));
-  return CheckMul(CheckDiv(CheckAdd(val, CheckSub(multiple, 1)), multiple), multiple);
+  auto div = CheckDiv(val, multiple);
+  auto mod = CheckMod(val, multiple);
+  auto has_remainder = CheckMin(mod, decltype(div)(1));
+  return CheckMul(CheckAdd(div, has_remainder), multiple);
 }
 
 CheckedNumeric<uint64_t> arm_transaction_elimination_row_size(CheckedNumeric<uint32_t> width) {
@@ -193,7 +200,7 @@ class IntelTiledFormats : public ImageFormatSet {
 
   CheckedNumeric<uint64_t> ImageFormatImageSize(const ImageFormat& image_format) const override {
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(pixel_format_and_modifier)));
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(pixel_format_and_modifier)));
 
     CheckedNumeric<uint32_t> width_in_tiles, height_in_tiles;
     uint32_t num_of_planes = FormatNumOfPlanes(image_format.pixel_format().value());
@@ -213,8 +220,8 @@ class IntelTiledFormats : public ImageFormatSet {
 
   CheckedNumeric<uint64_t> ImageFormatPlaneByteOffset(const ImageFormat& image_format,
                                                       uint32_t plane) const override {
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(
-        image_format.pixel_format().value(), image_format.pixel_format_modifier().value())));
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(image_format.pixel_format().value(),
+                                                 image_format.pixel_format_modifier().value())));
 
     uint32_t num_of_planes = FormatNumOfPlanes(image_format.pixel_format().value());
 
@@ -236,14 +243,16 @@ class IntelTiledFormats : public ImageFormatSet {
       GetSizeInTiles(image_format, plane_idx, &width_in_tiles, &height_in_tiles);
       offset += (width_in_tiles * height_in_tiles * kIntelTileByteSize);
     }
-    ZX_DEBUG_ASSERT(offset.IsValid() && ((offset % kIntelTileByteSize).ValueOrDie() == 0));
+    // The offset may have overflowed, in which case it's returned as invalid. A valid offset is
+    // always a whole number of tiles.
+    ZX_ASSERT(!offset.IsValid() || ((offset % kIntelTileByteSize).ValueOrDie() == 0));
     return offset;
   }
 
   CheckedNumeric<uint32_t> ImageFormatPlaneRowBytes(const ImageFormat& image_format,
                                                     uint32_t plane) const override {
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
 
     uint32_t num_of_planes = FormatNumOfPlanes(image_format.pixel_format().value());
 
@@ -276,10 +285,10 @@ class IntelTiledFormats : public ImageFormatSet {
       const fuchsia_sysmem2::ImageFormatConstraints& constraints,
       CheckedNumeric<uint32_t> width) const override {
     auto pixel_format_and_modifier = PixelFormatAndModifierFromConstraints(constraints);
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
 
     // Caller must set pixel_format.
-    ZX_DEBUG_ASSERT(constraints.pixel_format().has_value());
+    ZX_ASSERT(constraints.pixel_format().has_value());
 
     if (constraints.size_alignment().has_value()) {
       width = CheckRoundUp(width, safemath::CheckedNumeric(constraints.size_alignment()->width()));
@@ -297,15 +306,21 @@ class IntelTiledFormats : public ImageFormatSet {
     }
     CheckedNumeric<uint32_t> constraints_min_bytes_per_row =
         constraints.min_bytes_per_row().has_value() ? constraints.min_bytes_per_row().value() : 0;
-    CheckedNumeric<uint32_t> constraints_bytes_per_row_divisor =
-        constraints.bytes_per_row_divisor().has_value()
-            ? constraints.bytes_per_row_divisor().value()
-            : 1;
+    uint32_t bytes_per_row_divisor = constraints.bytes_per_row_divisor().has_value()
+                                         ? constraints.bytes_per_row_divisor().value()
+                                         : 1;
+    if (bytes_per_row_divisor == 0) {
+      return kInvalidCheckedNumeric32;
+    }
 
     const auto& tiling_data = GetTilingData(GetTilingTypeForPixelFormat(pixel_format_and_modifier));
 
-    constraints_bytes_per_row_divisor =
-        CheckRoundUp(constraints_bytes_per_row_divisor, tiling_data.bytes_per_row_per_tile);
+    // The row bytes must be a multiple of both the constraints' divisor and the tile width in
+    // bytes, so use their least common multiple.
+    const uint32_t bytes_per_row_per_tile = tiling_data.bytes_per_row_per_tile.ValueOrDie();
+    CheckedNumeric<uint32_t> constraints_bytes_per_row_divisor =
+        CheckMul(bytes_per_row_divisor / std::gcd(bytes_per_row_divisor, bytes_per_row_per_tile),
+                 bytes_per_row_per_tile);
 
     // This code should match the code in garnet/public/rust/fuchsia-framebuffer/src/sysmem.rs.
     CheckedNumeric<uint32_t> non_padding_bytes_per_row =
@@ -382,14 +397,14 @@ class IntelTiledFormats : public ImageFormatSet {
       case fuchsia_images2::PixelFormatModifier::kIntelI915YfTiled:
         return TilingType::kYf;
       default:
-        ZX_DEBUG_ASSERT(false);
-        return TilingType::kX;
+        ZX_PANIC("Not an Intel tiled modifier: 0x%" PRIx64,
+                 fidl::ToUnderlying(pixel_format.pixel_format_modifier));
     }
   }
 
   static const TilingData& GetTilingData(TilingType type) {
     static_assert(static_cast<size_t>(TilingType::kYf) < std::size(kTilingData));
-    ZX_DEBUG_ASSERT(static_cast<uint32_t>(type) < std::size(kTilingData));
+    ZX_ASSERT(static_cast<uint32_t>(type) < std::size(kTilingData));
     return kTilingData[static_cast<uint32_t>(type)];
   }
 
@@ -397,14 +412,14 @@ class IntelTiledFormats : public ImageFormatSet {
   static void GetSizeInTiles(const ImageFormat& image_format, uint32_t plane,
                              CheckedNumeric<uint32_t>* width_out,
                              CheckedNumeric<uint32_t>* height_out) {
-    ZX_DEBUG_ASSERT(width_out);
-    ZX_DEBUG_ASSERT(height_out);
+    ZX_ASSERT(width_out);
+    ZX_ASSERT(height_out);
     *width_out = kInvalidCheckedNumeric32;
     *height_out = kInvalidCheckedNumeric32;
 
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
     const auto& tiling_data = GetTilingData(GetTilingTypeForPixelFormat(pixel_format_and_modifier));
-    ZX_DEBUG_ASSERT(image_format.bytes_per_row().has_value());
+    ZX_ASSERT(image_format.bytes_per_row().has_value());
     CheckedNumeric<uint32_t> bytes_per_row = image_format.bytes_per_row().value();
 
     const auto& bytes_per_row_per_tile = tiling_data.bytes_per_row_per_tile;
@@ -416,7 +431,7 @@ class IntelTiledFormats : public ImageFormatSet {
       case PixelFormat::kB8G8R8A8:
       case PixelFormat::kB8G8R8X8: {
         // Format only has one plane
-        ZX_DEBUG_ASSERT(plane == 0);
+        ZX_ASSERT(plane == 0);
 
         *width_out = CheckRoundUp(bytes_per_row, bytes_per_row_per_tile) / bytes_per_row_per_tile;
         *height_out =
@@ -444,12 +459,12 @@ class IntelTiledFormats : public ImageFormatSet {
           *width_out = CheckRoundUp(bytes_per_row, bytes_per_row_per_tile) / bytes_per_row_per_tile;
           *height_out = CheckRoundUp(adjusted_height, tile_rows) / tile_rows;
         } else {
-          ZX_DEBUG_ASSERT(false);
+          ZX_PANIC("Invalid NV12 plane: %u", plane);
         }
         break;
       default:
-        ZX_DEBUG_ASSERT(false);
-        return;
+        ZX_PANIC("Unsupported pixel format: %u",
+                 sysmem::fidl_underlying_cast(pixel_format_and_modifier.pixel_format));
     }
 
     // if either of width_out or height_out is invalid at this point, ensure both are invalid
@@ -477,8 +492,7 @@ class IntelTiledFormats : public ImageFormatSet {
       case PixelFormat::kNv12:
         return 2u;
       default:
-        ZX_DEBUG_ASSERT(false);
-        return 0u;
+        ZX_PANIC("Unsupported pixel format: %u", sysmem::fidl_underlying_cast(pixel_format));
     }
   }
 
@@ -528,10 +542,10 @@ class AfbcFormats : public ImageFormatSet {
     constexpr CheckedNumeric<uint32_t> kAfbcBodyAlignment = 1024u;
     constexpr CheckedNumeric<uint32_t> kTiledAfbcBodyAlignment = 4096u;
 
-    ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
-    ZX_DEBUG_ASSERT(image_format.pixel_format_modifier().has_value());
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(
-        image_format.pixel_format().value(), image_format.pixel_format_modifier().value())));
+    ZX_ASSERT(image_format.pixel_format().has_value());
+    ZX_ASSERT(image_format.pixel_format_modifier().has_value());
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(image_format.pixel_format().value(),
+                                                 image_format.pixel_format_modifier().value())));
     CheckedNumeric<uint64_t> block_width;
     CheckedNumeric<uint64_t> block_height;
     CheckedNumeric<uint64_t> width_alignment;
@@ -572,15 +586,15 @@ class AfbcFormats : public ImageFormatSet {
     CheckedNumeric<uint64_t> body_alignment =
         tiled_header ? kTiledAfbcBodyAlignment : kAfbcBodyAlignment;
 
-    ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
-    ZX_DEBUG_ASSERT(image_format.pixel_format().value() == PixelFormatWire::kR8G8B8A8 ||
-                    image_format.pixel_format().value() == PixelFormatWire::kR8G8B8X8 ||
-                    image_format.pixel_format().value() == PixelFormatWire::kB8G8R8A8 ||
-                    image_format.pixel_format().value() == PixelFormatWire::kB8G8R8X8);
+    ZX_ASSERT(image_format.pixel_format().has_value());
+    ZX_ASSERT(image_format.pixel_format().value() == PixelFormatWire::kR8G8B8A8 ||
+              image_format.pixel_format().value() == PixelFormatWire::kR8G8B8X8 ||
+              image_format.pixel_format().value() == PixelFormatWire::kB8G8R8A8 ||
+              image_format.pixel_format().value() == PixelFormatWire::kB8G8R8X8);
     constexpr CheckedNumeric<uint32_t> kBytesPerPixel = 4;
     constexpr CheckedNumeric<uint32_t> kBytesPerBlockHeader = 16;
 
-    ZX_DEBUG_ASSERT(image_format.size().has_value());
+    ZX_ASSERT(image_format.size().has_value());
     CheckedNumeric<uint64_t> block_count =
         CheckRoundUp(CheckedNumeric<uint64_t>(image_format.size()->width()), width_alignment) /
         block_width *
@@ -603,8 +617,8 @@ class AfbcFormats : public ImageFormatSet {
 
   CheckedNumeric<uint64_t> ImageFormatPlaneByteOffset(const ImageFormat& image_format,
                                                       uint32_t plane) const override {
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(
-        image_format.pixel_format().value(), image_format.pixel_format_modifier().value())));
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(image_format.pixel_format().value(),
+                                                 image_format.pixel_format_modifier().value())));
     if (plane == 0) {
       return 0;
     }
@@ -620,6 +634,7 @@ class AfbcFormats : public ImageFormatSet {
       return 0;
     }
     if (plane == kTransactionEliminationPlane) {
+      ZX_ASSERT(image_format.size().has_value());
       return arm_transaction_elimination_row_size(image_format.size()->width());
     }
     // invalid plane param value
@@ -627,15 +642,15 @@ class AfbcFormats : public ImageFormatSet {
   }
   bool ImageFormatIsNonTiledSinglePlane(
       const PixelFormatAndModifier& pixel_format_and_modifier) const override {
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
     // only tiled formats are supported by this class
     return false;
   }
   CheckedNumeric<uint32_t> ImageFormatMinimumRowBytes(
       const fuchsia_sysmem2::ImageFormatConstraints& constraints,
       CheckedNumeric<uint32_t> width) const override {
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(
-        constraints.pixel_format().value(), constraints.pixel_format_modifier().value())));
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(constraints.pixel_format().value(),
+                                                 constraints.pixel_format_modifier().value())));
     if (!width.IsValid()) {
       return kInvalidCheckedNumeric32;
     }
@@ -723,7 +738,7 @@ CheckedNumeric<uint64_t> linear_size(CheckedNumeric<uint32_t> surface_height_par
 CheckedNumeric<uint32_t> linear_minimum_row_bytes(
     const fuchsia_sysmem2::ImageFormatConstraints& constraints, CheckedNumeric<uint32_t> width) {
   // Caller must set pixel_format.
-  ZX_DEBUG_ASSERT(constraints.pixel_format().has_value());
+  ZX_ASSERT(constraints.pixel_format().has_value());
   if (!width.IsValid()) {
     return kInvalidCheckedNumeric32;
   }
@@ -838,14 +853,13 @@ class LinearFormats : public ImageFormatSet {
   }
 
   CheckedNumeric<uint64_t> ImageFormatImageSize(const ImageFormat& image_format) const override {
-    ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
+    ZX_ASSERT(image_format.pixel_format().has_value());
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
-    ZX_DEBUG_ASSERT(image_format.size().has_value());
-    ZX_DEBUG_ASSERT(image_format.bytes_per_row().has_value());
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(image_format.size().has_value());
+    ZX_ASSERT(image_format.bytes_per_row().has_value());
     CheckedNumeric<uint32_t> surface_height = image_format.size()->height();
-    CheckedNumeric<uint32_t> bytes_per_row =
-        image_format.bytes_per_row().has_value() ? image_format.bytes_per_row().value() : 0;
+    CheckedNumeric<uint32_t> bytes_per_row = image_format.bytes_per_row().value();
     return linear_size(surface_height, bytes_per_row, pixel_format_and_modifier.pixel_format);
   }
 
@@ -947,11 +961,11 @@ class GoldfishFormats : public ImageFormatSet {
     }
   }
   CheckedNumeric<uint64_t> ImageFormatImageSize(const ImageFormat& image_format) const override {
-    ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
+    ZX_ASSERT(image_format.pixel_format().has_value());
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
-    ZX_DEBUG_ASSERT(image_format.size().has_value());
-    ZX_DEBUG_ASSERT(image_format.bytes_per_row().has_value());
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(image_format.size().has_value());
+    ZX_ASSERT(image_format.bytes_per_row().has_value());
 
     CheckedNumeric<uint32_t> surface_height = image_format.size()->height();
     CheckedNumeric<uint32_t> bytes_per_row = image_format.bytes_per_row().value();
@@ -959,8 +973,8 @@ class GoldfishFormats : public ImageFormatSet {
   }
   CheckedNumeric<uint64_t> ImageFormatPlaneByteOffset(const ImageFormat& image_format,
                                                       uint32_t plane) const override {
-    ZX_DEBUG_ASSERT(IsSupported(PixelFormatAndModifier(
-        image_format.pixel_format().value(), image_format.pixel_format_modifier().value())));
+    ZX_ASSERT(IsSupported(PixelFormatAndModifier(image_format.pixel_format().value(),
+                                                 image_format.pixel_format_modifier().value())));
     if (plane == 0) {
       return 0;
     }
@@ -1026,9 +1040,9 @@ class ArmTELinearFormats : public ImageFormatSet {
   CheckedNumeric<uint64_t> ImageFormatImageSize(
       const fuchsia_images2::ImageFormat& image_format) const override {
     auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
-    ZX_DEBUG_ASSERT(IsSupported(pixel_format_and_modifier));
-    ZX_DEBUG_ASSERT(image_format.size().has_value());
-    ZX_DEBUG_ASSERT(image_format.bytes_per_row().has_value());
+    ZX_ASSERT(IsSupported(pixel_format_and_modifier));
+    ZX_ASSERT(image_format.size().has_value());
+    ZX_ASSERT(image_format.bytes_per_row().has_value());
     CheckedNumeric<uint32_t> bytes_per_row = image_format.bytes_per_row().value();
     CheckedNumeric<uint64_t> size = linear_size(image_format.size()->height(), bytes_per_row,
                                                 pixel_format_and_modifier.pixel_format);
@@ -1043,8 +1057,8 @@ class ArmTELinearFormats : public ImageFormatSet {
       return kLinearFormats.ImageFormatPlaneByteOffset(image_format, plane);
     }
     if (plane == kTransactionEliminationPlane) {
-      ZX_DEBUG_ASSERT(image_format.size().has_value());
-      ZX_DEBUG_ASSERT(image_format.bytes_per_row().has_value());
+      ZX_ASSERT(image_format.size().has_value());
+      ZX_ASSERT(image_format.bytes_per_row().has_value());
       CheckedNumeric<uint32_t> bytes_per_row = image_format.bytes_per_row().value();
       CheckedNumeric<uint64_t> size = linear_size(image_format.size()->height(), bytes_per_row,
                                                   image_format.pixel_format().value());
@@ -1173,14 +1187,14 @@ bool ImageFormatIsSupported(const fuchsia_sysmem::wire::PixelFormat& wire_pixel_
 }
 
 uint32_t ImageFormatBitsPerPixel(const PixelFormatAndModifier& pixel_format) {
-  ZX_DEBUG_ASSERT(ImageFormatIsSupported(pixel_format));
+  ZX_ASSERT(ImageFormatIsSupported(pixel_format));
   switch (pixel_format.pixel_format) {
     case PixelFormat::kInvalid:
     case PixelFormat::kDoNotCare:
     case PixelFormat::kMjpeg:
       // impossible; checked previously.
-      ZX_DEBUG_ASSERT(false);
-      return 0u;
+      ZX_PANIC("Unsupported pixel format: %u",
+               sysmem::fidl_underlying_cast(pixel_format.pixel_format));
     case PixelFormat::kR8G8B8A8:
     case PixelFormat::kR8G8B8X8:
       return 4u * 8u;
@@ -1226,15 +1240,15 @@ uint32_t ImageFormatBitsPerPixel(const fuchsia_sysmem::wire::PixelFormat& wire_p
 }
 
 uint32_t ImageFormatStrideBytesPerWidthPixel(const PixelFormatAndModifier& pixel_format) {
-  ZX_DEBUG_ASSERT(ImageFormatIsSupported(pixel_format));
+  ZX_ASSERT(ImageFormatIsSupported(pixel_format));
   // This list should match the one in garnet/public/rust/fuchsia-framebuffer/src/sysmem.rs.
   switch (pixel_format.pixel_format) {
     case PixelFormat::kInvalid:
     case PixelFormat::kDoNotCare:
     case PixelFormat::kMjpeg:
       // impossible; checked previously.
-      ZX_DEBUG_ASSERT(false);
-      return 0u;
+      ZX_PANIC("Unsupported pixel format: %u",
+               sysmem::fidl_underlying_cast(pixel_format.pixel_format));
     case PixelFormat::kR8G8B8A8:
     case PixelFormat::kR8G8B8X8:
       return 4u;
@@ -1288,7 +1302,7 @@ uint32_t ImageFormatStrideBytesPerWidthPixel(
 
 safemath::CheckedNumeric<uint64_t> ImageFormatImageSizeChecked(
     const fuchsia_images2::ImageFormat& image_format) {
-  ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
+  ZX_ASSERT(image_format.pixel_format().has_value());
   auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
   for (auto format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1318,7 +1332,7 @@ safemath::CheckedNumeric<uint64_t> ImageFormatImageSizeChecked(
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(32)
 
 uint64_t ImageFormatImageSize(const fuchsia_images2::ImageFormat& image_format) {
-  ZX_DEBUG_ASSERT(image_format.pixel_format().has_value());
+  ZX_ASSERT(image_format.pixel_format().has_value());
   auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
   for (auto format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1345,14 +1359,14 @@ uint64_t ImageFormatImageSize(const fuchsia_sysmem::wire::ImageFormat2& wire_ima
 }
 
 uint32_t ImageFormatSurfaceWidthMinDivisor(const PixelFormatAndModifier& pixel_format) {
-  ZX_DEBUG_ASSERT(ImageFormatIsSupported(pixel_format));
+  ZX_ASSERT(ImageFormatIsSupported(pixel_format));
   switch (pixel_format.pixel_format) {
     case PixelFormat::kInvalid:
     case PixelFormat::kDoNotCare:
     case PixelFormat::kMjpeg:
       // impossible; checked previously.
-      ZX_DEBUG_ASSERT(false);
-      return 0u;
+      ZX_PANIC("Unsupported pixel format: %u",
+               sysmem::fidl_underlying_cast(pixel_format.pixel_format));
     case PixelFormat::kR8G8B8A8:
     case PixelFormat::kR8G8B8X8:
       return 1u;
@@ -1403,14 +1417,14 @@ uint32_t ImageFormatCodedWidthMinDivisor(
 }
 
 uint32_t ImageFormatSurfaceHeightMinDivisor(const PixelFormatAndModifier& pixel_format) {
-  ZX_DEBUG_ASSERT(ImageFormatIsSupported(pixel_format));
+  ZX_ASSERT(ImageFormatIsSupported(pixel_format));
   switch (pixel_format.pixel_format) {
     case PixelFormat::kInvalid:
     case PixelFormat::kDoNotCare:
     case PixelFormat::kMjpeg:
       // impossible; checked previously.
-      ZX_DEBUG_ASSERT(false);
-      return 0u;
+      ZX_PANIC("Unsupported pixel format: %u",
+               sysmem::fidl_underlying_cast(pixel_format.pixel_format));
     case PixelFormat::kR8G8B8A8:
     case PixelFormat::kR8G8B8X8:
       return 1u;
@@ -1461,14 +1475,14 @@ uint32_t ImageFormatCodedHeightMinDivisor(
 }
 
 uint32_t ImageFormatSampleAlignment(const PixelFormatAndModifier& pixel_format) {
-  ZX_DEBUG_ASSERT(ImageFormatIsSupported(pixel_format));
+  ZX_ASSERT(ImageFormatIsSupported(pixel_format));
   switch (pixel_format.pixel_format) {
     case PixelFormat::kInvalid:
     case PixelFormat::kDoNotCare:
     case PixelFormat::kMjpeg:
       // impossible; checked previously.
-      ZX_DEBUG_ASSERT(false);
-      return 0u;
+      ZX_PANIC("Unsupported pixel format: %u",
+               sysmem::fidl_underlying_cast(pixel_format.pixel_format));
     case PixelFormat::kR8G8B8A8:
     case PixelFormat::kR8G8B8X8:
       return 4u;
@@ -1526,7 +1540,7 @@ safemath::CheckedNumeric<uint32_t> ImageFormatMinimumRowBytesChecked(
     return kInvalidCheckedNumeric32;
   }
   // Caller must set pixel_format.
-  ZX_DEBUG_ASSERT(constraints.pixel_format().has_value());
+  ZX_ASSERT(constraints.pixel_format().has_value());
   auto pixel_format_and_modifier = PixelFormatAndModifierFromConstraints(constraints);
   for (auto& format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1562,9 +1576,9 @@ safemath::CheckedNumeric<uint32_t> ImageFormatMinimumRowBytesChecked(
 bool ImageFormatMinimumRowBytes(const fuchsia_sysmem2::ImageFormatConstraints& constraints,
                                 uint32_t width, uint32_t* minimum_row_bytes_out) {
   ZX_ASSERT(width != 0);
-  ZX_DEBUG_ASSERT(minimum_row_bytes_out);
+  ZX_ASSERT(minimum_row_bytes_out);
   // Caller must set pixel_format.
-  ZX_DEBUG_ASSERT(constraints.pixel_format().has_value());
+  ZX_ASSERT(constraints.pixel_format().has_value());
   auto pixel_format_and_modifier = PixelFormatAndModifierFromConstraints(constraints);
   for (auto& format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1706,7 +1720,7 @@ fpromise::result<fuchsia_sysmem::wire::ImageFormat2> ImageConstraintsToFormat(
   }
   // This arena isn't relied upon by the returned value, because kMaxOutOfLine == 0.
   fidl::Arena arena;
-  ZX_DEBUG_ASSERT(fidl::TypeTraits<fuchsia_sysmem::wire::ImageFormat2>::kMaxOutOfLine == 0);
+  ZX_ASSERT(fidl::TypeTraits<fuchsia_sysmem::wire::ImageFormat2>::kMaxOutOfLine == 0);
   auto wire_v1 = fidl::ToWire(arena, v1_out_result.take_value());
   return fpromise::ok(wire_v1);
 }
@@ -1744,7 +1758,7 @@ safemath::CheckedNumeric<uint64_t> ImageFormatPlaneByteOffsetChecked(
 
 bool ImageFormatPlaneByteOffset(const ImageFormat& image_format, uint32_t plane,
                                 uint64_t* offset_out) {
-  ZX_DEBUG_ASSERT(offset_out);
+  ZX_ASSERT(offset_out);
   auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
   for (auto& format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1767,7 +1781,7 @@ bool ImageFormatPlaneByteOffset(const ImageFormatWire& image_format, uint32_t pl
 
 bool ImageFormatPlaneByteOffset(const fuchsia_sysmem::wire::ImageFormat2& wire_image_format_v1,
                                 uint32_t plane, uint64_t* offset_out) {
-  ZX_DEBUG_ASSERT(offset_out);
+  ZX_ASSERT(offset_out);
   auto image_format_v1 = fidl::ToNatural(wire_image_format_v1);
   auto image_format_v2_result = sysmem::V2CopyFromV1ImageFormat(image_format_v1);
   if (!image_format_v2_result.is_ok()) {
@@ -1810,7 +1824,7 @@ safemath::CheckedNumeric<uint32_t> ImageFormatPlaneRowBytesChecked(
 
 bool ImageFormatPlaneRowBytes(const ImageFormat& image_format, uint32_t plane,
                               uint32_t* row_bytes_out) {
-  ZX_DEBUG_ASSERT(row_bytes_out);
+  ZX_ASSERT(row_bytes_out);
   auto pixel_format_and_modifier = PixelFormatAndModifierFromImageFormat(image_format);
   for (auto& format_set : kImageFormats) {
     if (format_set->IsSupported(pixel_format_and_modifier)) {
@@ -1833,7 +1847,7 @@ bool ImageFormatPlaneRowBytes(const ImageFormatWire& wire_image_format, uint32_t
 
 bool ImageFormatPlaneRowBytes(const fuchsia_sysmem::wire::ImageFormat2& wire_image_format_v1,
                               uint32_t plane, uint32_t* row_bytes_out) {
-  ZX_DEBUG_ASSERT(row_bytes_out);
+  ZX_ASSERT(row_bytes_out);
   auto image_format_v1 = fidl::ToNatural(wire_image_format_v1);
   auto image_format_v2_result = sysmem::V2CopyFromV1ImageFormat(image_format_v1);
   if (!image_format_v2_result.is_ok()) {

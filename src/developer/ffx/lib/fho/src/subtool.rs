@@ -98,7 +98,7 @@ pub trait FfxMain {
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
-pub enum FhoHandler<M: FfxTool<E>, E = Error>
+pub(crate) enum FhoHandler<M: FfxTool<E>, E = Error>
 where
     E: Into<Error> + 'static,
 {
@@ -153,7 +153,7 @@ pub struct StandaloneToolCommand<M: SubCommand> {
 
 #[derive(FromArgs)]
 /// Fuchsia Host Objects Runner
-pub struct ToolCommand<M: FfxTool<E>, E = Error>
+pub(crate) struct ToolCommand<M: FfxTool<E>, E = Error>
 where
     E: Into<Error> + 'static,
 {
@@ -161,7 +161,7 @@ where
     pub subcommand: FhoHandler<M, E>,
 }
 
-pub struct FhoSuite<M, E = Error> {
+pub(crate) struct FhoSuite<M, E = Error> {
     context: EnvironmentContext,
     _p: std::marker::PhantomData<fn(M, E) -> ()>,
 }

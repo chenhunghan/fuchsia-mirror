@@ -50,6 +50,8 @@ __BEGIN_CDECLS
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_persistent_dlog_write(const char* ptr, size_t len);
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_persistent_dlog_set_location(void* vaddr, size_t len);
 
 __END_CDECLS
 

@@ -153,7 +153,7 @@ void DumpAllSessions(const flatland::UberStruct::InstanceMap& snapshot, std::ost
 }
 
 void DumpLayers(const flatland::GlobalTopologyData& topology_data,
-                const std::vector<flatland::ResolvedLayer>& layers, std::ostream& output) {
+                std::span<const flatland::ResolvedLayer> layers, std::ostream& output) {
   static_assert(2 == std::variant_size_v<decltype(flatland::ResolvedLayer::content)>,
                 "DumpLayers must be updated to support new content types");
 
@@ -201,9 +201,8 @@ void DumpHitRegions(const flatland::UberStruct::InstanceMap& snapshot, std::ostr
 
 namespace flatland {
 
-void DumpScene(const UberStruct::InstanceMap& snapshot,
-               const flatland::GlobalTopologyData& topology_data,
-               const std::vector<flatland::ResolvedLayer>& layers, std::ostream& output) {
+void DumpScene(const UberStruct::InstanceMap& snapshot, const GlobalTopologyData& topology_data,
+               std::span<const ResolvedLayer> layers, std::ostream& output) {
   output << "\n========== BEGIN SCENE DUMP ======================\n";
   DumpTopology(snapshot, topology_data, output);
   output << '\n';

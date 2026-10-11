@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "starnix_registers",
+    srcs = ["src/lib.rs"] + select({
+        "@platforms//cpu:x86_64": ["src/x64.rs"],
+        "@platforms//cpu:arm64": ["src/arm64.rs"],
+        "@platforms//cpu:riscv64": ["src/riscv64.rs"],
+    }),
+    edition = "2024",
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/kernel/syscall_loop:__pkg__",
+    ],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:memoffset",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "starnix_registers_test_packaged_bin",
+    testonly = True,
+    binary = ":starnix_registers_test",
+    binary_name = "starnix_registers_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "starnix_registers_tests-manifest",
+    testonly = True,
+    component_name = "starnix_registers_tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/starnix_registers_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "starnix_registers_tests-component",
+    compiled_manifest = ":starnix_registers_tests-manifest",
+    component_name = "starnix_registers_tests",
+    deps = [":starnix_registers_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "starnix_registers_tests-package",
+    package_name = "starnix_registers_tests",
+    test_components = [":starnix_registers_tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "starnix_registers_tests",
+    package = ":starnix_registers_tests-package",
+)

@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Documentation
+#### PREBUILTS=${PREBUILT_BAZEL} ${PREBUILT_JQ} ${PREBUILT_LICENSE_CLASSIFIER} ${PREBUILT_PYTHON3}
 ### analyze the license state of a given package or directory
 
 ## USAGE:

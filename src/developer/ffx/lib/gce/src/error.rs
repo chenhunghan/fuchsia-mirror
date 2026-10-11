@@ -35,7 +35,10 @@ pub enum GceError {
     MissingSetting { name: &'static str, param: &'static str },
 
     /// There are no Google Cloud credentials to authenticate API calls with.
-    #[error("No Google Cloud credentials found. Run `ffx auth generate`.")]
+    #[error(
+        "No Google Cloud credentials found. Run `ffx auth generate` or \
+         `gcloud auth application-default login`."
+    )]
     MissingCredentials,
 
     /// Stored credentials could not be exchanged for an access token.
@@ -204,6 +207,16 @@ impl GceError {
         }
         None
     }
+
+    /// Returns `true` if this error is an HTTP `403 Forbidden` response from a Google Cloud API.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, Self::Api { status: StatusCode::FORBIDDEN, .. })
+    }
+
+    /// Returns `true` if this error is an HTTP `403 Forbidden` or `404 Not Found` response.
+    pub fn is_forbidden_or_not_found(&self) -> bool {
+        matches!(self, Self::Api { status: StatusCode::FORBIDDEN | StatusCode::NOT_FOUND, .. })
+    }
 }
 
 /// `write_file_atomically` reports its own I/O failures through the caller's error type, which
@@ -245,6 +258,8 @@ mod tests {
             url: Url::parse("https://compute.googleapis.com/compute/v1/projects/p").unwrap(),
             body: "denied".to_string(),
         };
+        assert!(err.is_forbidden());
+        assert!(err.is_forbidden_or_not_found());
         let message = err.to_string();
         assert!(message.contains("403 Forbidden"), "{message}");
         assert!(message.contains("compute.googleapis.com"), "{message}");
@@ -256,6 +271,8 @@ mod tests {
             url: Url::parse("https://compute.googleapis.com/compute/v1/projects/p").unwrap(),
             body: "missing".to_string(),
         };
+        assert!(!not_found.is_forbidden());
+        assert!(not_found.is_forbidden_or_not_found());
         assert!(not_found.to_string().ends_with("missing"), "{not_found}");
     }
 

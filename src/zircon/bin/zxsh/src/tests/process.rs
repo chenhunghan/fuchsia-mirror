@@ -2,12 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::eval::ShellEnv;
+use crate::eval::{EXIT_CANNOT_EXEC, EXIT_FAILURE, EXIT_NOT_FOUND, ShellEnv};
 use crate::fd::Fd;
-use crate::process::{clone_fd_to_action, make_pipe, read_fd_to_end, spawn_command};
+use crate::process::{
+    clone_fd_to_action, make_pipe, read_fd_to_end, spawn_command, spawn_status_to_exit_code,
+};
 use bstr::BString;
 use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
+
+#[test]
+fn test_spawn_status_to_exit_code() {
+    assert_eq!(spawn_status_to_exit_code(zx::Status::NOT_FOUND), EXIT_NOT_FOUND);
+    assert_eq!(spawn_status_to_exit_code(zx::Status::ACCESS_DENIED), EXIT_CANNOT_EXEC);
+    assert_eq!(spawn_status_to_exit_code(zx::Status::INVALID_ARGS), EXIT_FAILURE);
+    assert_eq!(spawn_status_to_exit_code(zx::Status::INTERNAL), EXIT_FAILURE);
+}
 
 #[test]
 fn test_pipe_and_read() {

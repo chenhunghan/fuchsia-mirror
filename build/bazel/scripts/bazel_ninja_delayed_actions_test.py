@@ -276,5 +276,124 @@ class ShouldUpdateStampTest(unittest.TestCase):
         )
 
 
+class MergeDebugSymbolManifestsTest(unittest.TestCase):
+    def test_merge_debug_symbol_manifests_by_target(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import bazel_action_impl
+        import build_utils
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            build_dir = Path(tmpdir)
+            execroot = build_dir / "execroot"
+            bin_dir = execroot / "bazel-out/x64/bin"
+            bin_dir.mkdir(parents=True)
+
+            (bin_dir / "foo.debug").write_bytes(b"")
+            (bin_dir / "bar.debug").write_bytes(b"")
+
+            (bin_dir / "foo_pkg.debug_symbols.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "label": "@@//src:foo_bin",
+                            "debug": "bazel-out/x64/bin/foo.debug",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                        }
+                    ]
+                )
+            )
+            (bin_dir / "bar_pkg.debug_symbols.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "label": "@@//src:foo_bin",
+                            "debug": "bazel-out/x64/bin/foo.debug",
+                            "dest_path": "bin/foo",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                        },
+                        {
+                            "label": "@@//src:bar_bin",
+                            "debug": "bazel-out/x64/bin/bar.debug",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                        },
+                    ]
+                )
+            )
+
+            build_ids = {
+                build_dir / "execroot/bazel-out/x64/bin/foo.debug": "11112222",
+                build_dir / "execroot/bazel-out/x64/bin/bar.debug": "33334444",
+            }
+
+            with mock.patch(
+                "debug_symbols.extract_gnu_build_id",
+                side_effect=lambda p: build_ids[Path(p)],
+            ):
+                (
+                    merged,
+                    by_target,
+                ) = bazel_action_impl.merge_debug_symbol_manifests(
+                    [
+                        "@@//src:foo_pkg,bazel-out/x64/bin/foo_pkg.debug_symbols.json",
+                        "@@//src:bar_pkg,bazel-out/x64/bin/bar_pkg.debug_symbols.json",
+                    ],
+                    bazel_execroot=execroot,
+                    build_dir=build_dir,
+                    time_profile=build_utils.TimeProfile(),
+                )
+
+            expected_foo = {
+                "label": "@@//src:foo_bin",
+                "debug": "execroot/bazel-out/x64/bin/foo.debug",
+                "dest_path": "bin/foo",
+                "os": "fuchsia",
+                "cpu": "x64",
+                "elf_build_id": "11112222",
+            }
+            expected_bar = {
+                "label": "@@//src:bar_bin",
+                "debug": "execroot/bazel-out/x64/bin/bar.debug",
+                "os": "fuchsia",
+                "cpu": "x64",
+                "elf_build_id": "33334444",
+            }
+
+            self.assertEqual(merged, [expected_foo, expected_bar])
+            self.assertIsInstance(
+                by_target, bazel_action_impl.BazelDebugSymbolMap
+            )
+            self.assertEqual(
+                by_target,
+                {
+                    "//src:foo_pkg": [expected_foo],
+                    "//src:bar_pkg": [expected_foo, expected_bar],
+                },
+            )
+
+    def test_merge_debug_symbol_manifests_missing_comma_raises(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        import bazel_action_impl
+        import build_utils
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            build_dir = Path(tmpdir)
+            with self.assertRaisesRegex(AssertionError, "missing comma"):
+                bazel_action_impl.merge_debug_symbol_manifests(
+                    ["no_comma_path.json"],
+                    bazel_execroot=build_dir,
+                    build_dir=build_dir,
+                    time_profile=build_utils.TimeProfile(),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

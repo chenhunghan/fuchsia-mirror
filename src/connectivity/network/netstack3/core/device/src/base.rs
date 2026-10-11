@@ -23,6 +23,7 @@ use netstack3_ip::nud::{LinkResolutionContext, NudCounters};
 use crate::blackhole::{BlackholeDeviceId, BlackholePrimaryDeviceId};
 use crate::internal::arp::ArpCounters;
 use crate::internal::ethernet::{EthernetLinkDevice, EthernetTimerId};
+use crate::internal::gro::GroCounters;
 use crate::internal::id::{
     BaseDeviceId, BasePrimaryDeviceId, DeviceId, EthernetDeviceId, EthernetPrimaryDeviceId,
     EthernetWeakDeviceId,
@@ -182,6 +183,8 @@ pub struct DeviceLayerState<BT: DeviceLayerTypes> {
     pub nud_v6_counters: NudCounters<Ipv6>,
     /// ARP counters.
     pub arp_counters: ArpCounters,
+    /// GRO counters.
+    pub gro_counters: GroCounters,
 }
 
 impl<BT: DeviceLayerTypes> DeviceLayerState<BT> {

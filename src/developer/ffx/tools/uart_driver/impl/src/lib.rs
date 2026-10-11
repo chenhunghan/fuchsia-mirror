@@ -304,8 +304,8 @@ pub enum ClientEvent {
 pub enum UartEvent {
     /// Decoded data payload received from the UART link for `channel_id`.
     UartData { channel_id: u16, data: Vec<u8> },
-    /// Remote close frame received from the UART link for `channel_id`.
-    UartClose { channel_id: u16 },
+    /// Remote close frame received from the UART link for `channel_id`, with an optional diagnostic reason.
+    UartClose { channel_id: u16, reason: Option<String> },
     /// A new UART session was established with an outgoing `sender_tx` queue.
     UpdateSender { sender_tx: mpsc::Sender<SenderMessage> },
     /// The active UART session disconnected or failed.
@@ -319,7 +319,10 @@ impl PartialEq for UartEvent {
                 Self::UartData { channel_id: c1, data: d1 },
                 Self::UartData { channel_id: c2, data: d2 },
             ) => c1 == c2 && d1 == d2,
-            (Self::UartClose { channel_id: c1 }, Self::UartClose { channel_id: c2 }) => c1 == c2,
+            (
+                Self::UartClose { channel_id: c1, reason: r1 },
+                Self::UartClose { channel_id: c2, reason: r2 },
+            ) => c1 == c2 && r1 == r2,
             (Self::UartDown, Self::UartDown) => true,
             _ => false,
         }
@@ -437,6 +440,7 @@ async fn handle_uart_event(
     active_channels: &mut HashMap<u16, ClientState>,
     outgoing_queue: &mut VecDeque<SenderMessage>,
     sender_tx: &mut Option<mpsc::Sender<SenderMessage>>,
+    metrics: &Arc<Mutex<DaemonMetrics>>,
 ) {
     match event {
         UartEvent::UartData { channel_id, data } => {
@@ -477,7 +481,11 @@ async fn handle_uart_event(
                 }
             }
         }
-        UartEvent::UartClose { channel_id } => {
+        UartEvent::UartClose { channel_id, reason } => {
+            if let Some(reason) = reason {
+                log::error!("Target closed channel {channel_id} with error: {reason}");
+                metrics.lock().unwrap().last_target_error = Some(reason);
+            }
             active_channels.remove(&channel_id);
         }
         UartEvent::UpdateSender { sender_tx: new_tx } => {
@@ -579,7 +587,14 @@ pub async fn coordinator_task(
         futures::select! {
             event = serial_rx.next().fuse() => {
                 let Some(event) = event else { break };
-                handle_uart_event(event, &mut active_channels, &mut outgoing_queue, &mut sender_tx).await;
+                handle_uart_event(
+                    event,
+                    &mut active_channels,
+                    &mut outgoing_queue,
+                    &mut sender_tx,
+                    &metrics,
+                )
+                .await;
             }
             _ = sender_ready_fut.fuse() => {}
             event = client_rx_fut => {
@@ -843,8 +858,17 @@ fn process_received_frame(
             }
         }
         FrameType::Close => {
-            log::trace!("Received CLOSE frame, seq={}, channel={}", frame.seq, frame.channel_id);
-            let ev = UartEvent::UartClose { channel_id: frame.channel_id };
+            let reason = (!frame.payload.is_empty()).then(|| {
+                safe_string::TermSafe::from_str_escaped(String::from_utf8_lossy(&frame.payload))
+                    .into_inner()
+            });
+            log::trace!(
+                "Received CLOSE frame, seq={}, channel={}, reason={:?}",
+                frame.seq,
+                frame.channel_id,
+                reason
+            );
+            let ev = UartEvent::UartClose { channel_id: frame.channel_id, reason };
             dispatch_ordered_event(
                 frame.session_id,
                 frame.channel_id,
@@ -1985,6 +2009,104 @@ mod tests {
 
         drop(client);
         let _ = task.await;
+    }
+
+    #[fuchsia::test]
+    async fn test_receiver_and_coordinator_record_target_close_error() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let reader = UartReader::new(server);
+        let (serial_tx, serial_rx) = mpsc::channel(16);
+        let ack_tracker = AckTracker::new();
+        let (incoming_event_tx, _incoming_event_rx) = mpsc::channel(16);
+        let metrics = Arc::new(Mutex::new(DaemonMetrics::default()));
+
+        let rx_task = fuchsia_async::Task::local(receiver_task(
+            reader,
+            serial_tx,
+            ack_tracker.clone(),
+            incoming_event_tx,
+            99,
+            metrics.clone(),
+        ));
+
+        let (mut client_tx_out, client_rx) = mpsc::channel(16);
+        let (client_tx, _client_rx_in) = mpsc::channel(16);
+        let (sender_tx_ch, mut sender_rx_ch) = mpsc::channel(16);
+        let coord_task = fuchsia_async::Task::local(coordinator_task(
+            client_rx,
+            serial_rx,
+            client_tx,
+            Some(sender_tx_ch),
+            metrics.clone(),
+        ));
+
+        let (mut host_client, host_server) = UnixStream::pair().unwrap();
+        client_tx_out
+            .send(ClientEvent::NewChannel { channel_id: 2, stream: host_server })
+            .await
+            .unwrap();
+        // Synchronize with `coordinator_task` via the FIFO `client_rx` channel so `NewChannel`
+        // is guaranteed to be registered in `active_channels` before `close_frame` arrives on
+        // `serial_rx` (since `futures::select!` polls ready branches in pseudo-random order).
+        client_tx_out
+            .send(ClientEvent::ChannelData { channel_id: 2, data: vec![0] })
+            .await
+            .unwrap();
+        assert!(matches!(
+            sender_rx_ch.next().await,
+            Some(SenderMessage::Data { channel_id: 2, .. })
+        ));
+
+        let close_frame = encode_frame(
+            99,
+            2,
+            0,
+            FrameType::Close,
+            b"Failed to register channel with RCS: PEER_CLOSED",
+        )
+        .unwrap();
+        client.write_all(&close_frame).await.unwrap();
+
+        // Wait for the host client socket to be closed by coordinator_task
+        let mut buf = [0u8; 8];
+        let n = host_client.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
+
+        assert_eq!(
+            metrics.lock().unwrap().last_target_error.as_deref(),
+            Some("Failed to register channel with RCS: PEER_CLOSED")
+        );
+
+        let (mut host_client_2, host_server_2) = UnixStream::pair().unwrap();
+        client_tx_out
+            .send(ClientEvent::NewChannel { channel_id: 3, stream: host_server_2 })
+            .await
+            .unwrap();
+        client_tx_out
+            .send(ClientEvent::ChannelData { channel_id: 3, data: vec![0] })
+            .await
+            .unwrap();
+        assert!(matches!(
+            sender_rx_ch.next().await,
+            Some(SenderMessage::Data { channel_id: 3, .. })
+        ));
+
+        let close_frame_2 =
+            encode_frame(99, 3, 1, FrameType::Close, b"bad \x1b[31mred\x1b[0m\nline2").unwrap();
+        client.write_all(&close_frame_2).await.unwrap();
+
+        let n = host_client_2.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
+
+        assert_eq!(
+            metrics.lock().unwrap().last_target_error.as_deref(),
+            Some("bad \\u{1b}[31mred\\u{1b}[0m\\nline2")
+        );
+
+        drop(client);
+        drop(client_tx_out);
+        let _ = rx_task.await;
+        assert!(coord_task.await.is_ok());
     }
     #[fuchsia::test]
     async fn test_receiver_task_reset_frame_error() {

@@ -6,6 +6,11 @@
 #include <fidl/fuchsia.wlan.stats/cpp/fidl.h>
 #include <zircon/errors.h>
 
+#include <cstring>
+#include <limits>
+#include <type_traits>
+#include <vector>
+
 #include <wlan/common/channel.h>
 #include <wlan/drivers/macaddr.h>
 #include <zxtest/zxtest.h>
@@ -24,6 +29,21 @@ using ::wlan::common::MacAddr;
 namespace wlan::brcmfmac {
 
 namespace wlan_ieee80211 = wlan_ieee80211;
+
+namespace {
+
+// Returns |value| as the raw bytes that the error injector substitutes for a firmware response.
+// Restricted to trivially copyable types, for which copying the object representation is well
+// defined.
+template <typename T>
+  requires std::is_trivially_copyable_v<T>
+std::vector<uint8_t> CreatePayloadVector(const T& value) {
+  std::vector<uint8_t> payload(sizeof(value));
+  std::memcpy(payload.data(), &value, sizeof(value));
+  return payload;
+}
+
+}  // namespace
 
 // Some default AP and association request values
 constexpr fuchsia_wlan_ieee80211::wire::ChannelNumber kDefaultChannel = {
@@ -72,9 +92,6 @@ constexpr auto kDefaultApDisassocReason = wlan_ieee80211::ReasonCode::kUnspecifi
 constexpr auto kDefaultClientDisassocReason = wlan_ieee80211::ReasonCode::kUnspecifiedReason;
 constexpr auto kDefaultApDeauthReason = wlan_ieee80211::ReasonCode::kInvalidAuthentication;
 constexpr auto kDefaultClientDeauthReason = wlan_ieee80211::ReasonCode::kLeavingNetworkDisassoc;
-// Sim firmware returns these values for SNR and RSSI.
-const uint8_t kDefaultSimFwSnr = 40;
-const int8_t kDefaultSimFwRssi = -20;
 
 class ConnectTest;
 class ConnectInterface : public SimInterface {
@@ -140,6 +157,11 @@ class ConnectTest : public SimTest {
   void GetIfaceHistogramStats(fuchsia_wlan_stats::wire::IfaceHistogramStats* out_stats);
   void GetSignalReport(fuchsia_wlan_stats::wire::SignalReport* out_signal_report);
   void DetailedHistogramErrorInject();
+  // brcmf_cfg80211_get_station() queries "tdls_sta_info" before "sta_info". The sim firmware
+  // doesn't implement "tdls_sta_info" and returns success with a zeroed buffer for unknown iovars,
+  // which would hide the "sta_info" response. Make it fail like real firmware does for a non-TDLS
+  // peer so that the driver falls back to "sta_info".
+  void InjectTdlsStaInfoUnsupported();
 
   // Event handlers
   void OnConnectConf(const fuchsia_wlan_fullmac::WlanFullmacImplIfcConnectConfRequest* resp);
@@ -188,6 +210,8 @@ class ConnectTest : public SimTest {
     int16_t signal_ind_snr = 0;
     // RSSI seen in the signal report indication.
     int16_t signal_ind_rssi = 0;
+    std::optional<uint32_t> signal_ind_tx_rate;
+    std::optional<uint32_t> signal_ind_rx_rate;
   };
 
   struct AssocRespInfo {
@@ -436,6 +460,8 @@ void ConnectTest::OnSignalReport(
   context_.signal_ind_count++;
   context_.signal_ind_rssi = req->ind().rssi_dbm().value_or(0);
   context_.signal_ind_snr = req->ind().snr_db().value_or(0);
+  context_.signal_ind_tx_rate = req->ind().tx_rate_500kbps();
+  context_.signal_ind_rx_rate = req->ind().rx_rate_500kbps();
 }
 
 void ConnectTest::StartConnect() {
@@ -465,10 +491,19 @@ void ConnectTest::StartReconnect() {
   EXPECT_TRUE(result.ok());
 }
 
+void ConnectTest::InjectTdlsStaInfoUnsupported() {
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    brcmf_simdev* sim = device->GetSim();
+    sim->sim_fw->err_inj_.AddErrInjIovar("tdls_sta_info", ZX_OK, BCME_UNSUPPORTED,
+                                         client_ifc_.iface_id_);
+  });
+}
+
 // Verify that we get a signal report when associated.
 TEST_F(ConnectTest, SignalReportTest) {
   // Create our device instance
   Init();
+  InjectTdlsStaInfoUnsupported();
 
   // Start up our fake AP
   simulation::FakeAp ap(env_.get(), kDefaultBssid, kDefaultSsid, kDefaultChannel,
@@ -487,6 +522,49 @@ TEST_F(ConnectTest, SignalReportTest) {
   // Verify the plumbing between the firmware and the signal report.
   EXPECT_EQ(context_.signal_ind_snr, kDefaultSimFwSnr);
   EXPECT_EQ(context_.signal_ind_rssi, kDefaultSimFwRssi);
+  // BRCMF_C_GET_RATE is already in units of 500 kbps, so it's reported as is.
+  EXPECT_EQ(context_.signal_ind_tx_rate, kDefaultSimFwTxRate);
+  // The sta_info rx rate is in kbps and must be converted to units of 500 kbps. The sim firmware
+  // reports 72'200 kbps (72.2 Mbps), which is 144.4 * 500 kbps and is truncated to 144.
+  static_assert(kDefaultSimFwStaInfoRxRateKbps == 72'200);
+  EXPECT_EQ(context_.signal_ind_rx_rate, 144u);
+}
+
+// Verify that the rx rate is left unset when the firmware reports an rx_rate of 0 in sta_info,
+// which means that no rx rate is available.
+TEST_F(ConnectTest, SignalReportTest_RxRateUnavailable) {
+  Init();
+  InjectTdlsStaInfoUnsupported();
+
+  simulation::FakeAp ap(env_.get(), kDefaultBssid, kDefaultSsid, kDefaultChannel,
+                        fuchsia_wlan_ieee80211::wire::ChannelBandwidth::kCbw20, 0);
+  ap.EnableBeacon(zx::msec(100));
+  aps_.push_back(&ap);
+
+  const std::vector<uint8_t> alt_sta_info_data = CreatePayloadVector<brcmf_sta_info_le>({
+      .ver = 4,
+      .len = sizeof(brcmf_sta_info_le),
+      .tx_rate = kDefaultSimFwStaInfoTxRateKbps,
+      .rx_rate = 0,
+  });
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    brcmf_simdev* sim = device->GetSim();
+    sim->sim_fw->err_inj_.AddErrInjIovar("sta_info", ZX_OK, BCME_OK, client_ifc_.iface_id_,
+                                         &alt_sta_info_data);
+  });
+
+  context_.expected_results.push_front(wlan_ieee80211::StatusCode::kSuccess);
+
+  env_->ScheduleNotification(std::bind(&ConnectTest::StartConnect, this), zx::msec(10));
+
+  env_->Run(kTestDuration);
+
+  ASSERT_GT(context_.signal_ind_count, 0u);
+  // The rest of the signal report should be unaffected.
+  EXPECT_EQ(context_.signal_ind_snr, kDefaultSimFwSnr);
+  EXPECT_EQ(context_.signal_ind_rssi, kDefaultSimFwRssi);
+  EXPECT_EQ(context_.signal_ind_tx_rate, kDefaultSimFwTxRate);
+  EXPECT_EQ(context_.signal_ind_rx_rate, std::nullopt);
 }
 
 void ConnectTest::GetIfaceStats(fuchsia_wlan_stats::wire::IfaceStats* out_stats) {
@@ -555,6 +633,72 @@ TEST_F(ConnectTest, GetSignalReportTest_Connected) {
   EXPECT_EQ(conn_report.rssi_dbm(), kDefaultSimFwRssi);
   EXPECT_EQ(conn_report.snr_db(), kDefaultSimFwSnr);
   EXPECT_EQ(conn_report.primary().number, kDefaultChannel.number);
+}
+
+// Verify that an SNR too large for the int8_t it is reported in is clamped rather than truncated.
+// SNR is retrieved through a string-named iovar.
+TEST_F(ConnectTest, GetSignalReportTest_SnrOutOfRange) {
+  Init();
+
+  simulation::FakeAp ap(env_.get(), kDefaultBssid, kDefaultSsid, kDefaultChannel,
+                        fuchsia_wlan_ieee80211::wire::ChannelBandwidth::kCbw20, 0);
+  ap.EnableBeacon(zx::msec(100));
+
+  // Far outside int8_t range. Truncating this value would report an SNR of 64 dB.
+  const std::vector<uint8_t> alt_snr_data = CreatePayloadVector<int32_t>(40000);
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    brcmf_simdev* sim = device->GetSim();
+    sim->sim_fw->err_inj_.AddErrInjIovar("snr", ZX_OK, BCME_OK, client_ifc_.iface_id_,
+                                         &alt_snr_data);
+  });
+
+  context_.expected_results.push_front(wlan_ieee80211::StatusCode::kSuccess);
+  fuchsia_wlan_stats::wire::SignalReport signal_report = {};
+
+  env_->ScheduleNotification(std::bind(&ConnectTest::StartConnect, this), zx::msec(10));
+  env_->ScheduleNotification(std::bind(&ConnectTest::GetSignalReport, this, &signal_report),
+                             zx::msec(30));
+
+  env_->Run(kTestDuration);
+
+  ASSERT_TRUE(signal_report.has_connection_signal_report());
+  auto conn_report = signal_report.connection_signal_report();
+  EXPECT_EQ(conn_report.snr_db(), std::numeric_limits<int8_t>::max());
+  // The RSSI is not injected, so it should be unaffected.
+  EXPECT_EQ(conn_report.rssi_dbm(), kDefaultSimFwRssi);
+}
+
+// Verify that an RSSI too small for the int8_t it is reported in is clamped rather than truncated.
+// Unlike SNR, RSSI is retrieved with a numbered command rather than a string-named iovar.
+TEST_F(ConnectTest, GetSignalReportTest_RssiOutOfRange) {
+  Init();
+
+  simulation::FakeAp ap(env_.get(), kDefaultBssid, kDefaultSsid, kDefaultChannel,
+                        fuchsia_wlan_ieee80211::wire::ChannelBandwidth::kCbw20, 0);
+  ap.EnableBeacon(zx::msec(100));
+
+  // Far outside int8_t range. Truncating this value would report an RSSI of -64 dBm.
+  const std::vector<uint8_t> alt_rssi_data = CreatePayloadVector<int32_t>(-40000);
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    brcmf_simdev* sim = device->GetSim();
+    sim->sim_fw->err_inj_.AddErrInjCmd(BRCMF_C_GET_RSSI, ZX_OK, BCME_OK, client_ifc_.iface_id_,
+                                       &alt_rssi_data);
+  });
+
+  context_.expected_results.push_front(wlan_ieee80211::StatusCode::kSuccess);
+  fuchsia_wlan_stats::wire::SignalReport signal_report = {};
+
+  env_->ScheduleNotification(std::bind(&ConnectTest::StartConnect, this), zx::msec(10));
+  env_->ScheduleNotification(std::bind(&ConnectTest::GetSignalReport, this, &signal_report),
+                             zx::msec(30));
+
+  env_->Run(kTestDuration);
+
+  ASSERT_TRUE(signal_report.has_connection_signal_report());
+  auto conn_report = signal_report.connection_signal_report();
+  EXPECT_EQ(conn_report.rssi_dbm(), std::numeric_limits<int8_t>::min());
+  // The SNR is not injected, so it should be unaffected.
+  EXPECT_EQ(conn_report.snr_db(), kDefaultSimFwSnr);
 }
 
 // This test is to verify that GetIfaceStats still returns a response even when the
@@ -1622,6 +1766,39 @@ TEST_F(ConnectTest, deauth_during_reconnect_via_assoc) {
   EXPECT_EQ(context_.disassoc_ind_count, 1U);
   EXPECT_EQ(context_.ind_locally_initiated_count, 0U);
   EXPECT_EQ(context_.deauth_conf_count, 1U);
+}
+
+TEST_F(ConnectTest, trailing_link_down_dropped_while_connecting) {
+  // Create our device instance
+  Init();
+
+  // Start up our fake AP
+  simulation::FakeAp ap(env_.get(), kDefaultBssid, kDefaultSsid, kDefaultChannel,
+                        fuchsia_wlan_ieee80211::wire::ChannelBandwidth::kCbw20, 0);
+  aps_.push_back(&ap);
+
+  context_.expected_results.push_front(wlan_ieee80211::StatusCode::kSuccess);
+  context_.expected_results.push_front(wlan_ieee80211::StatusCode::kSuccess);
+
+  env_->ScheduleNotification(std::bind(&ConnectTest::StartConnect, this), zx::msec(10));
+  env_->ScheduleNotification(std::bind(&ConnectTest::DisassocFromAp, this), zx::sec(2));
+  env_->ScheduleNotification(std::bind(&ConnectTest::StartReconnect, this), zx::sec(3));
+  // Inject a trailing LINK down event (flag 0) while reconnect is CONNECTING.
+  // The driver should drop this event and the reconnect should succeed.
+  env_->ScheduleNotification(
+      [this]() {
+        WithSimDevice([&](brcmfmac::SimDevice* device) {
+          brcmf_simdev* sim = device->GetSim();
+          sim->sim_fw->TriggerFirmwareLinkDownEvent();
+        });
+      },
+      zx::sec(3) + zx::usec(500));
+
+  env_->Run(kTestDuration);
+
+  EXPECT_EQ(context_.connect_resp_count, 2U);
+  EXPECT_EQ(context_.disassoc_ind_count, 1U);
+  EXPECT_EQ(context_.ind_locally_initiated_count, 0U);
 }
 
 // Verify that association is retried as per the setting

@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Error};
 use argh::FromArgs;
+use fidl::endpoints::DiscoverableProtocolMarker;
 use fidl_fuchsia_usb_policy as usb_policy;
 
 mod config;
@@ -26,6 +27,17 @@ enum SubCommand {
     Diag(DiagArgs),
     GetConfig(GetConfigArgs),
     SetConfig(SetConfigArgs),
+    CableBreaker(CableBreakerArgs),
+}
+
+#[derive(FromArgs, PartialEq, Debug)]
+/// Simulates a physical USB-C cable unplug/replug by opening CC1/CC2 terminations in the TCPC
+/// (e.g. `usb-cli cable-breaker --duration 10s`).
+#[argh(subcommand, name = "cable-breaker")]
+struct CableBreakerArgs {
+    /// duration before automatically waking and reconnecting CC lines (e.g. "10s" or "10")
+    #[argh(option, short = 'd')]
+    duration: Option<String>,
 }
 
 #[derive(FromArgs, PartialEq, Debug)]
@@ -98,16 +110,23 @@ async fn main() {
     println!("[usb-cli:DONE]");
 }
 
-async fn get_configuration_client() -> Result<usb_policy::ConfigurationProxy, Error> {
-    if std::path::Path::new("/exposed/fuchsia.usb.policy.Configuration").exists() {
-        return fuchsia_component::client::connect_to_protocol_at_path::<
-            usb_policy::ConfigurationMarker,
-        >("/exposed/fuchsia.usb.policy.Configuration")
-        .context("Failed to connect to /exposed/fuchsia.usb.policy.Configuration");
+fn connect_protocol_any<P: DiscoverableProtocolMarker>() -> Result<P::Proxy, Error> {
+    let ns_path = format!("/ns/svc/{}", P::PROTOCOL_NAME);
+    if std::path::Path::new(&ns_path).exists() {
+        return fuchsia_component::client::connect_to_protocol_at_path::<P>(&ns_path)
+            .with_context(|| format!("Failed to connect to {ns_path}"));
     }
+    let exposed_path = format!("/exposed/{}", P::PROTOCOL_NAME);
+    if std::path::Path::new(&exposed_path).exists() {
+        return fuchsia_component::client::connect_to_protocol_at_path::<P>(&exposed_path)
+            .with_context(|| format!("Failed to connect to {exposed_path}"));
+    }
+    fuchsia_component::client::connect_to_protocol::<P>()
+        .with_context(|| format!("Failed to connect to {} protocol", P::PROTOCOL_NAME))
+}
 
-    fuchsia_component::client::connect_to_protocol::<usb_policy::ConfigurationMarker>()
-        .context("Failed to connect to fuchsia.usb.policy.Configuration protocol")
+async fn get_configuration_client() -> Result<usb_policy::ConfigurationProxy, Error> {
+    connect_protocol_any::<usb_policy::ConfigurationMarker>()
 }
 
 async fn run_get_config(_args: GetConfigArgs) -> Result<(), Error> {
@@ -207,13 +226,7 @@ async fn run_set_config(args: SetConfigArgs) -> Result<(), Error> {
 }
 
 async fn get_health_report() -> Result<usb_policy::HealthReport, Error> {
-    let health =
-        fuchsia_component::client::connect_to_protocol_at_path::<usb_policy::HealthMarker>(
-            "/exposed/fuchsia.usb.policy.Health",
-        )
-        .map_err(|e| {
-            anyhow::format_err!("Failed to connect to Health protocol at /exposed: {e:?}")
-        })?;
+    let health = connect_protocol_any::<usb_policy::HealthMarker>()?;
 
     health
         .get_report()
@@ -265,6 +278,49 @@ async fn run_diagnostics(verbose: bool) -> Result<(), Error> {
     Ok(())
 }
 
+fn parse_duration_seconds(duration: &str) -> Result<u64, Error> {
+    let trimmed = duration.trim();
+    let numeric = trimmed.strip_suffix('s').unwrap_or(trimmed);
+    let secs: u64 = numeric.parse().with_context(|| {
+        format!("Invalid duration '{duration}': expected seconds (e.g. '10s' or '10')")
+    })?;
+    if secs == 0 {
+        anyhow::bail!("Duration must be greater than 0 seconds");
+    }
+    Ok(secs)
+}
+
+async fn execute_cable_breaker(
+    config_client: &usb_policy::ConfigurationProxy,
+    args: &CableBreakerArgs,
+) -> Result<(), Error> {
+    let duration_nanos = if let Some(duration_str) = &args.duration {
+        let secs = parse_duration_seconds(duration_str)?;
+        let secs_i64 = i64::try_from(secs).context("Duration is too large")?;
+        println!(
+            "Breaking Type-C cable connection (opening CC1/CC2) and scheduling wake alarm reconnect ({secs}s)..."
+        );
+        zx::MonotonicDuration::from_seconds(secs_i64).into_nanos()
+    } else {
+        println!("Breaking Type-C cable connection (opening CC1/CC2)...");
+        0
+    };
+
+    config_client
+        .disconnect_cable(duration_nanos)
+        .await
+        .context("Failed FIDL call disconnect_cable")?
+        .map_err(zx::Status::err_from_raw)
+        .context("DisconnectCable returned an error status")?;
+    println!("Type-C cable connection broken.");
+    Ok(())
+}
+
+async fn run_cable_breaker(args: CableBreakerArgs) -> Result<(), Error> {
+    let config_client = get_configuration_client().await?;
+    execute_cable_breaker(&config_client, &args).await
+}
+
 async fn run_cli() -> Result<(), Error> {
     let args: UsbCliArgs = argh::from_env();
     match args.subcommand {
@@ -274,16 +330,126 @@ async fn run_cli() -> Result<(), Error> {
         SubCommand::Diag(sc_args) => run_diagnostics(sc_args.verbose).await,
         SubCommand::GetConfig(sc_args) => run_get_config(sc_args).await,
         SubCommand::SetConfig(sc_args) => run_set_config(sc_args).await,
+        SubCommand::CableBreaker(sc_args) => run_cable_breaker(sc_args).await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[test]
     fn test_parse_missing_subcommand() {
         assert!(UsbCliArgs::from_args(&["usb-cli"], &[]).is_err());
+    }
+
+    #[test]
+    fn test_parse_cable_breaker() {
+        let cb_default = UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker"]).unwrap();
+        assert_eq!(
+            cb_default,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs { duration: None })
+            }
+        );
+
+        let cb_duration =
+            UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "--duration", "10s"]).unwrap();
+        assert_eq!(
+            cb_duration,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some("10s".to_string()),
+                })
+            }
+        );
+
+        let cb_short = UsbCliArgs::from_args(&["usb-cli"], &["cable-breaker", "-d", "15"]).unwrap();
+        assert_eq!(
+            cb_short,
+            UsbCliArgs {
+                subcommand: SubCommand::CableBreaker(CableBreakerArgs {
+                    duration: Some("15".to_string()),
+                })
+            }
+        );
+
+        assert_eq!(parse_duration_seconds("10s").unwrap(), 10);
+        assert_eq!(parse_duration_seconds("10").unwrap(), 10);
+        assert!(parse_duration_seconds("0s").is_err());
+        assert!(parse_duration_seconds("10m").is_err());
+    }
+
+    /// Serves `fuchsia.usb.policy.Configuration` until the client closes it, replying to
+    /// `DisconnectCable` with `disconnect_result`. Returns the requests it received, in order.
+    fn serve_configuration(
+        mut stream: usb_policy::ConfigurationRequestStream,
+        disconnect_result: Result<(), zx::Status>,
+    ) -> fuchsia_async::Task<Vec<String>> {
+        fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            while let Some(Ok(request)) = stream.next().await {
+                match request {
+                    usb_policy::ConfigurationRequest::DisconnectCable { duration, responder } => {
+                        events.push(format!("disconnect_cable:{duration}"));
+                        responder.send(disconnect_result.map_err(zx::Status::into_raw)).unwrap();
+                    }
+                    request => panic!("Unexpected request: {request:?}"),
+                }
+            }
+            events
+        })
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_with_duration() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        execute_cable_breaker(
+            &config_proxy,
+            &CableBreakerArgs { duration: Some("10s".to_string()) },
+        )
+        .await
+        .expect("execute_cable_breaker should succeed");
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_without_duration() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Ok(()));
+
+        execute_cable_breaker(&config_proxy, &CableBreakerArgs { duration: None })
+            .await
+            .expect("execute_cable_breaker should succeed");
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["disconnect_cable:0"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_execute_cable_breaker_failure() {
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = serve_configuration(config_stream, Err(zx::Status::UNAVAILABLE));
+
+        assert!(
+            execute_cable_breaker(
+                &config_proxy,
+                &CableBreakerArgs { duration: Some("10s".to_string()) },
+            )
+            .await
+            .is_err()
+        );
+        drop(config_proxy);
+
+        assert_eq!(server_task.await, vec!["disconnect_cable:10000000000"]);
     }
 
     #[test]

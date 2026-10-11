@@ -308,6 +308,31 @@ layout!({
     }
 });
 
+layout!({
+    /// Header word for an FXT Context Switch record (RecordType = 8, SchedulerEventType = 1).
+    pub struct ContextSwitchRecordHeader(u64);
+    {
+        let event_type @ 63..60: SchedulerEventType = SchedulerEventType::ContextSwitch;
+        let thread_state @ 39..36;
+        let cpu_number @ 35..20;
+        let arg_count @ 19..16;
+        let record_size @ 15..4;
+        let record_type @ 3..0: RecordType = RecordType::Scheduler;
+    }
+});
+
+layout!({
+    /// Header word for an FXT Thread Wakeup record (RecordType = 8, SchedulerEventType = 2).
+    pub struct ThreadWakeupRecordHeader(u64);
+    {
+        let event_type @ 63..60: SchedulerEventType = SchedulerEventType::ThreadWakeup;
+        let cpu_number @ 35..20;
+        let arg_count @ 19..16;
+        let record_size @ 15..4;
+        let record_type @ 3..0: RecordType = RecordType::Scheduler;
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +449,41 @@ mod tests {
         assert_eq!((raw >> 24) & 0xff, 0);
         assert_eq!((raw >> 32) & 0xffff, 10);
         assert_eq!((raw >> 48) & 0xffff, 20);
+    }
+
+    #[test]
+    fn test_context_switch_record_header() {
+        let mut cs = ContextSwitchRecordHeader::default();
+        cs.set_record_size(6).set_arg_count(2).set_cpu_number(0x1234).set_thread_state(3);
+        assert_eq!(cs.record_type(), RecordType::Scheduler);
+        assert_eq!(cs.record_size(), 6);
+        assert_eq!(cs.arg_count(), 2);
+        assert_eq!(cs.cpu_number(), 0x1234);
+        assert_eq!(cs.thread_state(), 3);
+        assert_eq!(cs.event_type(), SchedulerEventType::ContextSwitch);
+        let raw = cs.bits();
+        assert_eq!(raw & 0xf, 8);
+        assert_eq!((raw >> 4) & 0xfff, 6);
+        assert_eq!((raw >> 16) & 0xf, 2);
+        assert_eq!((raw >> 20) & 0xffff, 0x1234);
+        assert_eq!((raw >> 36) & 0xf, 3);
+        assert_eq!((raw >> 60) & 0xf, 1);
+    }
+
+    #[test]
+    fn test_thread_wakeup_record_header() {
+        let mut tw = ThreadWakeupRecordHeader::default();
+        tw.set_record_size(4).set_arg_count(1).set_cpu_number(0x5678);
+        assert_eq!(tw.record_type(), RecordType::Scheduler);
+        assert_eq!(tw.record_size(), 4);
+        assert_eq!(tw.arg_count(), 1);
+        assert_eq!(tw.cpu_number(), 0x5678);
+        assert_eq!(tw.event_type(), SchedulerEventType::ThreadWakeup);
+        let raw = tw.bits();
+        assert_eq!(raw & 0xf, 8);
+        assert_eq!((raw >> 4) & 0xfff, 4);
+        assert_eq!((raw >> 16) & 0xf, 1);
+        assert_eq!((raw >> 20) & 0xffff, 0x5678);
+        assert_eq!((raw >> 60) & 0xf, 2);
     }
 }

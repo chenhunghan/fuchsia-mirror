@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# host_shac_test() runs `shac test` in a minimal checkout containing only the
+# test's declared data, so tests depend on this to be able to load the check
+# implementations they test.
+filegroup(
+    name = "starlark_files",
+    testonly = True,
+    srcs = glob(["*.star"]),
+    visibility = [
+        "//build:__pkg__",
+        "//scripts/shac/tests:__subpackages__",
+    ],
+)

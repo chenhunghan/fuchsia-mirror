@@ -3,5 +3,6 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Source tree
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### generate symlinks to Rust Cargo.toml output files
 

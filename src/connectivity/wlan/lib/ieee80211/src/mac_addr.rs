@@ -53,6 +53,12 @@ impl MacAddr {
         self.0[0] & 0x01 != 0
     }
 
+    /// IEEE Std 802.3-2015, 3.2.3: The second least significant bit of the first octet of a MAC
+    /// address denotes a locally administered address.
+    pub fn is_locally_administered(&self) -> bool {
+        self.0[0] & 0x02 != 0
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
@@ -207,6 +213,20 @@ mod tests {
     #[test]
     fn is_multicast_not_valid_addr() {
         assert!(!MacAddr::from([34, 33, 33, 33, 33, 33]).is_multicast());
+    }
+
+    #[test]
+    fn locally_administered_addresses() {
+        assert!(MacAddr::from([0x02, 0, 0, 0, 0, 0]).is_locally_administered());
+        assert!(MacAddr::from([0xfe; 6]).is_locally_administered());
+        assert!(MacAddr::from([0xff; 6]).is_locally_administered());
+    }
+
+    #[test]
+    fn universally_administered_addresses() {
+        assert!(!MacAddr::from([0; 6]).is_locally_administered());
+        assert!(!MacAddr::from([0x01, 0, 0, 0, 0, 0]).is_locally_administered());
+        assert!(!MacAddr::from([0xfd; 6]).is_locally_administered());
     }
 
     #[test]

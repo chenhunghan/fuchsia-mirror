@@ -29,7 +29,9 @@ Symbols:
   - { Name: _zx_cprng_draw, Type: Func }
   - { Name: _zx_deadline_after, Type: Func }
   - { Name: _zx_debug_read, Type: Func }
+  - { Name: _zx_debug_resume, Type: Func }
   - { Name: _zx_debug_send_command, Type: Func }
+  - { Name: _zx_debug_suspend, Type: Func }
   - { Name: _zx_debug_write, Type: Func }
   - { Name: _zx_debuglog_create, Type: Func }
   - { Name: _zx_debuglog_read, Type: Func }
@@ -249,7 +251,9 @@ Symbols:
   - { Name: zx_cprng_draw, Type: Func, Weak: true }
   - { Name: zx_deadline_after, Type: Func, Weak: true }
   - { Name: zx_debug_read, Type: Func, Weak: true }
+  - { Name: zx_debug_resume, Type: Func, Weak: true }
   - { Name: zx_debug_send_command, Type: Func, Weak: true }
+  - { Name: zx_debug_suspend, Type: Func, Weak: true }
   - { Name: zx_debug_write, Type: Func, Weak: true }
   - { Name: zx_debuglog_create, Type: Func, Weak: true }
   - { Name: zx_debuglog_read, Type: Func, Weak: true }

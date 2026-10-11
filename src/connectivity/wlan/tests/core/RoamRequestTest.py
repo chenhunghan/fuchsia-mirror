@@ -13,17 +13,16 @@ import fidl_fuchsia_wlan_internal as fidl_security
 import fidl_fuchsia_wlan_sme as fidl_sme
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion import utils
-from antlion.controllers.access_point import AccessPoint, setup_ap
-from antlion.controllers.ap_lib import hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as DeprecatedSecurity,
-)
 from honeydew.affordances.connectivity.wlan.core import (
     ConnectTransactionEventHandler,
 )
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
+)
+from legacy_access_point.access_point import AccessPoint, setup_ap
+from legacy_access_point.ap_lib import hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as DeprecatedSecurity,
 )
 from mobly import signals, test_runner
 from mobly.asserts import (
@@ -229,16 +228,18 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         return f"test_roam_request_{dut_security_mode}_dut_from_{origin_security_mode}_{test_params.origin_band.name}_to_{target_security_mode}_{test_params.target_band.name}_{expected_result}"
 
     async def setup_aps(self, test_params: TestParams) -> RoamTestParameters:
-        ssid = utils.rand_ascii_str(hostapd_constants.AP_SSID_LENGTH_2G)
+        ssid = AccessPointConfig.random_string(
+            hostapd_constants.AP_SSID_LENGTH_2G
+        )
         origin_password = None
         target_password = None
         if not isinstance(test_params.origin_security_mode, SecurityOpen):
             # Length 13, so it can be used for WEP or WPA
-            origin_password = utils.rand_ascii_str(13)
+            origin_password = AccessPointConfig.random_string(13)
             target_password = origin_password
         elif not isinstance(test_params.target_security_mode, SecurityOpen):
             # If the origin is open but the target is not, generate password for target.
-            target_password = utils.rand_ascii_str(13)
+            target_password = AccessPointConfig.random_string(13)
 
         # Ensure the bands are a 2.4GHz and 5GHz pair. This test uses a single AP, and therefore
         # does not support the the same origin and target band.
@@ -423,19 +424,18 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         async with ConnectTransactionEventHandler(client) as ctx:
             txn_queue = ctx.txn_queue
 
+            protocol = test_params.origin_security_mode.to_fidl_wlan_internal()
+
             match test_params.origin_security_mode:
                 case SecurityOpen():
-                    protocol = fidl_security.Protocol.OPEN
                     credentials = None
                 case SecurityWep():
-                    protocol = fidl_security.Protocol.WEP
                     credentials = fidl_security.Credentials(
                         wep=fidl_security.WepCredentials(
                             TEST_WEP_PASSWORD_LITERAL.encode("ascii")
                         )
                     )
                 case SecurityWpa():
-                    protocol = fidl_security.Protocol.WPA1
                     if roam_params.origin_password is None:
                         raise signals.TestError("Password is required for WPA.")
                     credentials = fidl_security.Credentials(
@@ -446,7 +446,6 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         )
                     )
                 case SecurityWpa2() | SecurityWpaWpa2Mixed():
-                    protocol = fidl_security.Protocol.WPA2_PERSONAL
                     if roam_params.origin_password is None:
                         raise signals.TestError(
                             "Password is required for WPA2/WPA_WPA2."
@@ -459,7 +458,6 @@ class RoamRequestTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         )
                     )
                 case SecurityWpa3() | SecurityWpa2Wpa3Mixed():
-                    protocol = fidl_security.Protocol.WPA3_PERSONAL
                     if roam_params.origin_password is None:
                         raise signals.TestError(
                             "Password is required for WPA3/WPA2_WPA3."

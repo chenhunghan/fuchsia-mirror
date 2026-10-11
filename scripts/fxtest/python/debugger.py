@@ -6,9 +6,7 @@ import asyncio
 import atexit
 from collections.abc import Awaitable
 import os
-import random
 import signal
-import string
 import subprocess
 import sys
 import tempfile
@@ -81,14 +79,8 @@ def spawn(
         process.
     """
     breakpoints = breakpoints or []
-    fifo = os.path.join(
-        tempfile.gettempdir()
-        + "/zxdbpipe-"
-        + "".join(
-            random.choice(string.ascii_letters + string.digits)
-            for _ in range(6)
-        )
-    )
+    fifo_dir = tempfile.mkdtemp(prefix="zxdb-")
+    fifo = os.path.join(fifo_dir, "zxdbpipe")
 
     os.mkfifo(fifo)
 
@@ -217,9 +209,14 @@ def spawn(
 
         try:
             os.remove(fifo)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             # The tests for this don't actually create a file for the fifo, and we don't want to
             # throw an exception, since we were trying to remove the file anyway.
+            pass
+
+        try:
+            os.rmdir(fifo_dir)
+        except (FileNotFoundError, OSError):
             pass
 
         # Clean up daemon process if it was running

@@ -146,11 +146,14 @@ zx_status_t brcmf_fil_cmd_int_get(struct brcmf_if* ifp, uint32_t cmd, uint32_t* 
 
 static uint32_t brcmf_create_iovar(const char* name, const void* data, uint32_t datalen, char* buf,
                                    uint32_t buflen) {
-  uint32_t len;
-
-  len = strlen(name) + 1;
+  const size_t len = strlen(name) + 1;
 
   if ((len + datalen) > buflen) {
+    return 0;
+  }
+  if (len > std::numeric_limits<uint32_t>::max()) {
+    BRCMF_ERR("Requested iovar length %zu exceeds maximum length %u", len,
+              std::numeric_limits<uint32_t>::max());
     return 0;
   }
 
@@ -161,7 +164,7 @@ static uint32_t brcmf_create_iovar(const char* name, const void* data, uint32_t 
     memcpy(&buf[len], data, datalen);
   }
 
-  return len + datalen;
+  return static_cast<uint32_t>(len) + datalen;
 }
 
 zx_status_t brcmf_fil_iovar_data_set(struct brcmf_if* ifp, const char* name, const void* data,
@@ -249,19 +252,17 @@ static uint32_t brcmf_create_bsscfg(int32_t bsscfgidx, const char* name, const v
                                     uint32_t datalen, char* buf, uint32_t buflen) {
   const char* prefix = BRCMF_FWIL_BSSCFG_PREFIX;
   char* p;
-  uint32_t prefixlen;
-  uint32_t namelen;
-  uint32_t iolen;
   uint32_t bsscfgidx_le;
 
   if (bsscfgidx == 0) {
     return brcmf_create_iovar(name, data, datalen, buf, buflen);
   }
 
-  prefixlen = strlen(prefix);
-  namelen = strlen(name) + 1; /* lengh of iovar  name + null */
-  iolen = prefixlen + namelen + sizeof(bsscfgidx_le) + datalen;
+  const size_t prefixlen = strlen(prefix);
+  const size_t namelen = strlen(name) + 1; /* lengh of iovar  name + null */
+  const size_t iolen = prefixlen + namelen + sizeof(bsscfgidx_le) + datalen;
 
+  // This also ensures that iolen will fit inside a uint32_t.
   if (buflen < iolen) {
     BRCMF_ERR("buffer is too short");
     return 0;
@@ -287,7 +288,7 @@ static uint32_t brcmf_create_bsscfg(int32_t bsscfgidx, const char* name, const v
     memcpy(p, data, datalen);
   }
 
-  return iolen;
+  return static_cast<uint32_t>(iolen);
 }
 
 zx_status_t brcmf_fil_bsscfg_data_set(struct brcmf_if* ifp, const char* name, const void* data,

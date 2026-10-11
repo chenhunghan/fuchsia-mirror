@@ -12,6 +12,7 @@ if (is_host) {
       ":apt_test($host_toolchain)",
       ":gcloud_creds_test($host_toolchain)",
       ":gcloud_test($host_toolchain)",
+      ":select_auth_method_test($host_toolchain)",
     ]
   }
 
@@ -30,6 +31,11 @@ if (is_host) {
       ":apt",
       ":gcloud",
     ]
+  }
+
+  python_library("select_auth_method") {
+    sources = [ "select_auth_method.py" ]
+    library_deps = [ ":gcloud" ]
   }
 
   python_build_time_tests("apt_test") {
@@ -52,6 +58,15 @@ if (is_host) {
       ":gcloud",
       ":gcloud_creds",
     ]
+  }
+
+  python_build_time_tests("select_auth_method_test") {
+    tests = [ "select_auth_method_test.py" ]
+    inputs = [
+      "select_auth_method.py",
+      "gcloud.py",
+    ]
+    deps = [ ":select_auth_method" ]
   }
 } else {
   # If evaluated on the target toolchain (e.g. via fx add-test), redirect the

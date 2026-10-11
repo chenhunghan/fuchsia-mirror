@@ -20,11 +20,14 @@ Unlike greenfield driver synthesis (`fuchsia-driver-architect`), `fuchsia-driver
 1. **Smallest Genuine Fix:** Bias strongly toward the minimal code change that genuinely resolves the root cause verified by `driver-lab` or hermetic tests.
 2. **Defer Unrelated Refactors:** Do not reorganize files, rename existing functions/structs, rewrite state machines, or modernize unrelated idioms while fixing a bug.
 3. **Match Local Conventions:** Preserve the driver's existing error-handling patterns, logging macros, register abstraction style (`hwreg`, bitfields, or raw MMIO offsets), and concurrency model.
-4. **Respect Verification Mode Boundaries:**
-   * **Mode A (MMIO/IRQ):** Wire `with_mmio`, `with_writable_registers`, `with_hard_denied_ranges`, `with_interrupt`, and `with_quiesce_hook`.
-   * **Mode B (`StateBank` Single-Build Loop):** In Phase 1, wire a `"state0"` `StateBank` with observable state slots (`define_state_slot`), a fault/race-window injection knob (`define_knob`), a candidate fix-toggle knob (`define_knob`), and a diagnostic trigger (`define_trigger`) so `hardware-prober` can prove both reproduction (`fix = 0`) and resolution (`fix = 1`) in a single build. In Phase 3, strip the temporary knobs and apply the clean, unconditional production fix plus a permanent unit/realm regression test.
-   * **Mode C (Hermetic Test & Log Loop):** Do **not** shoe-horn `driver-lab` instrumentation into pure logic, parser, or deterministic lifecycle bugs. Fix the bug directly and verify with a unit/realm test (`fx test`) or `ffx log`.
+4. **Respect Verification Mode Boundaries & Never Substitute Fake Hardware for HITL:**
+   * **Mode A (MMIO/IRQ):** Wire `with_mmio`, `with_writable_registers`, `with_hard_denied_ranges`, `with_interrupt`, and `with_quiesce_hook`, and verify on real hardware via `hardware-prober`. Never treat "compiles with `driver_lab::Builder` wired in" + a mock unit test as completing Mode A.
+   * **Mode B (`StateBank` Single-Build Loop):** In Phase 1, wire a `"state0"` `StateBank` with observable state slots (`define_state_slot`), a fault/race-window injection knob (`define_knob`), a candidate fix-toggle knob (`define_knob`), and a diagnostic trigger (`define_trigger`) so `hardware-prober` can prove both reproduction (`fix = 0`) and resolution (`fix = 1`) in a single build on target. In Phase 3, strip the temporary knobs and apply the clean, unconditional production fix plus a permanent unit/realm regression test.
+   * **Mode C (Hermetic Pure-Software Contract Loop):** Restricted strictly to pure software/declarative contracts with zero dependency on silicon behavior (e.g., `.bind` rules, devicetree visitor wiring, or host tool parsing). Fake hardware test fixtures (mock MMIO/DMA/IRQs) are **never** a valid substitute for Mode A/B HITL verification, though permissive fake hardware fixtures should be tightened alongside Mode A/B fixes so unit tests also enforce the verified hardware constraints.
 5. **Reversible Instrumentation:** Keep any temporary `driver-lab` ceiling adjustments or Mode B diagnostic knobs cleanly isolated so they can be narrowed or stripped in Phase 3/4.
+6. **Do Not Assume a 1:1 Bug-to-Patch Relationship (Use CL Stacks When Appropriate):** When a bug spans multiple subsystems, drivers, board/devicetree definitions, or repositories, decompose the resolution into atomic CLs or a clean **CL stack** (one logical subsystem/driver per CL) rather than bundling separate drivers into a single patch. Always verify a clean upstream base (`git status`, `origin/main` or `jiri/head`) before creating an independent CL so unrelated patches are never accidentally chained together.
+7. **Self-Contained, Self-Explanatory CLs:** Each CL must make sense on its own within its target subsystem. Do not over-index on the source bug's narrative or external test harness story in commit messages, and never write code comments that merely cite a bug number (`// See b/...`) instead of explaining the technical invariant.
+8. **Mandatory Pre-Commit Final Sweep & No Escape Hatches:** Before finalizing any commit, perform a hunk-by-hunk sweep of `git diff` to strip stray investigation/testing artifacts and speculative edits from unverified hypotheses. Never add `__TA_NO_THREAD_SAFETY_ANALYSIS`, `NOLINT`, or unnecessary `unsafe` blocks to silence compiler or lock-analysis warnings caused by your change. Never "fix" a diagnostic warning or timeout by changing its clock domain or threshold unless you have verified against its origin commit/issue that the diagnostic measurement itself is buggy rather than flagging an unserviced hardware or lifecycle event.
 
 ---
 
@@ -130,62 +133,76 @@ If interrupt delivery is relevant to the bug, tap the driver's ISR handler with 
 
 ---
 
-## Responsibility 2: Iterative Bug Fixing & Fast Reload
+## Responsibility 2: Iterative Bug Fixing, Adversarial Revision, Pre-Commit Final Sweep & CL Stack Hygiene
 
-When invoked in **Phase 3 (Step 3a)** of the Fix $\leftrightarrow$ Verify loop:
+When invoked in **Phase 3 (Step 3a)**, **Phase 3.5 (Adversarial Review Revision)**, or **Phase 4** of the Fix $\leftrightarrow$ Verify loop:
 
-1. **Review the Evidence-Backed Root Cause:**
-   * Read `bug_spec.md` and the latest `driver-lab` evidence bundle (`operations.jsonl`, `target-audit.jsonl`) or failing test output.
-   * Confirm the exact register offset, bitmask, sequence order, synchronization lock/guard, state transition, or interrupt handling bug to fix.
-2. **Apply the Minimal Fix:**
-   * Edit only the lines necessary in the driver source.
+1. **Verify Reconciled Contradictions (`## 3b`) & 3-Axis Invariants (`## 3c`):**
+   * Read `bug_spec.md` (specifically `## 3b. Cross-Subagent Contradiction & Reconciliation Ledger` and `## 3c. In-Driver & End-to-End Invariant Trace`) and the latest `driver-lab` evidence bundle (`operations.jsonl`, `target-audit.jsonl`) or failing test output.
+   * Never implement a raw "Suggested Fix" from the bug report without verifying that it satisfies all reconciled constraints from `linux-driver-expert`, `datasheet-researcher`, and sibling call sites in the same driver (Axis 1), and preserves all canonical state-transition side effects and upper-layer callbacks (Axis 2).
+2. **Apply the Minimal Fix, Harden Permissive Test Fixtures & Split Into a CL Stack When Appropriate:**
+   * Edit only the lines necessary to resolve the verified root cause (or to resolve concrete objections raised by `adversarial-reviewer` in Phase 3.5).
+   * When a hardware invariant (such as DMA/TRB `max_packet_size` alignment) is discovered that an existing in-tree fake hardware test fixture failed to check, **tighten the fake hardware test fixture** so unit tests enforce that hardware invariant going forward and assert upper-layer protocol outcomes (e.g., `Control()` / completion payload delivery), alongside Mode A/B hardware verification.
+   * Do **not** assume a 1:1 relationship between the source bug and a single patch: if the verified root causes span multiple distinct subsystems, drivers, board/devicetree definitions, or repositories, decompose the changes into atomic commits in a **CL stack** (or separate CLs per repository), checking `git status` and starting from a clean upstream base (`origin/main` or `jiri/head`) so unrelated commits are never chained together.
    * In **Mode B (Phase 3)**, replace the temporary runtime knobs (`KNOB_RACE_DELAY_US`, `KNOB_FIX_ENABLED`) with the unconditional production fix and add a permanent unit or driver realm regression test.
 3. **Compile, Run Local Checks & Reload:**
    * For Rust drivers, run `fx clippy <target>` for fast feedback, then `fx build`.
    * Run unit or driver realm tests (`fx test <driver_test_target>`) to ensure local coverage passes.
    * For reloadable non-bootfs drivers on target, prefer fast reload via `ffx driver restart <driver_url>` (or `ffx driver disable` + `enable`) before falling back to full `fx ota` + device reboot.
-4. **Commit Trailer Attribution (When Creating or Amending a CL):**
-   * When creating or amending a git commit for the surgical fix, include the `/autoda-fix` observability trailers in the commit message footer:
+4. **Mandatory Pre-Commit Final Sweep (Remove Stray Testing/Investigation Code):**
+   * Before creating or amending any commit, inspect every hunk in `git diff` and ask: *"Does the verified bug return if this specific hunk is reverted?"*
+   * Unconditionally strip any stray debug logs, temporary test scaffolding, speculative null/state guards, or intermediate edits left over from contradicted or unverified hypotheses (`H1..Hn`).
+   * **Never** leave compiler or lock-analysis escape hatches (`__TA_NO_THREAD_SAFETY_ANALYSIS`, `NOLINT`, or unnecessary `unsafe`) in the diff to work around warnings introduced by your edits; fix the underlying call ordering or synchronization instead.
+   * **Never** silence a diagnostic `WARNING`, `ERROR`, or timeout solely by changing its clock domain (e.g., `boot` $\rightarrow$ `monotonic`) or widening its threshold unless the origin commit/issue proves the measurement itself is buggy rather than flagging an unserviced hardware or lifecycle event.
+5. **Self-Contained Commit Messages, Code Comments & Trailer Attribution:**
+   * **Subsystem-Scoped Commit Messages:** Write commit messages that explain **why** the change is required in terms of that subsystem's own invariants. Avoid both mechanical function-by-function diff summaries and distracting end-to-end stories from higher-level test harnesses or unrelated subsystems mentioned in the source bug.
+   * **Self-Contained Code Comments:** Any code comment explaining non-obvious hardware or lifecycle behavior must state the technical invariant directly in prose; never write `// See b/...` as a substitute for explaining the invariant.
+   * **Commit Trailer Attribution (Required on Every CL in a Stack):** When creating or amending each git commit for the fix, include a valid `Test:` line and the `/autoda-fix` observability trailers in the commit message footer:
      ```text
      Bug: <bug_id>
      Test: <verification command or driver-lab run summary>
-     TAG=agy
+     TAG: agy
      TAG: autoda-fix
+     SKILL-VERSION: <skill_version>
+     MODEL: <model>
+     MODE: <Mode A | Mode B | Mode C>
      CONV: <root_orchestrator_conversation_id>
      Change-Id: I...
      ```
-     (Use `Fixed: <bug_id>` instead of `Bug: <bug_id>` when closing the bug.)
-   * Always use the **parent Bug Orchestrator's** `<root_orchestrator_conversation_id>` in `CONV:` (or include both the root orchestrator and subagent `CONV:` lines) alongside `TAG=agy` and `TAG: autoda-fix`.
-5. **Return Structured Fix Report:**
-   * Report the exact files/lines changed, the expected post-fix register (`mmio0`) or state (`state0`) values at each offset, and any new/updated invariants or regression tests verified.
+     (Use `Fixed: <bug_id>` instead of `Bug: <bug_id>` on the final commit when closing the bug.)
+   * Always use the **parent Bug Orchestrator's** `<root_orchestrator_conversation_id>` in `CONV:` alongside `TAG: agy`, `TAG: autoda-fix`, `SKILL-VERSION: <skill_version>`, `MODEL: <model>`, and `MODE: <Mode A | Mode B | Mode C>`.
+6. **Return Structured Fix Report:**
+   * Report the exact files/lines changed, the results of the pre-commit final sweep, the expected post-fix register (`mmio0`) or state (`state0`) values at each offset, and any new/updated invariants or regression tests verified.
 
 ---
 
 ## Critical Driver Bug & Hardware Invariants Checklist
 
-Before finalizing any Phase 3 surgical fix, audit your candidate change against these four recurring hardware/driver failure patterns:
+Before finalizing any Phase 3 surgical fix, audit your candidate change against these six recurring hardware and driver failure patterns:
 
-1. **FIFO Level Register vs. Shift-Register Pipeline Depth (`TXFLR`):**
-   * On full-duplex serial controllers (such as DesignWare SSI SPI, UART, or I2C), hardware TX FIFO level registers (`TXFLR` / `tx_words`) only count entries sitting in TX FIFO SRAM -- they **do not** count the active word currently shifting out in the hardware TX shift register.
-   * When computing `tx_free` from `FIFO_SIZE - tx_words` to bound TX refills and prevent RX FIFO overflow, always subtract 1 word for the shift register:
-     ```rust
-     let tx_free = (FIFO_SIZE - tx_words).saturating_sub(1);
-     ```
-   * Do not rely solely on software `rx_remaining - tx_remaining` gap tracking, which equals `0` on the initial burst when 1 word has already moved from the TX FIFO into the shift register while `tx_words` reads `0`.
+1. **Intra-Driver Sibling Primitive & DMA/Descriptor Alignment Consistency (Axis 1):**
+   * Whenever modifying how an endpoint, channel, or queue programs DMA descriptors/TRBs, buffer sizes, or hardware commands, search all sibling endpoints/paths in the same driver directory and verify that all hardware alignment and rounding rules (e.g., rounding OUT TRB buffer sizes up to an integer multiple of `wMaxPacketSize` and clamping actual received length on completion) are enforced consistently.
 
-2. **Premature Interrupt Arming vs. Symptom Clearing (Root-Cause Ordering):**
-   * When hardware interrupts or overflow registers (e.g., `INTR_OVERFLOW`) latch during bring-up because interrupts were unmasked before the asynchronous interrupt consumer task (`fuchsia_async::OnInterrupt`) was spawned:
-     - **Never** mask the symptom by merely clearing the status/overflow register right before a bring-up diagnostic check while leaving interrupts armed early.
-     - **Remove** the premature interrupt-enable call from early bring-up (and update any strict-order bring-up MMIO mock expectations in unit tests to remove those early enable writes), and **move** the interrupt-enable call to the start of the async interrupt consumer task immediately before entering the `irq.next().await` loop.
-     - Also read and W1C-clear the interrupt overflow register on every interrupt pass inside the runtime IRQ loop (logging a warning if frame or transfer completion events overflowed).
+2. **End-to-End State-Machine & Upper-Layer Callback Continuity (Axis 2):**
+   * Whenever adding or modifying a state transition (`State A -> State B`) or event handler, trace the canonical transition path end-to-end and verify that no required side effect (such as delivering a control-write payload to the upper-layer protocol callback via `Control()`, clamping transfer length, or releasing resources) is bypassed.
 
-3. **Ring-Buffer & Descriptor-Pool Exhaustion Backpressure Ordering:**
-   * When fixing RX ring or buffer-pool exhaustion by awaiting async buffer return (e.g., replacing synchronous `free_rx_buffers.pop()` with `free_rx_buffers.pop_wait_available().await`):
-     - **Always** `.take()` the completed buffer out of the active descriptor slot (`let old_buf = self.active_rx_buffers[idx].take().unwrap();`) and dispatch `old_buf` to the upper-layer consumer **before** awaiting a replacement buffer (`let new_buf = self.free_rx_buffers.pop_wait_available().await; self.active_rx_buffers[idx] = Some(new_buf);`).
-     - **Never** await a replacement buffer *before* extracting and delivering `old_buf` -- holding a completed RX packet across an `.await` point starves upper-layer consumers that must process and return in-flight buffers to unblock the pool.
+3. **Hardware Pipeline Depth vs. FIFO SRAM Occupancy:**
+   * On full-duplex serial and DMA controllers (such as SPI, UART, or I2C), hardware TX FIFO occupancy registers only report words waiting in FIFO SRAM -- they do **not** include the active word currently shifting out in the hardware shift register or pipeline stage.
+   * When computing available TX headroom from FIFO capacity minus current TX FIFO level to prevent RX FIFO overflow, always reserve headroom for the active shift-register stage (for example, subtracting 1 additional word via saturating subtraction) rather than relying solely on software byte-count gap tracking.
 
-4. **Debounced State Machine Symmetry:**
-   * In debounced attach/disconnect or plug/unplug state machines (e.g., Type-C TCPC CC debounce):
-     - Track both the active debounce direction (`Attach` vs. `Disconnect`) and a monotonic sequence counter (`debounce_seq`) across async `.await` points, and clear `debounce_task` upon completion if the sequence is still current.
-     - **Never** mutate the committed connection state flag (such as `telemetry.is_connected.store(true, ...)`) *before* spawning the attach debounce task. Commit `is_connected = true` **inside** the attach debounce task only after the debounce timer expires and post-debounce re-sampling confirms the connection is stable -- symmetric with the disconnect debounce path.
+4. **Root-Cause Initialization Ordering & Diagnostic Invariants vs. Symptom Masking:**
+   * When hardware interrupts, status latches, or overflow flags trigger prematurely during bring-up because interrupts were unmasked before the asynchronous interrupt consumer task (`fuchsia_async::OnInterrupt` or dispatcher loop) started:
+     - **Never** mask the symptom by merely clearing the status/overflow register right before a bring-up check while leaving interrupts armed early.
+     - **Move** interrupt enablement out of early hardware init to the start of the interrupt consumer task immediately before entering the wait loop (updating any strict-order bring-up mock expectations in unit tests), and W1C-clear status/overflow latches on each runtime interrupt pass.
+   * When a diagnostic `WARNING`, `ERROR`, or timeout flags a delayed or unserviced event (e.g., across system suspend/resume), apply the **Measurement vs. Behavior Litmus Test**: never silence a valid diagnostic canary solely by changing how time or thresholds are measured (such as switching `boot` clock $\rightarrow$ `monotonic` clock) without resolving the underlying hardware/lifecycle gap or proving from `git blame` that the measurement itself was defective.
+
+5. **Async Backpressure & Resource Delivery Ordering:**
+   * When resolving RX ring or descriptor-pool exhaustion by awaiting asynchronous buffer replenishment across an `.await` point:
+     - **Always** extract the completed buffer from the active slot and dispatch it to the upper-layer consumer **before** awaiting a replacement buffer from the free pool.
+     - **Never** hold a completed packet across an `.await` point while waiting for a free buffer -- doing so starves the upper-layer consumer that must process and return in-flight buffers to unblock the pool.
+
+6. **Debounced State Machine, Lifecycle Restart Symmetry & Cross-File Convention:**
+   * In debounced attach/disconnect state machines, track both the active transition direction and a monotonic sequence counter across async waits, and commit the state flag **inside** the debounce task only after the timer expires and post-debounce re-sampling confirms stability (symmetric across attach and disconnect).
+   * In driver `Stop()` / `PrepareStop()` / `Disable()` and suspend/resume paths, trace lifecycle helpers across both wrapper and vendor/protocol layers (callers and callees, including firmware handshakes, ring-buffer drain loops, and DPC/ISR re-arming) rather than inspecting a helper in isolation; ensure teardown does not wipe parent bus resources (such as PCI bridge windows or shared clocks/regulators) that are only configured once during initial bus enumeration, and propagate error returns from callees rather than only guarding callers.
+   * When a bug is caused by a naming or contract mismatch between two files (such as `.bind` parent node names vs. C++/Rust driver code, or devicetree properties vs. board visitors), inspect sibling drivers and bus variants first and **always normalize the outlier to match the established platform/driver convention**.
 

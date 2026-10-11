@@ -19,7 +19,6 @@ class FakeBattery(affordance.Affordance):
     def set(
         self,
         level: float | None = None,
-        status: types.ChargeStatus | str | None = None,
         source: types.PowerSourceType | str | None = None,
         voltage_mv: int | None = None,
         current_ua: int | None = None,
@@ -35,8 +34,6 @@ class FakeBattery(affordance.Affordance):
 
         Args:
             level: Battery charge level percent (0.0 to 100.0).
-            status: Battery charging status ("charging", "discharging",
-                "not_charging", "full" or ChargeStatus enum).
             source: Power source type ("ac", "usb", "battery", "none",
                 "disconnected" or PowerSourceType enum).
             voltage_mv: Battery/source voltage in millivolts (e.g. 4200 for 4.2V).

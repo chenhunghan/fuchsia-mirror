@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::args::{OptionItem, OptionParser};
 use crate::eval::{EXIT_FAILURE, EXIT_SUCCESS, ShellState};
 use crate::string::{parse_octal_digits, parse_standard_escape, process_escape_bytes};
 use bstr::{BString, ByteSlice};
@@ -436,6 +437,129 @@ fn write_formatted(
     let _ = stdout.write_all(body.as_bytes());
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloatCase {
+    Lower,
+    Upper,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AltForm {
+    Standard,
+    Alternate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrailingZeros {
+    Keep,
+    Trim,
+}
+
+fn format_scientific(
+    abs_val: f64,
+    prec: usize,
+    case: FloatCase,
+    alt_form: AltForm,
+    trailing_zeros: TrailingZeros,
+) -> String {
+    let raw = format!("{:.1$e}", abs_val, prec);
+    let (mantissa, exp_str) = raw.split_once('e').unwrap_or((&raw, "0"));
+    let exp: i32 = exp_str.parse().unwrap_or(0);
+    let mut m = mantissa.to_string();
+    if trailing_zeros == TrailingZeros::Trim && alt_form == AltForm::Standard {
+        if m.contains('.') {
+            m = m.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+    } else if alt_form == AltForm::Alternate && !m.contains('.') {
+        m.push('.');
+    }
+    let exp_char = if case == FloatCase::Upper { 'E' } else { 'e' };
+    let exp_sign = if exp < 0 { '-' } else { '+' };
+    format!("{}{}{}{:02}", m, exp_char, exp_sign, exp.unsigned_abs())
+}
+
+fn format_hex_float(
+    abs_val: f64,
+    case: FloatCase,
+    alt_form: AltForm,
+    precision: Option<usize>,
+) -> String {
+    let bits = abs_val.to_bits();
+    let biased_exp = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
+
+    let (mut lead_digit, exp) = if biased_exp == 0 && mantissa == 0 {
+        (0u8, 0i32)
+    } else if biased_exp == 0 {
+        (0u8, -1022i32)
+    } else {
+        (1u8, biased_exp - 1023)
+    };
+
+    let mut nibbles = [0u8; 13];
+    for (i, nibble) in nibbles.iter_mut().enumerate() {
+        *nibble = ((mantissa >> (48 - i * 4)) & 0xf) as u8;
+    }
+
+    let hex_char = |n: u8| -> char {
+        if n < 10 {
+            (b'0' + n) as char
+        } else if case == FloatCase::Upper {
+            (b'A' + (n - 10)) as char
+        } else {
+            (b'a' + (n - 10)) as char
+        }
+    };
+
+    let mut frac = String::new();
+    match precision {
+        None => {
+            let mut sig_len = 13;
+            while sig_len > 0 && nibbles[sig_len - 1] == 0 {
+                sig_len -= 1;
+            }
+            if sig_len > 0 {
+                frac.push('.');
+                for &n in &nibbles[..sig_len] {
+                    frac.push(hex_char(n));
+                }
+            } else if alt_form == AltForm::Alternate {
+                frac.push('.');
+            }
+        }
+        Some(p) => {
+            if p < 13 {
+                let half = nibbles[p];
+                let tail_nonzero = nibbles[p + 1..].iter().any(|&n| n != 0);
+                let prev_odd =
+                    if p == 0 { (lead_digit & 1) != 0 } else { (nibbles[p - 1] & 1) != 0 };
+                if half > 8 || (half == 8 && (tail_nonzero || prev_odd)) {
+                    let mut carry = 1u8;
+                    for i in (0..p).rev() {
+                        let sum = nibbles[i] + carry;
+                        nibbles[i] = sum & 0xf;
+                        carry = sum >> 4;
+                    }
+                    lead_digit += carry;
+                }
+            }
+            if p > 0 {
+                frac.push('.');
+                for i in 0..p {
+                    let n = if i < 13 { nibbles[i] } else { 0 };
+                    frac.push(hex_char(n));
+                }
+            } else if alt_form == AltForm::Alternate {
+                frac.push('.');
+            }
+        }
+    }
+
+    let exp_char = if case == FloatCase::Upper { 'P' } else { 'p' };
+    let exp_sign = if exp < 0 { '-' } else { '+' };
+    format!("{}{}{}{}{}", hex_char(lead_digit), frac, exp_char, exp_sign, exp.unsigned_abs())
+}
+
 fn format_float(
     val: f64,
     spec_char: u8,
@@ -444,25 +568,8 @@ fn format_float(
     precision: Option<usize>,
     stdout: &mut dyn Write,
 ) {
-    let prec = precision.unwrap_or(6);
-    let abs_val = val.abs();
     let is_neg = val.is_sign_negative();
-
-    let num_str = match spec_char {
-        b'e' => format!("{:.1$e}", abs_val, prec),
-        b'E' => format!("{:.1$E}", abs_val, prec),
-        b'g' | b'G' => {
-            let formatted = format!("{:.1$}", abs_val, prec);
-            if !flags.alt_form && formatted.contains('.') {
-                formatted.trim_end_matches('0').trim_end_matches('.').to_string()
-            } else {
-                formatted
-            }
-        }
-        _ => format!("{:.1$}", abs_val, prec),
-    };
-
-    let prefix = if is_neg {
+    let sign_prefix = if is_neg {
         "-"
     } else if flags.show_sign {
         "+"
@@ -472,7 +579,62 @@ fn format_float(
         ""
     };
 
-    write_formatted(prefix, &num_str, flags, width, true, stdout);
+    let uppercase = matches!(spec_char, b'F' | b'E' | b'G' | b'A');
+    let case = if uppercase { FloatCase::Upper } else { FloatCase::Lower };
+    let alt_form = if flags.alt_form { AltForm::Alternate } else { AltForm::Standard };
+    if val.is_nan() {
+        let body = if uppercase { "NAN" } else { "nan" };
+        write_formatted(sign_prefix, body, flags, width, false, stdout);
+        return;
+    }
+    if val.is_infinite() {
+        let body = if uppercase { "INF" } else { "inf" };
+        write_formatted(sign_prefix, body, flags, width, false, stdout);
+        return;
+    }
+
+    let abs_val = val.abs();
+    if matches!(spec_char, b'a' | b'A') {
+        let hex_prefix = format!("{}{}", sign_prefix, if uppercase { "0X" } else { "0x" });
+        let body = format_hex_float(abs_val, case, alt_form, precision);
+        write_formatted(&hex_prefix, &body, flags, width, true, stdout);
+        return;
+    }
+
+    let prec = precision.unwrap_or(6);
+    let num_str = match spec_char {
+        b'e' | b'E' => format_scientific(abs_val, prec, case, alt_form, TrailingZeros::Keep),
+        b'g' | b'G' => {
+            let p = precision.unwrap_or(6).max(1);
+            let sci_raw = format!("{:.1$e}", abs_val, p - 1);
+            let (_, exp_str) = sci_raw.split_once('e').unwrap_or((&sci_raw, "0"));
+            let exp: i32 = exp_str.parse().unwrap_or(0);
+            if (-4..(p as i32)).contains(&exp) {
+                let frac_prec = ((p as i32) - 1 - exp).max(0) as usize;
+                let mut formatted = format!("{:.1$}", abs_val, frac_prec);
+                if !flags.alt_form {
+                    if formatted.contains('.') {
+                        formatted =
+                            formatted.trim_end_matches('0').trim_end_matches('.').to_string();
+                    }
+                } else if !formatted.contains('.') {
+                    formatted.push('.');
+                }
+                formatted
+            } else {
+                format_scientific(abs_val, p - 1, case, alt_form, TrailingZeros::Trim)
+            }
+        }
+        _ => {
+            let mut formatted = format!("{:.1$}", abs_val, prec);
+            if flags.alt_form && !formatted.contains('.') {
+                formatted.push('.');
+            }
+            formatted
+        }
+    };
+
+    write_formatted(sign_prefix, &num_str, flags, width, true, stdout);
 }
 
 fn format_specifier(
@@ -592,12 +754,21 @@ pub fn builtin_printf(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
-    if args.is_empty() {
+    let mut parser = OptionParser::new(args);
+    while let Some(opt_res) = parser.next_option(|_| false) {
+        if let Ok(OptionItem::Flag { flag, .. }) = opt_res {
+            let _ = writeln!(stderr, "printf: invalid option -- '{}'", flag as char);
+            return EXIT_FAILURE;
+        }
+    }
+
+    let rem_args = parser.rest();
+    if rem_args.is_empty() {
         let _ = writeln!(stderr, "printf: usage: printf format [arg ...]");
         return EXIT_FAILURE;
     }
 
-    let format_bytes = args[0].as_bytes();
+    let format_bytes = rem_args[0].as_bytes();
     let elements = match parse_format_string(format_bytes) {
         Ok(elems) => elems,
         Err(e) => {
@@ -606,7 +777,7 @@ pub fn builtin_printf(
         }
     };
 
-    let positional_args = &args[1..];
+    let positional_args = &rem_args[1..];
     let mut arg_idx = 0;
     let mut exit_status = EXIT_SUCCESS;
 

@@ -32,6 +32,7 @@ _DEP_FIELDS = [
     "args_test_deps",
     "ffx_deps",
     "proc_macro_deps",
+    "link_deps",
 ]
 
 # Fields that are considered "standard" and easy to convert.

@@ -48,6 +48,8 @@ pub enum PhyManagerError {
     IfaceCreateFailure,
     #[error("unable to destroy iface")]
     IfaceDestroyFailure,
+    #[error("unable to acquire power element lease")]
+    PowerElementLeaseFailure,
     #[error("internal state has become inconsistent")]
     InternalError,
 }
@@ -349,31 +351,33 @@ impl PhyManager {
         phy_id: u16,
         phy_container: &mut PhyContainer,
         level: u8,
-    ) {
+    ) -> Result<(), PhyManagerError> {
         let token = match &phy_container.power_dependency_token {
             Some(t) => t,
             None => {
                 // We can assume the driver is not power-enabled and just return
-                return;
+                return Ok(());
             }
         };
         let token_dup = match token.duplicate_handle(zx::Rights::SAME_RIGHTS) {
             Ok(t) => t,
             Err(e) => {
                 warn!("Failed to duplicate power element dep token: {:?}", e);
-                return;
+                return Err(PhyManagerError::PowerElementLeaseFailure);
             }
         };
         let lease_name = format!("wlancfg-phy-{}-level-{}-dependency", phy_id, level);
         match power_manager.power_element_lease(&lease_name, token_dup, level).await {
             Ok(lease) => {
                 phy_container.power_dependency_lease = Some(lease);
+                Ok(())
             }
             Err(e) => {
                 error!(
                     "Failed to acquire power dependency lease {:?} at level {} for phy {}: {:?}",
                     lease_name, level, phy_id, e
                 );
+                Err(PhyManagerError::PowerElementLeaseFailure)
             }
         }
     }
@@ -394,13 +398,17 @@ impl PhyManagerApi for PhyManager {
                 PhyManagerError::PhyQueryFailure
             })?
             .ok();
-        Self::set_phy_power_element_lease(
+        if let Err(e) = Self::set_phy_power_element_lease(
             &*self.power_manager,
             phy_id,
             &mut phy_container,
             POWER_LEVEL_ACTIVE,
         )
-        .await;
+        .await
+        {
+            self.telemetry_sender.send(TelemetryEvent::ChipPowerUpFailure);
+            return Err(e);
+        }
 
         // Get the PHY's capabilities
         let supported_mac_roles = self
@@ -963,26 +971,33 @@ impl PhyManagerApi for PhyManager {
     async fn on_before_suspend(&mut self) {
         info!("Modifying WLAN driver lease to 'suspend' level");
         for (phy_id, phy_container) in self.phys.iter_mut() {
-            Self::set_phy_power_element_lease(
+            if let Err(e) = Self::set_phy_power_element_lease(
                 &*self.power_manager,
                 *phy_id,
                 phy_container,
                 POWER_LEVEL_SUSPEND,
             )
-            .await;
+            .await
+            {
+                warn!("Failed to set power element lease to suspend for phy {}: {:?}", phy_id, e);
+            }
         }
     }
 
     async fn on_after_resume(&mut self) {
         info!("Modifying WLAN driver lease to 'on' level");
         for (phy_id, phy_container) in self.phys.iter_mut() {
-            Self::set_phy_power_element_lease(
+            if let Err(e) = Self::set_phy_power_element_lease(
                 &*self.power_manager,
                 *phy_id,
                 phy_container,
                 POWER_LEVEL_ACTIVE,
             )
-            .await;
+            .await
+            {
+                warn!("Failed to set power element lease to active for phy {}: {:?}", phy_id, e);
+                self.telemetry_sender.send(TelemetryEvent::ChipPowerUpFailure);
+            }
         }
     }
 }
@@ -5318,5 +5333,82 @@ mod tests {
         assert!(container.client_ifaces.contains(&10));
         assert!(container.power_dependency_token.is_none());
         assert!(container.power_dependency_lease.is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_add_phy_lease_failure_logs_telemetry() {
+        let mut exec = TestExecutor::new();
+        let mut test_values = test_setup();
+        test_values.power_manager.mock_power_element_lease_failure();
+
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+
+        let phy_id = 1;
+        {
+            let add_phy_fut = phy_manager.add_phy(phy_id);
+            let mut add_phy_fut = pin!(add_phy_fut);
+            assert!(exec.run_until_stalled(&mut add_phy_fut).is_pending());
+
+            let token = zx::Event::create();
+            send_get_power_element_dependency_token_response(
+                &mut exec,
+                &mut test_values.monitor_stream,
+                Ok(token),
+            );
+
+            assert_matches!(
+                exec.run_until_stalled(&mut add_phy_fut),
+                Poll::Ready(Err(PhyManagerError::PowerElementLeaseFailure))
+            );
+        }
+
+        assert!(!phy_manager.phys.contains_key(&phy_id));
+
+        assert_matches!(
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ChipPowerUpFailure)
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_power_leases_resume_lease_failure_logs_telemetry() {
+        let mut exec = TestExecutor::new();
+        let mut test_values = test_setup();
+        let mut phy_manager = PhyManager::new(
+            test_values.monitor_proxy,
+            recovery::lookup_recovery_profile(""),
+            false,
+            test_values.node,
+            test_values.telemetry_sender,
+            test_values.recovery_sender,
+            test_values.power_manager.clone(),
+        );
+
+        let phy_id = 0;
+        let mut phy_container = PhyContainer::new(vec![fidl_common::WlanMacRole::Client]);
+        let token = zx::Event::create();
+        let (lease_token, _) = zx::EventPair::create();
+        phy_container.power_dependency_token = Some(token);
+        phy_container.power_dependency_lease = Some(lease_token);
+        let _ = phy_manager.phys.insert(phy_id, phy_container);
+
+        test_values.power_manager.mock_power_element_lease_failure();
+
+        let resume_fut = phy_manager.on_after_resume();
+        let mut resume_fut = pin!(resume_fut);
+        assert_matches!(exec.run_until_stalled(&mut resume_fut), Poll::Ready(()));
+
+        assert_matches!(
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::ChipPowerUpFailure)
+        );
     }
 }

@@ -28,7 +28,6 @@
                 "fuchsia.fshost.ProvisionFxfs",
                 "fuchsia.fshost.RamdiskImage",
                 "fuchsia.fshost.StarnixVolumeName",
-                "fuchsia.fshost.WatchDeprecatedV1Drivers",
             ],
             from: "#config",
             to: "#bootstrap",

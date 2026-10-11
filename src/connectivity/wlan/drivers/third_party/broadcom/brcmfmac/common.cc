@@ -100,9 +100,11 @@ zx_status_t brcmf_c_process_clm_blob(struct brcmf_if* ifp, std::string_view clm_
   dload_data->crc = 0;
 
   for (size_t offset = 0; offset < clm_binary.size(); offset += MAX_CHUNK_LEN) {
-    size_t chunk_len = MAX_CHUNK_LEN;
+    uint32_t chunk_len = MAX_CHUNK_LEN;
     if (clm_binary.size() - offset <= MAX_CHUNK_LEN) {
-      chunk_len = clm_binary.size() - offset;
+      // If this assert holds then we know that the remaining chunk_len fits in an uint32_t.
+      static_assert(MAX_CHUNK_LEN <= std::numeric_limits<uint32_t>::max());
+      chunk_len = static_cast<uint32_t>(clm_binary.size() - offset);
       dload_data->flag |= DL_END;
     }
 

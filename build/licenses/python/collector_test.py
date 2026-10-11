@@ -521,6 +521,35 @@ class CollectorTest(unittest.TestCase):
             {"Fuchsia": ["//default_license.txt"]}
         )
 
+    def test_collects_license_for_build_prebuilt_wrapper_target(self) -> None:
+        self._add_files(
+            [
+                "default_license.txt",
+                "prebuilt/third_party/ucd/LICENSE",
+            ]
+        )
+        self._add_readme_file(
+            "prebuilt/third_party/ucd/README.fuchsia",
+            name="UCD",
+            license_files=["LICENSE"],
+        )
+        self.collector = dataclasses.replace(
+            self.collector,
+            default_license_file=GnLabel.from_str("//default_license.txt"),
+        )
+        self._add_applicable_licenses_metadata(
+            target="//build/prebuilt:ucd_zip",
+            licenses=[],
+            third_party_resources=["//prebuilt/third_party/ucd/UCD.zip"],
+        )
+
+        self._collect_and_assert_licenses(
+            {
+                "Fuchsia": ["//default_license.txt"],
+                "UCD": ["//prebuilt/third_party/ucd/LICENSE"],
+            }
+        )
+
     def test_does_not_add_default_license_for_3p_target(self) -> None:
         self._add_files(["default_license.txt"])
         self.collector = dataclasses.replace(

@@ -20,7 +20,10 @@
     "events": [
         {
             "type": "write_to_master",
-            "data": "a\u0003b\n"
+            "data": "a\u0003b\n",
+            "signals": [
+                "SIGINT"
+            ]
         },
         {
             "type": "read_from_master",

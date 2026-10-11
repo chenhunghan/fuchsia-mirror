@@ -296,6 +296,39 @@ SDK][fuchsia-prefix-sdk].
 
 Note: `rustc_*` are an exception because these do not conflict with `rust_*`.
 
+## Avoid configuration transitions
+
+Fuchsia platform targets should already build in the right configuration. If
+you think you need a transition, you most likely don't. Reach out to the Build
+team; only the Build team should add transitions or new platforms.
+
+## Pass tools as executable label attributes
+
+A rule that runs a tool should take it as
+`attr.label(executable = True, cfg = "exec")` and read it with
+`ctx.executable`.
+
+## Antipatterns
+
+Note: These mostly come up in AI-generated code.
+
+- Looking up tools through `PATH`. Infra sandboxes don't set it up, and Bazel
+  can't track a tool it doesn't know about. Pass the tool as an executable
+  label attribute instead.
+
+- Passing JSON or dict blobs that embed labels into rules or macros. Bazel only
+  sees labels in label-typed attributes, so it won't build or track those
+  dependencies. Use label attributes and providers instead.
+
+- Finding build outputs through the `bazel-bin` symlink. It points at one
+  configuration, and a transition can put the output you want in a different
+  `bazel-out` directory. Pass outputs through providers or report their paths
+  explicitly.
+
+- Relying on implementation details of upstream rulesets, such as the
+  `_solib_` directory prefix that `rules_cc` uses. They change without notice
+  when the ruleset is updated.
+
 ## Avoid caching or remoting large artifacts
 
 See [Avoiding caching for large artifacts][avoiding-caching-large-artifacts].

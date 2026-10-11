@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "rust",
+    srcs = ["src/lib.rs"],
+    crate_name = "device_watcher",
+    edition = "2024",
+    test_deps = [
+        "//src/lib/fuchsia",
+        "//src/storage/lib/vfs/rust:vfs",
+    ],
+    # Used by about 40 packages across the tree.
+    visibility = ["//:__subpackages__"],
+    with_unit_tests = True,
+    deps = [
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx-status",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

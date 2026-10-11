@@ -29,8 +29,10 @@
             name: "local-mdns",
             url: "#meta/mdns.cm",
         },
-
-        // local-netstack is provided by files that include this one.
+        {
+            name: "local-netstack",
+            url: "#meta/configurable-netstack-netstack3.cm",
+        },
         {
             name: "local-name-provider",
             url: "#meta/device-name-provider-local.cm",
@@ -45,8 +47,10 @@
             name: "remote-mdns",
             url: "#meta/mdns.cm",
         },
-
-        // remote-netstack is provided by files that include this one.
+        {
+            name: "remote-netstack",
+            url: "#meta/configurable-netstack-netstack3.cm",
+        },
         {
             name: "remote-name-provider",
             url: "#meta/device-name-provider-remote.cm",

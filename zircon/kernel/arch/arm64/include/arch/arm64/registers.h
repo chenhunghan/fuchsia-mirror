@@ -139,7 +139,7 @@ typedef struct arm64_debug_state {
 
 /* Enable/disable the HW debug functionalities for the specified thread. */
 struct Thread;
-void arm64_set_debug_state_for_thread(Thread*, bool active);
+extern "C" void arm64_set_debug_state_for_thread(Thread*, bool active);
 
 /* Checks whether the given state is valid to install on a running thread.
  *
@@ -157,30 +157,19 @@ void arm64_set_debug_state_for_thread(Thread*, bool active);
  * If returning true, |active_breakpoints| will be the number of activated breakpoints within
  * set given |debug_state|.
  * */
-bool arm64_validate_debug_state(arm64_debug_state_t* debug_state, uint32_t* active_breakpoints,
-                                uint32_t* active_watchpoints);
+extern "C" bool arm64_validate_debug_state(arm64_debug_state_t* debug_state,
+                                           uint32_t* active_breakpoints,
+                                           uint32_t* active_watchpoints);
 
 /* Returns the amount of HW breakpoints present in this CPU. */
-uint8_t arm64_hw_breakpoint_count();
-uint8_t arm64_hw_watchpoint_count();
-
-/* Read from the CPU registers into |debug_state|. */
-void arm64_read_hw_debug_regs(arm64_debug_state_t* debug_state);
+extern "C" uint8_t arm64_hw_breakpoint_count();
+extern "C" uint8_t arm64_hw_watchpoint_count();
 
 /* Write from the |debug_state| into the CPU registers.
  *
  * IMPORTANT: This function is used in the context switch, so no validation is done, just writing.
  *            In any other context (eg. setting debug values from a syscall), you *MUST* call
  *            arm64_validate_debug_state first. */
-void arm64_write_hw_debug_regs(const arm64_debug_state_t* debug_state);
-
-// Will zero out the debug registers for the current CPOU.
-void arm64_clear_hw_debug_regs();
-
-#ifndef NDEBUG
-// Debug only.
-void arm64_print_debug_registers(const arm64_debug_state_t*);
-void arm64_print_mdscr();
-#endif
+extern "C" void arm64_write_hw_debug_regs(const arm64_debug_state_t* debug_state);
 
 #endif  // ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_REGISTERS_H_

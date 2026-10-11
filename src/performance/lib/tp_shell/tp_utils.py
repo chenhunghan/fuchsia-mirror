@@ -451,9 +451,11 @@ class GsUriResolver(TraceUriResolver):
         self.uri = uri
 
     @classmethod
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def from_trace_uri(cls, uri: str) -> "GsUriResolver":
         return cls(uri)
 
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def resolve(self) -> list[TraceUriResolver.Result]:
         parsed = urllib.parse.urlsplit(self.uri)
         bucket = parsed.netloc.strip()
@@ -483,9 +485,11 @@ class HttpUriResolver(TraceUriResolver):
         self.uri = uri
 
     @classmethod
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def from_trace_uri(cls, uri: str) -> "HttpUriResolver":
         return cls(uri)
 
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def resolve(self) -> list[TraceUriResolver.Result]:
         context = ssl._create_unverified_context()
         if "perfetto.dev" in self.uri:
@@ -532,11 +536,13 @@ class FuchsiaPlatformDelegate(PlatformDelegate):
         super().__init__()
         self.host_tp_shell_path = host_tp_shell_path
 
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def get_shell_path(
         self, bin_path: str | None = None, fetch_latest: bool = False
     ) -> str:
         return self.host_tp_shell_path
 
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def get_resource(self, file: str) -> bytes:
         return (
             importlib.resources.files("perfetto.trace_processor")
@@ -544,6 +550,7 @@ class FuchsiaPlatformDelegate(PlatformDelegate):
             .read_bytes()
         )
 
+    # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
     def default_resolver_registry(self) -> ResolverRegistry:
         return ResolverRegistry(
             resolvers=[

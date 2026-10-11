@@ -7,90 +7,171 @@ use crate::task::CurrentTask;
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::pseudo::simple_directory::SimpleDirectory;
 use crate::vfs::{
-    FileObject, FileOps, FsNode, FsNodeOps, FsString, PathBuilder, fileops_impl_noop_sync,
+    FileObject, FileOps, FsNode, FsNodeOps, FsStr, FsString, PathBuilder, fileops_impl_noop_sync,
     fileops_impl_seekable, fs_node_impl_not_dir,
 };
+use derivative::Derivative;
 use starnix_logging::track_stub;
 use starnix_rcu::{RcuHashMap, RcuReadScope};
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::{errno, error};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-/// A Class is a higher-level view of a device.
+/// Higher-level view of a device.
 ///
-/// It groups devices based on what they do, rather than how they are connected.
-#[derive(Clone)]
+/// Groups devices based on what they do, rather than how they are connected.
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct Class {
-    pub name: FsString,
-    pub dir: Arc<SimpleDirectory>,
-    /// Physical bus that the devices belong to.
-    pub bus: Bus,
-    pub collection: Arc<SimpleDirectory>,
+    name: FsString,
+    #[derivative(Debug = "ignore")]
+    devices: Arc<SimpleDirectory>,
 }
 
 impl Class {
-    pub fn new(
-        name: FsString,
-        dir: Arc<SimpleDirectory>,
-        bus: Bus,
-        collection: Arc<SimpleDirectory>,
-    ) -> Self {
-        Self { name, dir, bus, collection }
+    pub(super) fn new(name: FsString, devices: Arc<SimpleDirectory>) -> Self {
+        Self { name, devices }
+    }
+
+    pub fn name(&self) -> &FsStr {
+        self.name.as_ref()
+    }
+
+    pub(super) fn devices(&self) -> &Arc<SimpleDirectory> {
+        &self.devices
     }
 }
 
-impl std::fmt::Debug for Class {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Class").field("name", &self.name).field("bus", &self.bus).finish()
-    }
-}
-
-/// A Bus identifies how the devices are connected to the processor.
-#[derive(Clone)]
+/// Identifies how devices are connected to the processor.
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct Bus {
-    pub name: FsString,
-    pub dir: Arc<SimpleDirectory>,
-    pub collection: Option<Arc<SimpleDirectory>>,
+    name: FsString,
+    #[derivative(Debug = "ignore")]
+    devices: Arc<SimpleDirectory>,
 }
 
 impl Bus {
-    pub fn new(
-        name: FsString,
-        dir: Arc<SimpleDirectory>,
-        collection: Option<Arc<SimpleDirectory>>,
-    ) -> Self {
-        Self { name, dir, collection }
+    pub(super) fn new(name: FsString, devices: Arc<SimpleDirectory>) -> Self {
+        Self { name, devices }
+    }
+
+    pub fn name(&self) -> &FsStr {
+        self.name.as_ref()
+    }
+
+    pub(super) fn devices(&self) -> &Arc<SimpleDirectory> {
+        &self.devices
     }
 }
 
-impl std::fmt::Debug for Bus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Bus").field("name", &self.name).finish()
+/// Subsystem with which a [`Device`] is associated.
+#[derive(Clone, Debug)]
+pub(super) enum Subsystem {
+    Bus(Bus),
+    Class(Class),
+}
+
+impl Subsystem {
+    pub(super) fn name(&self) -> &FsStr {
+        match self {
+            Self::Bus(bus) => bus.name(),
+            Self::Class(class) => class.name(),
+        }
+    }
+}
+
+impl From<Bus> for Subsystem {
+    fn from(bus: Bus) -> Self {
+        Self::Bus(bus)
+    }
+}
+
+impl From<Class> for Subsystem {
+    fn from(class: Class) -> Self {
+        Self::Class(class)
     }
 }
 
 pub type UEventProperties = Vec<(FsString, FsString)>;
 
-#[derive(Clone, Debug)]
+/// Device node in the `/sys/devices` hierarchy that can act as a parent for other devices.
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct Device {
-    pub name: FsString,
-    pub class: Class,
-    pub metadata: Option<DeviceMetadata>,
+    name: FsString,
+    parent: Option<Arc<Device>>,
+    subsystem: Option<Subsystem>,
+    metadata: Option<DeviceMetadata>,
+    /// Weak reference to the device's directory in `/sys/devices/...`.
+    ///
+    /// [`KObjectStore`](super::kobject_store::KObjectStore) strongly owns live device directories
+    /// via the sysfs root directory hierarchy. Storing a weak reference here avoids an `Arc` cycle
+    /// with the directory's `"uevent"` [`UEventFsNode`], which holds a clone of [`Device`].
+    #[derivative(Debug = "ignore")]
+    dir: Weak<SimpleDirectory>,
 }
 
 impl Device {
-    pub fn new(name: FsString, class: Class, metadata: Option<DeviceMetadata>) -> Self {
-        Self { name, class, metadata }
+    pub(super) fn new(
+        name: FsString,
+        parent: Option<Device>,
+        subsystem: Option<Subsystem>,
+        metadata: Option<DeviceMetadata>,
+        dir: Arc<SimpleDirectory>,
+    ) -> Self {
+        debug_assert!(parent.is_some() || !matches!(subsystem, Some(Subsystem::Class(_))));
+        Self { name, parent: parent.map(Arc::new), subsystem, metadata, dir: Arc::downgrade(&dir) }
     }
 
-    /// Returns a path to the device, relative to the sysfs root, going up `depth` directories.
+    pub fn name(&self) -> &FsStr {
+        self.name.as_ref()
+    }
+
+    pub fn parent(&self) -> Option<&Device> {
+        self.parent.as_deref()
+    }
+
+    pub fn metadata(&self) -> Option<&DeviceMetadata> {
+        self.metadata.as_ref()
+    }
+
+    pub(super) fn subsystem(&self) -> Option<&Subsystem> {
+        self.subsystem.as_ref()
+    }
+
+    pub(super) fn dir(&self) -> Option<Arc<SimpleDirectory>> {
+        self.dir.upgrade()
+    }
+
+    /// Intermediate `<class>` directory name inserted under `parent` for `subsystem`, if any.
+    pub(super) fn glue_dir_name_for<'a>(
+        parent: Option<&Device>,
+        subsystem: Option<&'a Subsystem>,
+    ) -> Option<&'a FsStr> {
+        let (Some(parent), Some(Subsystem::Class(class))) = (parent, subsystem) else {
+            return None;
+        };
+        (!matches!(parent.subsystem(), Some(Subsystem::Class(_)))).then(|| class.name())
+    }
+
+    /// Intermediate `<class>` directory name inserted between [`Self::parent`] and this device, if
+    /// any.
+    pub(super) fn glue_dir_name(&self) -> Option<&FsStr> {
+        Self::glue_dir_name_for(self.parent(), self.subsystem())
+    }
+
+    /// Relative path to the device from a directory `depth` levels below the sysfs root.
     pub fn path_from_depth(&self, depth: usize) -> FsString {
         let mut builder = PathBuilder::new();
-        builder.prepend_element(self.name.as_ref());
-        builder.prepend_element(self.class.name.as_ref());
-        builder.prepend_element(self.class.bus.name.as_ref());
+        for current in std::iter::successors(Some(self), |dev| dev.parent()) {
+            builder.prepend_element(current.name());
+            if let Some(glue_dir) = current.glue_dir_name() {
+                builder.prepend_element(glue_dir);
+            }
+        }
         builder.prepend_element(b"devices".into());
         for _ in 0..depth {
             builder.prepend_element(b"..".into());
@@ -114,7 +195,9 @@ impl Device {
         devpath.extend_from_slice(path.as_ref());
 
         props.push((b"DEVPATH".into(), devpath.into()));
-        props.push((b"SUBSYSTEM".into(), self.class.name.clone()));
+        if let Some(subsystem) = &self.subsystem {
+            props.push((b"SUBSYSTEM".into(), subsystem.name().to_owned()));
+        }
 
         if let Some(metadata) = &self.metadata {
             props.push((b"DEVNAME".into(), metadata.devname.clone()));
@@ -308,21 +391,30 @@ mod tests {
     #[test]
     fn test_uevent_properties() {
         let dir = SimpleDirectory::new();
-        let collection = SimpleDirectory::new();
-        let bus = Bus::new("bus".into(), dir.clone(), Some(collection.clone()));
-        let class = Class::new("class".into(), dir.clone(), bus, collection);
+        let devices = SimpleDirectory::new();
+        let bus = Bus::new("bus".into(), devices.clone());
+        let parent = Device::new(
+            "bus_dev".into(),
+            /* parent = */ None,
+            Some(bus.into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        let class = Class::new("class".into(), devices);
         let device = Device::new(
             "device".into(),
-            class,
+            Some(parent),
+            Some(class.into()),
             Some(
                 DeviceMetadata::new("devname".into(), DeviceId::new(1, 2), DeviceMode::Char)
                     .with_devtype("disk"),
             ),
+            dir,
         );
 
         assert_eq!(
             device.uevent_properties('\n'),
-            b"DEVPATH=/devices/bus/class/device\n\
+            b"DEVPATH=/devices/bus_dev/class/device\n\
              SUBSYSTEM=class\n\
              DEVNAME=devname\n\
              SYNTH_UUID=0\n\
@@ -335,18 +427,27 @@ mod tests {
     #[test]
     fn test_uevent_properties_no_devtype() {
         let dir = SimpleDirectory::new();
-        let collection = SimpleDirectory::new();
-        let bus = Bus::new("bus".into(), dir.clone(), Some(collection.clone()));
-        let class = Class::new("class".into(), dir.clone(), bus, collection);
+        let devices = SimpleDirectory::new();
+        let bus = Bus::new("bus".into(), devices.clone());
+        let parent = Device::new(
+            "bus_dev".into(),
+            /* parent = */ None,
+            Some(bus.into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        let class = Class::new("class".into(), devices);
         let device = Device::new(
             "device".into(),
-            class,
+            Some(parent),
+            Some(class.into()),
             Some(DeviceMetadata::new("devname".into(), DeviceId::new(1, 2), DeviceMode::Char)),
+            dir,
         );
 
         assert_eq!(
             device.uevent_properties('\n'),
-            b"DEVPATH=/devices/bus/class/device\n\
+            b"DEVPATH=/devices/bus_dev/class/device\n\
              SUBSYSTEM=class\n\
              DEVNAME=devname\n\
              SYNTH_UUID=0\n\
@@ -356,13 +457,105 @@ mod tests {
     }
 
     #[::fuchsia::test]
+    fn test_root_bus_and_nested_class_device_uevent_properties() {
+        let dir = SimpleDirectory::new();
+        let root_device = Device::new(
+            "platform".into(),
+            /* parent = */ None,
+            /* subsystem = */ None,
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        assert_eq!(root_device.path_from_depth(0), b"devices/platform");
+        assert_eq!(root_device.uevent_properties('\n'), b"DEVPATH=/devices/platform\n");
+
+        let platform_bus = Bus::new("platform".into(), SimpleDirectory::new());
+        let soc_device = Device::new(
+            "soc".into(),
+            Some(root_device),
+            Some(platform_bus.clone().into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        assert_eq!(soc_device.path_from_depth(0), b"devices/platform/soc");
+        assert_eq!(soc_device.path_from_depth(3), b"../../../devices/platform/soc");
+        assert_eq!(
+            soc_device.uevent_properties('\n'),
+            b"DEVPATH=/devices/platform/soc\n\
+             SUBSYSTEM=platform\n"
+        );
+
+        let drm_class = Class::new("drm".into(), SimpleDirectory::new());
+        let card0 = Device::new(
+            "card0".into(),
+            Some(soc_device),
+            Some(drm_class.clone().into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        assert_eq!(card0.path_from_depth(0), b"devices/platform/soc/drm/card0");
+
+        let connector = Device::new(
+            "sde-conn-0-DSI-1".into(),
+            Some(card0.clone()),
+            Some(drm_class.into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        assert_eq!(
+            connector.path_from_depth(0),
+            b"devices/platform/soc/drm/card0/sde-conn-0-DSI-1"
+        );
+        assert_eq!(
+            connector.uevent_properties('\n'),
+            b"DEVPATH=/devices/platform/soc/drm/card0/sde-conn-0-DSI-1\n\
+             SUBSYSTEM=drm\n"
+        );
+
+        // Bus device parented under a class device does not insert a glue directory,
+        // while a class device parented under that bus device does insert its class directory.
+        let child_bus_dev = Device::new(
+            "aux_dev".into(),
+            Some(card0),
+            Some(platform_bus.into()),
+            /* metadata = */ None,
+            dir.clone(),
+        );
+        assert_eq!(child_bus_dev.path_from_depth(0), b"devices/platform/soc/drm/card0/aux_dev");
+
+        let wakeup_class = Class::new("wakeup".into(), SimpleDirectory::new());
+        let grandchild_class_dev = Device::new(
+            "wakeup0".into(),
+            Some(child_bus_dev),
+            Some(wakeup_class.into()),
+            /* metadata = */ None,
+            dir,
+        );
+        assert_eq!(
+            grandchild_class_dev.path_from_depth(0),
+            b"devices/platform/soc/drm/card0/aux_dev/wakeup/wakeup0"
+        );
+    }
+
+    #[::fuchsia::test]
     fn test_get_uevent_properties_list() {
-        let bus = Bus::new("virtual".into(), SimpleDirectory::new(), None);
-        let class =
-            Class::new("android_usb".into(), SimpleDirectory::new(), bus, SimpleDirectory::new());
+        let virtual_device = Device::new(
+            "virtual".into(),
+            /* parent = */ None,
+            /* subsystem = */ None,
+            /* metadata = */ None,
+            SimpleDirectory::new(),
+        );
+        let class = Class::new("android_usb".into(), SimpleDirectory::new());
         let metadata =
             DeviceMetadata::new("android0".into(), DeviceId::new(1, 2), DeviceMode::Char);
-        let device = Device::new("android0".into(), class, Some(metadata));
+        let device = Device::new(
+            "android0".into(),
+            Some(virtual_device),
+            Some(class.into()),
+            Some(metadata),
+            SimpleDirectory::new(),
+        );
 
         let props = device.get_uevent_properties_list();
 
@@ -373,7 +566,7 @@ mod tests {
         assert_eq!(props[0], ("DEVPATH".into(), "/devices/virtual/android_usb/android0".into()));
         assert_eq!(props[1], ("SUBSYSTEM".into(), "android_usb".into()));
 
-        let properties = &device.metadata.as_ref().unwrap().properties;
+        let properties = &device.metadata().unwrap().properties;
         properties.insert("USB_STATE".into(), "CONNECTED".into());
         properties.insert("ABC".into(), "XYZ".into());
         properties.insert("FOO".into(), "BAR".into());

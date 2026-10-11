@@ -207,7 +207,7 @@ func (c *FFXStrictClient) Flash(ctx context.Context, fastbootSerial, productDir,
 	return nil
 }
 
-func (c *FFXStrictClient) EmuStart(ctx context.Context, productDir, name, engine, device string) error {
+func (c *FFXStrictClient) EmuStart(ctx context.Context, productDir, name, engine, device, gpu string) error {
 	args := []string{
 		"emu", "start", productDir,
 		"--net", "user",
@@ -220,6 +220,9 @@ func (c *FFXStrictClient) EmuStart(ctx context.Context, productDir, name, engine
 	}
 	if device != "" {
 		args = append(args, "--device", device)
+	}
+	if gpu != "" {
+		args = append(args, "--gpu", gpu)
 	}
 	if err := c.ffxInst.Run(ctx, args...); err != nil {
 		return fmt.Errorf("emu start failed: %w", err)

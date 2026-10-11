@@ -125,7 +125,7 @@ def _init_git_repo(
     if install_jiri_dispatchers:
         hooks_dir = repo_dir / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
-        for h in ("pre-commit", "commit-msg"):
+        for h in ("pre-commit", "commit-msg", "pre-push"):
             hook_file = hooks_dir / h
             hook_file.write_text(
                 MOCK_JIRI_DISPATCHER_TEMPLATE.format(hook_name=h),
@@ -378,9 +378,15 @@ class E2EGitHooksTest(unittest.TestCase):
         )
 
     def test_e2e_pre_commit_formats_and_restages(self) -> None:
-        """Verifies that unformatted code is auto-formatted and re-staged on git commit."""
+        """Verifies that pre-commit skips for human and auto-formats for agent."""
         workspace = self.fixture.create_isolated_workspace()
         self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        githooks.install_git_hook(
+            workspace,
+            hook_name="pre-commit",
+            script_path="$FUCHSIA_DIR/tools/agents/lib/githooks/runner.py",
+            script_args=["pre-commit"],
+        )
 
         foo_json = workspace / "src" / "foo.json"
         unformatted_content = '{\n  "unformatted":   true,\n "key": "value" \n}'
@@ -393,22 +399,46 @@ class E2EGitHooksTest(unittest.TestCase):
             "Test: none\n"
             "Change-Id: I0000000000000000000000000000000000000020\n"
         )
-        res = self._run_git("commit", "-m", msg, cwd=workspace)
+        # 1. Human developer commit: pre-commit hook is skipped; file is committed unformatted
+        res_human = self._run_git("commit", "-m", msg, cwd=workspace)
         self.assertEqual(
-            res.returncode,
+            res_human.returncode,
             0,
-            f"Commit should succeed with auto-formatting: {res.stderr}\n{res.stdout}",
+            f"Human commit should succeed: {res_human.stderr}\n{res_human.stdout}",
+        )
+        show_json_human = self._run_git(
+            "show", "HEAD:src/foo.json", cwd=workspace, check=True
+        )
+        self.assertEqual(show_json_human.stdout, unformatted_content)
+
+        # 2. Stage another unformatted file for agent commit
+        bar_json = workspace / "src" / "bar.json"
+        bar_json.write_text(unformatted_content, encoding="utf-8")
+        self._run_git("add", "src/bar.json", cwd=workspace, check=True)
+
+        # Agent commit: pre-commit hook runs, auto-formats and re-stages
+        res_agent = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"ANTIGRAVITY_AGENT": "1"},
+        )
+        self.assertEqual(
+            res_agent.returncode,
+            0,
+            f"Agent commit should succeed with auto-formatting: {res_agent.stderr}\n{res_agent.stdout}",
         )
 
         expected_formatted = (
             '{\n    "unformatted": true,\n    "key": "value"\n}\n'
         )
         show_json = self._run_git(
-            "show", "HEAD:src/foo.json", cwd=workspace, check=True
+            "show", "HEAD:src/bar.json", cwd=workspace, check=True
         )
         self.assertEqual(show_json.stdout, expected_formatted)
         self.assertEqual(
-            foo_json.read_text(encoding="utf-8"), expected_formatted
+            bar_json.read_text(encoding="utf-8"), expected_formatted
         )
 
         status_res = self._run_git(
@@ -417,9 +447,15 @@ class E2EGitHooksTest(unittest.TestCase):
         self.assertEqual(status_res.stdout.strip(), "")
 
     def test_e2e_pre_commit_blocks_partial_staging_conflict(self) -> None:
-        """Verifies that a partially staged file with formatting violations blocks the commit."""
+        """Verifies that a partially staged file with formatting violations blocks agent commit."""
         workspace = self.fixture.create_isolated_workspace()
         self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        githooks.install_git_hook(
+            workspace,
+            hook_name="pre-commit",
+            script_path="$FUCHSIA_DIR/tools/agents/lib/githooks/runner.py",
+            script_args=["pre-commit"],
+        )
 
         foo_json = workspace / "src" / "foo.json"
         staged_content = '{\n  "unformatted":   true,\n "key": "foo" \n}'
@@ -437,7 +473,13 @@ class E2EGitHooksTest(unittest.TestCase):
             "Test: none\n"
             "Change-Id: I0000000000000000000000000000000000000031\n"
         )
-        res = self._run_git("commit", "-m", msg, cwd=workspace)
+        res = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"ANTIGRAVITY_AGENT": "1"},
+        )
         self.assertEqual(
             res.returncode,
             1,
@@ -502,6 +544,12 @@ class E2EGitHooksTest(unittest.TestCase):
         """Verifies that hooks function properly in a linked Git worktree."""
         workspace = self.fixture.create_isolated_workspace()
         self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        githooks.install_git_hook(
+            workspace,
+            hook_name="pre-commit",
+            script_path="$FUCHSIA_DIR/tools/agents/lib/githooks/runner.py",
+            script_args=["pre-commit"],
+        )
 
         wt_temp = pathlib.Path(tempfile.mkdtemp(prefix="e2e_wt_"))
         self.addCleanup(shutil.rmtree, wt_temp, ignore_errors=True)
@@ -532,6 +580,7 @@ class E2EGitHooksTest(unittest.TestCase):
             "-m",
             msg,
             cwd=wt_dir,
+            extra_env={"ANTIGRAVITY_AGENT": "1"},
             remove_env=("FUCHSIA_DIR",),
         )
         self.assertEqual(
@@ -556,9 +605,15 @@ class E2EGitHooksTest(unittest.TestCase):
         self.assertEqual(status_res.stdout.strip(), "")
 
     def test_e2e_commit_blocks_on_lint_failure(self) -> None:
-        """Verifies that commits are blocked when fx lint reports a failure."""
+        """Verifies that lint failures block agent and forced commits, but skip human commits."""
         workspace = self.fixture.create_isolated_workspace(with_hooks=True)
         self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        githooks.install_git_hook(
+            workspace,
+            hook_name="pre-commit",
+            script_path="$FUCHSIA_DIR/tools/agents/lib/githooks/runner.py",
+            script_args=["pre-commit"],
+        )
 
         target_file = workspace / "src" / "foo.json"
         target_file.write_text('{\n    "valid": true\n}\n', encoding="utf-8")
@@ -571,20 +626,25 @@ class E2EGitHooksTest(unittest.TestCase):
             "Change-Id: I0000000000000000000000000000000000000077\n"
         )
 
-        # Human developer commit with a failing linter.
-        res = self._run_git(
+        # Human developer commit skips pre-commit linting (succeeds).
+        res_human = self._run_git(
             "commit",
             "-m",
             msg,
             cwd=workspace,
             extra_env={"FAIL_MOCK_LINT": "1"},
         )
-        self.assertNotEqual(res.returncode, 0)
-        self.assertIn(
-            "Mock lint failure on modified files", res.stderr + res.stdout
+        self.assertEqual(
+            res_human.returncode,
+            0,
+            f"Human commit should skip pre-commit linting: {res_human.stderr}",
         )
 
-        # AI coding agent commit with a failing linter.
+        # Stage a modification so the staging pipeline has files to evaluate
+        target_file.write_text('{\n    "valid": false\n}\n', encoding="utf-8")
+        self._run_git("add", "src/foo.json", cwd=workspace, check=True)
+
+        # AI coding agent commit with a failing linter is blocked.
         res_agent = self._run_git(
             "commit",
             "-m",
@@ -598,8 +658,28 @@ class E2EGitHooksTest(unittest.TestCase):
             res_agent.stderr + res_agent.stdout,
         )
 
+        # Forced hook commit (FUCHSIA_FORCE_HOOKS=1) with a failing linter is blocked.
+        res_forced = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"FUCHSIA_FORCE_HOOKS": "1", "FAIL_MOCK_LINT": "1"},
+        )
+        self.assertNotEqual(res_forced.returncode, 0)
+        self.assertIn(
+            "Mock lint failure on modified files",
+            res_forced.stderr + res_forced.stdout,
+        )
+
         # Commit succeeds once the linters pass.
-        res_ok = self._run_git("commit", "-m", msg, cwd=workspace)
+        res_ok = self._run_git(
+            "commit",
+            "-m",
+            msg,
+            cwd=workspace,
+            extra_env={"GEMINI_CLI": "1"},
+        )
         self.assertEqual(res_ok.returncode, 0)
 
     def test_e2e_commit_blocks_when_fix_pass_exits_zero(self) -> None:
@@ -611,6 +691,12 @@ class E2EGitHooksTest(unittest.TestCase):
         """
         workspace = self.fixture.create_isolated_workspace(with_hooks=True)
         self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        githooks.install_git_hook(
+            workspace,
+            hook_name="pre-commit",
+            script_path="$FUCHSIA_DIR/tools/agents/lib/githooks/runner.py",
+            script_args=["pre-commit"],
+        )
 
         target_file = workspace / "src" / "foo.json"
         target_file.write_text('{\n    "valid": true\n}\n', encoding="utf-8")
@@ -651,7 +737,7 @@ class E2EGitHooksTest(unittest.TestCase):
         for repo in repos:
             hooks_dir = repo / ".git" / "hooks"
             self.assertTrue(
-                (hooks_dir / "pre-commit.d" / "10-fuchsia-agent.sh").is_file()
+                (hooks_dir / "pre-push.d" / "10-fuchsia-agent.sh").is_file()
             )
             self.assertTrue(
                 (hooks_dir / "commit-msg.d" / "10-fuchsia-agent.sh").is_file()
@@ -668,7 +754,7 @@ class E2EGitHooksTest(unittest.TestCase):
         for repo in repos:
             hooks_dir = repo / ".git" / "hooks"
             self.assertFalse(
-                (hooks_dir / "pre-commit.d" / "10-fuchsia-agent.sh").exists()
+                (hooks_dir / "pre-push.d" / "10-fuchsia-agent.sh").exists()
             )
             self.assertFalse(
                 (hooks_dir / "commit-msg.d" / "10-fuchsia-agent.sh").exists()

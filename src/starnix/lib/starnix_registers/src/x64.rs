@@ -4,6 +4,7 @@
 
 use crate::{HeapRegs, RegisterStorage, RegisterStorageEnum};
 use starnix_uapi::errors::Errno;
+use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_HIGHEST_ADDRESS;
 use starnix_uapi::{__NR_restart_syscall, error, user_regs_struct};
 
 /// The size of the syscall instruction in bytes.
@@ -89,16 +90,18 @@ impl<T: RegisterStorage> RegisterState<T> {
         unreachable!("arch32 not supported on x64")
     }
 
-    /// Saves any register state required to restart `syscall_number`.
-    pub fn save_registers_for_restart(&mut self, syscall_number: u64) {
+    /// Saves any register state required to restart the syscall.
+    ///
+    /// Must be called at syscall entry, before the syscall's return value is written.
+    pub fn save_registers_for_restart(&mut self) {
+        // `orig_rax` should hold the original value loaded into `rax` by the userspace process.
+        self.orig_rax = self.rax;
+
         // The `rax` register read from the thread's state is clobbered by
         // zircon with ZX_ERR_BAD_SYSCALL.  Similarly, Linux sets it to ENOSYS
         // until it has determined the correct return value for the syscall; we
         // emulate this behavior because ptrace callers expect it.
         self.rax = -(starnix_uapi::ENOSYS as i64) as u64;
-
-        // `orig_rax` should hold the original value loaded into `rax` by the userspace process.
-        self.orig_rax = syscall_number;
     }
 
     /// Custom restart, invoke restart_syscall instead of the original syscall.
@@ -178,6 +181,14 @@ impl<T: RegisterStorage> RegisterState<T> {
     /// Resets the register that contains the application status flags.
     pub fn reset_flags(&mut self) {
         self.flags = 0;
+        // Clear out-of-range segment bases so that a signal handler can be entered if
+        // `zx_restricted_enter` rejected the state with `ZX_ERR_BAD_STATE`.
+        if self.fs_base as usize >= RESTRICTED_ASPACE_HIGHEST_ADDRESS {
+            self.fs_base = 0;
+        }
+        if self.gs_base as usize >= RESTRICTED_ASPACE_HIGHEST_ADDRESS {
+            self.gs_base = 0;
+        }
     }
 
     /// Executes the given predicate on the register.
@@ -254,11 +265,12 @@ impl<T: RegisterStorage> RegisterState<T> {
 
     pub fn load(&mut self, regs: zx::sys::zx_restricted_state_t) {
         *self.real_registers = regs;
-        self.sync_stack_ptr();
     }
 
-    pub fn sync_stack_ptr(&mut self) {
-        self.orig_rax = self.rax;
+    /// Copies the restricted state and the orig_rax bookkeeping register.
+    pub fn copy_from<O: RegisterStorage>(&mut self, other: &RegisterState<O>) {
+        self.load(*other.real_registers);
+        self.orig_rax = other.orig_rax;
     }
 }
 

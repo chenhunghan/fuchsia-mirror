@@ -5,6 +5,8 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//build/rust/rustc_library.gni")
+import("//zircon/kernel/kernel_bindgen_crate.gni")
 
 if (zircon_toolchain == false) {
   _headers = ""
@@ -17,6 +19,27 @@ library_headers("range.headers") {
   public_deps = [
     # <lib/memalloc/range.h> has #include <lib/zbi-format/zbi.h>.
     "//sdk/lib/zbi-format",
+  ]
+}
+
+kernel_bindgen_crate("bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/lib/memalloc/range.h" ]
+  non_rust_deps = [ ":range.headers" ]
+  cpp = true
+  layout_tests = false
+  explicit_padding = false
+  use_core = true
+  type_allowlist = [
+    "memalloc::Range",
+    "memalloc::Type",
+  ]
+  var_allowlist = [ "memalloc::kMinAllocatedTypeValue" ]
+  rustified_enum = [ "memalloc::Type" ]
+  notice_year = 2026
+  expect_lints = [
+    "non_camel_case_types",
+    "non_upper_case_globals",
   ]
 }
 
@@ -50,6 +73,25 @@ library_headers("headers") {
     # <lib/memalloc/pool.h> has #include <lib/fit/result.h>.
     "//zircon/system/ulib/zx$_headers",
   ]
+}
+
+rustc_library("memalloc-rs") {
+  name = "memalloc"
+  edition = "2024"
+
+  sources = [
+    "src/lib.rs",
+    "src/range.rs",
+    "src/testing.rs",
+  ]
+  deps = [
+    ":bindings",
+    "//sdk/rust/zbi",
+    "//src/lib/zr",
+    "//third_party/rust_crates:paste",
+  ]
+
+  with_unit_tests = true
 }
 
 static_library("memalloc") {
@@ -160,6 +202,7 @@ if (!is_kernel) {
     testonly = true
     deps = [
       ":memalloc-fuzzers",
+      ":memalloc-rs_test($host_toolchain)",
       ":memalloc-test($host_toolchain)",
       ":memalloc-test-package",
     ]

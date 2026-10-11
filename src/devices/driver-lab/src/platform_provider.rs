@@ -344,8 +344,7 @@ pub async fn acquire(
             context.incoming.service_marker(fgpio::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_device_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
-                match proxy.read(probe_deadline) {
+                match proxy.read(zx::MonotonicInstant::INFINITE) {
                     Ok(_) => {
                         let res_id = next_id;
                         next_id += 1;
@@ -383,9 +382,8 @@ pub async fn acquire(
             context.incoming.service_marker(fi2c::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_device_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
                 // An empty transfer triggers no bus activity and succeeds with INVALID_ARGS if the server is active.
-                match proxy.transfer(&[], probe_deadline) {
+                match proxy.transfer(&[], zx::MonotonicInstant::INFINITE) {
                     Ok(Err(status)) if status == zx::Status::INVALID_ARGS.into_raw() => {
                         let res_id = next_id;
                         next_id += 1;
@@ -446,9 +444,8 @@ pub async fn acquire(
             context.incoming.service_marker(fspi::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_device_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
                 // CanAssertCs is a pure software query that verifies server liveness without bus transmission.
-                match proxy.can_assert_cs(probe_deadline) {
+                match proxy.can_assert_cs(zx::MonotonicInstant::INFINITE) {
                     Ok(_) => {
                         let res_id = next_id;
                         next_id += 1;
@@ -486,8 +483,7 @@ pub async fn acquire(
             context.incoming.service_marker(fclock::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_clock_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
-                match proxy.is_enabled(probe_deadline) {
+                match proxy.is_enabled(zx::MonotonicInstant::INFINITE) {
                     Ok(_) => {
                         let res_id = next_id;
                         next_id += 1;
@@ -527,8 +523,7 @@ pub async fn acquire(
             context.incoming.service_marker(freset::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_reset_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
-                match proxy.status(probe_deadline) {
+                match proxy.status(zx::MonotonicInstant::INFINITE) {
                     Ok(_) => {
                         let res_id = next_id;
                         next_id += 1;
@@ -568,8 +563,7 @@ pub async fn acquire(
             context.incoming.service_marker(fserial::ServiceMarker).instance(&instance).connect()
         {
             if let Ok(proxy) = service.connect_to_device_sync() {
-                let probe_deadline = zx::MonotonicInstant::after(zx::Duration::from_millis(50));
-                match proxy.get_class(probe_deadline) {
+                match proxy.get_class(zx::MonotonicInstant::INFINITE) {
                     Ok(_) => {
                         let res_id = next_id;
                         next_id += 1;

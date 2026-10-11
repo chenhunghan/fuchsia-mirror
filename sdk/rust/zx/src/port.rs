@@ -430,8 +430,9 @@ impl GuestVcpuPacket {
             },
             sys::zx_packet_guest_vcpu_type_t::ZX_PKT_GUEST_VCPU_STARTUP => unsafe {
                 VcpuContents::Startup {
-                    id: self.0.union.startup.id,
+                    target: self.0.union.startup.target,
                     entry: self.0.union.startup.entry,
+                    context: self.0.union.startup.context,
                 }
             },
             _ => panic!("unexpected VCPU packet type"),
@@ -733,7 +734,11 @@ mod tests {
         let mut guest_vcpu_packet = sys::zx_packet_guest_vcpu_t::default();
         guest_vcpu_packet.r#type = sys::zx_packet_guest_vcpu_type_t::ZX_PKT_GUEST_VCPU_STARTUP;
         guest_vcpu_packet.union = sys::zx_packet_guest_vcpu_union_t {
-            startup: sys::zx_packet_guest_vcpu_startup_t { id: 16, entry: 0xffffffff11111111 },
+            startup: sys::zx_packet_guest_vcpu_startup_t {
+                target: 16,
+                entry: 0xffffffff11111111,
+                context: 0xfeedfacedeadbeef,
+            },
         };
         const KEY: u64 = 0x0123456789abcdef;
         const STATUS: i32 = sys::ZX_ERR_NO_RESOURCES;

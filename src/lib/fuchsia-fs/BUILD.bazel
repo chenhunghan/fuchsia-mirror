@@ -46,20 +46,26 @@ _COMMON_TEST_DEPS = [
 rustc_library(
     name = "fuchsia-fs",
     srcs = _COMMON_SRCS,
+    crate_features = select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["fdomain"],
+    }),
     crate_name = "fuchsia_fs",
     edition = "2024",
     test_deps = _COMMON_TEST_DEPS,
     visibility = ["//:__subpackages__"],
     with_unit_tests = True,
-    deps = _COMMON_DEPS + [
-        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
-        "//src/lib/fdomain/client:flex_fidl",
-    ] + select({
+    deps = _COMMON_DEPS + select({
         "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
             "//sdk/rust/zx",
             "//src/lib/fdio/rust:fdio",
+            "//src/lib/fdomain/client:flex_fidl",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+            "//src/lib/fdomain/client:flex_fdomain",
+        ],
     }),
 )
 

@@ -64,11 +64,13 @@ _REPROXY_CFG = Path("build", "rbe", "fuchsia-reproxy.cfg")
 
 _RECLIENT_ERROR_STATUS = 35
 _RBE_SERVER_ERROR_STATUS = 45
+_RBE_TIMEOUT_STATUS = 59
 _RBE_KILLED_STATUS = 137
 
 _RETRIABLE_REWRAPPER_STATUSES = {
     _RECLIENT_ERROR_STATUS,
     _RBE_SERVER_ERROR_STATUS,
+    _RBE_TIMEOUT_STATUS,
     _RBE_KILLED_STATUS,
 }
 
@@ -345,6 +347,7 @@ def _should_retry_remote_action(status: cl_utils.SubprocessResult) -> bool:
     Retry once under these conditions:
       35: reclient error (includes infrastructural issues or local errors)
       45: remote execution (server) error, e.g. remote blob download failure
+      59: remote execution or reclient timeout
       137: SIGKILL'd (signal 9) by OS.
         Reasons may include segmentation fault, or out of memory.
 
@@ -1338,7 +1341,15 @@ exec "${{cmd[@]}}"
             yield str(self.config)
 
         if self.exec_strategy:
-            yield f"--exec_strategy={self.exec_strategy}"
+            # Handle remote_local_fallback in Python instead of reproxy so that
+            # retriable remote errors (such as timeouts) can be retried once
+            # remotely before falling back to local execution.
+            rewrapper_strategy = (
+                "remote"
+                if self.exec_strategy == "remote_local_fallback"
+                else self.exec_strategy
+            )
+            yield f"--exec_strategy={rewrapper_strategy}"
 
         if self.platform:
             # Then merge the value from --cfg and --platform to override
@@ -2059,11 +2070,18 @@ exec "${{cmd[@]}}"
         # binaries.  We know however, whether the local/remote commands
         # match and can take the appropriate local fallback action,
         # like running a different command than the remote one.
-        if self._should_rerun_locally_on_failure:
-            # We intended to run a different local command,
+        # Additionally, when exec_strategy is remote_local_fallback, we run
+        # rewrapper with --exec_strategy=remote so that retriable errors (such
+        # as timeouts) can be retried once remotely before falling back here.
+        if (
+            self.exec_strategy == "remote_local_fallback"
+            or self._should_rerun_locally_on_failure
+        ):
+            # We intended to run a different local command, or
+            # remote_local_fallback failed remotely,
             # so ignore the result from rewrapper.
             local_exit_code = self._run_locally()
-            if local_exit_code == 0:
+            if local_exit_code == 0 and self._should_rerun_locally_on_failure:
                 # local succeeded where remote failed
                 self.show_local_remote_command_differences()
 

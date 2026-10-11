@@ -16,8 +16,8 @@ use netstack3_base::sync::Mutex;
 use netstack3_base::{
     AnyDevice, BroadcastIpExt, ChecksumOffloadSpec, ChecksumRxOffloading, CoreTimerContext, Device,
     DeviceIdAnyCompatContext, DeviceIdContext, FrameDestination, NetworkParsingContext,
-    NetworkSerializer, RecvFrameContext, RecvIpFrameMeta, ResourceCounterContext, SendFrameError,
-    SendFrameErrorReason, SendableFrameMeta, StrongDeviceIdentifier, TimerContext,
+    NetworkSerializer, PacketType, RecvFrameContext, RecvIpFrameMeta, ResourceCounterContext,
+    SendFrameError, SendFrameErrorReason, SendableFrameMeta, StrongDeviceIdentifier, TimerContext,
     TxMetadataBindingsTypes, WeakDeviceIdentifier,
 };
 use netstack3_ip::{DeviceIpLayerMetadata, IpCounters, IpPacketDestination};
@@ -299,7 +299,7 @@ where
                 Ok(e) => e,
             };
 
-        let LoopbackRxQueueMeta { target_device, ip_layer_metadata } = rx_meta;
+        let LoopbackRxQueueMeta { target_device, mut ip_layer_metadata } = rx_meta;
         let target_device: <CC as DeviceIdContext<AnyDevice>>::DeviceId =
             match target_device.map(|d| d.upgrade()) {
                 // This is a packet that should be delivered on `target_device`.
@@ -320,11 +320,17 @@ where
         let frame_dest = FrameDestination::from_dest(frame.dst_mac(), Mac::UNSPECIFIED);
         let ethertype = frame.ethertype();
 
+        let packet_type = match ip_layer_metadata.packet_type() {
+            PacketType::Loopback => PacketType::Loopback,
+            _ => PacketType::from(frame_dest),
+        };
+        ip_layer_metadata.set_packet_type(packet_type);
+
         DeviceSocketHandler::<AnyDevice, _>::handle_frame(
             self,
             bindings_ctx,
             &target_device,
-            ReceivedFrame::from_ethernet(frame, frame_dest).into(),
+            ReceivedFrame::from_ethernet(frame, frame_dest, packet_type).into(),
             whole_body,
         );
 
@@ -455,11 +461,11 @@ where
 {
     core_ctx.increment_both(device_id, DeviceCounters::send_frame::<I>);
 
-    let target_device = match destination {
-        IpPacketDestination::Loopback(device) => Some(device.downgrade()),
-        IpPacketDestination::Broadcast(_)
-        | IpPacketDestination::Multicast(_)
-        | IpPacketDestination::Neighbor(_) => None,
+    let (target_device, dst_mac) = match destination {
+        IpPacketDestination::Loopback(device) => (Some(device.downgrade()), LOOPBACK_MAC),
+        IpPacketDestination::Broadcast(_marker) => (None, Mac::BROADCAST),
+        IpPacketDestination::Multicast(multicast_ip) => (None, Mac::from(&multicast_ip)),
+        IpPacketDestination::Neighbor(_) => (None, LOOPBACK_MAC),
     };
     send_as_ethernet_frame_to_dst(
         core_ctx,
@@ -467,7 +473,7 @@ where
         device_id,
         packet,
         I::ETHER_TYPE,
-        LOOPBACK_MAC,
+        dst_mac,
         LoopbackTxQueueMeta { target_device, ip_layer_metadata },
     )
 }

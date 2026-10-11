@@ -170,7 +170,7 @@ pub fn thermal_device_init(kernel: &Kernel) -> Result<(), Error> {
     let sensors = sensor_manager.list_sensors(zx::MonotonicInstant::INFINITE)?;
 
     let registry = &kernel.device_registry;
-    let virtual_thermal_class = registry.objects.virtual_thermal_class();
+    let thermal_class = registry.objects.thermal_class();
     let mut sensor_proxies = HashMap::new();
 
     for (thermal_zone_id, sensor_info) in sensors.into_iter().enumerate() {
@@ -199,9 +199,11 @@ pub fn thermal_device_init(kernel: &Kernel) -> Result<(), Error> {
             continue;
         }
 
-        registry.add_numberless_device(thermal_zone.as_str().into(),
-            virtual_thermal_class.clone(),
-            move |device, dir|{
+        registry.add_numberless_device(
+            thermal_zone.as_str().into(),
+            /* parent = */ None,
+            thermal_class.clone(),
+            move |device, dir| {
                 match fuchsia_component::client::connect_to_protocol_sync::<fthermal::SensorManagerMarker>() {
                     Ok(sensor_manager) => build_thermal_zone_directory(device, sensor_sync, sensor_manager, sensor_name_clone, dir),
                     Err(error) => log_warn!("Failed to connect to SensorManager when building thermal zone for sensor {}: {:?}", sensor_name_clone, error),

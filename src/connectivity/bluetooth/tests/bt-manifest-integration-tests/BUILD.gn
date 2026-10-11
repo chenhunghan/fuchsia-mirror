@@ -137,10 +137,8 @@ fuchsia_test_component("bt-hfp-audio-gateway-smoke-test-component") {
 
 fuchsia_test_package("bt-hfp-audio-gateway-smoke-test") {
   test_components = [ ":bt-hfp-audio-gateway-smoke-test-component" ]
-  deps = [
-    "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:component",
-    "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:default_config_values",
-  ]
+  deps =
+      [ "//src/connectivity/bluetooth/profiles/bt-hfp-audio-gateway:component" ]
 
   # The max severity is set to ERROR due to the HFP component's ERROR log
   # message when the Profile service is dropped. In some test runs, the Profile

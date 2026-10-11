@@ -34,7 +34,7 @@ use fidl_fuchsia_io as fio;
 use moniker::{ExtendedMoniker, Moniker};
 use routing::component_instance::ComponentInstanceInterface;
 use routing::debug_route_sandbox_path;
-use routing::error::{PrettyPrintRef, RouteVerb, RoutingError};
+use routing::error::{RouteVerb, RoutingError};
 use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -3709,7 +3709,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                     && moniker == *b_component.moniker()
                     && capability_type == CapabilityTypeName::Runner
                     && verb == RouteVerb::Use
-                    && source == PrettyPrintRef::Environment
+                    && source == GenericRef::Environment
         );
     }
 
@@ -3850,7 +3850,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                     && moniker == Moniker::root()
                     && capability_type == CapabilityTypeName::Runner
                     && verb == RouteVerb::Register
-                    && source == PrettyPrintRef::Parent
+                    && source == GenericRef::Parent
         );
     }
 
@@ -3884,7 +3884,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                     && moniker == *a_component.moniker()
                     && capability_type == CapabilityTypeName::Runner
                     && verb == RouteVerb::Use
-                    && source == PrettyPrintRef::Environment
+                    && source == GenericRef::Environment
         );
     }
 
@@ -4289,7 +4289,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                     && moniker == Moniker::root()
                     && capability_type == CapabilityTypeName::Protocol
                     && verb == RouteVerb::Use
-                    && source == PrettyPrintRef::Self_
+                    && source == GenericRef::Self_
         );
     }
 

@@ -44,6 +44,31 @@ fn stamp_file(stamp: &Option<String>) -> Result<Option<File>> {
         .map(Some)
 }
 
+fn is_help_all(command: &FfxCommandLine) -> bool {
+    matches!(
+        command.global.subcommand.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+        ["--all"] | ["help" | "--help", "--all"] | ["--all", "help" | "--help"]
+    )
+}
+
+fn help_all_cmd(c: ffx::FfxCommandLine, exe_kind: ExecutableKind) -> Result<InitializedCmd> {
+    let context = c.global.load_context(exe_kind)?;
+    if find_machine_and_help(&c).is_some() {
+        return Ok(InitializedCmd { cmd: c, context, help_state: HelpState::ReturnArgsInfo });
+    }
+    let cmd_vec: Vec<&str> = c.cmd_iter().collect();
+    let output = <ffx::Ffx as argh::FromArgs>::from_args(&cmd_vec, &["help"])
+        .err()
+        .map(|e| e.output)
+        .unwrap_or_default();
+    let command = c.command.clone();
+    Ok(InitializedCmd {
+        cmd: c,
+        context,
+        help_state: HelpState::ReturnHelp { command, output, code: 0 },
+    })
+}
+
 fn write_exit_code<W: Write>(res: &Result<ExitStatus>, out: &mut W) {
     let exit_code = match res {
         Ok(status) => status.code().unwrap_or(1),
@@ -70,16 +95,7 @@ fn get_upload_timeout(context: Option<&EnvironmentContext>) -> Duration {
             // ```
             //
             // And they'd be stuck!
-            e.get(ffx_config::keys::METRICS_UPLOAD_TIMEOUT_KEY)
-                .map_err(|e| {
-                    // TODO(436934180): We shouldn't need to specify which key we couldn't fetch.
-                    // This should be the config's job to format this error properly for us.
-                    log::warn!(
-                        "unable to load `{}`: {e}",
-                        ffx_config::keys::METRICS_UPLOAD_TIMEOUT_KEY
-                    )
-                })
-                .ok()
+            e.get(ffx_config::keys::METRICS_UPLOAD_TIMEOUT_KEY).map_err(|e| log::warn!("{e}")).ok()
         })
         .unwrap_or(ffx_config::keys::METRICS_UPLOAD_TIMEOUT_DEFAULT);
     Duration::from_secs_f64(timeout_float)
@@ -165,6 +181,7 @@ pub struct InitializedCmd {
 /// and initializes config.
 pub fn init_cmd(exe_kind: ExecutableKind) -> Result<InitializedCmd> {
     match ffx::FfxCommandLine::from_env() {
+        Ok(c) if is_help_all(&c) => help_all_cmd(c, exe_kind),
         Ok(c) => {
             let context = c.global.load_context(exe_kind)?;
             Ok(InitializedCmd { cmd: c, context, help_state: HelpState::None })
@@ -175,9 +192,15 @@ pub fn init_cmd(exe_kind: ExecutableKind) -> Result<InitializedCmd> {
             // when a help error is returned. So look for the `--machine json` flag
             // and either `help` or `--help` or `-h`.
             let argv = Vec::from_iter(std::env::args());
-            let c = ffx::FfxCommandLine::from_args_for_help(&argv)?;
+            let mut c = ffx::FfxCommandLine::from_args_for_help(&argv)?;
             let context = c.global.load_context(exe_kind)?;
-            if find_machine_and_help(&c).is_some() {
+            if c.global.subcommand.first().map(String::as_str) == Some("help")
+                && c.global.subcommand.get(1).is_some_and(|s| !s.starts_with('-'))
+            {
+                c.global.subcommand.remove(0);
+                c.global.subcommand.push("--help".to_string());
+                Ok(InitializedCmd { cmd: c, context, help_state: HelpState::None })
+            } else if find_machine_and_help(&c).is_some() {
                 Ok(InitializedCmd { cmd: c, context, help_state: HelpState::ReturnArgsInfo })
             } else {
                 Ok(InitializedCmd {
@@ -188,7 +211,15 @@ pub fn init_cmd(exe_kind: ExecutableKind) -> Result<InitializedCmd> {
             }
         }
 
-        Err(e) => Err(e),
+        Err(e) => {
+            let argv = Vec::from_iter(std::env::args());
+            if let Ok(c) = ffx::FfxCommandLine::from_args_for_help(&argv) {
+                if is_help_all(&c) {
+                    return help_all_cmd(c, exe_kind);
+                }
+            }
+            Err(e)
+        }
     }
 }
 
@@ -231,14 +262,17 @@ pub async fn run<T: ToolSuite>(icmd: InitializedCmd) -> Result<ExitStatus> {
             println!("{}", output.bug_context("Error serializing args")?);
             return Ok(ExitStatus::from_raw(0));
         }
-        HelpState::ReturnHelp { command, output, code } => {
+        HelpState::ReturnHelp { command, mut output, code } => {
             let mut commands: String = Default::default();
-            tools
-                .print_command_list(&mut commands)
-                .await
-                .bug_context("Error getting command list")?;
-            let full_output = format!("{output}\n{commands}");
-            return Err(Error::Help { command, output: full_output, code });
+            if is_help_all(&cmd) && find_machine_and_help(&cmd).is_none() {
+                tools.print_all_commands(&mut commands).await
+            } else {
+                tools.print_command_list(&mut commands).await
+            }
+            .bug_context("Error getting command list")?;
+            output = format!("{output}\n{commands}");
+            append_strict_help(&mut output, app.strict, code);
+            return Err(Error::Help { command, output, code });
         }
         HelpState::None => (),
     };
@@ -254,7 +288,7 @@ pub async fn run<T: ToolSuite>(icmd: InitializedCmd) -> Result<ExitStatus> {
         log::info!("No schema requested - calling try from args: {cmd:?}");
         match tools.try_from_args(&cmd).await {
             Ok(t) => t,
-            Err(Error::Help { command, output, code }) => {
+            Err(Error::Help { command, mut output, code }) => {
                 // TODO(b/303088345): Enhance argh to support custom help better.
                 // Check for machine json output and  help.
                 // This handles the sub command of ffx information.
@@ -285,7 +319,26 @@ pub async fn run<T: ToolSuite>(icmd: InitializedCmd) -> Result<ExitStatus> {
                     println!("{}", output.bug_context("Error serializing args")?);
                     return Ok(ExitStatus::from_raw(0));
                 } else {
+                    let is_subcommand_help = cmd.subcmd_iter().next() != Some("commands")
+                        && cmd.subcmd_iter().any(|c| c == "help" || c == "--help" || c == "-h");
+                    if code == 0 && is_subcommand_help {
+                        let top_level_help =
+                            <crate::Ffx as argh::FromArgs>::from_args(&["ffx"], &["--help"])
+                                .unwrap_err()
+                                .output;
+                        if let Some(opts_idx) = top_level_help.find("Options:\n") {
+                            let end_idx = top_level_help
+                                .find("Commands:\n")
+                                .or_else(|| top_level_help.find("Subcommands:\n"))
+                                .unwrap_or(top_level_help.len());
+                            let global_opts = &top_level_help[opts_idx..end_idx];
+                            output.push_str("\n\nGlobal ");
+                            output.push_str(global_opts.trim_end());
+                        }
+                    }
+
                     let command_clone = command.clone();
+                    append_strict_help(&mut output, app.strict, code);
                     let res: Result<ExitStatus, Error> = Err(Error::Help { command, output, code });
                     let enhanced_args = match send_enhanced_analytics().await {
                         true => Some(cmd.unredacted_args_for_analytics()),
@@ -325,6 +378,13 @@ pub async fn run<T: ToolSuite>(icmd: InitializedCmd) -> Result<ExitStatus> {
         None => Err(cmd.no_handler_help(metrics, &tools).await?),
     };
 
+    if let Some(strict_cmd) = crate::ffx::build_strict_command(&cmd, &context) {
+        log::debug!("Strict equivalent: {}", strict_cmd);
+        if cmd.global.strict_equivalent {
+            println!("Strict equivalent: {}", strict_cmd);
+        }
+    }
+
     // Write to our stamp file if it was requested
     if let Some(mut stamp) = stamp {
         write_exit_code(&res, &mut stamp);
@@ -345,8 +405,8 @@ pub async fn exit(
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
     let exit_code = res.exit_code();
     match res {
-        Err(err @ Error::Help { .. }) => {
-            if should_format {
+        Err(err @ Error::Help { code, .. }) => {
+            if should_format && code != 0 {
                 let mut out = std::io::stdout();
                 let err = SerializableError::from(&err);
                 let message = serde_json::to_string(&err).unwrap();
@@ -397,6 +457,15 @@ pub async fn exit(
     std::process::exit(exit_code);
 }
 
+/// append strict-mode notes to help output
+fn append_strict_help(output: &mut String, is_strict: bool, code: i32) {
+    if is_strict && code == 0 {
+        output.push_str(
+            "\nStrict Mode Notes:\n  When running with `--strict`, the following constraints apply:\n  - `--machine <format>` must be specified (e.g., `--machine json`).\n  - `--log-output <destination>` must be specified (unless `-c log.enabled=false`).\n  - `--target <target>` must be explicitly specified if the command requires a target.\n  - `--config` / `-c` values must be key=value pairs or valid JSON (environment variables and config files are not read).\n",
+        );
+    }
+}
+
 /// look through the command line args for `--machine <format>`
 /// and --help or help or -h. This is used to indicate the
 /// JSON arg info should be returned.
@@ -439,7 +508,7 @@ impl From<&Error> for SerializableError {
     fn from(error: &Error) -> Self {
         match error {
             err @ Error::Unexpected(e) => {
-                Self::Unexpected { code: err.exit_code(), message: format!("{}", e) }
+                Self::Unexpected { code: err.exit_code(), message: format!("{:#}", e) }
             }
             err @ Error::IoError(e) => {
                 Self::IoError { code: err.exit_code(), message: format!("{}", e) }
@@ -506,6 +575,15 @@ mod test {
             SerializableError::Unexpected { code: 1, message: "Cytherea".to_string() }
         );
         assert_eq!(
+            SerializableError::from(Error::Unexpected(
+                anyhow::anyhow!("inner error").context("outer error")
+            )),
+            SerializableError::Unexpected {
+                code: 1,
+                message: "outer error: inner error".to_string()
+            }
+        );
+        assert_eq!(
             SerializableError::from(Error::User(anyhow::Error::msg("Cytherea".to_string()))),
             SerializableError::User { code: 1, message: "Cytherea".to_string() }
         );
@@ -559,6 +637,42 @@ mod test {
             let json: serde_json::Value = serde_json::from_str(&output).expect(&err);
 
             assert_eq!(json, json!(case));
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_append_strict_help() {
+        let mut output = String::from("Some help");
+        append_strict_help(&mut output, true, 0);
+        assert!(output.contains("Strict Mode Notes:"));
+
+        let mut output2 = String::from("Some help");
+        append_strict_help(&mut output2, false, 0);
+        assert!(!output2.contains("Strict Mode Notes:"));
+
+        let mut output3 = String::from("Some help");
+        append_strict_help(&mut output3, true, 1);
+        assert!(!output3.contains("Strict Mode Notes:"));
+    }
+
+    #[fuchsia::test]
+    fn test_is_help_all() {
+        for (args, expected) in [
+            (&["--all"][..], true),
+            (&["help", "--all"], true),
+            (&["--help", "--all"], true),
+            (&["--all", "help"], true),
+            (&["--all", "--help"], true),
+            (&["target", "list"], false),
+        ] {
+            let command = FfxCommandLine {
+                global: ffx::Ffx {
+                    subcommand: args.iter().map(|s| (*s).into()).collect(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(is_help_all(&command), expected, "args: {args:?}");
         }
     }
 }

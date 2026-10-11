@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{Dispatcher, HandleValue, ProcessDispatcher, TimerDispatcher};
+use crate::object::{HandleValue, ProcessDispatcher, TimerDispatcher};
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
@@ -47,9 +47,14 @@ pub fn sys_timer_set(
         return Err(Status::OUT_OF_RANGE);
     }
 
-    let timer = Dispatcher::get_with_rights::<TimerDispatcher>(handle, ZX_RIGHT_WRITE)?;
-
-    let policy_slack = ProcessDispatcher::with_current(|up| up.get_timer_slack_policy_amount());
+    let (timer, policy_slack) = ProcessDispatcher::with_current(|up| -> Result<_, Status> {
+        let timer = up.handle_table().get_dispatcher_with_rights::<TimerDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )?;
+        Ok((timer, up.get_timer_slack_policy_amount()))
+    })?;
     let effective_slack = core::cmp::max(slack, policy_slack);
 
     timer.set(deadline, effective_slack)?;
@@ -60,7 +65,9 @@ pub fn sys_timer_set(
 pub fn sys_timer_cancel(handle: HandleValue) -> Result<(), Status> {
     ltracef!("handle {:?}\n", handle);
 
-    let timer = Dispatcher::get_with_rights::<TimerDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let timer = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<TimerDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     timer.cancel()?;
     Ok(())
 }

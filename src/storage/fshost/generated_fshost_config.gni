@@ -77,7 +77,6 @@ template("generated_fshost_config") {
       starnix_volume_name = ""
       inline_crypto = false
       provision_fxfs = false
-      watch_deprecated_v1_drivers = false
 
       if (defined(invoker.options)) {
         forward_variables_from(invoker.options, "*")

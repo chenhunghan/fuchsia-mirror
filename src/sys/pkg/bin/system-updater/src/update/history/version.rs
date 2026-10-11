@@ -127,13 +127,13 @@ impl Version {
     }
 
     pub fn for_manifest(manifest: &update_package::manifest::OtaManifest) -> Self {
-        use update_package::manifest::AssetType;
+        use update_package::manifest::{AssetType, ImageType, Slot};
         let [vbmeta_hash, zbi_hash] = [AssetType::Vbmeta, AssetType::Zbi].map(|asset_type| {
             manifest
                 .images
                 .iter()
                 .find(|image| {
-                    image.image_type == update_package::manifest::ImageType::Asset(asset_type)
+                    image.slot == Slot::AB && image.image_type == ImageType::Asset(asset_type)
                 })
                 .map(|image| image.blob.fuchsia_merkle_root.to_string())
                 .unwrap_or_default()
@@ -546,6 +546,58 @@ mod tests {
                 zbi_hash: zbi_hash.to_string(),
                 build_version: SystemVersion::Semantic(SemanticVersion::from([1, 2, 3, 4])),
                 epoch: "42".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn version_for_manifest_ignores_recovery_slot() {
+        use update_package::manifest::{AssetType, Blob, Image, ImageType, OtaManifest, Slot};
+
+        let r_zbi_hash = Hash::from([1; 32]);
+        let r_vbmeta_hash = Hash::from([2; 32]);
+        let ab_zbi_hash = Hash::from([3; 32]);
+        let ab_vbmeta_hash = Hash::from([4; 32]);
+
+        let manifest = OtaManifest {
+            product_bundle_version: SystemVersion::Semantic(SemanticVersion::from([1, 2, 3, 4])),
+            board: "x64".to_string(),
+            epoch: 42,
+            mode: update_package::UpdateMode::Normal,
+            blob_base_url: "http://example.com".to_string(),
+            images: vec![
+                Image {
+                    slot: Slot::R,
+                    image_type: ImageType::Asset(AssetType::Zbi),
+                    blob: Blob { uncompressed_size: 10, fuchsia_merkle_root: r_zbi_hash },
+                },
+                Image {
+                    slot: Slot::R,
+                    image_type: ImageType::Asset(AssetType::Vbmeta),
+                    blob: Blob { uncompressed_size: 10, fuchsia_merkle_root: r_vbmeta_hash },
+                },
+                Image {
+                    slot: Slot::AB,
+                    image_type: ImageType::Asset(AssetType::Zbi),
+                    blob: Blob { uncompressed_size: 10, fuchsia_merkle_root: ab_zbi_hash },
+                },
+                Image {
+                    slot: Slot::AB,
+                    image_type: ImageType::Asset(AssetType::Vbmeta),
+                    blob: Blob { uncompressed_size: 10, fuchsia_merkle_root: ab_vbmeta_hash },
+                },
+            ],
+            blobs: vec![],
+        };
+
+        assert_eq!(
+            Version::for_manifest(&manifest),
+            Version {
+                vbmeta_hash: ab_vbmeta_hash.to_string(),
+                zbi_hash: ab_zbi_hash.to_string(),
+                build_version: SystemVersion::Semantic(SemanticVersion::from([1, 2, 3, 4])),
+                epoch: "42".to_string(),
+                ..Version::default()
             }
         );
     }

@@ -158,6 +158,7 @@ fuchsia_product_configuration(
             "timekeeper": {
                 "first_sampling_delay_sec": 86400,
                 "back_off_time_between_pull_samples_sec": 86400,
+                "serve_fuchsia_time_alarms": True,
             },
             "media": {
                 "audio": {

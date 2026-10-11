@@ -330,7 +330,7 @@ pub fn sys_getsid(current_task: &CurrentTask, pid: pid_t) -> Result<pid_t, Errno
     if pid != 0 {
         security::check_task_getsid(current_task, &target_task)?;
     }
-    let sid = target_task.thread_group().read().process_group.session.leader.id;
+    let sid = target_task.thread_group().read().session.id;
     Ok(sid)
 }
 
@@ -338,7 +338,7 @@ pub fn sys_getpgid(current_task: &CurrentTask, pid: pid_t) -> Result<pid_t, Errn
     let task = get_task_or_current(current_task, pid)?;
 
     security::check_getpgid_access(current_task, &task)?;
-    let pgid = task.thread_group().read().process_group.leader.id;
+    let pgid = task.thread_group().read().process_group.id;
     Ok(pgid)
 }
 
@@ -938,14 +938,16 @@ pub fn sys_prctl(
         }
         PR_SET_DUMPABLE => {
             let mm = current_task.mm()?;
-            let mut dumpable = mm.dumpable.lock();
-            *dumpable = if arg2 == 1 { DumpPolicy::User } else { DumpPolicy::Disable };
+            mm.dumpable.store(match arg2 {
+                0 => DumpPolicy::Disable,
+                1 => DumpPolicy::User,
+                _ => return error!(EINVAL),
+            });
             Ok(().into())
         }
         PR_GET_DUMPABLE => {
             let mm = current_task.mm()?;
-            let dumpable = mm.dumpable.lock();
-            Ok(match *dumpable {
+            Ok(match mm.dumpable.load() {
                 DumpPolicy::Disable => 0.into(),
                 DumpPolicy::User => 1.into(),
             })
@@ -1855,6 +1857,7 @@ pub fn sys_kcmp(
         KcmpResource::VM => {
             Ok(encode_ordering(obfuscate_arc(&task1.mm()?).cmp(&obfuscate_arc(&task2.mm()?))))
         }
+        KcmpResource::SYSVSEM => error!(EOPNOTSUPP),
         _ => error!(EINVAL),
     }
 }
@@ -1931,8 +1934,8 @@ mod arch32 {
         sys_getpriority as sys_arch32_getpriority, sys_getresgid as sys_arch32_getresgid32,
         sys_getresuid as sys_arch32_getresuid32, sys_getrlimit as sys_arch32_ugetrlimit,
         sys_getrusage as sys_arch32_getrusage, sys_getuid as sys_arch32_getuid32,
-        sys_ioprio_set as sys_arch32_ioprio_set, sys_ptrace as sys_arch32_ptrace,
-        sys_quotactl as sys_arch32_quotactl,
+        sys_ioprio_set as sys_arch32_ioprio_set, sys_kcmp as sys_arch32_kcmp,
+        sys_ptrace as sys_arch32_ptrace, sys_quotactl as sys_arch32_quotactl,
         sys_sched_get_priority_max as sys_arch32_sched_get_priority_max,
         sys_sched_get_priority_min as sys_arch32_sched_get_priority_min,
         sys_sched_getaffinity as sys_arch32_sched_getaffinity,
@@ -1963,6 +1966,8 @@ mod tests {
     use starnix_syscalls::SUCCESS;
     use starnix_task_command::TaskCommand;
     use starnix_uapi::auth::Credentials;
+    use starnix_uapi::signals::SIGCHLD;
+    use starnix_uapi::uapi::{kcmp_type_KCMP_SYSVSEM, kcmp_type_KCMP_TYPES, kcmp_type_KCMP_VM};
     use starnix_uapi::{SCHED_FIFO, SCHED_NORMAL};
     use std::ffi::CString;
 
@@ -2126,14 +2131,17 @@ mod tests {
     #[::fuchsia::test]
     async fn test_prctl_get_set_dumpable() {
         spawn_kernel_and_run(async |current_task| {
-            sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0).expect("failed to get dumpable");
+            assert_eq!(sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0), Ok(1.into()));
+
+            sys_prctl(current_task, PR_SET_DUMPABLE, 0, 0, 0, 0).expect("failed to set dumpable");
+            assert_eq!(sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0), Ok(0.into()));
 
             sys_prctl(current_task, PR_SET_DUMPABLE, 1, 0, 0, 0).expect("failed to set dumpable");
-            sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0).expect("failed to get dumpable");
+            assert_eq!(sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0), Ok(1.into()));
 
             // SUID_DUMP_ROOT not supported.
-            sys_prctl(current_task, PR_SET_DUMPABLE, 2, 0, 0, 0).expect("failed to set dumpable");
-            sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0).expect("failed to get dumpable");
+            assert_eq!(sys_prctl(current_task, PR_SET_DUMPABLE, 2, 0, 0, 0), error!(EINVAL));
+            assert_eq!(sys_prctl(current_task, PR_GET_DUMPABLE, 0, 0, 0, 0), Ok(1.into()));
         })
         .await;
     }
@@ -2376,6 +2384,65 @@ mod tests {
                     std::str::from_utf8(arg).unwrap().trim_matches('\0').len()
                 ),
                 error!(E2BIG)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_kcmp() {
+        spawn_kernel_and_run(async |current_task| {
+            let pid = current_task.get_pid();
+            assert_eq!(sys_kcmp(&current_task, pid, pid, kcmp_type_KCMP_VM, 0, 0), Ok(0));
+            assert_eq!(
+                sys_kcmp(&current_task, pid, pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(EOPNOTSUPP)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, pid, kcmp_type_KCMP_SYSVSEM, 1, 2),
+                error!(EOPNOTSUPP)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, pid, kcmp_type_KCMP_SYSVSEM, u64::MAX, u64::MAX),
+                error!(EOPNOTSUPP)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, pid, kcmp_type_KCMP_TYPES, 0, 0),
+                error!(EINVAL)
+            );
+            assert_eq!(sys_kcmp(&current_task, pid, pid, u32::MAX, 0, 0), error!(EINVAL));
+            assert_eq!(
+                sys_kcmp(&current_task, 0, pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(ESRCH)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, 0, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(ESRCH)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, -1, pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(ESRCH)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, -1, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(ESRCH)
+            );
+
+            // Verify ptrace access checks take precedence over resource type errors for both tasks.
+            let target_task = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let target_pid = target_task.get_pid();
+            current_task.set_creds(Credentials::with_ids(1, 1));
+            assert_eq!(
+                sys_kcmp(&current_task, target_pid, target_pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(EPERM)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, pid, target_pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(EPERM)
+            );
+            assert_eq!(
+                sys_kcmp(&current_task, target_pid, pid, kcmp_type_KCMP_SYSVSEM, 0, 0),
+                error!(EPERM)
             );
         })
         .await;

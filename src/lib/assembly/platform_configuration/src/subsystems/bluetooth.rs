@@ -265,78 +265,51 @@ impl DefineSubsystemConfiguration<(&BluetoothConfig, &PlatformMediaConfig)>
             )?;
         }
 
-        if let AudioGatewayConfig::Enabled(hfp_ag_features) = &profiles.hfp.audio_gateway {
-            let audio_config = get_hfp_audio_config(profiles, media_config)?;
+        if let AudioGatewayConfig::Enabled(_) = &profiles.hfp.audio_gateway {
             builder.platform_bundle("bluetooth_hfp_ag")?;
-            let mut hfp_ag_config = builder
-                .package("bt-hfp-audio-gateway")
-                .component("meta/bt-hfp-audio-gateway.cm")?;
-            hfp_ag_config
-                .field("three_way_calling", hfp_ag_features.three_way_calling)?
-                .field("reject_incoming_voice_call", hfp_ag_features.reject_incoming_call)?
-                .field("in_band_ringtone", hfp_ag_features.inband_ringtone)?
-                .field("voice_recognition", hfp_ag_features.voice_recognition)?
-                .field(
-                    "echo_canceling_and_noise_reduction",
-                    hfp_ag_features.echo_canceling_and_noise_reduction,
-                )?
-                .field(
-                    "attach_phone_number_to_voice_tag",
-                    hfp_ag_features.attach_phone_number_voice_tag,
-                )?
-                .field("enhanced_call_controls", hfp_ag_features.enhanced_call_control)?
-                .field(
-                    "enhanced_voice_recognition",
-                    hfp_ag_features.enhanced_voice_recognition_status,
-                )?
-                .field(
-                    "enhanced_voice_recognition_with_text",
-                    hfp_ag_features.voice_recognition_text,
-                )?
-                .field(
-                    "controller_encoding_cvsd",
-                    audio_config.controller_encodes.contains(&HfpCodecId::Cvsd),
-                )?
-                .field(
-                    "controller_encoding_msbc",
-                    audio_config.controller_encodes.contains(&HfpCodecId::Msbc),
-                )?
-                .field(
-                    "wide_band_speech",
-                    audio_config.hfp_supported_codecs.contains(&HfpCodecId::Msbc),
-                )?
-                .field("offload_type", audio_config.offload_type)?;
         }
-        if let HandsFreeConfig::Enabled(hfp_hf_features) = &profiles.hfp.hands_free {
-            let audio_config = get_hfp_audio_config(profiles, media_config)?;
+        if let HandsFreeConfig::Enabled(_) = &profiles.hfp.hands_free {
             builder.platform_bundle("bluetooth_hfp_hf")?;
+        }
+        if matches!(profiles.hfp.audio_gateway, AudioGatewayConfig::Enabled(_))
+            || matches!(profiles.hfp.hands_free, HandsFreeConfig::Enabled(_))
+        {
+            let audio_config = get_hfp_audio_config(profiles, media_config)?;
 
-            let mut hfp_hf_config =
-                builder.package("bt-hfp-hands-free").component("meta/bt-hfp-hands-free.cm")?;
-            hfp_hf_config
-                .field("ec_or_nr", hfp_hf_features.echo_canceling_and_noise_reduction)?
-                .field("call_waiting_or_three_way_calling", hfp_hf_features.three_way_calling)?
-                .field("cli_presentation_capability", hfp_hf_features.calling_line_identification)?
-                .field("voice_recognition_activation", hfp_hf_features.voice_recognition)?
-                .field("remote_volume_control", hfp_hf_features.remote_volume_control)?
-                .field(
-                    "wide_band_speech",
-                    audio_config.hfp_supported_codecs.contains(&HfpCodecId::Msbc),
-                )?
-                .field("enhanced_voice_recognition", hfp_hf_features.enhanced_voice_recognition)?
-                .field(
-                    "enhanced_voice_recognition_with_text",
-                    hfp_hf_features.voice_recognition_text,
-                )?
-                .field(
-                    "controller_encoding_cvsd",
-                    audio_config.controller_encodes.contains(&HfpCodecId::Cvsd),
-                )?
-                .field(
-                    "controller_encoding_msbc",
-                    audio_config.controller_encodes.contains(&HfpCodecId::Msbc),
-                )?
-                .field("offload_type", audio_config.offload_type)?;
+            // ThreeWayCalling, RejectIncomingVoiceCall, EchoCancelingAndNoiseReduction,
+            // AttachPhoneNumberToVoiceTag, EnhancedCallControls, CallWaitingOrThreeWayCalling,
+            // CliPresentationCapability, VoiceRecognitionActivation, RemoteVolumeControl,
+            // EnhancedVoiceRecognition, and EnhancedVoiceRecognitionWithText are not configurable
+            // in assembly and use the default values defined in bt-hfp-audio-gateway.cml and
+            // bt-hfp-hands-free.cml.
+            builder.set_config_capability(
+                "fuchsia.bluetooth.ControllerEncodingCvsd",
+                Config::new(
+                    ConfigValueType::Bool,
+                    audio_config.controller_encodes.contains(&HfpCodecId::Cvsd).into(),
+                ),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.ControllerEncodingMsbc",
+                Config::new(
+                    ConfigValueType::Bool,
+                    audio_config.controller_encodes.contains(&HfpCodecId::Msbc).into(),
+                ),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.WideBandSpeech",
+                Config::new(
+                    ConfigValueType::Bool,
+                    audio_config.hfp_supported_codecs.contains(&HfpCodecId::Msbc).into(),
+                ),
+            )?;
+            builder.set_config_capability(
+                "fuchsia.bluetooth.OffloadType",
+                Config::new(
+                    ConfigValueType::String { max_size: 8 },
+                    audio_config.offload_type.into(),
+                ),
+            )?;
         }
         if profiles.map.mce_enabled {
             builder.platform_bundle("bluetooth_map_mce")?;

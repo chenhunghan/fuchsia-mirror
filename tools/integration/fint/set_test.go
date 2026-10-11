@@ -176,6 +176,24 @@ func TestSet(t *testing.T) {
 		}
 	})
 
+	t.Run("populates set_artifacts fields (experiments)", func(t *testing.T) {
+		staticSpec := proto.Clone(staticSpec).(*fintpb.Static)
+		staticSpec.Experiments = []string{"use_test_pilot"}
+		runner := &fakeSubprocessRunner{
+			mockStdout: []byte("some stdout"),
+		}
+		artifacts, err := setImpl(ctx, runner, staticSpec, contextSpec, "linux-x64", false, []string{})
+		if err != nil {
+			t.Fatalf("Unexpected error from setImpl: %s", err)
+		}
+		if diff := cmp.Diff(artifacts.ExperimentSpecs, []string{"use_test_pilot"}); diff != "" {
+			t.Errorf("Wrong experiment_specs (-got +want):\n%s", diff)
+		}
+		if diff := cmp.Diff(artifacts.EnabledExperiments, []string{"use_test_pilot"}); diff != "" {
+			t.Errorf("Wrong enabled_experiments (-got +want):\n%s", diff)
+		}
+	})
+
 	t.Run("leaves failure summary empty in case of success", func(t *testing.T) {
 		runner := &fakeSubprocessRunner{
 			mockStdout: []byte("some stdout"),
@@ -188,6 +206,104 @@ func TestSet(t *testing.T) {
 			t.Errorf("Expected setImpl to leave failure summary empty but got: %q", artifacts.FailureSummary)
 		}
 	})
+}
+
+func TestGetEnabledExperiments(t *testing.T) {
+	origSupported := supportedExperiments
+	origRandInt := randInt
+	defer func() {
+		supportedExperiments = origSupported
+		randInt = origRandInt
+	}()
+	supportedExperiments = []string{"exp0", "exp30", "exp50", "exp100", "exp_default"}
+
+	t.Run("stratification", func(t *testing.T) {
+		counts := make(map[string]int)
+		experiments := []string{"exp0:0", "exp30:30", "exp50:50", "exp100:100", "exp_default"}
+		for i := 0; i < 100; i++ {
+			randInt = func(n int) int {
+				if n != 100 {
+					t.Fatalf("unexpected randInt bound: got %d, want 100", n)
+				}
+				return i
+			}
+			got, err := GetEnabledExperiments(experiments)
+			if err != nil {
+				t.Fatalf("failed to get enabled experiments on iteration %d: %s", i, err)
+			}
+			for _, exp := range got {
+				counts[exp]++
+			}
+		}
+		wantCounts := map[string]int{
+			"exp30":       30,
+			"exp50":       50,
+			"exp100":      100,
+			"exp_default": 100,
+		}
+		if diff := cmp.Diff(counts, wantCounts); diff != "" {
+			t.Errorf("unexpected experiment enablement counts across 100 runs (-got +want):\n%s", diff)
+		}
+	})
+
+	errorTestCases := []struct {
+		name        string
+		experiments []string
+		wantErr     string
+	}{
+		{
+			name:        "empty experiment",
+			experiments: []string{""},
+			wantErr:     "Experiments must be non-empty",
+		},
+		{
+			name:        "too many colons",
+			experiments: []string{"exp30:50:60"},
+			wantErr:     `Invalid experiment format: "exp30:50:60"`,
+		},
+		{
+			name:        "unsupported experiment",
+			experiments: []string{"unsupported_exp"},
+			wantErr:     `unsupported experiment "unsupported_exp"`,
+		},
+		{
+			name:        "unsupported experiment with percentage",
+			experiments: []string{"unsupported_exp:50"},
+			wantErr:     `unsupported experiment "unsupported_exp"`,
+		},
+		{
+			name:        "non-integer percentage",
+			experiments: []string{"exp30:abc"},
+			wantErr:     `Invalid experiment format: "exp30:abc"`,
+		},
+		{
+			name:        "empty percentage after colon",
+			experiments: []string{"exp30:"},
+			wantErr:     `Invalid experiment format: "exp30:"`,
+		},
+		{
+			name:        "negative percentage",
+			experiments: []string{"exp30:-1"},
+			wantErr:     "invalid experiment percentage -1, must be between 0 and 100",
+		},
+		{
+			name:        "percentage over 100",
+			experiments: []string{"exp30:101"},
+			wantErr:     "invalid experiment percentage 101, must be between 0 and 100",
+		},
+	}
+
+	for _, tc := range errorTestCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := GetEnabledExperiments(tc.experiments)
+			if err == nil {
+				t.Fatalf("got nil error, want error containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("got error %q, want error containing %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
 }
 
 func TestRunGen(t *testing.T) {
@@ -363,6 +479,8 @@ func TestGenArgs(t *testing.T) {
 		skipLocalArgs bool
 		// assembly developer overrides strings
 		assemblyOverridesStrings []string
+		// enabled experiments
+		enabledExperiments []string
 	}{
 		{
 			name: "minimal specs",
@@ -640,6 +758,13 @@ func TestGenArgs(t *testing.T) {
 				`]`,
 			},
 		},
+		{
+			name:               "use_test_pilot experiment enabled",
+			enabledExperiments: []string{"use_test_pilot"},
+			expectedArgs: []string{
+				"use_test_pilot=true",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -676,7 +801,7 @@ func TestGenArgs(t *testing.T) {
 				}
 			}
 
-			args, err := genArgs(ctx, tc.staticSpec, tc.contextSpec, tc.skipLocalArgs, tc.assemblyOverridesStrings)
+			args, err := genArgs(ctx, tc.staticSpec, tc.contextSpec, tc.skipLocalArgs, tc.assemblyOverridesStrings, tc.enabledExperiments)
 			if err != nil {
 				if tc.expectErr {
 					return

@@ -5,9 +5,8 @@
 use anyhow::{Context, Error, anyhow, format_err};
 use fidl::endpoints::SynchronousProxy;
 use fidl_fuchsia_power_battery as fbattery;
-use fidl_fuchsia_power_cpu as fcpu;
 use starnix_core::device::kobject::Device;
-use starnix_core::fs::sysfs::build_device_directory;
+use starnix_core::fs::sysfs::{CpuFreqDomain, build_device_directory, get_cpu_freq_domains};
 use starnix_core::task::{CurrentTask, Kernel};
 use starnix_core::vfs::FsNodeOps;
 use starnix_core::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
@@ -18,7 +17,6 @@ use starnix_uapi::errors::{Errno, errno};
 use starnix_uapi::file_mode::mode;
 use std::borrow::Cow;
 use std::sync::Arc;
-use zx::MonotonicInstant;
 
 const BATTERY_CHARGER_SERVICE_DIRECTORY: &str = "/svc/fuchsia.power.battery.ChargerService";
 
@@ -109,60 +107,45 @@ impl CoolingDeviceRegistrar {
         id
     }
 
-    /// Register a device in the virtual thermal class.
+    /// Register a device in the thermal class.
     fn register<T: CoolingOps>(&mut self, kernel: &Kernel, device_type: String, ops: T) -> Device {
         let device_registry = &kernel.device_registry;
-        let device_class = device_registry.objects.virtual_thermal_class();
+        let device_class = device_registry.objects.thermal_class();
 
         let cooling_device =
             Arc::new(CoolingDevice::<T> { device_id: self.get_next_id(), device_type, ops });
 
         device_registry.add_numberless_device(
             cooling_device.get_device_name().as_str().into(),
+            /* parent = */ None,
             device_class,
             |device, dir| cooling_device.build_device_dir(device, dir),
         )
     }
 }
 
+const COOLING_DEVICE_VOTER: &str = "cooling_device";
+
 struct CpuCoolingOps {
-    domain_controller: Arc<fcpu::DomainControllerSynchronousProxy>,
-    domain_id: u64,
-    available_frequencies_hz: Vec<u64>,
+    domain: Arc<CpuFreqDomain>,
+}
+
+impl CpuCoolingOps {
+    fn new(domain: Arc<CpuFreqDomain>) -> Self {
+        Self { domain }
+    }
 }
 
 impl CoolingOps for CpuCoolingOps {
     fn get_max_state(&self) -> u32 {
-        (self.available_frequencies_hz.len() - 1) as u32
+        (self.domain.opp_count() - 1) as u32
     }
     fn get_state(&self) -> Result<u32, Errno> {
-        let max_frequency_index = self
-            .domain_controller
-            .get_max_frequency(self.domain_id, MonotonicInstant::INFINITE)
-            .map_err(|e| errno!(EIO, anyhow!("Failed to send get_max_frequency call: {:?}", e)))?
-            .map_err(|e| errno!(EIO, anyhow!("Failed response from get_max_frequency: {:?}", e)))?;
-        Ok(max_frequency_index as u32)
+        Ok(self.domain.get_vote(COOLING_DEVICE_VOTER).unwrap_or(0) as u32)
     }
     fn set_state(&self, state: u32) -> Result<(), Errno> {
-        if state == 0 {
-            self.domain_controller
-                .clear_max_frequency(self.domain_id, MonotonicInstant::INFINITE)
-                .map_err(|e| {
-                    errno!(EIO, anyhow!("Failed to send clear_max_frequency call: {:?}", e))
-                })?
-                .map_err(|e| {
-                    errno!(EIO, anyhow!("Failed response from clear_max_frequency: {:?}", e))
-                })
-        } else {
-            self.domain_controller
-                .set_max_frequency(self.domain_id, state.into(), MonotonicInstant::INFINITE)
-                .map_err(|e| {
-                    errno!(EIO, anyhow!("Failed to send set_max_frequency call: {:?}", e))
-                })?
-                .map_err(|e| {
-                    errno!(EIO, anyhow!("Failed response from set_max_frequency: {:?}", e))
-                })
-        }
+        let opp_index = if state == 0 { None } else { Some(state.into()) };
+        self.domain.update_vote(COOLING_DEVICE_VOTER, opp_index)
     }
 }
 
@@ -170,24 +153,15 @@ fn register_cpu_domains(
     kernel: &Kernel,
     registrar: &mut CoolingDeviceRegistrar,
 ) -> Result<(), Error> {
-    let domain_controller = Arc::new(
-        fuchsia_component::client::connect_to_protocol_sync::<fcpu::DomainControllerMarker>()
-            .map_err(|error| anyhow!("Failed to connect to DomainController: {:?}", error))?,
-    );
-    let domains = domain_controller
-        .list_domains(MonotonicInstant::INFINITE)
-        .map_err(|e| anyhow!("list_domains failed: {}", e))?;
+    let domains = get_cpu_freq_domains(kernel);
+    if !domains.iter().any(|d| d.is_tunable()) {
+        return Err(anyhow!("No tunable CPU domains available from DomainController"));
+    }
 
-    // Each domain is tunable, so expose each as a separate cooling device.
-    for domain in domains {
-        let device_type = domain.name.expect("name not provided");
-        let ops = CpuCoolingOps {
-            domain_controller: domain_controller.clone(),
-            domain_id: domain.id.expect("id not provided"),
-            available_frequencies_hz: domain
-                .available_frequencies_hz
-                .expect("available_frequencies_hz not provided"),
-        };
+    // Expose each tunable domain as a separate cooling device.
+    for domain in domains.iter().filter(|d| d.is_tunable()) {
+        let device_type = domain.name().context("name not provided")?.to_string();
+        let ops = CpuCoolingOps::new(domain.clone());
         registrar.register(kernel, device_type, ops);
     }
     Ok(())

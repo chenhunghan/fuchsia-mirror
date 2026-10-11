@@ -26,7 +26,8 @@ use netstack3_core::NetworkSerializationContext;
 use netstack3_core::device::DeviceId;
 use netstack3_core::filter::{
     BindingsPacketMatcher, EitherIpProto, FilterIpExt, FilterIpPacket, FilterPacketMetadata,
-    Interfaces, SocketEgressFilterResult, SocketInfo, SocketIngressFilterResult, SocketOpsFilter,
+    Interfaces, PacketType, SocketEgressFilterResult, SocketInfo, SocketIngressFilterResult,
+    SocketOpsFilter,
 };
 use netstack3_core::ip::{Mark, Marks};
 
@@ -40,6 +41,17 @@ use std::collections::{HashMap, hash_map};
 use std::mem::offset_of;
 use std::sync::{Arc, Weak};
 use zerocopy::FromBytes;
+
+fn packet_type_to_raw(packet_type: PacketType) -> u32 {
+    match packet_type {
+        PacketType::Host => ebpf_api::PACKET_HOST,
+        PacketType::Broadcast => ebpf_api::PACKET_BROADCAST,
+        PacketType::Multicast => ebpf_api::PACKET_MULTICAST,
+        PacketType::OtherHost => ebpf_api::PACKET_OTHERHOST,
+        PacketType::Outgoing => ebpf_api::PACKET_OUTGOING,
+        PacketType::Loopback => ebpf_api::PACKET_LOOPBACK,
+    }
+}
 
 fn get_linux_packet_mark(marks: &Marks) -> u32 {
     let Mark(mark) = marks.get(fnet::MARK_DOMAIN_SO_MARK.into_core());
@@ -169,6 +181,7 @@ impl<'a, C> SkBuff<'a, C> {
         data: &'a [u8],
         ip_offset: usize,
         default_offset: usize,
+        pkt_type: PacketType,
         bpf_sock: Option<&'a BpfSock>,
     ) -> Self {
         // Offsets should be within the data buffer. They may be set to `data.len()`
@@ -179,6 +192,7 @@ impl<'a, C> SkBuff<'a, C> {
         let mut result = SkBuff {
             sk_buff: __sk_buff {
                 len: packet_len.try_into().unwrap_or(0),
+                pkt_type: packet_type_to_raw(pkt_type),
                 mark,
                 protocol: ethertype.unwrap_or(0).to_be().into(),
                 ifindex,
@@ -206,6 +220,7 @@ impl<'a, C> SkBuff<'a, C> {
 
     fn from_ip_packet<I: FilterIpExt, P: FilterIpPacket<I>>(
         packet: &'a P,
+        pkt_type: PacketType,
         ifindex: u32,
         marks: &Marks,
         data_buffer: &'a mut SmallVec<[u8; PACKET_BUF_STACK_SIZE]>,
@@ -227,6 +242,7 @@ impl<'a, C> SkBuff<'a, C> {
         let mut result = SkBuff {
             sk_buff: __sk_buff {
                 len: packet_len.try_into().unwrap_or(0),
+                pkt_type: packet_type_to_raw(pkt_type),
                 mark,
                 protocol: u16::from(I::ETHER_TYPE).to_be().into(),
                 ifindex,
@@ -292,7 +308,7 @@ impl<C> Packet for &'_ SkBuff<'_, C> {
         // cBPF Socket Filters use non-negative offset to access packet content.
         // Negative offsets are handled as follows:
         //   SKF_AD_OFF (-0x1000) - Auxiliary info that may be outside of the packet.
-        //      Currently only SKF_AD_PROTOCOL is implemented.
+        //      Currently only SKF_AD_PROTOCOL and SKF_AD_PKTTYPE are implemented.
         //   SKF_NET_OFF (-0x100000) - Packet content relative to the IP header.
         //   SKF_LL_OFF (-0x200000) - Packet content relative to the link-level header.
         let (offset, slice) = if offset >= 0 {
@@ -301,12 +317,7 @@ impl<C> Packet for &'_ SkBuff<'_, C> {
             let ad_offset = offset - SKF_AD_OFF;
             return match ad_offset {
                 SKF_AD_PROTOCOL => Some(u16::from_be(self.sk_buff.protocol as u16).into()),
-                SKF_AD_PKTTYPE => {
-                    // TODO(https://fxbug.dev/538258894): support
-                    // `SKF_AD_PKTTYPE` (special-cased here to cut down on log
-                    // spam).
-                    None
-                }
+                SKF_AD_PKTTYPE => Some(self.sk_buff.pkt_type.into()),
                 ad_offset => {
                     log::info!(
                         "cBPF program tried to access unimplemented SKF_AD_OFF offset: {ad_offset}",
@@ -497,6 +508,7 @@ where
 
         let marks = packet_metadata.marks();
         let socket_info = packet_metadata.socket_info();
+        let pkt_type = packet_metadata.packet_type();
         let bpf_sock = socket_info.and_then(|info| BpfSock::new(info, &marks));
 
         // `ifindex` field is set to either ingress or ingress interface index
@@ -509,6 +521,7 @@ where
         let mut data_buffer = SmallVec::new();
         let sk_buff = SkBuff::<'_, SocketFilterProgram>::from_ip_packet(
             packet,
+            pkt_type,
             ifindex,
             &marks,
             &mut data_buffer,
@@ -881,6 +894,7 @@ impl<D: DeviceIfIndex> SocketOpsFilter<D> for &EbpfManager {
         let mut data_buffer = SmallVec::new();
         let sk_buff = SkBuff::from_ip_packet(
             packet,
+            PacketType::Outgoing,
             device.get_ifindex(),
             marks,
             &mut data_buffer,
@@ -911,6 +925,7 @@ impl<D: DeviceIfIndex> SocketOpsFilter<D> for &EbpfManager {
         device: &D,
         socket_info: SocketInfo,
         marks: &Marks,
+        packet_type: PacketType,
     ) -> SocketIngressFilterResult {
         let state = self.state.read();
         let Some(prog) = state.root_cgroup_ingress.as_ref() else {
@@ -943,6 +958,7 @@ impl<D: DeviceIfIndex> SocketOpsFilter<D> for &EbpfManager {
             &data[..],
             /*ip_offset=*/ 0,
             /*default_offset=*/ 0,
+            packet_type,
             bpf_sock.as_ref(),
         );
 
@@ -1008,6 +1024,7 @@ mod tests {
                 Self::BUFFER,
                 Self::BODY_POSITION,
                 default_offset,
+                PacketType::Host,
                 None,
             )
         }
@@ -1085,6 +1102,20 @@ mod tests {
         assert_eq!(
             packet_load(&packet, SKF_AD_OFF + SKF_AD_PROTOCOL, DataWidth::U32),
             Some(TestData::PROTO as u64)
+        );
+
+        // Loads from SKF_AD_OFF + SKF_AD_PKTTYPE load packet type, ignoring data width.
+        assert_eq!(
+            packet_load(&packet, SKF_AD_OFF + SKF_AD_PKTTYPE, DataWidth::U8),
+            Some(ebpf_api::PACKET_HOST as u64)
+        );
+        assert_eq!(
+            packet_load(&packet, SKF_AD_OFF + SKF_AD_PKTTYPE, DataWidth::U16),
+            Some(ebpf_api::PACKET_HOST as u64)
+        );
+        assert_eq!(
+            packet_load(&packet, SKF_AD_OFF + SKF_AD_PKTTYPE, DataWidth::U32),
+            Some(ebpf_api::PACKET_HOST as u64)
         );
 
         // SKF_AD_MAX is the max offset that can be used with SKF_AD_OFF.
@@ -1257,6 +1288,7 @@ mod tests {
                     &device,
                     socket_info,
                     &marks,
+                    PacketType::Host,
                 );
 
                 assert!(result == SocketIngressFilterResult::Accept);

@@ -10,9 +10,11 @@ use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
 use fuchsia_hash::{Hash, ParseHashError};
-use futures::{StreamExt as _, stream};
+use futures::future::BoxFuture;
+use futures::{FutureExt as _, StreamExt as _, stream};
 use log::{error, info};
 use std::collections::HashSet;
+use std::sync::Arc;
 use thiserror::Error;
 use vfs::execution_scope::ExecutionScope;
 use vfs::file::StreamIoConnection;
@@ -124,6 +126,7 @@ pub struct ClientBuilder {
     writable: bool,
     executable: bool,
     creator: bool,
+    reader: Option<Arc<dyn BlobReader>>,
 }
 
 impl ClientBuilder {
@@ -155,8 +158,15 @@ impl ClientBuilder {
             info!("Got vmex resource");
             vmo_blob::init_vmex_resource(vmex).map_err(BlobfsError::InitVmexResource)?;
         }
-        let reader = fuchsia_component::client::connect_to_protocol::<ffxfs::BlobReaderMarker>()
-            .map_err(BlobfsError::ConnectToBlobReader)?;
+        let reader = match self.reader {
+            Some(reader) => reader,
+            None => {
+                let proxy =
+                    fuchsia_component::client::connect_to_protocol::<ffxfs::BlobReaderMarker>()
+                        .map_err(BlobfsError::ConnectToBlobReader)?;
+                Arc::new(proxy)
+            }
+        };
         let creator = if self.writable || self.creator {
             Some(
                 fuchsia_component::client::connect_to_protocol::<ffxfs::BlobCreatorMarker>()
@@ -167,6 +177,12 @@ impl ClientBuilder {
         };
 
         Ok(Client { dir, creator, reader })
+    }
+
+    /// If set, [`Client`] will use this reader implementation instead of connecting to the
+    /// `fuchsia.fxfs.BlobReader` protocol in the component's namespace.
+    pub fn reader(self, reader: impl IntoBlobReader) -> Self {
+        Self { reader: Some(reader.into_blob_reader()), ..self }
     }
 
     /// If set, [`Client`] will connect to /blob in the current component's namespace with
@@ -206,23 +222,23 @@ impl Client {
 pub struct Client {
     dir: Option<fio::DirectoryProxy>,
     creator: Option<ffxfs::BlobCreatorProxy>,
-    reader: ffxfs::BlobReaderProxy,
+    reader: Arc<dyn BlobReader>,
 }
 
 impl Client {
     /// Returns a client connected to the given blob directory, BlobCreatorProxy, and
-    /// BlobReaderProxy. If `vmex` is passed in, sets the VmexResource, which is used to mark blobs
+    /// BlobReader. If `vmex` is passed in, sets the VmexResource, which is used to mark blobs
     /// as executable. If `creator` is not supplied, writes will fail.
     pub fn new(
         dir: fio::DirectoryProxy,
         creator: Option<ffxfs::BlobCreatorProxy>,
-        reader: ffxfs::BlobReaderProxy,
+        reader: impl IntoBlobReader,
         vmex: Option<zx::Resource>,
     ) -> Result<Self, anyhow::Error> {
         if let Some(vmex) = vmex {
             vmo_blob::init_vmex_resource(vmex)?;
         }
-        Ok(Self { dir: Some(dir), creator, reader })
+        Ok(Self { dir: Some(dir), creator, reader: reader.into_blob_reader() })
     }
 
     /// Creates a new client backed by the returned request stream. This constructor should not be
@@ -244,7 +260,7 @@ impl Client {
             fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobCreatorMarker>();
 
         (
-            Self { dir: Some(dir), creator: Some(creator), reader },
+            Self { dir: Some(dir), creator: Some(creator), reader: Arc::new(reader) },
             dir_stream,
             reader_stream,
             creator_stream,
@@ -265,18 +281,14 @@ impl Client {
             fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobCreatorMarker>();
 
         (
-            Self { dir: Some(dir), creator: Some(creator), reader },
+            Self { dir: Some(dir), creator: Some(creator), reader: Arc::new(reader) },
             mock::Mock { stream, reader_stream, creator_stream },
         )
     }
 
     /// Returns the read-only VMO backing the blob.
     pub async fn get_blob_vmo(&self, hash: &Hash) -> Result<zx::Vmo, GetBlobVmoError> {
-        self.reader
-            .get_vmo(hash)
-            .await
-            .map_err(GetBlobVmoError::Fidl)?
-            .map_err(|s| GetBlobVmoError::GetVmo(Status::err_from_raw(s)))
+        self.reader.get_vmo(hash).await
     }
 
     /// Open a blob for read using open3. `scope` will only be used if the client was configured to
@@ -406,26 +418,29 @@ impl Client {
 /// Spawns a task on `scope` to attempt opening `blob` via `reader`. Creates a file connection to
 /// the blob using [`vmo_blob::VmoBlob`]. Errors will be sent via `object_request` asynchronously.
 fn open_blob_with_reader<P: ProtocolsExt + Send>(
-    reader: ffxfs::BlobReaderProxy,
+    reader: Arc<dyn BlobReader>,
     blob_hash: Hash,
     scope: ExecutionScope,
     protocols: P,
     object_request: ObjectRequest,
 ) {
     scope.clone().spawn(object_request.handle_async(async move |object_request| {
-        let get_vmo_result = reader.get_vmo(&blob_hash.into()).await.map_err(|fidl_error| {
-            if let fidl::Error::ClientChannelClosed { epitaph, .. } = fidl_error {
+        let vmo = reader.get_vmo(&blob_hash).await.map_err(|e| match e {
+            GetBlobVmoError::GetVmo(status) => status,
+            GetBlobVmoError::Fidl(fidl::Error::ClientChannelClosed { epitaph, .. }) => {
                 error!("Blob reader channel closed: {epitaph:?}");
                 match epitaph.into() {
                     Err(status) => status,
                     Ok(()) => zx::Status::PEER_CLOSED,
                 }
-            } else {
+            }
+            GetBlobVmoError::Fidl(fidl_error) => {
                 error!("Transport error on get_vmo: {:?}", fidl_error);
                 zx::Status::INTERNAL
             }
+            GetBlobVmoError::OpenBlob(fuchsia_fs::node::OpenError::OpenError(status)) => status,
+            GetBlobVmoError::OpenBlob(_) => zx::Status::INTERNAL,
         })?;
-        let vmo = get_vmo_result.map_err(zx::Status::err_from_raw)?;
         let vmo_blob = vmo_blob::VmoBlob::new(vmo, blob_hash.into());
         object_request
             .create_connection::<StreamIoConnection<_>, _>(scope, vmo_blob, protocols)
@@ -444,6 +459,42 @@ pub enum GetBlobVmoError {
 
     #[error("making a fidl request")]
     Fidl(#[source] fidl::Error),
+}
+
+/// A reader for retrieving blob VMOs by their Merkle root hash.
+pub trait BlobReader: Send + Sync + std::fmt::Debug {
+    /// Returns the read-only VMO backing the blob identified by `blob`.
+    fn get_vmo<'a>(&'a self, blob: &'a Hash) -> BoxFuture<'a, Result<zx::Vmo, GetBlobVmoError>>;
+}
+
+impl BlobReader for ffxfs::BlobReaderProxy {
+    fn get_vmo<'a>(&'a self, blob: &'a Hash) -> BoxFuture<'a, Result<zx::Vmo, GetBlobVmoError>> {
+        async move {
+            self.get_vmo(blob)
+                .await
+                .map_err(GetBlobVmoError::Fidl)?
+                .map_err(|s| GetBlobVmoError::GetVmo(Status::err_from_raw(s)))
+        }
+        .boxed()
+    }
+}
+
+/// Helper trait for types that can be converted into an `Arc<dyn BlobReader>`.
+pub trait IntoBlobReader {
+    /// Converts `self` into an `Arc<dyn BlobReader>`.
+    fn into_blob_reader(self) -> Arc<dyn BlobReader>;
+}
+
+impl IntoBlobReader for ffxfs::BlobReaderProxy {
+    fn into_blob_reader(self) -> Arc<dyn BlobReader> {
+        Arc::new(self)
+    }
+}
+
+impl IntoBlobReader for Arc<dyn BlobReader> {
+    fn into_blob_reader(self) -> Arc<dyn BlobReader> {
+        self
+    }
 }
 
 #[cfg(test)]

@@ -9,17 +9,11 @@
 
 #include <stdint.h>
 #include <sys/types.h>
-#include <zircon/syscalls/debug.h>
 
 extern "C" {
 
 // Implemented in Rust (arch.rs); backs ArchIdlePowerThread::EnterIdleState().
 void arch_enter_idle_state();
-
-zx_status_t cpp_riscv64_get_general_regs(zx_thread_state_general_regs_t* regs);
-zx_status_t cpp_riscv64_set_general_regs(const zx_thread_state_general_regs_t* regs);
-
-uint64_t cpp_riscv64_cpu_mask_to_hart_mask(uint32_t cmask);
 
 void cpp_print_current_thread_backtrace();
 

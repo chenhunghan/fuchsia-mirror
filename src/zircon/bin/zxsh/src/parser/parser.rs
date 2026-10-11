@@ -6,26 +6,13 @@ use super::ast::{
     ASTBuilder, Command, CommandTag, Fd, Redirect, RedirectTag, RedirectTemplate, ResolvedWordPart,
     WordPart, WordPartTag,
 };
-use crate::string::parse_int;
+use crate::string::parse_non_negative_int;
 use bstr::{BStr, BString, ByteSlice};
 
 use super::error::{IncompleteReason, ParseError};
 use super::token::{RawWordPart, Token};
 use super::tokenizer::tokenize;
 use crate::relative;
-
-fn get_literal_word(
-    builder: &ASTBuilder,
-    slice: relative::Slice<WordPart>,
-) -> Result<BString, String> {
-    if slice.len() == 1 {
-        let parts = builder.get_slice(slice);
-        if parts[0].tag == WordPartTag::LITERAL {
-            return Ok(parts[0].text.to_bstring(builder));
-        }
-    }
-    Err("Function name must be a literal word".to_string())
-}
 
 fn get_literal_word_from_parts(parts: &[RawWordPart]) -> Result<BString, String> {
     if parts.len() == 1 {
@@ -241,6 +228,18 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     fn parse_pipeline(&mut self) -> Result<relative::Ptr<Command>, ParseError> {
+        let mut negate_count = 0usize;
+        while let Some(tok) = self.peek() {
+            if self.is_tok(tok, "!") {
+                self.next();
+                negate_count += 1;
+            } else {
+                break;
+            }
+        }
+        if negate_count > 0 && self.peek().is_none() {
+            return Err(ParseError::Incomplete(IncompleteReason::Pipeline));
+        }
         let mut left = self.parse_redirected()?;
         while let Some(Token::Pipe) = self.peek() {
             self.next();
@@ -249,6 +248,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             let right = self.parse_redirected()?;
             left = self.builder.add_binary_command(CommandTag::PIPELINE, left, right);
+        }
+        for _ in 0..negate_count {
+            left = self.builder.add_unary_command(CommandTag::NOT, left);
         }
         Ok(left)
     }
@@ -260,6 +262,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 | Token::RedirectOutClobber(_)
                 | Token::RedirectAppend(_)
                 | Token::RedirectIn(_)
+                | Token::RedirectReadWrite(_)
                 | Token::RedirectDupOut(_)
                 | Token::RedirectDupIn(_)
                 | Token::RedirectHereDoc { .. }
@@ -355,80 +358,66 @@ impl<'a, 'b> Parser<'a, 'b> {
                         body: None,
                     });
                 }
-                Token::RedirectDupOut(src_fd) => {
-                    let target_slice = target.unwrap();
-                    let src = src_fd.map(Fd).unwrap_or(Fd::STDOUT);
-                    let slice = self.builder.get_slice(target_slice);
-                    let is_close = slice.len() == 1
-                        && slice[0].tag == WordPartTag::LITERAL
-                        && slice[0].text.as_bstr(&self.builder) == "-";
-                    if is_close {
-                        templates.push(RedirectTemplate {
-                            tag: RedirectTag::CLOSE_FD,
-                            append: 0,
-                            clobber: 0,
-                            expand: 0,
-                            src_fd: src,
-                            dest_fd: Fd::STDIN,
-                            filename: None,
-                            body: None,
-                        });
-                    } else {
-                        let dest_bstr = get_literal_word(self.builder, target_slice)
-                            .map_err(|e| ParseError::Syntax(e))?;
-                        let dest = parse_int::<i32>(&dest_bstr).ok_or_else(|| {
-                            ParseError::Syntax(format!(
-                                "Expected destination FD after >&, got {}",
-                                target_slice
-                            ))
-                        })?;
-                        templates.push(RedirectTemplate {
-                            tag: RedirectTag::DUP_FD,
-                            append: 0,
-                            clobber: 0,
-                            expand: 0,
-                            src_fd: src,
-                            dest_fd: Fd(dest),
-                            filename: None,
-                            body: None,
-                        });
-                    }
+                Token::RedirectReadWrite(src_fd) => {
+                    let fd = src_fd.map(Fd).unwrap_or(Fd::STDIN);
+                    templates.push(RedirectTemplate {
+                        tag: RedirectTag::READ_WRITE,
+                        append: 0,
+                        clobber: 0,
+                        expand: 0,
+                        src_fd: fd,
+                        dest_fd: Fd::STDIN,
+                        filename: *target,
+                        body: None,
+                    });
                 }
-                Token::RedirectDupIn(src_fd) => {
+                Token::RedirectDupOut(src_fd) | Token::RedirectDupIn(src_fd) => {
+                    let is_out = matches!(op, Token::RedirectDupOut(_));
+                    let default_fd = if is_out { Fd::STDOUT } else { Fd::STDIN };
+                    let op_str = if is_out { ">&" } else { "<&" };
                     let target_slice = target.unwrap();
-                    let src = src_fd.map(Fd).unwrap_or(Fd::STDIN);
+                    let src = src_fd.map(Fd).unwrap_or(default_fd);
                     let slice = self.builder.get_slice(target_slice);
-                    let is_close = slice.len() == 1
-                        && slice[0].tag == WordPartTag::LITERAL
-                        && slice[0].text.as_bstr(&self.builder) == "-";
-                    if is_close {
-                        templates.push(RedirectTemplate {
-                            tag: RedirectTag::CLOSE_FD,
-                            append: 0,
-                            clobber: 0,
-                            expand: 0,
-                            src_fd: src,
-                            dest_fd: Fd::STDIN,
-                            filename: None,
-                            body: None,
-                        });
+                    if slice.len() == 1 && slice[0].tag == WordPartTag::LITERAL {
+                        let dest_bstr = slice[0].text.as_bstr(&self.builder);
+                        if dest_bstr == "-" {
+                            templates.push(RedirectTemplate {
+                                tag: RedirectTag::CLOSE_FD,
+                                append: 0,
+                                clobber: 0,
+                                expand: 0,
+                                src_fd: src,
+                                dest_fd: Fd::STDIN,
+                                filename: None,
+                                body: None,
+                            });
+                        } else {
+                            let dest = parse_non_negative_int(dest_bstr).ok_or_else(|| {
+                                ParseError::Syntax(format!(
+                                    "Expected destination FD after {}, got {}",
+                                    op_str, target_slice
+                                ))
+                            })?;
+                            templates.push(RedirectTemplate {
+                                tag: RedirectTag::DUP_FD,
+                                append: 0,
+                                clobber: 0,
+                                expand: 0,
+                                src_fd: src,
+                                dest_fd: Fd(dest),
+                                filename: None,
+                                body: None,
+                            });
+                        }
                     } else {
-                        let dest_bstr = get_literal_word(self.builder, target_slice)
-                            .map_err(|e| ParseError::Syntax(e))?;
-                        let dest = parse_int::<i32>(&dest_bstr).ok_or_else(|| {
-                            ParseError::Syntax(format!(
-                                "Expected destination FD after <&, got {}",
-                                target_slice
-                            ))
-                        })?;
                         templates.push(RedirectTemplate {
                             tag: RedirectTag::DUP_FD,
                             append: 0,
                             clobber: 0,
                             expand: 0,
                             src_fd: src,
-                            dest_fd: Fd(dest),
-                            filename: None,
+                            dest_fd: Fd::STDIN,
+                            filename: Some(target_slice),
                             body: None,
                         });
                     }

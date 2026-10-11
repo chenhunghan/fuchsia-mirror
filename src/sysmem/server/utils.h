@@ -154,9 +154,13 @@ template <typename T, typename U>
 auto CheckRoundUp(T val, U multiple) {
   using safemath::CheckAdd;
   using safemath::CheckDiv;
+  using safemath::CheckMin;
+  using safemath::CheckMod;
   using safemath::CheckMul;
-  using safemath::CheckSub;
-  return CheckMul(CheckDiv(CheckAdd(val, CheckSub(multiple, 1)), multiple), multiple);
+  auto div = CheckDiv(val, multiple);
+  auto mod = CheckMod(val, multiple);
+  auto has_remainder = CheckMin(mod, decltype(div)(1));
+  return CheckMul(CheckAdd(div, has_remainder), multiple);
 }
 
 }  // namespace sysmem_service

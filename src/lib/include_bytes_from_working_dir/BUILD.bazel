@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_proc_macro")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_proc_macro(
+    name = "include_bytes_from_working_dir",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
+    visibility = [
+        "//build/rust:__pkg__",  # @bazel2gn:raw_overwrite:"//src/lib/versioning/version-history/rust/proc-macro:*"
+        "//src/lib/assembly/vbmeta:__pkg__",
+        "//src/sys/component_manager:__pkg__",
+        "//src/sys/pkg/lib/update-package:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:proc-macro2",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)

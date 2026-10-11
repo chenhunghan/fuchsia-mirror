@@ -164,6 +164,8 @@ int main() {
       std::move(redactor),
       MainService::Options{
           local_device_id_path, kCurrentGracefulShutdownInfoFile, kCurrentSystemTimePath,
+          /*enable_periodic_system_time_writes=*/feedback_config->disk_endurance ==
+              DiskEndurance::kHigh,
           LastReboot::Options{
               .is_first_instance = component.IsFirstInstance(),
               .reboot_log = std::move(reboot_log),

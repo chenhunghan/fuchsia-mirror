@@ -18,8 +18,7 @@ class PhyPowerTest : public SimTest {
  public:
   PhyPowerTest() = default;
   void Init();
-  zx_status_t PowerDown();
-  zx_status_t PowerUp();
+
   zx_status_t Reset();
   zx_status_t GetPowerState(bool* power_on);
 
@@ -27,25 +26,6 @@ class PhyPowerTest : public SimTest {
 };
 
 void PhyPowerTest::Init() { ASSERT_EQ(SimTest::Init(), ZX_OK); }
-
-zx_status_t PhyPowerTest::PowerDown() {
-  auto result = client_->PowerDown();
-  if (result.is_error()) {
-    return result.error_value().is_domain_error() ? result.error_value().domain_error()
-                                                  : result.error_value().framework_error().status();
-  }
-  return ZX_OK;
-}
-
-zx_status_t PhyPowerTest::PowerUp() {
-  auto result = client_->PowerUp();
-  if (result.is_error()) {
-    return result.error_value().is_domain_error() ? result.error_value().domain_error()
-                                                  : result.error_value().framework_error().status();
-  }
-  return ZX_OK;
-}
-
 zx_status_t PhyPowerTest::Reset() {
   auto result = client_->Reset();
   if (result.is_error()) {
@@ -62,27 +42,6 @@ zx_status_t PhyPowerTest::GetPowerState(bool* power_on) {
                                                   : result.error_value().framework_error().status();
   }
   return ZX_OK;
-}
-
-// Test PowerDown
-TEST_F(PhyPowerTest, PowerDownSuccess) {
-  zx_status_t status;
-
-  Init();
-
-  // Set a valid PS mode and verify it succeeds
-  status = PowerDown();
-  ASSERT_EQ(status, ZX_OK);
-}
-
-TEST_F(PhyPowerTest, PowerUpSuccess) {
-  zx_status_t status;
-
-  Init();
-
-  // Set a valid PS mode and verify it succeeds
-  status = PowerUp();
-  ASSERT_EQ(status, ZX_OK);
 }
 
 TEST_F(PhyPowerTest, ResetSuccess) {

@@ -201,6 +201,38 @@ func TestCrashAssert(t *testing.T) {
 	i.WaitForLogMessage("value 42")
 }
 
+// See that `k crash rust_panic` crashes the kernel through the Rust panic handler, and that the
+// whole of a long formatted panic message is printed.
+func TestCrashRustPanic(t *testing.T) {
+	exDir := execDir(t)
+	distro := emulatortest.UnpackFrom(t, filepath.Join(exDir, "test_data"), emulator.DistributionParams{
+		Emulator: emulator.Qemu,
+	})
+	arch := distro.TargetCPU()
+	device := emulator.DefaultVirtualDevice(string(arch))
+	device.KernelArgs = append(device.KernelArgs, cmdline...)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	i := distro.NewInstance(ctx, device)
+	i.Start()
+
+	// Wait for the system to finish booting.
+	i.WaitForLogMessage("usage: k <command>")
+
+	// Crash the kernel.
+	i.RunCommand("k crash rust_panic")
+
+	// See that it panicked.
+	i.WaitForLogMessage("ZIRCON KERNEL PANIC")
+
+	// See that it was a Rust panic, that its source location was printed, and that the message
+	// was printed in full. The message is several hundred bytes long and its last line comes
+	// after the filler, so seeing that line shows it was not truncated.
+	i.WaitForLogMessage("KERNEL PANIC (Rust):")
+	i.WaitForLogMessage("top/debug.rs:")
+	i.WaitForLogMessage("end of rust_panic test message")
+}
+
 func execDir(t *testing.T) string {
 	ex, err := os.Executable()
 	if err != nil {

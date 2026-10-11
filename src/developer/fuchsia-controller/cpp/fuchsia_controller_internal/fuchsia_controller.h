@@ -15,11 +15,6 @@ extern "C" {
 struct ffx_lib_context_t;
 struct ffx_env_context_t;
 
-typedef struct _ffx_config_t {
-  const char* key;
-  const char* value;
-} ffx_config_t;
-
 // Determines the type of error from `ffx_get_last_error`.
 typedef int32_t fc_err_type_t;
 
@@ -61,8 +56,7 @@ _Static_assert(sizeof(long) >= sizeof(fc_status_t));  // NOLINT
 extern void create_ffx_lib_context(ffx_lib_context_t** ctx);
 
 extern fc_status_t create_ffx_env_context(ffx_env_context_t** env_ctx, ffx_lib_context_t* lib_ctx,
-                                          ffx_config_t* config, uint64_t config_len,
-                                          const char* isolate_dir);
+                                          const char* config_json, const char* isolate_dir);
 
 extern void destroy_ffx_env_context(ffx_env_context_t* ctx);
 

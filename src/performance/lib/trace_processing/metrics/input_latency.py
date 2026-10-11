@@ -6,6 +6,7 @@
 
 import logging
 import statistics
+import typing
 from collections.abc import MutableSequence
 
 from reporting import metrics
@@ -44,15 +45,18 @@ class InputLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
         self._aggregates_only: bool = aggregates_only
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         """This processor follows a flow with many parts, so defer to category_names."""
         return set()
 
     @property
+    @typing.override
     def category_names(self) -> set[str]:
         """This processor follows a flow with many parts across `gfx` and `input`."""
         return {_CATEGORY_GFX, _CATEGORY_INPUT}
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

@@ -6,6 +6,7 @@
 
 #include <lib/fdio/directory.h>
 #include <lib/media/codec_impl/codec_metrics.h>
+#include <lib/sync/cpp/completion.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -74,6 +75,15 @@ DriverCtx::DriverCtx()
       shared_fidl_loop_{std::make_unique<async::Loop>(&kAsyncLoopConfigNoAttachToCurrentThread)},
       diagnostics_{kDriverName, shared_fidl_loop_->dispatcher()} {
   shared_fidl_loop_->StartThread("shared_fidl_thread", &shared_fidl_thread_);
+  {
+    libsync::Completion completion;
+    zx_status_t post_status = async::PostTask(shared_fidl_loop_->dispatcher(), [this, &completion] {
+      shared_fidl_checker_.emplace(shared_fidl_loop_->dispatcher());
+      completion.Signal();
+    });
+    ZX_ASSERT(post_status == ZX_OK);
+    completion.Wait();
+  }
   metrics_.emplace();
   // This won't actually be logged until codec_factory opens a device and calls
   // SetAuxServiceDirectory() on it.  Until then we're buffering event counts.

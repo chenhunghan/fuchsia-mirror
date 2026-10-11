@@ -107,84 +107,30 @@
 #define BRCMU_CHSPEC_D11AC_BND_4G    0x8000
 #define BRCMU_CHSPEC_D11AC_BND_5G    0xc000
 
-#define BRCMU_CHAN_BAND_2G 0
-#define BRCMU_CHAN_BAND_5G 1
-
 // clang-format on
 
-enum brcmu_chan_bw {
-  BRCMU_CHAN_BW_20,
-  BRCMU_CHAN_BW_40,
-  BRCMU_CHAN_BW_80,
-  BRCMU_CHAN_BW_80P80,
-  BRCMU_CHAN_BW_160,
-};
-
-enum brcmu_chan_sb {
-  BRCMU_CHAN_SB_NONE = -1,
-  BRCMU_CHAN_SB_LLL,
-  BRCMU_CHAN_SB_LLU,
-  BRCMU_CHAN_SB_LUL,
-  BRCMU_CHAN_SB_LUU,
-  BRCMU_CHAN_SB_ULL,
-  BRCMU_CHAN_SB_ULU,
-  BRCMU_CHAN_SB_UUL,
-  BRCMU_CHAN_SB_UUU,
-  BRCMU_CHAN_SB_L = BRCMU_CHAN_SB_LLL,
-  BRCMU_CHAN_SB_U = BRCMU_CHAN_SB_LLU,
-  BRCMU_CHAN_SB_LL = BRCMU_CHAN_SB_LLL,
-  BRCMU_CHAN_SB_LU = BRCMU_CHAN_SB_LLU,
-  BRCMU_CHAN_SB_UL = BRCMU_CHAN_SB_LUL,
-  BRCMU_CHAN_SB_UU = BRCMU_CHAN_SB_LUU,
-};
-
-/**
- * struct brcmu_chan - stores channel formats
- *
- * This structure can be used with functions translating chanspec into generic
- * channel info and the other way.
- *
- * @chspec: firmware specific format
- * @chnum: center channel number
- * @control_ch_num: control channel number
- * @band: frequency band
- * @bw: channel width
- * @sb: control sideband (location of control channel against the center one)
- */
 struct brcmu_chan {
-  uint16_t chspec;
-  uint8_t chnum;
-  uint8_t control_ch_num;
-  uint8_t band;
-  enum brcmu_chan_bw bw;
-  enum brcmu_chan_sb sb;
+  chanspec_t chspec = INVCHANSPEC;
+  fuchsia_wlan_ieee80211::wire::ChannelNumber primary;
+  fuchsia_wlan_ieee80211::wire::ChannelBandwidth cbw;
 };
 
 /**
  * struct brcmu_d11inf - provides functions translating channel format
  *
  * @io_type: determines version of channel format used by firmware
- * @encchspec: encodes channel info into a chanspec, requires center channel
- *  number, ignores control one
- * @decchspec: decodes chanspec into generic info
+ * @encchspec: function pointer to encode a chanspec_t from a brcmu_chan
+ * @decchspec: function pointer to decode a chanspec_t to a brcmu_chan
  */
 struct brcmu_d11inf {
   uint8_t io_type;
-
-  void (*encchspec)(struct brcmu_chan* ch);
-  void (*decchspec)(struct brcmu_chan* ch);
+  zx_status_t (*encchspec)(struct brcmu_chan* ch);
+  zx_status_t (*decchspec)(struct brcmu_chan* ch);
 };
 
-void brcmu_d11_attach(struct brcmu_d11inf* d11inf);
+zx_status_t brcmu_d11_attach(struct brcmu_d11inf* d11inf);
 
-fuchsia_wlan_ieee80211::wire::ChannelNumber chanspec_to_operating_channel_number(
-    const brcmu_d11inf* d11_inf, uint16_t chanspec);
-fuchsia_wlan_ieee80211::wire::ChannelNumber chanspec_to_primary_channel_number(
-    const brcmu_d11inf* d11_inf, uint16_t chanspec);
-fuchsia_wlan_ieee80211::wire::ChannelBandwidth chanspec_to_channel_bandwidth(
-    const brcmu_d11inf* d11_inf, uint16_t chanspec);
-fuchsia_wlan_ieee80211::wire::ChannelNumber chanspec_to_secondary80(const brcmu_d11inf* d11_inf,
-                                                                    uint16_t chanspec);
+zx::result<brcmu_chan> chanspec_to_channel(const brcmu_d11inf* d11inf, chanspec_t chanspec);
 
 fuchsia_wlan_ieee80211::ChannelBandwidth enforce_bandwidth_limitations(
     uint8_t primary, fuchsia_wlan_ieee80211::WlanBand band,

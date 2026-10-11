@@ -133,14 +133,14 @@ typedef struct zx_packet_guest_vcpu {
     struct {
       uint64_t mask;
       uint8_t vector;
-      uint8_t padding1[7];
+      uint8_t padding1[15];
     } interrupt;
     struct {
-      uint64_t id;
+      uint64_t target;
       zx_gpaddr_t entry;
+      uint64_t context;
     } startup;
   };
-  uint64_t reserved;
 } zx_packet_guest_vcpu_t;
 
 typedef struct zx_packet_interrupt {

@@ -30,5 +30,8 @@
     <hook name="install-pydantic-core"
           project="fuchsia"
           action="tools/build/scripts/extract_pydantic_core_wheel.sh"/>
+    <hook name="install-pathspec-py3"
+          project="fuchsia"
+          action="tools/build/scripts/extract_pathspec_wheel.sh"/>
   </hooks>
 </manifest>

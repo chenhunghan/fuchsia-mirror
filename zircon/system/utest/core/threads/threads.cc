@@ -6,24 +6,32 @@
 #include <lib/captive-thread/captive-thread.h>
 #include <lib/core-test-utils.h>
 #include <lib/fit/defer.h>
+#include <lib/maybe-standalone-test/maybe-standalone.h>
 #include <lib/stdcompat/span.h>
+#include <lib/zx/channel.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/debuglog.h>
 #include <lib/zx/event.h>
 #include <lib/zx/handle.h>
+#include <lib/zx/job.h>
 #include <lib/zx/port.h>
 #include <lib/zx/process.h>
+#include <lib/zx/resource.h>
+#include <lib/zx/suspend_token.h>
 #include <lib/zx/thread.h>
+#include <lib/zx/vmar.h>
 #include <lib/zx/vmo.h>
 #include <stddef.h>
 #include <unistd.h>
 #include <zircon/errors.h>
 #include <zircon/process.h>
+#include <zircon/status.h>
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/debug.h>
 #include <zircon/syscalls/exception.h>
 #include <zircon/syscalls/object.h>
 #include <zircon/syscalls/port.h>
+#include <zircon/syscalls/resource.h>
 #include <zircon/threads.h>
 #include <zircon/types.h>
 
@@ -2401,5 +2409,72 @@ TEST(Threads, WatchpointSyscallPanic) {
   thread.wait_one(ZX_THREAD_TERMINATED, zx::time::infinite(), nullptr);
 }
 #endif
+
+TEST(Threads, SuspendAndKillDebugRead) {
+  zx::unowned_resource system_resource = maybe_standalone::GetSystemResource();
+  if (!system_resource->is_valid()) {
+    ZXTEST_SKIP("System resource not available, skipping test.");
+  }
+  zx::result<zx::resource> debug_resource =
+      maybe_standalone::GetSystemResourceWithBase(system_resource, ZX_RSRC_SYSTEM_DEBUG_BASE);
+  ASSERT_OK(debug_resource.status_value());
+
+  zx::process process;
+  zx::thread thread;
+  zx::vmar vmar;
+  constexpr char kName[] = "debug-read";
+  ASSERT_OK(
+      zx::process::create(*zx::job::default_job(), kName, sizeof(kName) - 1, 0, &process, &vmar));
+  ASSERT_OK(zx::thread::create(process, kName, sizeof(kName) - 1, 0, &thread));
+
+  zx::channel control;
+  ASSERT_OK(start_mini_process_etc(process.get(), thread.get(), vmar.get(), ZX_HANDLE_INVALID, true,
+                                   control.reset_and_get_address()));
+  auto cleanup = fit::defer([&]() {
+    process.kill();
+    process.wait_one(ZX_PROCESS_TERMINATED, zx::time::infinite(), nullptr);
+  });
+
+  // Send the debug resource handle with MINIP_CMD_DEBUG_READ. The subprocess reads (consuming any
+  // buffered serial input) until it blocks in zx_debug_read. If zx_debug_read is not supported on
+  // this system, it replies immediately with ZX_ERR_NOT_SUPPORTED.  Note that the handle is
+  // consumed by zx_channel_write even on failure, so it cannot leak.
+  ASSERT_OK(mini_process_cmd_send(control.get(), MINIP_CMD_DEBUG_READ, debug_resource->release()));
+
+  // Returns true if the subprocess replies before |deadline|, which it does only once
+  // zx_debug_read has failed.
+  auto replied = [&control](zx::time deadline) {
+    return control.wait_one(ZX_CHANNEL_READABLE | ZX_CHANNEL_PEER_CLOSED, deadline, nullptr) ==
+           ZX_OK;
+  };
+
+  // Give the subprocess some time to block in zx_debug_read.  There is no reliable way to observe
+  // that a thread is blocked in zx_debug_read (it is reported as ZX_THREAD_STATE_RUNNING), so if
+  // the subprocess has not yet blocked by the time we suspend it, this test may pass without
+  // testing anything.  However, it will never fail spuriously.
+  constexpr zx::duration kBlockDelay = zx::msec(100);
+  if (replied(zx::deadline_after(kBlockDelay))) {
+    zx_status_t cmd_status = mini_process_cmd_read_reply(control.get(), nullptr);
+    if (cmd_status == ZX_ERR_NOT_SUPPORTED) {
+      ZXTEST_SKIP("zx_debug_read not supported, skipping test.");
+    }
+    FAIL("MINIP_CMD_DEBUG_READ completed unexpectedly: %s", zx_status_get_string(cmd_status));
+  }
+
+  // Suspend the thread while it is (likely) blocked in zx_debug_read.
+  zx::suspend_token suspend_token;
+  ASSERT_OK(thread.suspend(&suspend_token));
+  ASSERT_OK(thread.wait_one(ZX_THREAD_SUSPENDED, zx::time::infinite(), nullptr));
+
+  // Resume the thread. Because zx_debug_read is @blocking, the vDSO should automatically retry
+  // the interrupted syscall rather than returning ZX_ERR_INTERNAL_INTR_RETRY to the caller.
+  suspend_token.reset();
+  EXPECT_FALSE(replied(zx::deadline_after(kBlockDelay)));
+
+  // Kill the process while its thread is blocked in zx_debug_read.
+  cleanup.cancel();
+  ASSERT_OK(process.kill());
+  ASSERT_OK(process.wait_one(ZX_PROCESS_TERMINATED, zx::time::infinite(), nullptr));
+}
 
 }  // namespace

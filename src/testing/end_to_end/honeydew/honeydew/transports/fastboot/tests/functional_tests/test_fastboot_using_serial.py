@@ -45,7 +45,7 @@ class FastbootUsingSerialTests(fuchsia_base_test.FuchsiaBaseTest):
         #   * reboot back to fuchsia mode
         # So to avoid all these additional steps in actual test case, we are explicitly
         # instantiating fastboot transport in setup_class
-        self._fastboot_node_id: str = await self.dut.fastboot.node_id()
+        self._fastboot_node_id: str = self.dut.fastboot.node_id
 
     async def teardown_test(self) -> None:
         """teardown_test is called once after running each test.
@@ -54,7 +54,7 @@ class FastbootUsingSerialTests(fuchsia_base_test.FuchsiaBaseTest):
             * Ensures device is in fuchsia mode.
         """
         await super().teardown_test()
-        if await self.dut.fastboot.is_in_fastboot_mode():
+        if self.dut.fastboot.is_in_fastboot_mode():
             _LOGGER.warning(
                 "%s is in fastboot mode which is not expected. "
                 "Rebooting to fuchsia mode",
@@ -86,13 +86,13 @@ class FastbootUsingSerialTests(fuchsia_base_test.FuchsiaBaseTest):
                 "This test can't be run."
             )
 
-        await self.dut.fastboot.boot_to_fastboot_mode(
+        self.dut.fastboot.boot_to_fastboot_mode(
             use_serial=True,
             serial_transport=serial,
             power_switch=power_switch,
         )
 
-        await self.dut.fastboot.run(cmd=["getvar", "hw-revision"])
+        self.dut.fastboot.run(cmd=["getvar", "hw-revision"])
 
         await self.dut.fastboot.boot_to_fuchsia_mode()
 

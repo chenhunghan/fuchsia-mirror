@@ -30,6 +30,8 @@ cc_test_executable("unittests") {
     "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
     "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
     "//sdk/fidl/fuchsia.ui.display.color:fuchsia.ui.display.color_cpp",
+    "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_cpp",
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-default",
     "//sdk/lib/async-testing",

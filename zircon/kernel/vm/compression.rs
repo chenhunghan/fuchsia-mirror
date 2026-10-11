@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::vm::compressor::VmCompressor;
+use crate::vm::vm_page_list::ReferenceValue;
 use compression_bindings as bindings;
 use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
@@ -34,6 +35,20 @@ impl VmCompression {
     /// extended wait times.
     pub fn acquire_compressor<'a>(&'a self) -> impl PinInit<CompressorGuard<'a>> {
         pin_init_ffi!(bindings::cpp_vmcompression_acquire_compressor, self.as_raw())
+    }
+
+    /// Frees the compressed reference without decompressing it. `reference` may be the temporary
+    /// reference.
+    ///
+    /// # Safety
+    ///
+    /// `reference` must be owned by the caller, must not be used again, and must belong to this
+    /// `VmCompression`. If it may be the temporary reference, the lock of the VMO it was placed
+    /// into must be held.
+    pub unsafe fn free(&self, reference: ReferenceValue) {
+        // SAFETY: `self.as_raw()` points to a live `VmCompression`, and the caller upholds the
+        // requirements documented in `# Safety`.
+        unsafe { bindings::cpp_vmcompression_free_reference(self.as_raw(), reference.value()) }
     }
 }
 

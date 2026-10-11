@@ -396,6 +396,10 @@ impl ProductBundleV2 {
 
         // Canonicalize the virtual device specifications path.
         if let Some(path) = &self.virtual_devices_path {
+            if product_bundle_dir.as_str().is_empty() {
+                self.virtual_devices_path = Some(canonicalizer.canonicalize_path(path, vec![]));
+                return Ok(());
+            }
             let virtual_devices_path = product_bundle_dir.join(path);
             let dir = virtual_devices_path
                 .parent()

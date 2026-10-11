@@ -969,7 +969,7 @@ pub fn fastrpc_device_init(kernel: &Kernel) {
         .register_dyn_device(
             kernel,
             "adsprpc-smd-secure".into(),
-            registry.objects.get_or_create_class("fastrpc".into(), registry.objects.virtual_bus()),
+            registry.objects.get_or_create_class("fastrpc".into()),
             device,
         )
         .expect("Can register heap device");

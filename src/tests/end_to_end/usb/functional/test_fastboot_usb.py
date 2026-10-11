@@ -62,16 +62,14 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         )
 
         asserts.assert_true(
-            await self.dut.fastboot.is_in_fastboot_mode(),
+            self.dut.fastboot.is_in_fastboot_mode(),
             msg=f"{self.dut.device_name} failed to enter fastboot mode.",
         )
 
         _LOGGER.info(
             "Querying Fastboot `max-download-size` to bound bulk payload staging..."
         )
-        max_dl_lines = await self.dut.fastboot.run(
-            ["getvar", "max-download-size"]
-        )
+        max_dl_lines = self.dut.fastboot.run(["getvar", "max-download-size"])
         max_dl_parsed: list[Tuple[str, str]] = [
             res
             for line in max_dl_lines
@@ -115,7 +113,7 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
                 temp_path,
             )
             # Run 'stage' command using the underlying ffx target fastboot execution.
-            await self.dut.fastboot.run(["stage", temp_path])
+            self.dut.fastboot.run(["stage", temp_path])
             _LOGGER.info(
                 "Successfully staged payload over USB without flashing."
             )
@@ -143,7 +141,7 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         )
 
         asserts.assert_true(
-            await self.dut.fastboot.is_in_fastboot_mode(),
+            self.dut.fastboot.is_in_fastboot_mode(),
             msg=f"{self.dut.device_name} failed to enter fastboot mode.",
         )
 

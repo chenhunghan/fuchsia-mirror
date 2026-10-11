@@ -40,10 +40,11 @@ int PhysLoadTestMain(KernelStorage& kernelfs) {
 
 #ifdef __aarch64__
   // TODO(https://fxbug.dev/42085337): There is no upper address space in EL2+ by
-  // default, so drop down to EL1 and proceed with the test.
-  if (auto el = arch::ArmCurrentEl::Read().el(); el > 1) {
+  // default (unless FEAT_VHE / HCR_EL2.E2H is enabled).
+  if (auto el = arch::ArmCurrentEl::Read().el();
+      el > 1 && !(el == 2 && arch::ArmHcrEl2::Read().e2h())) {
     printf(
-        "TODO(https://fxbug.dev/42085337): %s test is only supported for EL1 (current EL is %lu); skipping it\n",
+        "TODO(https://fxbug.dev/42085337): %s test is only supported for EL1 or EL2 with VHE (current EL is %lu); skipping it\n",
         kTestName, el);
     return 0;
   }

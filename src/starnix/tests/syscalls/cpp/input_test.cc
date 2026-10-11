@@ -4,23 +4,24 @@
 
 #include <fcntl.h>
 #include <sys/epoll.h>
-#include <sys/stat.h>
-#include <sys/sysmacros.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <cstring>
+#include <optional>
 #include <string>
 
+#include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 #include <linux/input-event-codes.h>
 #include <linux/input.h>
+#include <linux/uinput.h>
 
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
 
-const uint32_t kTouchInputMinor = 0;
-const uint32_t kKeyboardInputMinor = 1;
-const uint32_t kMouseInputMinor = 2;
+using test_helper::ScopedUinputDevice;
 
 constexpr size_t min_bytes(size_t n_bits) { return (n_bits + 7) / 8; }
 
@@ -33,38 +34,17 @@ bool get_bit(const std::array<uint8_t, SIZE>& buf, size_t bit_num) {
   return buf[byte_index] & (1 << bit_index);
 }
 
-// TODO(quiche): Maybe move this to a test fixture, and guarantee removal of the input
-// node between test cases.
-fbl::unique_fd GetInputFile(const uint32_t kInputMinor) {
-  // TODO(b/310963779): Here should directly /dev/input/eventX.
-
-  // Typically, this would be `/dev/input/event0` or `/dev/input/event1`, but there's
-  // not much to be gained by exercising `mkdir()` in these tests.
-  std::string kInputFile = "/dev/input" + std::to_string(kInputMinor);
-
-  // Create device node. Allow `EEXIST`, to avoid requiring each test case to remove the
-  // input device node.
-  const uint32_t kInputMajor = 13;
-  if (mknod(kInputFile.c_str(), 0600 | S_IFCHR, makedev(kInputMajor, kInputMinor)) != 0 &&
-      errno != EEXIST) {
-    ADD_FAILURE() << " creating " << kInputFile << " failed: " << strerror(errno);
-  };
-
-  // Open device node.
-  fbl::unique_fd fd(open(kInputFile.c_str(), O_RDONLY));
-  EXPECT_TRUE(fd.is_valid()) << " failed to open " << kInputFile << ": " << strerror(errno);
-
-  return fd;
-}
-
 TEST(InputTest, DevicePropertiesMatchTouchProperties) {
   // TODO(https://fxbug.dev/317285180) don't skip on baseline
   if (getuid() != 0) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  auto fd = GetInputFile(kTouchInputMinor);
-  ASSERT_TRUE(fd.is_valid());
+  auto device = ScopedUinputDevice::Create("Touchscreen device", /*product=*/3, /*evbit=*/EV_ABS);
+  if (!device) {
+    return;
+  }
+  const auto& fd = device->event_fd;
 
   // Getting the driver version must succeed, but the actual value doesn't matter.
   {
@@ -200,8 +180,11 @@ TEST(InputTest, DevicePropertiesMatchKeyboardProperties) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  auto fd = GetInputFile(kKeyboardInputMinor);
-  ASSERT_TRUE(fd.is_valid());
+  auto device = ScopedUinputDevice::Create("Keyboard device", /*product=*/2);
+  if (!device) {
+    return;
+  }
+  const auto& fd = device->event_fd;
 
   // Getting the driver version must succeed, but the actual value doesn't matter.
   {
@@ -327,12 +310,11 @@ TEST(InputTest, DevicePropertiesMatchMouseProperties) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  // TODO(b/564945259): Mouse device is not registered by default.
-  // Re-enable when dynamic hotplugging is supported.
-  GTEST_SKIP() << "Mouse device is not registered by default (b/564945259).";
+  // TODO(https://fxbug.dev/564945259): Mouse device is not available via dynamic uinput injection
+  // yet.
+  GTEST_SKIP() << "uinput does not support mice yet, see https://fxbug.dev/564945259";
 
-  auto fd = GetInputFile(kMouseInputMinor);
-  ASSERT_TRUE(fd.is_valid());
+  fbl::unique_fd fd;
 
   // Getting the driver version must succeed, but the actual value doesn't matter.
   {
@@ -470,8 +452,11 @@ TEST(InputTest, DeviceCanBeRegisteredWithEpoll) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  auto input_fd = GetInputFile(kTouchInputMinor);
-  ASSERT_TRUE(input_fd.is_valid());
+  auto device = ScopedUinputDevice::Create("Touchscreen device", /*product=*/3, /*evbit=*/EV_ABS);
+  if (!device) {
+    return;
+  }
+  const auto& input_fd = device->event_fd;
 
   fbl::unique_fd epoll_fd(epoll_create(1));  // Per `man` page, must be >0.
   ASSERT_TRUE(epoll_fd.is_valid()) << "failed to create epoll fd: " << strerror(errno);
@@ -490,8 +475,11 @@ TEST(InputTest, GetDeviceName) {
     GTEST_SKIP() << "Can only be run as root.";
   }
 
-  auto fd = GetInputFile(kTouchInputMinor);
-  ASSERT_TRUE(fd.is_valid());
+  auto device = ScopedUinputDevice::Create("Touchscreen device", /*product=*/3, /*evbit=*/EV_ABS);
+  if (!device) {
+    return;
+  }
+  const auto& fd = device->event_fd;
 
   // Getting the device name with zero buffer length must succeed and return 0 bytes without
   // underflowing.
@@ -503,6 +491,7 @@ TEST(InputTest, GetDeviceName) {
   int ret = ioctl(fd.get(), EVIOCGNAME(sizeof(buf)), buf);
   ASSERT_GT(ret, 0) << "get name failed: " << strerror(errno);
   EXPECT_GT(strlen(buf), 0u);
+  EXPECT_STREQ(buf, "Touchscreen device");
 }
 
 // The evdev current-state queries report what the device is doing right now (which keys
@@ -517,19 +506,31 @@ TEST(InputTest, CurrentStateQueriesSucceed) {
   if (getuid() != 0) {
     GTEST_SKIP() << "Can only be run as root.";
   }
+  struct DeviceConfig {
+    const char* name;
+    uint16_t product;
+    std::optional<int> evbit;
+  };
+  // TODO(https://fxbug.dev/564945259): Add mouse device config once uinput supports mice.
+  const DeviceConfig configs[] = {
+      {.name = "Touchscreen device", .product = 3, .evbit = EV_ABS},
+      {.name = "Keyboard device", .product = 2, .evbit = std::nullopt},
+  };
 
-  // TODO(b/564945259): Re-add kMouseInputMinor once mouse device is registered dynamically.
-  for (const uint32_t minor : {kTouchInputMinor, kKeyboardInputMinor}) {
-    auto fd = GetInputFile(minor);
-    ASSERT_TRUE(fd.is_valid());
+  for (const auto& config : configs) {
+    auto device = ScopedUinputDevice::Create(config.name, config.product, config.evbit);
+    if (!device) {
+      return;
+    }
+    const auto& fd = device->event_fd;
 
     {
       std::array<uint8_t, min_bytes(KEY_MAX)> buf;
       buf.fill(0xAA);
       ASSERT_EQ(0, ioctl(fd.get(), EVIOCGKEY(buf.size()), buf.data()))
-          << "minor " << minor << ": get key state failed: " << strerror(errno);
+          << config.name << ": get key state failed: " << strerror(errno);
       for (size_t i = 0; i < buf.size(); i++) {
-        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no key should be reported as held";
+        EXPECT_EQ(0, buf[i]) << config.name << ": no key should be reported as held";
       }
     }
 
@@ -537,9 +538,9 @@ TEST(InputTest, CurrentStateQueriesSucceed) {
       std::array<uint8_t, min_bytes(LED_MAX)> buf;
       buf.fill(0xAA);
       ASSERT_EQ(0, ioctl(fd.get(), EVIOCGLED(buf.size()), buf.data()))
-          << "minor " << minor << ": get led state failed: " << strerror(errno);
+          << config.name << ": get led state failed: " << strerror(errno);
       for (size_t i = 0; i < buf.size(); i++) {
-        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no LED should be reported as lit";
+        EXPECT_EQ(0, buf[i]) << config.name << ": no LED should be reported as lit";
       }
     }
 
@@ -547,9 +548,9 @@ TEST(InputTest, CurrentStateQueriesSucceed) {
       std::array<uint8_t, min_bytes(SND_MAX)> buf;
       buf.fill(0xAA);
       ASSERT_EQ(0, ioctl(fd.get(), EVIOCGSND(buf.size()), buf.data()))
-          << "minor " << minor << ": get sound state failed: " << strerror(errno);
+          << config.name << ": get sound state failed: " << strerror(errno);
       for (size_t i = 0; i < buf.size(); i++) {
-        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no sound should be reported as playing";
+        EXPECT_EQ(0, buf[i]) << config.name << ": no sound should be reported as playing";
       }
     }
 
@@ -557,9 +558,9 @@ TEST(InputTest, CurrentStateQueriesSucceed) {
       std::array<uint8_t, min_bytes(SW_MAX)> buf;
       buf.fill(0xAA);
       ASSERT_EQ(0, ioctl(fd.get(), EVIOCGSW(buf.size()), buf.data()))
-          << "minor " << minor << ": get switch state failed: " << strerror(errno);
+          << config.name << ": get switch state failed: " << strerror(errno);
       for (size_t i = 0; i < buf.size(); i++) {
-        EXPECT_EQ(0, buf[i]) << "minor " << minor << ": no switch should be reported as toggled";
+        EXPECT_EQ(0, buf[i]) << config.name << ": no switch should be reported as toggled";
       }
     }
   }

@@ -19,7 +19,9 @@ use crate::object_store::object_manager::ReservationUpdate;
 use crate::object_store::object_record::{
     AttributeKey, ObjectAttributes, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue,
 };
-use crate::object_store::transaction::{AssocObj, LockKey, Mutation, Options, lock_keys};
+use crate::object_store::transaction::{
+    AssocObj, LockKey, Mutation, Options, ReservationOptions, lock_keys,
+};
 use crate::object_store::tree::reservation_amount_from_layer_size;
 use crate::object_store::volume::{RootVolume, root_volume};
 use crate::object_store::{
@@ -159,12 +161,9 @@ impl ObjectStore {
         let locked = (layer_with_metadata as Arc<dyn Layer<_, _>>).into();
         inner_layer_set.layers.push(locked);
 
-        let object_manager = fs.object_manager();
-        let reservation = object_manager.metadata_reservation();
         let txn_options = Options {
             skip_journal_checks: true,
-            borrow_metadata_space: true,
-            allocator_reservation: Some(reservation),
+            reservation: ReservationOptions::BorrowedMetadataAndData,
             ..Default::default()
         };
 
@@ -188,6 +187,7 @@ impl ObjectStore {
                     self.store_info_handle_object_id().unwrap(),
                 )],
                 true,
+                txn_options,
             )
             .await?
             .1;

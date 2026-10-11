@@ -10,26 +10,27 @@ use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_bluetooth_host::{HostMarker, ReceiverMarker, ReceiverRequestStream};
 use fidl_fuchsia_component::{CreateChildArgs, RealmMarker, RealmProxy};
 use fidl_fuchsia_component_decl::{
-    Child, ChildRef, CollectionRef, ConfigOverride, ConfigSingleValue, ConfigValue, DependencyType,
-    Durability, Offer, OfferDirectory, Ref as CompRef, StartupMode,
+    Child, CollectionRef, ConfigOverride, ConfigSingleValue, ConfigValue, Durability, StartupMode,
 };
 use fidl_fuchsia_driver_test as fdt;
+use fidl_fuchsia_hardware_bluetooth as fhbt;
 use fidl_fuchsia_io as fio;
-use fidl_fuchsia_io::Operations;
 use fidl_fuchsia_logger::LogSinkMarker;
+use fuchsia_async::TimeoutExt as _;
 use fuchsia_bluetooth::constants::{
-    BT_HOST, BT_HOST_COLLECTION, BT_HOST_URL, DEV_DIR, HCI_DEVICE_DIR,
+    BT_HOST, BT_HOST_COLLECTION, BT_HOST_URL, BT_SERVICE_DIR, INTEGRATION_TIMEOUT as WATCH_TIMEOUT,
 };
+use fuchsia_component::client::{Service, ServiceInstanceStream};
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
     Capability, ChildOptions, LocalComponentHandles, RealmBuilder, RealmInstance, Ref, Route,
     ScopedInstance,
 };
 use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
-use fuchsia_sync::Mutex;
 use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, TryFutureExt, TryStreamExt};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod constants {
     pub mod receiver {
@@ -252,7 +253,9 @@ async fn resolve_test_component(
 
 pub struct HostRealm {
     realm: RealmInstance,
-    receiver: Mutex<Option<Receiver<ClientEnd<HostMarker>>>>,
+    receiver: futures::lock::Mutex<Receiver<ClientEnd<HostMarker>>>,
+    service_watcher: futures::lock::Mutex<ServiceInstanceStream<fhbt::ServiceMarker>>,
+    next_host_id: AtomicUsize,
 }
 
 impl HostRealm {
@@ -303,7 +306,18 @@ impl HostRealm {
 
         add_host_routes(&builder, Ref::collection(BT_HOST_COLLECTION.to_string())).await?;
 
+        let dtr_exposes = vec![Capability::service::<fhbt::ServiceMarker>().into()];
+        let _ = builder.driver_test_realm_add_dtr_exposes(&dtr_exposes).await?;
+
         // Route capabilities between realm components and bt-host-collection
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::service::<fhbt::ServiceMarker>())
+                    .from(Ref::child(fuchsia_driver_test::COMPONENT_NAME))
+                    .to(Ref::collection(BT_HOST_COLLECTION.to_string())),
+            )
+            .await?;
         builder
             .add_route(
                 Route::new()
@@ -340,25 +354,50 @@ impl HostRealm {
                 device_id: bind_fuchsia_platform::BIND_PLATFORM_DEV_DID_BT_HCI_EMULATOR,
             }]),
             test_component: Some(resolved_test_component),
+            dtr_exposes: Some(dtr_exposes),
             ..Default::default()
         };
         instance.driver_test_realm_start(args).await?;
 
-        Ok(Self { realm: instance, receiver: Some(receiver).into() })
+        let service_watcher =
+            Service::open_from_dir(instance.root.get_exposed_dir(), fhbt::ServiceMarker)?
+                .watch()
+                .await?;
+
+        Ok(Self {
+            realm: instance,
+            receiver: futures::lock::Mutex::new(receiver),
+            service_watcher: futures::lock::Mutex::new(service_watcher),
+            next_host_id: AtomicUsize::new(0),
+        })
     }
 
-    // Create bt-host component with |filename| and add it to bt-host collection in HostRealm.
-    // Wait for the component to register itself with Receiver and get the client end of the Host
-    // protocol.
+    // Wait for a newly published fuchsia.hardware.bluetooth.Service instance, create a bt-host
+    // component for it in the bt-host collection in HostRealm, and wait for the component to
+    // register itself with Receiver and return the client end of the Host protocol.
     pub async fn create_bt_host_in_collection(
         realm: &Arc<HostRealm>,
-        filename: &str,
     ) -> Result<ClientEnd<HostMarker>, Error> {
-        let component_name = format!("{BT_HOST}_{filename}"); // Name must only contain [a-z0-9-_]
-        let device_path = format!("{DEV_DIR}/{HCI_DEVICE_DIR}/default");
+        let instance = realm
+            .service_watcher
+            .lock()
+            .await
+            .try_next()
+            .map_err(Error::from)
+            .on_timeout(WATCH_TIMEOUT, || {
+                Err(format_err!(
+                    "timed out waiting for fuchsia.hardware.bluetooth.Service instance"
+                ))
+            })
+            .await?
+            .ok_or_else(|| format_err!("fuchsia.hardware.bluetooth.Service watcher closed"))?;
+        let instance_name = instance.instance_name();
+        let id = realm.next_host_id.fetch_add(1, Ordering::SeqCst);
+        let component_name = format!("{BT_HOST}_{id}_{instance_name}"); // Name must only contain [a-z0-9-_]
+        let device_path = format!("{BT_SERVICE_DIR}/{instance_name}/vendor");
         let collection_ref = CollectionRef { name: BT_HOST_COLLECTION.to_owned() };
         let child_decl = Child {
-            name: Some(component_name.to_owned()),
+            name: Some(component_name),
             url: Some(BT_HOST_URL.to_owned()),
             startup: Some(StartupMode::Lazy),
             config_overrides: Some(vec![ConfigOverride {
@@ -369,38 +408,15 @@ impl HostRealm {
             ..Default::default()
         };
 
-        let bt_host_offer = Offer::Directory(OfferDirectory {
-            source: Some(CompRef::Child(ChildRef {
-                name: fuchsia_driver_test::COMPONENT_NAME.to_owned(),
-                collection: None,
-            })),
-            source_name: Some("dev-class".to_owned()),
-            target_name: Some("dev-bt-hci-instance".to_owned()),
-            subdir: Some(format!("bt-hci/{filename}")),
-            dependency_type: Some(DependencyType::Strong),
-            rights: Some(
-                Operations::READ_BYTES
-                    | Operations::CONNECT
-                    | Operations::GET_ATTRIBUTES
-                    | Operations::TRAVERSE
-                    | Operations::ENUMERATE,
-            ),
-            ..Default::default()
-        });
-
         let realm_proxy: RealmProxy =
             realm.instance().connect_to_protocol_at_exposed_dir().unwrap();
         let _ = realm_proxy
-            .create_child(
-                &collection_ref,
-                &child_decl,
-                CreateChildArgs { dynamic_offers: Some(vec![bt_host_offer]), ..Default::default() },
-            )
+            .create_child(&collection_ref, &child_decl, CreateChildArgs::default())
             .await
             .map_err(|e| format_err!("{e:?}"))?
             .map_err(|e| format_err!("{e:?}"))?;
 
-        let host = realm.receiver().next().await.unwrap();
+        let host = realm.receiver.lock().await.next().await.unwrap();
         Ok(host)
     }
 
@@ -430,9 +446,5 @@ impl HostRealm {
 
     pub fn dev(&self) -> Result<fio::DirectoryProxy, Error> {
         self.realm.driver_test_realm_connect_to_dev()
-    }
-
-    pub fn receiver(&self) -> Receiver<ClientEnd<HostMarker>> {
-        self.receiver.lock().take().unwrap()
     }
 }

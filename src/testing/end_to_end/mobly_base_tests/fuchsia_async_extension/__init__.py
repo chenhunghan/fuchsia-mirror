@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import functools
 import inspect
@@ -27,6 +28,27 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
+def _run_until_complete(coro: Coroutine[Any, Any, T]) -> T:
+    """Runs a coroutine on the global event loop, cancelling it if interrupted.
+
+    In Python's asyncio.BaseEventLoop.run_until_complete(), if a synchronous
+    signal handler (such as Mobly's SIGTERM handler raising TestAbortAll) raises
+    a BaseException while the event loop is running, run_until_complete() exits
+    without cancelling the task. That leaves the interrupted coroutine running
+    in the background during subsequent teardown_test/teardown_class execution.
+    """
+    loop = get_loop()
+    task = loop.create_task(coro)
+    try:
+        return loop.run_until_complete(task)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                loop.run_until_complete(task)
+        raise
+
+
 def _make_sync_wrapper(
     func: Callable[P, Coroutine[Any, Any, T]]
 ) -> Callable[P, Coroutine[Any, Any, T] | T]:
@@ -43,7 +65,7 @@ def _make_sync_wrapper(
         # If there was no event loop, then run func on the global event loop.
         # This is a Mobly synchronous entry point.
         if loop is None:
-            return get_loop().run_until_complete(func(*args, **kwargs))
+            return _run_until_complete(func(*args, **kwargs))
         # If an event loop is running, return the coroutine directly.
         # The caller will await the coroutine because the calling test
         # test code must already be running in an async context.
@@ -219,9 +241,7 @@ class AsyncBaseTestClass(_AsyncBaseTestClassMeta):
                 # from a synchronous context. Run the future on the global
                 # event loop.
                 if loop is None:
-                    return get_loop().run_until_complete(
-                        test_logic(*t_args, **t_kwargs)
-                    )
+                    return _run_until_complete(test_logic(*t_args, **t_kwargs))
                 # This case indicates the test method was called from an async context,
                 # but only Mobly calls test methods, and Mobly always calls them
                 # from a synchronous context. Therefore, reaching this case indicates

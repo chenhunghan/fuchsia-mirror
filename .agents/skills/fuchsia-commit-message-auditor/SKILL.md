@@ -30,16 +30,19 @@ Follow this 5-step workflow to prepare, audit, and commit changes.
    ```bash
    git add path/to/file1.cc path/to/file2.rs
    ```
-   - **NEVER** use catch-all staging (`git add .`, `git add -A`, `git commit
-     -a`).
+   - **NEVER** use catch-all staging (`git add .`, `git add -A`, `git add -u`,
+     `git commit -a`).
    - In multi-repo workspaces, execute git commands in the target repository
      root (e.g., `//` or `//vendor/google`).
-4.  **Diff Hygiene**: Inspect `git diff --staged` and ensure only intended
-    changes are included:
+4.  **Diff Hygiene**: Inspect `git diff --staged` and `git status --short`
+    (without `-uno`, which hides untracked files) to ensure only intended
+    changes are staged and no temporary files remain in the working tree:
    - **Accidentally Staged Files**: If scratch scripts, temporary files (`.tmp`,
-     `.log`), or unrelated files were staged, unstage them:
+     `.log`), or unrelated files were staged, unstage them (and remove any
+     temporary files):
      ```bash
      git restore --staged path/to/unwanted_file
+     rm -f path/to/temporary_file
      ```
    - **No Debug Code**: Strip debug prints (e.g., `printf("DEBUG_PRINT_TRAP")`)
      and temporary logging from staged code.
@@ -49,9 +52,10 @@ Follow this 5-step workflow to prepare, audit, and commit changes.
 ## Step 2: Draft Commit Message to Scratch File
 
 Important: Always draft and edit commit messages in a scratch file in your
-designated scratch directory using native file tools (e.g., `write_to_file`).
-NEVER use shell commands (`echo`, `cat << 'EOF'`, heredocs, redirection) or CLI
-flags (`-m`, `--text`).
+designated scratch directory (e.g., `/tmp/commit_msg_<workspace_or_id>.txt`,
+never inside the repository or a shared `/tmp/commit_msg.txt` on multi-session
+hosts) using native file tools (e.g., `write_to_file`). NEVER use shell commands
+(`echo`, `cat << 'EOF'`, heredocs, redirection) or CLI flags (`-m`, `--text`).
 
 ### Commit Message Structure & Example
 
@@ -88,24 +92,29 @@ Test: fx test commit_msg_checker_test
   - **Net Atomic Change**: Narrate net state relative to parent (`<commit>^`).
     Describe newly introduced files (`status A`) as `add`/`create`/`introduce`,
     never "update".
+  - **Command Output & Code Blocks (4-Space Indented)**: When including sample
+    command output or verification transcripts in the body (above the footers),
+    indent lines by 4 spaces and copy the output verbatim from an actual command
+    execution rather than fabricating it.
   - **Series**: For multi-part migrations, indicate series step in summary or
     body: `(1/3)`.
   - Never include "DO NOT SUBMIT".
 - **Footers (Bottom, separated by blank line)**:
   - `Test: <actual_verification>` (**Required**): State how the change was
-    verified. Must describe automated tests, manual testing, or ad-hoc
-    verification genuinely performed (e.g., `Test: fx test foo_tests`, `Test:
-    Manual verification on emulator`, `Test: Added unit tests`, or `Test: None,
-    doc update`). Diagnostics (e.g., `--list`, `--help`, `git status`) and code
-    formatting are **not** tests. Never fabricate tests or use `TODO`/`TBD`.
-    Wrap at 72 chars; use multiple `Test:` lines for multiple suites.
+    verified. Must describe the concrete automated test targets that actually
+    ran (e.g., `Test: fx test //src/diagnostics/iquery:lib_test`, not a `:tests`
+    group label that matched zero tests), manual testing, or ad-hoc verification
+    genuinely performed (or `Test: None, doc update`). Diagnostics (e.g.,
+    `--list`, `git status`) and code formatting are **not** tests. Never
+    fabricate tests or use `TODO`/`TBD`. Wrap at 72 chars; use multiple `Test:`
+    lines for multiple suites.
   - `Bug: <id>` / `Fixed: <id>` (**Recommended**): One per line (`Bug: None` if
     standalone). `Fixed:` auto-closes the issue upon submission.
   - `Multiply: <test_name>` (Optional): Trigger deflake runs in infra for
     new/modified tests.
   - `Change-Id:` (**Gerrit Hook**):
     - **New commit**: Omit; generated automatically by Gerrit commit hook upon
-      `git commit`.
+      `git commit` (never pass `--no-verify`).
     - **Amending existing commit**: Preserve exact `Change-Id: I...` (must be
       the final line).
   - Presubmit Controls (Optional): `Depends-on: <Change-Id>`, `Run-All-Tests:
@@ -140,23 +149,30 @@ Cross-check the diff against your draft scratch file:
 
 ## Step 4: Mechanical Lint Check (Pre-Commit)
 
-Warning: `fx lint` is a line-length checker only, NOT a semantic reviewer.
-Passing `fx lint` (`exit code 0`) only proves lines are wrapped and tags are not
-duplicated. It CANNOT verify whether your claims match the diff, whether tests
-actually ran, or whether debug noise was staged. You MUST complete the Semantic
-Intent Audit in Step 3 before running `git commit`.
+Warning: Mechanical commit-message linters are line-length and footer checkers
+only, NOT semantic reviewers. Passing the linter (`exit code 0`) only proves
+lines are wrapped and tags are not duplicated. It CANNOT verify whether your
+claims match the diff, whether tests actually ran, or whether debug noise was
+staged. You MUST complete the Semantic Intent Audit in Step 3 before running
+`git commit`.
 
-Validate your draft scratch file before committing:
+Validate your draft scratch file before committing (`commit_msg_checker.py` is
+registered in `fx lint` as the `commit_msg` SHAC check for committed changes via
+`fx lint --commit-msg`, but pre-commit validation of an uncommitted
+`<scratch_file>` invokes `scripts/shac/commit_msg_checker.py` directly because
+SHAC's `commit_msg` check inspects committed git history and `fx lint` treats
+arguments after `--` as file path filters):
 
 ```bash
-# Validate draft scratch file (note '--files=""', '--strict', and '--'):
-fx lint --commit-msg --files="" -- --strict --message-file <scratch_file>
+./scripts/fuchsia-vendored-python scripts/shac/commit_msg_checker.py \
+  --strict --message-file <scratch_file>
 ```
 
-Note: For a read-only audit of a pre-existing commit on HEAD without amending,
-run `fx lint --commit-msg -- --strict`.
+Note: For a read-only audit of a pre-existing commit on `HEAD` without amending,
+run `fx lint --commit-msg` (or `./scripts/fuchsia-vendored-python
+scripts/shac/commit_msg_checker.py --strict` to exit non-zero on warnings).
 
-`fx lint --commit-msg` validates:
+`fx lint --commit-msg` / `commit_msg_checker.py --strict` validates:
 - First line summary length (<= 65 characters)
 - Body line wrapping (<= 72 characters)
 - No duplicate `Change-Id` footers
@@ -169,22 +185,25 @@ re-run Step 4 until clean.
 
 ### Initial Commit
 ```bash
-git commit -F <scratch_file>
+git commit -F <scratch_file> && rm -f <scratch_file>
 ```
 
 ### Amending Existing Commit / Rebase
 1.  **Inspect & Preserve Metadata**: Run `git show --stat HEAD` to inspect the
     existing commit message and diff. Retain existing `Change-Id: I...` (must
     remain the final line) and existing `Bug:` tags in `<scratch_file>`.
-2.  **Lint Draft**: `fx lint --commit-msg --files="" -- --strict --message-file
-    <scratch_file>`
+2.  **Lint Draft**:
+    ```bash
+    ./scripts/fuchsia-vendored-python scripts/shac/commit_msg_checker.py \
+      --strict --message-file <scratch_file>
+    ```
 3.  **Stage & Amend**:
-   ```bash
-   git add <explicit_modified_files>
-   git commit --amend -F <scratch_file>
-   ```
-   (If currently in an interactive rebase: `GIT_EDITOR=true git rebase
-   --continue`)
+    ```bash
+    git add <explicit_modified_files>
+    git commit --amend -F <scratch_file> && rm -f <scratch_file>
+    ```
+    (If currently in an interactive rebase: `GIT_EDITOR=true git rebase
+    --continue`)
 4.  **Completion**: Once `git commit` or `git commit --amend` succeeds, the task
     is finished. Do not re-run `fx lint`, `fx format-code`, or redundant log
     queries post-commit.

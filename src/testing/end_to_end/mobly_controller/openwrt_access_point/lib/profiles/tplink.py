@@ -293,4 +293,4 @@ def tplink_tlwr940n(
     )
 
 
-# LINT.ThenChange(//src/testing/end_to_end/antlion/packages/antlion/controllers/ap_lib/third_party_ap_profiles/tplink.py)
+# LINT.ThenChange(//src/testing/end_to_end/mobly_controller/legacy_access_point/ap_lib/third_party_ap_profiles/tplink.py)

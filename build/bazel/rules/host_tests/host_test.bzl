@@ -9,7 +9,11 @@ load(
     "DebugPackageInfo",
 )
 load("@rules_rust//rust:rust_common.bzl", "CrateInfo")
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load(
     "//build/bazel/rules/host_tests:host_test_data.bzl",
     "CollectedFuchsiaHostTestDataInfo",
@@ -199,7 +203,7 @@ def _host_test_impl(ctx):
         files = [launcher, runtime_dir] + host_test_data_runtime_files,
     ).merge(runfiles)
 
-    current_platform = ctx.attr._current_platform[CurrentPlatformInfo]
+    current_platform = get_current_platform_info(ctx)
 
     unstripped_file = ctx.file.unstripped_binary
     if not unstripped_file:
@@ -327,9 +331,5 @@ host_test = rule(
                 "//build/bazel/scripts:runfiles_utils.py",
             ],
         ),
-        "_current_platform": attr.label(
-            providers = [CurrentPlatformInfo],
-            default = "@//build/bazel:current_platform",
-        ),
-    } | PY_TOOLCHAIN_ATTRS,
+    } | PY_TOOLCHAIN_ATTRS | CURRENT_PLATFORM_INFO_ATTRS,
 )

@@ -373,11 +373,15 @@ class Collector:
             return False
 
     def _label_requires_licenses(self, label: GnLabel) -> bool:
-        # The labels in //bundles/assembly/bazel_inputs are all forwarding
-        # labels to elsewhere in the tree, and have no licenses, but they
-        # can trigger false-positives when they export packages from
-        # the third_party folders.
+        # The labels in //bundles/assembly/bazel_inputs and //build/prebuilt
+        # are 1st-party build infrastructure targets that have no licenses of
+        # their own (their underlying prebuilt/3p resources are tracked via
+        # `third_party_resources` metadata).
         if label.gn_str.startswith("//bundles/assembly/bazel_inputs/"):
+            return False
+        if label.path_str == "build/prebuilt" or label.path_str.startswith(
+            "build/prebuilt/"
+        ):
             return False
         return label.is_3rd_party() or label.is_prebuilt()
 

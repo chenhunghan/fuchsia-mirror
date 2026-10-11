@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 """Wakeup trace metrics."""
 
+import typing
 from collections.abc import MutableSequence
 
 from reporting import metrics
@@ -39,6 +40,7 @@ class WakeupMetricsProcessor(trace_metrics.MetricsProcessor):
         self._event_names = event_names
         self._require_wakeup = require_wakeup
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

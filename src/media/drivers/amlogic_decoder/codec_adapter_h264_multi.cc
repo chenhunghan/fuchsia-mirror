@@ -110,8 +110,8 @@ CodecAdapterH264Multi::CodecAdapterH264Multi(std::mutex& lock,
       device_(device),
       video_(device_->video()),
       core_loop_(&kAsyncLoopConfigNoAttachToCurrentThread),
-      shared_fidl_thread_closure_queue_(std::in_place,
-                                        device->driver()->shared_fidl_loop()->dispatcher()) {
+      shared_fidl_sequence_closure_queue_(std::in_place,
+                                          device->driver()->shared_fidl_loop()->dispatcher()) {
   ZX_DEBUG_ASSERT(device_);
   ZX_DEBUG_ASSERT(video_);
   ZX_DEBUG_ASSERT(secure_memory_mode_[kInputPort] == fuchsia::mediacodec::SecureMemoryMode::OFF);
@@ -132,17 +132,17 @@ CodecAdapterH264Multi::CodecAdapterH264Multi(std::mutex& lock,
 }
 
 CodecAdapterH264Multi::~CodecAdapterH264Multi() {
-  // We need to delete the shared_fidl_thread_closure_queue_ on its dispatcher sequence, per the
+  // We need to delete the shared_fidl_sequence_closure_queue_ on its dispatcher sequence, per the
   // rules of ~ClosureQueue.
   sync_completion_t shared_fidl_finished;
   auto run_on_shared_fidl = [this, &shared_fidl_finished] {
-    shared_fidl_thread_closure_queue_.reset();
+    shared_fidl_sequence_closure_queue_.reset();
     sync_completion_signal(&shared_fidl_finished);
   };
-  if (shared_fidl_thread_closure_queue_->IsSynchronized()) {
+  if (shared_fidl_sequence_closure_queue_->IsSynchronized()) {
     run_on_shared_fidl();
   } else {
-    shared_fidl_thread_closure_queue_->Enqueue(run_on_shared_fidl);
+    shared_fidl_sequence_closure_queue_->Enqueue(run_on_shared_fidl);
   }
   sync_completion_wait(&shared_fidl_finished, ZX_TIME_INFINITE);
 
@@ -1318,7 +1318,7 @@ zx_status_t CodecAdapterH264Multi::InitializeFrames(uint32_t min_frame_count,
     //
     // TODO(dustingreen): This may be unnecessary / redundant.
     events_->onCoreCodecOutputFormatChange();
-    shared_fidl_thread_closure_queue_->Enqueue([this] {
+    shared_fidl_sequence_closure_queue_->Enqueue([this] {
       // We have to run this on the shared fidl thread since that's what CodecImpl is using to
       // process RecycleOutputPacket(); we need to avoid this running concurrently with
       // CoreCodecRecycleOutputPacket().

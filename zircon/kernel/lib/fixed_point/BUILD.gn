@@ -4,21 +4,59 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//build/components.gni")
 import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_rust_crate.gni")
 
 group("fixed_point") {
-  public_deps = [ ":headers" ]
+  public_deps = [
+    ":fixed_point-rs",
+    ":headers",
+  ]
 }
 
+# <lib/fixed_point.h> defines `struct fp_32_64` and exposes the historical
+# function names as thin inline wrappers over the `rust_fixed_point_*` FFI
+# trampolines exported by the Rust crate below.
 library_headers("headers") {
-  headers = [
-    "lib/fixed_point.h",
-    "lib/fixed_point_debug.h",
+  headers = [ "lib/fixed_point.h" ]
+}
+
+kernel_rust_crate("fixed_point-rs") {
+  crate_name = "fixed_point"
+  source_root = "src/lib.rs"
+  sources = [
+    "src/fixed_point.rs",
+    "src/fixed_point_debug.rs",
+    "src/lib.rs",
   ]
+  deps = [
+    "//src/lib/zr",
+    "//zircon/kernel/lib/debug",
+  ]
+
+  # Pure arithmetic with no kernel-only dependencies, so unit tests run on host
+  # (see //zircon/kernel/lib/range_check for the same pattern).
+  if (!is_kernel) {
+    with_unit_tests = true
+  }
+}
+
+if (!is_kernel) {
+  fuchsia_unittest_package("fixed-point-rust-test-pkg") {
+    package_name = "fixed-point-rust-test"
+    deps = [ ":fixed_point-rs_test" ]
+  }
 }
 
 group("tests") {
   testonly = true
+  if (!is_kernel) {
+    deps = [
+      ":fixed-point-rust-test-pkg",
+      ":fixed_point-rs_test($host_toolchain)",
+    ]
+  }
 }
 
 group("kernel-tests") {

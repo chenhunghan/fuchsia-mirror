@@ -99,7 +99,7 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_test(self) -> None:
         """Puts the device into fastboot mode before each test."""
         await super().setup_test()
-        await self.dut.fastboot.boot_to_fastboot_mode()
+        self.dut.fastboot.boot_to_fastboot_mode()
 
     async def teardown_test(self) -> None:
         """Puts the device back into Fuchsia mode after each test."""
@@ -107,13 +107,13 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
             await self.dut.fastboot.boot_to_fuchsia_mode()
         await super().teardown_test()
 
-    async def test_getvar(self) -> None:
+    def test_getvar(self) -> None:
         """Tests fastboot variables."""
         # Make sure each variable can also be individually queried and that the
         # value is what we expect.
         logging.info("Checking `getvar` variables")
         for expected_name, expected_values in _REQUIRED_VARS.items():
-            lines = await self.dut.fastboot.run(["getvar", expected_name])
+            lines = self.dut.fastboot.run(["getvar", expected_name])
 
             if len(lines) == 1:
                 output = lines[0]
@@ -140,7 +140,7 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
         # Make sure all the variables we care about also exist in `getvar all`.
         logging.info("Checking `getvar all`")
         getvar_all_vars = []
-        for line in await self.dut.fastboot.run(["getvar", "all"]):
+        for line in self.dut.fastboot.run(["getvar", "all"]):
             if ignore_line(line):
                 continue
             name, _ = parse_getvar(line)

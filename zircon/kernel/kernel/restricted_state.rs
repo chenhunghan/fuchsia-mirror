@@ -56,7 +56,7 @@ fn create_vmo_mapping() -> Result<VmoMapping, Status> {
 
     // SAFETY: VmObjectPaged inherits from VmObject, so casting its RefPtr to RefPtr<VmObject> is sound.
     let base_vmo = unsafe { vmo.clone().cast::<VmObject>() };
-    let mapping_name = c"restricted state";
+    let mapping_name = b"restricted state";
     let arch_mmu_flags = ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
 
     let map_result = kernel_vmar

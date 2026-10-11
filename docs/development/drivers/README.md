@@ -71,6 +71,7 @@ section.
 
   - [VMO registration pattern][vmo-registration-pattern]
   - [Driver stack performance][driver-stack-performance]
+  - [Device firmware][device-firmware]
 
 - Guidelines
 
@@ -115,17 +116,19 @@ section.
   - [Device driver lifecycle][device-driver-lifecycle]
   - [Device power management][device-power-management]
   - [Protocols in drivers][protocols-in-drivers]
-  - [FIDL in drivers][fidl-in-drivers]
   - [Composite devices][composite-devices]
-  - [Device firmware][device-firmware]
 
 ### Driver-specific guides
 
 -  Board drivers
    - [GPIO initialization][gpio-init]
 -  Display drivers
-   -  [Modifying board drivers][modifying-board-drivers]
-   -  [What does a display controller do?][what-does-a-display-controller-do]
+   -  [Display hardware overview][display-hardware-overview]
+   -  [Developing drivers for new display hardware][developing-drivers-for-new-display-hardware]
+   -  [Display Coordinator terms for configuration states][display-coordinator-config-states]
+   -  [Referencing information sources in Fuchsia display drivers][display-referencing]
+   -  [Principles for modern register definitions][modern-register-definitions]
+   -  [Rubric for display drivers written in Rust][display-rust-rubric]
 -  PCI drivers
    - [Configuration][configuration]
 -  Registers
@@ -161,8 +164,12 @@ section.
 [driver-runtime-api-guidelines]: developer_guide/driver-runtime-api-guidelines.md
 [cpp-drivers-rubric]: developer_guide/cpp-rubric.md
 [rust-drivers-rubric]: developer_guide/rust-rubric.md
-[modifying-board-drivers]: driver_guides/display/board_driver_changes.md
-[what-does-a-display-controller-do]: driver_guides/display/hardware_concepts.md
+[display-hardware-overview]: driver_guides/display/hardware.md
+[developing-drivers-for-new-display-hardware]: driver_guides/display/new-driver-guide.md
+[display-coordinator-config-states]: driver_guides/display/config-states.md
+[display-referencing]: driver_guides/display/referencing.md
+[modern-register-definitions]: driver_guides/display/register-definitions.md
+[display-rust-rubric]: driver_guides/display/rust-rubric.md
 [registers-overview]: driver_guides/registers/overview.md
 [getting-descriptors-and-endpoints-from-usb]: driver_guides/usb/getting_descriptors_and_endpoints.md
 [usb-system-overview]: driver_guides/usb/concepts/overview.md
@@ -193,9 +200,8 @@ section.
 [device-power-management]: concepts/device_driver_model/device-power.md
 [protocols-in-drivers]: concepts/device_driver_model/protocol.md
 [platform-bus]: concepts/device_driver_model/platform-bus.md
-[fidl-in-drivers]: concepts/device_driver_model/fidl.md
 [composite-devices]: concepts/device_driver_model/composite.md
-[device-firmware]: concepts/device_driver_model/firmware.md
+[device-firmware]: best_practices/firmware.md
 [driver-architectures-overview]: concepts/driver_architectures/README.md
 [fuchsia-input-drivers]: concepts/driver_architectures/input_drivers/input.md
 [input-report-reader-library]: concepts/driver_architectures/input_drivers/input_report_reader.md

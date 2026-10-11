@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::eval::{EvalOutcome, ExecutionContext, ShellState, eval_command, run_exit_trap};
+use crate::eval::{
+    EXIT_FAILURE, EvalOutcome, ExecutionContext, ShellState, eval_command, run_exit_trap,
+};
 use crate::parser::ast::ASTBuilder;
 use crate::parser::{parse_script, tokenize};
-use crate::string::parse_int;
 use bstr::{BStr, ByteSlice};
 use std::io::Write;
 
@@ -44,40 +45,30 @@ fn run_string_with_context(input: &BStr, mut state: ShellState, ctx: &mut Execut
             Ok(EvalOutcome::Code(c)) => {
                 last_code = c;
             }
-            Ok(EvalOutcome::Exit(c)) => {
-                run_exit_trap(&mut state, ctx);
-                return c;
-            }
-            Ok(EvalOutcome::Return(c)) => {
-                run_exit_trap(&mut state, ctx);
-                return c;
+            Ok(EvalOutcome::Exit(c) | EvalOutcome::Return(c)) => {
+                return run_exit_trap(&mut state, ctx, c);
             }
             Ok(EvalOutcome::Break(_)) => {
                 eprintln!("zxsh: break: can only break from a loop");
-                run_exit_trap(&mut state, ctx);
-                return 1;
+                return run_exit_trap(&mut state, ctx, 1);
             }
             Ok(EvalOutcome::Continue(_)) => {
                 eprintln!("zxsh: continue: can only continue from a loop");
-                run_exit_trap(&mut state, ctx);
-                return 1;
+                return run_exit_trap(&mut state, ctx, 1);
             }
             Err(e) => {
                 if !e.is_empty() {
                     eprintln!("Eval error: {}", e);
                 }
-                let code_bstr = state.get_var(b"?");
-                let code =
-                    code_bstr.as_ref().and_then(|b| parse_int::<i32>(b.as_bytes())).unwrap_or(1);
-                let code = if code == 0 { 1 } else { code };
-                state.set_last_status(code);
-                run_exit_trap(&mut state, ctx);
-                return code;
+                let code = match state.last_status() {
+                    0 => EXIT_FAILURE,
+                    c => c,
+                };
+                return run_exit_trap(&mut state, ctx, code);
             }
         }
     }
-    run_exit_trap(&mut state, ctx);
-    last_code
+    run_exit_trap(&mut state, ctx, last_code)
 }
 
 /// Run a script from a file path.

@@ -112,6 +112,14 @@ impl Inspect for &mut Provider {
     }
 }
 
+/// The source of the key used to decrypt a key-based pairing request.
+enum KeySource {
+    /// Derived from the local Anti-Spoofing private key and the peer's public key.
+    AntiSpoofing(SharedSecret),
+    /// Matched from the locally saved AccountKeyList.
+    AccountKey(SharedSecret),
+}
+
 impl Provider {
     pub async fn new(config: Config, metrics: MetricsLogger) -> Result<Self, Error> {
         let advertiser = LowEnergyAdvertiser::new()?;
@@ -187,18 +195,22 @@ impl Provider {
     /// Implements Steps 1 & 2 in the Pairing Procedure as defined in the GFPS specification. See
     /// https://developers.google.com/nearby/fast-pair/specifications/service/gatt#procedure
     ///
-    /// Returns the decrypted request and associated shared secret key if the request was
+    /// Returns the decrypted request and associated shared secret key source if the request was
     /// successfully decrypted.
     /// Returns Error otherwise.
     fn find_key_for_encrypted_request(
         &mut self,
         request: Vec<u8>,
-    ) -> Result<(SharedSecret, KeyBasedPairingRequest), Error> {
+    ) -> Result<(KeySource, KeyBasedPairingRequest), Error> {
         // There must be an active local Host to facilitate pairing.
         let discoverable = self.host_watcher.pairing_mode().ok_or(Error::NoActiveHost)?;
 
         let (encrypted_request, remote_public_key) = parse_key_based_pairing_request(request)?;
-        let keys_to_try = if let Some(key) = remote_public_key {
+        // Anti-spoofing key path
+        // 1. Derive an AES session key from the local Anti-Spoofing private key and remote public
+        //    key, then decrypt the request.
+        // 2. Returns AES session key + decrypted request
+        if let Some(key) = remote_public_key {
             debug!("Trying remote public key");
             // The Public/Private key pairing flow is only accepted if the local Host is
             // discoverable.
@@ -208,22 +220,29 @@ impl Provider {
 
             let aes_key =
                 aes_from_anti_spoofing_and_public(&self.state.config.local_private_key, &key)?;
-            vec![aes_key]
-        } else {
-            debug!("Trying saved Account Keys");
-            self.account_keys.keys().map(|k| k.shared_secret()).cloned().collect()
-        };
+            let request =
+                decrypt_key_based_pairing_request(&encrypted_request, &aes_key).map_err(|e| {
+                    debug!("Key failed to decrypt message: {e:?}");
+                    Error::NoAvailableKeys
+                })?;
+            debug!("Found a valid key for pairing");
+            return Ok((KeySource::AntiSpoofing(aes_key), request));
+        }
 
+        debug!("Trying saved Account Keys");
+        // Saved account key path
+        // 1. Decrypt request using one of saved account keys
+        // 2. Returns the matched account key + decrypted request
+        let keys_to_try: Vec<_> =
+            self.account_keys.keys().map(|k| k.shared_secret()).cloned().collect();
         for key in keys_to_try {
             match decrypt_key_based_pairing_request(&encrypted_request, &key) {
                 Ok(request) => {
                     debug!("Found a valid key for pairing");
                     // Refresh the LRU position of the key that successfully decrypted the request
-                    // as it will be used for subsequent steps of the pairing procedure. The result
-                    // of this operation is ignored as if the `key` is calculated using the
-                    // Public/Private keys, then it won't exist in the `account_keys` cache.
+                    // as it will be used for subsequent steps of the pairing procedure.
                     let _ = self.account_keys.mark_used(&(&key).into());
-                    return Ok((key, request));
+                    return Ok((KeySource::AccountKey(key), request));
                 }
                 Err(e) => {
                     // Errors here are not fatal. We will simply try the next available key.
@@ -244,8 +263,8 @@ impl Provider {
     ) -> Result<(), Error> {
         // If we were able to match the request with an Account Key, notify the GATT characteristic
         // and temporarily save the key. Steps 3-6 in the Pairing Procedure.
-        let (key, request) = match self.find_key_for_encrypted_request(encrypted_request) {
-            Ok((key, request)) => (key, request),
+        let (key_source, request) = match self.find_key_for_encrypted_request(encrypted_request) {
+            Ok((key_source, request)) => (key_source, request),
             Err(e) => {
                 response(Err(gatt::Error::WriteRequestRejected));
                 return Err(e);
@@ -269,22 +288,19 @@ impl Provider {
         // TODO(https://fxbug.dev/42178310): Track the salt in `request` to prevent replay attacks.
         debug!(peer_id:%; "Received key based pairing request: {:?}", request);
         let pairing_type = PairingType::from_action(&request.action, discoverable);
-        match request.action {
-            KeyBasedPairingAction::SeekerInitiatesPairing { received_provider_address }
-            | KeyBasedPairingAction::PersonalizedNameWrite { received_provider_address } => {
-                // We already check the HostWatcher for the existence of an active Host.
-                let addresses = self.host_watcher.addresses().expect("active host");
-                if !addresses.iter().any(|addr| addr.bytes() == &received_provider_address) {
-                    let error = format!(
-                        "Received address ({received_provider_address:?}) doesn't match any local ({addresses:?})"
-                    );
+        let is_account_key = matches!(key_source, KeySource::AccountKey(_));
+        let key = match key_source {
+            KeySource::AntiSpoofing(key) | KeySource::AccountKey(key) => key,
+        };
+        match &request.action {
+            KeyBasedPairingAction::SeekerInitiatesPairing { received_provider_address } => {
+                if !self.host_watcher.is_valid_address(received_provider_address) {
                     response(Err(gatt::Error::WriteRequestRejected));
-                    return Err(Error::internal(&error));
+                    return Err(Error::internal(&format!(
+                        "Received address ({received_provider_address:?}) doesn't match any local"
+                    )));
                 }
-
-                if matches!(request.action, KeyBasedPairingAction::SeekerInitiatesPairing { .. }) {
-                    let _ = self.inspect_node.pairing_request_count.add(1);
-                }
+                let _ = self.inspect_node.pairing_request_count.add(1);
             }
             KeyBasedPairingAction::ProviderInitiatesPairing { .. } => {
                 // TODO(https://fxbug.dev/42071496): Use `sys.Access/Pair` to pair to peer.
@@ -293,6 +309,20 @@ impl Provider {
                 // TODO(https://fxbug.dev/42066852): This can be improved by using a timeout after an
                 // OnPairingComplete signal is received. A retroactive write can only occur within
                 // some finite period of time.
+            }
+            KeyBasedPairingAction::PersonalizedNameWrite { received_provider_address } => {
+                // Only a Seeker that has previously paired (and therefore holds an Account Key) is
+                // authorized to modify the personalized name.
+                if !is_account_key {
+                    response(Err(gatt::Error::WriteRequestRejected));
+                    return Err(Error::internal("Personalized name write requires an Account Key"));
+                }
+                if !self.host_watcher.is_valid_address(received_provider_address) {
+                    response(Err(gatt::Error::WriteRequestRejected));
+                    return Err(Error::internal(&format!(
+                        "Received address ({received_provider_address:?}) doesn't match any local"
+                    )));
+                }
             }
         }
 
@@ -1505,6 +1535,12 @@ mod tests {
                 .try_into()
                 .unwrap(),
         );
+        // A personalized name write requires a saved Account Key. Save one that matches the test
+        // key so that `encrypt_message` produces a request authenticated with an Account Key.
+        provider.account_keys = AccountKeyList::with_capacity_and_keys(
+            10,
+            vec![AccountKey::new(keys::tests::example_aes_key().as_bytes().clone())],
+        );
         let (_sender, _provider_server) = server_task(provider);
 
         // First peer wants to know the personalized name. `flags` = notify name
@@ -1515,12 +1551,12 @@ mod tests {
         // default name associated with the local host - set in `example_host()`.
         assert_eq!(current_name, "fuchsia123".to_string());
 
-        // A different peer wants to set the personalized name by making a Device Action request
-        // via the key-based pairing characteristic.
+        // A different peer with a saved Account Key wants to set the personalized name by making a
+        // Device Action request via the key-based pairing characteristic.
         gatt_write_results_in_expected_notification(
             &gatt,
             KEY_BASED_PAIRING_CHARACTERISTIC_HANDLE,
-            encrypt_message_include_public_key(&DEVICE_ACTION_PERSONALIZED_NAME_REQUEST),
+            encrypt_message(&DEVICE_ACTION_PERSONALIZED_NAME_REQUEST),
             Ok(()),
             /* expect_item= */ true,
         )
@@ -1541,6 +1577,85 @@ mod tests {
         let current_name = make_personalized_name_request(&gatt, random_id, encrypted_buf).await;
         // The returned name should be the personalized name set by the previous peer.
         assert_eq!(current_name, "myfuchsia".to_string());
+    }
+
+    /// A Seeker that only authenticates via the Anti-Spoofing (public key) path and does not
+    /// possess an Account Key must not be able to set the personalized name.
+    #[fuchsia::test]
+    async fn personalized_name_write_with_anti_spoofing_key_is_rejected() {
+        let (mut provider, _le_peripheral, gatt, _host_watcher, _mock_pairing, _mock_upstream) =
+            setup_provider().await;
+        // Discoverable host with no saved Account Keys.
+        provider.host_watcher.set_active_host(
+            example_host(HostId(1), /* active= */ true, /* discoverable= */ true)
+                .try_into()
+                .unwrap(),
+        );
+        let (_sender, _provider_server) = server_task(provider);
+
+        // The personalized name write request should be rejected since
+        // the Seeker is using an Anti-spoofing key.
+        gatt_write_results_in_expected_notification(
+            &gatt,
+            KEY_BASED_PAIRING_CHARACTERISTIC_HANDLE,
+            encrypt_message_include_public_key(&DEVICE_ACTION_PERSONALIZED_NAME_REQUEST),
+            Err(gatt::Error::WriteRequestRejected),
+            /* expect_item= */ false,
+        )
+        .await;
+
+        // A subsequent write to the Additional Data characteristic should also fail as there is no
+        // authorized procedure in progress.
+        gatt_write_results_in_expected_notification(
+            &gatt,
+            ADDITIONAL_DATA_CHARACTERISTIC_HANDLE,
+            personalized_name_response(&keys::tests::example_aes_key(), "myfuchsia".to_string()),
+            Err(gatt::Error::UnlikelyError),
+            /* expect_item= */ false,
+        )
+        .await;
+    }
+
+    /// A Seeker with a valid Account Key must still provide the correct Provider address in a
+    /// personalized name write request.
+    #[fuchsia::test]
+    async fn personalized_name_write_with_invalid_provider_address_fails() {
+        let (mut provider, _le_peripheral, gatt, _host_watcher, _mock_pairing, _mock_upstream) =
+            setup_provider().await;
+        provider.host_watcher.set_active_host(
+            example_host(HostId(1), /* active= */ true, /* discoverable= */ true)
+                .try_into()
+                .unwrap(),
+        );
+        provider.account_keys = AccountKeyList::with_capacity_and_keys(
+            10,
+            vec![AccountKey::new(keys::tests::example_aes_key().as_bytes().clone())],
+        );
+        let (_sender, _provider_server) = server_task(provider);
+
+        // The request is encrypted with the saved Account Key, but the Provider address (bytes
+        // 2-7) doesn't match the local host. The request should be rejected.
+        let mut request_with_invalid_address = DEVICE_ACTION_PERSONALIZED_NAME_REQUEST;
+        request_with_invalid_address[4] = 0xff;
+        gatt_write_results_in_expected_notification(
+            &gatt,
+            KEY_BASED_PAIRING_CHARACTERISTIC_HANDLE,
+            encrypt_message(&request_with_invalid_address),
+            Err(gatt::Error::WriteRequestRejected),
+            /* expect_item= */ false,
+        )
+        .await;
+
+        // A subsequent write to the Additional Data characteristic should also fail as there is no
+        // authorized procedure in progress.
+        gatt_write_results_in_expected_notification(
+            &gatt,
+            ADDITIONAL_DATA_CHARACTERISTIC_HANDLE,
+            personalized_name_response(&keys::tests::example_aes_key(), "myfuchsia".to_string()),
+            Err(gatt::Error::UnlikelyError),
+            /* expect_item= */ false,
+        )
+        .await;
     }
 
     #[fuchsia::test]

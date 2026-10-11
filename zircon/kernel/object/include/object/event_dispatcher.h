@@ -31,6 +31,8 @@ zx_status_t cpp_memory_stall_event_dispatcher_create(
     uint32_t kind, zx_duration_mono_t threshold, zx_duration_mono_t window,
     ffi::Uninitialized<KernelHandle<EventDispatcher>>* out_handle,
     ffi::Uninitialized<zx_rights_t>* out_rights);
+zx_status_t cpp_event_dispatcher_user_signal_self(EventDispatcher* event, uint32_t clear_mask,
+                                                  uint32_t set_mask);
 }
 
 class EventDispatcher : public Dispatcher {
@@ -86,10 +88,13 @@ class MemoryStallEventDispatcher final : public EventDispatcher,
   // 1:1 correspondence between instances of StallObserver and
   // MemoryStallEventDispatcher.
   //
+  // The observer lives in Rust, so this is an owning raw pointer that our
+  // destructor releases with StallObserver::Destroy.
+  //
   // This would ideally be const (once set, the pointer never changes), but it
   // cannot be because the StallObserver is created after our constructor has
   // already been executed.
-  ktl::unique_ptr<StallObserver> observer_;
+  StallObserver* observer_ = nullptr;
 
   // The kind of memory stall that the observer_ has been registered to (used by
   // our destructor to unregister it).

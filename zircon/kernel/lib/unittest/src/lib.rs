@@ -70,26 +70,30 @@ pub use unittest_macro::suite;
 use kprint::kprintln;
 
 #[doc(hidden)]
-pub fn print_comparison_failure(
-    file: &str,
-    line: u32,
-    expected: &str,
-    expected_val: isize,
-    op: &str,
-    actual: &str,
-    actual_val: isize,
-    msg: &str,
-) {
+#[derive(Debug, Clone, Copy)]
+pub struct ComparisonFailure<'a> {
+    pub file: &'a str,
+    pub line: u32,
+    pub expected: &'a str,
+    pub expected_val: isize,
+    pub op: &'a str,
+    pub actual: &'a str,
+    pub actual_val: isize,
+    pub msg: &'a str,
+}
+
+#[doc(hidden)]
+pub fn print_comparison_failure(failure: &ComparisonFailure<'_>) {
     kprintln!(
         "\n    [FAILED]\n    {:s}:{}:\n    expected {:s} ({}) {:s} {:s} ({})\n    {:s}",
-        file,
-        line,
-        expected,
-        expected_val,
-        op,
-        actual,
-        actual_val,
-        msg,
+        failure.file,
+        failure.line,
+        failure.expected,
+        failure.expected_val,
+        failure.op,
+        failure.actual,
+        failure.actual_val,
+        failure.msg,
     );
 }
 
@@ -111,16 +115,16 @@ macro_rules! check_comparison {
     ($cond:expr, $early_return:expr, $op:literal, $expected:expr, $expected_val:expr, $actual:expr, $actual_val:expr, $msg:expr) => {
         if !$cond {
             record_failure!();
-            $crate::print_comparison_failure(
-                file!(),
-                line!(),
-                stringify!($expected),
-                $expected_val as isize,
-                $op,
-                stringify!($actual),
-                $actual_val as isize,
-                $msg,
-            );
+            $crate::print_comparison_failure(&$crate::ComparisonFailure {
+                file: file!(),
+                line: line!(),
+                expected: stringify!($expected),
+                expected_val: $expected_val as isize,
+                op: $op,
+                actual: stringify!($actual),
+                actual_val: $actual_val as isize,
+                msg: $msg,
+            });
             if $early_return {
                 return false;
             }

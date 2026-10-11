@@ -7,6 +7,7 @@ import io
 import os
 import signal
 import subprocess
+import tempfile
 import typing
 import unittest
 import unittest.mock as mock
@@ -521,3 +522,33 @@ class TestDebuggerTest(unittest.IsolatedAsyncioTestCase):
 
         # Should not raise OSError
         debugger.spawn([test], callback, None, True, False, None, [])
+
+    async def test_debugger_spawn_creates_fifo_in_secure_private_directory(
+        self,
+    ) -> None:
+        """Test that debugger.spawn creates the FIFO inside a private, restricted directory
+        rather than directly in the shared temporary directory."""
+
+        async def callback() -> None:
+            pass
+
+        package_name = "fuchsia-pkg://fuchsia.com/foo_test#meta/foo_test.cm"
+        test = Test(
+            build=tests_json_file.TestEntry(
+                test=tests_json_file.TestSection(package_name, "", ""),
+            ),
+        )
+
+        # Mock mkdtemp so no real directories are created on disk. A constant placeholder path
+        # is safe here since tempfile.mkdtemp, os.mkfifo, and subprocess are all mocked.
+        with mock.patch("debugger.tempfile.mkdtemp") as mock_mkdtemp:
+            mock_mkdtemp.return_value = "/tmp/zxdb-mock-private-dir"
+            debugger.spawn([test], callback, None, True, False, None, [])
+
+            mock_mkdtemp.assert_called_once()
+            self.assertTrue(
+                self.fifo_path_.startswith("/tmp/zxdb-mock-private-dir/")
+            )
+            self.assertNotEqual(
+                os.path.dirname(self.fifo_path_), tempfile.gettempdir()
+            )

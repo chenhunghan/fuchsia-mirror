@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{Dispatcher, FifoDispatcher, HandleValue, ProcessDispatcher};
+use crate::object::{FifoDispatcher, HandleValue, ProcessDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -47,7 +47,9 @@ pub fn sys_fifo_write(
 ) -> Result<(), Status> {
     ltracef!("handle {handle:?}, elem_size {elem_size}, count {count}\n");
 
-    let fifo = Dispatcher::get_with_rights::<FifoDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let fifo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<FifoDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     let mut actual = 0usize;
     fifo.write_from_user(elem_size, data, count, &mut actual)?;
 
@@ -67,7 +69,9 @@ pub fn sys_fifo_read(
 ) -> Result<(), Status> {
     ltracef!("handle {handle:?}, elem_size {elem_size}, count {count}\n");
 
-    let fifo = Dispatcher::get_with_rights::<FifoDispatcher>(handle, ZX_RIGHT_READ)?;
+    let fifo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<FifoDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     let mut actual = 0usize;
     fifo.read_to_user(elem_size, data, count, &mut actual)?;
 

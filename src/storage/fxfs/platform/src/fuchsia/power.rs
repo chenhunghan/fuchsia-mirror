@@ -22,7 +22,7 @@ impl FuchsiaPowerManager {
 
     fn watch_battery_with_proxy(
         proxy: BatteryManagerProxy,
-    ) -> BoxStream<'static, (bool, WakeLease)> {
+    ) -> BoxStream<'static, (bool, Option<WakeLease>)> {
         let (watcher_client, watcher_stream) =
             fidl::endpoints::create_request_stream::<BatteryInfoWatcherMarker>();
 
@@ -48,9 +48,8 @@ impl FuchsiaPowerManager {
                             | Some(ChargeSource::Usb)
                             | Some(ChargeSource::Wireless)
                     );
-                    let handle =
-                        wake_lease.map_or(zx::NullableHandle::invalid(), |l| l.into_handle());
-                    Some(((on_battery, handle), stream))
+                    let lease = wake_lease.map(WakeLease::new);
+                    Some(((on_battery, lease), stream))
                 }
                 Some(Err(error)) => {
                     error!(error:?; "Battery watcher stream error");
@@ -64,7 +63,7 @@ impl FuchsiaPowerManager {
 }
 
 impl PowerManager for FuchsiaPowerManager {
-    fn watch_battery(self: Arc<Self>) -> BoxStream<'static, (bool, WakeLease)> {
+    fn watch_battery(self: Arc<Self>) -> BoxStream<'static, (bool, Option<WakeLease>)> {
         match connect_to_protocol::<BatteryManagerMarker>() {
             Ok(proxy) => Self::watch_battery_with_proxy(proxy),
             Err(error) => {
@@ -143,23 +142,23 @@ mod tests {
 
         let (on_battery, lease) = battery_stream.next().await.unwrap();
         assert!(!on_battery);
-        assert!(lease.is_invalid());
+        assert!(lease.is_none());
 
         let (on_battery, lease) = battery_stream.next().await.unwrap();
         assert!(!on_battery);
-        assert!(!lease.is_invalid());
+        assert!(lease.is_some());
 
         let (on_battery, lease) = battery_stream.next().await.unwrap();
         assert!(!on_battery);
-        assert!(lease.is_invalid());
+        assert!(lease.is_none());
 
         let (on_battery, lease) = battery_stream.next().await.unwrap();
         assert!(on_battery);
-        assert!(lease.is_invalid());
+        assert!(lease.is_none());
 
         let (on_battery, lease) = battery_stream.next().await.unwrap();
         assert!(on_battery);
-        assert!(lease.is_invalid());
+        assert!(lease.is_none());
 
         server_task.await;
         assert!(battery_stream.next().await.is_none());

@@ -22,10 +22,13 @@ FUCHSIA_SYNC_SRCS = [
 FUCHSIA_SYNC_DEPS_COMMON = ["//third_party/rust_crates/vendor:lock_api"]
 
 # @bazel2gn:transformer=deps
-FUCHSIA_SYNC_DEPS_FUCHSIA = [
-    "//sdk/rust/zx",
-    "//zircon/system/ulib/sync",
-]
+FUCHSIA_SYNC_DEPS_FUCHSIA = ["//sdk/rust/zx"]
+
+# @bazel2gn:transformer=deps
+FUCHSIA_SYNC_LINK_DEPS = select({
+    "@platforms//os:fuchsia": ["//zircon/system/ulib/sync"],
+    "//conditions:default": [],
+})
 
 # @bazel2gn:transformer=deps
 FUCHSIA_SYNC_DEPS_HOST = [
@@ -39,12 +42,13 @@ FUCHSIA_SYNC_TEST_DEPS = ["//third_party/rust_crates/vendor:crossbeam"]
 DETECT_LOCK_CYCLE_FLAGS = ["--cfg=detect_lock_cycles"]
 
 # @bazel2gn:transformer=deps
-DETECT_LOCK_CYCLE_DEPS = ["//third_party/rust_crates/forks/tracing-mutex-0.3.2:tracing_mutex"]
+DETECT_LOCK_CYCLE_DEPS = ["//third_party/rust_crates/forks/tracing-mutex-0.3.3:tracing_mutex"]
 
 rustc_library(
     name = "fuchsia-sync",
     srcs = FUCHSIA_SYNC_SRCS,
     edition = "2024",
+    link_deps = FUCHSIA_SYNC_LINK_DEPS,
     rustc_flags = DETECT_LOCK_CYCLE_FLAGS if fuchsia_sync_detect_lock_cycles else [],
     test_deps = FUCHSIA_SYNC_TEST_DEPS,
     version = "0.1.0",
@@ -59,6 +63,7 @@ rustc_test(
     name = "fuchsia-sync-tests-detect-cycles",
     srcs = FUCHSIA_SYNC_SRCS,
     edition = "2024",
+    link_deps = FUCHSIA_SYNC_LINK_DEPS,
     rustc_flags = DETECT_LOCK_CYCLE_FLAGS,
     deps = FUCHSIA_SYNC_DEPS_COMMON + FUCHSIA_SYNC_TEST_DEPS + DETECT_LOCK_CYCLE_DEPS + select({
         "@platforms//os:fuchsia": FUCHSIA_SYNC_DEPS_FUCHSIA,
@@ -70,6 +75,7 @@ rustc_test(
     name = "fuchsia-sync-tests-no-detect-cycles",
     srcs = FUCHSIA_SYNC_SRCS,
     edition = "2024",
+    link_deps = FUCHSIA_SYNC_LINK_DEPS,
     deps = FUCHSIA_SYNC_DEPS_COMMON + FUCHSIA_SYNC_TEST_DEPS + select({
         "@platforms//os:fuchsia": FUCHSIA_SYNC_DEPS_FUCHSIA,
         "//conditions:default": FUCHSIA_SYNC_DEPS_HOST,

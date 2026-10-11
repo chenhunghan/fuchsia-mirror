@@ -30,7 +30,7 @@ pub fn riscv64_vector_status() -> ExtensionStatus {
 }
 
 /// Compute maximum vector length `VLMAX` in elements for a given `vtype` encoding.
-fn riscv64_vlmax(vtype: u64) -> Option<u64> {
+pub(super) fn riscv64_vlmax(vtype: u64) -> Option<u64> {
     let mut value = 8 * feature::vlenb(); // VLEN
     if value == 0 {
         return None;
@@ -151,26 +151,6 @@ pub unsafe fn riscv64_thread_vector_restore(
         // The old vector hardware should have the initial state here and we didn't reset it
         // so we should still be in the initial state.
         debug_assert_eq!(status, ExtensionStatus::Initial);
-    }
-}
-
-// C FFI exports
-
-/// Compute VLMAX for C callers, returning (value, has_value).
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_riscv64_vlmax(vtype: u64, has_value: *mut bool) -> u64 {
-    debug_assert!(!has_value.is_null());
-    match riscv64_vlmax(vtype) {
-        Some(val) => {
-            // SAFETY: Caller guarantees pointer validity.
-            unsafe { *has_value = true };
-            val
-        }
-        None => {
-            // SAFETY: Caller guarantees pointer validity.
-            unsafe { *has_value = false };
-            0
-        }
     }
 }
 

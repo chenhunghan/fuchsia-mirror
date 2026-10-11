@@ -1,0 +1,94 @@
+{
+    "name": "echoprt_utf8_and_kill",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IUTF8"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOKE",
+            "ECHOPRT",
+            "ECHOCTL",
+            "IEXTEN"
+        ],
+        "c_cc": {
+            "VEOL": 59
+        }
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "a\u00a9\u20ac\u007f\u007fb\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": [
+                128,
+                127,
+                10
+            ]
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "hello\u0015world\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "ab\u007f;c\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "ab\u007f"
+        },
+        {
+            "action": "flush",
+            "side": "main",
+            "queue_selector": "TCOFLUSH"
+        },
+        {
+            "action": "write_to_master",
+            "data": "c\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

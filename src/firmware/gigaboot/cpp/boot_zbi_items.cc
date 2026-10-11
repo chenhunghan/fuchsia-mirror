@@ -49,6 +49,7 @@ extern "C" efi_status generate_efi_memory_attributes_table_item(
 namespace {
 
 constexpr size_t kBufferSize = (static_cast<size_t>(32) * 1024) / 2;
+constexpr size_t kMaxCpuNodes = 16;
 
 template <typename T>
 using MemArray = std::array<T, kBufferSize / sizeof(T)>;
@@ -248,7 +249,7 @@ bool AddMadtItems(zbi_header_t* image, size_t capacity, const AcpiRsdp& rsdp, Zb
     return true;
   }
 
-  std::array<zbi_topology_node_t, 1> nodes;
+  std::array<zbi_topology_node_t, kMaxCpuNodes> nodes;
   auto node_span = madt->GetTopology(nodes);
   if (!node_span.empty() && zbi_create_entry_with_payload(
                                 image, capacity, ZBI_TYPE_CPU_TOPOLOGY, sizeof(node_span.front()),

@@ -13,18 +13,19 @@ use component_debug::realm::Instance;
 use diagnostics_data::InspectData;
 use flex_fuchsia_diagnostics::Selector;
 use flex_fuchsia_sys2 as fsys;
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt;
 
-#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 pub struct MonikerWithUrl {
     pub moniker: String,
     pub component_url: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
 pub enum ListResultItem {
     Moniker(String),
     MonikerWithUrl(MonikerWithUrl),
@@ -60,16 +61,7 @@ impl PartialOrd for ListResultItem {
     }
 }
 
-impl Serialize for ListResultItem {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Moniker(string) => serializer.serialize_str(string),
-            Self::MonikerWithUrl(data) => data.serialize(serializer),
-        }
-    }
-}
-
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ListResult(Vec<ListResultItem>);
 
 impl fmt::Display for ListResult {

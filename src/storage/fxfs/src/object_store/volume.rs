@@ -263,12 +263,13 @@ impl RootVolume {
 
     /// Acquires a transaction with appropriate locks to remove volume |name|.
     /// Also returns the object ID of the store which will be deleted.
-    pub async fn acquire_transaction_for_remove_volume(
+    pub async fn acquire_transaction_for_remove_volume<'a>(
         &self,
         name: &str,
         extra_keys: impl IntoIterator<Item = LockKey>,
         allow_not_found: bool,
-    ) -> Result<(u64, Transaction<'_>), Error> {
+        options: Options<'a>,
+    ) -> Result<(u64, Transaction<'a>), Error> {
         // Since we don't know the store object ID until we've looked it up in the volumes
         // directory, we need to loop until we have acquired a lock on a store whose ID is the same
         // as it was in the last iteration.
@@ -308,12 +309,7 @@ impl RootVolume {
 
             transaction = Some((
                 object_id,
-                store
-                    .new_transaction(
-                        LockKeys::Vec(lock_keys.clone()),
-                        Options { borrow_metadata_space: true, ..Default::default() },
-                    )
-                    .await?,
+                store.new_transaction(LockKeys::Vec(lock_keys.clone()), options).await?,
             ));
         }
     }
@@ -350,7 +346,7 @@ mod tests {
     use crate::lsm_tree::types::LayerWriter as _;
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::directory::Directory;
-    use crate::object_store::transaction::{Options, lock_keys};
+    use crate::object_store::transaction::{Options, ReservationOptions, lock_keys};
     use crate::object_store::{
         DirectWriter, HandleOptions, LockKey, NewChildStoreOptions, ObjectKey, ObjectStore,
         ObjectValue, StoreOptions,
@@ -548,7 +544,10 @@ mod tests {
                         ),
                         LockKey::flush(store_id)
                     ],
-                    Options { borrow_metadata_space: true, ..Default::default() },
+                    Options {
+                        reservation: ReservationOptions::BorrowedMetadata,
+                        ..Default::default()
+                    },
                 )
                 .await
                 .expect("new_transaction failed");
@@ -642,8 +641,19 @@ mod tests {
         // Replace "vol" with "vol2", and ensure the filesystem and installed volume passes fsck.
         {
             let root = root_volume(fs.clone()).await.expect("root_volume failed");
-            let mut transaction =
-                root.acquire_transaction_for_remove_volume("vol", [], false).await.unwrap().1;
+            let mut transaction = root
+                .acquire_transaction_for_remove_volume(
+                    "vol",
+                    [],
+                    false,
+                    Options {
+                        reservation: ReservationOptions::BorrowedMetadata,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .1;
             root.replace_volume(&mut transaction, "vol2", "vol").await.unwrap();
             transaction.commit().await.unwrap();
             do_fsck(&fs, Some("vol"), None).await;
@@ -723,8 +733,7 @@ mod tests {
             let parent_store = store.parent_store().unwrap();
             let txn_options = Options {
                 skip_journal_checks: true,
-                borrow_metadata_space: true,
-                allocator_reservation: Some(fs.object_manager().metadata_reservation()),
+                reservation: ReservationOptions::BorrowedMetadataAndData,
                 ..Default::default()
             };
             let mut transaction = parent_store
@@ -732,7 +741,7 @@ mod tests {
                 .await
                 .expect("new_transaction failed");
             let new_layer_object = if let Some(crypt) = &crypt {
-                let raw_id = parent_store.get_next_object_id().await.unwrap();
+                let raw_id = parent_store.get_next_object_id(&transaction).await.unwrap();
                 let (fxfs_key, unwrapped_key) =
                     crypt.create_key(raw_id.get(), KeyPurpose::Data).await.unwrap();
                 ObjectStore::create_object_with_key(
@@ -886,7 +895,12 @@ mod tests {
         }
 
         let (_, transaction) = root
-            .acquire_transaction_for_remove_volume("vol", [], false)
+            .acquire_transaction_for_remove_volume(
+                "vol",
+                [],
+                false,
+                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
+            )
             .await
             .expect("acquire_transaction_for_remove_volume failed");
         root.delete_volume("vol", transaction, || {}).await.expect("delete_volume failed");

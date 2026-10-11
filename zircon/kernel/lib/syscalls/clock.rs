@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
-use crate::object::{ClockDispatcher, Dispatcher, HandleValue};
+use crate::object::{ClockDispatcher, HandleValue, ProcessDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -83,7 +83,13 @@ pub fn sys_clock_read(
 ) -> Result<(), Status> {
     ltracef!("clock_handle 0x{:x}, user_now {:?}\n", clock_handle.raw_value(), user_now);
 
-    let clock = Dispatcher::get_with_rights::<ClockDispatcher>(clock_handle, ZX_RIGHT_READ)?;
+    let clock = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ClockDispatcher>(
+            up,
+            clock_handle,
+            ZX_RIGHT_READ,
+        )
+    })?;
     let now = clock.read()?;
     user_now.write(now)?;
     Ok(())
@@ -109,7 +115,13 @@ pub fn sys_clock_get_details(
         return Err(Status::INVALID_ARGS);
     }
 
-    let clock = Dispatcher::get_with_rights::<ClockDispatcher>(clock_handle, ZX_RIGHT_READ)?;
+    let clock = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ClockDispatcher>(
+            up,
+            clock_handle,
+            ZX_RIGHT_READ,
+        )
+    })?;
     let details = clock.get_details()?;
     user_details.reinterpret::<zx_clock_details_v1_t>().write(details)?;
     Ok(())
@@ -170,7 +182,13 @@ pub fn sys_clock_update(
         return Err(Status::INVALID_ARGS);
     }
 
-    let clock = Dispatcher::get_with_rights::<ClockDispatcher>(clock_handle, ZX_RIGHT_WRITE)?;
+    let clock = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ClockDispatcher>(
+            up,
+            clock_handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     match &args {
         UpdateArgs::V1(v1) => clock.update(options, v1),

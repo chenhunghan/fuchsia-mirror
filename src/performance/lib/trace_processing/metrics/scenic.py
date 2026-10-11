@@ -6,6 +6,7 @@
 
 import logging
 import statistics
+import typing
 from collections.abc import MutableSequence
 
 from reporting import metrics
@@ -65,6 +66,7 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
         self.include_render_total: bool = include_render_total
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         """Patterns describing the trace events needed to generate these metrics."""
         return {
@@ -75,6 +77,7 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
             _RENDER_FLOW_NAME,
         }
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

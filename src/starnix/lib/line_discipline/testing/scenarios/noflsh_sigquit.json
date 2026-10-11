@@ -1,5 +1,6 @@
 {
     "name": "noflsh_sigquit",
+    "capture_signals": true,
     "initial_termios": {
         "c_iflag": [
             "ICRNL"
@@ -20,7 +21,8 @@
     "events": [
         {
             "action": "write_to_master",
-            "data": "foo\u001c\n"
+            "data": "foo\u001c\n",
+            "expect_signal": true
         },
         {
             "action": "read_from_master"

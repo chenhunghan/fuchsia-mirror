@@ -4,6 +4,7 @@
 
 #### CATEGORY=Code submission and review
 #### EXECUTABLE=${FUCHSIA_DIR}/tools/devshell/contrib/gerrit-split-cl-lib/split_cl.py
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### Submits chains of CLs to Gerrit
 ## #usage: fx split_cl [-h] [--dry_run] [--repo REPO] --cl CL --patch N
 ##

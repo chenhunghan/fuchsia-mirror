@@ -15,6 +15,7 @@
 #include <lib/root_resource_filter.h>
 #include <lib/system-topology.h>
 #include <lib/zbi-format/driver-config.h>
+#include <lib/zx/result.h>
 #include <sys/types.h>
 #include <trace.h>
 #include <zircon/errors.h>

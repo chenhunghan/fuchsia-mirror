@@ -14,11 +14,13 @@ rustc_library(
         "src/rcu_intrusive_list.rs",
         "src/rcu_list.rs",
         "src/rcu_raw_hash_map.rs",
+        "src/tests/mod.rs",
+        "src/tests/rcu_array.rs",
+        "src/tests/rcu_intrusive_list.rs",
+        "src/tests/rcu_list.rs",
+        "src/tests/rcu_raw_hash_map.rs",
     ],
     edition = "2024",
-    # Rust std needs fdio on Fuchsia. GN adds it to every Fuchsia executable,
-    # Bazel does not (https://fxbug.dev/42065890), so list it for the test.
-    test_deps = ["//sdk/lib/fdio"],
     visibility = [
         "//src/starnix/kernel/core:__pkg__",
         "//src/starnix/lib/starnix_rcu:__pkg__",

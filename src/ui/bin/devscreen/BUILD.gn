@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
+
+# devscreen: boot dashboard for display-only eng builds. See README.md.
+
+rustc_binary("bin") {
+  output_name = "devscreen"
+  edition = "2024"
+  with_unit_tests = false
+  deps = [
+    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
+    "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+    "//sdk/fidl/fuchsia.hardware.cpu.ctrl:fuchsia.hardware.cpu.ctrl_rust",
+    "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_rust",
+    "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
+    "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+    "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+    "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+    "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+    "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_rust",
+    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/ui/carnelian",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:euclid",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+  sources = [
+    "src/main.rs",
+    "src/telemetry.rs",
+    "src/ui.rs",
+  ]
+}
+
+resource("font") {
+  sources = [ "//prebuilt/third_party/fonts/robotoslab/RobotoSlab-Regular.ttf" ]
+  outputs = [ "data/fonts/{{source_file_part}}" ]
+}
+
+resource("mono_font") {
+  sources = [ "//prebuilt/third_party/fonts/robotomono/RobotoMono-Regular.ttf" ]
+  outputs = [ "data/fonts/{{source_file_part}}" ]
+}
+
+fuchsia_component("component") {
+  component_name = "devscreen"
+  manifest = "meta/devscreen.cml"
+  deps = [
+    ":bin",
+    ":font",
+    ":mono_font",
+  ]
+}
+
+fuchsia_package("package") {
+  package_name = "devscreen"
+  deps = [ ":component" ]
+}

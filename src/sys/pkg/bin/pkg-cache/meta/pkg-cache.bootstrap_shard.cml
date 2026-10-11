@@ -23,6 +23,7 @@
                 "fuchsia.pkgcache.AllPackagesExecutable",
                 "fuchsia.pkgcache.EnableUpgradablePackages",
                 "fuchsia.pkgcache.RequireSystemImage",
+                "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "parent",
             to: "#pkg-cache",
@@ -91,6 +92,15 @@
             protocol: "fuchsia.fxfs.BlobReader",
             from: "#fshost",
             to: "#pkg-cache",
+        },
+        {
+            protocol: [
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
+            ],
+            from: "#fshost",
+            to: "#pkg-cache",
+            availability: "optional",
         },
         {
             directory: "boot",

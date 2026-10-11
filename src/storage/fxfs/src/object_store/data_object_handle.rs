@@ -2123,7 +2123,7 @@ mod tests {
     use crate::object_store::data_object_handle::{OverwriteOptions, WRITE_ATTR_BATCH_SIZE};
     use crate::object_store::directory::replace_child;
     use crate::object_store::object_record::{FsverityMetadata, ObjectKey, ObjectValue, Timestamp};
-    use crate::object_store::transaction::{Mutation, Options, lock_keys};
+    use crate::object_store::transaction::{Mutation, Options, ReservationOptions, lock_keys};
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
         AttributeId, AttributeKey, DataObjectHandle, DirType, Directory, Extent, ExtentMode,
@@ -2185,7 +2185,7 @@ mod tests {
             .expect("new_transaction failed");
 
         object = if let Some(crypt) = crypt {
-            let object_id = store.get_next_object_id().await.unwrap();
+            let object_id = store.get_next_object_id(&transaction).await.unwrap();
             let (key, unwrapped_key) =
                 crypt.create_key(object_id.get(), KeyPurpose::Data).await.unwrap();
             ObjectStore::create_object_with_key(
@@ -4011,7 +4011,7 @@ mod tests {
         store
             .tombstone_object(
                 object.object_id(),
-                Options { borrow_metadata_space: true, ..Default::default() },
+                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
                 None,
             )
             .await
@@ -5096,6 +5096,21 @@ mod tests {
         // These should touch the written overwrite block and fail.
         assert!(!object.check_unwritten_zero((block_size * 4)..(block_size * 6)).await.unwrap());
         assert!(!object.check_unwritten_zero((block_size * 5)..(block_size * 7)).await.unwrap());
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_allocate_large_file() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let object = create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), false).await;
+        let block_size = fs.block_size().get();
+
+        for i in (0..1600).step_by(2) {
+            object.allocate(i * block_size..(i + 1) * block_size).await.expect("allocate failed");
+        }
+        object.allocate(0..1600 * block_size).await.expect("allocate failed");
 
         fs.close().await.expect("close failed");
     }

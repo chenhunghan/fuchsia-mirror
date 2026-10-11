@@ -58,8 +58,8 @@ pub enum ConfigError {
     #[error("No single source available for aggregated query")]
     NoSingleSource,
 
-    #[error("Conversion to {to} not possible for value: {value}")]
-    ConversionFailed { to: &'static str, value: Value },
+    #[error("Conversion to {to} not possible for value: {value}{}", key.as_ref().map(|k| format!(" (key: '{}')", k)).unwrap_or_default())]
+    ConversionFailed { to: &'static str, value: Value, key: Option<String> },
 
     #[error("No value set. Could not convert to {0}")]
     NoValueSet(&'static str),

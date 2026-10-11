@@ -214,7 +214,8 @@ template("bad_signature_update") {
              "//src/sys/pkg/bin/system-updater:component",
 
              # Production network components for OTA update.
-             "//src/connectivity/network/netstack:component",
+             "//src/connectivity/network/netstack3:component-for-tests",
+             "//src/connectivity/policy/http-client:component",
 
              # Mock SWD component dependencies.
              "//src/cobalt/bin/testing/fake_cobalt:component_v2",

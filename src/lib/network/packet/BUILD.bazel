@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "packet",
+    srcs = [
+        "src/fragmented.rs",
+        "src/lib.rs",
+        "src/records.rs",
+        "src/serialize.rs",
+        "src/util.rs",
+    ],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        "//src/connectivity/network:performance_critical_rust_crate",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/bringup/bin/netsvc/test/integration:__pkg__",
+        "//src/connectivity:__subpackages__",
+        "//src/developer/ffx/lib/mdns_discovery:__pkg__",
+        "//src/lib/mdns/rust:__pkg__",
+        "//src/lib/network:__subpackages__",
+        "//src/testing/end_to_end/antlion/runner:__pkg__",
+    ],
+    deps = [
+        "//src/lib/replace-with",
+        "//third_party/rust_crates/vendor:arrayvec",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "packet_lib_test",
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        "//src/connectivity/network:performance_critical_rust_crate",
+    ],
+    crate = ":packet",
+    edition = "2024",
+    deps = [
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+# @bazel2gn:skip
+wrap_host_rust_test(
+    name = "packet_host_test",
+    binary_name = "packet_lib_test",
+)
+
+fx_unittest_package(
+    name = "packet-test",
+    package_name = "packet-test",
+    unit_tests = [":packet_lib_test"],
+)

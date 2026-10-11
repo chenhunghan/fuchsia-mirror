@@ -1027,6 +1027,37 @@ TEST_F(ProcMountsTest, MountAdded) {
   EXPECT_THAT(read_mounts(), UnorderedElementsAreArray(before_mounts));
 }
 
+TEST_F(ProcMountsTest, FilesystemMountOptions) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
+  }
+
+  std::optional<test_helper::ScopedTempDir> temp_dir;
+  temp_dir.emplace();
+
+  ASSERT_THAT(chmod(temp_dir->path().c_str(), 0777), SyscallSucceeds());
+  ASSERT_THAT(mount("none", temp_dir->path().c_str(), "proc", 0, "hidepid=2,gid=3009"),
+              SyscallSucceeds());
+
+  std::string opts = MountOptionsFor(temp_dir->path());
+  EXPECT_TRUE(cpp23::contains(opts, "hidepid=2") || cpp23::contains(opts, "hidepid=invisible"))
+      << "opts: " << opts;
+  EXPECT_TRUE(cpp23::contains(opts, "gid=3009")) << "opts: " << opts;
+
+  std::optional<test_helper::MountInfo> mount_info =
+      test_helper::ReadMountInfoLine(temp_dir->path());
+  ASSERT_TRUE(mount_info.has_value());
+  EXPECT_TRUE(cpp23::contains(mount_info->super_options, "hidepid=2") ||
+              cpp23::contains(mount_info->super_options, "hidepid=invisible"))
+      << "super_options: " << mount_info->super_options;
+  EXPECT_TRUE(cpp23::contains(mount_info->super_options, "gid=3009"))
+      << "super_options: " << mount_info->super_options;
+
+  // Clean-up.
+  ASSERT_THAT(umount(temp_dir->path().c_str()), SyscallSucceeds());
+  temp_dir.reset();
+}
+
 TEST_F(ProcMountsTest, RemountBindReadOnlyFlagInheritance) {
   // TODO(https://fxbug.dev/317285180) don't skip on baseline
   if (!test_helper::HasSysAdmin()) {

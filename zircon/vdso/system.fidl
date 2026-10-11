@@ -37,6 +37,13 @@ type SystemSuspendOption = flexible bits : uint64 {
     /// `zx_system_suspend_enter` which will cause the syscall to skip any attempts to
     /// suspend.  Instead, it will only generate a report as it unwinds.
     REPORT_ONLY = 0x2;
+
+    /// `ZX_SYSTEM_SUSPEND_OPTION_DEEP` is an option which may be passed to
+    /// `zx_system_suspend_enter` to request that the system enter a deep suspend
+    /// state if supported.  It is not an error to request deep suspend on a device
+    /// that does not support deep suspend (the call will behave as if no option
+    /// was specified).  This option may not be combined with any other option.
+    DEEP = 0x4;
 };
 
 /// Flags which can be reported via the `flags` member of the
@@ -1073,6 +1080,13 @@ closed protocol System {
     /// and the call to `zx_system_suspend_enter` returns when the resume deadline expires. Offline
     /// processor states are not affected.
     ///
+    /// ### Deep Suspend
+    ///
+    /// Users may pass the `ZX_SYSTEM_SUSPEND_OPTION_DEEP` flag in the options to request that the
+    /// system enter a deep suspend state if supported.  It is not an error to request deep suspend
+    /// on a device that does not support deep suspend (the call will behave as if no option was
+    /// specified).  `ZX_SYSTEM_SUSPEND_OPTION_DEEP` may not be combined with any other option.
+    ///
     /// ### Wake Source Reports
     ///
     /// #### Requesting reports.
@@ -1153,6 +1167,9 @@ closed protocol System {
     ///
     /// `ZX_ERR_OUT_OF_RANGE` *resource* is not in the range [`ZX_RSRC_SYSTEM_CPU_BASE`,
     /// `ZX_RSRC_SYSTEM_CPU_BASE`+1).
+    ///
+    /// `ZX_ERR_INVALID_ARGS` *options* contains an unknown option, or
+    /// `ZX_SYSTEM_SUSPEND_OPTION_DEEP` combined with any other option.
     ///
     ///options uint64;
     @next

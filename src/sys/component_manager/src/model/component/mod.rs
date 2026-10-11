@@ -85,56 +85,7 @@ pub type WeakExtendedInstance = WeakExtendedInstanceInterface<ComponentInstance>
 
 pub type IncarnationId = u64;
 
-/// Describes the reason a component instance is being requested to start.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub enum StartReason {
-    /// Indicates that the target is starting the component because it wishes to access
-    /// the capability at path.
-    AccessCapability { target: Moniker, name: Name },
-    /// Indicates that the component is starting because of a request to its outgoing
-    /// directory.
-    OutgoingDirectory,
-    /// Indicates that the component is starting because it is in a single-run collection.
-    SingleRun,
-    /// Indicates that the component was explicitly started for debugging purposes.
-    Debug,
-    /// Indicates that the component was marked as eagerly starting by the parent.
-    // TODO(https://fxbug.dev/42127825): Include the parent StartReason.
-    // parent: ExtendedMoniker,
-    // parent_start_reason: Option<Arc<StartReason>>
-    Eager,
-    /// Indicates that this component is starting because it is the root component.
-    Root,
-    /// Storage administration is occurring on this component.
-    StorageAdmin,
-    /// Indicates that this component is starting because the client of a
-    /// `fuchsia.component.Controller` connection has called `Start()`
-    Controller,
-}
-
-impl fmt::Display for StartReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                StartReason::AccessCapability { target, name } => {
-                    format!("'{}' requested capability '{}'", target, name)
-                }
-                StartReason::OutgoingDirectory => {
-                    "Instance started due to a request to its outgoing directory".to_string()
-                }
-                StartReason::SingleRun => "Instance is in a single_run collection".to_string(),
-                StartReason::Debug => "Instance was started from debugging workflow".to_string(),
-                StartReason::Eager => "Instance is an eager child".to_string(),
-                StartReason::Root => "Instance is the root".to_string(),
-                StartReason::StorageAdmin => "Storage administration on instance".to_string(),
-                StartReason::Controller =>
-                    "Instructed to start with the fuchsia.component.Controller protocol".to_string(),
-            }
-        )
-    }
-}
+pub use hooks::StartReason;
 
 /// Component information returned by the resolver.
 #[derive(Clone, Debug)]

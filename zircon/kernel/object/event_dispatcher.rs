@@ -7,7 +7,7 @@
 use super::KernelHandle;
 use super::event_dispatcher_ffi::{
     cpp_event_dispatcher_create, cpp_event_dispatcher_get_mem_pressure_event,
-    cpp_memory_stall_event_dispatcher_create,
+    cpp_event_dispatcher_user_signal_self, cpp_memory_stall_event_dispatcher_create,
 };
 use crate::counters::define_kcounter;
 use core::mem::MaybeUninit;
@@ -100,5 +100,19 @@ impl EventDispatcher {
                 cpp_memory_stall_event_dispatcher_create(kind, threshold, window, h_out, r_out)
             })
         }
+    }
+
+    /// Sets or clears user signals on this event dispatcher.
+    pub fn user_signal_self(&self, clear_mask: u32, set_mask: u32) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `EventDispatcher` reference, and `user_signal_self` is
+        // internally synchronized by the dispatcher's lock.
+        let status = unsafe {
+            cpp_event_dispatcher_user_signal_self(
+                self as *const Self as *mut Self,
+                clear_mask,
+                set_mask,
+            )
+        };
+        Status::ok(status)
     }
 }

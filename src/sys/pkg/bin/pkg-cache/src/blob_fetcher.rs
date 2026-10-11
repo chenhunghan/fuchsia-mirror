@@ -2,13 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use anyhow::anyhow;
 use fidl_connector::Connect as _;
 use fidl_fuchsia_pkg_ext as pkg;
 use fidl_fuchsia_pkg_http as fpkg_http;
+use fuchsia_inspect as finspect;
+use fuchsia_inspect::NumericProperty as _;
+use fuchsia_sync::Mutex;
 use http_uri_ext::HttpUriExt as _;
+use log::warn;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 mod retry;
+
+const INSPECT_RECENT_FETCH_COUNT: usize = 25;
 
 #[derive(Clone, Copy, Debug, typed_builder::TypedBuilder)]
 pub(crate) struct Params {
@@ -66,16 +74,28 @@ impl BlobFetcher {
         params: Params,
         blobfs_client: blobfs::Client,
         http_client: fidl_connector::ServiceReconnector<fpkg_http::ClientMarker>,
+        inspect: finspect::Node,
     ) -> (impl Future<Output = ()>, Self) {
+        let inspect = Arc::new(Inspect::new(inspect));
         let (queue, sender) = work_queue::work_queue(
             max_concurrency,
             move |blob_id: pkg::BlobId, context: QueueContext| {
                 let http_client = http_client.clone();
                 let blobfs_client = blobfs_client.clone();
+                let inspect = Arc::clone(&inspect);
                 async move {
-                    fetch_blob_with_retry(blob_id, context, params, &blobfs_client, &http_client)
-                        .await
-                        .map_err(Arc::new)
+                    let inspect_fetch = inspect.start_fetch(&blob_id, &context);
+                    let res = fetch_blob_with_retry(
+                        blob_id,
+                        context,
+                        params,
+                        &blobfs_client,
+                        &http_client,
+                        &inspect_fetch,
+                    )
+                    .await;
+                    inspect.end_fetch(inspect_fetch, &res);
+                    res.map_err(Arc::new)
                 }
             },
         );
@@ -122,6 +142,7 @@ async fn fetch_blob_with_retry(
     }: Params,
     blobfs_client: &blobfs::Client,
     http_client: &fidl_connector::ServiceReconnector<fpkg_http::ClientMarker>,
+    inspect: &InspectFetch,
 ) -> Result<Option<u64>, FetchError> {
     match conflict_behavior {
         ConflictBehavior::AskBlobfs => {
@@ -136,6 +157,7 @@ async fn fetch_blob_with_retry(
         .extend_dir_with_path(&blob_id.to_string())
         .map_err(|source| FetchError::BlobUrl { source, base_url: error_base, blob_id })?;
     fuchsia_backoff::retry_or_first_error(retry::blob_fetch(), || async move {
+        inspect.attempt();
         let blob = blobfs_client
             .open_blob_for_write(&blob_id.into(), true)
             .await
@@ -192,7 +214,7 @@ pub(crate) enum FetchError {
     #[error("FIDL error while calling fuchsia.pkg.http.Client.DownloadBlob")]
     DownloadBlobFidl(#[source] fidl::Error),
 
-    #[error("error while calling fuchsia.pkg.http.Client.DownloadBlob {0:?}")]
+    #[error("fuchsia.pkg.http.Client.DownloadBlob failed: {0:?}")]
     DownloadBlob(fpkg_http::ClientDownloadBlobError),
 
     #[error("checking blob status after write")]
@@ -255,5 +277,69 @@ impl From<&FetchError> for fidl_fuchsia_pkg::ResolveError {
             PostWriteStatusCheck { .. } => Err::Internal,
             BlobAbsentAfterWrite => Err::Internal,
         }
+    }
+}
+
+struct Inspect {
+    active: finspect::Node,
+    fetch_count: std::sync::atomic::AtomicU64,
+    recent: Mutex<fuchsia_inspect_contrib::nodes::BoundedListNode>,
+    _node: finspect::Node,
+}
+
+impl Inspect {
+    fn new(node: finspect::Node) -> Self {
+        Self {
+            active: node.create_child("active"),
+            fetch_count: std::sync::atomic::AtomicU64::new(0),
+            recent: Mutex::new(fuchsia_inspect_contrib::nodes::BoundedListNode::new(
+                node.create_child("recent"),
+                INSPECT_RECENT_FETCH_COUNT,
+            )),
+            _node: node,
+        }
+    }
+
+    fn start_fetch(&self, blob_id: &pkg::BlobId, context: &QueueContext) -> InspectFetch {
+        let QueueContext { blob_base_url, conflict_behavior } = context;
+        let node = self.active.create_child(
+            self.fetch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string(),
+        );
+        node.record_int("start_boot_ns", zx::BootInstant::get().into_nanos());
+        node.record_string("hash", blob_id.to_string());
+        node.record_string("base_url", blob_base_url.to_string());
+        node.record_string("conflict_behavior", format!("{conflict_behavior:?}"));
+        InspectFetch { attempts: node.create_uint("attempts", 0), node }
+    }
+
+    fn end_fetch(&self, fetch: InspectFetch, res: &Result<Option<u64>, FetchError>) {
+        let InspectFetch { attempts, node } = fetch;
+        node.record_int("end_boot_ns", zx::BootInstant::get().into_nanos());
+        node.record_string(
+            "result",
+            match res {
+                Ok(Some(download_size)) => {
+                    Cow::Owned(format!("success: downloaded {download_size} bytes"))
+                }
+                Ok(None) => Cow::Borrowed("success: download not necessary"),
+                Err(e) => Cow::Owned(format!("error: {}", crate::stringify_error(e))),
+            },
+        );
+        node.record(attempts);
+        let () =
+            self.recent.lock().adopt_entry(node).map(|_: &finspect::Node| ()).unwrap_or_else(|e| {
+                warn!("failed to move inspect node to recent: {:#}", anyhow!(e))
+            });
+    }
+}
+
+struct InspectFetch {
+    attempts: finspect::UintProperty,
+    node: finspect::Node,
+}
+
+impl InspectFetch {
+    fn attempt(&self) {
+        self.attempts.add(1);
     }
 }

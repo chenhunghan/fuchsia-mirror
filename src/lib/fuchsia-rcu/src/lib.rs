@@ -5,6 +5,7 @@
 mod atomic_stack;
 mod rcu_arc;
 mod rcu_box;
+mod rcu_callback;
 mod rcu_droppable;
 mod rcu_droppable_arc;
 mod rcu_option_arc;

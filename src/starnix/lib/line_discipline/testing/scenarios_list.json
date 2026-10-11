@@ -64,5 +64,22 @@
     "veol2_no_iexten",
     "packet_mode_basic",
     "tcflush_packet_mode",
-    "tciflush_buffer_full"
+    "tciflush_buffer_full",
+    "istrip_basic",
+    "parmrk_ff_doubling",
+    "extproc_basic",
+    "veof_canonical_lines",
+    "canonical_partial_read",
+    "tab_erase_columns",
+    "echoctl_special_chars",
+    "noncanon_no_special_chars",
+    "vreprint_no_echo_and_echoprt",
+    "echoprt_utf8_and_kill",
+    "werase_punctuation_and_no_echoe",
+    "onlcr_resets_column_onocr",
+    "ixon_flow_control_and_packet_mode",
+    "signals_and_packet_mode",
+    "icanon_toggle_state",
+    "pty_close_replica",
+    "pty_close_main"
 ]

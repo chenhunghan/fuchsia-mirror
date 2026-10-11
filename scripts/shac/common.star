@@ -43,5 +43,20 @@ def compiled_tool_path(ctx, tool_name):
             tool["name"] == tool_name and
             "%s-%s" % (tool["os"], tool["cpu"]) == cipd_platform_name(ctx)
         ):
-            return build_dir + "/" + tool["path"]
+            exe_path = build_dir + "/" + tool["path"]
+            res = os_exec(
+                ctx,
+                ["/usr/bin/test", "-f", exe_path],
+                raise_on_failure = False,
+            ).wait()
+            if res.retcode != 0:
+                label = tool["label"].split("(")[0]
+                fail(
+                    "Tool '%s' has not been built yet.\n" % tool_name +
+                    "To build this tool, run:\n" +
+                    "  fx build --host %s\n" % label +
+                    "Or to compile all static check tools, run:\n" +
+                    "  fx build --host //bundles/buildbot/static_checks",
+                )
+            return exe_path
     fail("no such tool in tool_paths.json: %s" % tool_name)

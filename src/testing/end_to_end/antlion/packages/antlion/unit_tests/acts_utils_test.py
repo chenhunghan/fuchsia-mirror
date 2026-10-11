@@ -12,7 +12,6 @@ import unittest
 import mock
 from antlion import utils
 from antlion.capabilities.ssh import SSHConfig, SSHResult
-from antlion.controllers.android_device import AndroidDevice
 from antlion.controllers.fuchsia_device import FuchsiaDevice
 from antlion.controllers.fuchsia_lib.ssh import FuchsiaSSHProvider
 from libs.proc import job
@@ -169,32 +168,6 @@ class IpAddressUtilTest(unittest.TestCase):
             utils.get_interface_ip_addresses(
                 SshConnection("mock_settings"), "wlan1"
             ),
-            CORRECT_EMPTY_IP_LIST,
-        )
-
-    @mock.patch("antlion.controllers.adb.AdbProxy")
-    @mock.patch.object(AndroidDevice, "is_bootloader", return_value=True)
-    def test_android_get_interface_ip_addresses_full(
-        self, is_bootloader, adb_mock
-    ):
-        adb_mock().shell.side_effect = [
-            MOCK_ENO1_IP_ADDRESSES,
-        ]
-        self.assertEqual(
-            utils.get_interface_ip_addresses(AndroidDevice(), "eno1"),
-            CORRECT_FULL_IP_LIST,
-        )
-
-    @mock.patch("antlion.controllers.adb.AdbProxy")
-    @mock.patch.object(AndroidDevice, "is_bootloader", return_value=True)
-    def test_android_get_interface_ip_addresses_empty(
-        self, is_bootloader, adb_mock
-    ):
-        adb_mock().shell.side_effect = [
-            MOCK_WLAN1_IP_ADDRESSES,
-        ]
-        self.assertEqual(
-            utils.get_interface_ip_addresses(AndroidDevice(), "wlan1"),
             CORRECT_EMPTY_IP_LIST,
         )
 

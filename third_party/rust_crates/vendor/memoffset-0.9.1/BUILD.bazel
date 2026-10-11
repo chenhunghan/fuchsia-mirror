@@ -82,7 +82,7 @@ rust_library(
     }),
     version = "0.9.1",
     deps = [
-        "//third_party/rust_crates/vendor/memoffset-0.9.1:build_script_build",
+        ":build_script_build",
     ],
 )
 
@@ -123,6 +123,7 @@ cargo_build_script(
         ],
     ),
     edition = "2015",
+    emit_warnings = False,
     pkg_name = "memoffset",
     rustc_flags = [
         "--cap-lints=allow",

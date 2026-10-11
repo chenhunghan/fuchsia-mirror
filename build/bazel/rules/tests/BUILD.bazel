@@ -98,7 +98,8 @@ filegroup(
         "//src/recovery/factory-reset-trigger",
         # Tests `fx_test()`.
         "//build/bazel/rules/packages/tests:build_only_tests",
-        # Tests `fx_package()`, `fx_test_component()` and `fx_test()`.
+        # Tests `fx_package()`, `fx_test_component()`, `fx_test()`,
+        # `fx_unittest_component()`, and `fx_unittest_package()`.
         "//build/bazel/rules/packages/tests:quick_build_only_tests",
         # Build libraries that support next-generation FIDL bindings for Rust.
         # TODO(https://fxbug.dev/454452299): Replace these build-only tests with:

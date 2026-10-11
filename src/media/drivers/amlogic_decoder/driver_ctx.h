@@ -59,6 +59,11 @@ class DriverCtx {
   // the shared FIDL thread.
   thrd_t shared_fidl_thread() { return shared_fidl_thread_; }
 
+  bool IsSharedFidlSynchronized() {
+    ZX_DEBUG_ASSERT(shared_fidl_checker_.has_value());
+    return std::holds_alternative<std::monostate>(shared_fidl_checker_->is_synchronized());
+  }
+
   // Run to_run on given dispatcher, in order.
   void PostSerial(async_dispatcher_t* dispatcher, fit::closure to_run);
 
@@ -93,6 +98,9 @@ class DriverCtx {
 
   // Inspector diagnostics
   CodecDiagnostics diagnostics_;
+
+  // set very early; stays set from then on
+  std::optional<async::synchronization_checker> shared_fidl_checker_;
 };
 
 }  // namespace amlogic_decoder

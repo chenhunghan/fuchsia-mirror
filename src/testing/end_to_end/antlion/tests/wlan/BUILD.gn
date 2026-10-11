@@ -6,8 +6,5 @@ assert(is_host, "antlion tests only supported for host testing")
 
 group("e2e_tests") {
   testonly = true
-  public_deps = [
-    "compliance:e2e_tests",
-    "performance:e2e_tests",
-  ]
+  public_deps = [ "performance:e2e_tests" ]
 }

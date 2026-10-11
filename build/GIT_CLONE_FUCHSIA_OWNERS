@@ -1,0 +1,7 @@
+# Ensure people working on go/git-clone-fuchsia can make changes to all build
+# files during the project.
+
+annizhang@google.com
+atait@google.com
+awolter@google.com
+jcecil@google.com

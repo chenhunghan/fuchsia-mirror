@@ -5,17 +5,17 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::{CStr, c_void};
+use core::marker::PhantomPinned;
 use core::mem::MaybeUninit;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
-use fbl::RefPtr;
+use fbl::{RefPtr, UniquePtr};
 use kalloc::Box;
 use ksync::declare_singleton_mutex;
 use object_constants_rs as object_constants;
 use zr::ToMutPtr;
-use zx_types::{ZX_KOID_INVALID, ZX_MAX_NAME_LEN, zx_koid_t, zx_signals_t};
-
-#[cfg(ktest)]
 use zx_status::Status;
+use zx_types::{ZX_KOID_INVALID, ZX_MAX_NAME_LEN, zx_koid_t, zx_signals_t};
 
 use super::handle::HandleRef;
 use super::job_dispatcher::{JobDispatcher, ZX_JOB_NO_CHILDREN};
@@ -58,6 +58,7 @@ impl RootJobSignalObserverStorage {
 type Callback = Box<dyn FnMut() + Send>;
 
 /// Observes termination of the root job and coordinates system shutdown or notifications.
+#[derive(fbl::Recyclable)]
 #[repr(C, align(8))]
 pub struct RootJobObserver {
     root_job: RefPtr<JobDispatcher>,
@@ -66,6 +67,7 @@ pub struct RootJobObserver {
     callback: Option<Callback>,
     #[cfg(not(ktest))]
     _reserved: [u8; core::mem::size_of::<Option<Callback>>()],
+    _pin: PhantomPinned,
 }
 
 // SAFETY: RootJobObserver can be moved across threads safely.
@@ -104,6 +106,7 @@ impl RootJobObserver {
                 callback: None,
                 #[cfg(not(ktest))]
                 _reserved: Default::default(),
+                _pin: PhantomPinned,
             })
         };
         let observer_ptr: *mut Self = observer;
@@ -124,6 +127,22 @@ impl RootJobObserver {
         };
     }
 
+    /// Create a `RootJobObserver` that halts the system when the root job terminates
+    /// (i.e. asserts `ZX_JOB_NO_CHILDREN`).
+    pub fn new(
+        root_job: RefPtr<JobDispatcher>,
+        root_job_handle: Option<HandleRef<'_>>,
+    ) -> Result<Pin<UniquePtr<Self>>, Status> {
+        let mut observer = Box::<Self>::try_new_uninit().map_err(|_| Status::NO_MEMORY)?;
+        // SAFETY: `observer` is a valid, properly aligned, uninitialized heap allocation that
+        // is pinned below and will not move before being dropped in-place by `UniquePtr::drop`.
+        unsafe {
+            Self::init_in_storage(&mut *observer, root_job, root_job_handle);
+            let raw = Box::into_raw(observer.assume_init());
+            Ok(Pin::new_unchecked(UniquePtr::from_raw(raw)))
+        }
+    }
+
     /// Creates a new `RootJobObserver` that calls `callback` when the root job asserts `ZX_JOB_NO_CHILDREN`.
     ///
     /// The callback is called while holding the watched `JobDispatcher`'s lock, so the callback
@@ -136,19 +155,20 @@ impl RootJobObserver {
         root_job: RefPtr<JobDispatcher>,
         root_job_handle: Option<HandleRef<'_>>,
         callback: F,
-    ) -> Result<Box<Self>, Status> {
+    ) -> Result<Pin<UniquePtr<Self>>, Status> {
         let boxed = Box::try_new(callback).map_err(|_| Status::NO_MEMORY)?;
         let raw_callback: *mut (dyn FnMut() + Send) = Box::<F>::into_raw(boxed);
         // SAFETY: raw_callback was allocated via Box::try_new.
         let callback_box: Callback = unsafe { Box::from_raw(raw_callback) };
 
-        let mut observer = Box::try_new(Self {
+        let mut observer = UniquePtr::try_new(Self {
             root_job,
             signal_observer: RootJobSignalObserverStorage::default(),
             callback: Some(callback_box),
+            _pin: PhantomPinned,
         })
         .map_err(|_| Status::NO_MEMORY)?;
-        let observer_ptr: *mut Self = &mut *observer;
+        let observer_ptr: *mut Self = UniquePtr::as_mut_ptr(&mut observer);
         let ctx = observer_ptr as *mut c_void;
         // SAFETY: observer_ptr is valid and points to the heap-allocated RootJobObserver.
         let signal_observer_ptr = unsafe { (*observer_ptr).signal_observer.as_mut_ptr() };
@@ -161,7 +181,8 @@ impl RootJobObserver {
         let _ = unsafe {
             observer.root_job.add_observer(signal_observer_ptr, handle_ptr, ZX_JOB_NO_CHILDREN)
         };
-        Ok(observer)
+        // SAFETY: `observer` is heap-allocated and will not be moved out of the pinned UniquePtr.
+        Ok(unsafe { Pin::new_unchecked(observer) })
     }
 
     /// Halts or reboots the platform in response to root job termination.

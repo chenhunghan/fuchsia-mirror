@@ -6,7 +6,11 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_import")
 load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load("//build/bazel/rules:golden_files.bzl", "verify_golden_files")
 load("//build/bazel/rules/cc:providers.bzl", "PrebuiltLibraryInfo")
 
@@ -292,7 +296,7 @@ def _link_stub_from_ifs_file_impl(ctx):
 
     link_stub_output = ctx.actions.declare_file(link_stub_file_name)
 
-    current_cpu = ctx.attr._current_platform[CurrentPlatformInfo].cpu
+    current_cpu = get_current_platform_info(ctx).cpu
     clang_cpu = _to_clang_cpu(current_cpu)
 
     args = ctx.actions.args()
@@ -336,11 +340,7 @@ link_stub_from_ifs_file = rule(
             allow_single_file = True,
             cfg = "exec",
         ),
-        "_current_platform": attr.label(
-            providers = [CurrentPlatformInfo],
-            default = "@//build/bazel:current_platform",
-        ),
-    },
+    } | CURRENT_PLATFORM_INFO_ATTRS,
 )
 
 def _cc_link_stub_from_ifs_file_impl(

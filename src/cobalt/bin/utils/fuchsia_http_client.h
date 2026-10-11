@@ -10,6 +10,8 @@
 #include <lib/async/dispatcher.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <cstdint>
+
 #include "third_party/cobalt/src/public/lib/http_client.h"
 #include "third_party/cobalt/src/public/lib/statusor/statusor.h"
 
@@ -28,7 +30,23 @@ class FuchsiaHTTPClient : public lib::HTTPClient {
   lib::statusor::StatusOr<lib::HTTPResponse> PostSync(
       lib::HTTPRequest request, std::chrono::steady_clock::time_point deadline) override;
 
+  // Sends an HTTP GET request to fuchsia's network backend.
+  lib::statusor::StatusOr<lib::HTTPResponse> GetSync(
+      lib::HTTPRequest request, std::chrono::steady_clock::time_point deadline) override;
+
  private:
+  enum class Method : uint8_t {
+    kGet,
+    kPost,
+  };
+
+  static fuchsia::net::http::Request MakeRequest(const lib::HTTPRequest& request, Method method,
+                                                 zx::time deadline);
+
+  lib::statusor::StatusOr<lib::HTTPResponse> SendRequest(
+      const lib::HTTPRequest& request, Method method,
+      std::chrono::steady_clock::time_point deadline);
+
   const LoaderFactory loader_factory_;
   ::fuchsia::net::http::LoaderSyncPtr loader_;
 };

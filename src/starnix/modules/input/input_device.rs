@@ -7,11 +7,14 @@ use crate::input_event_relay::OpenedFiles;
 use futures::FutureExt;
 use starnix_core::device::kobject::{Device, DeviceMetadata};
 use starnix_core::device::{DeviceMode, DeviceOps};
+use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::task::{CurrentTask, Kernel};
-use starnix_core::vfs::{FileOps, FsString, NamespaceNode};
-use starnix_sync::{InputDeviceFileNodesLock, LockDepMutex};
+use starnix_core::vfs::pseudo::simple_file::BytesFile;
+use starnix_core::vfs::{FileOps, NamespaceNode};
+use starnix_sync::{InputDeviceFileNodesLock, InputDeviceInfoLock, LockDepMutex};
 use starnix_uapi::device_id::{DeviceId as StarnixDeviceId, INPUT_MAJOR};
 use starnix_uapi::errors::Errno;
+use starnix_uapi::file_mode::mode;
 use starnix_uapi::input_id;
 use starnix_uapi::open_flags::OpenFlags;
 use std::sync::Arc;
@@ -184,9 +187,11 @@ pub struct InputDeviceInfo {
     pub name: String,
 }
 
+pub type InputDeviceInfoHandle = Arc<LockDepMutex<InputDeviceInfo, InputDeviceInfoLock>>;
+
 impl InputDeviceInfo {
-    pub fn new(input_id: input_id, name: String) -> Arc<Self> {
-        Arc::new(Self { input_id, name })
+    pub fn new(input_id: input_id, name: String) -> InputDeviceInfoHandle {
+        Arc::new(LockDepMutex::new(Self { input_id, name }))
     }
 }
 
@@ -198,14 +203,14 @@ pub struct InputDevice {
 
     pub inspect_status: Arc<InputDeviceStatus>,
 
-    pub info: Arc<InputDeviceInfo>,
+    pub info: InputDeviceInfoHandle,
 }
 
 impl InputDevice {
     pub fn new_touch(
         display_width: i32,
         display_height: i32,
-        info: Arc<InputDeviceInfo>,
+        info: InputDeviceInfoHandle,
         node_name: &str,
         inspect_node: &fuchsia_inspect::Node,
     ) -> Self {
@@ -219,7 +224,7 @@ impl InputDevice {
     }
 
     pub fn new_keyboard(
-        info: Arc<InputDeviceInfo>,
+        info: InputDeviceInfoHandle,
         node_name: &str,
         inspect_node: &fuchsia_inspect::Node,
     ) -> Self {
@@ -233,7 +238,7 @@ impl InputDevice {
     }
 
     pub fn new_mouse(
-        info: Arc<InputDeviceInfo>,
+        info: InputDeviceInfoHandle,
         node_name: &str,
         inspect_node: &fuchsia_inspect::Node,
     ) -> Self {
@@ -246,25 +251,97 @@ impl InputDevice {
         }
     }
 
+    /// Registers the input device, and its event interface, with the kernel's device registry.
+    ///
+    /// Linux exposes each input device as an `inputN` device of the `input` class, with the
+    /// `eventN` character device for its event interface nested beneath it, e.g.:
+    ///
+    /// ```text
+    /// /sys/devices/virtual/input/input0/
+    /// ├── name
+    /// ├── uevent
+    /// ├── id/{bustype,vendor,product,version}
+    /// └── event0/
+    ///     ├── dev
+    ///     └── uevent
+    /// ```
+    ///
+    /// Since both devices belong to the `input` class, `event{minor}` is created directly within
+    /// the `input{minor}` directory, without an intermediate class directory. Each is also linked
+    /// from `/sys/class/input`.
+    ///
+    /// Only the `eventN` device generates a uevent, since it is the only device with a `/dev`
+    /// node.
+    ///
+    /// Returns the `eventN` [`Device`], which should be passed to [`Self::unregister`] to remove
+    /// both devices.
     pub fn register(self, kernel: &Kernel, minor: u32) -> Result<Device, Errno> {
         let registry = &kernel.device_registry;
-
         let input_class = registry.objects.input_class();
-        registry.register_device(
+        let info = self.info.clone();
+
+        let input_device = registry.add_numberless_device(
+            format!("input{minor}").as_str().into(),
+            /* parent = */ None,
+            input_class.clone(),
+            move |device, dir| {
+                build_device_directory(device, dir);
+                let name_info = info.clone();
+                dir.entry(
+                    "name",
+                    BytesFile::new_node(move || Ok(format!("{}\n", name_info.lock().name))),
+                    mode!(IFREG, 0o444),
+                );
+                dir.subdir("id", 0o755, |dir| {
+                    let fields: [(&str, fn(&input_id) -> u16); 4] = [
+                        ("bustype", |id| id.bustype),
+                        ("vendor", |id| id.vendor),
+                        ("product", |id| id.product),
+                        ("version", |id| id.version),
+                    ];
+                    for (attribute, selector) in fields {
+                        let attr_info = info.clone();
+                        dir.entry(
+                            attribute,
+                            BytesFile::new_node(move || {
+                                Ok(format!("{:04x}\n", selector(&attr_info.lock().input_id)))
+                            }),
+                            mode!(IFREG, 0o444),
+                        );
+                    }
+                });
+            },
+        );
+
+        registry.register_device_with_dir(
             kernel,
-            FsString::from(format!("event{}", minor)).as_ref(),
+            format!("event{minor}").as_str().into(),
             DeviceMetadata::new(
-                format!("input/event{}", minor).into(),
+                format!("input/event{minor}").into(),
                 StarnixDeviceId::new(INPUT_MAJOR, minor),
                 DeviceMode::Char,
             ),
+            Some(input_device),
             input_class,
+            build_device_directory,
             self,
         )
     }
 
+    /// Unregisters an input device previously registered with [`Self::register`].
+    ///
+    /// `event_device` is the `eventN` [`Device`] returned by [`Self::register`]; its parent
+    /// `inputN` device is removed too.
+    pub fn unregister(current_task: &CurrentTask, event_device: Device) {
+        let registry = &current_task.kernel().device_registry;
+        let input_device = event_device.parent().cloned();
+        registry.remove_device(current_task, event_device);
+        if let Some(input_device) = input_device {
+            registry.remove_device(current_task, input_device);
+        }
+    }
+
     pub fn open_internal(&self) -> Box<dyn FileOps> {
-        let info = self.info.clone();
         let input_file = match self.device_type {
             InputDeviceId::Touch(display_width, display_height) => {
                 let mut file_nodes = self.inspect_status.file_nodes.lock();
@@ -273,8 +350,7 @@ impl InputDevice {
                     .node
                     .create_child(format!("touch_file_{}", file_nodes.len()));
                 let file = Arc::new(InputFile::new_touch(
-                    info.input_id,
-                    &info.name,
+                    self.info.clone(),
                     display_width,
                     display_height,
                     &child_node,
@@ -288,8 +364,7 @@ impl InputDevice {
                     .inspect_status
                     .node
                     .create_child(format!("keyboard_file_{}", file_nodes.len()));
-                let file =
-                    Arc::new(InputFile::new_keyboard(info.input_id, &info.name, &child_node));
+                let file = Arc::new(InputFile::new_keyboard(self.info.clone(), &child_node));
                 file_nodes.push(child_node);
                 file
             }
@@ -299,7 +374,7 @@ impl InputDevice {
                     .inspect_status
                     .node
                     .create_child(format!("mouse_file_{}", file_nodes.len()));
-                let file = Arc::new(InputFile::new_mouse(info.input_id, &info.name, &child_node));
+                let file = Arc::new(InputFile::new_mouse(self.info.clone(), &child_node));
                 file_nodes.push(child_node);
                 file
             }
@@ -355,10 +430,12 @@ mod test {
     use assert_matches::assert_matches;
     use diagnostics_assertions::{AnyProperty, assert_data_tree};
     use fidl::endpoints::RequestStream as _;
+    use fidl_fuchsia_ui_input as fuiinput;
     use fidl_fuchsia_ui_input::MediaButtonsEvent;
     use fidl_fuchsia_ui_input3 as fuiinput3;
     use fidl_fuchsia_ui_pointer as fuipointer;
     use fidl_fuchsia_ui_policy as fuipolicy;
+    use fuchsia_async::DurationExt;
     use fuipointer::{
         EventPhase, TouchEvent, TouchInteractionId, TouchPointerSample, TouchSourceV2Marker,
     };
@@ -448,6 +525,37 @@ mod test {
         (media_buttons_listener, touch_buttons_listener)
     }
 
+    async fn init_device_listener(
+        device_listener_registry_stream: &mut fuiinput::DeviceListenerRegistryRequestStream,
+    ) -> (fuiinput::DeviceListenerProxy, fuiinput::DeviceIteratorRequestStream) {
+        let (device_iterator_client_end, device_iterator_stream) =
+            fidl::endpoints::create_request_stream::<fuiinput::DeviceIteratorMarker>();
+        let device_listener_proxy = match device_listener_registry_stream.next().await {
+            Some(Ok(fuiinput::DeviceListenerRegistryRequest::RegisterListener {
+                listener,
+                responder,
+            })) => {
+                let _ = responder.send(device_iterator_client_end);
+                listener.into_proxy()
+            }
+            _ => {
+                panic!("Failed to initialize device listener");
+            }
+        };
+        (device_listener_proxy, device_iterator_stream)
+    }
+
+    async fn drain_empty_device_iterator(
+        device_iterator_stream: &mut fuiinput::DeviceIteratorRequestStream,
+    ) {
+        match device_iterator_stream.next().await {
+            Some(Ok(fuiinput::DeviceIteratorRequest::GetNext { responder })) => {
+                responder.send(&[]).expect("failed to send empty batch");
+            }
+            _ => panic!("Failed to respond to existing devices iterator GetNext"),
+        }
+    }
+
     async fn start_touch_input_inspect_and_dimensions(
         current_task: &CurrentTask,
         x_max: i32,
@@ -493,6 +601,9 @@ mod test {
                 mouse_source_client_end,
                 view_ref: view_ref_pair.view_ref,
                 registry_proxy: device_registry_proxy,
+                device_listener_registry: None,
+                display_width: x_max,
+                display_height: y_max,
             },
         );
 
@@ -549,6 +660,9 @@ mod test {
                 mouse_source_client_end,
                 view_ref: view_ref_pair.view_ref,
                 registry_proxy: device_registry_proxy,
+                device_listener_registry: None,
+                display_width: 0,
+                display_height: 0,
             },
         );
 
@@ -603,6 +717,9 @@ mod test {
                 mouse_source_client_end,
                 view_ref: view_ref_pair.view_ref,
                 registry_proxy: device_registry_proxy,
+                device_listener_registry: None,
+                display_width: 0,
+                display_height: 0,
             },
         );
 
@@ -660,6 +777,9 @@ mod test {
                 mouse_source_client_end,
                 view_ref: view_ref_pair.view_ref,
                 registry_proxy: device_registry_proxy,
+                device_listener_registry: None,
+                display_width: 0,
+                display_height: 0,
             },
         );
 
@@ -2164,6 +2284,7 @@ mod test {
                 fidl::endpoints::create_sync_proxy_and_stream::<
                     fuipolicy::DeviceListenerRegistryMarker,
                 >();
+
             let (mut relay, _relay_handle) = input_event_relay::new_input_relay();
             relay.add_touch_device(
                 input_event_relay::DEFAULT_TOUCH_DEVICE_ID,
@@ -2179,6 +2300,9 @@ mod test {
                     mouse_source_client_end,
                     view_ref: view_ref_pair.view_ref,
                     registry_proxy: device_registry_proxy,
+                    device_listener_registry: None,
+                    display_width: 700,
+                    display_height: 700,
                 },
             );
 
@@ -2947,6 +3071,589 @@ mod test {
                     }
                 }
             });
+        })
+        .await;
+    }
+
+    async fn wait_for_device(kernel: &Kernel, devt: StarnixDeviceId, present: bool) {
+        while kernel.device_registry.get_device(devt, DeviceMode::Char).is_ok() != present {
+            fuchsia_async::Timer::new(
+                fuchsia_async::MonotonicDuration::from_millis(10).after_now(),
+            )
+            .await;
+        }
+    }
+
+    async fn wait_for_device_listener_registered(
+        inspector: &fuchsia_inspect::Inspector,
+        expected: bool,
+    ) {
+        loop {
+            let hierarchy = fuchsia_inspect::reader::read(inspector).await.unwrap();
+            if let Some(relay_node) = hierarchy.get_child("input_events_relay") {
+                if let Some(prop) = relay_node.get_property("device_listener_registered") {
+                    if prop.boolean() == Some(expected) {
+                        break;
+                    }
+                }
+            }
+            fuchsia_async::Timer::new(
+                fuchsia_async::MonotonicDuration::from_millis(10).after_now(),
+            )
+            .await;
+        }
+    }
+
+    async fn wait_for_num_devices(inspector: &fuchsia_inspect::Inspector, expected: u64) {
+        loop {
+            let hierarchy = fuchsia_inspect::reader::read(inspector).await.unwrap();
+            if let Some(relay_node) = hierarchy.get_child("input_events_relay") {
+                if let Some(prop) = relay_node.get_property("num_devices") {
+                    if prop.uint() == Some(expected) {
+                        break;
+                    }
+                }
+            }
+            fuchsia_async::Timer::new(
+                fuchsia_async::MonotonicDuration::from_millis(10).after_now(),
+            )
+            .await;
+        }
+    }
+
+    #[::fuchsia::test]
+    async fn test_dynamic_device_registration() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+
+            // 1. Create endpoints for all standard protocols
+            let (touch_source_client_end, _touch_source_stream) =
+                fidl::endpoints::create_request_stream::<TouchSourceV2Marker>();
+            let (mouse_source_client_end, _mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<fuiinput3::KeyboardMarker>();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            // 2. Create endpoints for the DeviceListenerRegistry protocol
+            let (device_listener_registry_proxy, mut device_listener_registry_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuiinput::DeviceListenerRegistryMarker,
+                >();
+
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            let (relay, relay_handle) = input_event_relay::new_input_relay();
+            let relay = relay.with_inspect_node(inspector.root());
+            relay.start_relays(
+                &kernel,
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: Some(device_listener_registry_proxy),
+                    display_width: 700,
+                    display_height: 700,
+                },
+            );
+
+            let _ = init_keyboard_listener(&mut keyboard_stream).await;
+            let _ = init_button_listeners(&mut device_listener_stream).await;
+            let (device_listener_proxy, mut device_iterator_stream) =
+                init_device_listener(&mut device_listener_registry_stream).await;
+            drain_empty_device_iterator(&mut device_iterator_stream).await;
+
+            // 4. Send an Action::Added event for a Touch device with pre-populated device_infos
+            let device_id = 42;
+            let prepopulated_input_id =
+                uapi::input_id { bustype: 25, vendor: 26, product: 27, version: 28 };
+            let prepopulated_name = "prepopulated_touch_device".to_string();
+            relay_handle.update_uinput_device(
+                device_id,
+                prepopulated_input_id,
+                prepopulated_name.clone(),
+            );
+
+            let descriptor = fuiinput::DeviceDescriptor {
+                touch: Some(fuiinput::TouchDescriptor::default()),
+                device_information: Some(fuiinput::DeviceInformation {
+                    product_name: Some("test_touch_device".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let event = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(device_id),
+                descriptor: Some(descriptor.clone()),
+                ..Default::default()
+            };
+
+            device_listener_proxy
+                .on_device_changed(&event)
+                .expect("Failed to send dynamic device Added event");
+
+            // 5. Wait for the device to be registered in the kernel's device registry (minor 0).
+            let touch_devt = StarnixDeviceId::new(INPUT_MAJOR, 0);
+            wait_for_device(kernel, touch_devt, true).await;
+
+            // Verify that register_and_add_device reused the pre-populated device_infos.
+            let info = relay_handle
+                .device_infos
+                .lock()
+                .get(&device_id)
+                .expect("device_info exists")
+                .clone();
+            assert_eq!(info.lock().input_id, prepopulated_input_id);
+            assert_eq!(info.lock().name, prepopulated_name);
+
+            // Test ConsumerControl (standalone buttons) registration
+            let buttons_device_id = 43;
+            let descriptor_buttons = fuiinput::DeviceDescriptor {
+                consumer_control: Some(fuiinput::ConsumerControlDescriptor::default()),
+                device_information: Some(fuiinput::DeviceInformation {
+                    product_name: Some("test_buttons_device".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let event_buttons = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(buttons_device_id),
+                descriptor: Some(descriptor_buttons.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_buttons)
+                .expect("Failed to send dynamic ConsumerControl device Added event");
+
+            let buttons_devt = StarnixDeviceId::new(INPUT_MAJOR, 1);
+            wait_for_device(kernel, buttons_devt, true).await;
+
+            // Test Keyboard dynamic registration
+            let keyboard_device_id = 44;
+            let descriptor_keyboard = fuiinput::DeviceDescriptor {
+                keyboard: Some(fuiinput::KeyboardDescriptor::default()),
+                device_information: Some(fuiinput::DeviceInformation {
+                    product_name: Some("test_keyboard_device".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let event_keyboard = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(keyboard_device_id),
+                descriptor: Some(descriptor_keyboard.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_keyboard)
+                .expect("Failed to send dynamic Keyboard device Added event");
+
+            let keyboard_devt = StarnixDeviceId::new(INPUT_MAJOR, 2);
+            wait_for_device(kernel, keyboard_devt, true).await;
+
+            // Test Mouse dynamic registration
+            let mouse_device_id = 45;
+            let descriptor_mouse = fuiinput::DeviceDescriptor {
+                mouse: Some(fuiinput::MouseDescriptor::default()),
+                device_information: Some(fuiinput::DeviceInformation {
+                    product_name: Some("test_mouse_device".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let event_mouse = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(mouse_device_id),
+                descriptor: Some(descriptor_mouse.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_mouse)
+                .expect("Failed to send dynamic Mouse device Added event");
+
+            let mouse_devt = StarnixDeviceId::new(INPUT_MAJOR, 3);
+            wait_for_device(kernel, mouse_devt, true).await;
+
+            wait_for_num_devices(&inspector, 4).await;
+            assert_data_tree!(inspector, root: contains {
+                input_events_relay: contains {
+                    num_devices: 4u64,
+                    device_listener_registered: true,
+                }
+            });
+
+            // 6. Send Action::Removed events
+            let event_removed = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Removed),
+                device_id: Some(device_id),
+                descriptor: Some(descriptor.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_removed)
+                .expect("Failed to send dynamic device Removed event");
+
+            // Wait for the touch device to be removed from the kernel's device registry
+            wait_for_device(kernel, touch_devt, false).await;
+            assert!(relay_handle.device_infos.lock().get(&device_id).is_none());
+
+            // Re-add a device to verify that the freed minor number (0) is recycled.
+            let replacement_device_id = 46;
+            let replacement_descriptor = fuiinput::DeviceDescriptor {
+                touch: Some(fuiinput::TouchDescriptor::default()),
+                device_information: Some(fuiinput::DeviceInformation {
+                    product_name: Some("test_replacement_touch_device".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let event_readd = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(replacement_device_id),
+                descriptor: Some(replacement_descriptor.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_readd)
+                .expect("Failed to send dynamic device Added event for replacement device");
+
+            // Verify minor 0 is recycled for the new device
+            wait_for_device(kernel, touch_devt, true).await;
+
+            // Remove the replacement device
+            let event_replacement_removed = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Removed),
+                device_id: Some(replacement_device_id),
+                descriptor: Some(replacement_descriptor.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_replacement_removed)
+                .expect("Failed to send dynamic device Removed event for replacement device");
+
+            wait_for_device(kernel, touch_devt, false).await;
+
+            // Remove Keyboard
+            let event_keyboard_removed = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Removed),
+                device_id: Some(keyboard_device_id),
+                descriptor: Some(descriptor_keyboard.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_keyboard_removed)
+                .expect("Failed to send dynamic Keyboard device Removed event");
+
+            wait_for_device(kernel, keyboard_devt, false).await;
+
+            // Remove Mouse
+            let event_mouse_removed = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Removed),
+                device_id: Some(mouse_device_id),
+                descriptor: Some(descriptor_mouse.clone()),
+                ..Default::default()
+            };
+            device_listener_proxy
+                .on_device_changed(&event_mouse_removed)
+                .expect("Failed to send dynamic Mouse device Removed event");
+
+            wait_for_device(kernel, mouse_devt, false).await;
+
+            wait_for_num_devices(&inspector, 1).await;
+            assert_data_tree!(inspector, root: contains {
+                input_events_relay: contains {
+                    num_devices: 1u64,
+                    device_listener_registered: true,
+                }
+            });
+
+            // Dropping the listener proxy closes the peer channel, which should cause the relay
+            // to mark device_listener_registered as false.
+            drop(device_listener_proxy);
+            wait_for_device_listener_registered(&inspector, false).await;
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_existing_devices_iterator() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+
+            // 1. Create endpoints for all standard protocols
+            let (touch_source_client_end, _touch_source_stream) =
+                fidl::endpoints::create_request_stream::<TouchSourceV2Marker>();
+            let (mouse_source_client_end, _mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<fuiinput3::KeyboardMarker>();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            // 2. Create endpoints for DeviceListenerRegistry protocol
+            let (device_listener_registry_proxy, mut device_listener_registry_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuiinput::DeviceListenerRegistryMarker,
+                >();
+
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            // 3. Start the relays with existing_devices_iterator
+            let (relay, _relay_handle) = input_event_relay::new_input_relay();
+            let relay = relay.with_inspect_node(inspector.root());
+            relay.start_relays(
+                &kernel,
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: Some(device_listener_registry_proxy),
+                    display_width: 700,
+                    display_height: 700,
+                },
+            );
+
+            // Respond to initial listener setup
+            let _ = init_keyboard_listener(&mut keyboard_stream).await;
+            let _ = init_button_listeners(&mut device_listener_stream).await;
+            let (_device_listener_proxy, mut device_iterator_stream) =
+                init_device_listener(&mut device_listener_registry_stream).await;
+
+            // 4. Serve the existing devices iterator:
+            // First batch yields a touch device and a keyboard device with Action::Added.
+            let touch_event = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(10),
+                descriptor: Some(fuiinput::DeviceDescriptor {
+                    touch: Some(fuiinput::TouchDescriptor::default()),
+                    device_information: Some(fuiinput::DeviceInformation {
+                        product_name: Some("existing_touch_device".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let keyboard_event = fuiinput::DeviceEvent {
+                action: Some(fuiinput::Action::Added),
+                device_id: Some(11),
+                descriptor: Some(fuiinput::DeviceDescriptor {
+                    keyboard: Some(fuiinput::KeyboardDescriptor::default()),
+                    device_information: Some(fuiinput::DeviceInformation {
+                        product_name: Some("existing_keyboard_device".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            match device_iterator_stream.next().await {
+                Some(Ok(fuiinput::DeviceIteratorRequest::GetNext { responder })) => {
+                    responder
+                        .send(&[touch_event, keyboard_event])
+                        .expect("failed to send first batch");
+                }
+                other => panic!("Unexpected request on DeviceIterator: {:?}", other),
+            }
+
+            // Second batch yields an empty list to indicate completion.
+            match device_iterator_stream.next().await {
+                Some(Ok(fuiinput::DeviceIteratorRequest::GetNext { responder })) => {
+                    responder.send(&[]).expect("failed to send empty batch");
+                }
+                other => panic!("Unexpected request on DeviceIterator: {:?}", other),
+            }
+
+            // 5. Verify the devices are registered in kernel.device_registry at startup.
+            let touch_devt = StarnixDeviceId::new(INPUT_MAJOR, 0);
+            wait_for_device(kernel, touch_devt, true).await;
+
+            let keyboard_devt = StarnixDeviceId::new(INPUT_MAJOR, 1);
+            wait_for_device(kernel, keyboard_devt, true).await;
+
+            wait_for_num_devices(&inspector, 2).await;
+            assert_data_tree!(inspector, root: contains {
+                input_events_relay: contains {
+                    num_devices: 2u64,
+                    device_listener_registered: true,
+                }
+            });
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_dynamic_device_registration_failure() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+
+            // 1. Create endpoints for all standard protocols
+            let (touch_source_client_end, _touch_source_stream) =
+                fidl::endpoints::create_request_stream::<TouchSourceV2Marker>();
+            let (mouse_source_client_end, _mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<fuiinput3::KeyboardMarker>();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            // 2. Create endpoints for DeviceListenerRegistry and immediately drop server
+            // to simulate registration failure (peer closed).
+            let (device_listener_registry_proxy, device_listener_registry_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuiinput::DeviceListenerRegistryMarker,
+                >();
+            drop(device_listener_registry_stream);
+
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            // 3. Start the relays
+            let (relay, _relay_handle) = input_event_relay::new_input_relay();
+            let relay = relay.with_inspect_node(inspector.root());
+            relay.start_relays(
+                &kernel,
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: Some(device_listener_registry_proxy),
+                    display_width: 700,
+                    display_height: 700,
+                },
+            );
+
+            let keyboard_listener = init_keyboard_listener(&mut keyboard_stream).await;
+            let _ = init_button_listeners(&mut device_listener_stream).await;
+
+            // Synchronize with the relay thread by awaiting a two-way key event.
+            // Because keyboard events are only handled inside the event loop after registration
+            // has finished, this guarantees registration has completed.
+            let key_event = fuiinput3::KeyEvent {
+                timestamp: Some(0),
+                type_: Some(fuiinput3::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::A),
+                ..Default::default()
+            };
+            let _ = keyboard_listener.on_key_event(&key_event).await;
+
+            wait_for_device_listener_registered(&inspector, false).await;
+
+            assert_data_tree!(inspector, root: contains {
+                input_events_relay: contains {
+                    num_devices: 0u64,
+                    device_listener_registered: false,
+                }
+            });
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn register_nests_event_device_under_input_device() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+            let inspector = fuchsia_inspect::Inspector::default();
+            let info = InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_buttons".to_string());
+            let keyboard_device =
+                InputDevice::new_keyboard(info.clone(), "keyboard_device", &inspector.root());
+
+            let event_device =
+                keyboard_device.register(kernel, 7).expect("failed to register input device");
+            assert_eq!(event_device.name(), "event7");
+            assert_eq!(event_device.parent().map(|parent| parent.name()), Some("input7".into()));
+
+            let root = &kernel.device_registry.objects.root;
+            for path in [
+                "devices/virtual/input/input7/uevent",
+                "devices/virtual/input/input7/event7/dev",
+                "devices/virtual/input/input7/event7/uevent",
+                "class/input/input7",
+                "class/input/event7",
+                "dev/char/13:7",
+            ] {
+                assert!(root.lookup(path.into()).is_some(), "missing {path}");
+            }
+
+            let read_attr = |path: &str| -> String {
+                let node = root.lookup(path.into()).unwrap_or_else(|| panic!("missing {path}"));
+                let file_ops =
+                    node.create_file_ops(&current_task, OpenFlags::RDONLY).expect("open attr");
+                let file = starnix_core::testing::anon_test_file(
+                    &current_task,
+                    file_ops,
+                    OpenFlags::RDONLY,
+                );
+                let mut buf = VecOutputBuffer::new(64);
+                let bytes_read = file.read(&current_task, &mut buf).expect("read attr");
+                String::from_utf8(Vec::from(&buf.data()[..bytes_read])).expect("utf8 attr")
+            };
+            assert_eq!(read_attr("devices/virtual/input/input7/name"), "starnix_buttons\n");
+            assert_eq!(
+                read_attr("devices/virtual/input/input7/id/bustype"),
+                format!("{:04x}\n", KEYBOARD_INPUT_ID.bustype)
+            );
+            assert_eq!(
+                read_attr("devices/virtual/input/input7/id/vendor"),
+                format!("{:04x}\n", KEYBOARD_INPUT_ID.vendor)
+            );
+            assert_eq!(
+                read_attr("devices/virtual/input/input7/id/product"),
+                format!("{:04x}\n", KEYBOARD_INPUT_ID.product)
+            );
+            assert_eq!(
+                read_attr("devices/virtual/input/input7/id/version"),
+                format!("{:04x}\n", KEYBOARD_INPUT_ID.version)
+            );
+
+            // Dynamic metadata updates (as performed by uinput) must be reflected in sysfs.
+            *info.lock() = InputDeviceInfo {
+                input_id: input_id { bustype: 0x0003, vendor: 0x1234, product: 0x5678, version: 9 },
+                name: "custom_uinput".to_string(),
+            };
+            assert_eq!(read_attr("devices/virtual/input/input7/name"), "custom_uinput\n");
+            assert_eq!(read_attr("devices/virtual/input/input7/id/bustype"), "0003\n");
+            assert_eq!(read_attr("devices/virtual/input/input7/id/vendor"), "1234\n");
+            assert_eq!(read_attr("devices/virtual/input/input7/id/product"), "5678\n");
+            assert_eq!(read_attr("devices/virtual/input/input7/id/version"), "0009\n");
+
+            // Same-class children are created directly within their parent, without an
+            // intermediate class directory.
+            assert!(root.lookup("devices/virtual/input/input7/input".into()).is_none());
+
+            InputDevice::unregister(&current_task, event_device);
+            for path in [
+                "devices/virtual/input/input7",
+                "class/input/input7",
+                "class/input/event7",
+                "dev/char/13:7",
+            ] {
+                assert!(root.lookup(path.into()).is_none(), "unexpected {path}");
+            }
         })
         .await;
     }

@@ -189,6 +189,10 @@
                                         "normperfs_per_ghz": {
                                             "type": "number",
                                             "minimum": 0
+                                        },
+                                        "boost_opp": {
+                                            "type": "integer",
+                                            "minimum": 0
                                         }
                                     }
                                 },

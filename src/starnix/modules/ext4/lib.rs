@@ -12,8 +12,8 @@ use starnix_core::mm::ProtectionFlags;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::task::CurrentTask;
 use starnix_core::vfs::{
-    CacheMode, DEFAULT_BYTES_PER_BLOCK, DirectoryEntryType, DirentSink, FileObject, FileOps,
-    FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeFlags,
+    CacheMode, DEFAULT_BYTES_PER_BLOCK, DirEntry, DirectoryEntryType, DirentSink, FileObject,
+    FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeFlags,
     FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, MemoryRegularFile, SeekTarget,
     SymlinkTarget, XattrOp, XattrStorage, default_seek, fileops_impl_directory,
     fileops_impl_noop_sync, fs_node_impl_dir_readonly, fs_node_impl_not_dir, fs_node_impl_symlink,
@@ -145,11 +145,11 @@ impl FsNodeOps for ExtDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let fs = node.fs();
+        let fs = entry.node.fs();
         let fs_ops = fs.downcast_ops::<ExtFilesystem>().unwrap();
         let dir_entries =
             fs_ops.parser.entries_from_inode(&self.inner.inode).map_err(|e| errno!(EIO, e))?;

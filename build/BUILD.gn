@@ -2,12 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel2gn_verification_targets.gni")
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 import("//build/testing/host_test_data.gni")
 import("//build/testing/python_build_time_tests.gni")
-import("//sdk/fidl/bazel2gn_verification_targets.gni")
 import("//sdk/lib/c/include/libc_headers.gni")
 
 group("build") {
@@ -21,7 +20,7 @@ group("tests") {
   testonly = true
 
   deps = [
-    ":bazel2gn_verifications($host_toolchain)",
+    ":bazel_host_tests",
     ":build_tests_json_tests($host_toolchain)",
     ":regenerator_tests($host_toolchain)",
     ":target_metadata_test($host_toolchain)",
@@ -39,6 +38,7 @@ group("tests") {
     "go:tests",
     "licenses:tests",
     "packages:tests",
+    "prebuilt:tests",
     "profile:tests",
     "python:tests($host_toolchain)",
     "rbe:tests",
@@ -51,30 +51,8 @@ group("tests") {
   ]
 }
 
-# Collect a list of directories with bazel2gn synced GN and Bazel build files
-# for `fx bazel2gn`.
-generated_file("bazel2gn_dir_list") {
-  testonly = true
-  outputs = [ "${root_out_dir}/bazel2gn_dir_list" ]
-  data_keys = [ "bazel2gn_dir" ]
-  deps = [ ":bazel2gn_verifications(${host_toolchain})" ]
-}
-
-if (is_host) {
-  group("bazel2gn_verifications") {
-    testonly = true
-    deps = []
-
-    # `fidl_bazel2gn_verification_targets` from
-    # `//sdk/fidl/bazel2gn_verification_targets.gni` contains all bazel2gn
-    # verification targets under `//sdk/fidl`.
-    deps += fidl_bazel2gn_verification_targets
-
-    # `bazel2gn_verification_targets` from
-    # `//build/bazel2gn_verification_targets.gni` contains all other bazel2gn
-    # verification targets.
-    deps += bazel2gn_verification_targets
-  }
+bazel_test_suite("bazel_host_tests") {
+  host_tests = [ "//build:host_tests" ]
 }
 
 if (is_host) {
@@ -141,6 +119,7 @@ if (is_host) {
       "bazel/rules/host_tests/tests/py/test_with_py_library.py",
       "bazel/rules/host_tests/tests/py/test_with_unittests.py",
       "bazel/update-rustc-third-party/remove_incorrect_aliases.py",
+      "beads/.agent/skills/analyzing_migration_dag/scripts/analyze_migration_dag.py",
       "check_product_bundles_manifest.py",
       "config/clang/generate_config_json.py",
       "config/fuchsia/get_platform_version.py",

@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_debug")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "storage_xts",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    # Default optimizations are for size, but that has a noticeable impact on
+    # speed.
+    rustc_flags = [] if is_debug else [
+        "-Copt-level=3",
+    ],  # @bazel2gn:raw_overwrite:[] if (!is_debug) { configs -= [ "//build/config:default_optimize" ] configs += [ "//build/config:optimize_speed", "//build/config/lto:lto-if-compatible" ] }
+    test_deps = ["//third_party/rust_crates/vendor:test-case"],
+    visibility = [
+        "//src/storage/fvm:__pkg__",
+        "//src/storage/fxfs/crypto:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    with_host_unit_tests = True,
+    deps = [
+        "//src/storage/lib/ptr_slice",
+        "//third_party/rust_crates/vendor:cipher",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

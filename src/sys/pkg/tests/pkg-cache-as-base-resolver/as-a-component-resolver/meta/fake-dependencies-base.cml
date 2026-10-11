@@ -28,6 +28,14 @@
             path: "/fxfs-svc/fuchsia.fxfs.BlobReader",
         },
         {
+            protocol: "fuchsia.storage.block.Mapper",
+            path: "/fxfs-svc/fuchsia.storage.block.Mapper",
+        },
+        {
+            protocol: "fuchsia.storage.mapping.MappingProvider",
+            path: "/fxfs-svc/fuchsia.storage.mapping.MappingProvider",
+        },
+        {
             dictionary: "boot_args",
             path: "/svc/fuchsia.component.sandbox.DictionaryRouter",
         },
@@ -58,11 +66,12 @@
             from: "self",
         },
         {
-            protocol: "fuchsia.fxfs.BlobCreator",
-            from: "self",
-        },
-        {
-            protocol: "fuchsia.fxfs.BlobReader",
+            protocol: [
+                "fuchsia.fxfs.BlobCreator",
+                "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
+            ],
             from: "self",
         },
         {

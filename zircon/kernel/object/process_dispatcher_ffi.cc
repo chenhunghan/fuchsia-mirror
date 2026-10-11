@@ -109,22 +109,9 @@ FFI_ALWAYS_INLINE zx_status_t cpp_process_dispatcher_make_and_add_handle_from_re
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_handle_table_get_dispatcher(
-    zx_handle_t handle, ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_disp,
-    zx_rights_t* out_rights) {
-  auto up = ProcessDispatcher::GetCurrent();
-  fbl::RefPtr<Dispatcher> disp;
-  zx_status_t status = up->handle_table().GetDispatcherAndRights(*up, handle, &disp, out_rights);
-  if (status == ZX_OK) {
-    out_disp->Initialize(ktl::move(disp));
-  }
-  return status;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_remove_handle(ProcessDispatcher* process,
-                                                               zx_handle_t handle_value) {
-  return process->handle_table().RemoveHandle(*process, handle_value).release();
+FFI_ALWAYS_INLINE const HandleTable* cpp_process_dispatcher_handle_table(
+    const ProcessDispatcher* process) {
+  return &process->handle_table();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -143,64 +130,6 @@ cpp_process_dispatcher_get_timer_slack_policy_amount(const ProcessDispatcher* pr
 FFI_ALWAYS_INLINE void cpp_process_dispatcher_get_timer_slack_policy(
     const ProcessDispatcher* process, TimerSlack* out_slack) {
   *out_slack = process->GetTimerSlackPolicy();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void* cpp_process_dispatcher_handle_table_lock(const ProcessDispatcher* process) {
-  return process->handle_table().get_lock();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_get_handle_locked(
-    ProcessDispatcher* process, zx_handle_t handle_value) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return process->handle_table().GetHandleLocked(*process, handle_value);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_handle_t cpp_process_dispatcher_handle_table_map_handle_to_value(
-    const ProcessDispatcher* process, const Handle* handle) {
-  return process->handle_table().MapHandleToValue(handle);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_process_dispatcher_handle_table_add_handle_locked(
-    ProcessDispatcher* process, Handle* handle) TA_NO_THREAD_SAFETY_ANALYSIS {
-  process->handle_table().AddHandleLocked(HandleOwner(handle));
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_remove_handle_locked(
-    ProcessDispatcher* process, zx_handle_t handle_value) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return process->handle_table().RemoveHandleLocked(*process, handle_value).release();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Handle* cpp_process_dispatcher_handle_table_remove_handle_ptr_locked(
-    ProcessDispatcher* process, Handle* handle) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return process->handle_table().RemoveHandleLocked(handle).release();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_koid_t
-cpp_process_dispatcher_handle_table_koid(const ProcessDispatcher* process) {
-  return process->handle_table().get_koid();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_process_dispatcher_get_dispatcher_with_rights(
-    ProcessDispatcher* process, zx_handle_t handle_value, zx_obj_type_t type, zx_rights_t rights,
-    ffi::Uninitialized<fbl::RefPtr<Dispatcher>>* out_disp) {
-  fbl::RefPtr<Dispatcher> disp;
-  zx_status_t status =
-      process->handle_table().GetDispatcherWithRights(*process, handle_value, rights, &disp);
-  if (unlikely(status != ZX_OK)) {
-    return status;
-  }
-  if (unlikely(disp->get_type() != type)) {
-    return ZX_ERR_WRONG_TYPE;
-  }
-  out_disp->Initialize(ktl::move(disp));
-  return ZX_OK;
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -317,6 +246,17 @@ FFI_ALWAYS_INLINE zx_status_t cpp_process_add_initialized_thread(ProcessDispatch
 FFI_ALWAYS_INLINE void cpp_process_remove_thread(ProcessDispatcher* process,
                                                  ThreadDispatcher* thread) {
   process->RemoveThread(thread);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Exceptionate* cpp_process_dispatcher_exceptionate(ProcessDispatcher* process) {
+  return process->exceptionate();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Exceptionate* cpp_process_dispatcher_debug_exceptionate(
+    ProcessDispatcher* process) {
+  return process->debug_exceptionate();
 }
 
 }  // extern "C"

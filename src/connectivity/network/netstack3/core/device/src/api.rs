@@ -10,8 +10,8 @@ use core::marker::PhantomData;
 use log::debug;
 use net_types::ip::{Ipv4, Ipv6};
 use netstack3_base::{
-    AnyDevice, ContextPair, CoreTimerContext, Device, DeviceIdAnyCompatContext, DeviceIdContext,
-    Inspector, RecvFrameContext, ReferenceNotifiers, ReferenceNotifiersExt as _,
+    AnyDevice, ContextPair, CoreTimerContext, CounterContext, Device, DeviceIdAnyCompatContext,
+    DeviceIdContext, Inspector, RecvFrameContext, ReferenceNotifiers, ReferenceNotifiersExt as _,
     RemoveResourceResultWithContext, ResourceCounterContext, TimerContext,
 };
 use netstack3_ip::device::{
@@ -34,6 +34,7 @@ use crate::internal::config::{
     NdpConfigurationUpdate,
 };
 use crate::internal::ethernet::EthernetLinkDevice;
+use crate::internal::gro::GroCounters;
 use crate::internal::id::{
     BaseDeviceId, BasePrimaryDeviceId, BaseWeakDeviceId, DeviceId, DeviceProvider,
     for_any_device_id,
@@ -459,6 +460,12 @@ where
         for_any_device_id!(DeviceId, DeviceProvider, D, device,
             device => self.device::<D>().inspect(device, inspector))
     }
+
+    /// Gets the stack-wide GRO counters.
+    pub fn gro_counters(&mut self) -> &GroCounters {
+        let Self(ctx) = self;
+        CounterContext::<GroCounters>::counters(ctx.core_ctx())
+    }
 }
 
 /// A marker trait for all the core context traits required to fulfill the
@@ -478,6 +485,7 @@ pub trait DeviceApiCoreContext<
     + ResourceCounterContext<Self::DeviceId, IpCounters<Ipv6>>
     + ResourceCounterContext<Self::DeviceId, IgmpCounters>
     + ResourceCounterContext<Self::DeviceId, MldCounters>
+    + CounterContext<GroCounters>
     + CoreTimerContext<D::TimerId<Self::WeakDeviceId>, BC>
     + DeviceTxOffloadSpecContext<D, BC>
 {
@@ -498,6 +506,7 @@ where
         + ResourceCounterContext<Self::DeviceId, IpCounters<Ipv6>>
         + ResourceCounterContext<Self::DeviceId, IgmpCounters>
         + ResourceCounterContext<Self::DeviceId, MldCounters>
+        + CounterContext<GroCounters>
         + CoreTimerContext<D::TimerId<Self::WeakDeviceId>, BC>
         + DeviceTxOffloadSpecContext<D, BC>,
 {

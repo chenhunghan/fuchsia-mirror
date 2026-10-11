@@ -317,27 +317,6 @@
                 ],
             },
             {
-                // We restrict access to PackageResolver because it gives direct access to package
-                // handles which provide executability which bypass VX security policy.
-                source_moniker: "/core/pkg-resolver",
-                source: "component",
-                source_name: "fuchsia.pkg.PackageResolver",
-                capability: "protocol",
-                target_monikers: [
-                    "/bootstrap",
-                    "/bootstrap/console-launcher",
-                    "/bootstrap/full_resolver",
-                    "/bootstrap/netsvc",
-                    "/toolbox",
-
-                    // debug-dash-launcher is used in engineering builds to launch
-                    // dash shells. It uses PackageResolver to add tool package directories
-                    // into the dash environment.
-                    "/core/debug-dash-launcher",
-                    "/core/process_resolver",
-                ],
-            },
-            {
                 // We restrict access to ProcessResolver because it is a deprecated protocol
                 // that allows resolving binaries from universe packages.
                 source_moniker: "/core/process_resolver",
@@ -366,30 +345,6 @@
                 ],
             },
             {
-                // We restrict access to PackageResolver because it gives direct access to
-                // executable package handles.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "fuchsia.pkg.PackageResolver-base",
-                capability: "protocol",
-                target_monikers: [
-                    "/core/debug-dash-launcher",
-                    "/core/process_resolver",
-                ],
-            },
-            {
-                // We restrict access to component.resolution.Resolver because it gives direct
-                // access to executable package handles.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "fuchsia.component.resolution.Resolver-base",
-                capability: "protocol",
-                target_monikers: [
-                    "/bootstrap/driver_index",
-                    "/core/full-resolver",
-                ],
-            },
-            {
                 // We restrict access to component.resolution.Resolver because it gives direct
                 // access to executable package handles.
                 source_moniker: "/bootstrap/full_resolver",
@@ -398,117 +353,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/bootstrap/driver_index",
-                ],
-            },
-            {
-                // We restrict access to PackageCache because it gives direct access to package
-                // handles which provide executability which bypass VX security policy.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "fuchsia.pkg.PackageCache",
-                capability: "protocol",
-                target_monikers: [
-                    "/core/pkg-resolver",
-                    "/toolbox",
-                    "/core/system-update/system-updater",
-                ],
-            },
-            {
-                // We restrict access to RetainedPackages because it gives callers the ability
-                // to override certain package garbage collection behavior intended to only be
-                // used by the system updater.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "fuchsia.pkg.RetainedPackages",
-                capability: "protocol",
-                target_monikers: [
-                    "/core/system-update/system-updater",
-                ],
-            },
-            {
-                // We restrict access to PackageCache because it gives direct access to executable
-                // binaries.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "bin",
-                capability: "directory",
-                target_monikers: [
-                    "/bootstrap/console-launcher",
-                    "/toolbox",
-                ],
-            },
-            {
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "build-info",
-                capability: "directory",
-                target_monikers: [
-                    "/core/build-info",
-                    "/core/feedback",
-                    "/toolbox",
-                    "/core/system-update/omaha-client-service",
-                    "/core/system-update/system-update-checker",
-                    "/core/system-update/system-updater",
-
-                    // TODO(crbug.com/1326674): Is this still needed for one
-                    // or both realms?
-                    // TODO(https://fxbug.dev/42173552): Once we can define test realms out of tree
-                    // we should remove this.
-                    "/core/test_manager/chromium-system-tests:**",
-                    "/core/test_manager/chromium-tests:**",
-                    "/core/testing/chromium-tests:**",
-                ],
-            },
-            {
-                // We restrict access to pkgfs because it gives direct access to executable package
-                // handles.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "pkgfs",
-                capability: "directory",
-                target_monikers: [
-                    "/bootstrap/console-launcher",
-                    "/toolbox",
-                ],
-            },
-            {
-                // We restrict access to pkgfs-packages because it gives direct access to
-                // executable package handles.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "pkgfs-packages",
-                capability: "directory",
-                target_monikers: [],
-            },
-            {
-                // We restrict access to system because it gives direct access to executable
-                // binaries.
-                source_moniker: "/bootstrap/pkg-cache",
-                source: "component",
-                source_name: "system",
-                capability: "directory",
-                target_monikers: [
-                    "/bootstrap",
-                    "/bootstrap/console-launcher",
-                    "/bootstrap/driver_manager",
-                    "/toolbox",
-                    "/core/system-update/omaha-client-service",
-                    "/core/system-update/system-update-checker",
-                    "/core/system-update/system-updater",
-                ],
-            },
-
-            // Only route Component resolver to test manager and system tests.
-            // TODO(https://fxbug.dev/42167477): Remove this once we have facet API
-            {
-                source_moniker: "/core/full-resolver",
-                source: "component",
-                source_name: "fuchsia.component.resolution.Resolver",
-                capability: "protocol",
-                target_monikers: [
-                    "/core/test_manager",
-                    "/core/testing/test-arch-tests:**",
-                    "/core/full-resolver",
                 ],
             },
             {

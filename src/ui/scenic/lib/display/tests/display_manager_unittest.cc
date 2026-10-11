@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
 #include <fidl/fuchsia.images2/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input.internal/cpp/fidl.h>
 #include <lib/async-testing/test_loop.h>
 #include <lib/async/default.h>
 #include <lib/async/time.h>
@@ -18,11 +19,14 @@
 
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
 #include "src/ui/scenic/lib/display/tests/mock_display_coordinator.h"
+#include "src/ui/scenic/lib/utils/helpers.h"
 #include "src/ui/scenic/lib/utils/range_inclusive.h"
 
 namespace display::test {
 
 namespace {
+
+using fuchsia_ui_input_internal::InputOwnershipSignal;
 
 constexpr uint32_t kMaxDisplayLayersCount = 2;
 
@@ -581,6 +585,182 @@ TEST(DisplayManager, DisplayModeConstraintsOverriddenByModeIndex) {
   EXPECT_EQ(default_display->height_in_px(), kModeOverridden.active_area.height);
   EXPECT_EQ(default_display->maximum_refresh_rate_in_millihertz(),
             kModeOverridden.refresh_rate_millihertz);
+}
+
+bool IsSignalled(const zx::event& event, InputOwnershipSignal signal) {
+  return utils::IsEventSignalled(event, static_cast<uint32_t>(signal));
+}
+
+void ExpectOwnershipSignals(const zx::event& event, InputOwnershipSignal expected) {
+  EXPECT_EQ(IsSignalled(event, InputOwnershipSignal::kDisplayUnowned),
+            static_cast<bool>(expected & InputOwnershipSignal::kDisplayUnowned));
+  EXPECT_EQ(IsSignalled(event, InputOwnershipSignal::kDisplayPlatformOwned),
+            static_cast<bool>(expected & InputOwnershipSignal::kDisplayPlatformOwned));
+  EXPECT_EQ(IsSignalled(event, InputOwnershipSignal::kInputClientOwned),
+            static_cast<bool>(expected & InputOwnershipSignal::kInputClientOwned));
+  EXPECT_EQ(IsSignalled(event, InputOwnershipSignal::kInputPlatformOwned),
+            static_cast<bool>(expected & InputOwnershipSignal::kInputPlatformOwned));
+}
+
+TEST_F(DisplayManagerMockTest, InitialOwnershipSignals) {
+  const display::WireDisplayId kDisplayId = {.value = 1};
+  Display test_display(kDisplayId, 1024, 768, kMaxDisplayLayersCount);
+
+  // `ownership_event` should be initialized with `DISPLAY_UNOWNED | INPUT_PLATFORM_OWNED`.
+  ExpectOwnershipSignals(
+      test_display.ownership_event(),
+      InputOwnershipSignal::kDisplayUnowned | InputOwnershipSignal::kInputPlatformOwned);
+}
+
+TEST_F(DisplayManagerMockTest, ClientOwnershipChangeUpdatesDisplaySignals) {
+  const display::WireDisplayId kDisplayId = {.value = 1};
+  auto [coordinator_client, coordinator_server] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+
+  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
+                                                   std::move(listener_server));
+
+  display_manager()->SetDefaultDisplayForTests(
+      std::make_shared<Display>(kDisplayId, 1024, 768, kMaxDisplayLayersCount));
+
+  MockDisplayCoordinator mock_display_coordinator(WireDisplayInfo{});
+  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client));
+
+  // Initial state before ownership is granted.
+  ExpectOwnershipSignals(
+      display()->ownership_event(),
+      InputOwnershipSignal::kDisplayUnowned | InputOwnershipSignal::kInputPlatformOwned);
+
+  // Grant display ownership.
+  fidl::OneWayStatus result =
+      mock_display_coordinator.listener().sync()->OnClientOwnershipChange(true);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  // `DISPLAY_UNOWNED` cleared, `DISPLAY_PLATFORM_OWNED` set, `INPUT_PLATFORM_OWNED` preserved.
+  ExpectOwnershipSignals(
+      display()->ownership_event(),
+      InputOwnershipSignal::kDisplayPlatformOwned | InputOwnershipSignal::kInputPlatformOwned);
+
+  // Revoke display ownership (e.g. switch to Virtcon).
+  result = mock_display_coordinator.listener().sync()->OnClientOwnershipChange(false);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  // `DISPLAY_PLATFORM_OWNED` cleared, `DISPLAY_UNOWNED` set, `INPUT_PLATFORM_OWNED` preserved.
+  ExpectOwnershipSignals(
+      display()->ownership_event(),
+      InputOwnershipSignal::kDisplayUnowned | InputOwnershipSignal::kInputPlatformOwned);
+}
+
+TEST_F(DisplayManagerMockTest, ClientOwnershipChangePreservesClientInputOwnershipBits) {
+  const display::WireDisplayId kDisplayId = {.value = 1};
+  auto [coordinator_client, coordinator_server] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+
+  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
+                                                   std::move(listener_server));
+
+  display_manager()->SetDefaultDisplayForTests(
+      std::make_shared<Display>(kDisplayId, 1024, 768, kMaxDisplayLayersCount));
+
+  MockDisplayCoordinator mock_display_coordinator(WireDisplayInfo{});
+  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client));
+
+  // Grant display ownership.
+  fidl::OneWayStatus result =
+      mock_display_coordinator.listener().sync()->OnClientOwnershipChange(true);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  ExpectOwnershipSignals(
+      display()->ownership_event(),
+      InputOwnershipSignal::kDisplayPlatformOwned | InputOwnershipSignal::kInputPlatformOwned);
+
+  // Simulate `ViewTree` transferring input ownership to client (assert `INPUT_CLIENT_OWNED`, clear
+  // `INPUT_PLATFORM_OWNED`).
+  display()->ownership_event().signal(
+      static_cast<uint32_t>(InputOwnershipSignal::kInputPlatformOwned),
+      static_cast<uint32_t>(InputOwnershipSignal::kInputClientOwned));
+
+  ExpectOwnershipSignals(display()->ownership_event(), InputOwnershipSignal::kDisplayPlatformOwned |
+                                                           InputOwnershipSignal::kInputClientOwned);
+
+  // Lost display ownership to Virtcon.
+  result = mock_display_coordinator.listener().sync()->OnClientOwnershipChange(false);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  // `DISPLAY_UNOWNED` set, `DISPLAY_PLATFORM_OWNED` cleared.
+  // Crucially, `INPUT_CLIENT_OWNED` (ZX_USER_SIGNAL_3) must be preserved!
+  ExpectOwnershipSignals(display()->ownership_event(), InputOwnershipSignal::kDisplayUnowned |
+                                                           InputOwnershipSignal::kInputClientOwned);
+
+  // Regain display ownership from Virtcon.
+  result = mock_display_coordinator.listener().sync()->OnClientOwnershipChange(true);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  // `DISPLAY_PLATFORM_OWNED` restored, `INPUT_CLIENT_OWNED` still preserved (auto-resumed direct
+  // input).
+  ExpectOwnershipSignals(display()->ownership_event(), InputOwnershipSignal::kDisplayPlatformOwned |
+                                                           InputOwnershipSignal::kInputClientOwned);
+}
+
+TEST_F(DisplayManagerMockTest, DisplayAddedAfterOwnershipAlreadyAcquired) {
+  static const display::WireDisplayId kDisplayId = {.value = 1};
+  static const WireDisplayMode kMode = {
+      .active_area = {.width = 1024, .height = 768},
+      .refresh_rate_millihertz = 60'000,
+  };
+  std::vector<WireDisplayMode> modes = {kMode};
+  auto pixel_format = fuchsia_images2::wire::PixelFormat::kR8G8B8A8;
+  const WireDisplayInfo kDisplayInfo = {
+      .id = kDisplayId,
+      .modes = fidl::VectorView<WireDisplayMode>::FromExternal(modes),
+      .pixel_format =
+          fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(&pixel_format, 1),
+      .manufacturer_name = "manufacturer",
+      .monitor_name = "model",
+      .monitor_serial = "0001",
+      .horizontal_size_mm = 120,
+      .vertical_size_mm = 100,
+      .using_fallback_size = false,
+      .max_layer_count = kMaxDisplayLayersCount,
+  };
+
+  auto [coordinator_client, coordinator_server] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+
+  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
+                                                   std::move(listener_server));
+
+  MockDisplayCoordinator mock_display_coordinator(kDisplayInfo);
+  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client));
+
+  // Gain ownership before any display is added.
+  fidl::OneWayStatus result =
+      mock_display_coordinator.listener().sync()->OnClientOwnershipChange(true);
+  ASSERT_TRUE(result.ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(display_manager()->default_display(), nullptr);
+
+  // Now display is added.
+  mock_display_coordinator.SendOnDisplayChangedRequest();
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  // Default display should now exist and reflect that ownership was already granted.
+  const Display* default_display = display_manager()->default_display();
+  ASSERT_NE(default_display, nullptr);
+  ExpectOwnershipSignals(
+      default_display->ownership_event(),
+      InputOwnershipSignal::kDisplayPlatformOwned | InputOwnershipSignal::kInputPlatformOwned);
 }
 
 }  // namespace

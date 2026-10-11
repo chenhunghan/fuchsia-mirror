@@ -11,7 +11,7 @@
 
 use crate::commands::{LibraryCommand, ReadResponse};
 use crate::compat::FcTransportStatus;
-use crate::env_context::{EnvContext, FfxConfigEntry};
+use crate::env_context::EnvContext;
 use crate::ext_buffer::ExtBuffer;
 use crate::lib_context::LibContext;
 use std::ffi::CStr;
@@ -39,13 +39,6 @@ pub unsafe extern "C" fn create_ffx_lib_context(ctx: *mut *const LibContext) {
     unsafe { *ctx = ptr };
 }
 
-#[derive(Debug)]
-#[repr(C)]
-pub struct FfxExternalConfigEntry {
-    pub key: *const i8,
-    pub value: *const i8,
-}
-
 unsafe fn get_arc<T>(ptr: *const T) -> Arc<T> {
     unsafe { Arc::increment_strong_count(ptr) };
     unsafe { Arc::from_raw(ptr) }
@@ -55,36 +48,40 @@ unsafe fn get_arc<T>(ptr: *const T) -> Arc<T> {
 pub unsafe extern "C" fn create_ffx_env_context(
     env_ctx: *mut *const EnvContext,
     lib_ctx: *const LibContext,
-    external_config: *const FfxExternalConfigEntry,
-    config_len: u64,
+    config_json: *const i8,
     isolate_dir: *const i8,
 ) -> FcTransportStatus {
-    let lib = unsafe { get_arc(lib_ctx) };
-    let isolate_dir = unsafe { isolate_dir.as_ref() }.map(|i| {
-        PathBuf::from(unsafe {
-            CStr::from_ptr(i).to_str().expect("value isolate dir string").to_owned()
-        })
-    });
-    let (responder, rx) = mpsc::sync_channel(1);
-    let mut config = Vec::new();
-    if external_config != std::ptr::null_mut() {
-        for i in 0..TryInto::<isize>::try_into(config_len).unwrap() {
-            let config_entry: &FfxExternalConfigEntry = unsafe { &*external_config.offset(i) };
-            let key = unsafe {
-                CStr::from_ptr(config_entry.key).to_str().expect("valid config string").to_owned()
-            };
-            let value = unsafe {
-                CStr::from_ptr(config_entry.value).to_str().expect("valid config string").to_owned()
-            };
-            config.push(FfxConfigEntry { key, value });
-        }
+    if env_ctx.is_null() || lib_ctx.is_null() {
+        return FcTransportStatus::INVALID_ARGS;
     }
+    let lib = unsafe { get_arc(lib_ctx) };
     let calling_thread = std::thread::current().id();
+    let isolate_dir = match unsafe { isolate_dir.as_ref() } {
+        Some(i) => match unsafe { CStr::from_ptr(i) }.to_str() {
+            Ok(s) => Some(PathBuf::from(s)),
+            Err(e) => {
+                lib.write_err(calling_thread, e);
+                return FcTransportStatus::INVALID_ARGS;
+            }
+        },
+        None => None,
+    };
+    let config_json = match unsafe { config_json.as_ref() } {
+        Some(c) => match unsafe { CStr::from_ptr(c) }.to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                lib.write_err(calling_thread, e);
+                return FcTransportStatus::INVALID_ARGS;
+            }
+        },
+        None => None,
+    };
+    let (responder, rx) = mpsc::sync_channel(1);
     lib.run(LibraryCommand::CreateEnvContext {
         lib: lib.clone(),
         calling_thread,
         responder,
-        config,
+        config_json,
         isolate_dir,
     });
     match rx.recv() {
@@ -707,7 +704,7 @@ mod test {
     fn testing_env_context(lib_ctx: *const LibContext) -> *const EnvContext {
         let mut env: *const EnvContext = std::ptr::null_mut();
         unsafe {
-            create_ffx_env_context(&mut env, lib_ctx, std::ptr::null(), 0, std::ptr::null());
+            create_ffx_env_context(&mut env, lib_ctx, std::ptr::null(), std::ptr::null());
         }
         env
     }
@@ -814,6 +811,35 @@ mod test {
         let read_handle = notifier_buf_reader.read_u32::<NativeEndian>().unwrap();
         assert_eq!(read_handle, ch, "Got notification for the wrong channel: {read_handle}");
         do_read()
+    }
+
+    #[test]
+    fn create_env_context_invalid_utf8() {
+        let lib_ctx = testing_lib_context();
+        let mut env: *const EnvContext = std::ptr::null_mut();
+        let invalid_utf8 = b"\xff\xfe\x00";
+        let status = unsafe {
+            create_ffx_env_context(
+                &mut env,
+                lib_ctx,
+                invalid_utf8.as_ptr() as *const i8,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(status, FcTransportStatus::INVALID_ARGS);
+        assert!(env.is_null());
+
+        let status = unsafe {
+            create_ffx_env_context(
+                &mut env,
+                lib_ctx,
+                std::ptr::null(),
+                invalid_utf8.as_ptr() as *const i8,
+            )
+        };
+        assert_eq!(status, FcTransportStatus::INVALID_ARGS);
+        assert!(env.is_null());
+        unsafe { destroy_ffx_lib_context(lib_ctx) };
     }
 
     #[test]

@@ -6,13 +6,14 @@ use crate::process::BinderProcess;
 use crate::shared_memory::TransactionBuffers;
 use crate::thread::{BinderThread, Command};
 use bitflags::bitflags;
+use starnix_core::task::Pid;
 use starnix_core::vfs::FdNumber;
 use starnix_logging::{log_error, log_trace, track_stub};
 use starnix_sync::{BinderObjectLevel, LockDepGuard, LockDepMutex};
 use starnix_types::ownership::{DropGuard, Releasable, WeakRef};
 use starnix_uapi::arc_key::ArcKey;
 use starnix_uapi::errors::{Errno, errno, error};
-use starnix_uapi::uapi::{binder_transaction_data__bindgen_ty_2__bindgen_ty_1, pid_t};
+use starnix_uapi::uapi::binder_transaction_data__bindgen_ty_2__bindgen_ty_1;
 use starnix_uapi::union::struct_with_union_into_bytes;
 use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{
@@ -704,8 +705,8 @@ pub struct LocalBinderObject {
 /// Non-union version of [`binder_transaction_data`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct TransactionData {
-    pub peer_pid: pid_t,
-    pub peer_tid: pid_t,
+    pub peer_pid: Option<Pid>,
+    pub peer_tid: Pid,
     pub peer_euid: u32,
 
     pub object: FlatBinderObject,
@@ -724,7 +725,7 @@ impl TransactionData {
                     cookie: 0,
                     code: self.code,
                     flags: self.flags,
-                    sender_pid: self.peer_pid,
+                    sender_pid: self.peer_pid.as_ref().map_or(0, |p| p.id),
                     sender_euid: self.peer_euid,
                     data_size: self.buffers.data.length as u64,
                     offsets_size: self.buffers.offsets.length as u64,
@@ -740,7 +741,7 @@ impl TransactionData {
                     cookie: object.strong_ref_addr.ptr() as u64,
                     code: self.code,
                     flags: self.flags,
-                    sender_pid: self.peer_pid,
+                    sender_pid: self.peer_pid.as_ref().map_or(0, |p| p.id),
                     sender_euid: self.peer_euid,
                     data_size: self.buffers.data.length as u64,
                     offsets_size: self.buffers.offsets.length as u64,

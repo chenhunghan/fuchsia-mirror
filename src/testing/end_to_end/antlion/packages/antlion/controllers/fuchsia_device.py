@@ -32,12 +32,10 @@ from antlion.controllers.fuchsia_lib.ssh import (
     FuchsiaSSHProvider,
 )
 from antlion.decorators import cached_property
-from antlion.types import ControllerConfig, Json
 from antlion.utils import (
     get_fuchsia_mdns_ipv6_address,
     get_interface_ip_addresses,
 )
-from antlion.validation import MapValidator
 from honeydew.affordances.connectivity.wlan.utils.types import CountryCode
 from honeydew.auxiliary_devices.power_switch.power_switch_using_dmc import (
     PowerSwitchDmcError,
@@ -46,6 +44,8 @@ from honeydew.auxiliary_devices.power_switch.power_switch_using_dmc import (
 from honeydew.transports.ffx.config import FfxConfig
 from honeydew.transports.ffx.ffx import FFX
 from honeydew.typing.custom_types import DeviceInfo, FidlEndpoint, IpPort
+from libs.types import ControllerConfig, Json
+from libs.validation import MapValidator
 from mobly import logger, signals
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "FuchsiaDevice"

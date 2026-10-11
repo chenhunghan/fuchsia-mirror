@@ -302,8 +302,14 @@ zx_status_t ParseNvramBinary(std::string_view nvram, std::string* parsed_nvram_o
   // Pad with an extra '\0', then out to 4-byte alignment.
   parsed_nvram.append(1 + padding_size, '\0');
 
+  const size_t length_token = parsed_nvram.size() / 4;
+  if (length_token > std::numeric_limits<uint32_t>::max()) {
+    BRCMF_ERR("NVRam size %zu exceeds 16 GiB limit", parsed_nvram.size());
+    return ZX_ERR_INVALID_ARGS;
+  }
+
   // Append the length token.
-  token = parsed_nvram.size() / 4;
+  token = static_cast<uint32_t>(length_token);
   token = (~token << 16) | (token & 0x0000FFFF);
   parsed_nvram.append(reinterpret_cast<const char*>(&token), sizeof(token));
   parsed_nvram.shrink_to_fit();

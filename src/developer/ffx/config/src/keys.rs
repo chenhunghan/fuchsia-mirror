@@ -18,6 +18,9 @@ pub const METRICS_UPLOAD_TIMEOUT_KEY: &'static str = "metrics.upload_timeout";
 /// The timeout, in milliseconds, when discovering a device.
 pub const DISCOVERY_TIMEOUT_MS: &str = "discovery.timeout";
 
+/// The timeout, in milliseconds, when querying a fastboot device during discovery.
+pub const DISCOVERY_FASTBOOT_TIMEOUT_MS: &str = "discovery.fastboot.timeout";
+
 /// This is a bit of a special case: the upload default timeout could potentially
 /// be inaccessible due to not being able to initialize an `EnvironmentContext` correctly, so there
 /// _needs_ to be a reasonable backup somewhere if that is the case. See `ffx_command::report_bug()`

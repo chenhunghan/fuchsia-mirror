@@ -10,37 +10,9 @@
 #include <lib/arch/arm64/system.h>
 #include <lib/id_allocator.h>
 
-#include <arch/aspace.h>
-#include <fbl/array.h>
-#include <hypervisor/page.h>
 #include <kernel/cpu.h>
 #include <kernel/mp.h>
 #include <ktl/unique_ptr.h>
-
-class El2TranslationTable {
- public:
-  El2TranslationTable() = default;
-  ~El2TranslationTable();
-
-  zx::result<> Init();
-  zx_paddr_t Base() const;
-
- private:
-  // Reset to initial state, releasing all allocated resources.
-  void Reset();
-
-  ktl::optional<ArchVmAspace> el2_aspace_;
-};
-
-// Represents a stack for use with EL2/
-class El2Stack {
- public:
-  zx::result<> Alloc();
-  zx_paddr_t Top() const;
-
- private:
-  hypervisor::Page page_;
-};
 
 // Maintains the EL2 state for each CPU.
 class El2CpuState {
@@ -53,9 +25,6 @@ class El2CpuState {
   zx::result<> FreeVmid(uint16_t id);
 
  private:
-  El2TranslationTable table_;
-  fbl::Array<El2Stack> stacks_;
-  arch::ArmTcrEl2 tcr_;
   arch::ArmVtcrEl2 vtcr_;
 
   cpu_mask_t cpu_mask_ = 0;

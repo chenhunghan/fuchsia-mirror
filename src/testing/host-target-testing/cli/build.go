@@ -24,6 +24,21 @@ const (
 	productBundleDirKind
 )
 
+func (k repeatableBuildKind) String() string {
+	switch k {
+	case builderNameKind:
+		return "builder-name"
+	case buildIdKind:
+		return "build-id"
+	case fuchsiaBuildDirKind:
+		return "fuchsia-build-dir"
+	case productBundleDirKind:
+		return "product-bundle-dir"
+	default:
+		return fmt.Sprintf("repeatableBuildKind(%d)", k)
+	}
+}
+
 type BuildConfig struct {
 	archiveConfig    *ArchiveConfig
 	deviceConfig     *DeviceConfig
@@ -146,6 +161,7 @@ type RepeatableBuildConfig struct {
 	archiveConfig  *ArchiveConfig
 	deviceConfig   *DeviceConfig
 	defaultBuildID string
+	blobFetchMode  artifacts.BlobFetchMode
 	builds         []repeatableBuild
 }
 
@@ -160,6 +176,7 @@ func NewRepeatableBuildConfig(
 		archiveConfig:  archiveConfig,
 		deviceConfig:   deviceConfig,
 		defaultBuildID: defaultBuildID,
+		blobFetchMode:  artifacts.Unspecified,
 	}
 
 	fs.Var(
@@ -170,7 +187,7 @@ func NewRepeatableBuildConfig(
 	fs.Var(
 		repeatableBuildVar{c: c, kind: buildIdKind},
 		fmt.Sprintf("%sbuild-id", prefix),
-		"Pave to this specific build id",
+		"Pave to this specific build id, optionally with :<version_policy> (e.g. <build_id>:fromApiLevel)",
 	)
 	fs.Var(
 		repeatableBuildVar{c: c, kind: fuchsiaBuildDirKind},
@@ -181,6 +198,11 @@ func NewRepeatableBuildConfig(
 		repeatableBuildVar{c: c, kind: productBundleDirKind},
 		fmt.Sprintf("%sproduct-bundle-dir", prefix),
 		"Update to the latest version of this builder",
+	)
+	fs.Var(
+		&c.blobFetchMode,
+		fmt.Sprintf("%sblob-fetch-mode", prefix),
+		"Default blob fetch mode for builds ('prefetch' or 'lazy', default is 'unspecified')",
 	)
 
 	return c
@@ -233,7 +255,11 @@ func (c *RepeatableBuildConfig) GetBuilds(
 		case productBundleDirKind:
 			build = artifacts.NewProductBundleDirBuild(b.value)
 		}
-		builds = append(builds, artifacts.BuildWithVersion{Build: build, Version: ffx.FfxVersionPolicy(b.versionPolicy)})
+		builds = append(builds, artifacts.BuildWithVersion{
+			Build:         build,
+			Version:       ffx.FfxVersionPolicy(b.versionPolicy),
+			BlobFetchMode: c.blobFetchMode,
+		})
 	}
 
 	// Append the last build id as our final upgrade.
@@ -247,7 +273,11 @@ func (c *RepeatableBuildConfig) GetBuilds(
 			return nil, err
 		}
 
-		builds = append(builds, artifacts.BuildWithVersion{Build: build, Version: ffx.FfxVersionPolicyLatest})
+		builds = append(builds, artifacts.BuildWithVersion{
+			Build:         build,
+			Version:       ffx.FfxVersionPolicyLatest,
+			BlobFetchMode: c.blobFetchMode,
+		})
 	}
 
 	return builds, nil
@@ -285,6 +315,9 @@ func (v repeatableBuildVar) Set(s string) error {
 		val = parts[0]
 		if val == "" {
 			return fmt.Errorf("build ID cannot be empty")
+		}
+		if len(parts) > 2 {
+			return fmt.Errorf("too many parts in build ID specifier: %q", s)
 		}
 		if len(parts) > 1 {
 			versionPolicy = parts[1]

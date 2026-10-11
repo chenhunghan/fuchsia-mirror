@@ -46,7 +46,7 @@ class DecodeConformanceTests(unittest.TestCase):
         handles: list[int] = []
         {{- end }}
         encoded_bytes = {{ .Bytes }}
-        value: typing.Any = {{ .ValueType }}.decode(encoded_bytes, handles)
+        value: typing.Any = {{ .ValueType }}.decode(bytes(encoded_bytes), handles)
 {{ .EqualityCheck }}
 {{ end }}
 

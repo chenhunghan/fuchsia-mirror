@@ -36,8 +36,7 @@ impl std::fmt::Debug for FuchsiaGpio {
 
 impl GpioBackend for FuchsiaGpio {
     fn read(&mut self) -> Result<bool, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.read(deadline) {
+        match self.proxy.read(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Gpio.read error: {status}");
@@ -52,8 +51,7 @@ impl GpioBackend for FuchsiaGpio {
 
     fn write(&mut self, value: bool) -> Result<(), BackendError> {
         let mode = if value { fgpio::BufferMode::OutputHigh } else { fgpio::BufferMode::OutputLow };
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.set_buffer_mode(mode, deadline) {
+        match self.proxy.set_buffer_mode(mode, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Gpio.set_buffer_mode error: {status}");
@@ -114,8 +112,7 @@ impl I2cBackend for FuchsiaI2c {
         if transactions.is_empty() {
             return Ok(Vec::new());
         }
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.transfer(&transactions, deadline) {
+        match self.proxy.transfer(&transactions, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(mut read_data)) => {
                 if read_length > 0 {
                     if let Some(data) = read_data.pop() {
@@ -167,8 +164,7 @@ impl std::fmt::Debug for FuchsiaSpi {
 
 impl SpiBackend for FuchsiaSpi {
     fn transmit(&mut self, tx_data: &[u8]) -> Result<Vec<u8>, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.exchange_vector(tx_data, deadline) {
+        match self.proxy.exchange_vector(tx_data, zx::MonotonicInstant::INFINITE) {
             Ok((status, rxdata)) => {
                 if status == 0 {
                     Ok(rxdata)
@@ -210,8 +206,7 @@ impl std::fmt::Debug for FuchsiaClock {
 
 impl ClockBackend for FuchsiaClock {
     fn enable(&mut self) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.enable(deadline) {
+        match self.proxy.enable(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Clock.enable error: {status}");
@@ -225,8 +220,7 @@ impl ClockBackend for FuchsiaClock {
     }
 
     fn disable(&mut self) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.disable(deadline) {
+        match self.proxy.disable(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Clock.disable error: {status}");
@@ -240,8 +234,7 @@ impl ClockBackend for FuchsiaClock {
     }
 
     fn is_enabled(&mut self) -> Result<bool, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.is_enabled(deadline) {
+        match self.proxy.is_enabled(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Clock.is_enabled error: {status}");
@@ -255,8 +248,7 @@ impl ClockBackend for FuchsiaClock {
     }
 
     fn set_rate(&mut self, hz: u64) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.set_rate(hz, deadline) {
+        match self.proxy.set_rate(hz, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Clock.set_rate error: {status}");
@@ -270,8 +262,7 @@ impl ClockBackend for FuchsiaClock {
     }
 
     fn query_rate(&mut self, hz_in: u64) -> Result<u64, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.query_supported_rate(hz_in, deadline) {
+        match self.proxy.query_supported_rate(hz_in, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Clock.query_supported_rate error: {status}");
@@ -285,8 +276,7 @@ impl ClockBackend for FuchsiaClock {
     }
 
     fn get_rate(&mut self) -> Result<u64, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.get_rate(deadline) {
+        match self.proxy.get_rate(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Clock.get_rate error: {status}");
@@ -340,8 +330,7 @@ impl std::fmt::Debug for FuchsiaReset {
 
 impl ResetBackend for FuchsiaReset {
     fn assert(&mut self) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.assert(deadline) {
+        match self.proxy.assert(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Reset.assert error: {status}");
@@ -355,8 +344,7 @@ impl ResetBackend for FuchsiaReset {
     }
 
     fn deassert(&mut self) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.deassert(deadline) {
+        match self.proxy.deassert(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Reset.deassert error: {status}");
@@ -370,8 +358,7 @@ impl ResetBackend for FuchsiaReset {
     }
 
     fn toggle(&mut self) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.toggle(deadline) {
+        match self.proxy.toggle(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Reset.toggle error: {status}");
@@ -385,8 +372,7 @@ impl ResetBackend for FuchsiaReset {
     }
 
     fn status(&mut self) -> Result<bool, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.status(deadline) {
+        match self.proxy.status(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Reset.status error: {status}");
@@ -434,8 +420,7 @@ impl std::fmt::Debug for FuchsiaSerial {
 
 impl SerialBackend for FuchsiaSerial {
     fn read(&mut self) -> Result<Vec<u8>, BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.read(deadline) {
+        match self.proxy.read(zx::MonotonicInstant::INFINITE) {
             Ok(Ok(val)) => Ok(val),
             Ok(Err(status)) => {
                 log::warn!("Serial.read error: {status}");
@@ -449,8 +434,7 @@ impl SerialBackend for FuchsiaSerial {
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), BackendError> {
-        let deadline = zx::MonotonicInstant::after(zx::Duration::from_seconds(1));
-        match self.proxy.write(data, deadline) {
+        match self.proxy.write(data, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(status)) => {
                 log::warn!("Serial.write error: {status}");

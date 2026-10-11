@@ -4,8 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::evictor::Evictor;
 use super::pmm_arena::PmmArenaInfo;
 use super::pmm_node::PmmNode;
+pub use super::pmm_node::{AllocFailure, AllocFailureType};
 use crate::kernel::types::PAddr;
 use crate::vm::page::{VmPageDoublyLinkedList, VmPagePtr};
 use crate::vm::page_queues::PageQueues;
@@ -162,6 +164,15 @@ pub fn page_queues() -> &'static PageQueues {
     node().page_queues()
 }
 
+/// Returns the static `Evictor` instance associated with the PMM.
+pub fn evictor() -> &'static Evictor {
+    // SAFETY: No preconditions.
+    let evictor = unsafe { bindings::cpp_pmm_evictor() };
+    let evictor: *const Evictor = evictor.cast();
+    // SAFETY: `cpp_pmm_evictor` returns a valid static pointer to the global PMM's Evictor.
+    unsafe { evictor.as_ref_unchecked() }
+}
+
 /// Returns a reference to the global `PmmNode` instance.
 #[inline]
 pub fn node() -> &'static PmmNode {
@@ -290,5 +301,18 @@ mod pmm_rust {
 
         unsafe { free_page(page0) };
         unsafe { free_page(page1) };
+    }
+
+    /// Tests AllocFailure type string conversions.
+    #[test]
+    fn alloc_failure_type_to_str() {
+        use crate::vm::pmm_node::{AllocFailure, AllocFailureType};
+        assert_true!(AllocFailure::type_to_str(AllocFailureType::None) == "None");
+        assert_true!(AllocFailure::type_to_str(AllocFailureType::Pmm) == "PMM");
+        assert_true!(AllocFailure::type_to_str(AllocFailureType::Heap) == "Heap");
+        assert_true!(AllocFailure::type_to_str(AllocFailureType::Handle) == "Handle");
+        assert_true!(AllocFailure::type_to_str(AllocFailureType::Other) == "Other");
+        let failure = AllocFailure { r#type: AllocFailureType::Pmm, size: 4096, free_count: 100 };
+        assert_true!(failure.type_str() == "PMM");
     }
 }

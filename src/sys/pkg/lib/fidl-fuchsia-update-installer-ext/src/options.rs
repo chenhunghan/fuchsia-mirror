@@ -4,6 +4,7 @@
 
 //! Wrapper types for the Options table.
 
+use cobalt_client::traits::AsEventCode;
 use fuchsia_inspect::{self as inspect, ArrayProperty as _};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -27,6 +28,17 @@ impl Initiator {
             Initiator::User => "User",
             Initiator::Service => "Service",
         }
+    }
+}
+
+impl AsEventCode for Initiator {
+    fn as_event_code(&self) -> u32 {
+        use cobalt_sw_delivery_registry::SoftwareDeliveryMetricDimensionInitiator::*;
+        match self {
+            Initiator::Service => AutomaticUpdateCheck,
+            Initiator::User => UserInitiatedCheck,
+        }
+        .as_event_code()
     }
 }
 

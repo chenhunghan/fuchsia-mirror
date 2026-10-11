@@ -315,6 +315,9 @@ void Sysmem::Shutdown() {
   // If a test is stuck waiting here, ensure that the test is dropping its sysmem VMO handles before
   // ~Sysmem.
   loop_.JoinThreads();
+  // Re-bind loop_checker_ to the current thread now that loop_thrd_ has joined, since
+  // loop_.Shutdown() runs remaining wait/task cancellations synchronously on this thread.
+  loop_checker_.emplace();
   loop_.Shutdown();
 
   LOG(DEBUG, "Finished Shutdown");
@@ -803,6 +806,7 @@ zx_status_t Sysmem::RegisterHeapInternal(
             "Attempt to register system or secure heap via RegisterHeap denied: heap_type: %s id: "
             "%" PRId64,
             heap_.heap_type().value_or("").c_str(), heap_.id().value_or(0));
+        heap_client_.AsyncTeardown();
         return;
       }
       // A heap should not be registered twice.

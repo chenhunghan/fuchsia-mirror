@@ -63,7 +63,8 @@ zx::result<std::vector<dma_buffer::PhysIter>> EndpointServer::get_iter(RequestVa
                                          kPageSize,
                                          sub_offset,
                                          req_size,
-                                         max_length};
+                                         max_length,
+                                         /*merge=*/true};
         if (sg_support_ == ScatterGatherSupport::kUnsupported && req_size > 0) {
           auto it_p = iter.begin();
           if (it_p == iter.end() || (*it_p).second < req_size) {

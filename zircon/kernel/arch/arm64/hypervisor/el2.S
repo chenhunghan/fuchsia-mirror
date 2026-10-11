@@ -7,18 +7,18 @@
 #include <arch/arm64/hypervisor/el2_state.h>
 #include <arch/arm64/mmu.h>
 #include <asm.h>
+#include <lib/arch/arm64/feature-asm.h>
 #include <lib/arch/asm.h>
 #include <zircon/errors.h>
 
 #define ESR_EL2_EC_FP                   0x07
-#define ESR_EL2_EC_HVC                  0x16
 #define ESR_EL2_EC_SHIFT                26
-#define ESR_EL2_ISS_MASK                0x01ffffff
 
 #define MDCR_EL2_TDOSA                  BIT_32(10)
 
 // The switching code here can use the FP / vector registers, though
 // most kernel code cannot.
+.arch armv8.1-a
 .arch_extension fp
 
 .section .text.el2,"ax",@progbits
@@ -28,6 +28,18 @@
 reg_xs  .req x9
 reg_xt  .req x10
 reg_xa  .req x11
+
+.macro test_feature feat_reg, feat_mask, skip_label, feat_reg2=, feat_mask2=, scratch=reg_xa
+    mrs \scratch, \feat_reg
+    tst \scratch, \feat_mask
+.ifnb \feat_reg2
+    b.ne 0f
+    mrs \scratch, \feat_reg2
+    tst \scratch, \feat_mask2
+.endif
+    b.eq \skip_label
+0:
+.endm
 
 .macro fp_state inst, off
     add reg_xs, reg_xs, \off
@@ -71,44 +83,71 @@ reg_xa  .req x11
 .endif
 .endm
 
-.macro system_state inst, off
+// Save/restore unbanked EL0/EL1 system registers that are used by the EL2 host
+// (E2H=1) and shared with the EL1/EL0 guest.
+.macro host_system_state inst, off
+    add reg_xt, reg_xs, \off
+    system_register \inst, HSS_TPIDR_EL0, tpidr_el0
+    system_register \inst, HSS_TPIDRRO_EL0, tpidrro_el0
+    system_register \inst, HSS_MDSCR_EL1, mdscr_el1
+    system_register \inst, HSS_TPIDR_EL1, tpidr_el1
+.ifc "\inst", "ldr"
+    // Zircon maintains the invariant that sp_el0 is 0 while in the kernel
+    // (user sp_el0 is saved/restored in the exception iframe).
+    msr sp_el0, xzr
+.endif
+.endm
+
+// Under FEAT_VHE (E2H=1), guest EL1 registers that are redirected for the EL2
+// host are accessed via their *_el12 encodings so host EL2 state (SCTLR_EL2,
+// TCR_EL2, TTBR0_EL2, TTBR1_EL2, MAIR_EL2, VBAR_EL2, etc.) remains untouched.
+.macro guest_system_state inst, off
     add reg_xt, reg_xs, \off
     system_register \inst, SS_SP_EL0, sp_el0
     system_register \inst, SS_TPIDR_EL0, tpidr_el0
     system_register \inst, SS_TPIDRRO_EL0, tpidrro_el0
-
-    system_register \inst, SS_CNTKCTL_EL1, cntkctl_el1
-    system_register \inst, SS_CONTEXTIDR_EL1, contextidr_el1
-    system_register \inst, SS_CPACR_EL1, cpacr_el1
+    system_register \inst, SS_CNTKCTL_EL1, cntkctl_el12
+    system_register \inst, SS_CONTEXTIDR_EL1, contextidr_el12
+    system_register \inst, SS_CPACR_EL1, cpacr_el12
     system_register \inst, SS_CSSELR_EL1, csselr_el1
-    system_register \inst, SS_ELR_EL1, elr_el1
-    system_register \inst, SS_ESR_EL1, esr_el1
-    system_register \inst, SS_FAR_EL1, far_el1
-    system_register \inst, SS_MAIR_EL1, mair_el1
+    system_register \inst, SS_ELR_EL1, elr_el12
+    system_register \inst, SS_ESR_EL1, esr_el12
+    system_register \inst, SS_FAR_EL1, far_el12
+    system_register \inst, SS_AFSR0_EL1, afsr0_el12
+    system_register \inst, SS_AFSR1_EL1, afsr1_el12
+    system_register \inst, SS_MAIR_EL1, mair_el12
     system_register \inst, SS_MDSCR_EL1, mdscr_el1
     system_register \inst, SS_PAR_EL1, par_el1
-    system_register \inst, SS_SCTLR_EL1, sctlr_el1
+    system_register \inst, SS_SCTLR_EL1, sctlr_el12
+.ifc "\inst", "str"
+    // Clear SCTLR_EL12 so SCTLR_EL12.M is 0 while executing in the host.
+    msr sctlr_el12, xzr
+.endif
     system_register \inst, SS_SP_EL1, sp_el1
-    system_register \inst, SS_SPSR_EL1, spsr_el1
-    system_register \inst, SS_TCR_EL1, tcr_el1
+    system_register \inst, SS_SPSR_EL1, spsr_el12
+    system_register \inst, SS_TCR_EL1, tcr_el12
     system_register \inst, SS_TPIDR_EL1, tpidr_el1
-    system_register \inst, SS_TTBR0_EL1, ttbr0_el1
-    system_register \inst, SS_TTBR1_EL1, ttbr1_el1
-    system_register \inst, SS_VBAR_EL1, vbar_el1
-
+    system_register \inst, SS_TTBR0_EL1, ttbr0_el12
+    system_register \inst, SS_TTBR1_EL1, ttbr1_el12
+    system_register \inst, SS_VBAR_EL1, vbar_el12
+    system_register \inst, SS_AMAIR_EL1, amair_el12
     system_register \inst, SS_ELR_EL2, elr_el2
     system_register \inst, SS_SPSR_EL2, spsr_el2
 .endm
 
 .macro host_state inst, off
     add reg_xt, reg_xs, \off
-    \inst x15, x18, [reg_xt, HS_X(0)]
-    \inst x19, x20, [reg_xt, HS_X(2)]
-    \inst x21, x22, [reg_xt, HS_X(4)]
-    \inst x23, x24, [reg_xt, HS_X(6)]
-    \inst x25, x26, [reg_xt, HS_X(8)]
-    \inst x27, x28, [reg_xt, HS_X(10)]
-    \inst x29, x30, [reg_xt, HS_X(12)]
+    \inst x18, x19, [reg_xt, HS_X(0)]
+    \inst x20, x21, [reg_xt, HS_X(2)]
+    \inst x22, x23, [reg_xt, HS_X(4)]
+    \inst x24, x25, [reg_xt, HS_X(6)]
+    \inst x26, x27, [reg_xt, HS_X(8)]
+    \inst x28, x29, [reg_xt, HS_X(10)]
+.ifc "\inst", "ldp"
+    ldr x30, [reg_xt, HS_X(12)]
+.else
+    str x30, [reg_xt, HS_X(12)]
+.endif
 .endm
 
 .macro guest_state inst
@@ -139,17 +178,17 @@ reg_xa  .req x11
 
 .macro guest_enter_state
     ldr reg_xt, [reg_xs, GS_CNTV_CVAL_EL0]
-    msr cntv_cval_el0, reg_xt
+    msr cntv_cval_el02, reg_xt
     ldr reg_xt, [reg_xs, GS_CNTV_CTL_EL0]
-    msr cntv_ctl_el0, reg_xt
+    msr cntv_ctl_el02, reg_xt
     ldr reg_xt, [reg_xs, GS_VMPIDR_EL2]
     msr vmpidr_el2, reg_xt
 .endm
 
 .macro guest_exit_state
-    mrs reg_xt, cntv_ctl_el0
+    mrs reg_xt, cntv_ctl_el02
     str reg_xt, [reg_xs, GS_CNTV_CTL_EL0]
-    mrs reg_xt, cntv_cval_el0
+    mrs reg_xt, cntv_cval_el02
     str reg_xt, [reg_xs, GS_CNTV_CVAL_EL0]
     mrs reg_xt, esr_el2
     str reg_xt, [reg_xs, GS_ESR_EL2]
@@ -172,36 +211,8 @@ reg_xa  .req x11
     isb
 .endm
 
-.macro exception_return literal
-    mov x0, \literal
-    eret
-    SPECULATION_POSTFENCE
-.endm
-
 .macro pop_stack
     add sp, sp, 16
-.endm
-
-.macro hvc_jump table size
-    mrs reg_xs, esr_el2
-
-    // Check ESR_EL2.EC to determine what caused the exception.
-    lsr reg_xt, reg_xs, ESR_EL2_EC_SHIFT
-    cmp reg_xt, ESR_EL2_EC_HVC
-    b.ne .Linvalid_args_for_\table
-
-    // Check ESR_EL2.ICC to determine whether the HVC index is in range.
-    and reg_xt, reg_xs, ESR_EL2_ISS_MASK
-    cmp reg_xt, \size
-    b.ge .Linvalid_args_for_\table
-
-    // Branch to the jump table.
-    adr reg_xs, \table
-    add reg_xs, reg_xs, reg_xt, lsl 2
-    br reg_xs
-
-.Linvalid_args_for_\table:
-    exception_return ZX_ERR_INVALID_ARGS
 .endm
 
 .macro guest_exit return_code
@@ -212,45 +223,10 @@ reg_xa  .req x11
     str reg_xs, [sp, 8]
 .endm
 
-.macro entry_init
-.align 7
-    hvc_jump .Linit_table 9
-.Linit_table:
-    b el2_hvc_psci        // HVC 0:      psci
-    b el2_hvc_mexec       // HVC 1:      mexec
-    b el2_hvc_tlbi        // HVC 2:      tlbi
-    b el2_hvc_on          // HVC 3:      on
-    b el2_hvc_bad_state   // HVC 4: (**) off        (disabled)
-    b el2_hvc_bad_state   // HVC 5: (**) enter      (disabled)
-    b el2_hvc_bad_state   // HVC 6: (**) gich_state (disabled)
-    b el2_hvc_bad_state   // HVC 7: (**) gich_vtr   (disabled)
-    b el2_hvc_tlbi_el2    // HVC 8:      tlbi EL2
-.endm
-
 .macro entry_sync return_code
 .align 7
     guest_exit \return_code
-    // Check VTTBR_EL2 to determine whether the exception came from the guest or
-    // from the host.
-    mrs reg_xs, vttbr_el2
-    cbnz reg_xs, el2_guest_exit_or_fp_enter
-
-    // The exception came from the host, so there is no guest state to preserve.
-    pop_stack
-
-    // If we got to here, the exception came from the host or EL2.
-    // Continue execution through a jump table based on the HVC index.
-    hvc_jump .Lsync_table 9
-.Lsync_table:
-    b el2_hvc_psci        // HVC 0:      psci
-    b el2_hvc_mexec       // HVC 1:      mexec
-    b el2_hvc_tlbi        // HVC 2:      tlbi
-    b el2_hvc_bad_state   // HVC 3: (**) on        (disabled)
-    b el2_hvc_off         // HVC 4:      off
-    b el2_hvc_enter       // HVC 5:      enter
-    b el2_hvc_gich_state  // HVC 6:      gich_state
-    b el2_hvc_gich_vtr    // HVC 7:      gich_vtr
-    b el2_hvc_tlbi_el2    // HVC 8:      tlbi EL2
+    b el2_guest_exit_or_fp_enter
 .endm
 
 .macro entry_async return_code
@@ -267,39 +243,6 @@ reg_xa  .req x11
     1:
     b 1b
 .endm
-
-// We have two vector tables that we switch between, init and exec. The reason
-// is that we need to use the stack to temporarily save registers when we exit
-// from a guest. However, that stack may have not been set up, and therefore we
-// can not unconditionally use it. We use the init vector table to set up the
-// stack and hypervisor state, and we use the exec vector table to maintain
-// execution of the hypervisor.
-
-.align 11
-FUNCTION_LABEL(arm64_el2_init_table)
-    /* exceptions from current EL, using SP0 */
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-
-    /* exceptions from current EL, using SPx */
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-
-    /* exceptions from lower EL, running arm64 */
-    entry_init
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-
-    /* exceptions from lower EL, running arm32 */
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
-    entry_invalid_exception
 
 .align 11
 FUNCTION_LABEL(arm64_el2_exec_table)
@@ -327,87 +270,24 @@ FUNCTION_LABEL(arm64_el2_exec_table)
     entry_invalid_exception
     entry_invalid_exception
 
-// zx_status_t arm64_el2_on(zx_paddr_t ttbr0, zx_paddr_t stack_top, uint64_t tcr, uint64_t vtcr);
-//
-// |stack_top| must point to the physical address of a contiguous stack.
-FUNCTION(arm64_el2_on)
-    hvc 3
-    ret
-END_FUNCTION(arm64_el2_on)
-FUNCTION_LABEL(el2_hvc_on)
-    // Setup the EL2 translation table.
-    msr ttbr0_el2, x0
-
-    // Setup the EL2 stack pointer.
-    mov sp, x1
-
-    // Setup the EL2 translation control.
-    msr tcr_el2, x2
-
-    // Setup the virtualisation translation control.
-    msr vtcr_el2, x3
-
-    // Setup the EL2 memory attributes.
-    movlit reg_xs, MMU_MAIR_VAL
-    msr mair_el2, reg_xs
-    isb
-
-    // Invalidate all EL2 TLB entries.
-    tlbi alle2
-    dsb sy
-    isb
-
-    // Enable the MMU, I-cache, D-cache, and stack alignment checking.
-    movlit reg_xs, SCTLR_ELX_M | SCTLR_ELX_C | SCTLR_ELX_SA | SCTLR_ELX_I | SCTLR_EL2_RES1
-    msr sctlr_el2, reg_xs
-    isb
-
-    // Setup the exec vector table for EL2.
-    adr_global reg_xs, arm64_el2_exec_table
-    msr vbar_el2, reg_xs
-    isb
-
-    exception_return ZX_OK
-
-FUNCTION_LABEL(el2_hvc_psci)
-    smc 0
-    eret
-    SPECULATION_POSTFENCE
-
-FUNCTION_LABEL(el2_hvc_mexec)
-    br x0
-
 // zx_status_t arm64_el2_tlbi_ipa(uint64_t vttbr, zx_vaddr_t addr, bool terminal);
+//
+// With FEAT_VHE, TLBI IPAS2* and TLBI VMALLE1IS/VMALLS12E1IS require
+// HCR_EL2.TGE == 0 and the target guest's VTTBR_EL2 loaded.
 FUNCTION(arm64_el2_tlbi_ipa)
-    mov reg_xa, 0
-    hvc 2
-    ret
-END_FUNCTION(arm64_el2_tlbi_ipa)
-
-// zx_status_t arm64_el2_tlbi_vmid(uint64_t vttbr);
-FUNCTION(arm64_el2_tlbi_vmid)
-    mov reg_xa, 1
-    hvc 2
-    ret
-END_FUNCTION(arm64_el2_tlbi_vmid)
-
-FUNCTION_LABEL(el2_hvc_tlbi)
+    mrs reg_xs, daif
+    msr daifset, #0xf
     switch_to_guest
+    movlit reg_xt, HCR_EL2_RW | HCR_EL2_E2H
+    msr hcr_el2, reg_xt
+    isb
 
-    cbz reg_xa, el2_hvc_tlbi_ipa
-    b el2_hvc_tlbi_vmid
-
-.Ltlbi_exit:
-    switch_to_host
-    exception_return ZX_OK
-
-FUNCTION_LABEL(el2_hvc_tlbi_ipa)
     // TLBI IPAS2* instructions take bits [51:12] of the IPA.
     lsr x1, x1, 12
 
     // Invalidate IPA. Based on ARM DEN 0024A, page 12-5.
     dsb ishst
-    cbnz x2, .Lterminal
+    cbnz w2, .Lterminal
     tlbi ipas2e1is, x1
     b .Lsync
 .Lterminal:
@@ -417,87 +297,106 @@ FUNCTION_LABEL(el2_hvc_tlbi_ipa)
     tlbi vmalle1is
     dsb ish
     isb
-    b .Ltlbi_exit
 
-FUNCTION_LABEL(el2_hvc_tlbi_vmid)
+    movlit reg_xt, HCR_EL2_RW | HCR_EL2_E2H | HCR_EL2_TGE
+    msr hcr_el2, reg_xt
+    isb
+    switch_to_host
+    msr daif, reg_xs
+    mov x0, ZX_OK
+    ret
+END_FUNCTION(arm64_el2_tlbi_ipa)
+
+// zx_status_t arm64_el2_tlbi_vmid(uint64_t vttbr);
+FUNCTION(arm64_el2_tlbi_vmid)
+    mrs reg_xs, daif
+    msr daifset, #0xf
+    switch_to_guest
+    movlit reg_xt, HCR_EL2_RW | HCR_EL2_E2H
+    msr hcr_el2, reg_xt
+    isb
+
     // Invalidate VMID. Based on ARM DEN 0024A, page 12-5.
     dsb ishst
     tlbi vmalls12e1is
     dsb ish
     isb
-    b .Ltlbi_exit
 
-// zx_status_t arm64_el2_off();
-FUNCTION(arm64_el2_off)
-    hvc 4
+    movlit reg_xt, HCR_EL2_RW | HCR_EL2_E2H | HCR_EL2_TGE
+    msr hcr_el2, reg_xt
+    isb
+    switch_to_host
+    msr daif, reg_xs
+    mov x0, ZX_OK
     ret
-END_FUNCTION(arm64_el2_off)
-FUNCTION_LABEL(el2_hvc_off)
-    // Disable the MMU, but enable I-cache, D-cache, and stack alignment checking.
-    movlit reg_xs, SCTLR_ELX_C | SCTLR_ELX_SA | SCTLR_ELX_I | SCTLR_EL2_RES1
-    msr sctlr_el2, reg_xs
-    isb
+END_FUNCTION(arm64_el2_tlbi_vmid)
 
-    // Invalidate all EL2 TLB entries.
-    tlbi alle2
-    dsb sy
-    isb
-
-    // Setup the init vector table for EL2.
-    adr_global reg_xs, arm64_el2_init_table
-    msr vbar_el2, reg_xs
-    isb
-
-    exception_return ZX_OK
-
-// zx_status_t arm64_el2_enter(uint64_t vttbr, zx_paddr_t state, uint64_t hcr);
+// zx_status_t arm64_el2_enter(uint64_t vttbr, El2State* state, uint64_t hcr);
+//
+// Under FEAT_VHE, the host kernel executes in EL2h (E2H=1, TGE=1). Entering
+// a guest is a direct function call on the current kernel thread's stack.
 FUNCTION(arm64_el2_enter)
-    hvc 5
-    ret
-END_FUNCTION(arm64_el2_enter)
-FUNCTION_LABEL(el2_hvc_enter)
+    // Save host DAIF and PAN on the stack, masking all host exceptions (D, A, I, F)
+    // before switching world state.
+    mrs reg_xs, daif
+    msr daifset, #0xf
+    mov reg_xt, xzr
+    test_feature id_aa64mmfr1_el1, #ID_AA64MMFR1_EL1_PAN, .Lno_save_pan
+    mrs reg_xt, pan
+.Lno_save_pan:
+    stp reg_xs, reg_xt, [sp, -16]!
+
+    // Install the hypervisor guest-exit vector table for the duration of guest execution.
+    adr_global reg_xs, arm64_el2_exec_table
+    msr vbar_el2, reg_xs
+
     switch_to_guest
 
-    // Save El2State into tpidr_el2.
+    // Save El2State pointer into tpidr_el2.
     msr tpidr_el2, x1
     mov reg_xs, x1
 
-    // If the guest is being run for the first time, invalidate all VMID TLB
-    // entries in case the VMID has been used previously.
-    ldr reg_xt, [reg_xs, ES_RESUME]
-    cbnz reg_xt, .Lresume
-    tlbi vmalle1
-    mov reg_xt, 1
-    str reg_xt, [reg_xs, ES_RESUME]
-    dsb nshst
+    // Set the hypervisor control register (has E2H=1, TGE=0, VM=1, etc.).
+    msr hcr_el2, x2
+    isb
+
+    // If the guest is being run for the first time, invalidate all stage 1 and
+    // stage 2 TLB entries for this VMID in case the VMID has been used previously.
+    // (Must run with TGE=0.)
+    ldrb w10, [reg_xs, ES_RESUME]
+    cbnz w10, .Lresume
+    tlbi vmalls12e1is
+    mov w10, 1
+    strb w10, [reg_xs, ES_RESUME]
+    dsb ish
+    isb
 
 .Lresume:
-    // Set the hypervisor control register.
-    msr hcr_el2, x2
-
-    // Disable access to physical timer.
-    mov reg_xt, CNTHCTL_EL2_EL1PCTEN
+    // Allow guest EL1&0 access to physical counter, but trap physical timer.
+    movlit reg_xt, CNTHCTL_EL2_E2H1_EL1PCTEN
     msr cnthctl_el2, reg_xt
 
-    // Trap any accesses to debug related registers in the guest
-    mov reg_xt, MDCR_EL2_TDOSA
+    // Trap any accesses to OS lock debug registers in the guest while preserving HPMN.
+    mrs reg_xt, mdcr_el2
+    orr reg_xt, reg_xt, #MDCR_EL2_TDOSA
     msr mdcr_el2, reg_xt
 
-    // Enable floating-point traps.
-    movlit reg_xt, CPTR_EL2_RES1 | CPTR_EL2_TFP
+    // Enable floating-point traps for lazy FP context switch (E2H=1: FPEN = 0b00).
+    movlit reg_xt, CPTR_EL2_E2H1_ZEN | CPTR_EL2_E2H1_SMEN
     msr cptr_el2, reg_xt
     isb
 
     host_state stp, HS_XREGS
-    system_state str, HS_SYSTEM_STATE
+    host_system_state str, HS_SYSTEM_STATE
     guest_enter_state
-    system_state ldr, GS_SYSTEM_STATE
+    guest_system_state ldr, GS_SYSTEM_STATE
     guest_state ldp
     guest_xs_state ldp, reg_xs
 
-    // Return to guest.
+    // Enter guest via exception return.
     eret
     SPECULATION_POSTFENCE
+END_FUNCTION(arm64_el2_enter)
 
 FUNCTION_LABEL(el2_guest_exit_or_fp_enter)
     // Check ESR_EL2.EC to determine whether the exception was due to a
@@ -515,53 +414,67 @@ FUNCTION_LABEL(el2_guest_exit)
     // Load reg_xs from the stack, and save it in GuestState.
     ldr reg_xt, [sp]
     guest_xs_state stp, reg_xt
-    system_state str, GS_SYSTEM_STATE
+    guest_system_state str, GS_SYSTEM_STATE
     guest_exit_state
-    system_state ldr, HS_SYSTEM_STATE
+    host_system_state ldr, HS_SYSTEM_STATE
     host_state ldp, HS_XREGS
 
+    // With E2H=1, CPTR_EL2.FPEN (bits [21:20]) is 0b00 when trapping FP and
+    // 0b11 when untrapped by el2_fp_enter.
     mrs reg_xt, cptr_el2
-    tbnz reg_xt, CPTR_EL2_TFP_BIT, .Lfp_untrap
+    tbz reg_xt, CPTR_EL2_E2H1_FPEN_SHIFT, .Lfp_done
 
-    // Restore floating-point state if it was modified.
+    // Restore floating-point state if it was modified by the guest.
     fp_state stp, GS_FP_STATE
     fp_state ldp, HS_FP_STATE
-    b .Lfp_done
-
-.Lfp_untrap:
-    // Disable floating-point traps.
-    mov reg_xt, CPTR_EL2_RES1
-    msr cptr_el2, reg_xt
 
 .Lfp_done:
-    // Disable virtual timer set by guest, and enable access to physical timer.
-    msr cntv_ctl_el0, xzr
-    mov reg_xt, CNTHCTL_EL2_EL1PCTEN | CNTHCTL_EL2_EL1PCEN
-    msr cnthctl_el2, reg_xt
+    // Disable virtual timer set by guest.
+    msr cntv_ctl_el02, xzr
 
-    // Don't trap debug register access to EL2.
-    msr mdcr_el2, xzr
+    // Restore VMPIDR_EL2 to match host MPIDR_EL1.
+    mrs reg_xt, mpidr_el1
+    msr vmpidr_el2, reg_xt
 
-    // Disable guest traps, and ensure EL1 is arm64.
-    mov reg_xt, HCR_EL2_RW
+    // Load return code pushed by guest_exit macro.
+    ldr x0, [sp, 8]
+    pop_stack
+
+    // Restore host MDCR_EL2, CNTHCTL_EL2, HCR_EL2, VBAR_EL2, CPTR_EL2, PAN, and DAIF.
+    mrs reg_xt, mdcr_el2
+    bic reg_xt, reg_xt, #MDCR_EL2_TDOSA
+    msr mdcr_el2, reg_xt
+    movlit reg_xs, CNTHCTL_EL2_E2H1_EL1PTEN | CNTHCTL_EL2_E2H1_EL1PCTEN | \
+                   CNTHCTL_EL2_E2H1_EL0VCTEN | CNTHCTL_EL2_E2H1_EL0PCTEN
+    msr cnthctl_el2, reg_xs
+    movlit reg_xt, HCR_EL2_RW | HCR_EL2_E2H | HCR_EL2_TGE
     msr hcr_el2, reg_xt
     isb
 
     switch_to_host
 
-    // Return to host.
-    ldr x0, [sp, 8]
-    pop_stack
-    eret
-    SPECULATION_POSTFENCE
+    adr_global reg_xs, arm64_el1_exception
+    msr vbar_el2, reg_xs
+    movlit reg_xt, CPTR_EL2_E2H1_FPEN
+    msr cptr_el2, reg_xt
+    isb
+
+    ldp reg_xs, reg_xt, [sp], 16
+    test_feature id_aa64mmfr1_el1, #ID_AA64MMFR1_EL1_PAN, .Lno_restore_pan
+    msr pan, reg_xt
+.Lno_restore_pan:
+    msr daif, reg_xs
+
+    // Return to host caller (Vcpu::Enter).
+    ret
 
 FUNCTION_LABEL(el2_fp_enter)
     // Save reg_xt so we have an extra register to swap floating-point state.
     // We're returning to the guest so we don't need the return code in [sp, 8].
     str reg_xt, [sp, 8]
 
-    // Disable floating-point traps and reset exception syndrome.
-    mov reg_xs, CPTR_EL2_RES1
+    // Disable floating-point traps (E2H=1: FPEN = 0b11) and reset exception syndrome.
+    movlit reg_xs, CPTR_EL2_E2H1_FPEN | CPTR_EL2_E2H1_ZEN | CPTR_EL2_E2H1_SMEN
     msr cptr_el2, reg_xs
     msr esr_el2, xzr
     isb
@@ -576,21 +489,3 @@ FUNCTION_LABEL(el2_fp_enter)
     ldp reg_xs, reg_xt, [sp], 16
     eret
     SPECULATION_POSTFENCE
-
-// zx_status_t arm64_el2_tlbi_el2();
-FUNCTION(arm64_el2_tlbi_el2)
-    hvc 8
-    ret
-END_FUNCTION(arm64_el2_tlbi_el2)
-
-FUNCTION_LABEL(el2_hvc_tlbi_el2)
-    // Invalidate all EL2 TLB entries.
-    tlbi alle2
-    dsb sy
-    isb
-
-    exception_return ZX_OK
-
-FUNCTION_LABEL(el2_hvc_bad_state)
-    // Simply returns the ZX_ERR_BAD_STATE error code.
-    exception_return ZX_ERR_BAD_STATE

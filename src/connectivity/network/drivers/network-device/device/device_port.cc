@@ -23,7 +23,7 @@ void DevicePort::Create(
   }
 
   fbl::AllocChecker ac;
-  std::unique_ptr<DevicePort> port(
+  std::shared_ptr<DevicePort> port(
       new (&ac) DevicePort(parent, dispatcher, id, std::move(port_client), std::move(on_teardown)));
   if (!ac.check()) {
     LOGF_ERROR("Failed to allocate memory for port");
@@ -31,19 +31,17 @@ void DevicePort::Create(
     return;
   }
 
-  // Keep a raw pointer for making the call below, the unique ptr will have been moved.
-  DevicePort* port_ptr = port.get();
-  port_ptr->Init(mac_dispatcher, [on_created = std::move(on_created),
-                                  port = std::move(port)](zx_status_t status) mutable {
-    if (status != ZX_OK) {
-      // Reset the port client to ensure that the DevicePort object doesn't try to do anything with
-      // it on destruction.
-      port->port_ = fdf::WireSharedClient<netdriver::NetworkPort>();
-      on_created(zx::error(status));
-      return;
-    }
-    on_created(zx::ok(std::move(port)));
-  });
+  port->Init(mac_dispatcher,
+             [on_created = std::move(on_created), port](zx_status_t status) mutable {
+               if (status != ZX_OK) {
+                 // Reset the port client to ensure that the DevicePort object doesn't try to do
+                 // anything with it on destruction.
+                 port->port_ = fdf::WireSharedClient<netdriver::NetworkPort>();
+                 on_created(zx::error(status));
+                 return;
+               }
+               on_created(zx::ok(std::move(port)));
+             });
 }
 
 DevicePort::DevicePort(DeviceInterface* parent, async_dispatcher_t* dispatcher,
@@ -322,9 +320,16 @@ void DevicePort::ApplyPortStatus() {
   }
   // Always post notifications for later on dispatcher so the port implementation can safely call
   // back into the core device with no risk of deadlocks.
-  async::PostTask(dispatcher_, [this, active = has_session_attached_]() {
+  //
+  // The dispatcher may be unsynchronized, so teardown can complete and destroy the port on another
+  // thread before this task runs. Hold only a weak reference so the task is a no-op in that case.
+  async::PostTask(dispatcher_, [weak_this = weak_from_this(), active = has_session_attached_]() {
+    std::shared_ptr<DevicePort> port = weak_this.lock();
+    if (!port) {
+      return;
+    }
     fdf::Arena arena('NETD');
-    fidl::OneWayStatus result = port_.buffer(arena)->SetActive(active);
+    fidl::OneWayStatus result = port->port_.buffer(arena)->SetActive(active);
     if (!result.ok()) {
       LOGF_ERROR("SetActive failed with error: %s", result.FormatDescription().c_str());
     }

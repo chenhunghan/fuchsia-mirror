@@ -33,17 +33,18 @@ def _check_licenses(ctx):
     Args:
       ctx: A ctx instance.
     """
-    exe = compiled_tool_path(ctx, "check-licenses")
+    affected_files = ctx.scm.affected_files()
     fuchsia_dir = get_fuchsia_dir(ctx)
     findings_file = ctx.io.tempfile("")
 
-    affected_files = ctx.scm.affected_files()
     if _should_run_full_validate(affected_files):
+        exe = compiled_tool_path(ctx, "check-licenses")
         cmd = [exe, "validate", "--fuchsia_dir", fuchsia_dir, "-findings_file", findings_file]
     else:
         files = [f for f, meta in affected_files.items() if meta.action != "D"]
         if not files:
             return
+        exe = compiled_tool_path(ctx, "check-licenses")
         files_file = ctx.io.tempfile("\n".join(files) + "\n")
         cmd = [
             exe,
@@ -90,7 +91,12 @@ def _check_licenses(ctx):
         message = res.stderr.strip() or res.stdout.strip() or ("Execution failed with exit code %d" % res.retcode)
         ctx.emit.finding(
             level = "error",
-            message = "License compliance check failed:\n{}".format(message),
+            message = (
+                "License compliance check failed:\n{}\n\n" +
+                "If your local check-licenses binary is out of date, rebuild it with:\n" +
+                "  fx build --host //tools/check-licenses\n" +
+                "(Or to compile all static check tools, run: fx build --host //bundles/buildbot/static_checks)"
+            ).format(message),
         )
 
 def register_check_licenses_checks():

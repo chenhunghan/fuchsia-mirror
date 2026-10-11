@@ -159,7 +159,7 @@ impl Matcher for PublisherMatcher {
     }
 
     async fn match_device(&self, device: &mut dyn Device) -> bool {
-        device.parent() == Parent::Dev && !device.is_nand()
+        device.parent() == Parent::Dev
     }
 
     async fn process_device(
@@ -364,7 +364,7 @@ impl Matcher for GptAllMatcher {
     }
 
     async fn match_device(&self, device: &mut dyn Device) -> bool {
-        if device.is_nand() || device.is_fshost_ramdisk() || device.is_removable().await {
+        if device.is_fshost_ramdisk() || device.is_removable().await {
             return false;
         }
         device.content_format().await.ok() == Some(DiskFormat::Gpt)
@@ -417,7 +417,7 @@ impl Matcher for SystemGptMatcher {
         if self.device_path.is_some() {
             return false;
         }
-        if device.is_nand() || device.is_fshost_ramdisk() || device.is_removable().await {
+        if device.is_fshost_ramdisk() || device.is_removable().await {
             return false;
         }
         // If the partition has a type GUID, that implies it's inside a partition table so it can't
@@ -633,9 +633,6 @@ mod tests {
                 max_transfer_size: 0,
                 flags: DeviceFlag::empty(),
             })
-        }
-        fn is_nand(&self) -> bool {
-            false
         }
         async fn is_removable(&self) -> bool {
             self.is_removable

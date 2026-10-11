@@ -78,15 +78,10 @@ impl Child {
             graph.make_bandwidth_requests(&self.path)
         };
 
-        let result = self.device.set_nodes_bandwidth(&requests).await.map_err(|err| {
+        let response = self.device.set_nodes_bandwidth(&requests).await.map_err(|err| {
             error!("Failed to set bandwidth with {err}");
             Status::INTERNAL
-        })?;
-
-        let response = match result {
-            Ok(response) => response,
-            Err(err) => return Err(err.err().unwrap_or(Status::INTERNAL)),
-        };
+        })??;
 
         graph.borrow_mut().update_stats(response.aggregated_bandwidth);
 

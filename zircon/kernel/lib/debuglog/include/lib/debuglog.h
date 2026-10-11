@@ -138,6 +138,8 @@ zx_status_t cpp_dlog_reader_read(DlogReader* reader, uint32_t flags, dlog_record
                                  size_t* actual);
 void cpp_dlog_serial_write(const char* ptr, size_t len);
 void cpp_dlog_sync();
+void cpp_dlog_panic_start();
+void cpp_dlog_bluescreen_init();
 }
 
 #endif  // ZIRCON_KERNEL_LIB_DEBUGLOG_INCLUDE_LIB_DEBUGLOG_H_

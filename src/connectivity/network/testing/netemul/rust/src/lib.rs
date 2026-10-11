@@ -1323,35 +1323,6 @@ impl<'a> TestEndpoint<'a> {
     }
 }
 
-/// The DHCP client version.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum DhcpClientVersion {
-    /// The in-Netstack2 DHCP client.
-    InStack,
-    /// The out-of-stack DHCP client.
-    OutOfStack,
-}
-
-/// Abstraction for how DHCP client functionality is provided.
-pub trait DhcpClient {
-    /// The DHCP client version to be used.
-    const DHCP_CLIENT_VERSION: DhcpClientVersion;
-}
-
-/// The in-Netstack2 DHCP client.
-pub enum InStack {}
-
-impl DhcpClient for InStack {
-    const DHCP_CLIENT_VERSION: DhcpClientVersion = DhcpClientVersion::InStack;
-}
-
-/// The out-of-stack DHCP client.
-pub enum OutOfStack {}
-
-impl DhcpClient for OutOfStack {
-    const DHCP_CLIENT_VERSION: DhcpClientVersion = DhcpClientVersion::OutOfStack;
-}
-
 /// A [`TestEndpoint`] that is installed in a realm's Netstack.
 ///
 /// Note that a [`TestInterface`] adds to the reference count of the underlying
@@ -1848,28 +1819,8 @@ impl<'a> TestInterface<'a> {
         mac_addressing.get_unicast_address().await.expect("get_unicast_address")
     }
 
-    async fn set_dhcp_client_enabled(&self, enable: bool) -> Result<()> {
-        self.connect_stack()
-            .context("connect stack")?
-            .set_dhcp_client_enabled(self.id, enable)
-            .await
-            .context("failed to call SetDhcpClientEnabled")?
-            .map_err(|e| anyhow!("{:?}", e))
-    }
-
     /// Starts DHCP on this interface.
-    pub async fn start_dhcp<D: DhcpClient>(&self) -> Result<()> {
-        match D::DHCP_CLIENT_VERSION {
-            DhcpClientVersion::InStack => self.start_dhcp_in_stack().await,
-            DhcpClientVersion::OutOfStack => self.start_dhcp_client_out_of_stack().await,
-        }
-    }
-
-    async fn start_dhcp_in_stack(&self) -> Result<()> {
-        self.set_dhcp_client_enabled(true).await.context("failed to start dhcp client")
-    }
-
-    async fn start_dhcp_client_out_of_stack(&self) -> Result<()> {
+    pub async fn start_dhcp(&self) -> Result<()> {
         let Self { endpoint: _, realm, id, control, device_control: _, dhcp_client_task } = self;
         let id = NonZeroU64::new(*id).expect("interface ID should be nonzero");
         let mut dhcp_client_task = dhcp_client_task.lock().await;
@@ -1895,31 +1846,18 @@ impl<'a> TestInterface<'a> {
     }
 
     /// Stops DHCP on this interface.
-    pub async fn stop_dhcp<D: DhcpClient>(&self) -> Result<()> {
-        match D::DHCP_CLIENT_VERSION {
-            DhcpClientVersion::InStack => self.stop_dhcp_in_stack().await,
-            DhcpClientVersion::OutOfStack => {
-                self.stop_dhcp_out_of_stack().await;
-                Ok(())
-            }
-        }
-    }
-
-    async fn stop_dhcp_in_stack(&self) -> Result<()> {
-        self.set_dhcp_client_enabled(false).await.context("failed to stop dhcp client")
-    }
-
-    async fn stop_dhcp_out_of_stack(&self) {
+    pub async fn stop_dhcp(&self) -> Result<()> {
         let Self { endpoint: _, realm: _, id: _, control: _, device_control: _, dhcp_client_task } =
             self;
         let mut dhcp_client_task = dhcp_client_task.lock().await;
         if let Some(task) = dhcp_client_task.deref_mut().take() {
             task.shutdown().await.expect("client shutdown should succeed");
         }
+        Ok(())
     }
 
     /// Resolves when the out-of-stack DHCP client, if any, has shut down.
-    pub async fn wait_dhcp_out_of_stack_stopped(&self) {
+    pub async fn wait_dhcp_client_stopped(&self) {
         let Self { endpoint: _, realm: _, id: _, control: _, device_control: _, dhcp_client_task } =
             self;
         let fut = {

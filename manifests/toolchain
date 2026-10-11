@@ -49,7 +49,7 @@
          TODO(phosek): repo/bot link about provenance
     -->
     <package name="fuchsia/go/${platform}"
-             version="git_revision:14265db9dd19d6adc2c59f6e4f609d4f5a251442"
+             version="git_revision:0e8f75048563897aeb1e06b9c791cd55e41a0469"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/go/{{.OS}}-{{.Arch}}"/>
 
@@ -128,7 +128,7 @@
      <!-- rust-analyzer, used for rust editor support -->
      <!-- mac platforms added to support CIPD tagging -->
      <package name="fuchsia/third_party/rust-analyzer/${platform}"
-              version="git_revision:3332931d313fad08166571c05d7237d3a4d77ac2"
+              version="git_revision:88552f82f1a539d46fdc2ccacdeb23dcb2dfa2cd"
               platforms="linux-amd64,mac-amd64"
               path="prebuilt/third_party/rust-analyzer"/>
 
@@ -153,7 +153,7 @@
     <!-- Ninja from https://ninja-build.org/ -->
     <!-- TODO(phosek): link to bot/recipe/autoroller(?) -->
     <package name="fuchsia/third_party/ninja/${platform}"
-      version="git_revision:4c765c865872a6dd5a80688db7bf27619814566d"
+      version="git_revision:0fde9fdcbbd2c8ec826344fdedbe2bd615f162bf"
              platforms="linux-amd64,linux-arm64,windows-amd64"
              path="prebuilt/third_party/ninja/{{.OS}}-{{.Arch}}"/>
 
@@ -183,7 +183,7 @@
     <!-- Python3 interpreter, used for host tools after bootstrap.
     -->
     <package name="infra/3pp/tools/cpython3/${platform}"
-             version="version:3@3.13.14.chromium.1"
+             version="version:3@3.14.8.chromium.1"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/python3/{{.OS}}-{{.Arch}}"/>
 

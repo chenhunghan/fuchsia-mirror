@@ -8,7 +8,8 @@
     "events": [
         {
             "action": "write_to_master",
-            "data": "hello"
+            "data": "hello",
+            "expect_no_change": true
         },
         {
             "action": "flush",

@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_library(
+    name = "debug",
+    srcs = ["debug.cc"],
+    hdrs = ["debug.h"],
+    implementation_deps = ["//zircon/system/ulib/zx"],
+    visibility = [
+        "//src/developer/debug/e2e_tests/inferiors:__pkg__",
+        "//src/lib/debug/rust:__pkg__",
+    ],
+)
+
+# Library to request a backtrace.
+cc_library(
+    name = "backtrace-request",
+    hdrs = ["backtrace-request.h"],
+    visibility = [
+        "//src/connectivity/network/drivers/network-device/device:__pkg__",
+        "//src/developer/debug/debug_agent/test_data:__pkg__",
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/lib/debug/rust:__pkg__",
+        "//src/lib/debug/test:__pkg__",
+        "//src/lib/lockdep/user-runtime:__pkg__",
+        "//src/lib/vulkan/tests:__pkg__",
+        "//src/storage/lib/ftl:__pkg__",
+        "//src/sys/fuzzing/common:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/target:__pkg__",
+        "//zircon/system/ulib/mini-process:__pkg__",
+        "//zircon/system/ulib/test-utils:__pkg__",
+        "//zircon/system/utest/debugger:__pkg__",
+        "//zircon/system/utest/inspector:__pkg__",
+    ],
+    deps = [
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+    alwayslink = True,
+)
+
+# Internal library to request, detect, and clean up backtrace requests.
+cc_library(
+    name = "backtrace-request-utils",
+    srcs = ["backtrace-request-utils.cc"],
+    hdrs = ["backtrace-request-utils.h"],
+    implementation_deps = [":backtrace-request"],
+    visibility = [
+        "//src/bringup/bin/critical-services/crashsvc:__pkg__",
+        "//src/bringup/bin/kernel_debug_broker:__pkg__",
+        "//src/lib/debug/test:__pkg__",
+        "//zircon/system/ulib/inspector:__pkg__",
+    ],
+)

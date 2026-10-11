@@ -4,7 +4,6 @@
 
 #include <fidl/fuchsia.hardware.sysmem/cpp/fidl.h>
 
-#include "src/graphics/display/lib/fake-display-stack/fake-sysmem-device-hierarchy.h"
 #include "src/sysmem/server/sysmem.h"
 #include "sysmem_fuzz_common.h"
 
@@ -36,7 +35,7 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t* data, size_t size) {
 
   LOGRTNC(size != kRequiredFuzzingBytes, "size: %zu != kRequiredFuzzingBytes: %zu\n", size,
           kRequiredFuzzingBytes);
-  auto inproc_sysmem = display::FakeSysmemDeviceHierarchy::Create();
+  auto inproc_sysmem = MockSysmem::Create();
 
   auto allocator_client_result = inproc_sysmem->ConnectAllocator();
   ZX_ASSERT(allocator_client_result.is_ok());

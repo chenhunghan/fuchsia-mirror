@@ -11,7 +11,6 @@
         {
             name: "sensors_playback",
             url: "sensors_playback#meta/sensors_playback.cm",
-            startup: "eager",
         },
     ],
     capabilities: [

@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "fscrypt",
+    srcs = [
+        "src/direntry.rs",
+        "src/hkdf.rs",
+        "src/lib.rs",
+        "src/proxy_filename.rs",
+    ],
+    edition = "2024",
+    # Rust std needs fdio on Fuchsia. GN adds it to every Fuchsia executable,
+    # Bazel does not (https://fxbug.dev/42065890), so list it for the test.
+    test_deps = [
+        "//sdk/lib/fdio",
+        "//third_party/rust_crates/vendor:hex",
+    ],
+    visibility = [
+        "//src/storage/crypt/fxfs/common:__pkg__",
+        "//src/storage/crypt/starnix:__pkg__",
+        "//src/storage/f2fs_reader:__subpackages__",
+        "//src/storage/fxfs:__subpackages__",
+        "//src/storage/lib/block_server/vmo_backed:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    with_unit_tests = True,
+    deps = [
+        "//src/storage/fxfs/unicode",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:hmac",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:siphasher",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

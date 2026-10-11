@@ -4,11 +4,13 @@
 
 use block_client::{BlockClient as _, BufferSlice, MutableBufferSlice, RemoteBlockClient};
 use clap::{Parser, Subcommand};
-use fidl_fuchsia_storage_block::BlockMarker;
+use fidl::endpoints::DiscoverableProtocolMarker as _;
+use fidl_fuchsia_storage_block::{BlockMarker, BlockProxy};
 use fuchsia_component::client;
 use fuchsia_fs::{PERM_READABLE, directory};
+use futures::StreamExt as _;
 
-const BLOCK_CLASS_PATH: &str = "/dev/class/block/";
+const BLOCK_PATH: &str = "/block";
 
 #[derive(Parser, Debug)]
 struct Config {
@@ -29,32 +31,43 @@ enum Command {
     Write { offset: u64, value: u8 },
 }
 
+async fn find_block_by_bus_path(bus_path: &str) -> Result<BlockProxy, anyhow::Error> {
+    let dir = directory::open_in_namespace(BLOCK_PATH, PERM_READABLE)?;
+    let mut watcher = directory::Watcher::new(&dir).await?;
+    while let Some(message) = watcher.next().await {
+        let message = message?;
+        match message.event {
+            directory::WatchEvent::ADD_FILE | directory::WatchEvent::EXISTING => {
+                let block_subdir = message.filename.to_str().unwrap();
+                if block_subdir == "." {
+                    continue;
+                }
+                let bus_path_file_path = format!("{block_subdir}/bus_path");
+                if let Ok(content) = directory::read_file_to_string(&dir, &bus_path_file_path).await
+                {
+                    if content.trim() == bus_path {
+                        let block_path =
+                            format!("{BLOCK_PATH}/{block_subdir}/{}", BlockMarker::PROTOCOL_NAME);
+                        return client::connect_to_protocol_at_path::<BlockMarker>(&block_path);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    Err(anyhow::anyhow!("Watch stream unexpectedly ended"))
+}
+
 #[fuchsia::main]
 async fn main() -> Result<(), anyhow::Error> {
     let Config { block_size, pci_bus, pci_device, cmd } = Config::parse();
 
-    // The filename is will contain the BDF in the form <bus>:<device>.<function>. The function is
-    // always zero for virtio block devices.
-    let bdf = format!("{:02}:{:02}.0", pci_bus, pci_device);
+    // The bus_path will contain the BDF in the form
+    // pci<bus>:<device>.<function>. The function is always zero for virtio
+    // block devices.
+    let bus_path = format!("pci{:02X}:{:02X}.0", pci_bus, pci_device);
 
-    // This tool has access to block nodes in the /dev/class/block path, but we need to match
-    // against composite PCI devices which sit in the /dev/ root we cannot get blanket access to. To
-    // achieve this, we walk all the block devices and look up their corresponding topological path
-    // to see if it corresponds to the device we're looking for.
-    //
-    // Scan current files in the directory and watch for new ones in case we don't find the block
-    // device we're looking for. There's a slim possibility a partition may not yet be available
-    // when this tool is executed in a test.
-    let block_dir = directory::open_in_namespace(BLOCK_CLASS_PATH, PERM_READABLE)?;
-    let block_proxy = device_watcher::wait_for_device_with(
-        &block_dir,
-        |device_watcher::DeviceInfo { filename, topological_path }| {
-            topological_path.contains(&bdf).then(|| {
-                client::connect_to_named_protocol_at_dir_root::<BlockMarker>(&block_dir, filename)
-            })
-        },
-    )
-    .await??;
+    let block_proxy = find_block_by_bus_path(&bus_path).await?;
     let block_client = RemoteBlockClient::new(block_proxy).await?;
 
     let result = match cmd {

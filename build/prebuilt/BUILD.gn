@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/prebuilt/cipd_prebuilt.gni")
 import("//build/prebuilt_binaries.gni")
+import("//build/testing/host_test_data.gni")
 
 # The //prebuilt directory contains only the binary artifacts managed by
 # jiri.  So this directory represents it in the build.
@@ -10,6 +12,78 @@ import("//build/prebuilt_binaries.gni")
 # TODO(https://fxbug.dev/454618550): Remove this once all breakpad symbol
 # generation has been moved post-build through
 # build/api/client export_last_build_debug_symbols
-prebuilt_binaries("prebuilt") {
-  build_id_dir = "//prebuilt/.build-id"
+if (current_toolchain == default_toolchain) {
+  prebuilt_binaries("prebuilt") {
+    build_id_dir = "//prebuilt/.build-id"
+  }
+}
+
+cipd_prebuilt("cipd_prebuilt_test") {
+  testonly = true
+  paths = [ "//prebuilt/third_party/gn/${host_platform}/gn" ]
+}
+
+# Verify that downstream targets in both default and host toolchains can consume
+# the output staged by `cipd_prebuilt()` under
+# `${cipd_prebuilt_root}/prebuilt/...`.
+action("verify_cipd_prebuilt_test") {
+  testonly = true
+  script = "//build/scripts/run_and_stamp.sh"
+  deps = [ ":cipd_prebuilt_test" ]
+  inputs =
+      [ "${cipd_prebuilt_root}/prebuilt/third_party/gn/${host_platform}/gn" ]
+  outputs = [ "$target_gen_dir/${target_name}.stamp" ]
+  args = [
+    rebase_path(outputs[0], root_build_dir),
+    "test",
+    "-x",
+    rebase_path(inputs[0], root_build_dir),
+  ]
+}
+
+if (is_host) {
+  # Verify that `host_test_data()` consuming a staged `cipd_prebuilt()` path
+  # without explicit `outputs` records the underlying `//prebuilt/...` path in
+  # `test_runtime_deps` for isolated Swarming test sandboxes.
+  host_test_data("cipd_prebuilt_host_test_data_test") {
+    testonly = true
+    deps = [ ":cipd_prebuilt_test" ]
+    sources =
+        [ "${cipd_prebuilt_root}/prebuilt/third_party/gn/${host_platform}/gn" ]
+  }
+
+  generated_file("cipd_prebuilt_runtime_deps_test") {
+    testonly = true
+    deps = [ ":cipd_prebuilt_host_test_data_test" ]
+    outputs = [ "$target_gen_dir/${target_name}.deps.json" ]
+    data_keys = [ "test_runtime_deps" ]
+    walk_keys = [ "test_runtime_deps_barrier" ]
+    rebase = root_build_dir
+    output_conversion = "json"
+  }
+
+  action("verify_cipd_prebuilt_host_test_data_test") {
+    testonly = true
+    script = "//build/scripts/run_and_stamp.sh"
+    deps = [ ":cipd_prebuilt_runtime_deps_test" ]
+    inputs = get_target_outputs(":cipd_prebuilt_runtime_deps_test")
+    outputs = [ "$target_gen_dir/${target_name}.stamp" ]
+    args = [
+      rebase_path(outputs[0], root_build_dir),
+      "grep",
+      "-q",
+      rebase_path("//prebuilt/third_party/gn/${host_platform}/gn",
+                  root_build_dir),
+      rebase_path(inputs[0], root_build_dir),
+    ]
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":verify_cipd_prebuilt_host_test_data_test($host_toolchain)",
+    ":verify_cipd_prebuilt_test($default_toolchain)",
+    ":verify_cipd_prebuilt_test($host_toolchain)",
+  ]
 }

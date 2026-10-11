@@ -32,6 +32,9 @@ rustc_library("binderfs") {
     "user_memory_cursor.rs",
   ]
 
+  inputs =
+      [ "//src/starnix/lib/selinux/testdata/micro_policies/hooks_tests_policy" ]
+
   # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
   exclude_toolchain_tags = [
     "asan",

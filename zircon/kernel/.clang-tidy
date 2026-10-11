@@ -1,0 +1,17 @@
+---
+# The zircon kernel environment does not use the standard C++ library (std::)
+# directly, but instead uses the curated Kernel Template Library (ktl::).
+# Disable modernize checks that recommend replacing code with std:: routines.
+InheritParentConfig: true
+Checks: >
+  -modernize-make-shared,
+  -modernize-make-unique,
+  -modernize-min-max-use-initializer-list,
+  -modernize-use-integer-sign-comparison,
+  -modernize-use-ranges,
+  -modernize-use-std-*,
+  -modernize-use-std-bit,
+  -modernize-use-std-format,
+  -modernize-use-std-numbers,
+  -modernize-use-std-print,
+  -modernize-use-to-underlying,

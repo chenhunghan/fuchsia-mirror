@@ -24,8 +24,8 @@ use netstack3_core::device::{
 };
 use netstack3_core::device_socket::{
     DeviceSocketBindingsContext, DeviceSocketMetadata, DeviceSocketTypes, EthernetFrame,
-    EthernetHeaderParams, Frame, FrameDestination, IpFrame, Protocol, ReceiveFrameError,
-    ReceivedFrame, SendFrameErrorReason, SentFrame, SocketId, SocketInfo, TargetDevice,
+    EthernetHeaderParams, Frame, IpFrame, PacketType, Protocol, ReceiveFrameError, ReceivedFrame,
+    SendFrameErrorReason, SentFrame, SocketId, SocketInfo, TargetDevice,
 };
 use netstack3_core::ip::{DeviceIpLayerMetadata, Marks};
 use netstack3_core::sync::{Mutex, RwLock};
@@ -128,6 +128,24 @@ impl DeviceSocketBindingsContext<DeviceId<Self>> for BindingsCtx {
     ) -> Result<(), ReceiveFrameError> {
         let SocketState { queue, kind, bpf_filter } = socket_id.socket_state();
 
+        let packet_type = frame.packet_type();
+        let fidl_packet_type = match packet_type {
+            PacketType::Host => fppacket::PacketType::Host,
+            PacketType::Broadcast => fppacket::PacketType::Broadcast,
+            PacketType::Multicast => fppacket::PacketType::Multicast,
+            PacketType::OtherHost => fppacket::PacketType::OtherHost,
+            PacketType::Outgoing => fppacket::PacketType::Outgoing,
+
+            // `PacketType::Loopback` is used for looped back multicast and
+            // broadcast packets. These were already delivered to the packet
+            // socket, so it's not necessary to deliver them again. Note that
+            // this doesn't affect packets sent on the loopback interface - they
+            // are still delivered twice (once as `PacketType::Outgoing` and
+            // once as `PacketType::Host`). This behavior is consistent with
+            // Linux.
+            PacketType::Loopback => return Ok(()),
+        };
+
         // Run BPF filter if any. The filter may request the packet
         // to be truncated or dropped.
         let truncated_size = match bpf_filter.read().as_ref() {
@@ -146,6 +164,7 @@ impl DeviceSocketBindingsContext<DeviceId<Self>> for BindingsCtx {
                     raw,
                     frame.body_offset(),
                     default_offset,
+                    packet_type,
                     None,
                 );
                 let result = program.run(packet);
@@ -157,7 +176,7 @@ impl DeviceSocketBindingsContext<DeviceId<Self>> for BindingsCtx {
             None => usize::MAX,
         };
 
-        let data = MessageData::new(&frame, device);
+        let data = MessageData::new(&frame, fidl_packet_type, device);
 
         // NB: Perform the expensive tasks before taking the message queue lock.
         let body = match kind {
@@ -266,28 +285,20 @@ enum MessageDataInfo {
 }
 
 impl MessageData {
-    fn new(frame: &Frame<&[u8]>, device: &DeviceId<BindingsCtx>) -> Self {
-        let (packet_type, info) = match frame {
-            Frame::Sent(sent) => (
-                fppacket::PacketType::Outgoing,
-                match sent {
-                    SentFrame::Ethernet(frame) => MessageDataInfo::new_ethernet(frame),
-                    SentFrame::Ip(frame) => MessageDataInfo::new_ip(frame),
-                },
-            ),
-            Frame::Received(ReceivedFrame::Ethernet { destination, frame }) => {
-                let packet_type = match destination {
-                    FrameDestination::Broadcast => fppacket::PacketType::Broadcast,
-                    FrameDestination::Multicast => fppacket::PacketType::Multicast,
-                    FrameDestination::Individual { local } => local
-                        .then_some(fppacket::PacketType::Host)
-                        .unwrap_or(fppacket::PacketType::OtherHost),
-                };
-                (packet_type, MessageDataInfo::new_ethernet(frame))
+    fn new(
+        frame: &Frame<&[u8]>,
+        packet_type: fppacket::PacketType,
+        device: &DeviceId<BindingsCtx>,
+    ) -> Self {
+        let info = match frame {
+            Frame::Sent(sent) => match sent {
+                SentFrame::Ethernet(frame) => MessageDataInfo::new_ethernet(frame),
+                SentFrame::Ip(frame) => MessageDataInfo::new_ip(frame),
+            },
+            Frame::Received(ReceivedFrame::Ethernet { destination: _, frame, packet_type: _ }) => {
+                MessageDataInfo::new_ethernet(frame)
             }
-            Frame::Received(ReceivedFrame::Ip(frame)) => {
-                (fppacket::PacketType::Host, MessageDataInfo::new_ip(frame))
-            }
+            Frame::Received(ReceivedFrame::Ip(frame)) => MessageDataInfo::new_ip(frame),
         };
 
         Self {
@@ -912,6 +923,7 @@ mod tests {
     use super::*;
 
     use net_declare::{fidl_mac, net_mac};
+    use netstack3_core::device_socket::FrameDestination;
     use test_case::test_case;
 
     const IFACE: u64 = 1;
@@ -992,5 +1004,73 @@ mod tests {
             }),
             expected_params
         );
+    }
+
+    #[test]
+    fn test_frame_packet_type() {
+        let ip_frame: IpFrame<&[u8]> = IpFrame { ip_version: IpVersion::V4, body: &[] };
+        assert_eq!(
+            Frame::Sent(SentFrame::Ip(ip_frame.clone())).packet_type(),
+            PacketType::Outgoing
+        );
+        assert_eq!(Frame::Received(ReceivedFrame::Ip(ip_frame)).packet_type(), PacketType::Host);
+
+        let eth_frame: EthernetFrame<&[u8]> = EthernetFrame {
+            src_mac: MAC,
+            dst_mac: MAC,
+            ethertype: Some(PROTO),
+            body_offset: 14,
+            body: &[],
+        };
+        assert_eq!(
+            Frame::Sent(SentFrame::Ethernet(eth_frame.clone())).packet_type(),
+            PacketType::Outgoing
+        );
+        assert_eq!(
+            Frame::Received(ReceivedFrame::Ethernet {
+                destination: FrameDestination::Broadcast,
+                frame: eth_frame.clone(),
+                packet_type: PacketType::Broadcast,
+            })
+            .packet_type(),
+            PacketType::Broadcast
+        );
+        assert_eq!(
+            Frame::Received(ReceivedFrame::Ethernet {
+                destination: FrameDestination::Multicast,
+                frame: eth_frame.clone(),
+                packet_type: PacketType::Multicast,
+            })
+            .packet_type(),
+            PacketType::Multicast
+        );
+        assert_eq!(
+            Frame::Received(ReceivedFrame::Ethernet {
+                destination: FrameDestination::Individual { local: true },
+                frame: eth_frame.clone(),
+                packet_type: PacketType::Host,
+            })
+            .packet_type(),
+            PacketType::Host
+        );
+        assert_eq!(
+            Frame::Received(ReceivedFrame::Ethernet {
+                destination: FrameDestination::Individual { local: false },
+                frame: eth_frame.clone(),
+                packet_type: PacketType::OtherHost,
+            })
+            .packet_type(),
+            PacketType::OtherHost
+        );
+        assert_eq!(
+            Frame::Received(ReceivedFrame::Ethernet {
+                destination: FrameDestination::Broadcast,
+                frame: eth_frame.clone(),
+                packet_type: PacketType::Loopback,
+            })
+            .packet_type(),
+            PacketType::Loopback
+        );
+        assert_eq!(Frame::Received(ReceivedFrame::Ip(ip_frame)).packet_type(), PacketType::Host);
     }
 }

@@ -13,6 +13,11 @@
 //! [RFC 1141]: https://tools.ietf.org/html/rfc1141
 //! [RFC 1624]: https://tools.ietf.org/html/rfc1624
 
+#![no_std]
+
+#[cfg(test)]
+extern crate alloc;
+
 // Optimizations applied:
 //
 // 0. Byteorder independence: as described in RFC 1071 section 2.(B)
@@ -297,6 +302,8 @@ fn normalize(a: u128) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use rand::{RngExt as _, SeedableRng as _};
 
     use rand_xorshift::XorShiftRng;

@@ -228,10 +228,23 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		// Necessary to redirect to stdout.
 		allKernelArgs = append(allKernelArgs, "kernel.serial=legacy")
 	}
+	var dryRun bool
 	// Add kernel args specified by the builder.
-	allKernelArgs = append(allKernelArgs, args...)
+	for _, arg := range args {
+		if arg == "-dry-run" || arg == "--dry-run" {
+			dryRun = true
+			continue
+		}
+		allKernelArgs = append(allKernelArgs, arg)
+	}
 	// Add kernel args specified by the shard environment.
-	allKernelArgs = append(allKernelArgs, t.config.Emulator.KernelArgs...)
+	for _, arg := range t.config.Emulator.KernelArgs {
+		if arg == "-dry-run" || arg == "--dry-run" {
+			dryRun = true
+			continue
+		}
+		allKernelArgs = append(allKernelArgs, arg)
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -282,6 +295,9 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 	cmd, err := t.ffx.EmuStartConsole(ctx, cwd, DefaultEmulatorNodename, tools, startArgs)
 	if err != nil {
 		return err
+	}
+	if dryRun {
+		return nil
 	}
 
 	stdout, stderr, flush := botanist.NewStdioWriters(ctx, t.binary)

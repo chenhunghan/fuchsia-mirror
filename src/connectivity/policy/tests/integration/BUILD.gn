@@ -70,15 +70,6 @@ package_deps_for_tests = [
   "//src/connectivity/policy/socket-proxy/integration/fake-socket-proxy:svc",
 ]
 
-# RISC-V on Fuchsia does not support Golang.
-if (target_cpu != "riscv64") {
-  package_deps_for_tests += [
-    "//src/connectivity/network/netstack:component",
-    "//src/connectivity/network/netstack:component-debug",
-    "//src/connectivity/network/netstack:component-with-fast-udp-debug",
-  ]
-}
-
 fuchsia_test_package("policy-integration-tests") {
   test_components = []
   foreach(test, tests) {

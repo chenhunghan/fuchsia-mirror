@@ -16,7 +16,7 @@ extern "C" int LLVMFuzzerTestOneInput(uint8_t* data, size_t size) {
           kBufferCollectionConstraintsSize);
   uint8_t* data_ptr = data;
 
-  auto inproc_sysmem = display::FakeSysmemDeviceHierarchy::Create();
+  auto inproc_sysmem = MockSysmem::Create();
 
   auto allocator_client_1_result = inproc_sysmem->ConnectAllocator();
   ZX_ASSERT(allocator_client_1_result.is_ok());

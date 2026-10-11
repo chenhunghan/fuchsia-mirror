@@ -173,4 +173,15 @@ cpp_thread_dispatcher_get_current_message_waiter() {
   return ThreadDispatcher::GetCurrent()->GetMessageWaiter();
 }
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const ProcessDispatcher* cpp_thread_dispatcher_process(
+    const ThreadDispatcher* thread) {
+  return thread->process();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Exceptionate* cpp_thread_dispatcher_exceptionate(ThreadDispatcher* thread) {
+  return thread->exceptionate();
+}
+
 }  // extern "C"

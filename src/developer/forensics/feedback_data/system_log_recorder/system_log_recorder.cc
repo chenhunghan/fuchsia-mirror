@@ -7,13 +7,20 @@
 #include <lib/fit/result.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "src/developer/forensics/utils/purge_memory.h"
+#include "src/lib/files/directory.h"
 
 namespace forensics {
 namespace feedback_data {
 namespace system_log_recorder {
+namespace {
+
+constexpr char kRestartMessage[] =
+    "!!! MESSAGES MAY BE MISSING BECAUSE LOG PERSISTENCE STOPPED !!!\n";
 
 // No rate limiting in the first minute of recording to allow us to catch up on all the log
 // messages prior to listening.
@@ -24,6 +31,22 @@ constexpr zx::duration kNoRateLimitDuration = zx::sec(60);
 // could be due to the initial snapshot of logs from Diagnostics or due to rate limiting being
 // disabled for the first 60 seconds.
 constexpr zx::duration kPurgeMemoryDuration = zx::sec(150);
+
+// On a restart, |log_source_| re-subscribes to Archivist with `SNAPSHOT_THEN_SUBSCRIBE`. To avoid
+// duplicating logs that were already written to disk before the restart, `store_` ignores messages
+// with timestamps at or before the last persisted timestamp.
+std::optional<zx::time_boot> LastPersistedTimestamp(const bool is_restart,
+                                                    const std::string& metadata_path) {
+  if (!is_restart) {
+    return std::nullopt;
+  }
+
+  const std::optional<DiskBackedLogsMetadata> metadata =
+      DiskBackedLogsMetadata::FromFile(metadata_path, SystemLogWriter::kFirstFileNumber);
+  return metadata.has_value() ? metadata->LastTimestamp() : std::nullopt;
+}
+
+}  // namespace
 
 SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
                                      async_dispatcher_t* write_dispatcher,
@@ -37,8 +60,10 @@ SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
       redactor_(std::move(redactor)),
       write_period_(write_parameters.period),
       fallback_buffer_size_(write_parameters.fallback_buffer_size),
+      is_restart_(files::IsDirectory(write_parameters.logs_dir)),
       store_(write_parameters.total_log_size / write_parameters.max_num_files,
-             write_parameters.max_write_size, redactor_.get(), std::move(encoder)),
+             write_parameters.max_write_size, redactor_.get(), std::move(encoder),
+             LastPersistedTimestamp(is_restart_, write_parameters.metadata_path)),
       log_source_(archive_dispatcher, std::move(services), &store_),
       writer_(write_dispatcher, std::in_place, write_parameters.logs_dir,
               write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder),
@@ -47,6 +72,15 @@ SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
       next_collection_id_(0) {}
 
 void SystemLogRecorder::Start() {
+  if (is_restart_) {
+    // Messages from Archivist aren't guaranteed to be in perfect chronological order, so even
+    // though we're only persisting messages with a newer timestamp, it's possible that some
+    // messages go missing because they had an older timestamp but arrived later (in addition to any
+    // messages that weren't flushed before persistence stopped or rolled out of Archivist's buffer
+    // while persistence was stopped).
+    store_.InsertRawMessage(kRestartMessage);
+  }
+
   log_source_.Start();
   periodic_write_task_.Post(archive_dispatcher_);
 

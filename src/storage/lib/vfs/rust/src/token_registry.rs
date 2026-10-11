@@ -71,9 +71,6 @@ mod implementation {
     use std::collections::hash_map::{Entry, HashMap};
     use zx_status::Status;
 
-    #[cfg(not(target_os = "fuchsia"))]
-    use fuchsia_emulated_handle::Koid;
-    #[cfg(target_os = "fuchsia")]
     use zx::Koid;
 
     const DEFAULT_TOKEN_RIGHTS: Rights = Rights::BASIC;

@@ -482,7 +482,7 @@ const char* PageQueues::string_from_age_reason(PageQueues::AgeReason reason) {
   }
 }
 
-void PageQueues::Dump() {
+void PageQueues::Dump() const {
   // Need to grab a copy of all the counts and generations. As the lock is needed to acquire the
   // active/inactive counts, also hold the lock over the copying of the counts to avoid needless
   // races.
@@ -939,25 +939,6 @@ void PageQueues::MaybeCheckActiveRatioAgingLocked(size_t pages) {
   }
 }
 
-void PageQueues::SetQueueBacklinkLockedList(vm_page_t* page, void* object, uintptr_t page_offset,
-                                            PageQueue queue) {
-  DEBUG_ASSERT(queue != PageQueueReclaimIsolate);
-  DEBUG_ASSERT(page->state() == vm_page_state::OBJECT);
-  DEBUG_ASSERT(!page->is_free());
-  DEBUG_ASSERT(!page->queue_node.InContainer());
-  DEBUG_ASSERT(object);
-  DEBUG_ASSERT(!page->object.get_object());
-  DEBUG_ASSERT(page->object.get_page_offset() == 0);
-
-  page->object.set_object(object);
-  page->object.set_page_offset(page_offset);
-
-  DEBUG_ASSERT(page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) == PageQueueNone);
-  page->object.get_page_queue_ref().store(queue, ktl::memory_order_relaxed);
-  page_queues_[queue].push_front(page);
-  page_queue_counts_[queue].fetch_add(1, ktl::memory_order_relaxed);
-}
-
 void PageQueues::MoveToQueueLockedList(vm_page_t* page, PageQueue queue) {
   DEBUG_ASSERT(queue != PageQueueReclaimIsolate);
   DEBUG_ASSERT(page->state() == vm_page_state::OBJECT);
@@ -989,38 +970,12 @@ void PageQueues::MoveToIsolateLockedList(vm_page_t* page, size_t isolate_queue_i
   page_queue_counts_[PageQueueReclaimIsolate].fetch_add(1, ktl::memory_order_relaxed);
 }
 
-void PageQueues::SetWired(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  Guard<CriticalMutex> guard{&list_lock_};
-  SetQueueBacklinkLockedList(page, object, page_offset, PageQueueWired);
-}
-
 void PageQueues::MoveToWired(vm_page_t* page) {
   {
     Guard<CriticalMutex> guard{&list_lock_};
     MoveToQueueLockedList(page, PageQueueWired);
   }
   MaybeCheckActiveRatioAging(1);
-}
-
-void PageQueues::SetAnonymous(vm_page_t* page, VmCowPages* object, uint64_t page_offset,
-                              bool skip_reclaim) {
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    SetQueueBacklinkLockedList(
-        page, object, page_offset,
-        anonymous_is_reclaimable_ && !skip_reclaim ? mru_gen_to_queue() : PageQueueAnonymous);
-#if DEBUG_ASSERT_IMPLEMENTED
-    if (debug_compressor_) {
-      debug_compressor_->Add(page, object, page_offset);
-    }
-#endif
-  }
-  MaybeCheckActiveRatioAging(1);
-}
-
-void PageQueues::SetHighPriority(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  Guard<CriticalMutex> guard{&list_lock_};
-  SetQueueBacklinkLockedList(page, object, page_offset, PageQueueHighPriority);
 }
 
 void PageQueues::MoveToHighPriority(vm_page_t* page) {
@@ -1046,14 +1001,6 @@ void PageQueues::MoveToAnonymous(vm_page_t* page, bool skip_reclaim) {
   MaybeCheckActiveRatioAging(1);
 }
 
-void PageQueues::SetReclaim(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    SetQueueBacklinkLockedList(page, object, page_offset, mru_gen_to_queue());
-  }
-  MaybeCheckActiveRatioAging(1);
-}
-
 void PageQueues::MoveToReclaim(vm_page_t* page) {
   {
     Guard<CriticalMutex> guard{&list_lock_};
@@ -1070,30 +1017,10 @@ void PageQueues::MoveToReclaimDontNeed(vm_page_t* page) {
   MaybeCheckActiveRatioAging(1);
 }
 
-void PageQueues::SetPagerBackedDirty(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  Guard<CriticalMutex> guard{&list_lock_};
-  SetQueueBacklinkLockedList(page, object, page_offset, PageQueuePagerBackedDirty);
-}
-
 void PageQueues::MoveToPagerBackedDirty(vm_page_t* page) {
   {
     Guard<CriticalMutex> guard{&list_lock_};
     MoveToQueueLockedList(page, PageQueuePagerBackedDirty);
-  }
-  MaybeCheckActiveRatioAging(1);
-}
-
-void PageQueues::SetAnonymousZeroFork(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    SetQueueBacklinkLockedList(
-        page, object, page_offset,
-        zero_fork_is_reclaimable_ ? mru_gen_to_queue() : PageQueueAnonymousZeroFork);
-#if DEBUG_ASSERT_IMPLEMENTED
-    if (debug_compressor_) {
-      debug_compressor_->Add(page, object, page_offset);
-    }
-#endif
   }
   MaybeCheckActiveRatioAging(1);
 }
@@ -1144,216 +1071,48 @@ void PageQueues::CompressFailed(vm_page_t* page) {
   MaybeCheckActiveRatioAging(1);
 }
 
-void PageQueues::ChangeObjectOffset(vm_page_t* page, VmCowPages* object, uint64_t page_offset) {
-  Guard<CriticalMutex> guard{&list_lock_};
-  ChangeObjectOffsetLockedList(page, object, page_offset);
-}
-
-void PageQueues::ChangeObjectOffsetArray(vm_page_t** pages, VmCowPages* object, uint64_t* offsets,
-                                         size_t count) {
-  DEBUG_ASSERT(pages);
-  DEBUG_ASSERT(offsets);
-  DEBUG_ASSERT(object);
-
-  for (size_t i = 0; i < count;) {
-    Guard<CriticalMutex> guard{&list_lock_};
-    // Use a do/while structure for the inner loop to ensure we at least make some progress before
-    // checking again for a lock drop.
-    do {
-      DEBUG_ASSERT(pages[i]);
-      ChangeObjectOffsetLockedList(pages[i], object, offsets[i]);
-      i++;
-    } while (i < count && !BatchOpShouldDropLock(i));
-  }
-}
-
-void PageQueues::ChangeObjectOffsetLockedList(vm_page_t* page, VmCowPages* object,
-                                              uint64_t page_offset) {
-  DEBUG_ASSERT(page->state() == vm_page_state::OBJECT);
-  DEBUG_ASSERT(!page->is_free());
-  DEBUG_ASSERT(page->queue_node.InContainer());
-  DEBUG_ASSERT(object);
-  DEBUG_ASSERT(page->object.get_object());
-  page->object.set_object(object);
-  page->object.set_page_offset(page_offset);
-}
-
-void PageQueues::RemoveLockedList(vm_page_t* page) {
-  // Directly exchange the old gen.
-  uint32_t old_queue =
-      page->object.get_page_queue_ref().exchange(PageQueueNone, ktl::memory_order_relaxed);
-  DEBUG_ASSERT(old_queue != PageQueueNone);
-  page_queue_counts_[old_queue].fetch_sub(1, ktl::memory_order_relaxed);
-  page->object.set_object(nullptr);
-  page->object.set_page_offset(0);
-  page->queue_node.template RemoveFromContainer<vm_page_node_traits>();
-}
-
-void PageQueues::Remove(vm_page_t* page) {
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    RemoveLockedList(page);
-  }
-  MaybeCheckActiveRatioAging(1);
-}
-
-void PageQueues::RemoveArrayIntoList(vm_page_t** pages, size_t count,
-                                     VmPageDoublyLinkedList* out_list) {
-  DEBUG_ASSERT(pages);
-
-  for (size_t i = 0; i < count;) {
-    Guard<CriticalMutex> guard{&list_lock_};
-    // Use a do/while structure for the inner loop to ensure we at least make some progress before
-    // checking again for a lock drop.
-    do {
-      DEBUG_ASSERT(pages[i]);
-      RemoveLockedList(pages[i]);
-      out_list->push_back(pages[i]);
-      i++;
-    } while (i < count && !BatchOpShouldDropLock(i));
-  }
-
-  MaybeCheckActiveRatioAging(count);
-}
-
 PageQueues::ReclaimCounts PageQueues::GetReclaimQueueCounts() const {
   ReclaimCounts counts;
-
-  // Grab the lock to prevent LRU processing, this lets us get a slightly less racy snapshot of
-  // the queue counts, although we may still double count pages that move after we count them.
-  // Specifically any parallel callers of MarkAccessed could move a page and change the counts,
-  // causing us to either double count or miss count that page. As these counts are not load
-  // bearing we accept the very small chance of potentially being off a few pages.
-  Guard<CriticalMutex> guard{&list_lock_};
-  uint64_t lru = lru_gen_.load(ktl::memory_order_relaxed);
-  uint64_t mru = mru_gen_.load(ktl::memory_order_relaxed);
-
-  counts.total = 0;
-  for (uint64_t index = lru; index <= mru; index++) {
-    uint64_t count = page_queue_counts_[gen_to_queue(index)].load(ktl::memory_order_relaxed);
-    // Distance to the MRU, and not the LRU, determines the bucket the count goes into. This is to
-    // match the logic in PeekPagerBacked, which is also based on distance to MRU.
-    if (index > mru - kNumActiveQueues) {
-      counts.newest += count;
-    } else if (index <= mru - (kNumReclaim - kNumOldestQueues)) {
-      counts.oldest += count;
-    }
-    counts.total += count;
-  }
-  // Account the Isolate queue length under |oldest|, since (Isolate + oldest LRU) pages are
-  // eligible for reclamation first. |oldest| is meant to track pages eligible for eviction first.
-  uint64_t inactive_count =
-      page_queue_counts_[PageQueueReclaimIsolate].load(ktl::memory_order_relaxed);
-  counts.oldest += inactive_count;
-  counts.total += inactive_count;
+  rust_page_queues_get_reclaim_queue_counts(this, &counts);
   return counts;
 }
 
 PageQueues::Counts PageQueues::QueueCounts() const {
-  Counts counts = {};
-
-  // Grab the lock to prevent LRU processing, this lets us get a slightly less racy snapshot of
-  // the queue counts. We may still double count pages that move after we count them.
-  Guard<CriticalMutex> guard{&list_lock_};
-  uint64_t lru = lru_gen_.load(ktl::memory_order_relaxed);
-  uint64_t mru = mru_gen_.load(ktl::memory_order_relaxed);
-
-  for (uint64_t index = lru; index <= mru; index++) {
-    counts.reclaim[mru - index] =
-        page_queue_counts_[gen_to_queue(index)].load(ktl::memory_order_relaxed);
-  }
-  counts.reclaim_isolate =
-      page_queue_counts_[PageQueueReclaimIsolate].load(ktl::memory_order_relaxed);
-  counts.pager_backed_dirty =
-      page_queue_counts_[PageQueuePagerBackedDirty].load(ktl::memory_order_relaxed);
-  counts.anonymous = page_queue_counts_[PageQueueAnonymous].load(ktl::memory_order_relaxed);
-  counts.wired = page_queue_counts_[PageQueueWired].load(ktl::memory_order_relaxed);
-  counts.anonymous_zero_fork =
-      page_queue_counts_[PageQueueAnonymousZeroFork].load(ktl::memory_order_relaxed);
-  counts.failed_reclaim =
-      page_queue_counts_[PageQueueFailedReclaim].load(ktl::memory_order_relaxed);
-  counts.high_priority = page_queue_counts_[PageQueueHighPriority].load(ktl::memory_order_relaxed);
+  Counts counts;
+  rust_page_queues_queue_counts(this, &counts);
   return counts;
 }
 
-template <typename F>
-bool PageQueues::DebugPageIsSpecificReclaim(const vm_page_t* page, F validator,
-                                            size_t* queue) const {
-  fbl::RefPtr<VmCowPages> cow_pages;
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    PageQueue q = (PageQueue)page->object.get_page_queue_ref().load(ktl::memory_order_relaxed);
-    if (q < PageQueueReclaimBase || q > PageQueueReclaimLast) {
-      return false;
-    }
-    if (queue) {
-      *queue = queue_age(q, mru_gen_to_queue());
-    }
-    VmCowPages* cow = reinterpret_cast<VmCowPages*>(page->object.get_object());
-    DEBUG_ASSERT(cow);
-    cow_pages = fbl::MakeRefPtrUpgradeFromRaw(cow, guard);
-    DEBUG_ASSERT(cow_pages);
-  }
-  return validator(cow_pages);
-}
-
-template <typename F>
-bool PageQueues::DebugPageIsSpecificQueue(const vm_page_t* page, PageQueue queue,
-                                          F validator) const {
-  fbl::RefPtr<VmCowPages> cow_pages;
-  {
-    Guard<CriticalMutex> guard{&list_lock_};
-    PageQueue q = (PageQueue)page->object.get_page_queue_ref().load(ktl::memory_order_relaxed);
-    if (q != queue) {
-      return false;
-    }
-    VmCowPages* cow = reinterpret_cast<VmCowPages*>(page->object.get_object());
-    DEBUG_ASSERT(cow);
-    cow_pages = fbl::MakeRefPtrUpgradeFromRaw(cow, guard);
-    DEBUG_ASSERT(cow_pages);
-  }
-  return validator(cow_pages);
-}
-
 bool PageQueues::DebugPageIsReclaim(const vm_page_t* page, size_t* queue) const {
-  return DebugPageIsSpecificReclaim(page, [](auto cow) { return true; }, queue);
+  return rust_page_queues_debug_page_is_reclaim(this, page, queue);
 }
 
 bool PageQueues::DebugPageIsReclaimIsolate(const vm_page_t* page) const {
-  return DebugPageIsSpecificQueue(page, PageQueueReclaimIsolate,
-                                  [](auto cow) { return cow->can_evict(); });
+  return rust_page_queues_debug_page_is_reclaim_isolate(this, page);
 }
 
 bool PageQueues::DebugPageIsPagerBackedDirty(const vm_page_t* page) const {
-  return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) ==
-         PageQueuePagerBackedDirty;
+  return rust_page_queues_debug_page_is_pager_backed_dirty(this, page);
 }
 
 bool PageQueues::DebugPageIsAnonymous(const vm_page_t* page) const {
-  if (ReclaimIsOnlyPagerBacked()) {
-    return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) == PageQueueAnonymous;
-  }
-  return DebugPageIsSpecificReclaim(page, [](auto cow) { return !cow->can_evict(); }, nullptr);
-}
-
-bool PageQueues::DebugPageIsWired(const vm_page_t* page) const {
-  return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) == PageQueueWired;
-}
-
-bool PageQueues::DebugPageIsHighPriority(const vm_page_t* page) const {
-  return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) == PageQueueHighPriority;
+  return rust_page_queues_debug_page_is_anonymous(this, page);
 }
 
 bool PageQueues::DebugPageIsAnonymousZeroFork(const vm_page_t* page) const {
-  if (ReclaimIsOnlyPagerBacked()) {
-    return page->object.get_page_queue_ref().load(ktl::memory_order_relaxed) ==
-           PageQueueAnonymousZeroFork;
-  }
-  return DebugPageIsSpecificReclaim(page, [](auto cow) { return !cow->can_evict(); }, nullptr);
+  return rust_page_queues_debug_page_is_anonymous_zero_fork(this, page);
 }
 
 bool PageQueues::DebugPageIsAnyAnonymous(const vm_page_t* page) const {
-  return DebugPageIsAnonymous(page) || DebugPageIsAnonymousZeroFork(page);
+  return rust_page_queues_debug_page_is_any_anonymous(this, page);
+}
+
+bool PageQueues::DebugPageIsWired(const vm_page_t* page) const {
+  return rust_page_queues_debug_page_is_wired(this, page);
+}
+
+bool PageQueues::DebugPageIsHighPriority(const vm_page_t* page) const {
+  return rust_page_queues_debug_page_is_high_priority(this, page);
 }
 
 ktl::optional<PageQueues::VmoBacklink> PageQueues::PopAnonymousZeroFork() {
@@ -1436,19 +1195,9 @@ ktl::optional<PageQueues::VmoBacklink> PageQueues::PeekIsolate(size_t lowest_que
 }
 
 PageQueues::ActiveInactiveCounts PageQueues::GetActiveInactiveCounts() const {
-  uint64_t active_count = 0;
-  uint64_t inactive_count = 0;
-  PageQueue mru = mru_gen_to_queue();
-  for (uint8_t queue = 0; queue < PageQueueNumQueues; queue++) {
-    uint64_t count = page_queue_counts_[queue].load(ktl::memory_order_relaxed);
-    if (queue_is_active(static_cast<PageQueue>(queue), mru)) {
-      active_count += count;
-    }
-    if (queue_is_inactive(static_cast<PageQueue>(queue), mru)) {
-      inactive_count += count;
-    }
-  }
-  return ActiveInactiveCounts{.active = active_count, .inactive = inactive_count};
+  ActiveInactiveCounts counts;
+  rust_page_queues_get_active_inactive_counts(this, &counts);
+  return counts;
 }
 
 void PageQueues::SetAgingEvent(Event* event) {

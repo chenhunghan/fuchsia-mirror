@@ -5,6 +5,7 @@
 
 #### CATEGORY=Test
 #### DEPRECATED
+#### PREBUILTS=${PREBUILT_CLANG_DIR} ${PREBUILT_NINJA}
 ### build and run tests on host
 
 ## Usage: fx run-host-tests [-z] [host test names ...] [-- [test runner flags]]

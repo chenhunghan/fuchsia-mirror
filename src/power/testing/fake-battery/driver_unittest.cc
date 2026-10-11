@@ -80,8 +80,6 @@ TEST_F(FakeBatteryDriverTest, CanGetStatus) {
   ASSERT_EQ(result.status(), ZX_OK);
   ASSERT_TRUE(result->is_ok());
   const auto& status = result->value()->status;
-  ASSERT_TRUE(status.has_charge_status());
-  ASSERT_EQ(status.charge_status(), hbattery::ChargeStatus::kCharging);
   ASSERT_EQ(status.time_remaining(), zx::sec(59).to_nsecs());
 
   // Verify presence, voltage, current, and health
@@ -105,14 +103,14 @@ TEST_F(FakeBatteryDriverTest, CanGetSpec) {
   ASSERT_TRUE(spec.has_supported_options());
   ASSERT_TRUE(spec.supported_options().has_interest());
   ASSERT_TRUE(spec.supported_options().interest().has_level_percent());
-  ASSERT_TRUE(spec.supported_options().interest().has_charge_status());
+  ASSERT_TRUE(spec.supported_options().interest().has_health());
 }
 
 TEST_F(FakeBatteryDriverTest, CanConfigureWatch) {
   fidl::SyncClient client(std::move(GetHardwareBatteryClient()));
   fuchsia_hardware_power_battery::Status interest;
   interest.level_percent(0.0f);
-  interest.charge_status(fuchsia_hardware_power_battery::ChargeStatus::kCharging);
+  interest.health(fuchsia_hardware_power_battery::HealthStatus::kGood);
 
   fuchsia_hardware_power_battery::WatchOptions options;
   options.interest(std::move(interest));
@@ -122,7 +120,7 @@ TEST_F(FakeBatteryDriverTest, CanConfigureWatch) {
   const auto& effective_options = result->effective_options();
   ASSERT_TRUE(effective_options.interest().has_value());
   ASSERT_TRUE(effective_options.interest()->level_percent().has_value());
-  ASSERT_TRUE(effective_options.interest()->charge_status().has_value());
+  ASSERT_TRUE(effective_options.interest()->health().has_value());
 
   // Restore client end
   GetHardwareBatteryClient() = client.TakeClientEnd();
@@ -187,7 +185,7 @@ TEST_F(FakeBatteryDriverTest, WatchHangingUntilSetBatteryStatus) {
 
   // Second watch will hang because state has not changed.
   bool watch_resolved = false;
-  fuchsia_hardware_power_battery::ChargeStatus received_charge_status;
+  fuchsia_hardware_power_battery::HealthStatus received_health;
   float received_level_percent = 0.0f;
 
   fidl::Client async_client(sync_client.TakeClientEnd(),
@@ -200,8 +198,8 @@ TEST_F(FakeBatteryDriverTest, WatchHangingUntilSetBatteryStatus) {
         if (status.level_percent().has_value()) {
           received_level_percent = status.level_percent().value();
         }
-        if (status.charge_status().has_value()) {
-          received_charge_status = status.charge_status().value();
+        if (status.health().has_value()) {
+          received_health = status.health().value();
         }
         watch_resolved = true;
       });
@@ -216,14 +214,14 @@ TEST_F(FakeBatteryDriverTest, WatchHangingUntilSetBatteryStatus) {
   fidl::SyncClient ctrl_client(std::move(connect_ctrl.value()));
   fuchsia_hardware_power_battery::Status new_status;
   new_status.level_percent(42.0f);
-  new_status.charge_status(fuchsia_hardware_power_battery::ChargeStatus::kDischarging);
+  new_status.health(fuchsia_hardware_power_battery::HealthStatus::kWarm);
   auto set_res = ctrl_client->SetBatteryStatus({std::move(new_status)});
   ASSERT_TRUE(set_res.is_ok());
 
   driver_test().runtime().RunUntil([&]() { return watch_resolved; });
   EXPECT_TRUE(watch_resolved);
   EXPECT_EQ(received_level_percent, 42.0f);
-  EXPECT_EQ(received_charge_status, fuchsia_hardware_power_battery::ChargeStatus::kDischarging);
+  EXPECT_EQ(received_health, fuchsia_hardware_power_battery::HealthStatus::kWarm);
 }
 
 TEST_F(FakeBatteryDriverTest, ConcurrentWatchReturnsAlreadyWatching) {

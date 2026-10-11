@@ -4872,6 +4872,34 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_mapper_session_detaches_vmo_on_cancel() {
+        let interface = Arc::new(MockInterface::default());
+        let block_server = BlockServer::new(BLOCK_SIZE, interface.clone());
+
+        let (mapper_proxy, mapper_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fblock::MapperMarker>();
+        let scope = fasync::Scope::new();
+        scope.spawn(async move {
+            let _ = block_server.handle_mapper_requests(mapper_stream).await;
+        });
+
+        let (session_proxy, session_server) =
+            fidl::endpoints::create_proxy::<fblock::MapperSessionMarker>();
+        let mapping_vmo = zx::Vmo::create(4096).unwrap();
+        mapper_proxy.open_session(session_server, mapping_vmo, None, None).await.unwrap().unwrap();
+
+        let _paged_vmo = session_proxy
+            .create_vmo(1, 4096, fblock::CreateVmoOptions::empty())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interface.attached_vmos.load(Ordering::Relaxed), 1);
+
+        scope.cancel().await;
+        assert_eq!(interface.attached_vmos.load(Ordering::Relaxed), 0);
+    }
+
+    #[fuchsia::test]
     async fn test_inline_crypto_key_registration_and_access_control() {
         struct CryptoInterface {
             last_hw_slot: Mutex<Option<u8>>,

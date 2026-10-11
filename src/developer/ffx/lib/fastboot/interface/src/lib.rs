@@ -103,10 +103,23 @@ pub mod test {
         }
 
         async fn get_all_vars(&mut self, listener: Sender<Variable>) -> Result<(), FastbootError> {
-            listener
-                .send(Variable { name: "test".to_string(), value: "test".to_string() })
-                .await
-                .unwrap();
+            let vars: Vec<Variable> = {
+                let state = self.state.lock().unwrap();
+                if state.variables.is_empty() {
+                    vec![Variable { name: "test".to_string(), value: "test".to_string() }]
+                } else {
+                    state
+                        .variables
+                        .iter()
+                        .filter_map(|(name, (val, _))| {
+                            val.as_ref().map(|v| Variable { name: name.clone(), value: v.clone() })
+                        })
+                        .collect()
+                }
+            };
+            for var in vars {
+                listener.send(var).await.unwrap();
+            }
             Ok(())
         }
 

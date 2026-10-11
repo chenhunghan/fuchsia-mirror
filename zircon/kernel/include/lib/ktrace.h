@@ -34,7 +34,9 @@ struct KTraceState {
   ktl::atomic<bool> writes_enabled{false};
 };
 static_assert(sizeof(KTraceState) == 8);
-// LINT.ThenChange(//zircon/kernel/lib/ktrace/src/lib.rs:KTraceState)
+// LINT.ThenChange(//zircon/kernel/lib/ktrace/src/mod.rs:KTraceState)
+
+extern "C" KTraceState GLOBAL_KTRACE_STATE;
 
 //
 // # Kernel tracing instrumentation and state management interfaces
@@ -656,9 +658,6 @@ using fxt::operator""_intern;
 void ktrace_report_live_threads();
 void ktrace_report_live_processes();
 
-// Test-only helper to restore Rust KTrace back to the global singleton after tests override it.
-extern "C" void ktrace_restore_rust_singleton();
-
 class KTrace {
  public:
   using Reservation = percpu_writer::Buffer::Reservation;
@@ -907,13 +906,11 @@ class KTrace {
   // Retrieves a reference to the global KTrace instance.
   static KTrace& GetInstance() { return instance_; }
 
+  void* rust_ktrace() const { return rust_ktrace_.load(ktl::memory_order_acquire); }
+
  private:
   friend class KTraceTests;
   friend class TestKTrace;
-  friend void ::ktrace_restore_rust_singleton();
-
-  // Test helper to restore the global singleton state in Rust after tests override it.
-  void RestoreRustSingleton() TA_EXCL(lock_);
 
   // A special KOID used to signify the lack of an associated process.
   constexpr static fxt::Koid kNoProcess{0u};
@@ -921,9 +918,12 @@ class KTrace {
   // Set this class up as a singleton by:
   // * Making the constructor and destructor private
   // * Preventing copies and moves
-  constexpr explicit KTrace(bool disable_diagnostic_logs = false)
-      : disable_diagnostic_logs_(disable_diagnostic_logs) {}
-  virtual ~KTrace() = default;
+  // Constructor for the global singleton instance, which shares GLOBAL_KTRACE_STATE with Rust.
+  constexpr KTrace() : state_(GLOBAL_KTRACE_STATE) {}
+  // Constructor for test instances (via TestKTrace), which use per-instance local_state_.
+  constexpr explicit KTrace(bool disable_diagnostic_logs)
+      : disable_diagnostic_logs_(disable_diagnostic_logs), state_(local_state_) {}
+  virtual ~KTrace();
   KTrace(const KTrace&) = delete;
   KTrace& operator=(const KTrace&) = delete;
   KTrace(KTrace&&) = delete;
@@ -1049,12 +1049,15 @@ class KTrace {
 
   // A mapping of KOIDs to CPUs, used to annotate trace records.
   CpuContextMap cpu_context_map_;
+  ktl::atomic<void*> rust_ktrace_{nullptr};
   // True if diagnostic log messages should not be printed. Set to true in tests to avoid logspam.
   const bool disable_diagnostic_logs_{false};
 
+  // Per-instance state used by test instances; the global singleton uses GLOBAL_KTRACE_STATE.
+  KTraceState local_state_;
   // The atomic tracing state. This is shared with the Rust KTrace implementation
   // via FFI by passing its address during initialization.
-  KTraceState state_;
+  KTraceState& state_;
 
   // The buffers used to store data when using per-CPU mode.
   ktl::unique_ptr<percpu_writer::Buffer[]> percpu_buffers_{nullptr};
@@ -1076,6 +1079,12 @@ FFI_ALWAYS_INLINE zx_status_t cpp_ktrace_read_user(user_out_ptr<void> ptr, uint3
                                                    size_t len, size_t* out_actual);
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_ktrace_control(uint32_t action, uint32_t options);
+
+void* cpp_ktrace_get_active_instance();
+#ifdef UNITTESTS_ENABLED
+void* cpp_ktrace_get_thread_local_override();
+void cpp_ktrace_set_thread_local_override(void* ktrace_ptr);
+#endif
 
 __END_CDECLS
 

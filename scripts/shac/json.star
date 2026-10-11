@@ -12,12 +12,15 @@ def _json5_format(ctx):
     Args:
       ctx: A ctx instance.
     """
-    exe = compiled_tool_path(ctx, "formatjson5")
     json5_files = ctx.scm.affected_files(glob = [
         "*.json5",
         "*.persist",
         "*.triage",
     ])
+    if not json5_files:
+        return
+
+    exe = compiled_tool_path(ctx, "formatjson5")
 
     procs = []
     for f in json5_files:

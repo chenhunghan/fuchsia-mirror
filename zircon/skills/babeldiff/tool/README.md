@@ -13,8 +13,8 @@ where the Rust does not do the same thing:
 - **error returns** that differ in code or order, and failures that one side
   handles and the other propagates
 - **locks** taken in a different place or on a different lock
-- **control flow** (`if`, loops, `switch`/`match`, `return`, `break`) with no
-  counterpart
+- **control flow** (`if`, loops, `switch`/`match`, `case` arms, `return`, `break`)
+  with no counterpart
 - **steps** (calls) that only one side performs
 
 The output is plain text in the style of `diff -y`, meant to be read by people
@@ -119,7 +119,8 @@ with `file:line` references on both sides. The marker column is:
 
 Rust safety comments (`// SAFETY: ...` and `# Safety` doc sections) are
 expected additions: they are shown, marked `>`, with no finding, and never
-aligned with a C++ comment.
+aligned with a C++ comment. Doc comments on `pub` Rust functions where the
+C++ function had none are also expected additions.
 
 Locking is compared through ksync's differences from C++. `ksync::lock!(let g
 = self.lock.lock())`, `self.read_lock()`, `self.write_lock()` and a
@@ -145,7 +146,7 @@ checks:
 
 | Kind | What it covers |
 | --- | --- |
-| `comment` | A comment lost, added or reworded. Each lost comment is its own finding. |
+| `comment` | A comment lost, added, reworded, or still using C++ trailing-underscore member names (`foo_`) or `kPascalCase` constants (`kOutOfMemory`) that were renamed in Rust. Each lost comment is its own finding. |
 | `error-path` | Error codes, propagation, and success versus failure. |
 | `lock` | Locks taken or released. |
 | `control-flow` | Branches, loops, returns, and tests added to or dropped from a condition. |
@@ -187,12 +188,12 @@ no pairing, and they are listed at the end of the report, under
 
 | Lint | What it checks |
 | --- | --- |
-| `extern-signature` | A Rust `extern "C"` declaration of a `cpp_*` helper, or a `rust_*` export, has the parameters and return type of the C++ side: the same count, pointer depth and scalar widths. A mutable pointer the receiving side may write through while the other treats it as const is a note. |
+| `extern-signature` | A Rust `extern "C"` declaration of a `cpp_*` helper, or a `rust_*` export, has the parameters and return type of the C++ side: the same count, pointer depth and scalar widths, and each `cpp_*` helper defined in a `.cc` file has an `extern "C"` prototype declaration in a C++ header. A mutable pointer the receiving side may write through while the other treats it as const is a note. |
 | `unsafe-safety` | Every `unsafe` block and `unsafe impl` has a `// SAFETY:` comment, and every `unsafe fn` a `# Safety` doc section. Blocks are reported once per function. |
 | `shim-logic` | A `rust_*` shim or `cpp_*` helper only forwards. Branches, loops and `match` arms are reported unless they only convert a result, a status, or a null pointer or empty optional. |
 | `file-placement` | Each C++ file becomes one Rust file named after it (`foo.cc` to `foo.rs`, `dir_foo.rs` for a flattened directory, or a part named `foo_*.rs`). A C++ file split across several Rust files, and functions that landed in a file not named after their C++ file, are issues; a Rust file that collects three or more C++ files is a note. Test files and `_ffi` companions don't count. The report also maps each C++ file to the Rust files its functions went to, under `File placement`. |
 | `provenance-comment` | Comments that say where code was ported from ("Ported from foo.cc", "(`foo.cc:12-34`)", "Mirrors the C++ version"), reported once per file. |
-| `invented-lifetime` | A reference made from a raw pointer that was taken from a place still in scope (`let p = buf.as_mut_ptr(); ... &mut *p`), whose lifetime the compiler can't check. |
+| `invented-lifetime` | A reference made from a raw pointer that was taken from a place still in scope (`let p = buf.as_mut_ptr(); ... &mut *p`), or a `&mut *self.field.get()` borrow held across a `self.method()` call or another `self.field.get()` access and used again afterwards, whose lifetime the compiler can't check. |
 | `unsafe-density` | A note on a file whose changed functions have ten or more `unsafe` blocks between them. |
 
 A lint issue counts toward the exit status like any other issue.
@@ -280,22 +281,31 @@ on narrow screens, and prints cleanly.
    `if (status != ZX_OK) return status;` reads as `?`, and so do a status
    chained through `if (status == ZX_OK) status = B();` to a final
    `return status;` and a status set in each branch and checked once;
+   `status = foo(); if (status != ZX_OK) { ... }` lines up with
+   `let status = foo(); if let Err(status) = status { ... }` and with
+   `let h = match foo() { Ok(h) => h, Err(status) => { ... } };`;
    `if (!ac.check()) return ZX_ERR_NO_MEMORY;` after an allocation reads as
    `try_new(..).ok_or(NO_MEMORY)?`;
    `return c ? A : B;` as `if c { A } else { B }`,
    `*out = x; return ZX_OK;` as `Ok(x)`, `do { ... } while (c);` as
-   `loop { ... if !c { break; } }`, and `case A: case B:` as `A | B =>`.
+   `loop { ... if !c { break; } }`, `case A: case B:` as `A | B =>`, and
+   nested `extern "C" fn` callback bodies as C++ lambda bodies. A C++ class
+   with no explicit constructor that initializes fields via in-class default
+   member initializers synthesizes a `ClassName::ClassName` constructor so its
+   fields align with a Rust constructor returning `Self { ... }` or
+   `pin_init!(Self { ... })`.
    Declarations with no initializer, pure bindings such as
    `let state = self.state();`, out-parameter writes and thread-safety
    assertions are bookkeeping, not steps.
 3. **Pairing.** C++ functions are paired with Rust functions by, in order:
    explicit `--pair`s; the FFI shim pattern (the new C++ body calls
-   `rust_<class>_<method>`, whose `#[no_mangle]` definition forwards to the
-   Rust method, or the shim's name spells the C++ function's); the same
-   class and method name; then a score combining name similarity and body
-   similarity, where comments count double. When a shim calls several
-   same-named methods (`A::create` and `B::create`), the type path decides,
-   and if nothing does the shim is reported as ambiguous rather than
+   `rust_<class>_<method>`, whose `#[no_mangle]` or `pub extern "C"` definition
+   forwards to the Rust method, or the shim's name spells the C++ function's;
+   private `extern "C"` callbacks without `#[no_mangle]` pair as ordinary
+   functions); the same class and method name; then a score combining name
+   similarity and body similarity, where comments count double. When a shim
+   calls several same-named methods (`A::create` and `B::create`), the type path
+   decides, and if nothing does the shim is reported as ambiguous rather than
    guessed. A `#[no_mangle]` function that does the work itself is the port,
    and a C++ one-line trampoline hands the shim to the C++ it calls.
    C++ overrides of a method in related classes (found from the class
@@ -317,7 +327,10 @@ on narrow screens, and prints cleanly.
    a `case` turned `match` arm is one changed step. Aligned units are
    compared feature by feature, and `if` conditions test by test; unaligned
    ones are reported, and a unit that resembles one on the other side at a
-   different position is reported as possibly reordered.
+   different position is reported as possibly reordered. A C++ `default:`
+   arm that only panics, breaks or returns a fallback value is noted rather
+   than flagged when paired with an exhaustive Rust `match` that covers
+   every case.
 
 ## Library
 

@@ -253,6 +253,52 @@ pub struct GsoInfo {
     pub ipv4_id_mode: Option<Ipv4IdMode>,
 }
 
+/// The type of a packet.
+///
+/// The type is passed internally along with each packet as part of packet
+/// metadata. For incoming packets the value is set based on the L2 headers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PacketType {
+    /// Packet addressed to the local host (`PACKET_HOST`).
+    Host,
+    /// Packet addressed to all hosts on the local network (`PACKET_BROADCAST`).
+    Broadcast,
+    /// Packet addressed to a multicast group (`PACKET_MULTICAST`).
+    Multicast,
+    /// Packet addressed to another host, received in promiscuous mode
+    /// (`PACKET_OTHERHOST`).
+    OtherHost,
+    /// Packet originated from the local host (`PACKET_OUTGOING`).
+    Outgoing,
+    /// Packets looped back for local delivery, e.g. multicast and broadcast
+    /// while being delivered to local sockets. Note that this excludes packets
+    /// sent to the unicast loopback IP - those are marked as
+    /// `PacketType::Host`.
+    /// (`PACKET_LOOPBACK`).
+    Loopback,
+}
+
+impl From<FrameDestination<bool>> for PacketType {
+    fn from(dst: FrameDestination<bool>) -> Self {
+        match dst {
+            FrameDestination::Individual { local: true } => PacketType::Host,
+            FrameDestination::Individual { local: false } => PacketType::OtherHost,
+            FrameDestination::Broadcast => PacketType::Broadcast,
+            FrameDestination::Multicast => PacketType::Multicast,
+        }
+    }
+}
+
+impl From<LocalFrameDestination> for PacketType {
+    fn from(dst: LocalFrameDestination) -> Self {
+        match dst {
+            FrameDestination::Individual { local: () } => PacketType::Host,
+            FrameDestination::Broadcast => PacketType::Broadcast,
+            FrameDestination::Multicast => PacketType::Multicast,
+        }
+    }
+}
+
 /// The metadata required for a packet to get into the IP layer.
 pub struct RecvIpFrameMeta<D, M, I: Ip> {
     /// The device on which the IP frame was received.

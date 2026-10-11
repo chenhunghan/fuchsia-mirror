@@ -46,8 +46,8 @@ use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{AttributeKey, ObjectKey, ObjectKeyData, ObjectValue};
 use crate::object_store::transaction::{
     AllocatorMutation, LockKey, Mutation, MutationV56, MutationV57, MutationV59,
-    ObjectMutationIterator, ObjectStoreMutation, Options, TRANSACTION_MAX_JOURNAL_USAGE,
-    Transaction, lock_keys,
+    ObjectMutationIterator, ObjectStoreMutation, Options, ReservationOptions,
+    TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
     AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
@@ -1386,8 +1386,7 @@ impl Journal {
         let mut transaction = handle
             .new_transaction_with_options(Options {
                 skip_journal_checks: true,
-                borrow_metadata_space: true,
-                allocator_reservation: Some(self.objects.metadata_reservation()),
+                reservation: ReservationOptions::BorrowedMetadataAndData,
                 ..Default::default()
             })
             .await?;

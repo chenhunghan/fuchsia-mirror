@@ -130,7 +130,6 @@ pub fn load_bib_set(path: &Utf8Path) -> Result<VersionInfo> {
 
 /// Load a Product Bundle artifact and return the version information.
 pub fn load_product_bundle_v2(pb: &ProductBundleV2) -> VersionInfoWithDependencies {
-    let pb_info = pb.release_info.clone().unwrap();
     let mut btree: BTreeMap<UniqueReleaseInfo, Vec<Slot>> = BTreeMap::new();
 
     // If an existing UniqueReleaseInfo exists in the BTreeMap with the same
@@ -165,9 +164,11 @@ pub fn load_product_bundle_v2(pb: &ProductBundleV2) -> VersionInfoWithDependenci
     };
 
     // Push release information for the systems inside the PB.
-    pb_info.system_a.map(|system| add_flat_system_info(system, Slot::A));
-    pb_info.system_b.map(|system| add_flat_system_info(system, Slot::B));
-    pb_info.system_r.map(|system| add_flat_system_info(system, Slot::R));
+    if let Some(pb_info) = pb.release_info.clone() {
+        pb_info.system_a.map(|system| add_flat_system_info(system, Slot::A));
+        pb_info.system_b.map(|system| add_flat_system_info(system, Slot::B));
+        pb_info.system_r.map(|system| add_flat_system_info(system, Slot::R));
+    }
 
     // Convert the btreemap to a vector of keys, and set each UniqueReleaseInfo
     // slot field equal to the corresponding "value" in the BTreeMap.

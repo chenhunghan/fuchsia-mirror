@@ -313,7 +313,7 @@ fn configure_subsystems(
 
     swd::SwdSubsystemConfig::define_configuration(
         &context_base.for_subsystem("swd"),
-        &platform.software_delivery,
+        &(&platform.software_delivery, &platform.storage.filesystems.volume),
         builder,
     )
     .context("Configuring the 'software_delivery' subsystem")?;

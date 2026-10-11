@@ -167,7 +167,7 @@ pub(crate) async fn serve(
 #[derive(Debug)]
 enum PackageAvailability {
     Always,
-    Open(Arc<crate::RootDir>),
+    Open(Arc<crate::CachedRootDir>),
     Unknown,
 }
 
@@ -301,7 +301,8 @@ async fn get_impl(
     let needed_blobs = needed_blobs.into_stream();
     let pkg: Hash = meta_far_blob.blob_id.into();
 
-    let root_dir = match gc_protection {
+    let flags = executability_status(executability_restrictions, base_packages, pkg).into();
+    match gc_protection {
         // During OTA (which is the only client of Retained protection) do not short-circuit
         // fetches of packages expected to be resident, so that the system can recover from
         // unexpectedly absent blobs.
@@ -321,10 +322,15 @@ async fn get_impl(
                 cobalt_sender.open_io_error();
                 Status::UNAVAILABLE
             })?;
-            Arc::new(root_dir)
+            vfs::directory::serve_on(Arc::new(root_dir), flags, scope, dir);
         }
         fpkg::GcProtection::OpenPackageTracking => {
-            match PackageAvailability::get(base_packages, cache_packages, open_packages, &pkg) {
+            let root_dir = match PackageAvailability::get(
+                base_packages,
+                cache_packages,
+                open_packages,
+                &pkg,
+            ) {
                 PackageAvailability::Unknown => {
                     let root_dir = serve_needed_blobs(
                         needed_blobs,
@@ -359,12 +365,10 @@ async fn get_impl(
                         Status::INTERNAL
                     })?
                 }
-            }
+            };
+            vfs::directory::serve_on(root_dir, flags, scope, dir);
         }
-    };
-
-    let flags = executability_status(executability_restrictions, base_packages, pkg).into();
-    vfs::directory::serve_on(root_dir, flags, scope, dir);
+    }
 
     cobalt_sender.open_success();
     Ok(())

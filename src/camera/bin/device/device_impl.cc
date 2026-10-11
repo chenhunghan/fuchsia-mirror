@@ -51,7 +51,7 @@ fpromise::promise<std::vector<ConfigPtr>, zx_status_t> FetchConfigs(
   return bridge.consumer.promise().then(
       [&controller,
        configs = std::move(configs)](fpromise::result<ConfigPtr, zx_status_t>& result) mutable
-      -> fpromise::promise<std::vector<ConfigPtr>, zx_status_t> {
+          -> fpromise::promise<std::vector<ConfigPtr>, zx_status_t> {
         if (result.is_ok()) {
           // If we received a config, we need to call FetchConfigs again to get the next config.
           configs.push_back(result.take_value());
@@ -78,7 +78,7 @@ DeviceImpl::DeviceImpl(async_dispatcher_t* dispatcher, fpromise::executor& execu
       bad_state_event_(std::move(bad_state_event)),
       button_listener_binding_(this) {}
 
-DeviceImpl::~DeviceImpl() = default;
+DeviceImpl::~DeviceImpl() { *alive_ = false; }
 
 fpromise::promise<std::unique_ptr<DeviceImpl>, zx_status_t> DeviceImpl::Create(
     async_dispatcher_t* dispatcher, fpromise::executor& executor,
@@ -137,7 +137,7 @@ fpromise::promise<std::unique_ptr<DeviceImpl>, zx_status_t> DeviceImpl::Create(
   return fpromise::join_promises(std::move(device_info_promise), std::move(configs_promise))
       .then([device = std::move(device), registry = std::move(registry)](
                 fpromise::result<std::tuple<DeviceInfoResult, FetchConfigsResult>>& results) mutable
-            -> fpromise::result<std::unique_ptr<DeviceImpl>, zx_status_t> {
+                -> fpromise::result<std::unique_ptr<DeviceImpl>, zx_status_t> {
         FX_CHECK(results.is_ok());
         if (std::get<1>(results.value()).is_error()) {
           return fpromise::error(std::get<1>(results.value()).error());
@@ -203,7 +203,28 @@ void DeviceImpl::SetConfiguration(uint32_t index) {
   }
 
   deallocation_events_.clear();
-  deallocation_promises_ = std::move(deallocation_promises);
+  deallocation_error_ = false;
+  executor_.schedule_task(
+      fpromise::join_promise_vector(std::move(deallocation_promises))
+          .then([this](const fpromise::result<std::vector<fpromise::result<void, zx_status_t>>>&
+                           results) {
+            if (results.is_error()) {
+              FX_LOGS(WARNING) << "aggregate deallocation wait failed";
+              deallocation_error_ = true;
+            } else {
+              auto& wait_results = results.value();
+              for (const auto& wait_result : wait_results) {
+                if (wait_result.is_error()) {
+                  FX_PLOGS(WARNING, wait_result.error())
+                      << "wait failed for previous stream at index "
+                      << &wait_result - wait_results.data();
+                  deallocation_error_ = true;
+                }
+              }
+            }
+          })
+          .wrap_with(deallocation_barrier_)
+          .wrap_with(scope_));
 
   for (auto& stream : streams_) {
     if (stream) {
@@ -212,6 +233,7 @@ void DeviceImpl::SetConfiguration(uint32_t index) {
   }
 
   streams_.clear();
+  stream_generations_.clear();
 
 #if CAMERA_QUIRK_ADD_CONFIG_CHANGE_DELAY
   // TODO(b/224858687) - Temporary workaround to ensure that camera pipeline has an opportunity to
@@ -221,6 +243,7 @@ void DeviceImpl::SetConfiguration(uint32_t index) {
 #endif  // CAMERA_QUIRK_ADD_CONFIG_CHANGE_DELAY
 
   streams_.resize(configurations_[index].streams().size());
+  stream_generations_.resize(configurations_[index].streams().size(), 0);
   FX_LOGS(INFO) << "Configuration set to " << index << ".";
   for (auto& client : clients_) {
     client.second->ConfigurationUpdated(current_configuration_index_);
@@ -287,13 +310,17 @@ void DeviceImpl::ConnectToStream(uint32_t index,
   };
 
   // When the last client disconnects destroy the stream.
-  auto on_no_clients = [this, index]() { streams_[index] = nullptr; };
+  auto on_no_clients = [this, index]() {
+    stream_generations_[index] = 0;
+    streams_[index] = nullptr;
+  };
 
   auto streaming_failure_record = MetricsReporter::Get().CreateFailureTestRecord(
       MetricsReporter::FailureTestRecordType::FramesStuckInPipeline, false,
       current_configuration_index_, index);
   auto description =
       "c" + std::to_string(current_configuration_index_) + "s" + std::to_string(index);
+  stream_generations_[index] = stream_generation_next_++;
   streams_[index] = std::make_unique<StreamImpl>(
       dispatcher_, records_[current_configuration_index_]->GetStreamRecord(index),
       configurations_[current_configuration_index_].streams()[index],
@@ -306,54 +333,43 @@ void DeviceImpl::ConnectToStream(uint32_t index,
 void DeviceImpl::OnStreamRequested(uint32_t index,
                                    fidl::InterfaceRequest<fuchsia::camera2::Stream> request,
                                    uint32_t format_index) {
-  auto connect_to_stream =
-      [this, index, format_index, request = std::move(request)](
-          const fpromise::result<std::vector<fpromise::result<void, zx_status_t>>>&
-              results) mutable {
-        std::string description = "c" + std::to_string(current_configuration_index_) + "s" +
-                                  std::to_string(index) + "f" + std::to_string(format_index);
-        bool deallocation_complete = true;
-        if (results.is_error()) {
-          FX_LOGS(WARNING) << "aggregate deallocation wait failed prior to connecting to "
-                           << description;
-          deallocation_complete = false;
-        } else {
-          auto& wait_results = results.value();
-          for (const auto& wait_result : wait_results) {
-            if (wait_result.is_error()) {
-              FX_PLOGS(WARNING, wait_result.error()) << "wait failed for previous stream at index "
-                                                     << &wait_result - wait_results.data();
-              deallocation_complete = false;
-            }
-          }
-        }
-        fit::closure connect = [this, index, format_index, request = std::move(request),
-                                description]() mutable {
-          FX_LOGS(INFO) << "connecting to controller stream: " << description;
-          controller_->CreateStream(current_configuration_index_, index, format_index,
-                                    std::move(request));
-        };
-        // If the wait for deallocation failed, try to connect anyway after a fixed delay.
-        if (!deallocation_complete) {
-          constexpr uint32_t kFallbackDelayMsec = 5000;
-          FX_LOGS(WARNING) << "deallocation wait failed; falling back to timed wait of "
-                           << kFallbackDelayMsec << "ms";
-          ZX_ASSERT(async::PostDelayedTask(dispatcher_, std::move(connect),
-                                           zx::msec(kFallbackDelayMsec)) == ZX_OK);
-          return;
-        }
-        // Otherwise, connect immediately.
-        connect();
-      };
+  uint64_t generation = stream_generations_[index];
+  auto connect_to_stream = [this, index, format_index, request = std::move(request),
+                            generation](const fpromise::result<void, void>& result) mutable {
+    std::string description = "c" + std::to_string(current_configuration_index_) + "s" +
+                              std::to_string(index) + "f" + std::to_string(format_index);
+    fit::closure connect = [this, index, format_index, request = std::move(request), description,
+                            alive = alive_, generation]() mutable {
+      if (!*alive || index >= streams_.size() || !streams_[index] ||
+          stream_generations_[index] != generation || scope_.exited() ||
+          streams_[index]->Scope().exited()) {
+        FX_LOGS(WARNING) << "stream or device destroyed prior to connecting to " << description;
+        return;
+      }
+      FX_LOGS(INFO) << "connecting to controller stream: " << description;
+      controller_->CreateStream(current_configuration_index_, index, format_index,
+                                std::move(request));
+    };
+    // If the wait for deallocation failed, try to connect anyway after a fixed delay.
+    if (deallocation_error_) {
+      constexpr uint32_t kFallbackDelayMsec = 5000;
+      FX_LOGS(WARNING) << "deallocation wait failed; falling back to timed wait of "
+                       << kFallbackDelayMsec << "ms";
+      ZX_ASSERT(async::PostDelayedTask(dispatcher_, std::move(connect),
+                                       zx::msec(kFallbackDelayMsec)) == ZX_OK);
+      return;
+    }
+    // Otherwise, connect immediately.
+    connect();
+  };
 
-  // Wait for any previous configurations buffers to finish deallocation, then connect
-  // to stream. The move and clear are necessary to ensure subsequent accesses to the container
-  // produces well-defined results.
-  auto promises = std::move(deallocation_promises_);
-  deallocation_promises_.clear();
-  executor_.schedule_task(fpromise::join_promise_vector(std::move(promises))
+  // Wait for any previous configuration's buffers to finish deallocation, then connect
+  // to stream using deallocation_barrier_ so multiple calls reliably synchronize on the
+  // same deallocation completion without clearing promises or causing UAF on stream/device.
+  executor_.schedule_task(deallocation_barrier_.sync()
                               .then(std::move(connect_to_stream))
-                              .wrap_with(streams_[index]->Scope()));
+                              .wrap_with(streams_[index]->Scope())
+                              .wrap_with(scope_));
 }
 
 void DeviceImpl::OnBuffersRequested(uint32_t index,
@@ -368,9 +384,12 @@ void DeviceImpl::OnBuffersRequested(uint32_t index,
                                         .constraints.min_buffer_count_for_camping;
 
   auto allocation_complete =
-      [this, friendly_name, controller_camping_buffers,
+      [this, friendly_name, controller_camping_buffers, alive = alive_,
        max_camping_buffers_callback = std::move(max_camping_buffers_callback)](
           fpromise::result<BufferCollectionWithLifetime, zx_status_t>& result) mutable {
+        if (!*alive) {
+          return;
+        }
         if (result.is_error()) {
           FX_PLOGS(WARNING, result.error()) << friendly_name << ": failed to allocate buffers";
           return;
@@ -403,7 +422,8 @@ void DeviceImpl::OnBuffersRequested(uint32_t index,
                                                     std::move(v2_hlcpp_constraints),
                                                     "camera_" + friendly_name)
                               .then(std::move(allocation_complete))
-                              .wrap_with(streams_[index]->Scope()));
+                              .wrap_with(streams_[index]->Scope())
+                              .wrap_with(scope_));
 }
 
 void DeviceImpl::OnEvent(fuchsia::ui::input::MediaButtonsEvent event,

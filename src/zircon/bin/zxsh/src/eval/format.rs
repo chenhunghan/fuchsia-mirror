@@ -132,6 +132,10 @@ pub fn command_to_bstring(command: &Command, buffer: &relative::Buffer) -> BStri
                 formatted.extend_from_slice(&command_to_bstring(cmd_ptr.as_ref(buffer), buffer));
             }
         }
+        CommandTag::NOT => {
+            formatted.push_str("! ");
+            formatted.extend_from_slice(&command_to_bstring(command.left.as_ref(buffer), buffer));
+        }
         _ => unreachable!("invalid CommandTag: {}", command.tag.0),
     }
     formatted

@@ -14,9 +14,12 @@ rustc_binary("bin") {
   configs += [ "//build/config/rust/lints:clippy_warn_all" ]
 
   deps = [
+    "//sdk/fidl/fuchsia.hardware.power.usb:fuchsia.hardware.power.usb_rust",
     "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_rust",
     "//sdk/fidl/fuchsia.hardware.usb.policy:fuchsia.hardware.usb.policy_rust",
     "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
     "//sdk/fidl/fuchsia.usb.policy:fuchsia.usb.policy_rust",
     "//sdk/rust/zx",
     "//src/lib/async-utils",

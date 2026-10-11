@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::vfs::FsStr;
+use crate::vfs::{FsStr, FsString};
 use flyweights::FlyByteStr;
 use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
@@ -93,6 +93,21 @@ impl MountParams {
             flags |= MountFlags::STRICTATIME;
         }
         flags
+    }
+
+    /// Formats the mount parameters as comma-separated key[=value] pairs, with each option
+    /// preceded by a leading comma (e.g. `,gid=3009,hidepid=2`). The order is unspecified.
+    pub fn format_options(&self) -> FsString {
+        let mut result = FsString::default();
+        for (key, value) in &self.options {
+            result.push(b',');
+            result.extend_from_slice(key.as_ref());
+            if !value.is_empty() {
+                result.push(b'=');
+                result.extend_from_slice(value.as_ref());
+            }
+        }
+        result
     }
 }
 
@@ -186,9 +201,11 @@ mod parse_mount_options {
 #[cfg(test)]
 mod tests {
     use super::{MountParams, parse};
+    use crate::vfs::FsStr;
     use flyweights::FlyByteStr;
     use maplit::hashmap;
     use starnix_uapi::mount_flags::MountFlags;
+    use std::collections::HashSet;
 
     #[::fuchsia::test]
     fn empty_data() {
@@ -290,5 +307,30 @@ mod tests {
     #[::fuchsia::test]
     fn parse_data() {
         assert_eq!(parse::<usize>("42".into()), Ok(42));
+    }
+
+    #[::fuchsia::test]
+    fn test_format_options() {
+        // Splits `,a,b=c` into {"a", "b=c"}, since the order of options is unspecified.
+        fn split(options: &FsStr) -> HashSet<&[u8]> {
+            let bytes: &[u8] = options;
+            let bytes = bytes.strip_prefix(b",").expect("leading comma");
+            bytes.split(|&b| b == b',').collect()
+        }
+
+        let empty = MountParams::default();
+        assert_eq!(empty.format_options(), "");
+
+        let data = b"hidepid=2,gid=3009";
+        let parsed = MountParams::parse(data.into()).expect("parse options");
+        assert_eq!(
+            split(parsed.format_options().as_ref()),
+            HashSet::from([&b"gid=3009"[..], &b"hidepid=2"[..]])
+        );
+
+        let flags_data = b"nodev,nosuid,custom=opt";
+        let mut parsed = MountParams::parse(flags_data.into()).expect("parse options");
+        let _ = parsed.remove_mount_flags();
+        assert_eq!(parsed.format_options(), ",custom=opt");
     }
 }

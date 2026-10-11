@@ -198,12 +198,12 @@ def check_if_need_to_copy_file(args: tuple[Path, Path]) -> bool:
     return True
 
 
-def write_file_if_changed(dst_path: FilePath, content: str) -> None:
+def write_file_if_changed(dst_path: FilePath, content: str) -> bool:
     if os.path.exists(dst_path):
         with open(dst_path, "rt") as f:
             current_content = f.read()
         if current_content == content:
-            return
+            return False
 
     # Use lexists to make sure broken symlinks are removed as well.
     if os.path.lexists(dst_path):
@@ -214,3 +214,4 @@ def write_file_if_changed(dst_path: FilePath, content: str) -> None:
         os.makedirs(dst_dirname, exist_ok=True)
     with open(dst_path, "wt") as f:
         f.write(content)
+    return True

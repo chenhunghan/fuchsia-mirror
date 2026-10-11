@@ -21,15 +21,6 @@ class PowerSourceType(enum.IntEnum):
     USB = 3
 
 
-class ChargeStatus(enum.IntEnum):
-    """Corresponds to fuchsia.hardware.power.battery.ChargeStatus."""
-
-    NOT_CHARGING = 1
-    CHARGING = 2
-    DISCHARGING = 3
-    FULL = 4
-
-
 class HealthStatus(enum.IntEnum):
     """Corresponds to fuchsia.hardware.power.battery.HealthStatus."""
 
@@ -109,7 +100,6 @@ class BatteryStatus:
     present: bool | None = None
     voltage_uv: int | None = None
     current_ua: int | None = None
-    charge_status: ChargeStatus | None = None
     level_percent: float | None = None
     remaining_capacity_uah: int | None = None
     full_charge_capacity_uah: int | None = None
@@ -127,11 +117,6 @@ class BatteryStatus:
 
     @classmethod
     def from_fidl(cls, fidl: f_battery.Status) -> BatteryStatus:
-        charge_status = (
-            ChargeStatus(fidl.charge_status)
-            if fidl.charge_status is not None
-            else None
-        )
         health = HealthStatus(fidl.health) if fidl.health is not None else None
         time_rem = (
             timedelta(microseconds=fidl.time_remaining // 1000)
@@ -142,7 +127,6 @@ class BatteryStatus:
             present=fidl.present,
             voltage_uv=fidl.voltage_uv,
             current_ua=fidl.current_ua,
-            charge_status=charge_status,
             level_percent=fidl.level_percent,
             remaining_capacity_uah=fidl.remaining_capacity_uah,
             full_charge_capacity_uah=fidl.full_charge_capacity_uah,
@@ -153,11 +137,6 @@ class BatteryStatus:
         )
 
     def to_fidl(self) -> f_battery.Status:
-        charge_status = (
-            f_battery.ChargeStatus(self.charge_status.value)
-            if self.charge_status is not None
-            else None
-        )
         health = (
             f_battery.HealthStatus(self.health.value)
             if self.health is not None
@@ -172,7 +151,6 @@ class BatteryStatus:
             present=self.present,
             voltage_uv=self.voltage_uv,
             current_ua=self.current_ua,
-            charge_status=charge_status,
             level_percent=self.level_percent,
             remaining_capacity_uah=self.remaining_capacity_uah,
             full_charge_capacity_uah=self.full_charge_capacity_uah,

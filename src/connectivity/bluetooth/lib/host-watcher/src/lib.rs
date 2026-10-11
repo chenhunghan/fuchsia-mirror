@@ -123,6 +123,14 @@ impl HostWatcher {
             .or_else(|| self.public_address())
     }
 
+    /// Returns true if `address_bytes` matches any of the known addresses of the active Host.
+    /// Returns false if there is no active Host.
+    pub fn is_valid_address(&self, address_bytes: &[u8; 6]) -> bool {
+        self.active_host
+            .as_ref()
+            .is_some_and(|host| host.addresses.iter().any(|addr| addr.bytes() == address_bytes))
+    }
+
     /// Returns the current discoverable state of the active Host, or None if not set.
     pub fn pairing_mode(&self) -> Option<bool> {
         self.active_host.as_ref().map(|h| h.discoverable)
@@ -203,6 +211,31 @@ pub(crate) mod tests {
             .expect("valid FIDL request")
             .into_watch()
             .expect("Watch request")
+    }
+
+    #[fuchsia::test]
+    fn is_valid_address_matches_active_host_addresses() {
+        let _exec = fasync::TestExecutor::new();
+
+        let (proxy, _server) = fidl::endpoints::create_proxy_and_stream::<sys::HostWatcherMarker>();
+        let mut watcher = HostWatcher::new(proxy);
+
+        let public = Address::Public([1, 2, 3, 4, 5, 6]);
+        let random = Address::Random([2, 3, 2, 3, 2, 3]);
+        let unknown = [9, 9, 9, 9, 9, 9];
+
+        // No active host - no address is valid.
+        assert!(!watcher.is_valid_address(public.bytes()));
+
+        // Active host with a public and a random address.
+        let mut host =
+            example_host(HostId(1), /* active= */ true, /* discoverable= */ true);
+        host.addresses.as_mut().unwrap().push(random.into());
+        watcher.set_active_host(host.try_into().unwrap());
+
+        assert!(watcher.is_valid_address(public.bytes()));
+        assert!(watcher.is_valid_address(random.bytes()));
+        assert!(!watcher.is_valid_address(&unknown));
     }
 
     #[fuchsia::test]

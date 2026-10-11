@@ -132,11 +132,7 @@ impl<'a, D: Driver> DriverUnderTest<'a, D> {
     }
 
     pub(crate) async fn start_driver(&mut self, start_args: DriverStartArgs) -> Result<(), Status> {
-        self.client
-            .start(start_args)
-            .await
-            .expect("start call success")
-            .map_err(|e| e.err().unwrap_or(Status::INTERNAL))?;
+        self.client.start(start_args).await.expect("start call success")?;
         self.started = true;
         Ok(())
     }

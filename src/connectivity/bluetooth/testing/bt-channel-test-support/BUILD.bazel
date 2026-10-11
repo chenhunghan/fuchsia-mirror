@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "bt-channel-test-support",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/bluetooth:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/lib/fidl/rust/fidl",
+    ],
+)

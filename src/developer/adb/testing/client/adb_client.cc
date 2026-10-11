@@ -141,11 +141,11 @@ void AdbClientImpl::OnCompletion(
     zx_status_t status = completion.status().value_or(ZX_OK);
     if (status != ZX_OK) {
       FX_LOGS(ERROR) << "Bulk completion error: " << zx_status_get_string(status);
-      if (connect_completer_) {
-        connect_completer_->Reply(fit::error(status));
-        connect_completer_.reset();
+      if (status == ZX_ERR_IO_NOT_PRESENT) {
+        usb_connected_ = false;
       }
-      continue;
+      ResetSessionState(status);
+      return;
     }
 
     if (!completion.request().has_value() || !completion.request()->data().has_value() ||
@@ -260,12 +260,27 @@ void AdbClientImpl::OnCompletion(
   }
 }
 
-void AdbClientImpl::on_fidl_error(fidl::UnbindInfo error) {
-  FX_LOGS(ERROR) << "Bulk endpoint FIDL error: " << error;
+void AdbClientImpl::ResetSessionState(zx_status_t status) {
+  handshake_complete_ = false;
+  remote_id_ = 0;
+  expecting_payload_bytes_ = 0;
+  command_output_.clear();
   if (connect_completer_) {
-    connect_completer_->Reply(fit::error(error.status()));
+    connect_completer_->Reply(fit::error(status));
     connect_completer_.reset();
   }
+  if (execute_completer_) {
+    execute_completer_->Reply(fit::error(status));
+    execute_completer_.reset();
+  }
+}
+
+void AdbClientImpl::on_fidl_error(fidl::UnbindInfo error) {
+  FX_LOGS(ERROR) << "Bulk endpoint FIDL error: " << error;
+  usb_connected_ = false;
+  bulk_in_ = {};
+  bulk_out_ = {};
+  ResetSessionState(error.status());
 }
 
 zx_status_t AdbClientImpl::DiscoverAndConnect() {

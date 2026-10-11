@@ -401,9 +401,35 @@ impl StartTool {
                 instance.project
             )
         })?;
-        gce.client.upload_gcs_file(bucket, &object_name, &tar_gz_path).await.map_err(|e| {
-            user_error!("Failed to upload disk image to gs://{bucket}/{object_name}: {e}")
-        })?;
+        let mut active_bucket = bucket;
+        if let Err(err) = gce.client.upload_gcs_file(bucket, &object_name, &tar_gz_path).await {
+            if !err.is_forbidden_or_not_found()
+                || gce.has_explicit_bucket(self.cmd.bucket.as_deref())
+                || bucket == instance.project
+            {
+                return Err(user_error!(
+                    "Failed to upload disk image to gs://{bucket}/{object_name}: {err}"
+                ));
+            }
+            let fallback = instance.project.as_str();
+            writeln!(
+                writer.stderr(),
+                "Bucket 'gs://{bucket}' is unavailable; \
+                 falling back to gs://{fallback}/{object_name}..."
+            )?;
+            gce.client.ensure_bucket(&instance.project, fallback).await.map_err(|e| {
+                user_error!(
+                    "Failed to ensure GCS bucket '{fallback}' in project '{}': {e}",
+                    instance.project
+                )
+            })?;
+            gce.client.upload_gcs_file(fallback, &object_name, &tar_gz_path).await.map_err(
+                |e| {
+                    user_error!("Failed to upload disk image to gs://{fallback}/{object_name}: {e}")
+                },
+            )?;
+            active_bucket = fallback;
+        }
 
         writeln!(writer.stderr(), "Registering GCE custom image '{image_name}'...")?;
         let image = Image {
@@ -411,7 +437,7 @@ impl StartTool {
             description: Some(format!("{IMAGE_SERIAL_PREFIX}{serial}")),
             architecture: Some(image_arch.to_string()),
             raw_disk: Some(RawDisk {
-                source: format!("https://storage.googleapis.com/{bucket}/{object_name}"),
+                source: format!("https://storage.googleapis.com/{active_bucket}/{object_name}"),
             }),
             guest_os_features: vec![
                 GuestOsFeature { feature_type: "UEFI_COMPATIBLE".to_string() },

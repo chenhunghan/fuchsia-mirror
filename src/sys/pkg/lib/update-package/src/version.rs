@@ -4,25 +4,12 @@
 
 //! Typesafe wrappers around reading the version file.
 
-use fidl_fuchsia_io as fio;
 use omaha_client::version::Version as SemanticVersion;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
-use thiserror::Error;
-
-/// An error encountered while reading the version.
-#[derive(Debug, Error)]
-#[allow(missing_docs)]
-pub enum ReadVersionError {
-    #[error("while opening the file")]
-    OpenFile(#[source] fuchsia_fs::node::OpenError),
-
-    #[error("while reading the file")]
-    ReadFile(#[source] fuchsia_fs::file::ReadError),
-}
 
 struct SystemVersionVisitor;
 
@@ -117,57 +104,10 @@ impl fmt::Display for SystemVersion {
     }
 }
 
-pub(crate) async fn read_version(
-    proxy: &fio::DirectoryProxy,
-) -> Result<SystemVersion, ReadVersionError> {
-    let file = fuchsia_fs::directory::open_file(proxy, "version", fio::PERM_READABLE)
-        .await
-        .map_err(ReadVersionError::OpenFile)?;
-    let version_str =
-        fuchsia_fs::file::read_to_string(&file).await.map_err(ReadVersionError::ReadFile)?;
-
-    Ok(SystemVersion::from_str(&version_str).unwrap())
-}
-
 #[cfg(test)]
 #[allow(clippy::bool_assert_comparison)]
 mod tests {
     use super::*;
-    use crate::TestUpdatePackage;
-    use assert_matches::assert_matches;
-
-    #[fuchsia::test]
-    async fn read_version_success_file_exists() {
-        let p = TestUpdatePackage::new().add_file("version", "123").await;
-        assert_eq!(
-            p.version().await.unwrap(),
-            SystemVersion::Semantic(SemanticVersion::from([123]))
-        );
-    }
-
-    #[fuchsia::test]
-    async fn read_version_success_opaque() {
-        let p = TestUpdatePackage::new().add_file("version", "2020-09-08T10:17:00+10:00").await;
-        assert_eq!(
-            p.version().await.unwrap(),
-            SystemVersion::Opaque("2020-09-08T10:17:00+10:00".to_owned())
-        );
-    }
-
-    #[fuchsia::test]
-    async fn read_version_trims_trailing_whitespace() {
-        let p = TestUpdatePackage::new().add_file("version", "2020-09-08T10:17:00+10:00\n").await;
-        assert_eq!(
-            p.version().await.unwrap(),
-            SystemVersion::Opaque("2020-09-08T10:17:00+10:00".to_owned())
-        );
-    }
-
-    #[fuchsia::test]
-    async fn read_version_fail_file_does_not_exist() {
-        let p = TestUpdatePackage::new();
-        assert_matches!(read_version(p.proxy()).await, Err(ReadVersionError::OpenFile(_)));
-    }
 
     #[test]
     fn test_deserialize_version() {

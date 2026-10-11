@@ -163,7 +163,6 @@ Declare the test component with `fx_test_component()`, package it with
 `//src/foo/bar/BUILD.bazel`:
 
 ```bazel
-load("@fuchsia_build_info//:environments.bzl", "aemu_env", "nuc11_env")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
@@ -206,8 +205,8 @@ fx_test(
     package = ":bar_tests_package",
     # Optional: defaults to the build's default test environments when omitted.
     environments = [
-        aemu_env,
-        nuc11_env,
+        "//build/testing/environments:aemu_env",
+        "//build/testing/environments:nuc11_env",
     ],
 )
 ```
@@ -216,13 +215,36 @@ Every component in `test_components` becomes a separate test, whose name is its
 package URL, e.g. `fuchsia-pkg://fuchsia.com/bar_tests#meta/bar_test.cm`.
 
 To customize which target environments a test runs in, pass `environments` to
-`fx_test()` using the environment definitions in
-`@fuchsia_build_info//:environments.bzl` (generated from
-`//build/testing/environments.gni`). When `environments` is omitted, the test
-runs in the build's default test environments, exactly like a GN test that
-doesn't set `environments`. `environments` must be a plain list (not a
-`select()`) and must not be empty; to build a test without running it, set
+`fx_test()` as a list of environment targets. `//build/testing/environments`
+has one target for each individual environment in
+`//build/testing/environments.gni`, with the same name (e.g. `:emu_env` or
+`:nuc11_env`). When `environments` is omitted, the test runs in the build's
+default test environments (GN's `basic_envs`), exactly like a GN test that
+doesn't set `environments`. To build a test without running it, set
 `build_only = True` instead.
+
+To add infra settings, such as tags, to one of these environments, use
+`fx_test_environment_variant()`:
+
+```bazel
+load(
+    "//build/bazel/rules/testing:fx_test_environment.bzl",
+    "fx_test_environment_variant",
+)
+
+fx_test_environment_variant(
+    name = "nuc11_isolated_env",
+    base = "//build/testing/environments:nuc11_env",
+    env_tags = ["e2e-isolated"],
+)
+```
+
+New environments should be rare; most tests should use one of the existing
+environments in `//build/testing/environments`. When a new environment is
+needed, add it to both `//build/testing/environments.gni` and
+`//build/testing/environments/BUILD.bazel`, rather than defining it with
+`fx_test_environment()` next to a test. Environments' Swarming dimensions are
+an interface with infra, so they're kept in one place.
 
 To run a test in a non-hermetic test realm (such as `"starnix"`, `"system"`, or
 `"vulkan"`), pass `test_type` to `fx_test_component()` (or to `fx_test()` to

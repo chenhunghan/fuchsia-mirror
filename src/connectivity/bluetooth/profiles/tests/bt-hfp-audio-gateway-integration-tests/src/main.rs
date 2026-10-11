@@ -154,6 +154,35 @@ impl HfpAgIntegrationTest {
         add_mock_dai_devices(&test_harness.builder).await;
         add_mock_audio_device_enumerator_provider(&test_harness.builder).await;
 
+        test_harness
+            .builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration(
+                        "fuchsia.bluetooth.AttachPhoneNumberToVoiceTag",
+                    ))
+                    .capability(Capability::configuration(
+                        "fuchsia.bluetooth.ControllerEncodingCvsd",
+                    ))
+                    .capability(Capability::configuration(
+                        "fuchsia.bluetooth.ControllerEncodingMsbc",
+                    ))
+                    .capability(Capability::configuration(
+                        "fuchsia.bluetooth.EchoCancelingAndNoiseReduction",
+                    ))
+                    .capability(Capability::configuration("fuchsia.bluetooth.EnhancedCallControls"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.OffloadType"))
+                    .capability(Capability::configuration(
+                        "fuchsia.bluetooth.RejectIncomingVoiceCall",
+                    ))
+                    .capability(Capability::configuration("fuchsia.bluetooth.ThreeWayCalling"))
+                    .capability(Capability::configuration("fuchsia.bluetooth.WideBandSpeech"))
+                    .from(Ref::void())
+                    .to(Ref::child(HFP_AG_MONIKER)),
+            )
+            .await
+            .expect("failed to route optional config capabilities from void");
+
         let test_realm = test_harness.build().await.unwrap();
 
         // To be driven by the test.

@@ -45,9 +45,8 @@ pub fn create_overnet_socket(
         futures::future::join(
             async move {
                 if let Err(e) = async move {
-                    let (mut rx, mut tx) = futures::AsyncReadExt::split(
-                        fuchsia_async::Socket::from_socket(remote_socket),
-                    );
+                    let (mut rx, mut tx) =
+                        futures::AsyncReadExt::split(fidl::AsyncSocket::from_socket(remote_socket));
                     circuit::multi_stream::multi_stream_node_connection_to_async(
                         node.circuit_node(),
                         &mut rx,

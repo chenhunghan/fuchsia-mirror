@@ -138,7 +138,9 @@ type LeaseSchema = resource table {
     1: lease_token LeaseToken;
     /// Human-readable name for logging and debug purposes.
     2: lease_name string:MAX_ELEMENT_NAME_LEN;
-    /// List of dependencies for this lease.
+    /// List of dependencies for this lease. Must not be empty or absent; a
+    /// lease with no dependencies is rejected with
+    /// `LeaseError::INVALID_ARGUMENT`.
     3: dependencies vector<LeaseDependency>:MAX_DEPENDENCIES_IN_ADD_ELEMENT;
     /// (Optional) By default, `Topology.Lease` will wait until the lease is
     /// `SATISFIED` before returning. If `should_return_pending_lease` is true,

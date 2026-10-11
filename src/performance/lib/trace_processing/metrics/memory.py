@@ -6,6 +6,7 @@
 
 import collections
 import dataclasses
+import typing
 from collections.abc import Collection
 
 from reporting import metrics
@@ -53,6 +54,7 @@ _CUMULATIVE_METRIC_NAMES = frozenset(
 class _StructuredMetricName:
     structured_name: str
     unit: metrics.Unit
+    direction: metrics.Direction | None = None
 
 
 # Names and units of some of the metrics we will export as structured metrics.
@@ -71,7 +73,9 @@ _STRUCTURED_METRIC_NAMES = {
         "Memory/System/DecompressionTime", metrics.Unit.nanoseconds
     ),
     "page_refaults": _StructuredMetricName(
-        "Memory/System/PageRefaults", metrics.Unit.count
+        "Memory/System/PageRefaults",
+        metrics.Unit.count,
+        metrics.Direction.smallerIsBetter,
     ),
     "total_heap_bytes": _StructuredMetricName(
         "Memory/System/ZirconHeapBytes", metrics.Unit.bytes
@@ -160,12 +164,14 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
     """
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         """Patterns describing the trace events needed to generate these metrics."""
         return set(_KERNEL_EVENT_NAMES)
 
     FREEFORM_METRICS_FILENAME = "memory"
 
+    @typing.override
     def process_freeform_metrics(
         self, model: trace_model.Model
     ) -> tuple[str, metrics.JSON]:
@@ -190,6 +196,7 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
             ),
         )
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> Collection[metrics.TestCaseResult]:
@@ -214,6 +221,7 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
                     label=_STRUCTURED_METRIC_NAMES[name].structured_name,
                     values=values,
                     unit=_STRUCTURED_METRIC_NAMES[name].unit,
+                    direction=_STRUCTURED_METRIC_NAMES[name].direction,
                 )
             )
 

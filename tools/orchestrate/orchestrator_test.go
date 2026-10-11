@@ -128,8 +128,8 @@ func (m *mockFFXClient) ProductDownload(ctx context.Context, transferURL, outDir
 	return call.retErr
 }
 
-func (m *mockFFXClient) EmuStart(ctx context.Context, productDir, name, engine, device string) error {
-	call := m.recordCall("EmuStart", productDir, name, engine, device)
+func (m *mockFFXClient) EmuStart(ctx context.Context, productDir, name, engine, device, gpu string) error {
+	call := m.recordCall("EmuStart", productDir, name, engine, device, gpu)
 	return call.retErr
 }
 
@@ -328,7 +328,7 @@ func runOrchestratorScenario(t *testing.T, isEmulator bool, runInput *RunInput, 
 
 	if isEmulator {
 		// Emulator-specific expectations
-		mockFfx.expectCall("EmuStart", productBundleDir, emuName, runInput.Emulator.Engine, runInput.Emulator.Device)
+		mockFfx.expectCall("EmuStart", productBundleDir, emuName, runInput.Emulator.Engine, runInput.Emulator.Device, runInput.Emulator.Gpu)
 		mockFfx.expectCall("SetDefaultTarget", emuName) // Pass emuName as actual string, mock will check pointer value.
 	} else {
 		// Hardware-specific expectations

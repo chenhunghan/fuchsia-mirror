@@ -42,7 +42,8 @@ impl ReconnectBackoff {
     }
 }
 
-/// Checks if an error indicates that VSOCK is permanently unrouted or unsupported on this device.
+/// Checks if an error indicates that VSOCK is permanently unrouted, unsupported, or unstartable
+/// on this device.
 fn is_unsupported_error(err: &anyhow::Error) -> bool {
     if let Some(fidl_err) = err.downcast_ref::<fidl::Error>() {
         match fidl_err {
@@ -50,6 +51,7 @@ fn is_unsupported_error(err: &anyhow::Error) -> bool {
                 *epitaph == fidl::Status::NOT_FOUND
                     || *epitaph == fidl::Status::NOT_SUPPORTED
                     || *epitaph == fidl::Status::UNAVAILABLE
+                    || *epitaph == fidl::Status::INTERNAL
             }
             _ => false,
         }
@@ -637,5 +639,71 @@ mod tests {
             result.is_ok(),
             "expected clean Ok exit for unsupported vsock identify, got: {result:?}"
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_run_vsocks_start_error_exits_cleanly() {
+        let router = overnet_core::Router::new(None).expect("failed to create router");
+        let weak_router = Arc::downgrade(&router);
+        let service = Rc::new(RemoteControlService::new_with_default_allocator(|_, _| ()).await);
+        let weak_service = Rc::downgrade(&service);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let connector_factory = move || {
+            let attempt = attempts_clone.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                attempt, 0,
+                "expected run_vsocks_internal to exit cleanly after INTERNAL start error epitaph, not retry"
+            );
+            let (proxy, server_end) = fidl::endpoints::create_proxy::<vsock::ConnectorMarker>();
+            server_end.close_with_epitaph(fidl::Status::INTERNAL).expect("closed epitaph");
+            Ok(proxy)
+        };
+
+        let result = run_vsocks_internal(
+            weak_router,
+            weak_service,
+            ReconnectBackoff::Immediate,
+            connector_factory,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected clean Ok exit for INTERNAL start error, got: {result:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[fuchsia::test]
+    async fn test_run_identify_vsock_start_error_exits_cleanly() {
+        let service = Rc::new(RemoteControlService::new_with_default_allocator(|_, _| ()).await);
+        let weak_service = Rc::downgrade(&service);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let connector_factory = move || {
+            let attempt = attempts_clone.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                attempt, 0,
+                "expected run_identify_vsock_internal to exit cleanly after INTERNAL start error epitaph, not retry"
+            );
+            let (proxy, server_end) = fidl::endpoints::create_proxy::<vsock::ConnectorMarker>();
+            server_end.close_with_epitaph(fidl::Status::INTERNAL).expect("closed epitaph");
+            Ok(proxy)
+        };
+
+        let result = run_identify_vsock_internal(
+            weak_service,
+            ReconnectBackoff::Immediate,
+            connector_factory,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected clean Ok exit for INTERNAL identify start error, got: {result:?}"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

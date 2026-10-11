@@ -47,4 +47,13 @@ extern PanicBuffer panic_buffer;
 // A FILE that writes to both |stdout| and the global |panic_buffer|.
 extern FILE stdout_panic_buffer;
 
+extern "C" {
+
+// Writes `data` to both the console and the global panic buffer, exactly as
+// `fprintf(&stdout_panic_buffer, ...)` does from C++. This lets the Rust panic
+// handler stream its formatted output piecewise, with no intermediate buffer.
+void cpp_crashlog_panic_write(const char* data, size_t len);
+
+}  // extern "C"
+
 #endif  // ZIRCON_KERNEL_LIB_CRASHLOG_INCLUDE_LIB_CRASHLOG_H_

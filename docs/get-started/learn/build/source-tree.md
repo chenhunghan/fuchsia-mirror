@@ -362,27 +362,23 @@ search for in the Fuchsia tree that require **searching inside files**.
 ### Search within source files
 
 To search the tree for patterns within specific source files, use the
-`fx grep` command.
+`git grep` command.
 
 Run a search in the tree looking for references to the `hello-world` example
-using `fx grep`:
+using `git grep`:
 
 ```posix-terminal
-fx grep hello-world
+git grep hello-world
 ```
 
 This returns a long list of references from across the tree, because this
 example is referenced in documentation, build files, and other sources.
 
-You can refine the search using filters to help narrow in on the protocol
-definition. Perform the same search again, but this time only in GN build files
-using a filter:
-
-Note: For a complete list of available filters, see the
-[`fx grep` reference](https://fuchsia.dev/reference/tools/fx/cmd/grep).
+You can refine the search using pathspecs to help narrow in on the protocol
+definition. Perform the same search again, but this time only in GN build files:
 
 ```posix-terminal
-fx grep hello-world -- build
+git grep hello-world -- '*.gn' '*.gni'
 ```
 
 
@@ -397,6 +393,6 @@ fd hello_world
 
 <aside class="key-point">
   <b>Extra credit</b>
-  <p>Use <code>fx grep</code> to find components that implement the
-  <code>fuchsia.component.runner</code> FIDL protocol? How many are there?</p>
+  <p>Use <code>git grep</code> to find components that implement the
+  <code>fuchsia.component.runner</code> FIDL protocol. How many are there?</p>
 </aside>

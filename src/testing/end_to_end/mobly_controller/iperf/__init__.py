@@ -5,11 +5,8 @@
 
 from . import iperf_client, iperf_server
 from .iperf_client import (
-    IPerfClient,
     IPerfClientBase,
-    IPerfClientOverAdb,
     IPerfClientOverSsh,
-    IPerfError,
 )
 from .iperf_server import (
     IPerfResult,
@@ -21,11 +18,8 @@ from .iperf_server import (
 __all__ = [
     "iperf_client",
     "iperf_server",
-    "IPerfClient",
     "IPerfClientBase",
-    "IPerfClientOverAdb",
     "IPerfClientOverSsh",
-    "IPerfError",
     "IPerfResult",
     "IPerfServer",
     "IPerfServerBase",

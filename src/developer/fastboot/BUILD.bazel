@@ -26,6 +26,7 @@ rustc_library(
     ],
     visibility = [
         "//src/developer/ffx:__pkg__",
+        "//src/developer/ffx/lib/discovery:__pkg__",
         "//src/developer/ffx/lib/fastboot:__pkg__",
         "//src/developer/ffx/lib/fastboot/interface:__pkg__",
         "//src/developer/ffx/lib/fastboot/transport/factory:__pkg__",

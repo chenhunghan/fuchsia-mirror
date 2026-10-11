@@ -4,7 +4,6 @@
 # found in the LICENSE file.
 """Unit tests for the metrics allowlist code."""
 
-import io
 import json
 import operator
 import os
@@ -263,36 +262,38 @@ class SummarizeTest(unittest.TestCase):
         write_fuchsiaperf_json() can be read back successfully and give the
         same value.
         """
-        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as temp_file:
-            f = io.TextIOWrapper(temp_file)
-            json_data = [
-                {
-                    "foo": "bar",
-                    "list": [1, 2, 3],
-                },
-                {
-                    "foo": "bar2",
-                    "list": [4, 5, 6],
-                },
-                "string",
-                [4, 5, 6],
-            ]
-            summarize.write_fuchsiaperf_json(f, json_data)
-            f.close()
-            with open(f.name, "r", encoding="utf-8") as f:
-                self.assertEqual(json.load(f), json_data)
+        json_data = [
+            {
+                "foo": "bar",
+                "list": [1, 2, 3],
+            },
+            {
+                "foo": "bar2",
+                "list": [4, 5, 6],
+            },
+            "string",
+            [4, 5, 6],
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            file_path = os.path.join(temporary_directory, "fuchsiaperf.json")
+            with open(file_path, mode="wt", encoding="utf-8") as written_file:
+                summarize.write_fuchsiaperf_json(written_file, json_data)
+            with open(file_path, mode="rt", encoding="utf-8") as read_file:
+                self.assertEqual(json.load(read_file), json_data)
 
     def test_write_fuchsia_perf_json_newlines(self) -> None:
         """
         Check that write_fuchsiaperf_json() outputs a newline after each
         top-level entry.
         """
-        with tempfile.NamedTemporaryFile(delete=False, mode="wb") as temp_file:
-            f = io.TextIOWrapper(temp_file)
-            summarize.write_fuchsiaperf_json(f, ["foo", "bar", "qux"])
-            f.close()
-            with open(f.name, "r", encoding="utf-8") as f:
-                self.assertEqual(f.read(), '["foo",\n"bar",\n"qux"]\n')
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            file_path = os.path.join(temporary_directory, "fuchsiaperf.json")
+            with open(file_path, mode="wt", encoding="utf-8") as written_file:
+                summarize.write_fuchsiaperf_json(
+                    written_file, ["foo", "bar", "qux"]
+                )
+            with open(file_path, mode="rt", encoding="utf-8") as read_file:
+                self.assertEqual(read_file.read(), '["foo",\n"bar",\n"qux"]\n')
 
     def test_summarize_results_with_no_summarize_metrics(self) -> None:
         """Test that metrics in no_summarize_metrics keep their raw values."""

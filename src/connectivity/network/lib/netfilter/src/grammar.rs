@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(not(feature = "fdomain"))]
 use fidl_fuchsia_net_filter_ext as filter_ext;
+#[cfg(feature = "fdomain")]
+use fidl_fuchsia_net_filter_ext_fdomain as filter_ext;
 use pest_derive::Parser;
 
 #[derive(Parser)]

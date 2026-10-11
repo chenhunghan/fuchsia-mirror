@@ -163,6 +163,17 @@ This requires modifying post-build tools and scripts (e.g. `fx test` and many
 others) to see Bazel outputs directly, and be able to rebuild them on demand
 without invoking Ninja.
 
+Until then, a few practical consequences follow:
+
+- Bots only run a Bazel test if a GN `bazel_test_suite()` reaches it.
+  `fx bazel test` is fine for quick local runs, but `fx build` and `fx test`
+  are the supported interface.
+
+- The `@gn_targets` repository isn't cleaned between builds. A Bazel dependency
+  on a stale `@gn_targets` entry can keep working locally and then fail on
+  bots, so verify changes to GN targets that Bazel depends on with a clean
+  build.
+
 
 ## Exposing platform libraries as SDK atoms
 

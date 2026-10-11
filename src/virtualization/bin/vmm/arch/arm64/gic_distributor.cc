@@ -60,6 +60,9 @@ static_assert(kGicv3RedistributorStride >= kGicv3RedistributorSize + kGicv3Redis
 enum class GicdRegister : uint64_t {
     CTL           = 0x000,
     TYPE          = 0x004,
+    IIDR          = 0x008,
+    TYPER2        = 0x00c,
+    STATUSR       = 0x010,
     IGROUP0       = 0x080,
     IGROUP31      = 0x0FC,
     ISENABLE0     = 0x100,
@@ -68,6 +71,8 @@ enum class GicdRegister : uint64_t {
     ICENABLE0     = 0x180,
     ICENABLE1     = 0x184,
     ICENABLE7     = 0x19c,
+    ISPEND0       = 0x200,
+    ISPEND15      = 0x23c,
     ICPEND0       = 0x280,
     ICPEND15      = 0x2bc,
     ICFG0         = 0xc00,
@@ -101,13 +106,16 @@ enum class GicdRegister : uint64_t {
 enum class GicrRegister : uint64_t {
     // Offset from RD_BASE
     CTL           = 0x000,
+    IIDR          = 0x004,
     TYPE          = 0x008,
+    STATUSR       = 0x010,
     WAKE          = 0x014,
     PID2_V3       = 0xffe8,
     // Offset from SGI_BASE
     IGROUP0       = 0x10080,
     ISENABLE0     = 0x10100,
     ICENABLE0     = 0x10180,
+    ISPEND0       = 0x10200,
     ICPEND0       = 0x10280,
     ISACTIVE0     = 0X10300,
     ICACTIVE0     = 0x10380,
@@ -115,6 +123,8 @@ enum class GicrRegister : uint64_t {
     IPRIORITY63   = 0x104fc,
     ICFG0         = 0x10c00,
     ICFG1         = 0x10c04,
+    IGRPMOD0      = 0x10d00,
+    NSACR         = 0x10e00,
 };
 
 // Target CPU for the software-generated interrupt.
@@ -285,17 +295,32 @@ zx_status_t GicDistributor::Read(uint64_t addr, IoValue* value) {
       value->u32 = cfg_[index];
       return ZX_OK;
     }
-    case GicdRegister::ISENABLE0: {
+    case GicdRegister::ISENABLE0:
+    case GicdRegister::ICENABLE0: {
       uint64_t id = Vcpu::GetCurrent()->id();
       std::lock_guard<std::mutex> lock(mutex_);
       return redistributors_[id].Read(static_cast<uint64_t>(GicrRegister::ISENABLE0), value);
     }
-    case GicdRegister::ISENABLE1... GicdRegister::ISENABLE7: {
+    case GicdRegister::ISENABLE1... GicdRegister::ISENABLE7:
+    case GicdRegister::ICENABLE1... GicdRegister::ICENABLE7: {
       std::lock_guard<std::mutex> lock(mutex_);
-      const uint8_t* enable = &enabled_[addr - static_cast<uint64_t>(GicdRegister::ISENABLE1)];
+      const auto base = addr < static_cast<uint64_t>(GicdRegister::ICENABLE0)
+                            ? GicdRegister::ISENABLE1
+                            : GicdRegister::ICENABLE1;
+      const uint8_t* enable = &enabled_[addr - static_cast<uint64_t>(base)];
       value->u32 = *reinterpret_cast<const uint32_t*>(enable);
       return ZX_OK;
     }
+    case GicdRegister::IIDR:
+    case GicdRegister::TYPER2:
+    case GicdRegister::STATUSR:
+    case GicdRegister::ISPEND0... GicdRegister::ISPEND15:
+    case GicdRegister::ICPEND0... GicdRegister::ICPEND15:
+    case GicdRegister::IPRIORITY0... GicdRegister::IPRIORITY63:
+    case GicdRegister::IGROUP0... GicdRegister::IGROUP31:
+    case GicdRegister::IGRPMOD0... GicdRegister::IGRPMOD31:
+      value->u32 = 0;
+      return ZX_OK;
     case GicdRegister::ITARGETS0... GicdRegister::ITARGETS7: {
       // GIC Architecture Spec 4.3.12: Each field of ITARGETS0 to ITARGETS7
       // returns a mask that corresponds only to the current processor.
@@ -311,7 +336,11 @@ zx_status_t GicDistributor::Read(uint64_t addr, IoValue* value) {
         value->u32 = 0;
         return ZX_OK;
       }
-      const uint8_t* masks = &cpu_masks_[addr - static_cast<uint64_t>(GicdRegister::ITARGETS8)];
+      const auto spi = static_cast<uint32_t>(addr - static_cast<uint64_t>(GicdRegister::ITARGETS8));
+      if (spi + value->access_size > std::size(cpu_masks_)) {
+        return ZX_ERR_OUT_OF_RANGE;
+      }
+      const uint8_t* masks = &cpu_masks_[spi];
       for (uint8_t i = 0; i < value->access_size; i++) {
         value->data[i] = masks[i];
       }
@@ -323,9 +352,12 @@ zx_status_t GicDistributor::Read(uint64_t addr, IoValue* value) {
         value->u32 = 0;
         return ZX_OK;
       }
-      const auto vector = static_cast<uint32_t>(
+      const auto spi = static_cast<uint32_t>(
           (addr - static_cast<uint64_t>(GicdRegister::IROUTE32)) / value->access_size);
-      value->u64 = cpu_masks_[vector - kSpiBase];
+      if (spi >= std::size(cpu_masks_)) {
+        return ZX_ERR_OUT_OF_RANGE;
+      }
+      value->u64 = cpu_masks_[spi];
       if (value->u64 == UINT8_MAX) {
         value->u64 |= kGicdIrouteIRMMask;
       }
@@ -392,7 +424,10 @@ zx_status_t GicDistributor::Write(uint64_t addr, const IoValue& value) {
       if (affinity_routing_) {
         return ZX_OK;
       }
-      auto spi = static_cast<uint32_t>(addr - static_cast<uint64_t>(GicdRegister::ITARGETS8));
+      const auto spi = static_cast<uint32_t>(addr - static_cast<uint64_t>(GicdRegister::ITARGETS8));
+      if (spi + value.access_size > std::size(cpu_masks_)) {
+        return ZX_ERR_OUT_OF_RANGE;
+      }
       for (uint8_t i = 0; i < value.access_size; i++) {
         const uint8_t cpu_mask = value.data[i];
         cpu_masks_[spi + i] = cpu_mask;
@@ -453,13 +488,16 @@ zx_status_t GicDistributor::Write(uint64_t addr, const IoValue& value) {
       if (!affinity_routing_) {
         return ZX_OK;
       }
-      auto vector = static_cast<uint32_t>((addr - static_cast<uint64_t>(GicdRegister::IROUTE32)) /
-                                          value.access_size);
+      const auto spi = static_cast<uint32_t>(
+          (addr - static_cast<uint64_t>(GicdRegister::IROUTE32)) / value.access_size);
+      if (spi >= std::size(cpu_masks_)) {
+        return ZX_ERR_OUT_OF_RANGE;
+      }
       uint8_t cpu_mask = UINT8_MAX;
       if (!(value.u64 & kGicdIrouteIRMMask)) {
         cpu_mask &= value.u64;
       }
-      cpu_masks_[vector - kSpiBase] = cpu_mask;
+      cpu_masks_[spi] = cpu_mask;
       return ZX_OK;
     }
     case GicdRegister::ICFG1... GicdRegister::ICFG31: {
@@ -490,7 +528,9 @@ zx_status_t GicDistributor::Write(uint64_t addr, const IoValue& value) {
       is_active_[index] &= (~value.u32);
       return ZX_OK;
     }
+    case GicdRegister::STATUSR:
     case GicdRegister::ICFG0:
+    case GicdRegister::ISPEND0... GicdRegister::ISPEND15:
     case GicdRegister::ICPEND0... GicdRegister::ICPEND15:
     case GicdRegister::IPRIORITY0... GicdRegister::IPRIORITY63:
     case GicdRegister::IGROUP0... GicdRegister::IGROUP31:
@@ -595,6 +635,7 @@ zx_status_t GicRedistributor::Read(uint64_t addr, IoValue* value) {
 
   switch (static_cast<GicrRegister>(addr)) {
     case GicrRegister::ISENABLE0:
+    case GicrRegister::ICENABLE0:
       value->u32 = enabled_;
       return ZX_OK;
       // Read SGIs and PPIs activate state.
@@ -602,10 +643,21 @@ zx_status_t GicRedistributor::Read(uint64_t addr, IoValue* value) {
     case GicrRegister::ICACTIVE0:
       value->u32 = is_active_;
       return ZX_OK;
-    case GicrRegister::CTL:
-    case GicrRegister::WAKE:
     case GicrRegister::ICFG0:
+      // SGIs are RAO/WI (always edge-triggered).
+      value->u32 = UINT32_MAX;
+      return ZX_OK;
+    case GicrRegister::CTL:
+    case GicrRegister::IIDR:
+    case GicrRegister::STATUSR:
+    case GicrRegister::WAKE:
+    case GicrRegister::IGROUP0:
+    case GicrRegister::ISPEND0:
+    case GicrRegister::ICPEND0:
+    case GicrRegister::IPRIORITY0... GicrRegister::IPRIORITY63:
     case GicrRegister::ICFG1:
+    case GicrRegister::IGRPMOD0:
+    case GicrRegister::NSACR:
       value->u32 = 0;
       return ZX_OK;
     case GicrRegister::TYPE:
@@ -646,12 +698,17 @@ zx_status_t GicRedistributor::Write(uint64_t addr, const IoValue& value) {
     case GicrRegister::ICACTIVE0:
       is_active_ &= ~value.u32;
       return ZX_OK;
+    case GicrRegister::CTL:
+    case GicrRegister::STATUSR:
     case GicrRegister::WAKE:
     case GicrRegister::IGROUP0:
+    case GicrRegister::ISPEND0:
     case GicrRegister::ICPEND0:
     case GicrRegister::IPRIORITY0... GicrRegister::IPRIORITY63:
     case GicrRegister::ICFG0:
     case GicrRegister::ICFG1:
+    case GicrRegister::IGRPMOD0:
+    case GicrRegister::NSACR:
       return ZX_OK;
     default:
       FX_LOGS(ERROR) << "Unhandled GIC redistributor address write 0x" << std::hex << addr;

@@ -196,6 +196,13 @@ typedef struct zx_iob_discipline_mediated_write_ring_buffer {
 // suspend.  Instead, it will only generate a report as it unwinds.
 #define ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY ((uint64_t)(1u << 1))
 
+// ZX_SYSTEM_SUSPEND_OPTION_DEEP is an option which may be passed to
+// zx_system_suspend_enter to request that the system enter a deep suspend
+// state if supported.  It is not an error to request deep suspend on a device
+// that does not support deep suspend (the call will behave as if no option
+// was specified).  This option may not be combined with any other option.
+#define ZX_SYSTEM_SUSPEND_OPTION_DEEP ((uint64_t)(1u << 2))
+
 // An explicit definition of the option type.  This can be removed when the fidl
 // generator start to automatically generate all of the C bindings for us by
 // default.

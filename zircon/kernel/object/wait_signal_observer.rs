@@ -15,7 +15,8 @@ use zx_types::zx_signals_t;
 use crate::kernel::event::Event;
 
 use super::dispatcher::Dispatcher;
-use super::{HandleRef, HandleTableReadGuard};
+use super::{HandleRef, HandleTableLockClass};
+use ksync::LockToken;
 use object_constants_rs as object_constants;
 
 unsafe extern "C" {
@@ -208,11 +209,12 @@ impl WaitSignalObserver {
     ///
     /// # Invariants
     ///
-    /// Calling this requires a `HandleTableReadGuard` to prove that the handle table lock is held.
-    /// If this succeeds, `end()` must be called before the `Event` is destroyed.
+    /// Calling this requires a `LockToken<'_, HandleTableLockClass>` to prove that the handle
+    /// table lock is held. If this succeeds, `end()` must be called before the `Event` is
+    /// destroyed.
     pub fn begin(
         &mut self,
-        _guard: &HandleTableReadGuard<'_>,
+        _token: &LockToken<'_, HandleTableLockClass>,
         event: &Event,
         handle: &HandleRef<'_>,
         watched_signals: zx_signals_t,

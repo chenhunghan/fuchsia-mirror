@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::device::mem::new_null_file;
+use crate::device::mem::DevNull;
 use crate::execution::{
     create_init_child_process, create_init_process, create_system_task,
     execute_task_with_prerun_result,
@@ -148,10 +148,10 @@ where
     let security_server_for_callback = security_server.clone();
     spawn_kernel_and_run_internal(
         async move |current_task| {
-            security::selinuxfs_init_null(
-                current_task,
-                &new_null_file(current_task, OpenFlags::empty()),
-            );
+            let null_file =
+                Anon::new_file(current_task, Box::new(DevNull), OpenFlags::empty(), "[null]")
+                    .expect("create null file for selinuxfs");
+            security::selinuxfs_init_null(current_task, &null_file);
             callback(current_task, &security_server_for_callback).await
         },
         Some(security_server),

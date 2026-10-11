@@ -6,17 +6,30 @@
 
 #include "object/exception_dispatcher.h"
 
-#include <assert.h>
-#include <lib/counters.h>
+#include <lib/object-constants.h>
 
 #include <fbl/alloc_checker.h>
+#include <kernel/ffi.h>
 #include <ktl/utility.h>
-#include <object/process_dispatcher.h>
 
 #include <ktl/enforce.h>
 
-KCOUNTER(dispatcher_exception_create_count, "dispatcher.exception.create")
-KCOUNTER(dispatcher_exception_destroy_count, "dispatcher.exception.destroy")
+extern "C" ExceptionDispatcher* cpp_exception_dispatcher_create(
+    ThreadDispatcher* thread, zx_excp_type_t exception_type, const zx_exception_report_t* report,
+    const arch_exception_context_t* arch_context) {
+  fbl::RefPtr<ThreadDispatcher> thread_ref = fbl::ImportFromRawPtr(thread);
+  fbl::AllocChecker ac;
+  fbl::RefPtr<ExceptionDispatcher> exception = fbl::AdoptRef(
+      new (&ac) ExceptionDispatcher(ktl::move(thread_ref), exception_type, report, arch_context));
+  if (!ac.check()) {
+    // ExceptionDispatchers are small so if we get to this point a lot of
+    // other things will be failing too, but we could potentially pre-
+    // allocate space for an ExceptionDispatcher in each thread if we want
+    // to eliminate this case.
+    return nullptr;
+  }
+  return fbl::ExportToRawPtr(&exception);
+}
 
 zx_exception_report_t ExceptionDispatcher::BuildArchReport(
     uint32_t type, const arch_exception_context_t& context) {
@@ -30,176 +43,19 @@ zx_exception_report_t ExceptionDispatcher::BuildArchReport(
 fbl::RefPtr<ExceptionDispatcher> ExceptionDispatcher::Create(
     fbl::RefPtr<ThreadDispatcher> thread, zx_excp_type_t exception_type,
     const zx_exception_report_t* report, const arch_exception_context_t* arch_context) {
-  fbl::AllocChecker ac;
-  fbl::RefPtr<ExceptionDispatcher> exception = fbl::AdoptRef(
-      new (&ac) ExceptionDispatcher(ktl::move(thread), exception_type, report, arch_context));
-  if (!ac.check()) {
-    // ExceptionDispatchers are small so if we get to this point a lot of
-    // other things will be failing too, but we could potentially pre-
-    // allocate space for an ExceptionDispatcher in each thread if we want
-    // to eliminate this case.
-    return nullptr;
-  }
-
-  return exception;
+  return fbl::ImportFromRawPtr(rust_exception_dispatcher_create(
+      fbl::ExportToRawPtr(&thread), exception_type, report, arch_context));
 }
 
 ExceptionDispatcher::ExceptionDispatcher(fbl::RefPtr<ThreadDispatcher> thread,
                                          zx_excp_type_t exception_type,
                                          const zx_exception_report_t* report,
                                          const arch_exception_context_t* arch_context)
-    : thread_(ktl::move(thread)),
-      exception_type_(exception_type),
-      report_(report),
-      arch_context_(arch_context) {
-  kcounter_add(dispatcher_exception_create_count, 1);
+    : Dispatcher(0u) {
+  DISPATCHER_VERIFY_OFFSET(ExceptionDispatcher, kExceptionDispatcherStateOffset);
+  rust_exception_dispatcher_state_init(&opaque_storage_, this, fbl::ExportToRawPtr(&thread),
+                                       exception_type, report, arch_context);
 }
 
-ExceptionDispatcher::~ExceptionDispatcher() { kcounter_add(dispatcher_exception_destroy_count, 1); }
-
-bool ExceptionDispatcher::FillReport(zx_exception_report_t* report) const {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  if (report_) {
-    *report = *report_;
-    return true;
-  }
-  return false;
-}
-
-void ExceptionDispatcher::SetTaskRights(zx_rights_t thread_rights, zx_rights_t process_rights) {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  thread_rights_ = thread_rights;
-  process_rights_ = process_rights;
-}
-
-zx_status_t ExceptionDispatcher::MakeThreadHandle(HandleOwner* handle) const {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-
-  if (thread_rights_ == 0) {
-    return ZX_ERR_ACCESS_DENIED;
-  }
-
-  *handle = Handle::Make(thread_, thread_rights_);
-  if (!(*handle)) {
-    return ZX_ERR_NO_MEMORY;
-  }
-  return ZX_OK;
-}
-
-zx_status_t ExceptionDispatcher::MakeProcessHandle(HandleOwner* handle) const {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-
-  if (process_rights_ == 0) {
-    return ZX_ERR_ACCESS_DENIED;
-  }
-
-  // We have a RefPtr to |thread_| so it can't die, and the thread keeps its
-  // process alive, so we know the process is safe to wrap in a RefPtr.
-  *handle = Handle::Make(fbl::RefPtr(thread_->process()), process_rights_);
-  if (!(*handle)) {
-    return ZX_ERR_NO_MEMORY;
-  }
-  return ZX_OK;
-}
-
-void ExceptionDispatcher::on_zero_handles() {
-  canary_.Assert();
-
-  response_event_.Signal();
-}
-
-uint32_t ExceptionDispatcher::GetDisposition() const {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  return disposition_;
-}
-
-void ExceptionDispatcher::SetDisposition(uint32_t disposition) {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  disposition_ = disposition;
-}
-
-bool ExceptionDispatcher::IsSecondChance() const {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  return second_chance_;
-}
-
-void ExceptionDispatcher::SetWhetherSecondChance(bool second_chance) {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  second_chance_ = second_chance;
-}
-
-zx_status_t ExceptionDispatcher::WaitForHandleClose() {
-  canary_.Assert();
-
-  zx_status_t status;
-  do {
-    // Continue to wait for the exception response if we get suspended.
-    // Both the suspension and the exception need to be closed out before
-    // the thread can resume.
-    // The THREAD_SIGNAL_SUSPEND signal_mask checks for a suspend signal that might have come in
-    // before the Wait() call. And the status check for ZX_ERR_INTERNAL_INTR_RETRY in the while loop
-    // checks for a suspend that gets signaled while the wait is ongoing.
-    status = response_event_.Wait(Deadline::infinite(), THREAD_SIGNAL_SUSPEND);
-  } while (status == ZX_ERR_INTERNAL_INTR_RETRY);
-
-  if (status == ZX_ERR_INTERNAL_INTR_KILLED) {
-    // If the thread was killed it doesn't matter whether the handler
-    // wanted to resume or not.
-    return ZX_ERR_INTERNAL_INTR_KILLED;
-  } else if (status != ZX_OK) {
-    // Our event wait should only ever return one of the internal errors
-    // handled above or the ZX_OK we send in on_zero_handles().
-    ASSERT_MSG(false, "unexpected exception event result: %d\n", status);
-    __UNREACHABLE;
-  }
-
-  // Return the close action and reset it for next time.
-  Guard<CriticalMutex> guard{get_lock()};
-  switch (disposition_) {
-    case ZX_EXCEPTION_STATE_HANDLED:
-      status = ZX_OK;
-      break;
-    case ZX_EXCEPTION_STATE_THREAD_EXIT:
-      status = ZX_ERR_STOP;
-      break;
-    case ZX_EXCEPTION_STATE_TRY_NEXT:
-    default:
-      status = ZX_ERR_NEXT;
-      break;
-  }
-  disposition_ = ZX_EXCEPTION_STATE_TRY_NEXT;
-  return status;
-}
-
-void ExceptionDispatcher::DiscardHandleClose() {
-  canary_.Assert();
-
-  response_event_.Unsignal();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  disposition_ = ZX_EXCEPTION_STATE_TRY_NEXT;
-}
-
-void ExceptionDispatcher::Clear() {
-  canary_.Assert();
-
-  Guard<CriticalMutex> guard{get_lock()};
-  report_ = nullptr;
-  arch_context_ = nullptr;
-}
+IMPLEMENT_DISPATCHER_RUST_STATE(ExceptionDispatcher, rust_exception_dispatcher_state_get_lock,
+                                rust_exception_dispatcher_state_destroy)

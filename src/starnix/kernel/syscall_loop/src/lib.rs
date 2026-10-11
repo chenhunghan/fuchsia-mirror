@@ -7,7 +7,6 @@
 use anyhow::{Error, format_err};
 use extended_pstate::ExtendedPstatePointer;
 use starnix_core::arch::execution::new_syscall;
-use starnix_core::ptrace::{ptrace_syscall_enter, ptrace_syscall_exit};
 use starnix_core::signals::{SignalInfo, dequeue_signal, force_signal, prepare_to_restart_syscall};
 use starnix_core::task::{CurrentTask, ExceptionResult, ExitStatus, SeccompStateValue, TaskFlags};
 use starnix_logging::{
@@ -20,7 +19,7 @@ use starnix_syscalls::SyscallResult;
 use starnix_syscalls::decls::{Syscall, SyscallDecl};
 use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::signals::SIGKILL;
+use starnix_uapi::signals::{SIGKILL, SIGSEGV};
 use zerocopy::FromZeros;
 
 mod table;
@@ -56,6 +55,20 @@ type RestrictedExitCallback = extern "C" fn(
 ) -> bool;
 
 unsafe extern "C" {
+    /// Enters restricted mode in a loop, invoking `restricted_exit_callback` on each restricted
+    /// exit until the callback returns `false` or `zx_restricted_enter` fails.
+    ///
+    /// # Safety
+    ///
+    /// * `options` and `restricted_exit_callback` must be a valid `zx_restricted_enter` FFI
+    ///   configuration.
+    /// * `restricted_exit_callback_context` must point to a valid [`RestrictedEnterContext`] that
+    ///   is exclusively accessed by the current thread and outlives this call.
+    /// * `restricted_state` must point to the current thread's bound and mapped
+    ///   `zx_restricted_state_t`, which must outlive this call.
+    /// * `extended_pstate_ptr_ptr` must point to a valid [`ExtendedPstatePointer`] whose backing
+    ///   storage matches the architectural mode selected by `restricted_state` and outlives this
+    ///   call.
     // rustc doesn't like RestrictedEnterContext for FFI but we're just passing it back to
     // ourselves with extra steps.
     #[allow(improper_ctypes)]
@@ -113,10 +126,6 @@ fn run_task(
         return Ok(exit_status);
     }
 
-    // This extended pstate pointer points to the storage for extended processor
-    // state (vector and FP registers).
-    let mut extended_pstate_ptr = current_task.thread_state.extended_pstate.as_ptr();
-
     let mut restricted_enter_context = RestrictedEnterContext {
         current_task,
         error_context,
@@ -124,27 +133,57 @@ fn run_task(
         exception_report_raw,
     };
 
-    // SAFETY: `restricted_enter_context`, `restricted_state_ptr`, and `extended_pstate_ptr`
-    // point to valid, exclusively-owned state for the current thread that outlives
-    // `restricted_enter_loop`. The thread's extended pstate storage matches the
-    // architectural mode in `restricted_state_ptr`.
-    let restricted_enter_status = zx::Status::ok(unsafe {
-        restricted_enter_loop(
-            RESTRICTED_ENTER_OPTIONS,
-            restricted_exit_callback_c,
-            &mut restricted_enter_context,
-            restricted_state_ptr,
-            &raw mut extended_pstate_ptr,
-        )
-    });
-    if let Err(status) = restricted_enter_status {
-        // If restricted_enter_loop failed, it means that we failed to satisfy
-        // a prerequisite of zx_restricted_enter which should never happen.
-        log_error!(
-            "restricted_enter_loop failed: {}, register state: {:?}",
-            status,
-            restricted_enter_context.current_task.thread_state.registers
-        );
+    loop {
+        let mut extended_pstate_ptr =
+            restricted_enter_context.current_task.thread_state.extended_pstate.as_ptr();
+        // SAFETY:
+        // * `RESTRICTED_ENTER_OPTIONS` and `restricted_exit_callback_c` form a valid
+        //   `zx_restricted_enter` FFI configuration.
+        // * `restricted_enter_context` is exclusively accessed by the current thread, outlives the
+        //   call, and is passed as a raw pointer to avoid asserting an intermediate `&mut` borrow.
+        // * `restricted_state_ptr` points to the current thread's bound and mapped
+        //   `zx_restricted_state_t`, which outlives this function.
+        // * `extended_pstate_ptr` is refreshed on each iteration from `current_task.thread_state`
+        //   so its backing storage matches the architectural mode in `restricted_state_ptr`.
+        let restricted_enter_status = zx::Status::ok(unsafe {
+            restricted_enter_loop(
+                RESTRICTED_ENTER_OPTIONS,
+                restricted_exit_callback_c,
+                &raw mut restricted_enter_context,
+                restricted_state_ptr,
+                &raw mut extended_pstate_ptr,
+            )
+        });
+        match restricted_enter_status {
+            Ok(()) => break,
+            Err(zx::Status::BAD_STATE) => {
+                // `zx_restricted_enter` returns `ZX_ERR_BAD_STATE` if the restricted register
+                // state fails architectural pre-entry validation (e.g. an invalid user IP or flags).
+                // Deliver a forced `SIGSEGV` (`SI_KERNEL`) and process the completed exit to
+                // dispatch a signal handler or terminate the task.
+                force_signal(
+                    restricted_enter_context.current_task,
+                    SignalInfo::forced(SIGSEGV),
+                    /* restricted_exception = */ None,
+                );
+                if let Some(exit_status) = process_completed_restricted_exit(
+                    restricted_enter_context.current_task,
+                    &restricted_enter_context.error_context,
+                )? {
+                    return Ok(exit_status);
+                }
+            }
+            Err(status) => {
+                // If restricted_enter_loop failed, it means that we failed to satisfy
+                // a prerequisite of zx_restricted_enter which should never happen.
+                log_error!(
+                    "restricted_enter_loop failed: {}, register state: {:?}",
+                    status,
+                    restricted_enter_context.current_task.thread_state.registers
+                );
+                break;
+            }
+        }
     }
     restricted_enter_context.exit_status
 }
@@ -223,16 +262,12 @@ fn process_restricted_exit(
     error_context: &mut Option<ErrorContext>,
     exception_report_raw: *const zx::sys::zx_exception_report_t,
 ) -> Result<Option<ExitStatus>, Error> {
+    #[cfg(target_arch = "aarch64")]
     current_task.thread_state.registers.sync_stack_ptr();
 
     match reason_code {
         zx::sys::ZX_RESTRICTED_REASON_SYSCALL => {
-            let syscall_decl = SyscallDecl::from_number(
-                current_task.thread_state.registers.syscall_register(),
-                current_task.thread_state.arch_width(),
-            );
-
-            if let Some(new_error_context) = execute_syscall(current_task, syscall_decl) {
+            if let Some(new_error_context) = execute_syscall(current_task) {
                 *error_context = Some(new_error_context);
             }
         }
@@ -291,22 +326,22 @@ pub struct ErrorContext {
     pub error: Errno,
 }
 
-/// Executes the provided `syscall` in `current_task`.
+/// Executes the syscall for `current_task`.
 ///
 /// Returns an `ErrorContext` if the system call returned an error.
 #[inline(never)] // Inlining this function breaks the CFI directives used to unwind into user code.
-pub fn execute_syscall(
-    current_task: &mut CurrentTask,
-    syscall_decl: SyscallDecl,
-) -> Option<ErrorContext> {
+pub fn execute_syscall(current_task: &mut CurrentTask) -> Option<ErrorContext> {
+    current_task.thread_state.registers.save_registers_for_restart();
+
+    current_task.ptrace().on_syscall_enter();
+
+    let syscall_decl = SyscallDecl::from_number(
+        current_task.thread_state.registers.syscall_register(),
+        current_task.thread_state.arch_width(),
+    );
+
     fuchsia_trace::duration!(CATEGORY_STARNIX, syscall_decl.trace_name());
     let syscall = new_syscall(syscall_decl, current_task);
-
-    current_task.thread_state.registers.save_registers_for_restart(syscall.decl.number);
-
-    if current_task.trace_syscalls.load(std::sync::atomic::Ordering::Relaxed) {
-        ptrace_syscall_enter(current_task);
-    }
 
     log_syscall!(current_task, "{syscall:?}");
 
@@ -342,9 +377,7 @@ pub fn execute_syscall(
         }
     };
 
-    if current_task.trace_syscalls.load(std::sync::atomic::Ordering::Relaxed) {
-        ptrace_syscall_exit(current_task, return_value.is_some());
-    }
+    current_task.ptrace().on_syscall_exit(return_value.is_some());
 
     return_value
 }
@@ -396,9 +429,15 @@ pub fn process_completed_restricted_exit(
                 // loop back to process any pending signals before returning to userspace.
                 continue;
             }
+            // Restore signal mask if necessary, before returning to userspace.
+            if current_task.flags().contains(TaskFlags::TEMPORARY_SIGNAL_MASK) {
+                current_task.write().restore_signal_mask();
+                if current_task.should_check_for_pending_signals() {
+                    continue;
+                }
+            }
+
             result = None;
-            // Always restore signal mask before returning to userspace.
-            current_task.write().restore_signal_mask();
             break;
         }
     }

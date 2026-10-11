@@ -94,6 +94,9 @@ if (is_host) {
       disconnect_duration_sec = 2
       verify_mdns = true
       mdns_timeout_sec = 12
+
+      # Each case also checks mDNS, so don't name it test_usb_disconnect_N.
+      test_case_prefix = "test_usb_mdns_hotplug"
     }
     local_config_source = "UsbDisconnectTestbed.yaml"
     environments = [

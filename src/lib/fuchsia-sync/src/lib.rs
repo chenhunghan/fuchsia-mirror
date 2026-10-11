@@ -50,7 +50,7 @@ pub type MappedRwLockWriteGuard<'a, T> = lock_api::MappedRwLockWriteGuard<'a, Ra
 /// cause them to print instead of exiting the process.
 pub fn suppress_lock_cycle_panics() {
     #[cfg(detect_lock_cycles)]
-    tracing_mutex::suppress_panics();
+    tracing_mutex::util::set_cycle_handler(|message| eprintln!("{message}"));
 }
 
 /// A trait for locks whose dynamic dependency tracking graph can be reset.

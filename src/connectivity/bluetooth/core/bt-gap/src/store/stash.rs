@@ -232,6 +232,18 @@ fn bond_inspect_identifier(peer_id: PeerId) -> String {
     format!("bond {}", peer_id)
 }
 
+/// Returns the PeerId of an existing bond in `host_bonds` that has the same peer address as `bond`
+/// but a different PeerId, if one exists.
+fn find_bond_with_same_address(
+    host_bonds: &HashMap<PeerId, Inspectable<BondingData>>,
+    bond: &BondingData,
+) -> Option<PeerId> {
+    host_bonds
+        .values()
+        .find(|existing| existing.identifier != bond.identifier && existing.address == bond.address)
+        .map(|existing| existing.identifier)
+}
+
 fn insert_inspectable_bonds(
     data: &mut HashMap<Address, HashMap<PeerId, Inspectable<BondingData>>>,
     inspect: &fuchsia_inspect::Node,
@@ -239,12 +251,19 @@ fn insert_inspectable_bonds(
 ) {
     for bond in bonds {
         let (local_address, identifier) = (bond.local_address, bond.identifier);
-        let node = inspect.create_child(bond_inspect_identifier(identifier));
-        let bond = Inspectable::new(bond, node);
         // Update the in memory cache.
         let host_bonds = data.entry(local_address).or_insert(HashMap::new());
+        if let Some(existing_id) = find_bond_with_same_address(host_bonds, &bond) {
+            warn!(
+                "Bond for peer {} has the same address ({}) as existing bond for peer {} \
+                 (local adapter {})",
+                identifier, bond.address, existing_id, local_address
+            );
+        }
+        let node = inspect.create_child(bond_inspect_identifier(identifier));
+        let bond = Inspectable::new(bond, node);
         if host_bonds.insert(identifier, bond).is_some() {
-            warn!("Replaced bond data for {} peer id {}", local_address, identifier);
+            info!("Updated bond for peer {} (local adapter {})", identifier, local_address);
         }
     }
 }
@@ -915,6 +934,28 @@ mod tests {
         let result = accessor.get_value("bonding-data:0000000000000001").await;
         let bond_data = result.expect("failed to get value").map(|x| *x);
         assert_eq!(bond_data, Some(bond_entry_1()));
+    }
+
+    #[fuchsia::test]
+    fn find_bond_with_same_address_detects_different_peer_id() {
+        let mut data = HashMap::new();
+        let inspect = fuchsia_inspect::Node::default();
+        insert_inspectable_bonds(&mut data, &inspect, vec![bond_data_2(), bond_data_3()]);
+        let host_bonds = data.get(&Address::Public([2, 0, 0, 0, 0, 0])).unwrap();
+
+        // A bond with the same address but a different PeerId is detected.
+        assert_eq!(
+            find_bond_with_same_address(host_bonds, &bond_data_4_dupes_3()),
+            Some(PeerId(3))
+        );
+
+        // Updating the bond for the same PeerId is not a duplicate.
+        assert_eq!(find_bond_with_same_address(host_bonds, &bond_data_3()), None);
+
+        // Bonds for other addresses or other local adapters are not duplicates.
+        let host_bonds = data.get(&Address::Public([1, 0, 0, 0, 0, 0])).unwrap();
+        assert_eq!(find_bond_with_same_address(host_bonds, &bond_data_1()), None);
+        assert_eq!(find_bond_with_same_address(host_bonds, &bond_data_4_dupes_3()), None);
     }
 
     #[fuchsia::test]

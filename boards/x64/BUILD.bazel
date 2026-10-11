@@ -34,7 +34,6 @@ _COMMON_FILESYSTEMS = {
         "size_checker_maximum_bytes": 5216665600,
     },
     "gpt": "allow_multiple",
-    "watch_deprecated_v1_drivers": True,
 }
 
 _COMMON_PROVIDED_FEATURES = [

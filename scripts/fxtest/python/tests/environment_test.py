@@ -83,30 +83,40 @@ class TestExecutionEnvironment(unittest.TestCase):
 
             default_flags = args.parse_args([])
 
-            with mock.patch.dict(
-                os.environ,
-                {"FUCHSIA_DIR": tmp, "FUCHSIA_BUILD_DIR_FROM_FX": out_dir},
-            ):
-                env = environment.ExecutionEnvironment.initialize_from_args(
-                    default_flags
-                )
-                self.assertEqual(env.fuchsia_dir, tmp)
-                self.assertEqual(env.out_dir, out_dir)
-                self.assertTrue(
-                    env.log_file and env.log_file.startswith(out_dir), str(env)
-                )
-                self.assertTrue(
-                    env.log_file and "fxtest" in env.log_file, str(env)
-                )
-                self.assertEqual(
-                    env.test_json_file, os.path.join(out_dir, "tests.json")
-                )
-                self.assertIsNone(env.test_list_file)
+            for fx_build_dir in (out_dir, os.path.join("out", "baz")):
+                with self.subTest(fx_build_dir=fx_build_dir):
+                    with mock.patch.dict(
+                        os.environ,
+                        {
+                            "FUCHSIA_DIR": tmp,
+                            "FUCHSIA_BUILD_DIR_FROM_FX": fx_build_dir,
+                        },
+                    ):
+                        env = environment.ExecutionEnvironment.initialize_from_args(
+                            default_flags
+                        )
+                        self.assertEqual(env.fuchsia_dir, tmp)
+                        self.assertEqual(env.out_dir, out_dir)
+                        self.assertTrue(os.path.isabs(env.out_dir))
+                        self.assertTrue(
+                            env.log_file and env.log_file.startswith(out_dir),
+                            str(env),
+                        )
+                        self.assertTrue(
+                            env.log_file and "fxtest" in env.log_file, str(env)
+                        )
+                        self.assertEqual(
+                            env.test_json_file,
+                            os.path.join(out_dir, "tests.json"),
+                        )
+                        self.assertIsNone(env.test_list_file)
 
-                self.assertEqual(
-                    env.relative_to_root(os.path.join(tmp, "foo", "bar")),
-                    os.path.join("foo", "bar"),
-                )
+                        self.assertEqual(
+                            env.relative_to_root(
+                                os.path.join(tmp, "foo", "bar")
+                            ),
+                            os.path.join("foo", "bar"),
+                        )
 
     def test_no_fuchsia_dir(self) -> None:
         with mock.patch.dict(os.environ, {"FUCHSIA_DIR": ""}, clear=True):
@@ -383,5 +393,27 @@ class TestExecutionEnvironment(unittest.TestCase):
                 # Direct host tools do not get -t injected
                 self.assertEqual(
                     env.fx_cmd_line("dldist", "--needle", "foo"),
+                    [dldist_bin, "--needle", "foo"],
+                )
+
+            # Even if out_dir is relative, resolved tool paths are absolute so
+            # subprocesses invoked with a different CWD can still execute them.
+            rel_env = environment.ExecutionEnvironment(
+                fuchsia_dir=tmp,
+                out_dir=os.path.relpath(out_dir),
+                test_json_file=os.path.join(out_dir, "tests.json"),
+                disabled_ctf_tests_file=os.path.join(
+                    tmp, "sdk/ctf/disabled_tests.json"
+                ),
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    rel_env.fx_cmd_line(
+                        "ffx", "test", "run", "fuchsia-pkg://foo"
+                    ),
+                    [ffx_bin, "test", "run", "fuchsia-pkg://foo"],
+                )
+                self.assertEqual(
+                    rel_env.fx_cmd_line("dldist", "--needle", "foo"),
                     [dldist_bin, "--needle", "foo"],
                 )

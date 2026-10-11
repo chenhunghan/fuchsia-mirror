@@ -2,14 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load("//build/bazel/rules/cc:providers.bzl", "PrebuiltLibraryInfo")
 load("//build/bazel/rules/idk:providers.bzl", "FuchsiaIdkAtomInfo")
 
 def _get_current_cpu_arch(ctx):
     """Returns the CPU architecture of the current build."""
-    current_platform = ctx.attr._current_platform[CurrentPlatformInfo]
-    return current_platform.cpu
+    return get_current_platform_info(ctx).cpu
 
 # LINT.IfChange(idk_atom_info)
 def _create_test_atom_info_impl(ctx):
@@ -120,11 +123,7 @@ verify_atom_info = rule(
     attrs = {
         "atom": attr.label(mandatory = True, providers = [FuchsiaIdkAtomInfo]),
         "expected_atom_info": attr.label(mandatory = True, providers = [FuchsiaIdkAtomInfo]),
-        "_current_platform": attr.label(
-            providers = [CurrentPlatformInfo],
-            default = "@//build/bazel:current_platform",
-        ),
-    },
+    } | CURRENT_PLATFORM_INFO_ATTRS,
 )
 
 def _get_debug_file_impl(ctx):

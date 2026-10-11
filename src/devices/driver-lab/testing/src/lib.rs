@@ -299,6 +299,25 @@ impl Driver for LabRootDriver {
         sample_pdev.set_config(sample_config);
         let sample_offer = sample_pdev.serve(&mut fs, scope.to_handle(), "sample-pdev");
 
+        context.serve_outgoing(&mut fs)?;
+        scope.spawn(async move {
+            fs.collect::<()>().await;
+        });
+
+        let virtual_irq_clone =
+            virtual_irq.duplicate_handle(zx::Rights::SAME_RIGHTS).map_err(DriverError::Status)?;
+        let sample_irq_clone = sample_virtual_irq
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .map_err(DriverError::Status)?;
+        scope.spawn(async move {
+            loop {
+                fasync::Timer::new(fasync::MonotonicInstant::after(zx::Duration::from_millis(50)))
+                    .await;
+                let _ = virtual_irq_clone.trigger(zx::BootInstant::from_nanos(0));
+                let _ = sample_irq_clone.trigger(zx::BootInstant::from_nanos(0));
+            }
+        });
+
         let child = NodeBuilder::new("proxy-target")
             .add_property(bind_fuchsia_driver_lab::PROXY_TARGET, true)
             .add_property(bind_fuchsia::SERVICE, "fuchsia.hardware.platform.device.Service")
@@ -318,25 +337,6 @@ impl Driver for LabRootDriver {
             .add_offer(sample_offer)
             .build();
         node.add_child(sample_child).await?;
-
-        context.serve_outgoing(&mut fs)?;
-        scope.spawn(async move {
-            fs.collect::<()>().await;
-        });
-
-        let virtual_irq_clone =
-            virtual_irq.duplicate_handle(zx::Rights::SAME_RIGHTS).map_err(DriverError::Status)?;
-        let sample_irq_clone = sample_virtual_irq
-            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-            .map_err(DriverError::Status)?;
-        scope.spawn(async move {
-            loop {
-                fasync::Timer::new(fasync::MonotonicInstant::after(zx::Duration::from_millis(50)))
-                    .await;
-                let _ = virtual_irq_clone.trigger(zx::BootInstant::from_nanos(0));
-                let _ = sample_irq_clone.trigger(zx::BootInstant::from_nanos(0));
-            }
-        });
 
         info!("lab_root added proxy-target and sample-device nodes with MMIO, IRQ, GPIO, I2C, SPI");
         Ok(Self {

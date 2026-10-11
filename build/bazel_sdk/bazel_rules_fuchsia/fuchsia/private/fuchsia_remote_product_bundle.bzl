@@ -15,7 +15,7 @@ def fuchsia_remote_product_bundle(
         *,
         name,
         transfer_url,
-        product_version,
+        product_version = "",
         product_bundle_name = None,
         **kwargs):
     """Describes a product bundle which is not built locally and tasks that can be performed with it.
@@ -78,7 +78,7 @@ _fuchsia_remote_product_bundle = rule(
         ),
         "product_version": attr.string(
             doc = "The sdk version associated with this product bundle.",
-            mandatory = True,
+            default = "",
         ),
     },
     executable = True,

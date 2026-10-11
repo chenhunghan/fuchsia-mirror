@@ -1,0 +1,26 @@
+{
+    "name": "onlcr_resets_column_onocr",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR",
+            "ONOCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_slave",
+            "data": "hello\n\rworld\n"
+        },
+        {
+            "action": "read_from_master"
+        }
+    ]
+}

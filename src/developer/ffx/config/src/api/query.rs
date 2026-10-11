@@ -125,7 +125,15 @@ impl<'a> ConfigQuery<'a> {
             (src, _) => src,
         };
 
-        Ok(ConfigValue::new(mapped.value, source))
+        let result = ConfigValue::new(mapped.value, source);
+
+        if let Some(name) = self.name {
+            if let Some(val) = result.value() {
+                ctx.record_query(name, val);
+            }
+        }
+
+        Ok(result)
     }
 
     fn eval_strict<T: ValueStrategy>(
@@ -189,6 +197,15 @@ impl<'a> ConfigQuery<'a> {
         Ok((mapped.recursive_map(&T::handle_arrays), recorded_var.into_inner()))
     }
 
+    fn add_key_to_error<T>(&self, res: Result<T, ConfigError>) -> Result<T, ConfigError> {
+        res.map_err(|e| match e {
+            ConfigError::ConversionFailed { to, value, key: None } => {
+                ConfigError::ConversionFailed { to, value, key: self.name.map(str::to_string) }
+            }
+            _ => e,
+        })
+    }
+
     /// Get a value with as little processing as possible
     pub fn get_raw<T>(&self, context: &EnvironmentContext) -> Result<T, ConfigError>
     where
@@ -197,7 +214,14 @@ impl<'a> ConfigQuery<'a> {
         let ctx = context;
         T::validate_query(self)?;
         let cv = self.get_config(ctx)?;
-        T::try_convert(cv)
+
+        if let Some(name) = self.name {
+            if let Some(val) = cv.value() {
+                context.record_query(name, val);
+            }
+        }
+
+        self.add_key_to_error(T::try_convert(cv))
     }
 
     /// Get an optional value, ignoring "BadKey" errors, which are only generated when in strict
@@ -227,11 +251,11 @@ impl<'a> ConfigQuery<'a> {
         match self.eval_config_value::<T>(context) {
             Ok(cv) => {
                 let source = cv.source.clone();
-                let val = T::try_convert(cv)?;
+                let val = self.add_key_to_error(T::try_convert(cv))?;
                 Ok((val, source))
             }
             Err(ConfigError::BadValue { .. }) => {
-                let empty_val = T::try_convert(ConfigValue::from(None))?;
+                let empty_val = self.add_key_to_error(T::try_convert(ConfigValue::from(None)))?;
                 Ok((empty_val, None))
             }
             Err(e) => Err(e),
@@ -245,7 +269,7 @@ impl<'a> ConfigQuery<'a> {
     {
         T::validate_query(self)?;
         let cv = self.eval_config_value::<T>(context)?;
-        T::try_convert(cv)
+        self.add_key_to_error(T::try_convert(cv))
     }
 
     /// Get a value along with its source information.
@@ -270,7 +294,7 @@ impl<'a> ConfigQuery<'a> {
                 ConfigError::KeyNotFound
             }
         })?;
-        let val = T::try_convert(cv)?;
+        let val = self.add_key_to_error(T::try_convert(cv))?;
         Ok((val, source))
     }
 
@@ -283,7 +307,7 @@ impl<'a> ConfigQuery<'a> {
 
         T::validate_query(self)?;
         let cv = self.eval_config_value::<T>(ctx)?.recursive_map(&file_check);
-        T::try_convert(cv)
+        self.add_key_to_error(T::try_convert(cv))
     }
 
     /// Get a file value along with its source information.
@@ -307,7 +331,7 @@ impl<'a> ConfigQuery<'a> {
                 ConfigError::KeyNotFound
             }
         })?;
-        let val = T::try_convert(cv)?;
+        let val = self.add_key_to_error(T::try_convert(cv))?;
         Ok((val, source))
     }
 
@@ -468,6 +492,29 @@ mod test {
                 );
             }
             other => panic!("expected ConfigError::BadValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_conversion_error_includes_key() {
+        let mut default_map = ConfigMap::new();
+        default_map.insert(
+            "test".to_string(),
+            serde_json::json!({
+                "string_val": "foobar",
+            }),
+        );
+        let mut ctx = EnvironmentContext::default();
+        ctx.config = crate::storage::Config::new(None, None, None, ConfigMap::new(), default_map);
+
+        let q = ConfigQueryBuilder::from("test.string_val").build();
+        let res: Result<u64, ConfigError> = q.get(&ctx);
+        match res {
+            Err(ConfigError::ConversionFailed { to, value: _, key }) => {
+                assert_eq!(to, "u64");
+                assert_eq!(key, Some("test.string_val".to_string()));
+            }
+            other => panic!("expected ConfigError::ConversionFailed, got {:?}", other),
         }
     }
 }

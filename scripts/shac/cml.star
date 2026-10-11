@@ -10,9 +10,12 @@ def _cml_format(ctx):
     Args:
       ctx: A ctx instance.
     """
+    cml_files = ctx.scm.affected_files(glob = "*.cml")
+    if not cml_files:
+        return
     exe = compiled_tool_path(ctx, "cmc")
     procs = []
-    for f in ctx.scm.affected_files(glob = "*.cml"):
+    for f in cml_files:
         procs.append((f, os_exec(ctx, [exe, "format", f])))
 
     for f, proc in procs:

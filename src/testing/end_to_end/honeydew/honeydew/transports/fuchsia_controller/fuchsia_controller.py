@@ -6,6 +6,7 @@
 import logging
 
 import fuchsia_controller_py as fuchsia_controller
+from honeydew import errors
 from honeydew.affordances_capable import FuchsiaDeviceIpChange
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.fuchsia_controller import errors as fc_errors
@@ -13,6 +14,22 @@ from honeydew.typing import custom_types
 from honeydew.utils import decorators
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+# Exceptions raised by the native Fuchsia-Controller bindings on failure. Most
+# failures raise `FcTransportStatus`, but internal failures (e.g. target not
+# ready in `Context.target_wait()`) raise `RuntimeError`. See:
+# - `mod::set_python_exception()` in
+#   //src/developer/fuchsia-controller/cpp/fuchsia_controller_internal/mod.cc,
+#   which maps `FC_ERR_INTERNAL` to `RuntimeError` and most other statuses to
+#   `FcTransportStatus`.
+# - `LibraryCommand::TargetWait` in
+#   //src/developer/fuchsia-controller/src/commands.rs, which returns
+#   `FC_ERR_INTERNAL` when the target wait fails.
+_CONTROLLER_ERRORS: tuple[type[Exception], ...] = (
+    fuchsia_controller.FcTransportStatus,
+    RuntimeError,
+    errors.HoneydewError,
+)
 
 
 class FuchsiaController:
@@ -147,7 +164,7 @@ class FuchsiaController:
             self.ctx = fuchsia_controller.Context(
                 config=config, isolate_dir=isolate_dir, target=self._target
             )
-        except Exception as err:  # pylint: disable=broad-except
+        except _CONTROLLER_ERRORS as err:
             raise fc_errors.FuchsiaControllerError(
                 "Failed to create Fuchsia-Controller context"
             ) from err
@@ -171,7 +188,7 @@ class FuchsiaController:
                 "to %s...",
                 self._target_name,
             )
-        except Exception as err:  # pylint: disable=broad-except
+        except _CONTROLLER_ERRORS as err:
             raise fc_errors.FuchsiaControllerConnectionError(
                 f"Fuchsia-Controller connection check failed for "
                 f"{self._target_name} with error: {err}"

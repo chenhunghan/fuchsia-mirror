@@ -166,7 +166,7 @@ std::span<zbi_topology_node_t> AcpiMadt::GetTopology(std::span<zbi_topology_node
       return nodes;
     }
 
-    size_t num_cpus = std::distance(nodes.begin(), last_node);
+    size_t cpu_index = std::distance(nodes.begin(), last_node);
     *last_node = zbi_topology_node_t{
         .entity =
             {
@@ -189,8 +189,8 @@ std::span<zbi_topology_node_t> AcpiMadt::GetTopology(std::span<zbi_topology_node
                                     },
                             },
                         .flags = static_cast<zbi_topology_processor_flags_t>(
-                            (num_cpus) ? ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY : 0),
-                        .logical_ids = {static_cast<uint16_t>(num_cpus)},
+                            (cpu_index == 0) ? ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY : 0),
+                        .logical_ids = {static_cast<uint16_t>(cpu_index)},
                         .logical_id_count = 1,
                     },
             },

@@ -19,7 +19,6 @@ from honeydew.affordances.drivers.battery_manager.utils.errors import (
 from honeydew.affordances.drivers.battery_manager.utils.types import (
     BatterySpec,
     BatteryStatus,
-    ChargeStatus,
     HealthStatus,
     PowerSourceSpec,
     PowerSourceStatus,
@@ -46,7 +45,6 @@ __all__ = [
     "BatteryRequestError",
     "BatterySpec",
     "BatteryStatus",
-    "ChargeStatus",
     "HealthStatus",
     "HoneydewBatteryError",
     "PowerSourceSpec",

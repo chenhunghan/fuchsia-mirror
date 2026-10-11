@@ -267,7 +267,12 @@ class FFX:
         """Resolves the target using 'ffx target list' and caches it."""
         target_to_query = self._name if self._name else self._query
         cmd: list[str] = _FFX_CMDS["TARGET_SSH_ADDRESS"] + [target_to_query]
-        output: str = self.run(cmd=cmd, include_target=False)
+        # Skip the `ffx target status` triage on failure: it needs the target
+        # address that is being resolved here, so running it would call back
+        # into this method and recurse indefinitely.
+        output: str = self.run(
+            cmd=cmd, include_target=False, log_status_on_failure=False
+        )
         targets = json.loads(output)
         if not targets:
             raise ffx_errors.FfxCommandError(
@@ -407,7 +412,7 @@ class FFX:
                 log_status_on_failure=False,
                 timeout=30.0,
             )
-        except Exception as err:  # pylint: disable=broad-exception-caught
+        except errors.HoneydewError as err:
             _LOGGER.warning(
                 "Failed to notify intentional disconnect to FFX monitor: %s",
                 err,
@@ -480,7 +485,7 @@ class FFX:
                         "FFX Triage: State captured after command failure (ffx target status):\n%s",
                         output,
                     )
-                except Exception as e:  # pylint: disable=broad-exception-caught
+                except errors.HoneydewError as e:
                     _LOGGER.warning(
                         "Failed to execute diagnostic 'ffx target status' on target %s: %s",
                         self._log_name,

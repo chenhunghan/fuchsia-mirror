@@ -186,13 +186,18 @@ impl SocketFile {
         mut ancillary_data: Vec<AncillaryData>,
         flags: SocketMessageFlags,
     ) -> Result<usize, Errno> {
+        security::check_socket_sendmsg_access(current_task, &self.socket)?;
         let bytes_read_before = data.bytes_read();
 
         // TODO: Implement more `flags`.
         let mut op = || {
             let offset_before = data.bytes_read();
-            let sent_bytes =
-                self.socket.write(current_task, data, &mut dest_address, &mut ancillary_data)?;
+            let sent_bytes = self.socket.write_unchecked(
+                current_task,
+                data,
+                &mut dest_address,
+                &mut ancillary_data,
+            )?;
             debug_assert!(data.bytes_read() - offset_before == sent_bytes);
             if data.available() > 0 {
                 return error!(EAGAIN);
@@ -232,16 +237,18 @@ impl SocketFile {
         flags: SocketMessageFlags,
         deadline: Option<zx::MonotonicInstant>,
     ) -> Result<MessageReadInfo, Errno> {
+        security::check_socket_recvmsg_access(current_task, &self.socket)?;
         // TODO: Implement more `flags`.
         let mut read_info = MessageReadInfo::default();
 
         let mut op = || {
-            let mut info = self.socket.read(current_task, data, flags)?;
-            read_info.append(&mut info);
-            read_info.address = info.address;
+            let can_wait_all =
+                self.socket.read_and_append_unchecked(current_task, &mut read_info, data, flags)?;
 
             let should_wait_all = self.socket.socket_type == SocketType::Stream
                 && flags.contains(SocketMessageFlags::WAITALL)
+                && !flags.contains(SocketMessageFlags::PEEK)
+                && can_wait_all
                 && !self.socket.query_events(current_task)?.contains(FdEvents::POLLHUP);
             if should_wait_all && data.available() > 0 {
                 return error!(EAGAIN);

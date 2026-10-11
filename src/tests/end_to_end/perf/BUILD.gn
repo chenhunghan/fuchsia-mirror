@@ -19,6 +19,13 @@ python_perf_test("perf_publish_example") {
 
 python_perf_test("perftest_trace_events_test") {
   main_source = "test/perftest_trace_events_test.py"
+  honeydew_config = {
+    affordances = {
+      tracing = {
+        implementation = "ffx"
+      }
+    }
+  }
   expected_metric_names_filepaths = []
   libraries = [
     "//src/performance/lib/trace_processing",

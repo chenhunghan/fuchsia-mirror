@@ -35,6 +35,9 @@ if (current_toolchain == default_toolchain) {
     remove_common_configs = [ "//build/config:default_frame_pointers" ]
 
     exclude_variant_tags = [
+      # There is no GCC toolchain for phys, only Clang.
+      "gcc",
+
       # There is no possibility of fancy runtimes like ASan for phys.
       "instrumentation-runtime",
     ]
@@ -103,20 +106,17 @@ if (current_toolchain == default_toolchain) {
         "-fno-pic",
         "-fno-pie",
       ]
-      ldflags = cflags + [ "-Wl,-m,elf_i386" ]
+      ldflags = cflags + [
+                  "-Wl,-m,elf_i386",
 
-      if (is_gcc) {
-        cflags += [ "-mpreferred-stack-boundary=4" ]  # log2, i.e. 16
-      } else {
-        cflags += [
-          "-mstack-alignment=16",  # Same as GCC's -mpreferred-stack-boundary=4.
-          "-fsanitize=safe-stack",  # Enable all available paranoia for phys.
-        ]
+                  # Clang defaults to PIE but lld has a switch to reverse that.
+                  "-Wl,--no-pie",
+                ]
 
-        # Clang defaults to PIE but lld has a switch to reverse that.  GNU
-        # linkers have no such switch, but GCC doesn't pass -pie by default.
-        ldflags += [ "-Wl,--no-pie" ]
-      }
+      cflags += [
+        "-mstack-alignment=16",
+        "-fsanitize=safe-stack",  # Enable all available paranoia for phys.
+      ]
 
       asmflags = cflags
     }

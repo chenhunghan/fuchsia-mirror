@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::object::{CounterDispatcher, Dispatcher, HandleValue};
+use crate::object::{CounterDispatcher, HandleValue, ProcessDispatcher};
 use crate::user_copy::UserOutPtr;
 use syscalls_macro::syscall;
 use zx_status::Status;
@@ -27,8 +27,13 @@ pub fn sys_counter_create(options: u32, out: &mut HandleValue) -> Result<(), Sta
 pub fn sys_counter_add(handle: HandleValue, value: i64) -> Result<(), Status> {
     // Both read and write rights are required for add because the resulting signal state and error
     // code can be used to determine the counter's value.
-    let counter =
-        Dispatcher::get_with_rights::<CounterDispatcher>(handle, ZX_RIGHT_READ | ZX_RIGHT_WRITE)?;
+    let counter = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<CounterDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_READ | ZX_RIGHT_WRITE,
+        )
+    })?;
 
     counter.add(value)?;
     Ok(())
@@ -40,7 +45,9 @@ pub fn sys_counter_read(handle: HandleValue, value_out: UserOutPtr<i64>) -> Resu
         return Err(Status::INVALID_ARGS);
     }
 
-    let counter = Dispatcher::get_with_rights::<CounterDispatcher>(handle, ZX_RIGHT_READ)?;
+    let counter = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<CounterDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     let value = counter.value();
     value_out.write(value)?;
     Ok(())
@@ -48,7 +55,13 @@ pub fn sys_counter_read(handle: HandleValue, value_out: UserOutPtr<i64>) -> Resu
 
 #[syscall]
 pub fn sys_counter_write(handle: HandleValue, value: i64) -> Result<(), Status> {
-    let counter = Dispatcher::get_with_rights::<CounterDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let counter = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<CounterDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
     counter.set_value(value);
     Ok(())
 }

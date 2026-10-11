@@ -10,8 +10,8 @@ from ipaddress import IPv4Address
 
 import dhcp_testing
 import fuchsia_wlan_base_test
-from antlion.controllers.ap_lib import dhcp_config
 from antlion.controllers.utils_lib.commands import ip
+from legacy_access_point.ap_lib import dhcp_config
 from mobly import asserts, signals, test_runner
 from openwrt_access_point import DhcpConfig, Dnsmasq
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName
@@ -79,9 +79,14 @@ class Dhcpv4DuplicateAddressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             pool_start = 100
             pool_limit = 5
 
+            # Because all pool IPs are assigned as local addresses on the AP's LAN
+            # interface below, unicast DHCP replies (DHCPOFFER/DHCPACK) from dnsmasq
+            # to those IPs would be routed to loopback (`lo`) by the AP's kernel and
+            # never transmitted over Wi-Fi. Force broadcast replies (255.255.255.255)
+            # so they reach the DUT.
             self.openwrt_ap.dhcp.start_dhcp(
                 config=DhcpConfig(
-                    lan=Lan(start=pool_start, limit=pool_limit),
+                    lan=Lan(start=pool_start, limit=pool_limit, broadcast=True),
                     dnsmasq=Dnsmasq(noping=True),
                 )
             )
@@ -141,30 +146,20 @@ class Dhcpv4DuplicateAddressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
 
         if self.openwrt_ap:
-            # In this test, all IPs in the pool are marked as in-use on the AP interface.
-            # The client detects the conflict after receiving DHCPOFFER and ignores it,
-            # so it never sends a DHCPREQUEST. Thus, only DISCOVER and OFFER are seen.
+            # Per spec, the flow should be:
+            # Discover -> Offer -> Request -> Ack -> client performs DAD -> Decline
             expected_patterns = [
                 r"DHCPDISCOVER",
                 r"DHCPOFFER",
-            ]
-            unexpected_patterns = [
                 r"DHCPREQUEST",
                 r"DHCPACK",
+                r"DHCPDECLINE",
             ]
 
-            # Positive checks
             for pattern in expected_patterns:
                 asserts.assert_true(
                     re.search(pattern, dhcp_logs),
                     f"Did not find expected message ({pattern}) in logs",
-                )
-
-            # Negative checks
-            for pattern in unexpected_patterns:
-                asserts.assert_false(
-                    re.search(pattern, dhcp_logs),
-                    f"Found unexpected message ({pattern}) in logs which should not be there!",
                 )
         elif self.access_point:
             # Per spec, the flow should be:

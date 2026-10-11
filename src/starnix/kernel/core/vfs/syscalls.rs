@@ -1748,14 +1748,11 @@ fn do_mount_remount(
     flags: MountFlags,
     data_addr: UserCString,
 ) -> Result<(), Errno> {
-    if !data_addr.is_null() {
-        track_stub!(TODO("https://fxbug.dev/322875506"), "MS_REMOUNT: Updating data");
-    }
     let mount = target.mount_if_root()?;
 
     let data = current_task.read_path_if_non_null(data_addr)?;
-    let mount_options =
-        security::sb_eat_lsm_opts(current_task.kernel(), &mut MountParams::parse(data.as_ref())?)?;
+    let mut mount_params = MountParams::parse(data.as_ref())?;
+    let mount_options = security::sb_eat_lsm_opts(current_task.kernel(), &mut mount_params)?;
 
     // From <https://man7.org/linux/man-pages/man2/mount.2.html>
     //
@@ -1765,7 +1762,7 @@ fn do_mount_remount(
     //   without changing the underlying filesystem.
     if !flags.contains(MountFlags::BIND) {
         security::sb_remount(current_task, &mount, mount_options)?;
-        mount.reconfigure_fs(current_task, flags.file_system_flags())?;
+        mount.reconfigure_fs(current_task, flags.file_system_flags(), &mount_params)?;
     }
 
     let updated_flags = flags & MountFlags::CHANGEABLE_WITH_REMOUNT;
@@ -1998,7 +1995,7 @@ pub fn sys_pidfd_getfd(
 
     let file = current_task.files().get(pidfd)?;
     let tg = file.as_pid()?.get_thread_group()?;
-    let task = tg.read().get_running_task()?;
+    let task = tg.read().get_running_task_with_files()?;
 
     current_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &task)?;
 
@@ -2208,6 +2205,7 @@ fn select(
             }
         });
     }
+    drop(ready_items);
 
     let write_fd_set =
         |addr: UserRef<__kernel_fd_set>, value: __kernel_fd_set| -> Result<(), Errno> {
@@ -2538,6 +2536,7 @@ pub fn poll(
         pollfds[ready_key].revents = return_events as i16;
         unique_ready_items.set(ready_key, true);
     }
+    drop(ready_items);
 
     for (index, poll_descriptor) in pollfds.iter().enumerate() {
         current_task.write_object(user_pollfds.at(index)?, poll_descriptor)?;

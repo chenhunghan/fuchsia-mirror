@@ -29,3 +29,10 @@ alias(
     actual = ":fidl_next_util_internal",
     visibility = fidl_rust_next_allowlist,
 )
+
+alias(
+    name = "fidl_next_util_test",
+    testonly = True,
+    actual = ":fidl_next_util_internal_test",
+    visibility = fidl_rust_next_allowlist,
+)

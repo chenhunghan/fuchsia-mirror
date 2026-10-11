@@ -161,6 +161,14 @@ class CxxRemoteActionTests(unittest.TestCase):
             c.remote_action.inputs_relative_to_project_root,
             [fake_builddir / source],
         )
+        self.assertIn(
+            f"--exec_timeout={cxx_remote_wrapper._DEFAULT_EXEC_TIMEOUT}",
+            c.remote_action.launch_command,
+        )
+        self.assertIn(
+            f"--reclient_timeout={cxx_remote_wrapper._DEFAULT_RECLIENT_TIMEOUT}",
+            c.remote_action.launch_command,
+        )
         with mock.patch.object(
             cxx_remote_wrapper.CxxRemoteAction,
             "_run_remote_action",

@@ -13,6 +13,7 @@
         binary: "driver/spi.so",
         colocate: "true",
         default_dispatcher_opts: [ "allow_sync_calls" ],
+        default_dispatcher_scheduler_role: "fuchsia.devices.spi.drivers.spi.bus",
         allowed_scheduler_roles: [
             "fuchsia.devices.spi.drivers.aml-spi.transaction",
             "fuchsia.devices.spi.drivers.aml-spi.spi1",

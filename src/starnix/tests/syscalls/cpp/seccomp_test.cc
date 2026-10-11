@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <time.h>
 
 #include <array>
 #include <condition_variable>
@@ -1044,6 +1045,20 @@ TEST(SeccompTest, BpfMiscWithSourceXRejected) {
     EXPECT_EQ(-1, prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog, 0, 0));
     EXPECT_EQ(EINVAL, errno);
   });
+}
+
+TEST(SeccompTest, NonVdsoClockGettimeFiltered) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.RunInForkedProcess([] {
+    install_filter_block(__NR_clock_gettime, SECCOMP_RET_ERRNO | EPERM);
+
+    struct timespec ts{};
+    EXPECT_EQ(0, clock_gettime(CLOCK_MONOTONIC, &ts));
+    EXPECT_EQ(-1, clock_gettime(CLOCK_BOOTTIME_ALARM, &ts));
+    EXPECT_EQ(EPERM, errno);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 }  // anonymous namespace

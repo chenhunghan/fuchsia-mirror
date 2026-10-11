@@ -59,6 +59,7 @@ _SRCS = [
 
 # @bazel2gn:transformer=deps
 _COMMON_DEPS = [
+    "//sdk/rust/zx",
     "//sdk/rust/zx-status",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
@@ -90,7 +91,6 @@ _COMMON_TEST_DEPS = [
 # @bazel2gn:transformer=deps
 _FUCHSIA_DEPS = [
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
-    "//sdk/rust/zx",
     "//src/lib/fdomain/client:flex_fidl",
 ]
 
@@ -215,7 +215,6 @@ rustc_library(
     deps = _COMMON_DEPS + [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
         "//src/lib/fdomain/client:flex_fdomain",
-        "//src/lib/fuchsia-emulated-handle",
         "//third_party/rust_crates/vendor:log",
     ],
 )

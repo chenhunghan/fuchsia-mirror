@@ -202,13 +202,20 @@ def compute_clang_features(
                             # This flag will get applied after the default
                             # set of flags so we can think of this as an override
                             "-O1",
+                            # Rewrite relative source paths in coverage mappings so they
+                            # start with ../../ (matching GN and rustc's --remap-path-prefix=.=../..).
+                            "-fcoverage-prefix-map==../../",
+                            # Enable binary profile correlation required by ffx coverage.
                             "-mllvm",
+                            "-profile-correlate=binary",
                         ] + (
                             [
                                 # Enable runtime counter relocation in Linux.
+                                "-mllvm",
                                 "-runtime-counter-relocation",
                             ] if is_linux else [
                                 # Enable coverage from system headers in Fuchsia.
+                                "-mllvm",
                                 "-system-headers-coverage",
                             ] if is_fuchsia else []
                         ),

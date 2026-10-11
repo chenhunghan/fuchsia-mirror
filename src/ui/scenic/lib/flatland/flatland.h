@@ -471,7 +471,8 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   void ClearFlatland2State();
 
   // For each dead transform:
-  // 1) Remove the corresponding matrix
+  // 1) Remove the corresponding `matrices_`, `opacity_values_`, `clip_regions_`, and `hit_regions_`
+  //    entries.
   // 2) If it hosts a layer stack, drop the stack and release its layers via `ReleaseLayerObject()`.
   void ProcessDeadTransforms(const TransformGraph::TopologyData& data);
 
@@ -781,6 +782,12 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   // Tracks API calls which have the potential to modify the view tree.  If true, the next-presented
   // frame will trigger view tree recomputation.
   bool view_tree_dirty_ = false;
+
+  // Tracks API calls which modify the session's transform graph (`local_topology`,
+  // `local_matrices`, `local_clip_regions`, `local_opacity_values`, or links). Initialized to
+  // `true` so the session's initial `Present()` triggers a full `SceneState` rebuild.
+  // Transform-graph mutators set this directly even when calling helpers that also set it.
+  bool scene_state_dirty_ = true;
 
   // Callbacks for registering View-bound protocols.
   fit::function<void(fidl::ServerEnd<fuchsia_ui_views::Focuser>, zx_koid_t)> register_view_focuser_;

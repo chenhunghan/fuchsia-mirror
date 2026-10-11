@@ -55,7 +55,7 @@ use netstack3_base::testutil::{
 };
 use netstack3_base::{
     InstantContext as _, IpDeviceAddr, LocalFrameDestination, Mark, MarkMatcher, MarkMatchers,
-    Marks, NetworkParsingContext, NetworkSerializationContext,
+    Marks, NetworkParsingContext, NetworkSerializationContext, PacketType,
 };
 use netstack3_core::device::{
     DeviceId, EthernetCreationProperties, EthernetLinkDevice, MaxEthernetFrameSize,
@@ -65,7 +65,9 @@ use netstack3_core::filter::{
     Action, Hook, IpRoutines, NatRoutines, PacketMatcher, Routine, Routines, Rule, Tuple,
 };
 use netstack3_core::ip::MarkDomain;
-use netstack3_core::socket::{ListenerInfo, SocketInfo};
+use netstack3_core::socket::{
+    ListenerInfo, MulticastInterfaceSelector, MulticastMembershipInterfaceSelector, SocketInfo,
+};
 use netstack3_core::testutil::{
     Ctx, CtxPairExt as _, DEFAULT_INTERFACE_METRIC, FakeBindingsCtx, FakeCtx, FakeCtxBuilder,
     new_simple_fake_network,
@@ -73,7 +75,7 @@ use netstack3_core::testutil::{
 use netstack3_core::{BindingsContext, CoreCtx, IpExt, StackState};
 use netstack3_device::queue::{ReceiveQueueContext as _, ReceiveQueueHandler as _};
 use netstack3_device::testutil::IPV6_MIN_IMPLIED_MAX_FRAME_SIZE;
-use netstack3_filter::{FilterIpContext, FilterIpExt, TransportProtocol};
+use netstack3_filter::{FilterIpContext, FilterIpExt, TransportTuple};
 use netstack3_ip::device::{
     IpDeviceConfigurationUpdate, Ipv4DeviceConfigurationUpdate, Ipv6DeviceConfigurationUpdate,
     SlaacConfigurationUpdate, StableSlaacAddressConfiguration,
@@ -3269,11 +3271,12 @@ fn conntrack_entry_retained_across_loopback<I: TestDualStackIpExt + IpExt>(
 
     fn original_tuple<I: TestIpExt>(local_port: NonZeroU16) -> Tuple<I> {
         Tuple {
-            protocol: TransportProtocol::Udp,
             src_addr: I::LOOPBACK_ADDRESS.get(),
             dst_addr: I::TEST_ADDRS.remote_ip.get(),
-            src_port_or_id: local_port.get(),
-            dst_port_or_id: LISTENER_PORT.get(),
+            transport: TransportTuple::Udp {
+                src_port: local_port.get(),
+                dst_port: LISTENER_PORT.get(),
+            },
         }
     }
 
@@ -3422,7 +3425,7 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
     let (mut ctx, _device_ids) = FakeCtxBuilder::default().build();
     let _loopback = ctx.test_api().add_loopback();
 
-    // 1. Test UDP socket ingress filter marks over loopback.
+    // 1. Test UDP socket ingress filter marks and packet type over loopback.
     // FakeBindingsCtx configures:
     // - marks_to_keep_on_egress: &[MarkDomain::Mark1]
     // - marks_to_set_on_ingress: &[MarkDomain::Mark2]
@@ -3455,18 +3458,18 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
         [packet] => assert_eq!(packet, b"hello")
     );
 
-    let udp_filter_marks =
-        core::mem::take(&mut ctx.bindings_ctx.state_mut().socket_ingress_filter_marks);
-    assert_eq!(udp_filter_marks.len(), 1);
-    let (_sock_info, marks) = &udp_filter_marks[0];
+    let udp_filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
+    assert_eq!(udp_filter_metadata.len(), 1);
+    let (_sock_info, marks, packet_type) = &udp_filter_metadata[0];
     // Mark1 (SO_MARK) comes from the packet (kept on egress from sender).
     assert_eq!(marks.get(MarkDomain::Mark1), &Mark(Some(100)));
     // Mark2 (SOCKET_UID) comes from the destination socket (set on ingress from
     // receiver).
     assert_eq!(marks.get(MarkDomain::Mark2), &Mark(Some(2000)));
+    assert_eq!(*packet_type, PacketType::Host);
 
-    // 2. Test TCP socket ingress filter marks and accepted socket marks over
-    //    loopback.
+    // 2. Test TCP socket ingress filter marks, packet type, and accepted socket
+    //    marks over loopback.
     let mut tcp_api = ctx.core_api().tcp::<I>();
     let listener = tcp_api.create(Default::default());
     const TCP_PORT: NonZeroU16 = NonZeroU16::new(54321).unwrap();
@@ -3482,24 +3485,26 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
 
     while ctx.test_api().handle_queued_rx_packets() {}
 
-    let tcp_filter_marks =
-        core::mem::take(&mut ctx.bindings_ctx.state_mut().socket_ingress_filter_marks);
-    assert_eq!(tcp_filter_marks.len(), 3);
+    let tcp_filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
+    assert_eq!(tcp_filter_metadata.len(), 3);
     // 1. SYN arriving at the listener: Mark1 from client (400), Mark2 from
     //    listener (3000).
-    let (_syn_sock_info, syn_marks) = &tcp_filter_marks[0];
+    let (_syn_sock_info, syn_marks, syn_packet_type) = &tcp_filter_metadata[0];
     assert_eq!(syn_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(syn_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
+    assert_eq!(*syn_packet_type, PacketType::Host);
     // 2. SYN-ACK arriving at the client: Mark1 from child socket (inherited
     //    from SYN: 400), Mark2 from client (4000).
-    let (_syn_ack_sock_info, syn_ack_marks) = &tcp_filter_marks[1];
+    let (_syn_ack_sock_info, syn_ack_marks, syn_ack_packet_type) = &tcp_filter_metadata[1];
     assert_eq!(syn_ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(syn_ack_marks.get(MarkDomain::Mark2), &Mark(Some(4000)));
+    assert_eq!(*syn_ack_packet_type, PacketType::Host);
     // 3. Final ACK arriving at the listener: Mark1 from client (400), Mark2
     //    from child socket (3000).
-    let (_ack_sock_info, ack_marks) = &tcp_filter_marks[2];
+    let (_ack_sock_info, ack_marks, ack_packet_type) = &tcp_filter_metadata[2];
     assert_eq!(ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(ack_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
+    assert_eq!(*ack_packet_type, PacketType::Host);
 
     let mut tcp_api = ctx.core_api().tcp::<I>();
     let (accepted, _addr, _buffers) = tcp_api.accept(&listener).unwrap();
@@ -3507,4 +3512,60 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
     // from the listener (3000).
     assert_eq!(tcp_api.get_mark(&accepted, MarkDomain::Mark1), Mark(Some(400)));
     assert_eq!(tcp_api.get_mark(&accepted, MarkDomain::Mark2), Mark(Some(3000)));
+}
+
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+fn test_socket_ops_filter_on_ingress_multicast<I: IpExt + TestIpExt>() {
+    set_logger_for_test();
+
+    let (mut ctx, _device_ids) = FakeCtxBuilder::default().build();
+    let loopback = ctx.test_api().add_loopback();
+    ctx.test_api()
+        .add_route(AddableEntryEither::without_gateway(
+            I::MULTICAST_SUBNET.into(),
+            loopback.clone().into(),
+            AddableMetric::ExplicitMetric(RawMetric(0)),
+        ))
+        .unwrap();
+
+    let mut udp_api = ctx.core_api().udp::<I>();
+    let mcast_addr = I::get_multicast_addr(3);
+    let mcast_receiver = udp_api.create();
+    const MCAST_PORT: NonZeroU16 = NonZeroU16::new(23456).unwrap();
+    udp_api
+        .listen(&mcast_receiver, Some(ZonedAddr::Unzoned(mcast_addr.into())), Some(MCAST_PORT))
+        .unwrap();
+    udp_api
+        .set_multicast_membership(
+            &mcast_receiver,
+            mcast_addr,
+            MulticastMembershipInterfaceSelector::Specified(MulticastInterfaceSelector::Interface(
+                loopback.into(),
+            )),
+            true,
+        )
+        .unwrap();
+
+    let sender = udp_api.create();
+    udp_api
+        .send_to(
+            &sender,
+            Some(ZonedAddr::Unzoned(mcast_addr.into())),
+            MCAST_PORT.into(),
+            Buf::new(b"multicast".to_vec(), ..),
+            Default::default(),
+        )
+        .unwrap();
+
+    assert!(ctx.test_api().handle_queued_rx_packets());
+    assert_matches!(
+        &ctx.bindings_ctx.take_udp_received(&mcast_receiver)[..],
+        [packet] => assert_eq!(packet, b"multicast")
+    );
+
+    let mcast_filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
+    assert_eq!(mcast_filter_metadata.len(), 1);
+    let (_sock_info, _marks, mcast_packet_type) = &mcast_filter_metadata[0];
+    assert_eq!(*mcast_packet_type, PacketType::Multicast);
 }

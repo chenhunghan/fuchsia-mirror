@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::compat::FcTransportStatus;
-use crate::env_context::{EnvContext, FfxConfigEntry};
+use crate::env_context::EnvContext;
 use crate::ext_buffer::ExtBuffer;
 use crate::lib_context::LibContext;
 use fdomain_client::{AsHandleRef, HandleOp, MessageBuf, Peered};
@@ -43,7 +43,7 @@ pub(crate) enum LibraryCommand {
         lib: Arc<LibContext>,
         calling_thread: std::thread::ThreadId,
         responder: Responder<CmdResult<Arc<EnvContext>>>,
-        config: Vec<FfxConfigEntry>,
+        config_json: Option<String>,
         isolate_dir: Option<PathBuf>,
     },
     OpenDeviceProxy {
@@ -185,8 +185,8 @@ impl LibraryCommand {
                     }
                 }
             }
-            Self::CreateEnvContext { lib, calling_thread, responder, config, isolate_dir } => {
-                match EnvContext::new(Arc::downgrade(&lib), config, isolate_dir) {
+            Self::CreateEnvContext { lib, calling_thread, responder, config_json, isolate_dir } => {
+                match EnvContext::new(Arc::downgrade(&lib), config_json, isolate_dir) {
                     Ok(e) => {
                         responder.send(Ok(Arc::new(e))).unwrap();
                     }

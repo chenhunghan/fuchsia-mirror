@@ -6,6 +6,7 @@
 
 //! RISC-V Supervisor Binary Interface (SBI) wrapper and extension discovery.
 
+use crate::pdev_power::{PdevPowerOps, PowerCpuState, PowerRebootFlags, pdev_register_power};
 use core::sync::atomic::{AtomicU32, Ordering};
 use debug::dprintf;
 use zx_status::Status;
@@ -113,11 +114,6 @@ enum SbiExtension {
 
 static SUPPORTED_EXTENSIONS: AtomicU32 = AtomicU32::new(0);
 
-unsafe extern "C" {
-    fn cpp_riscv64_cpu_mask_to_hart_mask(cmask: u32) -> u64;
-    fn cpp_pdev_register_sbi_power();
-}
-
 /// Safely decode an SBI error code to `RiscvSbiError` without transmute UB.
 #[inline(always)]
 fn decode_sbi_error(err: i64) -> RiscvSbiError {
@@ -135,7 +131,6 @@ fn decode_sbi_error(err: i64) -> RiscvSbiError {
         _ => RiscvSbiError::Failed,
     }
 }
-
 /// Generic low-level SBI ECALL invocations.
 /// # Safety
 /// What an `ecall` does is entirely determined by `eid`/`fid` and the arguments:
@@ -287,7 +282,7 @@ unsafe fn sbi_call_4(
     RiscvSbiRet { error: decode_sbi_error(a0), value: a1 as isize }
 }
 
-/// Convert an SBI error code to `zx_status::Status`.
+/// Convert an SBI error code to a `zx_status::Status` result.
 fn riscv_status_to_zx_status(error: RiscvSbiError) -> Result<(), Status> {
     match error {
         RiscvSbiError::Success => Ok(()),
@@ -340,12 +335,50 @@ pub extern "C" fn riscv64_sbi_early_init() {
     SUPPORTED_EXTENSIONS.store(bitmap, Ordering::Relaxed);
 
     // Register with the pdev power driver.
-    unsafe { cpp_pdev_register_sbi_power() };
+    pdev_register_power(&SBI_POWER_OPS);
 }
 
+extern "C" fn sbi_reboot_cb(_flags: PowerRebootFlags) -> Result<(), Status> {
+    sbi_reset()
+}
+
+extern "C" fn sbi_shutdown_cb() -> Result<(), Status> {
+    sbi_shutdown()
+}
+
+extern "C" fn sbi_cpu_off_cb() -> Result<(), Status> {
+    sbi_hart_stop()
+}
+
+extern "C" fn sbi_cpu_on_cb(hw_cpu_id: u64, entry: u64, context: u64) -> Result<(), Status> {
+    sbi_hart_start(hw_cpu_id, entry as usize, context)
+}
+
+extern "C" fn sbi_get_cpu_state_cb(
+    hw_cpu_id: u64,
+    out_state: *mut PowerCpuState,
+) -> Result<(), Status> {
+    let state = sbi_get_cpu_state_impl(hw_cpu_id)?;
+    // SAFETY: the pdev power layer passes a non-null pointer valid for a
+    // `PowerCpuState` write, and `state` is one of the `POWER_CPU_STATE_*`
+    // values, each a discriminant of that 4-byte `#[repr(C)]` enum.
+    unsafe { out_state.cast::<u32>().write(state) };
+    Ok(())
+}
+
+static SBI_POWER_OPS: PdevPowerOps = PdevPowerOps {
+    reboot: Some(sbi_reboot_cb),
+    shutdown: Some(sbi_shutdown_cb),
+    cpu_off: Some(sbi_cpu_off_cb),
+    cpu_on: Some(sbi_cpu_on_cb),
+    get_cpu_state: Some(sbi_get_cpu_state_cb),
+    opp_set: None,
+    opp_get: None,
+    opp_get_domain_count: None,
+};
+
 /// Secondary initialization of SBI: dump specs and probed capabilities.
-#[unsafe(no_mangle)]
-pub extern "C" fn riscv64_sbi_init() {
+pub fn riscv64_sbi_init() {
     // Dump SBI version info and extensions found in early probing
     // SAFETY: Reads SBI machine IDs and spec versions.
     unsafe {
@@ -402,24 +435,22 @@ pub fn sbi_set_timer(stime_value: u64) -> RiscvSbiRet {
 }
 
 /// Send an inter-processor interrupt to the harts specified by mask.
-#[unsafe(no_mangle)]
-pub extern "C" fn sbi_send_ipi(mask: u64, mask_base: u64) -> RiscvSbiRet {
+pub fn sbi_send_ipi(mask: u64, mask_base: u64) -> RiscvSbiRet {
     // SAFETY: SBI IPI extension call.
     unsafe { sbi_call_2(SBI_EID_IPI, SBI_IPI_SEND_IPI, mask, mask_base) }
 }
 
 /// Start execution on a secondary hart.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_hart_start(hart_id: u64, start_addr: usize, priv_val: u64) -> Result<(), Status> {
-    // SAFETY: SBI HSM extension call.
+fn sbi_hart_start(hart_id: u64, start_addr: usize, priv_val: u64) -> Result<(), Status> {
     let ret =
+        // SAFETY: SBI HSM extension call. Starting a hart that is already running is
+        // reported as an error by the SEE rather than corrupting state.
         unsafe { sbi_call_3(SBI_EID_HART, SBI_HART_START, hart_id, start_addr as u64, priv_val) };
     riscv_status_to_zx_status(ret.error)
 }
 
 /// Stop execution on the current local hart.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_hart_stop() -> Result<(), Status> {
+fn sbi_hart_stop() -> Result<(), Status> {
     // SAFETY: SBI HSM extension call.
     let ret = unsafe { sbi_call_0(SBI_EID_HART, SBI_HART_STOP) };
     riscv_status_to_zx_status(ret.error)
@@ -445,39 +476,16 @@ pub fn sbi_get_cpu_state_impl(hart_id: u64) -> Result<u32, Status> {
     }
 }
 
-/// # Safety
-/// Caller guarantees valid out_state pointer.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn sbi_get_cpu_state(hart_id: u64, out_state: *mut u32) -> Result<(), Status> {
-    let state = sbi_get_cpu_state_impl(hart_id)?;
-    unsafe { *out_state = state };
-    Ok(())
-}
-
-/// # Safety
-/// Caller guarantees valid out_state pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_sbi_get_cpu_state(
-    hart_id: u64,
-    out_state: *mut u32,
-) -> Result<(), Status> {
-    unsafe { sbi_get_cpu_state(hart_id, out_state) }
-}
-
 /// Instruct remote harts to execute `fence.i`.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_remote_fencei(cpu_mask: u32) -> RiscvSbiRet {
-    // SAFETY: Pure translation of a CPU mask to a HART mask; no preconditions.
-    let hart_mask = unsafe { cpp_riscv64_cpu_mask_to_hart_mask(cpu_mask) };
+fn sbi_remote_fencei(cpu_mask: u32) -> RiscvSbiRet {
+    let hart_mask = super::mp::riscv64_cpu_mask_to_hart_mask(cpu_mask);
     // SAFETY: SBI RFence extension call.
     unsafe { sbi_call_2(SBI_EID_RFENCE, SBI_RFENCE_FENCE_I, hart_mask, 0) }
 }
 
 /// Instruct remote harts to execute `sfence.vma` over an address range.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_remote_sfence_vma(cpu_mask: u32, start: usize, size: usize) -> RiscvSbiRet {
-    // SAFETY: Pure translation of a CPU mask to a HART mask; no preconditions.
-    let hart_mask = unsafe { cpp_riscv64_cpu_mask_to_hart_mask(cpu_mask) };
+fn sbi_remote_sfence_vma(cpu_mask: u32, start: usize, size: usize) -> RiscvSbiRet {
+    let hart_mask = super::mp::riscv64_cpu_mask_to_hart_mask(cpu_mask);
     // SAFETY: SBI RFence extension call.
     unsafe {
         sbi_call_4(SBI_EID_RFENCE, SBI_RFENCE_SFENCE_VMA, hart_mask, 0, start as u64, size as u64)
@@ -485,15 +493,8 @@ extern "C" fn sbi_remote_sfence_vma(cpu_mask: u32, start: usize, size: usize) ->
 }
 
 /// Instruct remote harts to execute `sfence.vma` over an address range for an ASID.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_remote_sfence_vma_asid(
-    cpu_mask: u32,
-    start: usize,
-    size: usize,
-    asid: u64,
-) -> RiscvSbiRet {
-    // SAFETY: Pure translation of a CPU mask to a HART mask; no preconditions.
-    let hart_mask = unsafe { cpp_riscv64_cpu_mask_to_hart_mask(cpu_mask) };
+fn sbi_remote_sfence_vma_asid(cpu_mask: u32, start: usize, size: usize, asid: u64) -> RiscvSbiRet {
+    let hart_mask = super::mp::riscv64_cpu_mask_to_hart_mask(cpu_mask);
     // SAFETY: SBI RFence extension call.
     unsafe {
         let mut a0: i64;
@@ -514,8 +515,7 @@ extern "C" fn sbi_remote_sfence_vma_asid(
 }
 
 /// Request system shutdown via SBI System Reset extension.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_shutdown() -> Result<(), Status> {
+fn sbi_shutdown() -> Result<(), Status> {
     // SAFETY: SBI SRST extension call.
     let ret = unsafe {
         sbi_call_2(
@@ -529,8 +529,7 @@ extern "C" fn sbi_shutdown() -> Result<(), Status> {
 }
 
 /// Request system warm reboot via SBI System Reset extension.
-#[unsafe(no_mangle)]
-extern "C" fn sbi_reset() -> Result<(), Status> {
+fn sbi_reset() -> Result<(), Status> {
     // SAFETY: SBI SRST extension call.
     let ret = unsafe {
         sbi_call_2(

@@ -254,8 +254,10 @@ impl AsyncWrite for UdpNetworkInterface {
 
 pub async fn open(addr: SocketAddr) -> Result<UdpNetworkInterface, crate::FastbootTransportError> {
     let mut to_sock: SocketAddr = addr.clone();
-    // TODO(https://fxbug.dev/42159161): get the port from the mdns packet
-    to_sock.set_port(HOST_PORT);
+    if to_sock.port() == 0 {
+        // TODO(https://fxbug.dev/42159161): get the port from the mdns packet
+        to_sock.set_port(HOST_PORT);
+    }
     let socket = make_sender_socket(to_sock).await?;
     let (buf, sz) = send_to_device(&make_query_packet(), &socket).await?;
     let packet = Packet::parse(&buf[..sz]).ok_or(crate::FastbootTransportError::ParseError)?;
@@ -389,6 +391,7 @@ async fn make_sender_socket(addr: SocketAddr) -> Result<UdpSocket, crate::Fastbo
         .map_err(|e| crate::FastbootTransportError::Io(e))?,
     }
     .into();
+    socket.set_nonblocking(true).map_err(|e| crate::FastbootTransportError::Io(e))?;
     let result = UdpSocket::from_std(socket).map_err(|e| crate::FastbootTransportError::Io(e))?;
     result.connect(addr).await.map_err(|e| crate::FastbootTransportError::Io(e))?;
     Ok(result)
@@ -641,6 +644,36 @@ mod test {
         let res = interface.read_exact(&mut small_buf).await;
         assert!(res.is_err());
 
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_udp_open_handshake_and_custom_port() -> Result<()> {
+        let server = UdpSocket::bind("127.0.0.1:0").await?;
+        let server_addr = server.local_addr()?;
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; MAX_SIZE as usize];
+            // 1. Query packet
+            let (sz, peer) = server.recv_from(&mut buf).await.unwrap();
+            let query = Packet::parse(&buf[..sz]).unwrap();
+            assert_eq!(query.packet_type().unwrap(), PacketType::Query);
+            let query_resp = [0x01, 0x00, 0x00, 0x00, 0x00, 0x2A];
+            server.send_to(&query_resp, peer).await.unwrap();
+
+            // 2. Init packet
+            let (sz, peer) = server.recv_from(&mut buf).await.unwrap();
+            let init = Packet::parse(&buf[..sz]).unwrap();
+            assert_eq!(init.packet_type().unwrap(), PacketType::Init);
+            assert_eq!(init.header.sequence.get(), 0x002A);
+            let init_resp = [0x02, 0x00, 0x00, 0x2A, 0x00, 0x01, 0x02, 0x00];
+            server.send_to(&init_resp, peer).await.unwrap();
+        });
+
+        let interface = open(server_addr).await?;
+        assert_eq!(interface.maximum_size, 512);
+        assert_eq!(interface.sequence.0, 0x002B);
+        server_task.await?;
         Ok(())
     }
 }

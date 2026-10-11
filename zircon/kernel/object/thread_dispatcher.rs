@@ -302,6 +302,24 @@ impl ThreadDispatcher {
         let status = unsafe { cpp_sys_thread_legacy_yield(options) };
         Status::ok(status)
     }
+
+    /// Returns a reference to the process that owns this thread.
+    pub fn process(&self) -> &ProcessDispatcher {
+        // SAFETY: `self` is a valid `ThreadDispatcher`, which holds a `RefPtr<ProcessDispatcher>`
+        // for its entire lifetime.
+        unsafe { &*super::thread_dispatcher_ffi::cpp_thread_dispatcher_process(self as *const _) }
+    }
+
+    /// Returns the thread's `Exceptionate`.
+    pub fn exceptionate(&self) -> &super::exceptionate::Exceptionate {
+        // SAFETY: `self` is a valid `ThreadDispatcher`, which owns `exceptionate_` for its entire
+        // lifetime.
+        unsafe {
+            &*super::thread_dispatcher_ffi::cpp_thread_dispatcher_exceptionate(
+                self as *const _ as *mut _,
+            )
+        }
+    }
 }
 
 /// The reason a thread is currently blocked, matching C++ `ThreadDispatcher::Blocked`.

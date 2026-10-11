@@ -49,10 +49,6 @@ group("tests") {
     "fuchsia-audio-codec:tests",
     "fuchsia-audio-dai:tests",
     "fuchsia-audio-device:tests",
-    "fuchsia-bluetooth:tests",
     "host-watcher:tests",
-    "packet-encoding:tests",
-    "profile-client:tests",
-    "vigil:tests",
   ]
 }

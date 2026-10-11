@@ -10,7 +10,7 @@
 mod vmo_rs {
     use crate::kernel::thread::{self, ThreadPtr};
     use crate::kernel::types::PAddr;
-    use crate::platform_rs::timer::InstantMono;
+    use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time};
     use crate::user_memory::UserMemory;
     use crate::vm::arch_vm_aspace::{
         ARCH_MMU_FLAG_CACHE_MASK, ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE,
@@ -2702,6 +2702,269 @@ mod vmo_rs {
         // SAFETY: It is sound to reclaim `page` at offset 0.
         assert_eq!(unsafe { reclaim(&vmo, page, 0, EvictionAction::FollowHint) }, 1);
         expect_true!(AttributionCounts::zero() == vmo.get_attributed_memory_in_range(0, PAGE_SIZE));
+    }
+
+    /// Tests decommitting and recommitting pages in a contiguous VMO with borrowing.
+    #[test]
+    fn vmo_contiguous_decommit_test() {
+        // Make sure decommitting pages from a contiguous VMO is allowed, and that we get back the
+        // correct pages when committing pages back into a contiguous VMO, even if another VMO was
+        // (temporarily) using those pages.
+        let _loaning_enabled = ScopedLoaningEnabled::new(true);
+
+        const ALLOC_SIZE: usize = PAGE_SIZE_USIZE * 16;
+        const PAGE_COUNT: usize = ALLOC_SIZE / PAGE_SIZE_USIZE;
+        let alloc_size = ALLOC_SIZE as u64;
+        let vmo = unwrap_ok!(
+            VmObjectPaged::create_contiguous(ALLOC_FLAG_ANY, alloc_size, 0),
+            "vmobject creation\n"
+        );
+
+        let mut base_pa = PAddr(usize::MAX);
+        let status = vmo.lookup(0, PAGE_SIZE, &mut base_pa, |offset, pa, base_pa| {
+            assert!(*base_pa == PAddr(usize::MAX));
+            assert!(offset == 0);
+            *base_pa = pa;
+            Err(Status::NEXT)
+        });
+        assert_ok!(status, "stash base pa works\n");
+        assert_true!(base_pa != PAddr(usize::MAX));
+
+        let mut borrowed_seen = false;
+
+        // Default to true.
+        let mut page_expected = [true; PAGE_COUNT];
+
+        /// Make sure expected pages (and only expected pages) are present and consistent with start
+        /// physical address of contiguous VMO.
+        fn verify_expected_pages(
+            vmo: &VmObjectPaged,
+            base_pa: PAddr,
+            borrowed_seen: &mut bool,
+            page_expected: &[bool; PAGE_COUNT],
+        ) {
+            struct VerifyLookupCtx {
+                base_pa: PAddr,
+                page_seen: [bool; PAGE_COUNT],
+            }
+
+            let cow = vmo.debug_get_cow_pages().expect("vmo has cow pages");
+            let mut ctx = VerifyLookupCtx { base_pa, page_seen: [false; PAGE_COUNT] };
+            let status = vmo.lookup(0, ALLOC_SIZE as u64, &mut ctx, |offset, pa, ctx| {
+                let index = offset as usize / PAGE_SIZE_USIZE;
+                assert!(!ctx.page_seen[index]);
+                ctx.page_seen[index] = true;
+                if pa.0.wrapping_sub(ctx.base_pa.0) != offset as usize {
+                    return Err(Status::BAD_STATE);
+                }
+                Err(Status::NEXT)
+            });
+            assert!(
+                status.is_ok(),
+                "vmo->Lookup() failed - status: {}\n",
+                Status::result_into_raw(status)
+            );
+            for offset in (0..ALLOC_SIZE as u64).step_by(PAGE_SIZE_USIZE) {
+                let page_index = (offset / PAGE_SIZE) as usize;
+                assert!(
+                    page_expected[page_index] == ctx.page_seen[page_index],
+                    "page_expected[page_index] != page_seen[page_index]\n"
+                );
+                let page_from_cow = cow.debug_get_page(offset);
+                let page_from_pmm = paddr_to_vm_page(PAddr(base_pa.0 + offset as usize));
+                assert!(page_from_pmm.is_some());
+                let pmm_page = page_from_pmm.unwrap();
+                if page_expected[page_index] {
+                    assert!(page_from_cow.is_some());
+                    assert!(page_from_cow == page_from_pmm);
+                    assert!(cow.debug_is_page(offset));
+                    // SAFETY: `pmm_page` is safe to inspect.
+                    assert!(!unsafe { pmm_page.is_loaned() });
+                } else {
+                    assert!(page_from_cow.is_none());
+                    assert!(cow.debug_is_empty(offset));
+                    // SAFETY: `pmm_page` is safe to inspect.
+                    assert!(unsafe { pmm_page.is_loaned() });
+                    // SAFETY: `pmm_page` is safe to inspect.
+                    if !unsafe { pmm_page.is_free() } {
+                        // It's not in cow, and it's not free, so note that we observed a borrowed
+                        // page.
+                        *borrowed_seen = true;
+                    }
+                }
+                // SAFETY: `pmm_page` is safe to inspect.
+                assert!(!unsafe { pmm_page.is_loan_cancelled() });
+            }
+        }
+        verify_expected_pages(&vmo, base_pa, &mut borrowed_seen, &page_expected);
+        fn track_decommit(
+            vmo: &VmObjectPaged,
+            base_pa: PAddr,
+            borrowed_seen: &mut bool,
+            page_expected: &mut [bool; PAGE_COUNT],
+            start_offset: u64,
+            size: u64,
+        ) {
+            assert!(page::is_aligned(start_offset as usize));
+            assert!(page::is_aligned(size as usize));
+            let end_offset = start_offset + size;
+            for offset in (start_offset..end_offset).step_by(PAGE_SIZE_USIZE) {
+                page_expected[(offset / PAGE_SIZE) as usize] = false;
+            }
+            verify_expected_pages(vmo, base_pa, borrowed_seen, page_expected);
+        }
+
+        fn track_commit(
+            vmo: &VmObjectPaged,
+            base_pa: PAddr,
+            borrowed_seen: &mut bool,
+            page_expected: &mut [bool; PAGE_COUNT],
+            start_offset: u64,
+            size: u64,
+        ) {
+            assert!(page::is_aligned(start_offset as usize));
+            assert!(page::is_aligned(size as usize));
+            let end_offset = start_offset + size;
+            for offset in (start_offset..end_offset).step_by(PAGE_SIZE_USIZE) {
+                page_expected[(offset / PAGE_SIZE) as usize] = true;
+            }
+            verify_expected_pages(vmo, base_pa, borrowed_seen, page_expected);
+        }
+
+        assert_ok!(
+            vmo.decommit_range(PAGE_SIZE, 4 * PAGE_SIZE),
+            "decommit of contiguous VMO pages works\n"
+        );
+        track_decommit(
+            &vmo,
+            base_pa,
+            &mut borrowed_seen,
+            &mut page_expected,
+            PAGE_SIZE,
+            4 * PAGE_SIZE,
+        );
+
+        assert_ok!(
+            vmo.decommit_range(0, 4 * PAGE_SIZE),
+            "decommit of contiguous VMO pages overlapping non-present pages works\n"
+        );
+        track_decommit(&vmo, base_pa, &mut borrowed_seen, &mut page_expected, 0, 4 * PAGE_SIZE);
+
+        assert_ok!(
+            vmo.decommit_range(alloc_size - PAGE_SIZE, PAGE_SIZE),
+            "decommit at end of contiguous VMO works\n"
+        );
+        track_decommit(
+            &vmo,
+            base_pa,
+            &mut borrowed_seen,
+            &mut page_expected,
+            alloc_size - PAGE_SIZE,
+            PAGE_SIZE,
+        );
+
+        assert_ok!(
+            vmo.decommit_range(0, alloc_size),
+            "decommit all overlapping non-present pages\n"
+        );
+        track_decommit(&vmo, base_pa, &mut borrowed_seen, &mut page_expected, 0, alloc_size);
+
+        // Due to concurrent activity of the system, we may not be able to allocate the loaned
+        // pages into a VMO we're creating here, and depending on timing, we may also not observe
+        // the pages being borrowed.  However, it shouldn't take many tries, if we continue to
+        // allocate non-pinned pages to a VMO repeatedly, since loaned pages are preferred for
+        // allocations that can use them.
+        //
+        // We pay attention to whether ASAN is enabled in order to apply a strategy that's optimized
+        // for pages being put on the head (normal) or tail (ASAN) of the free list
+        // (`PmmNode::free_loaned_list_`).
+
+        // Reset borrowed_seen since we should be able to see borrowing _within_ the loop below,
+        // mainly so we can also have the loop below do a `commit_range` to reclaim before the
+        // borrowing VMO is deleted.
+        borrowed_seen = false;
+        let mut complain_deadline =
+            current_mono_time() + DurationMono::from_seconds(5).into_nanos();
+        let mut loop_count: u32 = 0;
+        while !borrowed_seen || loop_count < 5 {
+            // Not super small, in case we end up needing to do multiple iterations of the loop to
+            // see the pages being borrowed, and ASAN is enabled which could require more iterations
+            // of this loop if this size were smaller.  Also hopefully not big enough to fail on
+            // small-ish devices.
+            let (_borrowing_vmo, _pages) = unwrap_ok!(make_committed_pager_vmo::<64>(false, false));
+
+            // Updates borrowing_seen to true, if any pages of vmo are seen to be borrowed (maybe
+            // by borrowing_vmo, or maybe by some other VMO; we don't care which here).
+            verify_expected_pages(&vmo, base_pa, &mut borrowed_seen, &page_expected);
+
+            // We want the last iteration of the loop to have seen borrowing itself, so we're sure
+            // the else case below runs (to commit) before the borrowing VMO is deleted.
+            if loop_count < 5 {
+                borrowed_seen = false;
+            }
+
+            if !borrowed_seen || loop_count < 5 {
+                if !cfg!(sanitize = "address") {
+                    // By committing and de-committing in the loop, we put the pages we're paying
+                    // attention to back at the head of the `free_loaned_list_`, so the next
+                    // iteration of the loop is more likely to see them being borrowed (by
+                    // allocating them).
+                    assert_ok!(
+                        vmo.commit_range(0, 4 * PAGE_SIZE),
+                        "temp commit back to contiguous VMO, to remove from free list\n"
+                    );
+                    track_commit(
+                        &vmo,
+                        base_pa,
+                        &mut borrowed_seen,
+                        &mut page_expected,
+                        0,
+                        4 * PAGE_SIZE,
+                    );
+
+                    assert_ok!(
+                        vmo.decommit_range(0, 4 * PAGE_SIZE),
+                        "decommit back to free list at head of free list\n"
+                    );
+                    track_decommit(
+                        &vmo,
+                        base_pa,
+                        &mut borrowed_seen,
+                        &mut page_expected,
+                        0,
+                        4 * PAGE_SIZE,
+                    );
+                } else {
+                    // By _not_ committing and de-committing in the loop, the pages we're
+                    // allocating in a loop will eventually work through the `free_loaned_list_`,
+                    // even if a large contiguous VMO was decomitted at an inconvenient time.
+                }
+                let now = current_mono_time();
+                if now > complain_deadline {
+                    dprintf!(
+                        INFO,
+                        "!borrowed_seen is persisting longer than expected; still trying...\n"
+                    );
+                    complain_deadline = now + DurationMono::from_seconds(5).into_nanos();
+                }
+            } else {
+                // This covers the case where a page is reclaimed before being freed from the
+                // borrowing VMO.  And by forcing an iteration with loop_count >= 1 with the last
+                // iteration of the loop seeing borrowing durign the last iteration, we cover the
+                // case where we free the pages from the borrowing VMO before reclaiming.
+                assert_ok!(
+                    vmo.commit_range(0, alloc_size),
+                    "committed pages back into contiguous VMO\n"
+                );
+                track_commit(&vmo, base_pa, &mut borrowed_seen, &mut page_expected, 0, alloc_size);
+            }
+            loop_count += 1;
+        }
+
+        assert_ok!(vmo.decommit_range(0, alloc_size), "decommit from contiguous VMO\n");
+
+        assert_ok!(vmo.commit_range(0, alloc_size), "committed pages back into contiguous VMO\n");
+        track_commit(&vmo, base_pa, &mut borrowed_seen, &mut page_expected, 0, alloc_size);
     }
 
     /// Tests that decommitting from a contiguous VMO fails when loaning is disabled.

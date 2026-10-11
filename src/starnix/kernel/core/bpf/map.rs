@@ -5,6 +5,7 @@
 // TODO(https://github.com/rust-lang/rust/issues/39371): remove
 #![allow(non_upper_case_globals)]
 
+use crate::bpf::check_cap_or_sys_admin;
 use crate::mm::memory::MemoryObject;
 use crate::mm::{PAGE_SIZE, ProtectionFlags};
 use crate::security;
@@ -14,7 +15,7 @@ use ebpf_api::{Map, MapError, PinnedMap, compute_map_storage_size};
 use starnix_lifecycle::{ObjectReleaser, ReleaserAction};
 use starnix_sync::{EbpfMapStateLevel, LockDepGuard, LockDepMutex};
 use starnix_types::ownership::{Releasable, ReleaseGuard};
-use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON, CAP_SYS_ADMIN};
+use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::math::round_up_to_increment;
 use starnix_uapi::{
@@ -56,9 +57,6 @@ pub(crate) fn map_error_to_errno(e: MapError) -> Errno {
 }
 
 fn check_map_create_access(current_task: &CurrentTask, schema: &MapSchema) -> Result<(), Errno> {
-    if security::is_task_capable_noaudit(current_task, CAP_SYS_ADMIN) {
-        return Ok(());
-    }
     let cap_bpf_always_required = matches!(
         schema.map_type,
         bpf_map_type_BPF_MAP_TYPE_LPM_TRIE
@@ -78,7 +76,7 @@ fn check_map_create_access(current_task: &CurrentTask, schema: &MapSchema) -> Re
     );
 
     if cap_bpf_always_required || !current_task.kernel().allow_unprivileged_bpf() {
-        security::check_task_capable(current_task, CAP_BPF)?;
+        check_cap_or_sys_admin(current_task, CAP_BPF)?;
     }
 
     match schema.map_type {
@@ -88,10 +86,10 @@ fn check_map_create_access(current_task: &CurrentTask, schema: &MapSchema) -> Re
         | bpf_map_type_BPF_MAP_TYPE_SOCKMAP
         | bpf_map_type_BPF_MAP_TYPE_SOCKHASH
         | bpf_map_type_BPF_MAP_TYPE_XSKMAP => {
-            security::check_task_capable(current_task, CAP_NET_ADMIN)?;
+            check_cap_or_sys_admin(current_task, CAP_NET_ADMIN)?;
         }
         bpf_map_type_BPF_MAP_TYPE_STACK_TRACE => {
-            security::check_task_capable(current_task, CAP_PERFMON)?;
+            check_cap_or_sys_admin(current_task, CAP_PERFMON)?;
         }
         bpf_map_type_BPF_MAP_TYPE_STRUCT_OPS => {
             return error!(EPERM);

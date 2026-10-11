@@ -41,15 +41,6 @@ To use this extension:
      alt="This figure shows the VS Code menu to open a file in OSS code search."
      src="images/extensions/fuchsia-git-helper.png"/>
 
-### FuchsiAware
-
-[FuchsiAware](https://marketplace.visualstudio.com/items?itemName=RichKadel.fuchsiaware){: .external}
-assists with browsing Fuchsia artifacts, such as by linking from component URLs to component manifests.
-
-<img class="vscode-image vscode-image-center"
-     alt="This figure shows hyperlinks to fuchsia-pkg urls in VS Code."
-     src="images/extensions/fuchsiaware.png"/>
-
 ### Build system extensions
 
 #### GN

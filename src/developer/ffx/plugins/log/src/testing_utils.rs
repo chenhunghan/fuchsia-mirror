@@ -414,7 +414,7 @@ async fn handle_archive_accessor(mut stream: ArchiveAccessorRequestStream, state
                 .unbounded_send(TestEvent::Connected(parameters.stream_mode.unwrap()));
         }
         let _ = responder.send();
-        let mut socket = fasync::Socket::from_socket(stream);
+        let mut socket = fidl::AsyncSocket::from_socket(stream);
         let _ = socket.write_all(serde_json::to_string(&state.messages).unwrap().as_bytes()).await;
 
         match parameters.stream_mode.unwrap() {

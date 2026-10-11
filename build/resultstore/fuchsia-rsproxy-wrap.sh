@@ -18,7 +18,7 @@ readonly SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 readonly FUCHSIA_DIR="$(readlink -f "$SCRIPT_DIR/../..")"
 source "${FUCHSIA_DIR}/tools/devshell/lib/platform.sh"
 
-readonly check_loas_script="${FUCHSIA_DIR}/build/auth/check_loas_restrictions.sh"
+readonly select_auth_script="${FUCHSIA_DIR}/build/auth/select_auth_method.py"
 
 # rsclient install path is set in manifests/prebuilts
 readonly PREBUILT_RSCLIENT_DIR="${FUCHSIA_DIR}/prebuilt/rsclient/$HOST_PLATFORM"
@@ -30,12 +30,11 @@ readonly credshelper="${PREBUILT_RECLIENT_DIR}/credshelper"
 
 # default options:
 if command -v gcert >/dev/null 2>&1; then
-  # Detect LOAS type if it is not already passed in.
-  loas_type=auto
+  auth_type=auto
 else
   # Assume this in an infra environment, and do not attempt to
   # use any credential helpers.
-  loas_type=skip
+  auth_type=machine
 fi
 use_gce_machine_credentials=false
 verbose=0
@@ -57,9 +56,9 @@ usage: $0 [options] -- command ...
 
 options:
   -h | --help: print help and exit
-  --loas-type TYPE: {skip,auto,restricted,unrestricted}, default [$loas_type]
-    'skip' will bypass any preflight authentication checks
-    'auto' will attempt to detect as restricted or unrestricted.
+  --auth-type TYPE: {machine,none,auto,loas,oauth}, default [$auth_type]
+    'none' or 'machine' will bypass any preflight authentication checks
+    'auto' will attempt to detect the correct authentication method automatically.
   --use-machine-credentials: use GCE machine-credentials (bypasses LOAS/OAuth checks, takes absolute precedence)
   --log-dir DIR: rsproxy log dir
   -v | --verbose: print debug messages
@@ -108,8 +107,8 @@ do
 
   case "$opt" in
     -h | --help) usage; exit ;;
-    --loas-type=*) loas_type="$optarg" ;;
-    --loas-type) prev_opt=loas_type ;;
+    --auth-type=*) auth_type="$optarg" ;;
+    --auth-type) prev_opt=auth_type ;;
     --log-dir=*) log_dir="$optarg" ;;
     --log-dir) prev_opt=log_dir ;;
     --use-machine-credentials) use_gce_machine_credentials=true ;;
@@ -161,47 +160,47 @@ rsproxy_options=(
 # rsproxy configuration:
 #
 ### 'fx build'
-# Select config based on LOAS type.
-# FX_BUILD_LOAS_TYPE is set by 'fx build' to either "restricted" or
-# "unrestricted", and influences authentication method.
+# Select config based on auth type.
+# FX_BUILD_AUTH_TYPE is set by 'fx build' to either "oauth" or "loas",
+# and influences the authentication method.
 #
-# If loas_type was set by a command-line option (e.g. 'skip' for TUI),
+# If auth_type was set by a command-line option (e.g. 'none' for TUI),
 # it must take precedence. This is essential for the TUI because it uses
-# an insecure local connection; if we use a credentialed LOAS type,
+# an insecure local connection; if we use a credentialed auth type,
 # gRPC will refuse to send credentials over the insecure transport,
 # causing a deadlock.
 if [[ "$use_gce_machine_credentials" == "true" ]]; then
-  loas_type="skip"
+  auth_type="machine"
 fi
 
-if [[ "$loas_type" == "auto" ]]; then
-  loas_type="${FX_BUILD_LOAS_TYPE:-"auto"}"
+if [[ "$auth_type" == "auto" ]]; then
+  auth_type="${FX_BUILD_AUTH_TYPE:-"auto"}"
 fi
-[[ "$loas_type" != "auto" ]] || {
-  # Detect "restricted" or "unrestricted"
-  loas_type="$("$check_loas_script" | tail -n 1)" || {
-    die "Unable to infer LOAS certificate type"
+[[ "$auth_type" != "auto" ]] || {
+  # Automatically select authentication type (loas, oauth, or machine)
+  auth_type="$("$PREBUILT_PYTHON3" -S "$select_auth_script" | tail -n 1)" || {
+    die "Unable to infer build authentication type"
   }
 }
-debug_msg "using LOAS type: $loas_type"
-case "$loas_type" in
-  unrestricted)
+debug_msg "using build authentication type: $auth_type"
+case "$auth_type" in
+  loas)
     readonly CFG="$SCRIPT_DIR/fuchsia-resultstore-gcertauth.cfg"
     rsproxy_options+=(
       --cfg "$CFG"
       --credentials_helper "${credshelper}"
     )
     ;;
-  restricted)
+  oauth)
     readonly CFG="$SCRIPT_DIR/fuchsia-resultstore.cfg"
     rsproxy_options+=(
       --cfg "$CFG"
     )
     ;;
-  skip) : ;;
+  machine|none) : ;;
 
   *)
-    die "Unhandled LOAS type: $loas_type"
+    die "Unhandled authentication type: $auth_type"
     ;;
 esac
 

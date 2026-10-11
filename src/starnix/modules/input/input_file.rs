@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::input_device::InputDeviceInfoHandle;
 use crossbeam::queue::SegQueue;
 use fuchsia_inspect::Inspector;
 use futures::FutureExt;
@@ -240,7 +241,7 @@ impl InputFileStatus {
 
 pub struct InputFile {
     driver_version: u32,
-    input_id: uapi::input_id,
+    info: InputDeviceInfoHandle,
     supported_event_types: BitSet<{ min_bytes(EV_CNT) }>,
     supported_keys: BitSet<{ min_bytes(KEY_CNT) }>,
     supported_position_attributes: BitSet<{ min_bytes(ABS_CNT) }>, // ABSolute position
@@ -259,9 +260,6 @@ pub struct InputFile {
     // InputFile will be initialized with an InputFileStatus that holds Inspect data
     // `None` for Uinput InputFiles
     pub inspect_status: Option<Arc<InputFileStatus>>,
-
-    // A descriptive device name. Should contain only alphanumerics and `_`.
-    device_name: String,
 }
 
 pub struct LinuxEventWithTraceId {
@@ -399,25 +397,22 @@ impl InputFile {
     /// Creates an `InputFile` instance suitable for emulating a touchscreen.
     ///
     /// # Parameters
-    /// - `input_id`: device's bustype, vendor id, product id, and version.
-    /// - `name`: device name.
+    /// - `info`: input device information.
     /// - `width`: width of screen.
     /// - `height`: height of screen.
-    /// - `inspect_status`: The inspect status for the parent device of "touch_input_file".
+    /// - `node`: The inspect node for the parent device of "touch_input_file".
     pub fn new_touch(
-        input_id: uapi::input_id,
-        name: &str,
+        info: InputDeviceInfoHandle,
         width: i32,
         height: i32,
         node: &fuchsia_inspect::Node,
     ) -> Self {
-        let device_name = name.to_string();
         // Fuchsia scales the position reported by the touch sensor to fit view coordinates.
         // Hence, the range of touch positions is exactly the same as the range of view
         // coordinates.
         Self {
             driver_version: Self::DRIVER_VERSION,
-            input_id,
+            info,
             supported_event_types: BitSet::list([uapi::EV_ABS]),
             supported_keys: touch_key_attributes(),
             supported_position_attributes: touch_position_attributes(),
@@ -454,25 +449,18 @@ impl InputFile {
             events: SegQueue::new(),
             waiters: WaitQueue::default(),
             inspect_status: Some(InputFileStatus::new(node)),
-            device_name,
         }
     }
 
     /// Creates an `InputFile` instance suitable for emulating a keyboard.
     ///
     /// # Parameters
-    /// - `input_id`: device's bustype, vendor id, product id, and version.
-    /// - `name`: device name.
-    /// - `inspect_status`: The inspect status for the parent device of "keyboard_input_file".
-    pub fn new_keyboard(
-        input_id: uapi::input_id,
-        name: &str,
-        node: &fuchsia_inspect::Node,
-    ) -> Self {
-        let device_name = name.to_string();
+    /// - `info`: input device information.
+    /// - `node`: The inspect node for the parent device of "keyboard_input_file".
+    pub fn new_keyboard(info: InputDeviceInfoHandle, node: &fuchsia_inspect::Node) -> Self {
         Self {
             driver_version: Self::DRIVER_VERSION,
-            input_id,
+            info,
             supported_event_types: BitSet::list([uapi::EV_KEY]),
             supported_keys: keyboard_key_attributes(),
             supported_position_attributes: keyboard_position_attributes(),
@@ -489,21 +477,18 @@ impl InputFile {
             events: SegQueue::new(),
             waiters: WaitQueue::default(),
             inspect_status: Some(InputFileStatus::new(node)),
-            device_name,
         }
     }
 
     /// Creates an `InputFile` instance suitable for emulating a mouse.
     ///
     /// # Parameters
-    /// - `input_id`: device's bustype, vendor id, product id, and version.
-    /// - `name`: device name.
-    /// - `inspect_status`: The inspect status for the parent device of "mouse_input_file".
-    pub fn new_mouse(input_id: uapi::input_id, name: &str, node: &fuchsia_inspect::Node) -> Self {
-        let device_name = name.to_string();
+    /// - `info`: input device information.
+    /// - `node`: The inspect node for the parent device of "mouse_input_file".
+    pub fn new_mouse(info: InputDeviceInfoHandle, node: &fuchsia_inspect::Node) -> Self {
         Self {
             driver_version: Self::DRIVER_VERSION,
-            input_id,
+            info,
             // Mice report relative motion via EV_REL and buttons via EV_KEY.
             // Absolute motion (EV_ABS) is not supported to avoid misclassification
             // as a touch digitizer by libinput/Android EventHub.
@@ -523,7 +508,6 @@ impl InputFile {
             events: SegQueue::new(),
             waiters: WaitQueue::default(),
             inspect_status: Some(InputFileStatus::new(node)),
-            device_name,
         }
     }
 
@@ -627,7 +611,8 @@ impl FileOps for InputFile {
                 Ok(SUCCESS)
             }
             uapi::EVIOCGID => {
-                current_task.write_object(UserRef::new(user_addr), &self.input_id)?;
+                let input_id = self.info.lock().input_id;
+                current_task.write_object(UserRef::new(user_addr), &input_id)?;
                 Ok(SUCCESS)
             }
             uapi::EVIOCGABS_MT_SLOT => {
@@ -679,7 +664,9 @@ impl FileOps for InputFile {
                         return Ok(SUCCESS);
                     }
                     // Zero out the entire user buffer in case the user reads too much.
-                    current_task.zero(user_addr, buffer_bytes_count)?;
+                    if current_task.zero(user_addr, buffer_bytes_count)? != buffer_bytes_count {
+                        return error!(EFAULT);
+                    }
                     let to_copy = std::cmp::min(bits.len(), buffer_bytes_count);
                     current_task.write_memory(user_addr, &bits[..to_copy])?;
                     Ok(SUCCESS)
@@ -692,7 +679,9 @@ impl FileOps for InputFile {
                         return Ok(SUCCESS);
                     }
                     // Zero out the entire user buffer in case the user reads too much.
-                    current_task.zero(user_addr, buffer_bytes_count)?;
+                    if current_task.zero(user_addr, buffer_bytes_count)? != buffer_bytes_count {
+                        return error!(EFAULT);
+                    }
                     let to_copy = std::cmp::min(bytes.len(), buffer_bytes_count.saturating_sub(1));
                     current_task.write_memory(user_addr, &bytes[..to_copy])?;
                     // String queries (EVIOCGNAME, EVIOCGPHYS) return the number of bytes written,
@@ -711,9 +700,12 @@ impl FileOps for InputFile {
                     EVIOCGBIT_EV_MSC_BASE => write_bits(&self.supported_misc_features.bytes),
                     EVIOCGBIT_EV_SND_BASE => write_bits(&[]),
                     EVIOCGPROP_BASE => write_bits(&self.properties.bytes),
-                    EVIOCGNAME_BASE => write_string(self.device_name.as_bytes()),
+                    EVIOCGNAME_BASE => {
+                        let name = self.info.lock().name.clone();
+                        write_string(name.as_bytes())
+                    }
                     EVIOCGPHYS_BASE => {
-                        let phys = format!("starnix/{}", self.device_name);
+                        let phys = format!("starnix/{}", self.info.lock().name);
                         write_string(phys.as_bytes())
                     }
                     EVIOCGUNIQ_BASE => {
@@ -946,6 +938,7 @@ impl<const NUM_BYTES: usize> BitSet<{ NUM_BYTES }> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_device::InputDeviceInfo;
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -953,8 +946,10 @@ mod tests {
         let inspector = fuchsia_inspect::Inspector::default();
         let node = inspector.root();
         let keyboard_file = InputFile::new_keyboard(
-            uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
-            "keyboard_test",
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "keyboard_test".to_string(),
+            ),
             node,
         );
 
@@ -990,8 +985,10 @@ mod tests {
         let inspector = fuchsia_inspect::Inspector::default();
         let node = inspector.root();
         let input_file = InputFile::new_touch(
-            uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
-            "touch_test",
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "touch_test".to_string(),
+            ),
             100,
             100,
             node,
@@ -1051,8 +1048,10 @@ mod tests {
         let inspector = fuchsia_inspect::Inspector::default();
         let node = inspector.root();
         let mouse_file = InputFile::new_mouse(
-            uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
-            "mouse_test",
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "mouse_test".to_string(),
+            ),
             node,
         );
 

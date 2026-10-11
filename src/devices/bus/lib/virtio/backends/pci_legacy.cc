@@ -85,17 +85,38 @@ zx_status_t PciLegacyBackend::Init() {
 
   auto& bar0 = result->result();
 
-  if (bar0.result().Which() != fuchsia_hardware_pci::BarResult::Tag::kIo) {
-    return ZX_ERR_WRONG_TYPE;
-  }
+  switch (bar0.result().Which()) {
+    case fuchsia_hardware_pci::BarResult::Tag::kIo: {
+      bar0_base_ = static_cast<uint16_t>(bar0.result().io()->address() &
+                                         std::numeric_limits<uint16_t>::max());
 
-  bar0_base_ =
-      static_cast<uint16_t>(bar0.result().io()->address() & std::numeric_limits<uint16_t>::max());
-
-  zx_status_t status = zx_ioports_request(bar0.result().io()->resource().get(), bar0_base_,
-                                          static_cast<uint32_t>(bar0.size()));
-  if (status != ZX_OK) {
-    return status;
+      zx_status_t status = zx_ioports_request(bar0.result().io()->resource().get(), bar0_base_,
+                                              static_cast<uint32_t>(bar0.size()));
+      if (status != ZX_OK) {
+        return status;
+      }
+      break;
+    }
+    case fuchsia_hardware_pci::BarResult::Tag::kVmo: {
+      size_t vmo_size = 0;
+      zx_status_t status = bar0.result().vmo()->get_size(&vmo_size);
+      if (status != ZX_OK) {
+        return status;
+      }
+      zx::result<fdf::MmioBuffer> mmio = fdf::MmioBuffer::Create(
+          0, vmo_size, std::move(bar0.result().vmo().value()), ZX_CACHE_POLICY_UNCACHED_DEVICE);
+      if (mmio.is_error()) {
+        return mmio.status_value();
+      }
+      mmio_io_.emplace(std::move(*mmio));
+      if (legacy_io_ == PciLegacyIoInterface::Get()) {
+        legacy_io_ = &*mmio_io_;
+      }
+      bar0_base_ = 0;
+      break;
+    }
+    default:
+      return ZX_ERR_WRONG_TYPE;
   }
 
   device_cfg_offset_ = bar0_base_ + ((irq_mode() == fuchsia_hardware_pci::InterruptMode::kMsiX)
@@ -225,7 +246,7 @@ zx_status_t PciLegacyBackend::ConfirmFeatures() { return ZX_OK; }
 
 void PciLegacyBackend::DeviceReset() {
   std::lock_guard guard(lock());
-  legacy_io_->Write(bar0_base_ + VIRTIO_PCI_DEVICE_STATUS, 0u);
+  legacy_io_->Write(bar0_base_ + VIRTIO_PCI_DEVICE_STATUS, uint8_t{0});
   zxlogf(TRACE, "%s: device reset", tag());
 }
 

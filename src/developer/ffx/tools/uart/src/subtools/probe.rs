@@ -39,16 +39,12 @@ pub struct ProbeResult {
     /// Method used to verify target responsiveness.
     pub method: ProbeMethod,
     /// Process ID (PID) of the background driver if already active.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub driver_pid: Option<u32>,
     /// Negotiated or active framing protocol (e.g. "ResendSP").
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     /// Baud rate configured or used for probing, if applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub baud: Option<u32>,
     /// Round-trip time in milliseconds measured during direct handshake.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<u64>,
 }
 

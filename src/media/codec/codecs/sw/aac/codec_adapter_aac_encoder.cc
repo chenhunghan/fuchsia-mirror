@@ -138,6 +138,7 @@ void CodecAdapterAacEncoder::CoreCodecStopStream() {
   {
     std::lock_guard<std::mutex> lock(lock_);
     stream_active_ = false;
+    output_reconfig_pending_ = false;
     reconfig_cond_.notify_all();
   }
   output_sink_->StopAllWaits();
@@ -274,7 +275,7 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
 
   bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
     std::unique_lock<std::mutex> lock(lock_);
-    while (output_reconfig_pending_ && !input_item.is_format_details()) {
+    while (stream_active_ && output_reconfig_pending_ && !input_item.is_format_details()) {
       reconfig_cond_.wait(lock);
     }
     return stream_active_;
@@ -288,6 +289,12 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
     if (stream_) {
       if (!(stream_->format_details_version_ordinal ==
             input_item.format_details().format_details_version_ordinal())) {
+        {
+          std::lock_guard<std::mutex> lock(lock_);
+          stream_active_ = false;
+          output_reconfig_pending_ = false;
+        }
+        stream_ = std::nullopt;
         events_->onCoreCodecFailCodec("Midstream format change not supported.");
       }
       return;
@@ -295,6 +302,10 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
 
     auto build_stream_result = BuildStreamFromFormatDetails(input_item.format_details());
     if (build_stream_result.is_error()) {
+      {
+        std::lock_guard<std::mutex> lock(lock_);
+        stream_active_ = false;
+      }
       ReportError(build_stream_result.error());
       return;
     }
@@ -312,9 +323,19 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
 
   ChunkInputStream::Status status;
   if (input_item.is_packet()) {
+    ZX_DEBUG_ASSERT(stream_.has_value());
     status = stream_->chunk_input_stream.ProcessInputPacket(input_item.packet());
   } else {
     ZX_DEBUG_ASSERT(input_item.is_end_of_stream());
+    // On an empty stream (where input EOS is queued before any input packets),
+    // CodecImpl intentionally omits CoreCodecQueueInputFormatDetails() to avoid
+    // triggering an unnecessary output buffer reconfiguration. Consequently,
+    // `stream_` (which holds the encoder instance and chunker) was never
+    // initialized. Emit output EOS directly without attempting to flush.
+    if (!stream_.has_value()) {
+      events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
+      return;
+    }
     status = stream_->chunk_input_stream.Flush();
   }
 
@@ -328,6 +349,10 @@ void CodecAdapterAacEncoder::ProcessInput(CodecInputItem input_item) {
       __FALLTHROUGH;
     case ChunkInputStream::kUserTerminated:
       // A failure was reported through `events_`.
+      {
+        std::lock_guard<std::mutex> lock(lock_);
+        stream_active_ = false;
+      }
       stream_ = std::nullopt;
       __FALLTHROUGH;
     case ChunkInputStream::kOk:

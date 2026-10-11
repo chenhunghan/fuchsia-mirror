@@ -4,6 +4,7 @@
 
 //! Representation of the product_bundle metadata.
 
+use crate::gcs::*;
 use crate::v2::{CanonicalizeError, Canonicalizer, ProductBundleV2, RelativizeError, Type};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -11,10 +12,10 @@ use assembled_system::Image;
 use camino::{Utf8Path, Utf8PathBuf};
 use fuchsia_repo::repository::FileSystemRepository;
 use rayon::prelude::*;
-use sdk_metadata::{VirtualDevice, VirtualDeviceManifest, VirtualDeviceV1};
+use sdk_metadata::{Envelope, VirtualDevice, VirtualDeviceManifest, VirtualDeviceV1};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Seek, Write};
 use std::ops::Deref;
 use std::process::Command;
 use zip::read::ZipArchive;
@@ -53,6 +54,9 @@ pub enum ProductBundleLoadError {
     /// Malformed zip archive.
     #[error("Malformed zip archive: {0}")]
     MalformedZip(String),
+    /// GCS error.
+    #[error("GCS error: {0}")]
+    Gcs(#[from] GcsError),
 }
 
 /// Errors that can occur when writing a product bundle.
@@ -166,7 +170,9 @@ impl ZipLoadedProductBundle {
     }
 
     /// Load a product bundle from an already parsed ZipArchive.
-    pub fn load_from(mut zip: ZipArchive<File>) -> Result<Self, ProductBundleLoadError> {
+    pub fn load_from<R: Read + Seek>(
+        mut zip: ZipArchive<R>,
+    ) -> Result<Self, ProductBundleLoadError> {
         let product_bundle_manifest_name = zip
             .file_names()
             .find(|x| x == &"product_bundle.json" || x.ends_with("/product_bundle.json"))
@@ -189,7 +195,7 @@ impl ZipLoadedProductBundle {
             ProductBundle::V2(data) => {
                 let mut data = data;
                 let mut canonicalizer = ZipCanonicalizer::new(product_bundle_parent_path);
-                data.canonicalize_paths_with(product_bundle_parent_path, &mut canonicalizer)?;
+                data.canonicalize_paths_with("", &mut canonicalizer)?;
                 Ok(Self::new(ProductBundle::V2(data)))
             }
         }
@@ -214,6 +220,10 @@ impl Into<ProductBundle> for ZipLoadedProductBundle {
     }
 }
 
+fn normalize_zip_path(path: &Utf8Path) -> Utf8PathBuf {
+    path.components().filter(|c| matches!(c, camino::Utf8Component::Normal(_))).collect()
+}
+
 struct ZipCanonicalizer {
     product_bundle_dir: Utf8PathBuf,
 }
@@ -228,7 +238,7 @@ impl Canonicalizer for ZipCanonicalizer {
         path: impl AsRef<Utf8Path>,
         _image_types: Vec<Type>,
     ) -> Utf8PathBuf {
-        self.root_path().join(path)
+        join_gcs_uri(self.root_path(), path)
     }
 }
 
@@ -257,6 +267,13 @@ impl LoadedProductBundle {
     /// on disk. This method will return a LoadedProductBundle which keeps
     /// track of where it was loaded from.
     pub fn try_load_from(path: impl AsRef<Utf8Path>) -> Result<Self, ProductBundleLoadError> {
+        let p = path.as_ref();
+        if is_gcs_uri(p) {
+            return Ok(Self::new(ProductBundle::load_gcs(p, &HttpGcsFetcher::default())?, p));
+        }
+        if p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            return Ok(Self::new(ZipLoadedProductBundle::try_load_from(p)?.into(), p));
+        }
         if !path.as_ref().is_dir() {
             return Err(ProductBundleLoadError::NotADirectory(path.as_ref().to_string()));
         }
@@ -330,12 +347,19 @@ impl ProductBundle {
     /// Read a product bundle from a path, whether it be a zip file or a
     /// directory.
     pub fn try_load_from(path: impl AsRef<Utf8Path>) -> Result<Self, ProductBundleLoadError> {
-        let path = path.as_ref();
-        if path.is_file() && path.extension() == Some("zip") {
-            ZipLoadedProductBundle::try_load_from(path).map(|v| v.into())
-        } else {
-            LoadedProductBundle::try_load_from(path).map(|v| v.into())
+        LoadedProductBundle::try_load_from(path).map(Into::into)
+    }
+
+    fn load_gcs(u: &Utf8Path, f: &impl GcsFetcher) -> Result<Self, ProductBundleLoadError> {
+        let loc = GcsLocation::parse(u)?;
+        if loc.is_zip() {
+            let rdr = GcsRangeReader::new(f, loc)?;
+            return ZipLoadedProductBundle::load_from(ZipArchive::new(rdr)?).map(Into::into);
         }
+        let (base, obj) = loc.directory_manifest();
+        let Self::V2(mut d) = try_load_product_bundle(&*f.fetch(&loc.bucket, &obj, None)?.1)?;
+        d.canonicalize_paths_with("", &mut ZipCanonicalizer::new(base))?;
+        Ok(Self::V2(d))
     }
 
     /// Write a product bundle to a directory on disk at `path`.
@@ -652,6 +676,98 @@ pub fn get_repositories(
         repos.push(repo_builder.build());
     }
     Ok(repos)
+}
+
+fn canonicalize_best_effort(path: &Utf8Path) -> Utf8PathBuf {
+    for ancestor in path.ancestors().filter(|a| !a.as_str().is_empty()) {
+        if let (Ok(canon), Ok(rel)) = (ancestor.canonicalize_utf8(), path.strip_prefix(ancestor)) {
+            return if rel.as_str().is_empty() { canon } else { canon.join(rel) };
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Compute `artifact_path` relative to `bundle_path` for local, `.zip`, or `gs://` bundles.
+pub fn relativize_bundle_path(
+    bundle_path: impl AsRef<Utf8Path>,
+    artifact_path: impl AsRef<Utf8Path>,
+) -> Result<Utf8PathBuf> {
+    let (bundle, artifact) = (bundle_path.as_ref(), artifact_path.as_ref());
+    if bundle.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+        return Ok(normalize_zip_path(artifact));
+    }
+    let s = bundle.as_str().trim_end_matches('/');
+    let base = Utf8Path::new(s.strip_suffix("/product_bundle.json").unwrap_or(s));
+    utf8_path::path_relative_from(
+        canonicalize_best_effort(artifact),
+        canonicalize_best_effort(base),
+    )
+}
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
+
+fn load_vd_with(
+    source: &str,
+    vd_path: &Option<Utf8PathBuf>,
+    with_devices: bool,
+    fetcher: &impl GcsFetcher,
+) -> Result<(VirtualDeviceManifest, Vec<VirtualDevice>)> {
+    let Some(vd_path) = vd_path else {
+        return Ok((VirtualDeviceManifest::default(), Vec::new()));
+    };
+    let src = Utf8Path::new(source);
+    let gcs = is_gcs_uri(src).then(|| GcsLocation::parse(src)).transpose()?;
+
+    let reader: Option<Box<dyn ReadSeek + '_>> = match &gcs {
+        Some(loc) if loc.is_zip() => Some(Box::new(GcsRangeReader::new(fetcher, loc.clone())?)),
+        None if src.is_file() => Some(Box::new(File::open(src)?)),
+        _ => None,
+    };
+    let mut zip = reader.map(ZipArchive::new).transpose()?;
+    let base = gcs.as_ref().map(|loc| loc.directory_manifest().0).unwrap_or_else(|| src.into());
+
+    let mut read_entry = |path: &Utf8Path| -> Result<Vec<u8>> {
+        if let Some(archive) = &mut zip {
+            let mut buf = Vec::new();
+            archive.by_name(normalize_zip_path(path).as_str())?.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+        let uri = join_gcs_uri(&base, path);
+        match is_gcs_uri(&uri).then(|| GcsLocation::parse(&uri)).transpose()? {
+            Some(obj) => Ok(fetcher.fetch(&obj.bucket, &obj.object, None)?.1),
+            None => Ok(std::fs::read(&uri)?),
+        }
+    };
+
+    let manifest: VirtualDeviceManifest = serde_json::from_slice(&read_entry(vd_path)?)?;
+    let manifest_dir = vd_path.parent().unwrap_or_else(|| "".into());
+    let mut devices = Vec::new();
+    if with_devices {
+        for name in manifest.device_names() {
+            let bytes = read_entry(&join_gcs_uri(manifest_dir, &manifest.device_paths[&name]))?;
+            devices.push(VirtualDevice::V1(
+                serde_json::from_slice::<Envelope<VirtualDeviceV1>>(&bytes)?.data,
+            ));
+        }
+    }
+    Ok((manifest, devices))
+}
+
+/// Load a [`VirtualDeviceManifest`] from a product bundle source and its `virtual_devices_path`.
+pub fn load_virtual_device_manifest(
+    source: impl AsRef<Utf8Path>,
+    vd_path: &Option<Utf8PathBuf>,
+) -> Result<VirtualDeviceManifest> {
+    Ok(load_vd_with(source.as_ref().as_str(), vd_path, false, &HttpGcsFetcher::default())?.0)
+}
+
+/// Load all [`VirtualDevice`]s referenced by a product bundle's virtual device manifest.
+pub fn load_virtual_devices(
+    source: impl AsRef<Utf8Path>,
+    vd_path: &Option<Utf8PathBuf>,
+) -> Result<Vec<VirtualDevice>> {
+    Ok(load_vd_with(source.as_ref().as_str(), vd_path, true, &HttpGcsFetcher::default())?.1)
 }
 
 #[cfg(test)]
@@ -1300,5 +1416,91 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "System does not exist for the specified slot");
+    }
+
+    #[test]
+    fn test_gcs_directory_and_zip_bundle() -> Result<()> {
+        let mut pb = make_sample_pbv2("generic-x64", Some("vd/m.json".into()));
+        pb["system_a"] = json!([{"type": "zbi", "name": "z", "path": "a/zbi", "signed": false}]);
+        let vdm = json!({"recommended": "d", "device_paths": {"d": "./d.json", "d2": "d.json"}});
+        let mut z = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut f = std::collections::HashMap::new();
+        let st = FileOptions::default().compression_method(CompressionMethod::Stored);
+        for (k, v) in [
+            ("pb/a/zbi", vec![0xAB; 512 * 1024]),
+            ("pb/vd/d.json", VIRTUAL_DEVICE_VALID.as_bytes().to_vec()),
+            ("pb/vd/m.json", serde_json::to_vec(&vdm)?),
+            ("pb/product_bundle.json", serde_json::to_vec(&pb)?),
+        ] {
+            z.start_file(k, st)?;
+            z.write_all(&v)?;
+            f.insert(k, v);
+        }
+        f.insert("r/pb.zip", z.finish()?.into_inner());
+        let tmp = TempDir::new()?;
+        let zp = Utf8Path::from_path(tmp.path()).unwrap().join("pb.zip");
+        fs::write(&zp, &f["r/pb.zip"])?;
+        let ProductBundle::V2(lpb) = LoadedProductBundle::try_load_from(&zp)?.into();
+        assert_eq!(load_virtual_devices(&zp, &lpb.virtual_devices_path)?.len(), 2);
+        for (u, zbi, rel) in [
+            ("gs://b/pb", "gs://b/pb/a/zbi", "a/zbi"),
+            ("gs://b/pb/product_bundle.json", "gs://b/pb/a/zbi", "a/zbi"),
+            ("gs://b/r/pb.zip", "pb/a/zbi", "pb/a/zbi"),
+        ] {
+            let ProductBundle::V2(p) = ProductBundle::load_gcs(u.into(), &f)?;
+            assert_eq!(p.system_a.as_ref().unwrap()[0].source(), Utf8Path::new(zbi));
+            assert_eq!(relativize_bundle_path(u, zbi)?, Utf8PathBuf::from(rel));
+            let (m, vds) = load_vd_with(u, &p.virtual_devices_path, true, &f)?;
+            assert_eq!((m.recommended.as_deref(), vds.len()), (Some("d"), 2));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_relativize_bundle_path_symlink() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let real_worktree = root.join("pool-slot");
+        let pb_rel = "out/test_remote/obj/build/images/fuchsia/product_bundle";
+        let real_pb_dir = real_worktree.join(pb_rel);
+        fs::create_dir_all(real_pb_dir.join("system_a"))?;
+        fs::write(real_pb_dir.join("system_a/zbi"), b"zbi")?;
+
+        let mut pb = make_sample_pbv2("generic-x64", None);
+        pb["system_a"] =
+            json!([{"type": "zbi", "name": "z", "path": "system_a/zbi", "signed": false}]);
+        fs::write(real_pb_dir.join("product_bundle.json"), serde_json::to_vec(&pb)?)?;
+
+        let symlink_worktree = root.join("task-name");
+        std::os::unix::fs::symlink(&real_worktree, &symlink_worktree)?;
+        let symlink_pb_dir = symlink_worktree.join(pb_rel);
+
+        let ProductBundle::V2(loaded) = ProductBundle::try_load_from(&symlink_pb_dir)?;
+        let loaded_zbi = loaded.system_a.as_ref().unwrap()[0].source();
+
+        assert_eq!(
+            relativize_bundle_path(&symlink_pb_dir, loaded_zbi)?,
+            Utf8PathBuf::from("system_a/zbi")
+        );
+        assert_eq!(
+            relativize_bundle_path(symlink_pb_dir.join("product_bundle.json"), loaded_zbi)?,
+            Utf8PathBuf::from("system_a/zbi")
+        );
+        assert_eq!(
+            relativize_bundle_path(&real_pb_dir, symlink_pb_dir.join("system_a/zbi"))?,
+            Utf8PathBuf::from("system_a/zbi")
+        );
+        assert_eq!(
+            relativize_bundle_path(&symlink_pb_dir, real_pb_dir.join("repository/targets.json"))?,
+            Utf8PathBuf::from("repository/targets.json")
+        );
+        assert_eq!(
+            relativize_bundle_path(
+                "/nonexistent/pb/product_bundle.json",
+                "/nonexistent/pb/system_a/zbi"
+            )?,
+            Utf8PathBuf::from("system_a/zbi")
+        );
+        Ok(())
     }
 }

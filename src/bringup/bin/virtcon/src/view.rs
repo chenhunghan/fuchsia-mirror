@@ -729,6 +729,10 @@ impl ViewAssistant for VirtualConsoleViewAssistant {
         _event: &input::Event,
         pointer_event: &input::pointer::Event,
     ) -> Result<(), Error> {
+        if !self.owns_display {
+            return Ok(());
+        }
+
         match &pointer_event.phase {
             input::pointer::Phase::Down(location) => {
                 self.active_pointer_id = Some(pointer_event.pointer_id.clone());

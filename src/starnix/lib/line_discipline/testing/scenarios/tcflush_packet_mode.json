@@ -21,6 +21,14 @@
             "queue_selector": "TCIFLUSH"
         },
         {
+            "action": "wait_until_readable",
+            "side": "main"
+        },
+        {
+            "action": "read_once_from_master",
+            "size": 0
+        },
+        {
             "action": "read_from_master"
         },
         {

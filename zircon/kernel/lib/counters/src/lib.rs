@@ -11,73 +11,31 @@ use core::sync::atomic::{AtomicI64, Ordering};
 
 use crate::kernel::percpu::PerCpu;
 use crate::platform_rs::timer::{DurationMono, current_mono_time};
-use counters_bindings as bindings;
 
 /// The maximum number of CPUs that this counter descriptor supports.
 /// This value is read from the `SMP_MAX_CPUS` environment variable at build time.
 pub const SMP_MAX_CPUS: usize =
     zr::parse_usize(env!("SMP_MAX_CPUS")).expect("SMP_MAX_CPUS invalid");
 
+pub use counters_abi::{ARENA_VMO_NAME, DESCRIPTOR_VMO_NAME, Descriptor, DescriptorVmo, Type};
 pub use zr::to_array;
-
-/// The aggregation type of a kernel counter.
-///
-/// This specifies how the diagnostic tools should combine the per-CPU slot values
-/// of the counter to produce a single diagnostic value.
-#[repr(u64)]
-pub enum Type {
-    /// Padding element (unused).
-    Padding = 0,
-    /// Standard summation counter (aggregates the sum across all CPUs).
-    Sum = 1,
-    /// Minimum tracker counter (finds the minimum value across all CPUs).
-    Min = 2,
-    /// Maximum tracker counter (finds the maximum value across all CPUs).
-    Max = 3,
-}
-
-/// Binary-stable C-compatible representation of a kernel counter descriptor.
-///
-/// The memory layout of this structure matches Zircon's `counters::Descriptor` exactly,
-/// enabling the linker and userspace diagnostic tools to parse Rust-declared counters
-/// seamlessly from the kernel's binary segments.
-#[repr(C, align(8))]
-pub struct Descriptor {
-    name: [u8; 56],
-    type_: u64,
-}
-
-zr::static_assert!(
-    core::mem::size_of::<Descriptor>() == core::mem::size_of::<bindings::counters_Descriptor>()
-);
-zr::static_assert!(
-    core::mem::align_of::<Descriptor>() == core::mem::align_of::<bindings::counters_Descriptor>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(Descriptor, name)
-        == core::mem::offset_of!(bindings::counters_Descriptor, name)
-);
-zr::static_assert!(
-    core::mem::offset_of!(Descriptor, type_)
-        == core::mem::offset_of!(bindings::counters_Descriptor, type_)
-);
-zr::static_assert!(Type::Padding as u64 == bindings::counters_Type_kPadding);
-zr::static_assert!(Type::Sum as u64 == bindings::counters_Type_kSum);
-zr::static_assert!(Type::Min as u64 == bindings::counters_Type_kMin);
-zr::static_assert!(Type::Max as u64 == bindings::counters_Type_kMax);
-
-impl Descriptor {
-    /// Create a new raw `Descriptor` instance with the given packed name and type value.
-    pub const fn new(name: [u8; 56], type_: u64) -> Self {
-        Self { name, type_ }
-    }
-}
 
 // Via magic in kernel.ld, all the descriptors wind up in a contiguous
 // array bounded by these two symbols, sorted by name.
+//
+// That array sits inside a region that's page-aligned and padded out to
+// page size.  The region as a whole has the DescriptorVmo layout.
+//
+// Parallel magic in kernel.ld allocates int64_t[SMP_MAX_CPUS] worth
+// of data space for each counter, page-aligned and padded out to page size.
 unsafe extern "C" {
     static kcountdesc_begin: Descriptor;
     static kcountdesc_end: Descriptor;
+    static k_counter_desc_vmo_begin: u8;
+    static k_counter_desc_vmo_end: Descriptor;
+    static kcounters_arena: i64;
+    static kcounters_arena_end: i64;
+    static kcounters_arena_page_end: i64;
 }
 
 /// Diagnostic descriptor table metadata.
@@ -101,6 +59,40 @@ impl CounterDesc {
         let begin = self.begin() as usize;
         let end = self.end() as usize;
         (end - begin) / size_of::<Descriptor>()
+    }
+
+    pub fn vmo_data(&self) -> &'static [u8] {
+        let size = ptr::addr_of!(k_counter_desc_vmo_end) as usize
+            - ptr::addr_of!(k_counter_desc_vmo_begin) as usize;
+        // SAFETY: `k_counter_desc_vmo_begin` and `k_counter_desc_vmo_end` bound the static,
+        // page-aligned counter descriptor VMO region defined by `kernel.ld`.
+        unsafe { zr::slice_from_raw_parts(ptr::addr_of!(k_counter_desc_vmo_begin), size) }
+    }
+
+    pub fn vmo_stream_size(&self) -> usize {
+        self.end() as usize - ptr::addr_of!(k_counter_desc_vmo_begin) as usize
+    }
+}
+
+/// Live counter arena metadata.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct CounterArena;
+
+impl CounterArena {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn vmo_data(&self) -> &'static [u8] {
+        let size = ptr::addr_of!(kcounters_arena_page_end) as usize
+            - ptr::addr_of!(kcounters_arena) as usize;
+        // SAFETY: `kcounters_arena` and `kcounters_arena_page_end` bound the static,
+        // page-aligned counter arena VMO region defined by `kernel.ld`.
+        unsafe { zr::slice_from_raw_parts(ptr::addr_of!(kcounters_arena).cast::<u8>(), size) }
+    }
+
+    pub fn vmo_stream_size(&self) -> usize {
+        ptr::addr_of!(kcounters_arena_end) as usize - ptr::addr_of!(kcounters_arena) as usize
     }
 }
 
@@ -258,11 +250,9 @@ pub use define_kcounter;
 /// so as to fully populate the counters::DescriptorVmo layout.
 #[unsafe(link_section = ".kcounter.desc.header")]
 #[used]
-static VMO_HEADER: [u64; 2] = [bindings::counters_DescriptorVmo_kMagic, SMP_MAX_CPUS as u64];
+static VMO_HEADER: [u64; 2] = [DescriptorVmo::MAGIC, SMP_MAX_CPUS as u64];
 
-zr::static_assert!(
-    size_of_val(&VMO_HEADER) == offset_of!(bindings::counters_DescriptorVmo, descriptor_table_size)
-);
+zr::static_assert!(size_of_val(&VMO_HEADER) == offset_of!(DescriptorVmo, descriptor_table_size));
 
 // This counter tracks how long it takes for Zircon to reach the last init level
 // It also can show if the target does not reset the internal clock upon reboot

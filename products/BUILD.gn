@@ -15,7 +15,6 @@ group("products") {
 group("product_bundles") {
   testonly = true
   deps = [
-    "//bundles/buildbot/virtualization:starnix_linux_vm_bundle",
     "//products/bringup",
     "//products/core",
     "//products/microfuchsia",
@@ -23,4 +22,7 @@ group("product_bundles") {
     "//products/terminal",
     "//products/workbench",
   ]
+  if (target_cpu != "riscv64") {
+    deps += [ "//bundles/buildbot/virtualization:starnix_linux_vm_bundle" ]
+  }
 }

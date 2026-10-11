@@ -657,7 +657,7 @@ exit 0
 	}
 	defer client.Close()
 
-	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "", "")
+	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "", "", "")
 	if err != nil {
 		t.Fatalf("EmuStart failed: %v", err)
 	}
@@ -700,7 +700,7 @@ exit 0
 	}
 	defer client.Close()
 
-	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "qemu", "")
+	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "qemu", "", "")
 	if err != nil {
 		t.Fatalf("EmuStart failed: %v", err)
 	}
@@ -734,7 +734,7 @@ exit 0
 	}
 	defer client.Close()
 
-	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "", "x64-emu-large")
+	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "", "x64-emu-large", "")
 	if err != nil {
 		t.Fatalf("EmuStart failed: %v", err)
 	}
@@ -747,6 +747,40 @@ exit 0
 
 	if !strings.Contains(args, "--device x64-emu-large") {
 		t.Errorf("Expected '--device x64-emu-large' in args, got: %s", args)
+	}
+}
+
+func TestFFXStrictClient_EmuStart_WithGpu(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	argsFile := filepath.Join(tmpDir, "args.txt")
+	script := fmt.Sprintf(`#!/bin/bash
+echo "$@" >> %s
+exit 0
+`, argsFile)
+	fakeFfx := createFakeFfx(t, tmpDir, script)
+
+	ctx := context.Background()
+	client, err := NewFFXStrictClient(ctx, fakeFfx, tmpDir, "test-repo", nil)
+	if err != nil {
+		t.Fatalf("NewFFXStrictClient failed: %v", err)
+	}
+	defer client.Close()
+
+	err = client.EmuStart(ctx, "path/to/emu/product", "my-emu-name", "", "", "swiftshader_indirect")
+	if err != nil {
+		t.Fatalf("EmuStart failed: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("Failed to read args file: %v", err)
+	}
+	args := string(data)
+
+	if !strings.Contains(args, "--gpu swiftshader_indirect") {
+		t.Errorf("Expected '--gpu swiftshader_indirect' in args, got: %s", args)
 	}
 }
 

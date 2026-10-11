@@ -78,14 +78,6 @@
             to: "#tee-clients",
         },
         {
-            // Re-expose this protocol back for the widevine component
-            protocol: [ "widevine.oemcrypto.Provider" ],
-            from: "#tee-clients/tee-client-capabilities",
-            to: "#tee-clients",
-            dependency: "weak",
-            availability: "same_as_target",
-        },
-        {
             directory: "config-data",
             from: "parent",
             to: "#tee-clients",

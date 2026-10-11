@@ -151,9 +151,11 @@ async fn apply_command_line_options(
         // expect the log file to exist ahead of time.
         emu_config.host.log = PathBuf::from(env::current_dir()?).join(log);
     } else {
-        // TODO(https://fxbug.dev/42067481): Move logs to ffx log dir so `ffx doctor` collects them.
-        let instance = emu_instances.get_instance_dir(&cmd.name(ctx)?, false)?;
-        emu_config.host.log = instance.join("emulator.log");
+        let log_dir: PathBuf = ctx.get(ffx_config::logging::LOG_DIR)?;
+        if !log_dir.exists() {
+            std::fs::create_dir_all(&log_dir)?;
+        }
+        emu_config.host.log = log_dir.join(format!("emulator-{}.log", cmd.name(ctx)?));
     }
 
     if emu_config.host.acceleration == AccelerationMode::Auto {
@@ -536,6 +538,16 @@ mod tests {
         let opts =
             apply_command_line_options(opts, &cmd, &emulator_instances, &env2.context).await?;
         assert_eq!(opts.runtime.upscript, Some(PathBuf::from("/path/to/upscript")));
+
+        cmd.log = None;
+        let opts =
+            apply_command_line_options(emu_config.clone(), &cmd, &emulator_instances, &env.context)
+                .await?;
+        let expected_log_dir: PathBuf = env.context.get(ffx_config::logging::LOG_DIR)?;
+        assert_eq!(
+            opts.host.log,
+            expected_log_dir.join(format!("emulator-{}.log", cmd.name(&env.context)?))
+        );
 
         // Test relative file paths
         let temp_path = PathBuf::from(tempdir().unwrap().path());

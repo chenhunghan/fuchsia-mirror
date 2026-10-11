@@ -99,10 +99,7 @@ void CodecAdapterSbcDecoder::ProcessInputLoop() {
             /*output_re_config_required=*/true);
       }
     } else if (input_item.is_end_of_stream()) {
-      ZX_DEBUG_ASSERT(context_);
-      if (DecodeInput(nullptr) == kShouldTerminate) {
-        return;
-      }
+      events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
     } else if (input_item.is_packet()) {
       ZX_DEBUG_ASSERT(context_);
       if (DecodeInput(input_item.packet()) == kShouldTerminate) {
@@ -182,10 +179,10 @@ CodecAdapterSbcDecoder::CoreCodecGetBufferCollectionConstraints2(
     per_packet_buffer_bytes_min = kMaxInputFrames * SBC_MAX_FRAME_LEN;
     per_packet_buffer_bytes_max = kMaxInputFrames * SBC_MAX_FRAME_LEN;
   } else {
-    ZX_ASSERT(context_.has_value());
+    ZX_ASSERT(min_output_buffer_size_.has_value());
 
     ZX_DEBUG_ASSERT(port == kOutputPort);
-    per_packet_buffer_bytes_min = context_->max_pcm_chunk_size();
+    per_packet_buffer_bytes_min = *min_output_buffer_size_;
     // At least for now, don't cap the per-packet buffer size for output.
     per_packet_buffer_bytes_max = 0xFFFFFFFF;
   }
@@ -280,17 +277,17 @@ CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::CreateContext(
       return kShouldTerminate;
     }
   }
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    min_output_buffer_size_ = context_->max_pcm_chunk_size();
+  }
   return kOk;
 }
 
 CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::DecodeInput(
     const CodecPacket* input_packet) {
   FX_DCHECK(context_);
-
-  if (!input_packet) {
-    events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
-    return kOk;
-  }
+  FX_DCHECK(input_packet);
 
   uint32_t bytes_left = input_packet->valid_length_bytes();
   uint8_t* input_data = input_packet->buffer()->base() + input_packet->start_offset();

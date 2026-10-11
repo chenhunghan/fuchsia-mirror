@@ -48,11 +48,15 @@ loadable_module("standalone-elf-load-test-module") {
 
   sources = [ "test-module.cc" ]
   deps = [ ":test-module-header" ]
+  if (is_linux) {
+    # The normal default includes `-static-libstdc++`, which links examine even
+    # under `-nostdlib` only to warn that it goes unused with `-nostdlib`.
+    configs -= [ "//build/config/linux:implicit-host-libs" ]
+  }
   ldflags = [
     "-Wl,-e,TestStart",
-    "-nodefaultlibs",
+    "-nostdlib",
   ]
-  configs += [ "//build/config/zircon:nolibc" ]
 
   exclude_toolchain_tags = [ "instrumented" ]
 

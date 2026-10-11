@@ -63,12 +63,14 @@ func newOtas(
 		// the update package to make it unique.
 		var addRandomData bool
 
-		if i == 0 || !c.modifyUpdatePackage {
-			blobFetchMode = artifacts.LazilyFetchBlobs
+		blobFetchMode = buildWithVersion.BlobFetchMode
+		if i == 0 {
+			if blobFetchMode == artifacts.Unspecified {
+				blobFetchMode = artifacts.LazilyFetchBlobs
+			}
 			addRandomData = false
 		} else {
-			blobFetchMode = artifacts.PrefetchBlobs
-			addRandomData = true
+			addRandomData = c.modifyUpdatePackage
 		}
 
 		ota, err := newOta(
@@ -94,13 +96,17 @@ func newOtas(
 	addRandomData := c.modifyUpdatePackage
 
 	// Finally, redo the last build as our prime build.
+	primeBlobFetchMode := builds[len(builds)-1].BlobFetchMode
+	if primeBlobFetchMode == artifacts.Unspecified {
+		primeBlobFetchMode = artifacts.LazilyFetchBlobs
+	}
 	ota, err := newOta(
 		ctx,
 		rand,
 		latestFfx,
 		builds[len(builds)-1].Build,
 		"N-prime",
-		artifacts.LazilyFetchBlobs,
+		primeBlobFetchMode,
 		addRandomData,
 		ffxRunDir,
 		builds[len(builds)-1].Version,
@@ -127,6 +133,9 @@ func newOta(
 	ffxRunDir ffx.RunDir,
 	version ffx.FfxVersionPolicy,
 ) (*otaData, error) {
+	if blobFetchMode == artifacts.Unspecified {
+		blobFetchMode = artifacts.PrefetchBlobs
+	}
 	logger.Debugf(ctx, "Creating OTA %s", name)
 
 	latestFfx.ClearRunDir()

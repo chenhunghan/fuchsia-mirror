@@ -588,6 +588,17 @@ struct BinderReadResult {
   }
 };
 
+// Writes the `write_size` bytes of `write_buffer` to `binder`, without reading from it.
+void Write(const fbl::unique_fd& binder, const void* write_buffer, size_t write_size) {
+  struct binder_write_read write_read = {
+      .write_size = write_size,
+      .write_consumed = 0,
+      .write_buffer = (binder_uintptr_t)write_buffer,
+  };
+  EXPECT_THAT(ioctl(binder.get(), BINDER_WRITE_READ, &write_read), SyscallSucceeds());
+  EXPECT_EQ(write_read.write_consumed, write_size);
+}
+
 // Writes the `write_size` bytes of `write_buffer` to `binder`, and then reads from it, with a
 // single BINDER_WRITE_READ.
 BinderReadResult WriteRead(const fbl::unique_fd& binder, const void* write_buffer,
@@ -851,6 +862,45 @@ TEST_F(BinderTest, TwoWayTransactionCompleteIsNotOverwrittenByRefcountCommand) {
   EXPECT_TRUE(fork_helper.WaitForChildren());
 }
 
+// If the sender of a two-way transaction has exited, the reply cannot be delivered, but the replier
+// still only receives the BR_TRANSACTION_COMPLETE of its reply. libbinder may defer writing a
+// BC_REPLY until its looper reads the next command, and aborts if it receives a failure instead.
+TEST_F(BinderTest, ReplyToExitedSenderIsCompleted) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  // Written to by the context manager once it has received the transaction.
+  test_helper::ScopedPipe transaction_received;
+  // Written to once the sender of the transaction has exited.
+  test_helper::ScopedPipe sender_exited;
+
+  ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+    ASSERT_TRUE(ReadUntil(binder, BR_TRANSACTION).Contains(BR_TRANSACTION));
+    ASSERT_THAT(write(transaction_received.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+    WaitUntilReadable(sender_exited.ReadSide());
+    EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+  });
+
+  // The sender sends a two-way transaction to the context manager, and exits once the context
+  // manager has received it, without waiting for the reply.
+  pid_t sender_pid = fork_helper.RunInForkedProcess([&] {
+    auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+    ASSERT_TRUE(binder_and_map.fd_);
+    ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+    const TransactionWriteBuffer transaction = {
+        .command = BC_TRANSACTION,
+        .data = {.target = {.handle = kServiceManagerHandle}},
+    };
+    Write(binder_and_map.fd_, &transaction, sizeof(transaction));
+    WaitUntilReadable(transaction_received.ReadSide());
+  });
+  EXPECT_TRUE(fork_helper.WaitForChild(sender_pid).determined_result);
+
+  // Let the context manager reply.
+  ASSERT_THAT(write(sender_exited.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
 }  // namespace
 
 namespace starnix_binder {
@@ -868,7 +918,9 @@ class WithoutSEStarnix : public WithOrWithoutSEStarnix {
     return fork_helper.RunInForkedProcess(std::move(client_behavior));
   }
   void ValidateClientSecctxSeenByProvider(std::string_view secctx) override {
-    // Nothing to validate here in the Not-SE flavor.
+    // When SELinux is not active, the fallback security context is a single NUL byte,
+    // which appears as an empty string.
+    EXPECT_TRUE(secctx.empty());
   }
   bool SkipEntirely() override { return !test_helper::IsStarnix(); }
 };

@@ -4,25 +4,30 @@
 
 #include "src/developer/forensics/feedback/annotations/ui_state_provider.h"
 
-#include <fuchsia/ui/activity/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/function.h>
+#include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
 #include "src/developer/forensics/feedback/annotations/constants.h"
+#include "src/developer/forensics/feedback/annotations/fidl_provider.h"
 #include "src/developer/forensics/utils/errors.h"
 #include "src/developer/forensics/utils/time.h"
 
 namespace forensics::feedback {
 namespace {
 
-std::string GetUIStateString(fuchsia::ui::activity::State state) {
+// fuchsia.ui.activity.Listener isn't @discoverable, so its name isn't available via
+// fidl::DiscoverableProtocolName.
+constexpr std::string_view kListenerProtocolName = "fuchsia.ui.activity.Listener";
+
+std::string GetUIStateString(fuchsia_ui_activity::State state) {
   switch (state) {
-    case fuchsia::ui::activity::State::UNKNOWN:
+    case fuchsia_ui_activity::State::kUnknown:
       return "unknown";
-    case fuchsia::ui::activity::State::IDLE:
+    case fuchsia_ui_activity::State::kIdle:
       return "idle";
-    case fuchsia::ui::activity::State::ACTIVE:
+    case fuchsia_ui_activity::State::kActive:
       return "active";
   }
 }
@@ -41,39 +46,81 @@ UIStateProvider::UIStateProvider(async_dispatcher_t* dispatcher,
 }
 
 void UIStateProvider::StartListening() {
-  provider_ptr_ = services_->Connect<fuchsia::ui::activity::Provider>();
+  zx::result provider_endpoints = fidl::CreateEndpoints<fuchsia_ui_activity::Provider>();
+  if (provider_endpoints.is_error()) {
+    FX_LOGS(ERROR) << "Failed to create endpoints for "
+                   << fidl::DiscoverableProtocolName<fuchsia_ui_activity::Provider> << ": "
+                   << provider_endpoints.status_string();
+    return;
+  }
 
-  provider_ptr_.set_error_handler([this](zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.ui.activity.Provider";
+  zx::result listener_endpoints = fidl::CreateEndpoints<fuchsia_ui_activity::Listener>();
+  if (listener_endpoints.is_error()) {
+    FX_LOGS(ERROR) << "Failed to create endpoints for " << kListenerProtocolName << ": "
+                   << listener_endpoints.status_string();
+    return;
+  }
 
-    // The provider pointer and listener binding connections are not expected to close. Ensure both
-    // are unbound at the same time to simplify reconnections.
-    binding_.Unbind();
+  services_->Connect(fidl::DiscoverableProtocolName<fuchsia_ui_activity::Provider>,
+                     provider_endpoints->server.TakeChannel());
+  provider_ = fidl::Client<fuchsia_ui_activity::Provider>(std::move(provider_endpoints->client),
+                                                          dispatcher_, this);
 
-    OnDisconnect();
-  });
+  binding_.emplace(dispatcher_, std::move(listener_endpoints->server), this,
+                   [this](fidl::UnbindInfo info) { OnListenerClosed(info); });
 
-  binding_.set_error_handler([this](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.ui.activity.Listener";
+  const ::fit::result<::fidl::OneWayError> result = provider_->WatchState({{
+      .listener = std::move(listener_endpoints->client),
+  }});
 
-    // The provider pointer and listener binding connections are not expected to close. Ensure both
-    // are unbound at the same time to simplify reconnections.
-    provider_ptr_.Unbind();
-
-    OnDisconnect();
-  });
-
-  provider_ptr_->WatchState(binding_.NewBinding(dispatcher_));
+  if (result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to watch activity state: " << result.error_value();
+  }
 }
 
-void UIStateProvider::OnDisconnect() {
-  current_state_ = ErrorOrString(Error::kConnectionError);
-  last_transition_time_ = Error::kConnectionError;
+void UIStateProvider::on_fidl_error(fidl::UnbindInfo error) {
+  // The provider client and listener binding connections are not expected to close. A provider
+  // error tears down both so that StartListening can recreate them together.
+  provider_ = fidl::Client<fuchsia_ui_activity::Provider>();
+  binding_.reset();
+
+  OnDisconnect(error.status(), fidl::DiscoverableProtocolName<fuchsia_ui_activity::Provider>);
+}
+
+void UIStateProvider::OnListenerClosed(const fidl::UnbindInfo info) {
+  // Intentionally leave |provider_| bound. If fuchsia.ui.activity.Provider isn't available, its
+  // channel is closed with ZX_ERR_NOT_FOUND, which also drops the listener client end sent in
+  // WatchState. Both closures can be observed in either order, so let the provider's error handler
+  // decide whether to stop reconnecting. |provider_| is replaced when StartListening reconnects.
+  binding_.reset();
+
+  OnDisconnect(info.status(), kListenerProtocolName);
+}
+
+void UIStateProvider::OnDisconnect(const zx_status_t status,
+                                   const std::string_view interface_name) {
+  const internal::DisconnectResponse disconnect =
+      internal::DisconnectResponse::BuildFrom(status, interface_name);
+
+  current_state_ = ErrorOrString(disconnect.error);
+  last_transition_time_ = disconnect.error;
 
   if (on_update_) {
     on_update_({{kSystemUserActivityCurrentStateKey, *current_state_}});
   }
 
+  if (!disconnect.should_reconnect) {
+    reconnect_task_.Cancel();
+    FX_LOGS(WARNING) << disconnect.log_message;
+    return;
+  }
+
+  // Both connections can close for the same underlying reason; only schedule one reconnect.
+  if (reconnect_task_.is_pending()) {
+    return;
+  }
+
+  FX_PLOGS(WARNING, status) << disconnect.log_message;
   reconnect_task_.PostDelayed(dispatcher_, backoff_->GetNext());
 }
 
@@ -88,11 +135,12 @@ std::set<std::string> UIStateProvider::GetKeys() const {
   return UIStateProvider::GetAnnotationKeys();
 }
 
-void UIStateProvider::OnStateChanged(fuchsia::ui::activity::State state, int64_t transition_time,
-                                     OnStateChangedCallback callback) {
-  current_state_ = ErrorOrString(GetUIStateString(state));
-  last_transition_time_ = zx::time_monotonic(transition_time);
-  callback();
+void UIStateProvider::OnStateChanged(OnStateChangedRequest& request,
+                                     OnStateChangedCompleter::Sync& completer) {
+  backoff_->Reset();
+  current_state_ = ErrorOrString(GetUIStateString(request.state()));
+  last_transition_time_ = zx::time_monotonic(request.transition_time());
+  completer.Reply();
 
   if (on_update_) {
     on_update_({{kSystemUserActivityCurrentStateKey, *current_state_}});

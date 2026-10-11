@@ -12,14 +12,14 @@ use crate::{
     Slot, ValidationError, Wire, wire,
 };
 
-/// The wire type for [`Result<(), zx::Status>`].
+/// The wire type for [`zx::Status`].
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub struct StatusResult {
+pub struct Status {
     inner: wire::Int32,
 }
 
-impl Constrained for StatusResult {
+impl Constrained for Status {
     type Constraint = ();
 
     fn validate(_: Slot<'_, Self>, _: Self::Constraint) -> Result<(), ValidationError> {
@@ -28,9 +28,9 @@ impl Constrained for StatusResult {
 }
 
 // SAFETY:
-// - Lifetime erasure: `StatusResult` has no lifetimes, so `Narrowed` is `Self`.
-// - Padding: `StatusResult` is transparent over `Int32`, which has no padding.
-unsafe impl Wire for StatusResult {
+// - Lifetime erasure: `Status` has no lifetimes, so `Narrowed` is `Self`.
+// - Padding: `Status` is transparent over `Int32`, which has no padding.
+unsafe impl Wire for Status {
     type Narrowed<'de> = Self;
 
     #[inline]
@@ -40,115 +40,88 @@ unsafe impl Wire for StatusResult {
     }
 }
 
-impl StatusResult {
+impl Status {
     /// Returns the raw status code.
     pub fn into_raw(self) -> i32 {
         *self.inner
     }
 
-    /// Returns a `Result<(), zx::Status>` with the same value as this wire type.
-    pub fn to_result(self) -> Result<(), zx::Status> {
-        zx::Status::ok(*self.inner)
+    /// Returns a `zx::Status` with the same value as this wire type.
+    pub fn to_status(self) -> zx::Status {
+        zx::Status::try_from_raw(*self.inner).unwrap()
     }
 }
 
-impl From<zx::Status> for StatusResult {
+impl From<zx::Status> for Status {
     fn from(value: zx::Status) -> Self {
         Self { inner: wire::Int32(value.into_raw()) }
     }
 }
 
-impl From<Result<(), zx::Status>> for StatusResult {
-    fn from(value: Result<(), zx::Status>) -> Self {
-        Self { inner: wire::Int32(zx::Status::result_into_raw(value)) }
-    }
-}
-
-impl fmt::Debug for StatusResult {
+impl fmt::Debug for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.to_result().fmt(f)
+        self.to_status().fmt(f)
     }
 }
 
 // SAFETY: `decode` delegates to `Int32::decode`, which initializes the underlying `Int32`
-// and ensures `slot` contains a valid decoded `StatusResult`.
-unsafe impl<D: ?Sized> Decode<D> for StatusResult {
+// and ensures `slot` contains a valid decoded `Status`.
+unsafe impl<D: ?Sized> Decode<D> for Status {
     fn decode(
         slot: Slot<'_, Self>,
         decoder: &mut D,
         _: Self::Constraint,
     ) -> Result<(), DecodeError> {
-        munge!(let Self { inner } = slot);
-        wire::Int32::decode(inner, decoder, ())
+        munge!(let Self { mut inner } = slot);
+        wire::Int32::decode(inner.as_mut(), decoder, ())?;
+        if *inner == 0 {
+            return Err(DecodeError::InvalidNonZeroInteger);
+        }
+        Ok(())
     }
 }
 
 // SAFETY: `encode` delegates to the `Encode` implementation of the raw `i32` status value,
 // which initializes all non-padding bytes of `out`.
-unsafe impl<E: ?Sized> Encode<StatusResult, E> for zx::Status {
+unsafe impl<E: ?Sized> Encode<Status, E> for zx::Status {
     fn encode(
         self,
         encoder: &mut E,
-        out: &mut MaybeUninit<StatusResult>,
+        out: &mut MaybeUninit<Status>,
         constraint: (),
     ) -> Result<(), EncodeError> {
-        munge!(let StatusResult { inner } = out);
+        munge!(let Status { inner } = out);
         self.into_raw().encode(encoder, inner, constraint)
     }
 }
 
 // SAFETY: `encode` delegates to `zx::Status`'s `Encode` implementation, which initializes
 // all non-padding bytes of `out`.
-unsafe impl<E: ?Sized> Encode<StatusResult, E> for &zx::Status {
+unsafe impl<E: ?Sized> Encode<Status, E> for &zx::Status {
     fn encode(
         self,
         encoder: &mut E,
-        out: &mut MaybeUninit<StatusResult>,
+        out: &mut MaybeUninit<Status>,
         constraint: (),
     ) -> Result<(), EncodeError> {
         Encode::encode(*self, encoder, out, constraint)
     }
 }
 
-// SAFETY: `encode` delegates to the raw integer status encoding.
-unsafe impl<E: ?Sized> Encode<StatusResult, E> for Result<(), zx::Status> {
-    fn encode(
-        self,
-        encoder: &mut E,
-        out: &mut MaybeUninit<StatusResult>,
-        constraint: (),
-    ) -> Result<(), EncodeError> {
-        munge!(let StatusResult { inner } = out);
-        zx::Status::result_into_raw(self).encode(encoder, inner, constraint)
-    }
-}
-
-// SAFETY: delegates to value encoding.
-unsafe impl<E: ?Sized> Encode<StatusResult, E> for &Result<(), zx::Status> {
-    fn encode(
-        self,
-        encoder: &mut E,
-        out: &mut MaybeUninit<StatusResult>,
-        constraint: (),
-    ) -> Result<(), EncodeError> {
-        Encode::encode(*self, encoder, out, constraint)
-    }
-}
-
-impl FromWire<StatusResult> for Result<(), zx::Status> {
-    fn from_wire(wire: StatusResult) -> Self {
+impl FromWire<Status> for zx::Status {
+    fn from_wire(wire: Status) -> Self {
         Self::from_wire_ref(&wire)
     }
 }
 
-impl FromWireRef<StatusResult> for Result<(), zx::Status> {
-    fn from_wire_ref(wire: &StatusResult) -> Self {
-        zx::Status::ok(*wire.inner)
+impl FromWireRef<Status> for zx::Status {
+    fn from_wire_ref(wire: &Status) -> Self {
+        wire.to_status()
     }
 }
 
-impl IntoNatural for StatusResult {
-    type Natural = Result<(), zx::Status>;
+impl IntoNatural for Status {
+    type Natural = zx::Status;
 }
 
 #[cfg(test)]
@@ -157,54 +130,36 @@ mod tests {
     use crate::CHUNK_SIZE;
 
     #[test]
-    fn test_status_result_decode_zero() {
+    fn test_status_decode_zero() {
         let mut buffer = [0u8; CHUNK_SIZE];
-        let mut decoder = ();
-        // SAFETY: `buffer` is sufficiently sized and aligned for `StatusResult`.
-        let mut slot = unsafe { Slot::<StatusResult>::new_unchecked(buffer.as_mut_ptr().cast()) };
-        StatusResult::decode(slot.as_mut(), &mut decoder, ())
-            .expect("failed to decode 0 as StatusResult");
-        // SAFETY: `slot` was successfully decoded and initialized.
-        let wire_result = unsafe { slot.as_ptr().cast::<StatusResult>().read() };
-        assert_eq!(wire_result.to_result(), Ok(()));
-        assert_eq!(
-            <Result<(), zx::Status> as FromWire<StatusResult>>::from_wire(wire_result),
-            Ok(())
-        );
+        // SAFETY: `buffer` is sufficiently sized and aligned for `Status`.
+        let mut slot = unsafe { Slot::<Status>::new_unchecked(buffer.as_mut_ptr().cast()) };
+        Status::decode(slot.as_mut(), &mut (), ()).expect_err("successfully decoded 0 as Status");
     }
 
     #[test]
-    fn test_status_result_decode_error() {
+    fn test_status_decode_error() {
         let mut buffer = [0u8; CHUNK_SIZE];
         let status_raw = zx::Status::NOT_SUPPORTED.into_raw();
         buffer[..4].copy_from_slice(&status_raw.to_le_bytes());
 
-        let mut decoder = ();
-        // SAFETY: `buffer` is sufficiently sized and aligned for `StatusResult`.
-        let mut slot = unsafe { Slot::<StatusResult>::new_unchecked(buffer.as_mut_ptr().cast()) };
-        StatusResult::decode(slot.as_mut(), &mut decoder, ())
-            .expect("failed to decode error as StatusResult");
+        // SAFETY: `buffer` is sufficiently sized and aligned for `Status`.
+        let mut slot = unsafe { Slot::<Status>::new_unchecked(buffer.as_mut_ptr().cast()) };
+        Status::decode(slot.as_mut(), &mut (), ()).expect("failed to decode error as Status");
         // SAFETY: `slot` was successfully decoded and initialized.
-        let wire_result = unsafe { slot.as_ptr().cast::<StatusResult>().read() };
-        assert_eq!(wire_result.to_result(), Err(zx::Status::NOT_SUPPORTED));
+        let wire_result = unsafe { slot.as_ptr().cast::<Status>().read() };
+        assert_eq!(wire_result.to_status(), zx::Status::NOT_SUPPORTED);
         assert_eq!(
-            <Result<(), zx::Status> as FromWire<StatusResult>>::from_wire(wire_result),
-            Err(zx::Status::NOT_SUPPORTED)
+            <zx::Status as FromWire<Status>>::from_wire(wire_result),
+            zx::Status::NOT_SUPPORTED
         );
     }
 
     #[test]
     fn test_status_result_encode() {
-        let mut out = MaybeUninit::<StatusResult>::uninit();
-        let mut encoder = ();
-        Ok::<(), zx::Status>(()).encode(&mut encoder, &mut out, ()).unwrap();
-        // SAFETY: `encode` succeeded, so `out` is initialized.
-        let encoded = unsafe { out.assume_init() };
-        assert_eq!(encoded.into_raw(), 0);
-
-        let mut out = MaybeUninit::<StatusResult>::uninit();
-        let result: Result<(), zx::Status> = Err(zx::Status::NOT_FOUND);
-        result.encode(&mut encoder, &mut out, ()).unwrap();
+        let mut out = MaybeUninit::<Status>::uninit();
+        let status = zx::Status::NOT_FOUND;
+        status.encode(&mut (), &mut out, ()).unwrap();
         // SAFETY: `encode` succeeded, so `out` is initialized.
         let encoded = unsafe { out.assume_init() };
         assert_eq!(encoded.into_raw(), zx::Status::NOT_FOUND.into_raw());

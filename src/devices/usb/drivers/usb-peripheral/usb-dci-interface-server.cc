@@ -66,28 +66,32 @@ void UsbDciInterfaceServer::Control(ControlRequestView req, ControlCompleter::Sy
 void UsbDciInterfaceServer::SetConnected(SetConnectedRequestView req,
                                          SetConnectedCompleter::Sync& completer) {
   TRACE_DURATION("usb-peripheral", __func__);
-  drv_->OnHostConnectionChanged(req->is_connected);
   drv_->dci_inspect().RecordEvent(
       std::format("host connection changed: {}", req->is_connected ? "connected" : "disconnected"));
-  completer.ReplySuccess();
+  drv_->OnHostConnectionChanged(
+      req->is_connected, [completer = completer.ToAsync()]() mutable { completer.ReplySuccess(); });
 }
 
 void UsbDciInterfaceServer::SetSpeed(SetSpeedRequestView req, SetSpeedCompleter::Sync& completer) {
   TRACE_DURATION("usb-peripheral", __func__);
-  drv_->speed_ = static_cast<usb_speed_t>(req->speed);
-  const char* speed_str = usb_inspect::SpeedToString(drv_->speed_);
+  auto new_speed = static_cast<usb_speed_t>(req->speed);
+  const char* speed_str = usb_inspect::SpeedToString(new_speed);
   bool connected;
   {
     fbl::AutoLock lock(&drv_->lock_);
+    drv_->speed_ = new_speed;
     connected = drv_->state_ == UsbPeripheral::DeviceState::kHostConnected;
   }
-  drv_->dci_inspect().UpdateConnectionStatus(connected, drv_->speed_);
+  drv_->dci_inspect().UpdateConnectionStatus(connected, new_speed);
   drv_->dci_inspect().RecordEvent(std::format("speed set to: {}", speed_str));
   completer.ReplySuccess();
 }
 
 void UsbDciInterfaceServer::Stop() {
   TRACE_DURATION("usb-peripheral", __func__);
+  if (stopped_.exchange(true)) {
+    return;
+  }
   dispatcher_.ShutdownAsync();
   // Ensure the dispatcher is completely shut down before proceeding,
   // preventing any concurrent access to driver resources during teardown.

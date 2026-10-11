@@ -1,194 +1,357 @@
-# Using Inspect for drivers
+# Using Inspect in drivers
 
-Caution: This page may contain information that is specific to the legacy
-version of the driver framework (DFv1).
+This guide explains how to instrument Fuchsia Driver Framework (DFv2) drivers
+with [Inspect][inspect_overview] and how to query Inspect data from driver
+components.
 
-## Pre-requisites
+## Overview
 
-In case you are not familiarized with Inspect, it is recommend that you read the
-following pages:
+In Fuchsia's Driver Framework (DFv2), **drivers are components**. Drivers participate
+directly in Fuchsia's component diagnostics architecture and publish Inspect data
+using the standard `fuchsia.inspect.InspectSink` capability, just like any other
+Fuchsia component.
+
+```mermaid
+graph LR
+    subgraph Driver Component ["Driver Component (e.g. bootstrap/boot-drivers:...)"]
+        DriverCode["Driver Implementation (C++ DriverBase2 / Rust Driver)"]
+        Inspector["Inspector"]
+        DriverCode --> Inspector
+    end
+
+    Archivist["Archivist (Diagnostics Subsystem)"]
+    Tooling["Host (ffx inspect) / Target (iquery)"]
+
+    Inspector -- "fuchsia.inspect.InspectSink" --> Archivist
+    Tooling -- "Query Inspect Selectors" --> Archivist
+```
+
+Key characteristics of Inspect in DFv2:
+
+- **Standard capability routing**: The driver component manifest requests
+  `fuchsia.inspect.InspectSink` using the standard `inspect/client.shard.cml` shard.
+- **Component-attributed Inspect**: Inspect hierarchies are attributed to each
+  individual driver component under its component moniker (e.g. under
+  `bootstrap/boot-drivers` or `bootstrap/base-drivers`).
+- **Standard tooling**: Driver Inspect data is inspected using `ffx inspect` or
+  `iquery` with standard component selectors or component URL matching.
+
+## Prerequisites
+
+If you are unfamiliar with Inspect basics, review the following guides:
 
 - [Inspect overview][inspect_overview]
 - [Inspect codelab][inspect_codelab]
 - [Inspect selectors][selectors]
 
-## Introduction
+## Include Inspect in a driver
 
-Inspect can be used by drivers. However, there are some special considerations that must be made
-given that drivers are not components.
+### 1. Update the component manifest (`.cml`)
 
-Note: There is work being done to represent drivers as components using Components V2. For more
-information, see [Implementing drivers as components][roadmap-drivers-components].
+Include the Inspect client shard in your driver's `.cml` file:
 
-Consider the following system topology diagram:
-
-![System topology diagram showing components and drivers exposing inspect data via VMOs and Tree services.](inspect-topology.png)
-
-Diagram legend:
-
-*Gray*: Components.
-*Blue*: Component namespace that shows the out/diagnostics directory contents.
-*Purple*: Contents of the `out/diagnostics/*` inspect files.
-
-Components can expose inspect data in the following ways:
-
-- VMO file: Typically called `root.inspect`
-- Tree service: A service file for the `fuchsia.inspect.Tree` protocol
-
-A component can expose one or more of these files. In the diagram above, components `foo` and
-`echo` expose a single file. However, `driver_manager` exposes multiple files, one VMO file for
-each device.
-
-The reason for this is that each device is not a component, therefore `driver_manager` aggregates
-their inspect VMOs and publishes them itself. This is a major difference between exposing inspect
-data from a component and from a driver that has implications in how the data can be queried
-through selectors.
-
-If you wanted to query data for the `foo` and `echo` components, you can express that in a
-specific selector. For example, `core/foo:root/child1:prop1`, `core/echo:root/child1:prop1`. You
-have a unique way of querying each even if the properties and nodes are called the same way given
-that you can uniquely identify them using their moniker.
-
-However, when it comes to drivers, it’s recommended that all devices expose an inspect hierarchy
-where the root has a single child with the name of the device for a better experience using
-selectors to query their data. All other properties and nodes are children of this child.
-
-In the diagram above, you can query: `bootstrap/driver_manager:root/device_a:failures` and
-`bootstrap/driver_manager:root/device_b:failures` uniquely. If neither `device_a` nor `device_b`
-exposed their inspect VMO with a `root/{device name}` node where all properties are located, you
-wouldn’t have a way of differencing between both and the selector
-`bootstrap/driver_manager:root:failures` would match both of them.
-
-## Including Inspect in drivers
-
-These steps walk you through how to include Inspect in your drivers. For a full example of a driver
-with Inspect included, see the following [example test driver][example_test_driver].
-
-1. Add the zircon inspect library to your driver dependencies in BUILD.gn:
-
-  ```
-  deps = [
-      ...
-      "//zircon/system/ulib/inspect",
-  ],
-  ```
-
-1. Include this header in your driver:
-
-  ```
-  #include <lib/inspect/cpp/inspect.h>
-  ```
-
-1. Create an Inspector instance in your device class:
-
-  ```
-  class TestDevice {
-   …
-   private:
-       inspect::Inspector inspect_;
-  }
-  ```
-
-  Use this to create properties and children to build the inspect tree:
-
-  ```
-  TestDevice::TestDevice() {
-      state_ = inspect_.GetRoot().CreateString("state","invalid");
-      // inspect is a tree; You can add children and structure your data.
-      performance_ = inspect_.GetRoot().CreateChild("performance");
-      call_count_ = performance_.CreateUint("call_count",0);
-      total_time_ = performance_.CreateUint("total_time(ms)",0);
-      ...
-  }
-
-  TestDevice::SetState(State s) {
-    call_count_.Add(1);
-    ...
-      case kActive:
-        state_.Set("active");
-  }
-  ```
-
-  Inspect currently supports a variety of [property types][property_types] like integers, strings,
-  arrays, bool, double, histograms.
-
-  Inspect is RAII so remember to hold references to properties that you will update, otherwise
-  they’ll be removed from the inspect VMO.
-
-  ```
-  class TestDevice {
-   …
-   private:
-       inspect::Inspector inspect_;
-       inspect::StringProperty state_;
-       inspect::Node performance_;
-       inspect::UintProperty call_count_;
-       inspect::UintProperty total_time_;
-  }
-  ```
-
-  You can add properties and nodes to an  `inspect::ValueList` instead of holding references to them.
-  This will tie the lifetime of the properties and nodes with the lifetime of the
-  `inspect::ValueList`. Note that `inspect::Inspector` happens to be a ValueList for convenience.
-
-  ```
-  inspect_.GetRoot().CreateString("name","test device",&inspect_);
-  inspect_.GetRoot().CreateString("config_params",config,&inspect_);
-  ```
-
-1. Export inspect VMO to driver manager.
-
-  ```
-  zx_status Bind() {
-    …
-      DdkAdd(ddk::DeviceAddArgs("test").set_inspect_vmo(inspect_.DuplicateVmo()));
-  }
-  ```
-
-  You can publish one inspect VMO per device.
-
-1. Done. Now you can view Inspect data for the driver.
-
-  - The device inspect file is hosted in `class/<protocol>/xxx.inspect`
-  - Check the inspect data using `iquery`
-
-    Important: if you are working in a product other than `bringup` please
-    read [this section](#include-iquery-bootfs) to learn how to include
-    `iquery` in bootfs. If you are working on a product in which networking and
-    `ffx` are available, you can use `ffx inspect` instead of `iquery` without
-    the need of including `iquery` in `bootfs`.
-
-    ```
-    fx iquery show bootstrap/driver_manager --file class/ethernet/000.inspect
-
-    // To view all of driver_manager and driver host
-    fx iquery show bootstrap/driver_manager
-    ```
-
-1. Run `fx snapshot` and check if your inspect data is present in `inspect.json`. Note that the
-feedback component is not part of bringup, so taking snapshots is not very useful when working
-only with a bringup build. For these situations, prefer using `iquery` which is available in bootfs
-(in bringup, if you are working in other product see [below](#include-iquery-bootfs).
-
-  Note: Don’t forget to write tests for the inspect code. You can look at the inspect
-  [codelab][inspect_codelab] for an example.
-
-
-## Include `iquery` in bootfs {#include-iquery-bootfs}
-
-The `bringup` product and all `*_eng` products already include `iquery` in bootfs, so if you are
-working with any of those products, you can skip this section.
-
-If you are working on some other product and need to have `iquery` available in
-bootfs, then add the following to your `fx set`:
-
+```json5
+{
+    include: [
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "driver",
+        binary: "driver/my_driver.so",
+        bind: "meta/bind/my_driver.bindbc",
+    },
+}
 ```
-fx set core.x64 --args='product_bootfs_labels+=["//bundles:diagnostics-eng"]'
+
+The `inspect/client.shard.cml` shard routes the `fuchsia.inspect.InspectSink` protocol
+from the parent diagnostics directory into the driver's incoming namespace.
+
+### 2. Add build dependencies
+
+* {C++}
+
+  Add `//sdk/lib/inspect/component/cpp` to your driver's `BUILD.gn`:
+
+  ```gn
+  fuchsia_cc_driver("my_driver") {
+    deps = [
+      "//sdk/lib/driver/component/cpp",
+      "//sdk/lib/inspect/component/cpp",
+    ]
+  }
+  ```
+
+  If building with Bazel, add `@fuchsia_sdk//pkg/inspect_component_cpp` in `BUILD.bazel`:
+
+  ```bazel
+  fuchsia_cc_driver(
+      name = "my_driver",
+      deps = [
+          "@fuchsia_sdk//pkg/driver_component_cpp",
+          "@fuchsia_sdk//pkg/inspect_component_cpp",
+      ],
+  )
+  ```
+
+* {Rust}
+
+  In your driver's `BUILD.gn`, depend on `//sdk/lib/driver/component/rust`, `//src/lib/diagnostics/inspect/rust`, and `//src/lib/fuchsia-async`:
+
+  ```gn
+  fuchsia_rust_driver("my_driver") {
+    deps = [
+      "//sdk/lib/driver/component/rust",
+      "//src/lib/diagnostics/inspect/rust",
+      "//src/lib/fuchsia-async",
+    ]
+  }
+  ```
+
+### 3. Initialize and publish Inspect
+
+* {C++}
+
+  In C++, drivers inheriting from [`fdf::DriverBase2`][write-a-minimal-dfv2-driver]
+  can publish an Inspect tree using `context.CreateInspector(this)`:
+
+  ```cpp
+  #include <lib/driver/component/cpp/driver_base2.h>
+  #include <lib/driver/component/cpp/driver_export2.h>
+  #include <lib/inspect/component/cpp/component.h>
+
+  class MyDriver : public fdf::DriverBase2 {
+   public:
+    MyDriver() : fdf::DriverBase2("my_driver") {}
+
+    zx::result<> Start(fdf::DriverContext context) override {
+      // 1. Create and publish the ComponentInspector.
+      // Must be called before context.take_incoming() if transferring ownership.
+      component_inspector_ = context.CreateInspector(this);
+
+      // 2. Build the Inspect hierarchy from the root node.
+      hardware_node_ = component_inspector_->root().CreateChild("hardware_status");
+      revision_prop_ = hardware_node_.CreateUint("revision_id", 0x10);
+      requests_count_ = hardware_node_.CreateUint("requests_count", 0);
+
+      // 3. For values that do not change, use Record* helpers to avoid storing handles:
+      hardware_node_.RecordString("serial_number", "ABC-1234");
+
+      // 4. (Optional) Report component health:
+      component_inspector_->Health().Ok();
+
+      return zx::ok();
+    }
+
+    void HandleDeviceRequest() {
+      requests_count_.Add(1);
+    }
+
+    // Accessor for unit tests:
+    const inspect::Inspector& inspector() const {
+      return component_inspector_->inspector();
+    }
+
+   private:
+    std::optional<inspect::ComponentInspector> component_inspector_;
+    inspect::Node hardware_node_;
+    inspect::UintProperty revision_prop_;
+    inspect::UintProperty requests_count_;
+  };
+
+  FUCHSIA_DRIVER_EXPORT2(MyDriver);
+  ```
+
+  **Key points:**
+
+  - **`context.CreateInspector(this)`**: Automatically connects to `fuchsia.inspect.InspectSink`
+    in the incoming namespace and publishes the Inspect tree with the tree name set to the driver's
+    `name()`. Invoke `context.CreateInspector(this)` *before* taking the namespace via
+    `context.take_incoming()`.
+  - **Node & Property Lifetimes (RAII)**: Inspect properties are RAII objects. If a property
+    will change over time (such as `requests_count_`), store the property object as a class
+    member or store it in an `inspect::ValueList`. If you do not keep the property alive, it is
+    removed from the Inspect VMO. For immutable values, use `Record*` helper methods
+    (e.g., `RecordString`, `RecordUint`), which commit the value directly into the VMO without
+    requiring an object handle.
+  - **Component Health**: Use `component_inspector_->Health().Ok()`, `.Starting()`, or
+    `.Unhealthy(reason)` to report standard [component health][health-metrics].
+
+* {Rust}
+
+  In Rust drivers implementing `fdf_component::Driver`:
+
+  ```rust
+  use fdf_component::{Driver, DriverContext, DriverError};
+  use fuchsia_async::Scope;
+  use fuchsia_inspect::{Inspector, NumericProperty, UintProperty};
+
+  pub struct MyDriver {
+      // Keep the scope alive for the lifetime of the driver so that
+      // the Inspect publishing task continues running.
+      _inspect_scope: Scope,
+      inspector: Inspector,
+      requests_count: UintProperty,
+  }
+
+  impl Driver for MyDriver {
+      const NAME: &str = "my_driver";
+
+      async fn start(mut context: DriverContext) -> Result<Self, DriverError> {
+          let inspector = Inspector::default();
+
+          // Build hierarchy
+          let hardware = inspector.root().create_child("hardware_status");
+          hardware.record_string("serial_number", "ABC-1234");
+          let requests_count = hardware.create_uint("requests_count", 0);
+          inspector.root().record(hardware);
+
+          // Publish Inspect via InspectSink.
+          let inspect_scope = Scope::new_with_name("my_driver_inspect");
+          context.publish_inspect(&inspector, inspect_scope.to_handle())?;
+
+          Ok(Self {
+              _inspect_scope: inspect_scope,
+              inspector,
+              requests_count,
+          })
+      }
+  }
+
+  impl MyDriver {
+      pub fn handle_device_request(&self) {
+          self.requests_count.add(1);
+      }
+  }
+  ```
+
+  **Key points:**
+
+  - **Retain the `Scope`**: `context.publish_inspect` spawns a background task on
+    the provided `ScopeHandle`. Keep the `Scope` stored in your driver struct so the
+    task is not cancelled when `start()` completes.
+  - **Tree Name**: Rust's `context.publish_inspect` publishes using the default
+    tree name (`None`). Unlike C++ drivers published via `CreateInspector`, do not
+    pass a `--name` tree filter when querying unless using custom publish options.
+
+## Query driver Inspect data
+
+Because drivers are components, you query their Inspect data using standard Fuchsia
+diagnostics commands.
+
+### Driver monikers
+
+Driver component monikers reflect the device topology and the collection where the driver runs:
+
+- **Boot drivers**: `bootstrap/boot-drivers:<device_node_path>` (e.g., `bootstrap/boot-drivers:dev.sys.platform.00_00_2d`)
+- **Packaged drivers (base)**: `bootstrap/base-drivers:<device_node_path>`
+- **Packaged drivers (full/universe)**: `bootstrap/full-drivers:<device_node_path>`
+
+### Using `ffx inspect`
+
+From the host development workstation:
+
+- **Query by driver component URL / component name**:
+  ```sh
+  ffx inspect show my_driver.cm
+  ```
+
+- **Query all driver components**:
+  ```sh
+  ffx inspect show "bootstrap/*-drivers*:root"
+  ```
+
+- **Filter by C++ driver tree name**:
+  ```sh
+  ffx inspect show --name my_driver "bootstrap/*-drivers*:root"
+  ```
+
+- **Query a specific driver by moniker**:
+  Because collection child names are separated by a colon, the colon in the component moniker
+  must be escaped in selectors:
+  ```sh
+  ffx inspect show "bootstrap/boot-drivers\:suspend"
+  ```
+
+### Using `iquery` on target
+
+Important: if you are working in a product other than `bringup` please
+read [this section](#include-iquery-bootfs) to learn how to include
+`iquery` in bootfs. If you are working on a product in which networking and
+`ffx` are available, you can use `ffx inspect` instead of `iquery` without
+the need of including `iquery` in `bootfs`.
+
+When connected to a target device via serial or `ffx target ssh`:
+
+```sh
+iquery show my_driver.cm
+iquery show "bootstrap/*-drivers*:root"
+```
+
+## Testing driver Inspect
+
+### Unit tests
+
+In C++ driver unit tests using the [driver unit testing library][driver-unit-testing], validate
+Inspect trees directly from the driver's inspector:
+
+```cpp
+#include <lib/driver/testing/cpp/driver_test.h>
+#include <lib/fpromise/single_threaded_executor.h>
+#include <lib/inspect/cpp/reader.h>
+#include <lib/inspect/testing/cpp/inspect.h>
+#include <gtest/gtest.h>
+
+TEST_F(MyDriverTestFixture, InspectMetrics) {
+  // Run driver methods that modify inspect state...
+
+  dut_.RunInDriverContext([&](MyDriver& driver) {
+    auto hierarchy = fpromise::run_single_threaded(
+        inspect::ReadFromInspector(driver.inspector()))
+        .take_value();
+
+    const auto* hw_node = hierarchy.GetByPath({"hardware_status"});
+    ASSERT_NE(hw_node, nullptr);
+
+    const auto* prop = hw_node->node().get_property<inspect::UintPropertyValue>("requests_count");
+    ASSERT_NE(prop, nullptr);
+    EXPECT_EQ(prop->value(), 1u);
+  });
+}
+```
+
+### Integration tests with `DriverTestRealm`
+
+In integration tests running inside [`DriverTestRealm`][driver-test-realm], query
+Inspect using `diagnostics_reader::ArchiveReader`. Note that the colon separating the collection
+and child moniker must be escaped (`\\:`) in the selector string:
+
+```rust
+use diagnostics_assertions::assert_data_tree;
+use diagnostics_reader::ArchiveReader;
+
+let moniker = format!("realm_builder\\:{}/driver_test_realm/boot-drivers\\:dev.sys.my_node", instance.root.child_name());
+
+let hierarchy = ArchiveReader::inspect()
+    .add_selector(format!("{}:[name=my_driver]root", moniker))
+    .snapshot()
+    .await?
+    .into_iter()
+    .next()
+    .and_then(|result| result.payload)
+    .expect("driver inspect hierarchy not found");
+
+assert_data_tree!(hierarchy, root: contains {
+    hardware_status: contains {
+        requests_count: 0u64,
+    }
+});
 ```
 
 [inspect_overview]: /docs/development/diagnostics/inspect/README.md
-[roadmap-drivers-components]: /docs/contribute/roadmap/2020/overview.md#implementing_drivers_as_components
-[example_test_driver]: /src/devices/tests/driver-inspect-test/test-driver.cc
-[property_types]: /docs/development/diagnostics/inspect/README.md#property
 [inspect_codelab]: /docs/development/diagnostics/inspect/codelab.md
 [selectors]: /docs/reference/diagnostics/selectors.md
+[health-metrics]: /docs/development/diagnostics/inspect/health.md
+[write-a-minimal-dfv2-driver]: /docs/development/drivers/developer_guide/write-a-minimal-dfv2-driver.md
+[driver-unit-testing]: /docs/development/sdk/driver-testing/driver-unit-testing-quick-start.md
+[driver-test-realm]: /docs/development/drivers/testing/driver_test_realm.md

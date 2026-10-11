@@ -366,10 +366,17 @@ TEST_F(AcpiTableTest, BadSDTSignature) {
 TEST_F(AcpiTableTest, MadtItems) {
   struct __attribute__((packed)) {
     AcpiMadt madt = {.hdr = {.signature = AcpiMadt::kSig, .revision = 2}};
-    AcpiMadtGicInterface interrupt_controller = {
-        .hdr = {.type = AcpiMadtGicInterface::kType, .length = sizeof(AcpiMadtGicInterface)},
-        .cpu_interface_number = 4,
-        .mpidr = 0xABCDEF01,
+    AcpiMadtGicInterface interrupt_controllers[2] = {
+        {
+            .hdr = {.type = AcpiMadtGicInterface::kType, .length = sizeof(AcpiMadtGicInterface)},
+            .cpu_interface_number = 0,
+            .mpidr = 0x80000000,
+        },
+        {
+            .hdr = {.type = AcpiMadtGicInterface::kType, .length = sizeof(AcpiMadtGicInterface)},
+            .cpu_interface_number = 1,
+            .mpidr = 0x80000001,
+        },
     };
     AcpiMadtGicDistributor distributor = {
         .hdr = {.type = AcpiMadtGicDistributor::kType, .length = sizeof(AcpiMadtGicDistributor)},
@@ -389,8 +396,22 @@ TEST_F(AcpiTableTest, MadtItems) {
   AbrSlotIndex slot = kAbrSlotIndexA;
   ASSERT_TRUE(AddGigabootZbiItems(reinterpret_cast<zbi_header_t *>(buffer().data()),
                                   buffer().size(), &slot, &context()));
+  EXPECT_EQ(context().num_cpu_nodes, 2U);
+
   std::vector<zbitl::ByteView> items = FindItems(buffer().data(), ZBI_TYPE_CPU_TOPOLOGY);
   ASSERT_EQ(items.size(), 1ULL);
+  ASSERT_EQ(items[0].size(), 2 * sizeof(zbi_topology_node_t));
+
+  const auto *nodes = reinterpret_cast<const zbi_topology_node_t *>(items[0].data());
+  EXPECT_EQ(nodes[0].entity.processor.flags, ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY);
+  EXPECT_EQ(nodes[0].entity.processor.logical_ids[0], 0U);
+  EXPECT_EQ(nodes[0].entity.processor.architecture_info.arm64.cpu_id, 0U);
+  EXPECT_EQ(nodes[0].entity.processor.architecture_info.arm64.gic_id, 0U);
+
+  EXPECT_EQ(nodes[1].entity.processor.flags, 0U);
+  EXPECT_EQ(nodes[1].entity.processor.logical_ids[0], 1U);
+  EXPECT_EQ(nodes[1].entity.processor.architecture_info.arm64.cpu_id, 1U);
+  EXPECT_EQ(nodes[1].entity.processor.architecture_info.arm64.gic_id, 1U);
 
   items = FindItems(buffer().data(), ZBI_TYPE_KERNEL_DRIVER);
   ASSERT_EQ(items.size(), 1ULL);

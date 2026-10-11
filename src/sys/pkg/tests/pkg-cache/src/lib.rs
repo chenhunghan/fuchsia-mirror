@@ -22,6 +22,8 @@ use fidl_fuchsia_pkg_garbagecollector as fpkg_gc;
 use fidl_fuchsia_pkg_http as fpkg_http;
 use fidl_fuchsia_pkg_internal as fpkg_internal;
 use fidl_fuchsia_pkg_resolution as fpkg_resolution;
+use fidl_fuchsia_storage_block as fstorage_block;
+use fidl_fuchsia_storage_mapping as fstorage_mapping;
 use fidl_fuchsia_update as fupdate;
 use fidl_fuchsia_update_verify as fupdate_verify;
 use fuchsia_async as fasync;
@@ -42,6 +44,7 @@ use vfs::directory::helper::DirectlyMutable as _;
 mod base_pkg_index;
 mod cache_pkg_index;
 mod cobalt;
+mod driver_blob_paging;
 mod executability_enforcement;
 mod full_component_resolver;
 mod full_resolver;
@@ -404,6 +407,8 @@ struct TestEnvBuilder<BlobfsAndSystemImageFut> {
     blob_network_body_timeout_seconds: Option<u32>,
     blob_implementation: Option<blobfs_ramdisk::Implementation>,
     bootfs_blobs: HashMap<Hash, Vec<u8>>,
+    use_driver_blob_paging: bool,
+    mapper: Option<fstorage_block::MapperProxy>,
 }
 
 impl TestEnvBuilder<BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>> {
@@ -429,6 +434,8 @@ impl TestEnvBuilder<BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>> {
             blob_network_body_timeout_seconds: None,
             blob_implementation: None,
             bootfs_blobs: HashMap::new(),
+            use_driver_blob_paging: false,
+            mapper: None,
         }
     }
 }
@@ -467,6 +474,8 @@ where
             blob_network_body_timeout_seconds: self.blob_network_body_timeout_seconds,
             blob_implementation: self.blob_implementation,
             bootfs_blobs: self.bootfs_blobs,
+            use_driver_blob_paging: self.use_driver_blob_paging,
+            mapper: self.mapper,
         }
     }
 
@@ -507,11 +516,22 @@ where
             blob_network_body_timeout_seconds: self.blob_network_body_timeout_seconds,
             blob_implementation: Some(blobfs_ramdisk::Implementation::from_env()),
             bootfs_blobs: self.bootfs_blobs,
+            use_driver_blob_paging: self.use_driver_blob_paging,
+            mapper: self.mapper,
         }
     }
 
     fn require_system_image(self, require: bool) -> Self {
         Self { require_system_image: require, ..self }
+    }
+
+    fn use_driver_blob_paging(self, enabled: bool) -> Self {
+        Self { use_driver_blob_paging: enabled, ..self }
+    }
+
+    fn mapper(self, mapper: fstorage_block::MapperProxy) -> Self {
+        assert_matches!(self.mapper, None);
+        Self { mapper: Some(mapper), ..self }
     }
 
     fn enable_upgradable_packages(self) -> Self {
@@ -624,6 +644,59 @@ where
                 .unwrap();
         }
 
+        let has_custom_mapper = self.mapper.is_some();
+        if let Some(mapper_proxy) = self.mapper {
+            local_child_svc_dir
+                .add_entry(
+                    fstorage_block::MapperMarker::PROTOCOL_NAME,
+                    vfs::service::host(move |stream: fstorage_block::MapperRequestStream| {
+                        let mapper_proxy = mapper_proxy.clone();
+                        async move {
+                            let mut stream = stream;
+                            while let Ok(Some(request)) = stream.try_next().await {
+                                match request {
+                                    fstorage_block::MapperRequest::OpenSession {
+                                        session,
+                                        mapping_vmo,
+                                        port,
+                                        delivery_queue,
+                                        responder,
+                                    } => {
+                                        let res = mapper_proxy
+                                            .open_session(
+                                                session,
+                                                mapping_vmo,
+                                                port,
+                                                delivery_queue,
+                                            )
+                                            .await;
+                                        match res {
+                                            Ok(res) => {
+                                                let _ = responder.send(res);
+                                            }
+                                            Err(error) => {
+                                                log::error!(
+                                                    error:?;
+                                                    "Failed to forward OpenSession to real Mapper"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    fstorage_block::MapperRequest::_UnknownMethod {
+                                        ordinal,
+                                        ..
+                                    } => {
+                                        log::warn!(ordinal; "Unknown Mapper request ordinal");
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
+                .unwrap();
+        }
+
         let bootfs_blobs = {
             // The capability is optional, so if there are no bootfs blobs give pkg-cache a broken
             // proxy.
@@ -687,6 +760,7 @@ where
                 self.blob_network_body_timeout_seconds.unwrap_or(30).into(),
             ),
             ("fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit", 50u32.into()),
+            ("fuchsia.pkgcache.UseDriverBlobPaging", self.use_driver_blob_paging.into()),
         ] {
             builder
                 .add_capability(
@@ -778,6 +852,12 @@ where
             )
             .await
             .unwrap();
+        let mapper_capability = if has_custom_mapper {
+            Capability::protocol::<fstorage_block::MapperMarker>()
+        } else {
+            Capability::protocol::<fstorage_block::MapperMarker>()
+                .path(format!("/blob-svc/{}", fstorage_block::MapperMarker::PROTOCOL_NAME))
+        };
         builder
             .add_route(
                 Route::new()
@@ -789,7 +869,16 @@ where
                         Capability::protocol::<ffxfs::BlobReaderMarker>()
                             .path(format!("/blob-svc/{}", ffxfs::BlobReaderMarker::PROTOCOL_NAME)),
                     )
+                    .capability(
+                        Capability::protocol::<fstorage_mapping::MappingProviderMarker>().path(
+                            format!(
+                                "/blob-svc/{}",
+                                fstorage_mapping::MappingProviderMarker::PROTOCOL_NAME
+                            ),
+                        ),
+                    )
                     .capability(Capability::protocol::<fpkg::AuthorityMarker>())
+                    .capability(mapper_capability)
                     .from(&service_reflector)
                     .to(&pkg_cache),
             )
@@ -1366,29 +1455,4 @@ impl MockPkgAuthority {
     fn get_history_clone(&self) -> Vec<String> {
         self.lookup_call_history.lock().clone()
     }
-}
-
-#[fuchsia::test]
-async fn blob_reader_forwarding() {
-    let env = TestEnv::builder().fxblob().build().await;
-    env.block_until_started().await;
-
-    let content = "hello from blob reader forwarding".as_bytes();
-    let blob_hash = fuchsia_merkle::root_from_slice(content);
-    let () = env.blobfs.add_blob_from(blob_hash, content).await.unwrap();
-
-    let reader_vmo = env
-        .proxies
-        .blob_reader
-        .get_vmo(&blob_hash.into())
-        .await
-        .expect("get_vmo fidl failed")
-        .map_err(zx::Status::err_from_raw)
-        .expect("get_vmo failed");
-    assert_eq!(
-        reader_vmo.read_to_vec::<u8>(0, content.len() as u64).expect("read_to_vec failed"),
-        content
-    );
-
-    env.stop().await;
 }

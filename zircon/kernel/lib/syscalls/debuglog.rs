@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::debuglog_rs::{DLOG_MAX_DATA, dlog_record_t};
-use crate::object::{Dispatcher, HandleValue, LogDispatcher, validate_resource_kind_base};
+use crate::object::{HandleValue, LogDispatcher, ProcessDispatcher, validate_resource_kind_base};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -60,7 +60,13 @@ pub fn sys_debuglog_write(
         return Err(Status::INVALID_ARGS);
     }
 
-    let log = Dispatcher::get_with_rights::<LogDispatcher>(log_handle, ZX_RIGHT_WRITE)?;
+    let log = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<LogDispatcher>(
+            up,
+            log_handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); DLOG_MAX_DATA];
     let slice = ptr.copy_slice_from_user(&mut buf[..len])?;
@@ -130,7 +136,9 @@ pub fn sys_debuglog_read(
         return Err(Status::INVALID_ARGS);
     }
 
-    let log = Dispatcher::get_with_rights::<LogDispatcher>(log_handle, ZX_RIGHT_READ)?;
+    let log = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<LogDispatcher>(up, log_handle, ZX_RIGHT_READ)
+    })?;
 
     let mut record = dlog_record_t::default();
     let mut actual = 0;

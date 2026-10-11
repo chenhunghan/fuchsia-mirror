@@ -163,6 +163,10 @@ pub enum DecodeError {
     #[error("invalid padding")]
     InvalidPadding,
 
+    /// Invalid non-zero integer
+    #[error("non-zero integer was set to 0")]
+    InvalidNonZeroInteger,
+
     /// Validation Failed
     #[error("validation failed")]
     Validation(#[from] ValidationError),

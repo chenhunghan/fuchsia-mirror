@@ -181,5 +181,32 @@ class ExistsTest(unittest.TestCase):
         self.assertTrue(rbe_settings.exists(self.temp_dir))
 
 
+class FakeTest(unittest.TestCase):
+    """Tests the in-memory fake() factory helper function."""
+
+    def test_fake_defaults(self) -> None:
+        settings = rbe_settings.fake()
+        self.assertFalse(settings.rbe_enabled)
+        self.assertFalse(settings.rs_enabled)
+        self.assertFalse(settings.cxx_enable)
+        self.assertTrue(settings.cxx_download_objects)
+
+    def test_fake_overrides(self) -> None:
+        settings = rbe_settings.fake(
+            cxx_enable=True,
+            cxx_exec_strategy="remote",
+            needs_reproxy=True,
+        )
+        self.assertTrue(settings.rbe_enabled)
+        self.assertTrue(settings.cxx_enable)
+        self.assertEqual(settings.cxx_exec_strategy, "remote")
+        self.assertTrue(settings.needs_reproxy)
+
+    def test_fake_unknown_overrides_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            rbe_settings.fake(nonexistent_key=True)
+        self.assertIn("nonexistent_key", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

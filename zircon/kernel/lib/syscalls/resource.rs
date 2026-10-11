@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, HandleValue, ResourceDispatcher, StrictValidation, is_valid_kind,
+    HandleValue, ProcessDispatcher, ResourceDispatcher, StrictValidation, is_valid_kind,
     validate_ranged_resource_dispatcher,
 };
 use crate::user_copy::UserInPtr;
@@ -51,7 +51,13 @@ pub fn sys_resource_create(
     }
 
     // Obtain the parent Resource. WRITE access is required to create a child resource.
-    let parent = Dispatcher::get_with_rights::<ResourceDispatcher>(parent_rsrc, ZX_RIGHT_WRITE)?;
+    let parent = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ResourceDispatcher>(
+            up,
+            parent_rsrc,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     let kind = zx_rsrc_extract_kind(options);
     let flags = zx_rsrc_extract_flags(options);

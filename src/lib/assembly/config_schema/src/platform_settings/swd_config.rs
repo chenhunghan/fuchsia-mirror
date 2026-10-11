@@ -48,6 +48,10 @@ pub struct SwdConfig {
     /// this number of seconds (excluding waiting for reboot).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excessive_update_duration_seconds: Option<u32>,
+
+    /// Whether to use driver blob paging in pkg-cache.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub use_driver_blob_paging: bool,
 }
 
 /// The trust store to use for SWD.

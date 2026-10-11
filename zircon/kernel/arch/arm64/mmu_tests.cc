@@ -86,9 +86,47 @@ bool arm64_test_destroy_without_init() {
   END_TEST;
 }
 
+bool arm64_test_non_physmap_exec() {
+  BEGIN_TEST;
+
+  ArmArchVmAspace aspace(USER_ASPACE_BASE, USER_ASPACE_SIZE, ArmAspaceType::kUser);
+  ASSERT_OK(aspace.Init());
+
+  // Choose a physical address outside the physmap range to verify that cache maintenance during
+  // executable mappings does not attempt to dereference an unmapped physmap virtual address.
+  paddr_t pa = RoundUpPageSize(gPhysmapSize);
+  ASSERT_FALSE(is_physmap_phys_addr(pa));
+
+  constexpr arch_mmu_flags_t kRxFlags =
+      ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_EXECUTE | ARCH_MMU_FLAG_CACHED;
+  constexpr arch_mmu_flags_t kRoFlags = ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_CACHED;
+
+  EXPECT_OK(aspace.Map(kTestVirtualAddress, &pa, 1, kRxFlags,
+                       ArchVmAspaceInterface::ExistingEntryAction::Error));
+  paddr_t query_pa = 0;
+  arch_mmu_flags_t query_flags = 0;
+  EXPECT_OK(aspace.Query(kTestVirtualAddress, &query_pa, &query_flags));
+  EXPECT_EQ(pa, query_pa);
+  EXPECT_EQ(kRxFlags, query_flags);
+  EXPECT_OK(aspace.Unmap(kTestVirtualAddress, 1, ArchUnmapOptions::None));
+
+  EXPECT_OK(aspace.MapContiguous(kTestVirtualAddress, pa, 1, kRxFlags));
+  EXPECT_OK(aspace.Unmap(kTestVirtualAddress, 1, ArchUnmapOptions::None));
+
+  EXPECT_OK(aspace.Map(kTestVirtualAddress, &pa, 1, kRoFlags,
+                       ArchVmAspaceInterface::ExistingEntryAction::Error));
+  EXPECT_OK(aspace.Protect(kTestVirtualAddress, 1, kRxFlags, ArchUnmapOptions::None));
+  EXPECT_OK(aspace.Unmap(kTestVirtualAddress, 1, ArchUnmapOptions::None));
+
+  EXPECT_OK(aspace.Destroy());
+
+  END_TEST;
+}
+
 }  // anonymous namespace
 
 UNITTEST_START_TESTCASE(arm64_mmu_tests)
 UNITTEST("perms", arm64_test_perms)
 UNITTEST("destroy-without-init", arm64_test_destroy_without_init)
+UNITTEST("non-physmap-exec", arm64_test_non_physmap_exec)
 UNITTEST_END_TESTCASE(arm64_mmu_tests, "arm64_mmu", "arm64 mmu tests")

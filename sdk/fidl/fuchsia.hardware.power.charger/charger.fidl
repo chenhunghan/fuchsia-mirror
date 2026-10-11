@@ -388,8 +388,9 @@ open protocol Charger {
 ///
 /// This is a partial update: only the fields present are applied, and any omitted field leaves the
 /// corresponding hardware setting unchanged. While the `Controller` connection remains open, to
-/// relax a previously applied limit, set the field again to the desired value, or close the
-/// `Controller` channel to withdraw all overrides and restore driver defaults.
+/// relax or withdraw a previously applied limit, set the field again to the desired value, call
+/// [`Controller.ClearControl`] with a mask of fields to withdraw, or close the `Controller`
+/// channel to withdraw all constraints and restore driver defaults.
 ///
 /// Values between discrete hardware register steps are rounded in the direction that honors the
 /// constraint. Ceilings (current and voltage limits) round down, so a value below the lowest
@@ -430,44 +431,71 @@ type ControlOptions = table {
 
 /// Control interface for mutating charger hardware state.
 ///
-/// # Single-Client Exclusivity
-/// This protocol mutates shared hardware state and admits a single active client. While one client
-/// is connected, a second connection attempt is closed immediately with a `ZX_ERR_ALREADY_BOUND`
-/// epitaph before any request is served, so no request from the second client ever reaches the
-/// hardware.
+/// # Single-Client Exclusivity (Hardware Driver) vs. Policy Arbitrator
+/// On a hardware charger driver, this protocol mutates shared hardware state and admits a single
+/// active client: while one client is connected, a second connection attempt is closed immediately
+/// with a `ZX_ERR_ALREADY_BOUND` epitaph before any request is served. When served by a userspace
+/// policy arbitrator (such as `battery-manager`), multiple policy clients may connect concurrently;
+/// each connection owns an independent vote that is aggregated using minimum selection on limit
+/// fields and `Discharging > Passthrough > Charging` precedence on `operating_mode`.
 ///
 /// # Connection-Scoped Lifetime (Revert on Close)
 /// The `Controller` channel encodes the lifetime of the constraints applied through it. When the
-/// client closes the channel (or disconnects unexpectedly), the driver withdraws all constraints
-/// set during that session and reverts the charger to autonomous hardware / board-configured
-/// defaults (e.g. restoring autonomous USB-C/BC1.2 input current limit selection and default
-/// charging mode).
+/// client closes the channel (or disconnects unexpectedly), all constraints set during that
+/// session are withdrawn (equivalent to calling `ClearControl` with an empty `ControlOptions`).
 ///
 /// # Debug Overrides
 /// Fields overridden through [`Debug`] take precedence over this protocol. A request that sets an
-/// overridden field is validated and accepted as usual, but the new constraint (like the revert on
-/// close) reaches the hardware only once the override is cleared. See [`Debug`].
+/// overridden field is validated and accepted as usual, but the new constraint (like `ClearControl`
+/// or revert on close) reaches the hardware only once the override is cleared. See [`Debug`].
 @discoverable
 open protocol Controller {
-    /// Atomically applies operational and electrical constraints to the charger converter.
+    /// Applies operational and electrical constraints to the charger converter.
     ///
-    /// Either every requested constraint is applied, or none are; a rejected request leaves the
-    /// hardware in its previous state. The response is returned only after all corresponding
+    /// Validation is atomic: a request rejected with `NOT_SUPPORTED` or `INVALID_ARGS` leaves
+    /// hardware and session state untouched. The response is returned only after all corresponding
     /// hardware register writes have completed and been acknowledged by the charger IC.
     ///
     /// Parameters:
-    /// + `options`: The constraints to apply. Omitted fields leave the corresponding hardware
-    ///   setting unchanged.
+    /// + `options`: The constraints to apply. Present fields overwrite the constraints previously
+    ///   set on this connection for those fields; omitted fields leave this connection's prior
+    ///   constraints for those fields unchanged.
     ///
     /// Errors:
     /// - `NOT_SUPPORTED`: One or more requested constraints are not adjustable on this
-    ///   hardware, or the requested `operating_mode` is absent from `Spec.supported_modes`.
+    ///   hardware/arbiter, or the requested `operating_mode` is absent from `Spec.supported_modes`.
     /// - `INVALID_ARGS`: A requested value is outside the range the hardware can program, or the
     ///   requested `operating_mode` conflicts with the active power path state (for example,
     ///   requesting `OperatingMode::OTG` while external input power is online on the same port).
     /// - `IO`: Communication failure with the charger hardware (e.g. SPMI transfer failure).
     /// - `INTERNAL`: Internal driver error.
     flexible SetControl(struct {
+        options ControlOptions;
+    }) -> () error Error;
+
+    /// Withdraws constraints applied through this connection for the fields present in `options`.
+    ///
+    /// `options` acts as a field mask: only field presence (set vs. unset) is inspected, and the
+    /// field values themselves are ignored.
+    ///
+    /// - If `options` is empty (no fields set), **all** constraints applied through this
+    ///   connection are withdrawn.
+    /// - If one or more fields are set in `options`, only the constraints corresponding to those
+    ///   fields are withdrawn, leaving any other fields untouched.
+    ///
+    /// Each cleared field reverts to the next active constraint, if any, or otherwise to the
+    /// autonomous hardware / board-configured default that [`Controller`] restores on close.
+    /// Succeeds without effect for any targeted field that is not currently constrained.
+    ///
+    /// Parameters:
+    /// + `options`: Mask of `ControlOptions` fields whose constraints should be withdrawn, or an
+    ///   empty table to withdraw all constraints on this connection.
+    ///
+    /// Errors:
+    /// - `IO`: Communication failure with the charger hardware. Fields that could not be reverted
+    ///   retain their constraint, so the call can be retried.
+    /// - `INTERNAL`: Internal driver error.
+    flexible ClearControl(struct {
         options ControlOptions;
     }) -> () error Error;
 };
@@ -489,27 +517,15 @@ open protocol Controller {
 /// # Sticky Lifetime (No Revert on Close)
 /// Overrides are not tied to the connection that applied them: closing the channel leaves them in
 /// effect, so a utility can apply an override and exit. They remain in effect until
-/// [`Debug.ClearOverrides`] is called.
+/// `ClearControl` is called on a `Debug` connection.
 ///
-/// # Multiple Clients
-/// Any number of clients may connect concurrently; connections are never rejected with
-/// `ZX_ERR_ALREADY_BOUND`. All connections share one set of overrides: for each field, the most
-/// recent `SetControl` from any client wins, and [`Debug.ClearOverrides`] from any client
-/// withdraws all of them.
+/// # Multiple Connections
+/// Any number of `Debug` connections may be open concurrently; connections are never rejected with
+/// `ZX_ERR_ALREADY_BOUND`. All `Debug` connections share one set of `Debug` overrides: for each
+/// field, the most recent `SetControl` wins, and `ClearControl` withdraws the targeted `Debug`
+/// overrides.
 open protocol Debug {
     compose Controller;
-
-    /// Withdraws all overrides applied through `Debug`, including those applied by other clients.
-    ///
-    /// Each overridden field reverts to the constraint applied through the active [`Controller`]
-    /// connection, if any, or otherwise to the autonomous hardware / board-configured default that
-    /// [`Controller`] restores on close. Succeeds without effect if no field is overridden.
-    ///
-    /// Errors:
-    /// - `IO`: Communication failure with the charger hardware. Fields that could not be reverted
-    ///   remain overridden, so the call can be retried.
-    /// - `INTERNAL`: Internal driver error.
-    flexible ClearOverrides() -> () error Error;
 };
 
 service Service {

@@ -15,6 +15,10 @@ use std::sync::Arc;
 
 const INBOUND_WINDOW_SIZE: u32 = 2;
 
+/// Receive sensitivity, in dBm, that the fake RCP reports for
+/// `SPINEL_PROP_PHY_RX_SENSITIVITY`.
+const FAKE_RX_SENSITIVITY_DBM: i8 = -100;
+
 pub const PROP_DEBUG_LOGGING_TEST: Prop = Prop::Unknown(2097151);
 pub const PROP_DEBUG_SAVED_PANID_TEST: Prop = Prop::Unknown(2097152);
 
@@ -56,6 +60,11 @@ impl FakeSpinelDevice {
         properties.insert(Prop::Phy(PropPhy::Chan), vec![11]);
         properties.insert(Prop::Phy(PropPhy::TxPower), vec![0]);
         properties.insert(Prop::Phy(PropPhy::Enabled), vec![0]);
+        // OpenThread reads this when it enables the radio, and asserts if the read fails.
+        properties.insert(
+            Prop::Phy(PropPhy::RxSensitivity),
+            FAKE_RX_SENSITIVITY_DBM.to_le_bytes().to_vec(),
+        );
         properties.insert(Prop::Phy(PropPhy::ChanPreferred), vec![11, 12, 13]);
         properties.insert(Prop::Phy(PropPhy::ChanSupported), vec![11, 12, 13]);
         properties.insert(Prop::Mac(PropMac::ScanMask), vec![11, 12, 13]);
@@ -67,12 +76,14 @@ impl FakeSpinelDevice {
             vec![0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
         );
         properties.insert(Prop::Mac(PropMac::ShortAddr), vec![0, 0]);
-        properties.insert(Prop::Unknown(2048), vec![]); // SPINEL_PROP_RCP_MAC_KEY
-        properties.insert(Prop::Unknown(2049), vec![0, 0, 0, 0]); // SPINEL_PROP_RCP_MAC_FRAME_COUNTER
-        properties.insert(Prop::Unknown(2050), vec![0, 0, 0, 0, 0, 0, 0, 0]); // SPINEL_PROP_RCP_TIMESTAMP
-        properties.insert(Prop::Unknown(2051), vec![0, 0, 0, 0]); // SPINEL_PROP_RCP_ENH_ACK_PROBING
+        properties.insert(Prop::Rcp(PropRcp::MacKey), vec![]);
+        properties.insert(Prop::Rcp(PropRcp::MacFrameCounter), vec![0, 0, 0, 0]);
+        properties.insert(Prop::Rcp(PropRcp::Timestamp), vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        properties.insert(Prop::Rcp(PropRcp::EnhAckProbing), vec![0, 0, 0, 0]);
         properties.insert(Prop::Mac(PropMac::Unknown(4868)), vec![]);
         properties.insert(Prop::Mac(PropMac::Unknown(4869)), vec![]);
+        // Set at init because the platform radio URL includes `enable-coex`.
+        properties.insert(Prop::Phy(PropPhy::RadioCoexEnable), vec![0]);
 
         properties.insert(Prop::Stream(PropStream::Net), vec![]);
         properties.insert(Prop::Stream(PropStream::NetInsecure), vec![]);
@@ -675,8 +686,7 @@ impl FakeSpinelDevice {
                 )
                 .unwrap();
             }
-            Prop::Unknown(176) => {
-                // RCP API Version
+            Prop::Rcp(PropRcp::ApiVersion) => {
                 spinel_write!(
                     &mut response,
                     "Ciii",
@@ -687,7 +697,7 @@ impl FakeSpinelDevice {
                 )
                 .unwrap();
             }
-            Prop::Phy(PropPhy::Unknown(0x120b)) => {
+            Prop::Phy(PropPhy::RadioCaps) => {
                 spinel_write!(&mut response, "Ciii", frame.header, Cmd::PropValueIs, prop, 0xFFFF)
                     .unwrap();
             }
@@ -845,7 +855,9 @@ impl FakeSpinelDevice {
             Cmd::PropValueGet => {
                 let mut payload = frame.payload.iter();
                 let prop = Prop::try_unpack(&mut payload);
-                if payload.count() == 0 || prop.as_ref().ok() == Some(&Prop::Unknown(2050)) {
+                if payload.count() == 0
+                    || prop.as_ref().ok() == Some(&Prop::Rcp(PropRcp::Timestamp))
+                {
                     prop.ok()
                         .and_then(|prop| self.handle_get_prop(frame, prop))
                         .map(|r| vec![r])

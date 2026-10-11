@@ -17,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,8 @@ def check_call_with_logging(
     args, *, stdout_handler, stderr_handler, check=True, text=True, **kwargs
 ):
     stdout_handler(f"Subprocess: {shlex.join(str(arg) for arg in args)}")
+    if text:
+        kwargs.setdefault("errors", "ignore")
 
     with subprocess.Popen(
         args,
@@ -59,6 +62,8 @@ def check_output_with_logging(
     args, *, stdout_handler, stderr_handler, check=True, text=True, **kwargs
 ):
     stdout_handler(f"Subprocess: {shlex.join(str(arg) for arg in args)}")
+    if text:
+        kwargs.setdefault("errors", "ignore")
 
     buf = io.StringIO()
 
@@ -101,7 +106,10 @@ def atomic_link(link: Path, target: Path):
     os.makedirs(link_dir, exist_ok=True)
     link_file = link.name
     tmp_file = link_dir.joinpath(link_file + "_tmp")
-    os.link(target, tmp_file)
+    try:
+        os.link(target, tmp_file)
+    except OSError:
+        shutil.copy2(target, tmp_file)
     try:
         os.rename(tmp_file, link)
     except Exception as e:
@@ -139,7 +147,9 @@ class TestEnvironment:
         if tmp_dir is not None:
             TestEnvironment.__tmp_dir = Path(tmp_dir).absolute()
         else:
-            TestEnvironment.__tmp_dir = Path(__file__).parent.joinpath("tmp~")
+            TestEnvironment.__tmp_dir = Path(tempfile.gettempdir()).joinpath(
+                "fuchsia-test-runner"
+            )
         return TestEnvironment.__tmp_dir
 
     @staticmethod
@@ -147,7 +157,7 @@ class TestEnvironment:
         elems = triple.split("-")
         if len(elems) < 2:
             raise Exception(f"Unrecognized target triple {triple}")
-        triple_s = f"{elems[0]}-{elems[1]}"
+        triple_s = f"{elems[0]}-{elems[-1]}"
         if triple_s not in TestEnvironment.triple_to_arch_map:
             raise Exception(f"Unrecognized target triple {triple}")
         return TestEnvironment.triple_to_arch_map[triple_s]
@@ -212,11 +222,15 @@ class TestEnvironment:
             raise Exception(
                 f"Unreadable output from llvm-readelf for binary {binary}"
             )
-        notes = data[0]["Notes"]
+        notes = data[0].get("NoteSections") or data[0].get("Notes", [])
         for note in notes:
             note_section = note["NoteSection"]
             if note_section["Name"] == ".note.gnu.build-id":
-                return note_section["Note"]["Build ID"]
+                if "Note" in note_section:
+                    return note_section["Note"]["Build ID"]
+                for entry in note_section.get("Notes", []):
+                    if "Build ID" in entry:
+                        return entry["Build ID"]
         raise Exception(f"Build ID not found for binary {binary}")
 
     def generate_buildid_dir(
@@ -344,11 +358,7 @@ class TestEnvironment:
     def home_dir(self):
         return self.tmp_dir().joinpath("user-home")
 
-    def start_ffx_isolation(self):
-        # Most of this is translated directly from ffx's isolate library
-        os.mkdir(self.ffx_isolate_dir)
-        os.mkdir(self.home_dir)
-
+    def setup_ffx_environment(self):
         ffx_path = self.tool_path("ffx")
         ffx_env = self.ffx_cmd_env()
 
@@ -421,12 +431,15 @@ class TestEnvironment:
         self.setup_logging(log_to_file=True)
         os.mkdir(self.output_dir)
 
+        # Write to file
+        self.write_to_file()
+
         ffx_path = self.tool_path("ffx")
         ffx_env = self.ffx_cmd_env()
 
-        # Start ffx isolation
-        self.env_logger.info("Starting ffx isolation...")
-        self.start_ffx_isolation()
+        # Setting up ffx environment.
+        self.env_logger.info("Setting up ffx environment...")
+        self.setup_ffx_environment()
 
         # Stop any running emulators (there shouldn't be any)
         check_call_with_logging(
@@ -585,9 +598,6 @@ class TestEnvironment:
             stdout_handler=self.subprocess_logger.debug,
             stderr_handler=self.subprocess_logger.debug,
         )
-
-        # Write to file
-        self.write_to_file()
 
         self.env_logger.info("Success! Your environment is ready to run tests.")
 

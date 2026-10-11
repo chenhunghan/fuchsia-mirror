@@ -4,40 +4,26 @@
 
 use super::ExecutionContext;
 use super::arithmetic::evaluate_arithmetic;
-use super::glob::{WordChar, expand_glob, match_glob, word_chars_to_bstring};
+use super::glob::{WordChar, expand_glob, match_segment_glob, word_chars_to_bstring};
+use super::simple::{split_assignment_flat, split_simple_command_args};
 use super::state::ShellState;
+use crate::builtins::is_builtin;
 use crate::collections::FlatSet;
 use crate::errors::{io_err_str, zx_status_str};
 use crate::parser::ast::*;
-use crate::parser::{Token, parse_script, parse_subshell_command, resolve_word_parts, tokenize};
+use crate::parser::{
+    QuoteMode, Token, parse_script, parse_subshell_command, resolve_word_parts,
+    scan_arithmetic_expansion, scan_backtick_command_substitution, scan_braced_param,
+    scan_command_substitution, scan_unbraced_var_name, tokenize, tokenize_modifier_word,
+};
 use crate::process::{clone_fd_to_action, make_pipe, read_fd_to_end};
 use crate::relative;
 use crate::subshell::{SubshellScriptArgs, spawn_subshell_process};
 use bstr::{BStr, BString, ByteSlice};
 
-pub fn is_assignment_flat(arg: &[WordPart], buf: &relative::Buffer) -> bool {
-    if arg.is_empty() {
-        return false;
-    }
-    if arg[0].tag == WordPartTag::LITERAL {
-        let s = arg[0].text.as_bstr(buf);
-        if let Some(pos) = s.as_bytes().iter().position(|&b| b == b'=') {
-            let name = &s.as_bytes()[..pos];
-            if name.is_empty() {
-                return false;
-            }
-            let mut bytes = name.iter();
-            let &first = bytes.next().unwrap();
-            return (first.is_ascii_alphabetic() || first == b'_')
-                && bytes.all(|&c| c.is_ascii_alphanumeric() || c == b'_');
-        }
-    }
-    false
-}
-
 fn run_command_substitution(
     cmd: &Command,
-    state: &ShellState,
+    state: &mut ShellState,
     ctx: &ExecutionContext,
     source_buf: &relative::Buffer,
 ) -> Result<BString, String> {
@@ -67,6 +53,11 @@ fn run_command_substitution(
     proc.wait_one(zx::Signals::PROCESS_TERMINATED, zx::MonotonicInstant::INFINITE)
         .map_err(|e| format!("Wait for subshell failed: {}", zx_status_str(e)))?;
 
+    let info = proc
+        .info()
+        .map_err(|e| format!("Failed to get subshell process info: {}", zx_status_str(e)))?;
+    state.record_cmd_sub_status(info.return_code as i32);
+
     let mut output = output_bytes;
     while output.last() == Some(&b'\n') {
         output.pop();
@@ -74,218 +65,195 @@ fn run_command_substitution(
     Ok(BString::from(output))
 }
 
-fn is_builtin(name: &BStr) -> bool {
-    matches!(
-        name.as_bytes(),
-        b"." | b"["
-            | b":"
-            | b"alias"
-            | b"break"
-            | b"cd"
-            | b"chdir"
-            | b"command"
-            | b"continue"
-            | b"cp"
-            | b"dm"
-            | b"dump"
-            | b"echo"
-            | b"eval"
-            | b"exec"
-            | b"exit"
-            | b"export"
-            | b"false"
-            | b"getopts"
-            | b"hash"
-            | b"k"
-            | b"list"
-            | b"local"
-            | b"ls"
-            | b"mkdir"
-            | b"msleep"
-            | b"mv"
-            | b"power"
-            | b"printf"
-            | b"pwd"
-            | b"read"
-            | b"readonly"
-            | b"return"
-            | b"rm"
-            | b"set"
-            | b"shift"
-            | b"test"
-            | b"times"
-            | b"trap"
-            | b"true"
-            | b"type"
-            | b"ulimit"
-            | b"umask"
-            | b"unalias"
-            | b"unset"
-            | b"wait"
-    )
+fn is_special_param(b: u8) -> bool {
+    matches!(b, b'@' | b'*' | b'#' | b'?' | b'-' | b'$' | b'!')
+}
+
+fn is_valid_var_name(bytes: &[u8]) -> bool {
+    if let Some((&first, rest)) = bytes.split_first() {
+        (first.is_ascii_alphabetic() || first == b'_')
+            && rest.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
+    } else {
+        false
+    }
+}
+
+fn is_pure_param_name(bytes: &[u8]) -> bool {
+    (bytes.len() == 1 && is_special_param(bytes[0]))
+        || (!bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit()))
+        || is_valid_var_name(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NullCondition {
+    UnsetOnly,
+    UnsetOrNull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripLength {
+    Shortest,
+    Longest,
 }
 
 enum Modifier<'a> {
     Length,
-    Default(&'a BStr, bool),       // (word, null_too)
-    Assign(&'a BStr, bool),        // (word, null_too)
-    Error(Option<&'a BStr>, bool), // (msg, null_too)
-    Alternative(&'a BStr, bool),   // (word, null_too)
-    RemovePrefix(&'a BStr, bool),  // (pattern, longest)
-    RemoveSuffix(&'a BStr, bool),  // (pattern, longest)
+    Default(&'a BStr, NullCondition),
+    Assign(&'a BStr, NullCondition),
+    Error(Option<&'a BStr>, NullCondition),
+    Alternative(&'a BStr, NullCondition),
+    RemovePrefix(&'a BStr, StripLength),
+    RemoveSuffix(&'a BStr, StripLength),
 }
 
-fn parse_modifier<'a>(name: &'a BStr) -> (&'a BStr, Option<Modifier<'a>>) {
-    if name == "#"
-        || name == "?"
-        || name == "@"
-        || name == "*"
-        || name == "$"
-        || name == "!"
-        || name == "-"
-    {
-        return (name, None);
-    }
-    if name.starts_with(b"#") && name.len() > 1 {
-        let var_name = BStr::new(&name.as_bytes()[1..]);
-        return (var_name, Some(Modifier::Length));
+fn parse_modifier<'a>(name: &'a BStr) -> Result<(&'a BStr, Option<Modifier<'a>>), String> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() {
+        return Err("Bad substitution".to_string());
     }
 
-    if let Some(idx) = name.find(b":-") {
-        return (
-            BStr::new(&name.as_bytes()[..idx]),
-            Some(Modifier::Default(BStr::new(&name.as_bytes()[idx + 2..]), true)),
-        );
-    }
-    if let Some(idx) = name.find(b":=") {
-        return (
-            BStr::new(&name.as_bytes()[..idx]),
-            Some(Modifier::Assign(BStr::new(&name.as_bytes()[idx + 2..]), true)),
-        );
-    }
-    if let Some(idx) = name.find(b":?") {
-        let msg = BStr::new(&name.as_bytes()[idx + 2..]);
-        let opt_msg = if msg.is_empty() { None } else { Some(msg) };
-        return (BStr::new(&name.as_bytes()[..idx]), Some(Modifier::Error(opt_msg, true)));
-    }
-    if let Some(idx) = name.find(b":+") {
-        return (
-            BStr::new(&name.as_bytes()[..idx]),
-            Some(Modifier::Alternative(BStr::new(&name.as_bytes()[idx + 2..]), true)),
-        );
-    }
-
-    let mut min_idx = None;
-    let mut matched_char = None;
-    for &c in &[b'-', b'=', b'?', b'+', b'#', b'%'] {
-        if let Some(idx) = name.find(&[c]) {
-            if min_idx.map_or(true, |m| idx < m) {
-                min_idx = Some(idx);
-                matched_char = Some(c);
-            }
+    if bytes[0] == b'#' {
+        if bytes.len() == 1 {
+            return Ok((name, None));
+        }
+        let after_hash = &bytes[1..];
+        if is_pure_param_name(after_hash) {
+            return Ok((BStr::new(after_hash), Some(Modifier::Length)));
+        }
+        if !matches!(after_hash[0], b':' | b'-' | b'=' | b'?' | b'+' | b'#' | b'%') {
+            return Err(format!("{}: bad substitution", name));
         }
     }
 
-    if let Some(idx) = min_idx {
-        let var_name = BStr::new(&name.as_bytes()[..idx]);
-        let rest = BStr::new(&name.as_bytes()[idx..]);
-        match matched_char.unwrap() {
-            b'-' => {
-                return (
-                    var_name,
-                    Some(Modifier::Default(BStr::new(&rest.as_bytes()[1..]), false)),
-                );
-            }
-            b'=' => {
-                return (var_name, Some(Modifier::Assign(BStr::new(&rest.as_bytes()[1..]), false)));
-            }
-            b'?' => {
-                let msg = BStr::new(&rest.as_bytes()[1..]);
-                let opt_msg = if msg.is_empty() { None } else { Some(msg) };
-                return (var_name, Some(Modifier::Error(opt_msg, false)));
-            }
-            b'+' => {
-                return (
-                    var_name,
-                    Some(Modifier::Alternative(BStr::new(&rest.as_bytes()[1..]), false)),
-                );
-            }
-            b'#' => {
-                if rest.starts_with(b"##") {
-                    return (
-                        var_name,
-                        Some(Modifier::RemovePrefix(BStr::new(&rest.as_bytes()[2..]), true)),
-                    );
-                } else {
-                    return (
-                        var_name,
-                        Some(Modifier::RemovePrefix(BStr::new(&rest.as_bytes()[1..]), false)),
-                    );
-                }
-            }
-            b'%' => {
-                if rest.starts_with(b"%%") {
-                    return (
-                        var_name,
-                        Some(Modifier::RemoveSuffix(BStr::new(&rest.as_bytes()[2..]), true)),
-                    );
-                } else {
-                    return (
-                        var_name,
-                        Some(Modifier::RemoveSuffix(BStr::new(&rest.as_bytes()[1..]), false)),
-                    );
-                }
-            }
-            _ => unreachable!(),
-        }
+    let var_len = if is_special_param(bytes[0]) {
+        1
+    } else if bytes[0].is_ascii_digit() {
+        bytes.iter().take_while(|b| b.is_ascii_digit()).count()
+    } else if bytes[0].is_ascii_alphabetic() || bytes[0] == b'_' {
+        bytes.iter().take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_').count()
+    } else {
+        return Err(format!("{}: bad substitution", name));
+    };
+
+    let var_name = BStr::new(&bytes[..var_len]);
+    let rest = &bytes[var_len..];
+    if rest.is_empty() {
+        return Ok((var_name, None));
     }
 
-    (name, None)
+    let modifier = if let Some(word) = rest.strip_prefix(b":-") {
+        Modifier::Default(BStr::new(word), NullCondition::UnsetOrNull)
+    } else if let Some(word) = rest.strip_prefix(b"-") {
+        Modifier::Default(BStr::new(word), NullCondition::UnsetOnly)
+    } else if let Some(word) = rest.strip_prefix(b":=") {
+        Modifier::Assign(BStr::new(word), NullCondition::UnsetOrNull)
+    } else if let Some(word) = rest.strip_prefix(b"=") {
+        Modifier::Assign(BStr::new(word), NullCondition::UnsetOnly)
+    } else if let Some(msg) = rest.strip_prefix(b":?") {
+        let opt_msg = if msg.is_empty() { None } else { Some(BStr::new(msg)) };
+        Modifier::Error(opt_msg, NullCondition::UnsetOrNull)
+    } else if let Some(msg) = rest.strip_prefix(b"?") {
+        let opt_msg = if msg.is_empty() { None } else { Some(BStr::new(msg)) };
+        Modifier::Error(opt_msg, NullCondition::UnsetOnly)
+    } else if let Some(word) = rest.strip_prefix(b":+") {
+        Modifier::Alternative(BStr::new(word), NullCondition::UnsetOrNull)
+    } else if let Some(word) = rest.strip_prefix(b"+") {
+        Modifier::Alternative(BStr::new(word), NullCondition::UnsetOnly)
+    } else if let Some(pat) = rest.strip_prefix(b"##") {
+        Modifier::RemovePrefix(BStr::new(pat), StripLength::Longest)
+    } else if let Some(pat) = rest.strip_prefix(b"#") {
+        Modifier::RemovePrefix(BStr::new(pat), StripLength::Shortest)
+    } else if let Some(pat) = rest.strip_prefix(b"%%") {
+        Modifier::RemoveSuffix(BStr::new(pat), StripLength::Longest)
+    } else if let Some(pat) = rest.strip_prefix(b"%") {
+        Modifier::RemoveSuffix(BStr::new(pat), StripLength::Shortest)
+    } else {
+        return Err(format!("{}: bad substitution", name));
+    };
+
+    Ok((var_name, Some(modifier)))
+}
+
+fn parse_and_expand_modifier_to_elems(
+    modifier_str: &BStr,
+    quote_mode: QuoteMode,
+    state: &mut ShellState,
+    ctx: &ExecutionContext,
+) -> Result<Vec<PreSplitElem>, String> {
+    if modifier_str.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = ASTBuilder::new();
+    let raw_parts =
+        tokenize_modifier_word(modifier_str.as_bytes(), quote_mode).map_err(|e| e.to_string())?;
+    let resolved_parts = resolve_word_parts(&mut builder, &raw_parts).map_err(|e| e.to_string())?;
+    let word_slice = builder.add_resolved_word(&resolved_parts);
+    let slice = builder.get_slice(word_slice);
+    let fields = expand_argument_to_pre_split_fields(
+        slice,
+        state,
+        ctx,
+        TildeColonMode::DoNotExpandAfterColons,
+        FieldSplitMode::DoNotSplit,
+        &builder,
+    )?;
+    Ok(fields
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|elem| match elem {
+            PreSplitElem::Char(WordChar::Unquoted(b)) => PreSplitElem::Char(WordChar::Expansion(b)),
+            other => other,
+        })
+        .collect())
+}
+
+fn parse_and_expand_modifier_to_word_chars(
+    modifier_str: &BStr,
+    quote_mode: QuoteMode,
+    state: &mut ShellState,
+    ctx: &ExecutionContext,
+) -> Result<Vec<WordChar>, String> {
+    let elems = parse_and_expand_modifier_to_elems(modifier_str, quote_mode, state, ctx)?;
+    Ok(elems
+        .into_iter()
+        .filter_map(|elem| match elem {
+            PreSplitElem::Char(wc) => Some(wc),
+            PreSplitElem::EmptyQuote => None,
+        })
+        .collect())
 }
 
 /// Helper to parse and expand parameter modifier words.
-/// Note: this function will become more elaborate in a later CL.
 pub fn parse_and_expand_modifier(
     modifier_str: &BStr,
+    quote_mode: QuoteMode,
     state: &mut ShellState,
     ctx: &ExecutionContext,
 ) -> Result<BString, String> {
-    let mut escaped = Vec::new();
-    for &b in modifier_str.as_bytes() {
-        if b == b'\\' || b == b'"' {
-            escaped.push(b'\\');
-        }
-        escaped.push(b);
-    }
-    let mut quoted = Vec::new();
-    quoted.push(b'"');
-    quoted.extend_from_slice(&escaped);
-    quoted.push(b'"');
-
-    let mut builder = ASTBuilder::new();
-    let tokens = tokenize(&quoted).map_err(|e| e.to_string())?;
-    if tokens.len() == 1 {
-        if let Token::Word(parts) = &tokens[0] {
-            let temp_parts = resolve_word_parts(&mut builder, parts).map_err(|e| e.to_string())?;
-            let word_slice = builder.add_resolved_word(&temp_parts);
-            let slice = builder.get_slice(word_slice);
-            return expand_argument_no_split(slice, state, ctx, &builder);
-        }
-    }
-    Err(format!("Invalid modifier/expression: {}", modifier_str))
+    let chars = parse_and_expand_modifier_to_word_chars(modifier_str, quote_mode, state, ctx)?;
+    Ok(word_chars_to_bstring(&chars))
 }
 
-/// Expands a shell parameter expression including modifiers (e.g. `${var:-default}`, `${#var}`,
-/// `${var%pattern}`).
-///
-/// Evaluates defaults, alternate values, string slicing, length expansion, and prefix/suffix
-/// stripping.
-pub fn expand_var_with_modifiers(
+fn elems_to_bstring(elems: Vec<PreSplitElem>) -> BString {
+    let bytes: Vec<u8> = elems
+        .into_iter()
+        .filter_map(|elem| match elem {
+            PreSplitElem::Char(wc) => Some(wc.raw_byte()),
+            PreSplitElem::EmptyQuote => None,
+        })
+        .collect();
+    BString::from(bytes)
+}
+
+fn expand_var_to_elems(
     name: &BStr,
+    quote_mode: QuoteMode,
     state: &mut ShellState,
     ctx: &ExecutionContext,
-) -> Result<BString, String> {
-    let (var_name, modifier) = parse_modifier(name);
+) -> Result<Vec<PreSplitElem>, String> {
+    let (var_name, modifier) = parse_modifier(name)?;
 
     if state.opt_nounset {
         let is_unbound = state.get_var(var_name).is_none();
@@ -313,19 +281,19 @@ pub fn expand_var_with_modifiers(
 
     fn strip_pattern<'a>(
         val: &'a BStr,
-        pattern: &BStr,
+        pattern: &[WordChar],
         kind: StripKind,
-        longest: bool,
+        length: StripLength,
     ) -> &'a BStr {
         let len = val.len();
         let val_bytes = val.as_bytes();
 
         let find_match_index = || {
-            let indices: Box<dyn Iterator<Item = usize>> = match (kind, longest) {
-                (StripKind::Prefix, false) => Box::new(0..=len),
-                (StripKind::Prefix, true) => Box::new((0..=len).rev()),
-                (StripKind::Suffix, false) => Box::new((0..=len).rev()),
-                (StripKind::Suffix, true) => Box::new(0..=len),
+            let indices: Box<dyn Iterator<Item = usize>> = match (kind, length) {
+                (StripKind::Prefix, StripLength::Shortest) => Box::new(0..=len),
+                (StripKind::Prefix, StripLength::Longest) => Box::new((0..=len).rev()),
+                (StripKind::Suffix, StripLength::Shortest) => Box::new((0..=len).rev()),
+                (StripKind::Suffix, StripLength::Longest) => Box::new(0..=len),
             };
 
             for i in indices {
@@ -333,7 +301,7 @@ pub fn expand_var_with_modifiers(
                     StripKind::Prefix => &val_bytes[..i],
                     StripKind::Suffix => &val_bytes[i..],
                 };
-                if match_glob(pattern, BStr::new(candidate)) {
+                if match_segment_glob(pattern, BStr::new(candidate)) {
                     return Some(i);
                 }
             }
@@ -350,30 +318,51 @@ pub fn expand_var_with_modifiers(
         }
     }
 
+    let bytes_to_elems = |bytes: &[u8]| -> Vec<PreSplitElem> {
+        bytes.iter().map(|&b| PreSplitElem::Char(WordChar::Expansion(b))).collect()
+    };
+
     if let Some(mod_type) = modifier {
         match mod_type {
             Modifier::Length => {
-                let val = state.get_var(var_name).unwrap_or_default();
-                Ok(BString::from(val.len().to_string()))
+                let len = if var_name == "@" || var_name == "*" {
+                    state.get_args().len()
+                } else {
+                    state.get_var(var_name).unwrap_or_default().len()
+                };
+                Ok(bytes_to_elems(len.to_string().as_bytes()))
             }
-            Modifier::Default(_, null_too)
-            | Modifier::Assign(_, null_too)
-            | Modifier::Error(_, null_too)
-            | Modifier::Alternative(_, null_too) => {
+            Modifier::Default(_, null_condition)
+            | Modifier::Assign(_, null_condition)
+            | Modifier::Error(_, null_condition)
+            | Modifier::Alternative(_, null_condition) => {
+                if matches!(mod_type, Modifier::Assign(_, _))
+                    && !is_valid_var_name(var_name.as_bytes())
+                {
+                    return Err(format!(
+                        "{}: cannot assign in this way",
+                        String::from_utf8_lossy(var_name.as_bytes())
+                    ));
+                }
                 let val = state.get_var(var_name);
-                let null_or_unset = val.as_ref().map_or(true, |v| null_too && v.is_empty());
+                let null_or_unset = val
+                    .as_ref()
+                    .map_or(true, |v| null_condition == NullCondition::UnsetOrNull && v.is_empty());
                 match mod_type {
                     Modifier::Alternative(word, _) => {
                         if null_or_unset {
-                            Ok(BString::default())
+                            Ok(Vec::new())
                         } else {
-                            parse_and_expand_modifier(word, state, ctx)
+                            parse_and_expand_modifier_to_elems(word, quote_mode, state, ctx)
                         }
                     }
-                    _ if !null_or_unset => Ok(val.unwrap()),
-                    Modifier::Default(word, _) => parse_and_expand_modifier(word, state, ctx),
+                    _ if !null_or_unset => Ok(bytes_to_elems(val.unwrap().as_bytes())),
+                    Modifier::Default(word, _) => {
+                        parse_and_expand_modifier_to_elems(word, quote_mode, state, ctx)
+                    }
                     Modifier::Assign(word, _) => {
-                        let expanded_word = parse_and_expand_modifier(word, state, ctx)?;
+                        let expanded_word =
+                            parse_and_expand_modifier(word, quote_mode, state, ctx)?;
                         if state.is_readonly(var_name) {
                             return Err(format!(
                                 "{}: is read only",
@@ -381,12 +370,13 @@ pub fn expand_var_with_modifiers(
                             ));
                         }
                         state.set_var(var_name, &expanded_word);
-                        Ok(expanded_word)
+                        Ok(bytes_to_elems(expanded_word.as_bytes()))
                     }
                     Modifier::Error(opt_msg, _) => {
                         let msg = match opt_msg {
                             Some(w) => {
-                                let expanded = parse_and_expand_modifier(w, state, ctx)?;
+                                let expanded =
+                                    parse_and_expand_modifier(w, quote_mode, state, ctx)?;
                                 String::from_utf8_lossy(expanded.as_bytes()).into_owned()
                             }
                             None => format!(
@@ -400,22 +390,49 @@ pub fn expand_var_with_modifiers(
                     _ => unreachable!(),
                 }
             }
-            Modifier::RemovePrefix(pattern_word, longest) => {
+            Modifier::RemovePrefix(pattern_word, length) => {
                 let val = state.get_var(var_name).unwrap_or_default();
-                let pattern = parse_and_expand_modifier(pattern_word, state, ctx)?;
-                Ok(strip_pattern(val.as_bstr(), pattern.as_bstr(), StripKind::Prefix, longest)
-                    .to_owned())
+                let pattern = parse_and_expand_modifier_to_word_chars(
+                    pattern_word,
+                    QuoteMode::Unquoted,
+                    state,
+                    ctx,
+                )?;
+                Ok(bytes_to_elems(
+                    strip_pattern(val.as_bstr(), &pattern, StripKind::Prefix, length).as_bytes(),
+                ))
             }
-            Modifier::RemoveSuffix(pattern_word, longest) => {
+            Modifier::RemoveSuffix(pattern_word, length) => {
                 let val = state.get_var(var_name).unwrap_or_default();
-                let pattern = parse_and_expand_modifier(pattern_word, state, ctx)?;
-                Ok(strip_pattern(val.as_bstr(), pattern.as_bstr(), StripKind::Suffix, longest)
-                    .to_owned())
+                let pattern = parse_and_expand_modifier_to_word_chars(
+                    pattern_word,
+                    QuoteMode::Unquoted,
+                    state,
+                    ctx,
+                )?;
+                Ok(bytes_to_elems(
+                    strip_pattern(val.as_bstr(), &pattern, StripKind::Suffix, length).as_bytes(),
+                ))
             }
         }
     } else {
-        Ok(state.get_var(var_name).unwrap_or_default())
+        let val = state.get_var(var_name).unwrap_or_default();
+        Ok(bytes_to_elems(val.as_bytes()))
     }
+}
+
+/// Expands a shell parameter expression including modifiers (e.g. `${var:-default}`, `${#var}`,
+/// `${var%pattern}`).
+///
+/// Evaluates defaults, alternate values, string slicing, length expansion, and prefix/suffix
+/// stripping.
+pub fn expand_var_with_modifiers(
+    name: &BStr,
+    state: &mut ShellState,
+    ctx: &ExecutionContext,
+) -> Result<BString, String> {
+    let elems = expand_var_to_elems(name, QuoteMode::Unquoted, state, ctx)?;
+    Ok(elems_to_bstring(elems))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,7 +483,67 @@ fn expand_tilde(word_part_string: &BStr, state: &ShellState, mode: TildeExpansio
     }
 }
 
-fn split_word_chars_by_ifs(word: &[WordChar], ifs: &BStr) -> Vec<Vec<WordChar>> {
+#[derive(Clone)]
+enum PreSplitElem {
+    Char(WordChar),
+    EmptyQuote,
+}
+
+impl PreSplitElem {
+    fn is_ifs_whitespace(&self, ifs: &BStr) -> bool {
+        match self {
+            PreSplitElem::Char(wc) => wc.is_ifs_whitespace(ifs),
+            PreSplitElem::EmptyQuote => false,
+        }
+    }
+
+    fn is_ifs_non_whitespace(&self, ifs: &BStr) -> bool {
+        match self {
+            PreSplitElem::Char(wc) => wc.is_ifs_non_whitespace(ifs),
+            PreSplitElem::EmptyQuote => false,
+        }
+    }
+}
+
+fn push_quoted_bytes(field: &mut Vec<PreSplitElem>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        field.push(PreSplitElem::EmptyQuote);
+    } else {
+        for &byte in bytes {
+            field.push(PreSplitElem::Char(WordChar::Quoted(byte)));
+        }
+    }
+}
+
+fn push_arg_bytes(field: &mut Vec<PreSplitElem>, bytes: &[u8], quote_mode: QuoteMode) {
+    match quote_mode {
+        QuoteMode::DoubleQuoted => push_quoted_bytes(field, bytes),
+        QuoteMode::Unquoted => {
+            for &byte in bytes {
+                field.push(PreSplitElem::Char(WordChar::Expansion(byte)));
+            }
+        }
+    }
+}
+
+fn expand_positional_args_to_fields(
+    arguments: &[BString],
+    quote_mode: QuoteMode,
+    current_field: &mut Vec<PreSplitElem>,
+    fields: &mut Vec<Vec<PreSplitElem>>,
+) {
+    if let Some((first, rest)) = arguments.split_first() {
+        push_arg_bytes(current_field, first.as_bytes(), quote_mode);
+        for arg in rest {
+            if !current_field.is_empty() {
+                fields.push(std::mem::take(current_field));
+            }
+            push_arg_bytes(current_field, arg.as_bytes(), quote_mode);
+        }
+    }
+}
+
+fn split_word_chars_by_ifs(word: &[PreSplitElem], ifs: &BStr) -> Vec<Vec<WordChar>> {
     let mut results = Vec::new();
     let mut start = 0;
 
@@ -507,7 +584,7 @@ fn split_word_chars_by_ifs(word: &[WordChar], ifs: &BStr) -> Vec<Vec<WordChar>> 
             }
 
             results.push(std::mem::take(&mut current_field));
-            has_fields = has_adjacent_non_whitespace;
+            has_fields = false;
             i = next_i;
         } else if w.is_ifs_non_whitespace(ifs) {
             let mut next_i = i + 1;
@@ -516,16 +593,18 @@ fn split_word_chars_by_ifs(word: &[WordChar], ifs: &BStr) -> Vec<Vec<WordChar>> 
             }
 
             results.push(std::mem::take(&mut current_field));
-            has_fields = true;
+            has_fields = false;
             i = next_i;
         } else {
-            current_field.push(w.clone());
+            if let PreSplitElem::Char(wc) = w {
+                current_field.push(wc.clone());
+            }
             has_fields = true;
             i += 1;
         }
     }
 
-    if has_fields || !current_field.is_empty() {
+    if has_fields {
         results.push(current_field);
     }
 
@@ -544,28 +623,16 @@ pub enum FieldSplitMode {
     DoNotSplit,
 }
 
-/// Expands an AST argument slice into sequences of `WordChar`s preserving quote metadata.
-///
-/// Handles tilde expansion, parameter expansion, command substitution, arithmetic expansion,
-/// and optional IFS field splitting while distinguishing quoted literals from unquoted wildcards.
-pub fn expand_argument_to_word_chars(
+fn expand_argument_to_pre_split_fields(
     word_parts: &[WordPart],
     state: &mut ShellState,
     context: &ExecutionContext,
     tilde_colon_mode: TildeColonMode,
     field_split_mode: FieldSplitMode,
     buffer: &relative::Buffer,
-) -> Result<Vec<Vec<WordChar>>, String> {
-    if word_parts.is_empty() {
-        return Ok(vec![Vec::new()]);
-    }
-
-    let internal_field_separator = state.get_var(b"IFS").unwrap_or_else(|| BString::from(" \t\n"));
-
-    let mut fields: Vec<Vec<WordChar>> = Vec::new();
-    let mut current_field: Vec<WordChar> = Vec::new();
-    let mut current_has_quoted = false;
-    let mut has_fields = false;
+) -> Result<Vec<Vec<PreSplitElem>>, String> {
+    let mut fields: Vec<Vec<PreSplitElem>> = Vec::new();
+    let mut current_field: Vec<PreSplitElem> = Vec::new();
 
     for (part_index, part) in word_parts.iter().enumerate() {
         match part.tag {
@@ -580,101 +647,108 @@ pub fn expand_argument_to_word_chars(
                 };
                 let expanded_string = expand_tilde(literal_string, state, tilde_mode);
                 for &byte in expanded_string.as_bytes() {
-                    current_field.push(WordChar::Unquoted(byte));
+                    current_field.push(PreSplitElem::Char(WordChar::Unquoted(byte)));
                 }
-                has_fields = true;
             }
             WordPartTag::QUOTED_LITERAL => {
                 let quoted_string = part.text.as_bstr(buffer);
-                for &byte in quoted_string.as_bytes() {
-                    current_field.push(WordChar::Quoted(byte));
-                }
-                current_has_quoted = true;
-                has_fields = true;
+                push_quoted_bytes(&mut current_field, quoted_string.as_bytes());
             }
             WordPartTag::QUOTED_VAR => {
                 let variable_name = part.text.as_bstr(buffer);
-                if variable_name == "@" {
+                if variable_name == "@" && field_split_mode == FieldSplitMode::Split {
                     let arguments = state.get_args();
-                    if !arguments.is_empty() {
-                        current_has_quoted = true;
-                        has_fields = true;
-                        for &byte in arguments[0].as_bytes() {
-                            current_field.push(WordChar::Quoted(byte));
-                        }
-                        if arguments.len() > 1 {
-                            fields.push(std::mem::take(&mut current_field));
-                            for i in 1..arguments.len() - 1 {
-                                let mut argument_word = Vec::new();
-                                for &byte in arguments[i].as_bytes() {
-                                    argument_word.push(WordChar::Quoted(byte));
-                                }
-                                fields.push(argument_word);
-                            }
-                            current_field = Vec::new();
-                            for &byte in arguments.last().unwrap().as_bytes() {
-                                current_field.push(WordChar::Quoted(byte));
-                            }
-                        }
-                    }
+                    expand_positional_args_to_fields(
+                        &arguments,
+                        QuoteMode::DoubleQuoted,
+                        &mut current_field,
+                        &mut fields,
+                    );
                 } else {
-                    current_has_quoted = true;
-                    has_fields = true;
-                    let value = expand_var_with_modifiers(variable_name, state, context)?;
-                    for &byte in value.as_bytes() {
-                        current_field.push(WordChar::Quoted(byte));
-                    }
+                    let elems = expand_var_to_elems(
+                        variable_name,
+                        QuoteMode::DoubleQuoted,
+                        state,
+                        context,
+                    )?;
+                    let value = elems_to_bstring(elems);
+                    push_quoted_bytes(&mut current_field, value.as_bytes());
                 }
             }
             WordPartTag::QUOTED_COMMAND_SUBSTITUTION => {
-                current_has_quoted = true;
-                has_fields = true;
                 let command = part.command.as_ref(buffer);
                 let value = run_command_substitution(command, state, context, buffer)?;
-                for &byte in value.as_bytes() {
-                    current_field.push(WordChar::Quoted(byte));
-                }
+                push_quoted_bytes(&mut current_field, value.as_bytes());
             }
             WordPartTag::VAR => {
                 let variable_name = part.text.as_bstr(buffer);
-                let value = expand_var_with_modifiers(variable_name, state, context)?;
-                for &byte in value.as_bytes() {
-                    current_field.push(WordChar::Expansion(byte));
+                if (variable_name == "@" || variable_name == "*")
+                    && field_split_mode == FieldSplitMode::Split
+                {
+                    let arguments = state.get_args();
+                    expand_positional_args_to_fields(
+                        &arguments,
+                        QuoteMode::Unquoted,
+                        &mut current_field,
+                        &mut fields,
+                    );
+                } else {
+                    let elems =
+                        expand_var_to_elems(variable_name, QuoteMode::Unquoted, state, context)?;
+                    current_field.extend(elems);
                 }
-                has_fields = true;
             }
             WordPartTag::COMMAND_SUBSTITUTION => {
                 let command = part.command.as_ref(buffer);
                 let value = run_command_substitution(command, state, context, buffer)?;
                 for &byte in value.as_bytes() {
-                    current_field.push(WordChar::Expansion(byte));
+                    current_field.push(PreSplitElem::Char(WordChar::Expansion(byte)));
                 }
-                has_fields = true;
             }
             WordPartTag::ARITHMETIC => {
                 let expression = part.text.as_bstr(buffer);
                 let value = evaluate_arithmetic(expression, state, context)?.to_string();
                 for &byte in value.as_bytes() {
-                    current_field.push(WordChar::Expansion(byte));
+                    current_field.push(PreSplitElem::Char(WordChar::Expansion(byte)));
                 }
-                has_fields = true;
             }
             WordPartTag::QUOTED_ARITHMETIC => {
-                current_has_quoted = true;
-                has_fields = true;
                 let expression = part.text.as_bstr(buffer);
                 let value = evaluate_arithmetic(expression, state, context)?.to_string();
-                for &byte in value.as_bytes() {
-                    current_field.push(WordChar::Quoted(byte));
-                }
+                push_quoted_bytes(&mut current_field, value.as_bytes());
             }
             _ => unreachable!(),
         }
     }
 
-    if has_fields || current_has_quoted || !current_field.is_empty() {
+    if !current_field.is_empty() {
         fields.push(current_field);
     }
+
+    Ok(fields)
+}
+
+/// Expands an AST argument slice into sequences of `WordChar`s preserving quote metadata.
+///
+/// Handles tilde expansion, parameter expansion, command substitution, arithmetic expansion,
+/// and optional IFS field splitting while distinguishing quoted literals from unquoted wildcards.
+pub fn expand_argument_to_word_chars(
+    word_parts: &[WordPart],
+    state: &mut ShellState,
+    context: &ExecutionContext,
+    tilde_colon_mode: TildeColonMode,
+    field_split_mode: FieldSplitMode,
+    buffer: &relative::Buffer,
+) -> Result<Vec<Vec<WordChar>>, String> {
+    let internal_field_separator = state.get_var(b"IFS").unwrap_or_else(|| BString::from(" \t\n"));
+    let fields = expand_argument_to_pre_split_fields(
+        word_parts,
+        state,
+        context,
+        tilde_colon_mode,
+        field_split_mode,
+        buffer,
+    )?;
 
     if field_split_mode == FieldSplitMode::Split && !internal_field_separator.is_empty() {
         let mut split_fields = Vec::new();
@@ -684,7 +758,18 @@ pub fn expand_argument_to_word_chars(
         }
         Ok(split_fields)
     } else {
-        Ok(fields)
+        Ok(fields
+            .into_iter()
+            .map(|field| {
+                field
+                    .into_iter()
+                    .filter_map(|elem| match elem {
+                        PreSplitElem::Char(wc) => Some(wc),
+                        PreSplitElem::EmptyQuote => None,
+                    })
+                    .collect()
+            })
+            .collect())
     }
 }
 
@@ -711,7 +796,8 @@ pub fn expand_argument(
         if state.opt_noglob {
             final_results.push(word_chars_to_bstring(&word));
         } else {
-            let matches = expand_glob(&word);
+            let cwd_path = state.cwd().to_path().unwrap_or_else(|_| std::path::Path::new("."));
+            let matches = expand_glob(&word, cwd_path);
             final_results.extend(matches);
         }
     }
@@ -735,11 +821,7 @@ pub fn expand_argument_no_split(
         FieldSplitMode::DoNotSplit,
         buf,
     )?;
-    if word_chars_list.is_empty() {
-        return Ok(BString::default());
-    }
-    let word = &word_chars_list[0];
-    Ok(word_chars_to_bstring(word))
+    Ok(word_chars_list.first().map(|w| word_chars_to_bstring(w)).unwrap_or_default())
 }
 
 /// Expands the value side of a variable assignment statement (e.g. `VAR=value`).
@@ -798,11 +880,34 @@ pub fn expand_assignment_value(
         FieldSplitMode::DoNotSplit,
         &builder,
     )?;
-    if word_chars_list.is_empty() {
-        return Ok(BString::default());
+    Ok(word_chars_list.first().map(|w| word_chars_to_bstring(w)).unwrap_or_default())
+}
+
+fn word_has_side_effects(
+    parts: &[WordPart],
+    state: &ShellState,
+    buffer: &relative::Buffer,
+) -> bool {
+    for part in parts {
+        match part.tag {
+            WordPartTag::LITERAL | WordPartTag::QUOTED_LITERAL => {}
+            WordPartTag::COMMAND_SUBSTITUTION
+            | WordPartTag::QUOTED_COMMAND_SUBSTITUTION
+            | WordPartTag::ARITHMETIC
+            | WordPartTag::QUOTED_ARITHMETIC => return true,
+            WordPartTag::VAR | WordPartTag::QUOTED_VAR => {
+                if state.opt_nounset {
+                    return true;
+                }
+                let var_text = part.text.as_bstr(buffer);
+                if !matches!(parse_modifier(var_text), Ok((_, None))) {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
     }
-    let word = &word_chars_list[0];
-    Ok(word_chars_to_bstring(word))
+    false
 }
 
 pub fn needs_subshell_process<'a>(
@@ -813,39 +918,91 @@ pub fn needs_subshell_process<'a>(
     loop {
         match command.tag {
             CommandTag::SIMPLE => {
-                let arguments = command.simple_args.as_slice(buffer);
-                let mut command_arguments = Vec::new();
-                let mut parsing_assignments = true;
-                for argument in arguments {
-                    let parts = argument.as_slice(buffer);
-                    if parsing_assignments && is_assignment_flat(parts, buffer) {
-                        // skip leading assignments
-                    } else {
-                        parsing_assignments = false;
-                        command_arguments.push(parts);
-                    }
-                }
+                let (assignments, command_arguments) = split_simple_command_args(command, buffer);
                 if command_arguments.is_empty() {
-                    return false;
-                } else {
-                    let first_argument = command_arguments[0];
-                    if first_argument.len() == 1 {
-                        let part = &first_argument[0];
-                        match part.tag {
-                            WordPartTag::LITERAL | WordPartTag::QUOTED_LITERAL => {
-                                let literal_string = part.text.as_bstr(buffer);
-                                return is_builtin(literal_string)
-                                    || state.get_function(literal_string).is_some()
-                                    || state.aliases.contains_key(literal_string);
-                            }
-                            _ => return false,
-                        }
-                    } else {
-                        return false;
+                    return true;
+                }
+
+                for assign_slice in &assignments {
+                    let parts = assign_slice.as_slice(buffer);
+                    let (name, _, _) = split_assignment_flat(parts, buffer);
+                    if state.is_readonly(name) || word_has_side_effects(parts, state, buffer) {
+                        return true;
                     }
                 }
+
+                for arg_slice in &command_arguments {
+                    let parts = arg_slice.as_slice(buffer);
+                    if word_has_side_effects(parts, state, buffer) {
+                        return true;
+                    }
+                }
+
+                let first_argument = command_arguments[0].as_slice(buffer);
+                if first_argument.is_empty() {
+                    return true;
+                }
+
+                let mut cmd_name = Vec::new();
+                for (part_index, part) in first_argument.iter().enumerate() {
+                    match part.tag {
+                        WordPartTag::LITERAL => {
+                            let literal = part.text.as_bstr(buffer);
+                            if part_index == 0 && (literal == "~" || literal.starts_with(b"~/")) {
+                                return true;
+                            }
+                            if !state.opt_noglob
+                                && literal
+                                    .as_bytes()
+                                    .iter()
+                                    .any(|&b| matches!(b, b'*' | b'?' | b'['))
+                            {
+                                return true;
+                            }
+                            cmd_name.extend_from_slice(literal.as_bytes());
+                        }
+                        WordPartTag::QUOTED_LITERAL => {
+                            cmd_name.extend_from_slice(part.text.as_bstr(buffer).as_bytes());
+                        }
+                        _ => return true,
+                    }
+                }
+
+                if cmd_name.is_empty() {
+                    return true;
+                }
+
+                let cmd_bstr = BStr::new(&cmd_name);
+                return is_builtin(cmd_bstr)
+                    || state.get_function(cmd_bstr).is_some()
+                    || state.aliases.contains_key(cmd_bstr);
             }
             CommandTag::REDIRECT => {
+                for redirect in command.redirects.as_slice(buffer) {
+                    match redirect.tag {
+                        RedirectTag::TO_FILE
+                        | RedirectTag::FROM_FILE
+                        | RedirectTag::READ_WRITE
+                        | RedirectTag::DUP_FD => {
+                            if word_has_side_effects(
+                                redirect.filename.as_slice(buffer),
+                                state,
+                                buffer,
+                            ) {
+                                return true;
+                            }
+                        }
+                        RedirectTag::HERE_DOC => {
+                            if redirect.expand != 0 {
+                                let body = redirect.body.as_slice(buffer);
+                                if body.contains(&b'$') || body.contains(&b'`') {
+                                    return true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 command = command.left.as_ref(buffer);
             }
             _ => return true,
@@ -853,53 +1010,16 @@ pub fn needs_subshell_process<'a>(
     }
 }
 
-fn extract_parenthesized_bytes<'a>(
-    bytes: &'a [u8],
-    index: &mut usize,
-    is_double: bool,
-) -> &'a BStr {
-    let start_index = *index;
-    let mut depth = if is_double { 2 } else { 1 };
-    let mut end_index = start_index;
-
-    while *index < bytes.len() {
-        let current_byte = bytes[*index];
-        match current_byte {
-            b'\\' => {
-                *index += 1;
-                if *index < bytes.len() {
-                    *index += 1;
-                }
-            }
-            b'(' => {
-                depth += 1;
-                *index += 1;
-            }
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    end_index = *index;
-                    *index += 1;
-                    break;
-                }
-                if is_double && depth == 1 {
-                    if *index + 1 < bytes.len() && bytes[*index + 1] == b')' {
-                        end_index = *index;
-                        *index += 2;
-                        break;
-                    }
-                }
-                *index += 1;
-            }
-            _ => {
-                *index += 1;
-            }
-        }
-    }
-    if end_index < start_index {
-        end_index = *index;
-    }
-    BStr::new(&bytes[start_index..end_index])
+fn eval_command_substitution_bytes(
+    inner_bytes: &[u8],
+    state: &mut ShellState,
+    context: &ExecutionContext,
+) -> Result<BString, String> {
+    let mut sub_builder = ASTBuilder::new();
+    let command_pointer =
+        parse_subshell_command(&mut sub_builder, inner_bytes).map_err(|e| e.to_string())?;
+    let command = sub_builder.get_ref(command_pointer);
+    run_command_substitution(command, state, context, &sub_builder)
 }
 
 fn expand_dollar(
@@ -911,68 +1031,35 @@ fn expand_dollar(
 ) -> Result<(), String> {
     if *index + 1 < bytes.len() && bytes[*index + 1] == b'(' {
         *index += 2; // consume '$' and '('
-        let is_double = if *index < bytes.len() && bytes[*index] == b'(' {
+        if *index < bytes.len() && bytes[*index] == b'(' {
             *index += 1; // consume second '('
-            true
-        } else {
-            false
-        };
-
-        let inner_bytes = extract_parenthesized_bytes(bytes, index, is_double);
-
-        if is_double {
-            let expanded_inner = expand_string(inner_bytes, state, context)?;
+            let inner_bytes = match scan_arithmetic_expansion(bytes, index) {
+                Ok(s) | Err(s) => s,
+            };
+            let expanded_inner = expand_string(inner_bytes.as_bstr(), state, context)?;
             let value = evaluate_arithmetic(expanded_inner.as_bstr(), state, context)?;
             result_bytes.extend_from_slice(value.to_string().as_bytes());
         } else {
-            let mut sub_builder = ASTBuilder::new();
-            let command_pointer = parse_subshell_command(&mut sub_builder, inner_bytes.as_bytes())
-                .map_err(|e| e.to_string())?;
-            let command = sub_builder.get_ref(command_pointer);
-            let value = run_command_substitution(command, state, context, &sub_builder)?;
+            let inner_bytes = match scan_command_substitution(bytes, index) {
+                Ok(s) | Err(s) => s,
+            };
+            let value = eval_command_substitution_bytes(inner_bytes.as_bytes(), state, context)?;
             result_bytes.extend_from_slice(value.as_bytes());
         }
     } else if *index + 1 < bytes.len() && bytes[*index + 1] == b'{' {
         *index += 2; // consume '$' and '{'
-        let mut variable_name_bytes = Vec::new();
-        while *index < bytes.len() {
-            let current_byte = bytes[*index];
-            if current_byte == b'}' {
-                *index += 1;
-                break;
-            }
-            variable_name_bytes.push(current_byte);
-            *index += 1;
-        }
-        let value = expand_var_with_modifiers(BStr::new(&variable_name_bytes), state, context)?;
+        let var_expr = match scan_braced_param(bytes, index, QuoteMode::Unquoted) {
+            Ok(s) | Err(s) => s,
+        };
+        let value = expand_var_with_modifiers(var_expr.as_bstr(), state, context)?;
         result_bytes.extend_from_slice(value.as_bytes());
     } else {
         *index += 1; // consume '$'
-        let mut variable_name_bytes = Vec::new();
-        if *index < bytes.len() {
-            let current_byte = bytes[*index];
-            if matches!(current_byte, b'?' | b'#' | b'@' | b'*' | b'$' | b'!' | b'-')
-                || current_byte.is_ascii_digit()
-            {
-                variable_name_bytes.push(current_byte);
-                *index += 1;
-            } else {
-                while *index < bytes.len() {
-                    let c = bytes[*index];
-                    if c.is_ascii_alphanumeric() || c == b'_' {
-                        variable_name_bytes.push(c);
-                        *index += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        if variable_name_bytes.is_empty() {
-            result_bytes.push(b'$');
-        } else {
-            let value = expand_var_with_modifiers(BStr::new(&variable_name_bytes), state, context)?;
+        if let Some(var_name) = scan_unbraced_var_name(bytes, index) {
+            let value = expand_var_with_modifiers(var_name.as_bstr(), state, context)?;
             result_bytes.extend_from_slice(value.as_bytes());
+        } else {
+            result_bytes.push(b'$');
         }
     }
     Ok(())
@@ -994,7 +1081,9 @@ pub fn expand_string(
             b'\\' => {
                 if index + 1 < bytes.len() {
                     let next_byte = bytes[index + 1];
-                    if next_byte == b'$' || next_byte == b'\\' || next_byte == b'`' {
+                    if next_byte == b'\n' {
+                        index += 2;
+                    } else if next_byte == b'$' || next_byte == b'\\' || next_byte == b'`' {
                         result_bytes.push(next_byte);
                         index += 2;
                     } else {
@@ -1008,6 +1097,23 @@ pub fn expand_string(
             }
             b'$' => {
                 expand_dollar(bytes, &mut index, state, context, &mut result_bytes)?;
+            }
+            b'`' => {
+                index += 1;
+                match scan_backtick_command_substitution(bytes, &mut index, QuoteMode::Unquoted) {
+                    Ok(inner_bytes) => {
+                        let value = eval_command_substitution_bytes(
+                            inner_bytes.as_bytes(),
+                            state,
+                            context,
+                        )?;
+                        result_bytes.extend_from_slice(value.as_bytes());
+                    }
+                    Err(inner_bytes) => {
+                        result_bytes.push(b'`');
+                        result_bytes.extend_from_slice(inner_bytes.as_bytes());
+                    }
+                }
             }
             _ => {
                 result_bytes.push(byte);
@@ -1031,10 +1137,20 @@ pub fn expand_prompt(
         Some(s) => s.as_ref(),
         None => default_prompt,
     };
-    match expand_string(prompt_raw, state, context) {
+    let saved_status = state.get_var(BStr::new("?"));
+    let saved_cmd_sub = state.take_cmd_sub_status();
+    let res = match expand_string(prompt_raw, state, context) {
         Ok(expanded) => expanded,
         Err(_) => BString::from(default_prompt),
+    };
+    state.take_cmd_sub_status();
+    if let Some(code) = saved_cmd_sub {
+        state.record_cmd_sub_status(code);
     }
+    if let Some(status) = saved_status {
+        state.set_var(BStr::new("?"), status.as_bstr());
+    }
+    res
 }
 
 /// Extracts the literal command string if the argument word consists solely of a single unquoted
@@ -1126,6 +1242,14 @@ pub fn append_args_to_command(
             append_args_to_command(builder, body_ptr, extra_args);
             cmd_ptr
         }
+        CommandTag::NOT => {
+            let left_ptr = {
+                let cmd = builder.get_ref(cmd_ptr);
+                cmd.left
+            };
+            append_args_to_command(builder, left_ptr, extra_args);
+            cmd_ptr
+        }
         _ => cmd_ptr,
     }
 }
@@ -1158,7 +1282,9 @@ pub fn expand_alias(
         if let Some(val) = state.aliases.get(&name).cloned() {
             if !ctx.active_aliases.contains(&name) && !active.contains(&name) {
                 let val_tokens = tokenize(val.as_bytes()).map_err(|e| e.to_string())?;
-                let is_simple = val_tokens.iter().all(|t| matches!(t, Token::Word(_)));
+                let is_simple = val_tokens.iter().all(|t| matches!(t, Token::Word(_)))
+                    && val_tokens.first().and_then(|t| t.as_unquoted_bstr())
+                        != Some(BStr::new(b"!"));
                 if is_simple {
                     let mut new_words = Vec::new();
                     for t in &val_tokens {

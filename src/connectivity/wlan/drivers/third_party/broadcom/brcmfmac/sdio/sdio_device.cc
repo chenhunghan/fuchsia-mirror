@@ -96,12 +96,15 @@ void SdioDevice::Stop(fdf::StopCompleter completer) {
 }
 
 void SdioDevice::Shutdown(fit::callback<void()>&& on_complete) {
-  if (brcmf_bus_) {
-    brcmf_sdio_exit(brcmf_bus_.get());
-    brcmf_bus_.reset();
-  }
-
-  Device::Shutdown([on_complete = std::move(on_complete)]() mutable { on_complete(); });
+  Device::Shutdown([this, on_complete = std::move(on_complete)]() mutable {
+    // Only free the resources after the device has shutdown, which ensures no outstanding FIDL
+    // requests or workqueue tasks can access these resources after they are freed.
+    if (brcmf_bus_) {
+      brcmf_sdio_exit(brcmf_bus_.get());
+      brcmf_bus_.reset();
+    }
+    on_complete();
+  });
 }
 
 zx_status_t SdioDevice::BusInit(const std::shared_ptr<fdf::Namespace>& incoming) {

@@ -15,12 +15,14 @@ class Lan:
         lease_time: The lease time for IP addresses (e.g., '12h', '30m').
         start: The start offset for the DHCP pool.
         limit: The number of addresses in the DHCP pool.
+        broadcast: Always broadcast DHCP responses (--dhcp-broadcast).
     """
 
     dynamic_dhcp: bool = True
     lease_time: str = "12h"
     start: int | None = None
     limit: int | None = None
+    broadcast: bool = False
 
 
 @dataclasses.dataclass

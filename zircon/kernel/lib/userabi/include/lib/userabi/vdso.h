@@ -12,6 +12,7 @@
 #include <zircon/compiler.h>
 
 #include <kernel/ffi.h>
+#include <ktl/array.h>
 #include <object/vm_object_dispatcher.h>
 #include <vm/handoff-end.h>
 #include <vm/vm_object.h>
@@ -105,6 +106,16 @@ class VDso {
 };
 
 __BEGIN_CDECLS
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const VDso* cpp_vdso_create(
+    const HandoffEnd::Elf* elf_image,
+    ffi::Uninitialized<ktl::array<KernelHandle<VmObjectDispatcher>, VDso::kNumVdsoVariants>>*
+        vmo_kernel_handles_out,
+    ffi::Uninitialized<KernelHandle<VmObjectDispatcher>>* time_values_handle_out);
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_rights_t cpp_vdso_vmo_rights(const VDso* vdso);
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE bool cpp_vmo_is_vdso(const VmObject* vmo);

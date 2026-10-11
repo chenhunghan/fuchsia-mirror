@@ -1,0 +1,101 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListOutput",
+    "type": "object",
+    "properties": {
+        "instances": {
+            "type": "array",
+            "items": {
+                "$ref": "#/definitions/Instance"
+            }
+        }
+    },
+    "required": [
+        "instances"
+    ],
+    "definitions": {
+        "Instance": {
+            "type": "object",
+            "properties": {
+                "moniker": {
+                    "description": "Moniker of the component.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/Moniker"
+                        }
+                    ]
+                },
+                "url": {
+                    "description": "URL of the component.",
+                    "type": "string"
+                },
+                "environment": {
+                    "description": "Environment of the component from its parent.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "instance_id": {
+                    "description": "Unique identifier of component.",
+                    "type": [
+                        "string",
+                        "null"
+                    ]
+                },
+                "resolved_info": {
+                    "description": "Information about resolved state of instance.",
+                    "anyOf": [
+                        {
+                            "$ref": "#/definitions/ResolvedInfo"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "moniker",
+                "url"
+            ]
+        },
+        "Moniker": {
+            "type": "string"
+        },
+        "ResolvedInfo": {
+            "description": "Additional information about components that are resolved.",
+            "type": "object",
+            "properties": {
+                "resolved_url": {
+                    "type": "string"
+                },
+                "execution_info": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/definitions/ExecutionInfo"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                }
+            },
+            "required": [
+                "resolved_url"
+            ]
+        },
+        "ExecutionInfo": {
+            "description": "Additional information about components that are running.",
+            "type": "object",
+            "properties": {
+                "start_reason": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "start_reason"
+            ]
+        }
+    }
+}

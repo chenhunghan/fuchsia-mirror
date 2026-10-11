@@ -12,7 +12,6 @@
 
 #include <lib/arch/asm.h>
 #include <lib/arch/intrin.h>
-#include <lib/zx/result.h>
 #include <stdbool.h>
 #include <sys/types.h>
 #include <zircon/compiler.h>
@@ -82,27 +81,27 @@ void platform_irq(iframe_t* frame);
 arm64_context_switch_frame* arm64_get_context_switch_frame(Thread* thread);
 
 // FPU routines
-void arm64_fpu_exception(iframe_t* iframe, uint exception_flags);
-void arm64_fpu_context_switch(Thread* oldthread, Thread* newthread);
-void arm64_fpu_save_state(Thread* t);
-void arm64_fpu_restore_state(const Thread* t);
+extern "C" void arm64_fpu_context_switch(Thread* oldthread, Thread* newthread);
+extern "C" void arm64_fpu_save_state(Thread* t);
+extern "C" void arm64_fpu_restore_state(const Thread* t);
 
-// TODO(https://fxbug.dev/393619961): Identically 1 today, but should one day
-// be dynamic.
-constexpr uint64_t arm64_get_boot_el() { return 1; }
+inline uint64_t arm64_get_boot_el() { return __arm_rsr64("CurrentEL") >> 2; }
 
 // Called during clock selection (if it is called at all) before secondary CPUs
 // have started.
-void arm64_allow_pct_in_el0();
+extern "C" void arm64_allow_pct_in_el0();
+
+// Puts the calling cpu in a working state and reads its feature flags.
+extern "C" void arm64_cpu_early_init();
 
 // Allocates a stack for the secondary cpu with bootstrap data placed on it.
 // Ready to be passed to the cpu when starting it for the first time.
-// Returns a virtual address near the top of the stack just below the bootstrap
-// payload.
-zx::result<uintptr_t> arm64_create_secondary_stack(cpu_num_t cpu_num);
+// On success, |*out| is a virtual address near the top of the stack just below
+// the bootstrap payload.
+extern "C" zx_status_t arm64_create_secondary_stack(cpu_num_t cpu_num, uintptr_t* out);
 
 // Frees a stack created by |arm64_create_secondary_stack|.
-zx_status_t arm64_free_secondary_stack(cpu_num_t cpu_num);
+extern "C" zx_status_t arm64_free_secondary_stack(cpu_num_t cpu_num);
 
 // Shortcuts for setting and clearing PSTATE.PAN.
 inline void arm64_enable_pan() { __arm_wsr64("PAN", 1); }

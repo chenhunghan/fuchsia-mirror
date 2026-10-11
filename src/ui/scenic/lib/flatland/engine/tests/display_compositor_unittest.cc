@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
 #include <fidl/fuchsia.math/cpp/fidl.h>
 #include <fidl/fuchsia.ui.composition/cpp/fidl.h>
+#include <fidl/fuchsia.ui.views/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/async/cpp/task.h>
@@ -36,6 +37,8 @@
 #include "src/ui/scenic/lib/utils/check_is_on_thread.h"
 #include "src/ui/scenic/lib/utils/helpers.h"
 #include "src/ui/scenic/tests/utils/promise.h"
+
+#include <glm/gtx/matrix_transform_2d.hpp>
 
 using ::testing::_;
 using ::testing::Eq;
@@ -2236,7 +2239,31 @@ TEST_F(DisplayCompositorTest, SetDisplayPowerModeForwardsToCoordinator) {
   ExpectDisplayCleanup();
 }
 
-TEST_F(DisplayCompositorTest, SkipRenderLeavesViewTreeEmpty) {
+// The first view tree is always generated; after that, with no session requesting a
+// recomputation and no link change, `GenerateViewTreeSnapshot()` answers "no diff".
+TEST_F(DisplayCompositorTest, ViewTreeSnapshotIsNoDiffWhenNothingChanged) {
+  auto flatland_presenter =
+      std::make_shared<flatland::FlatlandPresenterImpl>(dispatcher(), fake_frame_scheduler_);
+  auto uber_struct_system = std::make_shared<flatland::UberStructSystem>();
+  auto link_system =
+      std::make_shared<flatland::LinkSystem>(uber_struct_system->GetNextInstanceId());
+
+  flatland::Engine engine(display_compositor_, flatland_presenter, uber_struct_system, link_system,
+                          inspect::Node(),
+                          /*get_root_transform=*/[]() -> std::optional<flatland::TransformHandle> {
+                            return std::nullopt;
+                          });
+
+  auto first = engine.GenerateViewTreeSnapshot(flatland::TransformHandle(1, 1));
+  EXPECT_TRUE(std::holds_alternative<std::unique_ptr<view_tree::SubtreeSnapshot>>(first));
+
+  auto second = engine.GenerateViewTreeSnapshot(flatland::TransformHandle(1, 1));
+  EXPECT_TRUE(std::holds_alternative<view_tree::SubtreeSnapshotNoDiff>(second));
+
+  EXPECT_CALL(*mock_display_coordinator_, DiscardConfig(_)).Times(1).WillOnce(Return());
+}
+
+TEST_F(DisplayCompositorTest, RenderScheduledFrameWithoutDisplayLeavesViewTreeEmpty) {
   auto flatland_presenter =
       std::make_shared<flatland::FlatlandPresenterImpl>(dispatcher(), fake_frame_scheduler_);
   auto uber_struct_system = std::make_shared<flatland::UberStructSystem>();
@@ -2250,8 +2277,9 @@ TEST_F(DisplayCompositorTest, SkipRenderLeavesViewTreeEmpty) {
                           });
 
   bool callback_called = false;
-  engine.SkipRender([&callback_called](const scheduling::Timestamps&) { callback_called = true; },
-                    /*rotate_scene_state=*/true);
+  engine.RenderScheduledFrame(
+      /*frame_number=*/1, /*presentation_time=*/zx::time(1000), /*display=*/nullptr,
+      [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
   EXPECT_TRUE(callback_called);
 
   auto snapshot_variant = engine.GenerateViewTreeSnapshot(flatland::TransformHandle(1, 1));
@@ -2261,8 +2289,6 @@ TEST_F(DisplayCompositorTest, SkipRenderLeavesViewTreeEmpty) {
   ASSERT_NE(snapshot, nullptr);
   EXPECT_EQ(snapshot->root, ZX_KOID_INVALID);
   EXPECT_TRUE(snapshot->view_tree.empty());
-
-  engine.CleanUpFrame();
 
   EXPECT_CALL(*mock_display_coordinator_, DiscardConfig(_)).Times(1).WillOnce(Return());
 }
@@ -2373,7 +2399,7 @@ TEST_F(DisplayCompositorTest,
   // but must invoke the frame presented callback and preserve the populated ViewTree.
   bool callback_called = false;
   engine.RenderScheduledFrame(
-      /*frame_number=*/1, /*presentation_time=*/zx::time(1000), *flatland_display,
+      /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
       [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
   EXPECT_TRUE(callback_called);
 
@@ -2386,7 +2412,377 @@ TEST_F(DisplayCompositorTest,
   EXPECT_EQ(snapshot->root, expected_koid);
   EXPECT_TRUE(snapshot->view_tree.contains(expected_koid));
 
-  engine.CleanUpFrame();
+  flatland_display.reset();
+  RunLoopUntilIdle();
+
+  ExpectDisplayCleanup();
+}
+
+TEST_F(DisplayCompositorTest, RenderScheduledFrameWithoutDisplayClearsViewTree) {
+  auto flatland_presenter =
+      std::make_shared<flatland::FlatlandPresenterImpl>(dispatcher(), fake_frame_scheduler_);
+  auto uber_struct_system = std::make_shared<flatland::UberStructSystem>();
+  auto link_system =
+      std::make_shared<flatland::LinkSystem>(uber_struct_system->GetNextInstanceId());
+
+  flatland::Engine engine(display_compositor_, flatland_presenter, uber_struct_system, link_system,
+                          inspect::Node(),
+                          /*get_root_transform=*/[]() -> std::optional<flatland::TransformHandle> {
+                            return std::nullopt;
+                          });
+
+  const display::DisplayId kDisplayId(1);
+  glm::uvec2 resolution(1024, 768);
+  auto display =
+      std::make_shared<display::Display>(display::WireDisplayId{.value = kDisplayId.value()},
+                                         resolution.x, resolution.y, kMaxDisplayLayersCount);
+
+  // Set up mock coordinator expectations for AddDisplay().
+  next_layer_id_ = 1;
+  EXPECT_CALL(*mock_display_coordinator_, CreateLayer(_, _))
+      .Times(kMaxDisplayLayersCount + 1)
+      .WillRepeatedly(testing::Invoke(
+          [this](fidl::WireServer<fuchsia_hardware_display::Coordinator>::CreateLayerRequestView
+                     request,
+                 MockDisplayCoordinator::CreateLayerCompleter::Sync& completer) {
+            EXPECT_EQ(request->layer_id.value, next_layer_id_++);
+            completer.Reply(fit::ok());
+          }));
+  EXPECT_CALL(*renderer_, ChoosePreferredRenderTargetFormat(_))
+      .WillRepeatedly(Return(kPixelFormat));
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).WillRepeatedly(Return());
+
+  engine.AddDisplay(*display, /*num_vmos=*/0);
+  RunLoopUntilIdle();
+
+  const auto session_id = scheduling::GetNextSessionId();
+  auto [client_end, server_end] =
+      fidl::Endpoints<fuchsia_ui_composition::FlatlandDisplay>::Create();
+  auto uber_struct_queue = uber_struct_system->AllocateQueueForSession(session_id);
+  auto flatland_display = FlatlandDisplay::New(
+      std::make_shared<utils::UnownedDispatcherHolder>(dispatcher()), std::move(server_end),
+      session_id, display,
+      /*destroy_display_function=*/[] {}, flatland_presenter, link_system, uber_struct_queue);
+
+  // Create an UberStruct with a ViewRef. It has no image layer, so the first frame prepares the
+  // scene state and then skips instead of submitting a frame to the DisplayCompositor.
+  auto uber_struct = std::make_unique<flatland::UberStruct>();
+  zx::eventpair endpoint1, endpoint2;
+  ASSERT_EQ(zx::eventpair::create(0, &endpoint1, &endpoint2), ZX_OK);
+  auto view_ref = std::make_shared<const flatland::ViewRef>(std::move(endpoint1));
+  const zx_koid_t expected_koid = view_ref->koid();
+  uber_struct->view_ref = view_ref;
+  uber_struct->local_topology = {{flatland_display->root_transform(), 0}};
+
+  uber_struct_queue->Push(/*present_id=*/1, std::move(uber_struct), /*recompute_view_tree=*/true);
+  uber_struct_system->ForceUpdateAllSessions();
+
+  // A frame with the FlatlandDisplay populates the scene state; a following frame without one
+  // must clear it.
+  bool first_callback_called = false;
+  engine.RenderScheduledFrame(
+      /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
+      [&first_callback_called](const scheduling::Timestamps&) { first_callback_called = true; });
+  EXPECT_TRUE(first_callback_called);
+
+  // Generate the ViewTree snapshot for Frame 1, consuming `MustRecomputeViewTree()`.
+  auto first_snapshot_variant = engine.GenerateViewTreeSnapshot(flatland_display->root_transform());
+  ASSERT_TRUE(
+      std::holds_alternative<std::unique_ptr<view_tree::SubtreeSnapshot>>(first_snapshot_variant));
+  const auto& first_snapshot =
+      std::get<std::unique_ptr<view_tree::SubtreeSnapshot>>(first_snapshot_variant);
+  ASSERT_NE(first_snapshot, nullptr);
+  EXPECT_EQ(first_snapshot->root, expected_koid);
+  EXPECT_TRUE(first_snapshot->view_tree.contains(expected_koid));
+
+  bool second_callback_called = false;
+  engine.RenderScheduledFrame(
+      /*frame_number=*/2, /*presentation_time=*/zx::time(2000), /*display=*/nullptr,
+      [&second_callback_called](const scheduling::Timestamps&) { second_callback_called = true; });
+  EXPECT_TRUE(second_callback_called);
+
+  // Frame 1 consumed `MustRecomputeViewTree()`, but `SceneState::Clear()` reset
+  // `link_topology_generation` to 0, so the generator produces a snapshot of the cleared scene
+  // state rather than `SubtreeSnapshotNoDiff`.
+  auto snapshot_variant = engine.GenerateViewTreeSnapshot(flatland_display->root_transform());
+  EXPECT_TRUE(
+      std::holds_alternative<std::unique_ptr<view_tree::SubtreeSnapshot>>(snapshot_variant));
+  auto& snapshot = std::get<std::unique_ptr<view_tree::SubtreeSnapshot>>(snapshot_variant);
+  ASSERT_NE(snapshot, nullptr);
+  EXPECT_EQ(snapshot->root, ZX_KOID_INVALID);
+  EXPECT_TRUE(snapshot->view_tree.empty());
+
+  flatland_display.reset();
+  RunLoopUntilIdle();
+
+  ExpectDisplayCleanup();
+}
+
+// `RenderScheduledFrame()` rebuilds the `SceneState` on the first frame, on a frame whose
+// session requested it, and on a frame where a link changed, and reuses it on a frame where
+// none of those happened. The scene has topology but no layers, so every frame prepares the
+// `SceneState` and then skips rendering.
+TEST_F(DisplayCompositorTest, LayerOnlyFrameReusesSceneState) {
+  auto flatland_presenter =
+      std::make_shared<flatland::FlatlandPresenterImpl>(dispatcher(), fake_frame_scheduler_);
+  auto uber_struct_system = std::make_shared<flatland::UberStructSystem>();
+  auto link_system =
+      std::make_shared<flatland::LinkSystem>(uber_struct_system->GetNextInstanceId());
+
+  flatland::Engine engine(display_compositor_, flatland_presenter, uber_struct_system, link_system,
+                          inspect::Node(),
+                          /*get_root_transform=*/[]() -> std::optional<flatland::TransformHandle> {
+                            return std::nullopt;
+                          });
+
+  const display::DisplayId kDisplayId(1);
+  glm::uvec2 resolution(1024, 768);
+  auto display =
+      std::make_shared<display::Display>(display::WireDisplayId{.value = kDisplayId.value()},
+                                         resolution.x, resolution.y, kMaxDisplayLayersCount);
+
+  // Set up mock coordinator expectations for AddDisplay().
+  next_layer_id_ = 1;
+  EXPECT_CALL(*mock_display_coordinator_, CreateLayer(_, _))
+      .Times(kMaxDisplayLayersCount + 1)
+      .WillRepeatedly(testing::Invoke(
+          [this](fidl::WireServer<fuchsia_hardware_display::Coordinator>::CreateLayerRequestView
+                     request,
+                 MockDisplayCoordinator::CreateLayerCompleter::Sync& completer) {
+            EXPECT_EQ(request->layer_id.value, next_layer_id_++);
+            completer.Reply(fit::ok());
+          }));
+  EXPECT_CALL(*renderer_, ChoosePreferredRenderTargetFormat(_))
+      .WillRepeatedly(Return(kPixelFormat));
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).WillRepeatedly(Return());
+
+  engine.AddDisplay(*display, /*num_vmos=*/0);
+  RunLoopUntilIdle();
+
+  const auto session_id = scheduling::GetNextSessionId();
+  auto [client_end, server_end] =
+      fidl::Endpoints<fuchsia_ui_composition::FlatlandDisplay>::Create();
+  auto uber_struct_queue = uber_struct_system->AllocateQueueForSession(session_id);
+  auto flatland_display = FlatlandDisplay::New(
+      std::make_shared<utils::UnownedDispatcherHolder>(dispatcher()), std::move(server_end),
+      session_id, display,
+      /*destroy_display_function=*/[] {}, flatland_presenter, link_system, uber_struct_queue);
+
+  const flatland::TransformHandle root = flatland_display->root_transform();
+  const flatland::TransformHandle child(root.GetInstanceId(), root.GetTransformId() + 1);
+
+  // Frame 1: the session requests a rebuild, and the cache describes no frame yet.
+  {
+    auto uber_struct = std::make_unique<flatland::UberStruct>();
+    uber_struct->local_topology = {{root, 0}};
+    uber_struct_queue->Push(/*present_id=*/1, std::move(uber_struct),
+                            /*recompute_view_tree=*/false, /*recompute_scene_state=*/true);
+    uber_struct_system->ForceUpdateAllSessions();
+
+    bool callback_called = false;
+    engine.RenderScheduledFrame(
+        /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
+        [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    EXPECT_TRUE(callback_called);
+    EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 1u);
+    EXPECT_FALSE(engine.scene_state_for_test().cleared);
+  }
+
+  // Frame 2: the same topology without a rebuild request reuses the cached state; the reuse arm
+  // still swaps in the new snapshot.
+  {
+    auto uber_struct = std::make_unique<flatland::UberStruct>();
+    uber_struct->local_topology = {{root, 0}};
+    const flatland::UberStruct* const frame2_uber_struct = uber_struct.get();
+    uber_struct_queue->Push(/*present_id=*/2, std::move(uber_struct),
+                            /*recompute_view_tree=*/false, /*recompute_scene_state=*/false);
+    uber_struct_system->ForceUpdateAllSessions();
+
+    bool callback_called = false;
+    engine.RenderScheduledFrame(
+        /*frame_number=*/2, /*presentation_time=*/zx::time(2000), flatland_display.get(),
+        [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    EXPECT_TRUE(callback_called);
+    EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 1u);
+    const auto& snapshot_map = engine.scene_state_for_test().snapshot.map;
+    ASSERT_TRUE(snapshot_map.contains(session_id));
+    EXPECT_EQ(snapshot_map.at(session_id).get(), frame2_uber_struct);
+  }
+
+  // Frame 3: a transform-graph change with a rebuild request rebuilds the cached state.
+  {
+    auto uber_struct = std::make_unique<flatland::UberStruct>();
+    uber_struct->local_topology = {{root, 1}, {child, 0}};
+    uber_struct->local_matrices[child] = glm::translate(glm::mat3(1.f), {10.f, 20.f});
+    uber_struct_queue->Push(/*present_id=*/3, std::move(uber_struct),
+                            /*recompute_view_tree=*/false, /*recompute_scene_state=*/true);
+    uber_struct_system->ForceUpdateAllSessions();
+
+    bool callback_called = false;
+    engine.RenderScheduledFrame(
+        /*frame_number=*/3, /*presentation_time=*/zx::time(3000), flatland_display.get(),
+        [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    EXPECT_TRUE(callback_called);
+    EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 2u);
+  }
+
+  // Frame 4: a link resolves in `link_system` without a session publishing a rebuild request
+  // (`MustRecomputeSceneState()` is false); `links_changed` triggers a rebuild.
+  {
+    auto dispatcher_holder = std::make_shared<utils::UnownedDispatcherHolder>(dispatcher());
+    zx::channel endpoint1, endpoint2;
+    ASSERT_EQ(zx::channel::create(0, &endpoint1, &endpoint2), ZX_OK);
+    fuchsia_ui_views::ViewCreationToken child_token({.value = std::move(endpoint1)});
+    fuchsia_ui_views::ViewportCreationToken parent_token({.value = std::move(endpoint2)});
+
+    auto [parent_client_end, parent_server_end] =
+        fidl::Endpoints<fuchsia_ui_composition::ParentViewportWatcher>::Create();
+    fidl::Client<fuchsia_ui_composition::ParentViewportWatcher> parent_viewport_watcher(
+        std::move(parent_client_end), dispatcher());
+    const flatland::TransformHandle child_transform(uber_struct_system->GetNextInstanceId(), 1);
+    auto link_to_parent = link_system->CreateLinkToParent(
+        dispatcher_holder, std::move(child_token), /*view_identity=*/std::nullopt,
+        std::move(parent_server_end), child_transform,
+        [](const std::string& error_log) { GTEST_FAIL() << error_log; });
+
+    auto [child_client_end, child_server_end] =
+        fidl::Endpoints<fuchsia_ui_composition::ChildViewWatcher>::Create();
+    fidl::Client<fuchsia_ui_composition::ChildViewWatcher> child_view_watcher(
+        std::move(child_client_end), dispatcher());
+    fuchsia_ui_composition::ViewportProperties properties;
+    properties.logical_size(fuchsia_math::SizeU{{.width = 1, .height = 2}});
+    properties.inset(fuchsia_math::Inset{{.top = 0, .right = 0, .bottom = 0, .left = 0}});
+    const flatland::TransformHandle parent_transform(uber_struct_system->GetNextInstanceId(), 2);
+    auto link_to_child = link_system->CreateLinkToChild(
+        dispatcher_holder, std::move(parent_token), std::move(properties),
+        std::move(child_server_end), parent_transform,
+        [](const std::string& error_log) { GTEST_FAIL() << error_log; });
+
+    EXPECT_FALSE(uber_struct_system->MustRecomputeSceneState());
+
+    bool callback_called = false;
+    engine.RenderScheduledFrame(
+        /*frame_number=*/4, /*presentation_time=*/zx::time(4000), flatland_display.get(),
+        [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+    EXPECT_TRUE(callback_called);
+    EXPECT_EQ(engine.scene_state_for_test().rebuild_count, 3u);
+  }
+
+  flatland_display.reset();
+  RunLoopUntilIdle();
+
+  ExpectDisplayCleanup();
+}
+
+// A link change that lands after `RenderScheduledFrame()` but before `GenerateViewTreeSnapshot()`
+// still reaches the view tree on the next frame.
+TEST_F(DisplayCompositorTest, ViewTreeRegeneratesForLinkChangeAfterRender) {
+  auto flatland_presenter =
+      std::make_shared<flatland::FlatlandPresenterImpl>(dispatcher(), fake_frame_scheduler_);
+  auto uber_struct_system = std::make_shared<flatland::UberStructSystem>();
+  auto link_system =
+      std::make_shared<flatland::LinkSystem>(uber_struct_system->GetNextInstanceId());
+
+  flatland::Engine engine(display_compositor_, flatland_presenter, uber_struct_system, link_system,
+                          inspect::Node(),
+                          /*get_root_transform=*/[]() -> std::optional<flatland::TransformHandle> {
+                            return std::nullopt;
+                          });
+
+  const display::DisplayId kDisplayId(1);
+  glm::uvec2 resolution(1024, 768);
+  auto display =
+      std::make_shared<display::Display>(display::WireDisplayId{.value = kDisplayId.value()},
+                                         resolution.x, resolution.y, kMaxDisplayLayersCount);
+
+  // Set up mock coordinator expectations for AddDisplay().
+  next_layer_id_ = 1;
+  EXPECT_CALL(*mock_display_coordinator_, CreateLayer(_, _))
+      .Times(kMaxDisplayLayersCount + 1)
+      .WillRepeatedly(testing::Invoke(
+          [this](fidl::WireServer<fuchsia_hardware_display::Coordinator>::CreateLayerRequestView
+                     request,
+                 MockDisplayCoordinator::CreateLayerCompleter::Sync& completer) {
+            EXPECT_EQ(request->layer_id.value, next_layer_id_++);
+            completer.Reply(fit::ok());
+          }));
+  EXPECT_CALL(*renderer_, ChoosePreferredRenderTargetFormat(_))
+      .WillRepeatedly(Return(kPixelFormat));
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).WillRepeatedly(Return());
+
+  engine.AddDisplay(*display, /*num_vmos=*/0);
+  RunLoopUntilIdle();
+
+  const auto session_id = scheduling::GetNextSessionId();
+  auto [client_end, server_end] =
+      fidl::Endpoints<fuchsia_ui_composition::FlatlandDisplay>::Create();
+  auto uber_struct_queue = uber_struct_system->AllocateQueueForSession(session_id);
+  auto flatland_display = FlatlandDisplay::New(
+      std::make_shared<utils::UnownedDispatcherHolder>(dispatcher()), std::move(server_end),
+      session_id, display,
+      /*destroy_display_function=*/[] {}, flatland_presenter, link_system, uber_struct_queue);
+
+  const flatland::TransformHandle root = flatland_display->root_transform();
+
+  // Render frame 1 and generate a view tree (full snapshot).
+  auto uber_struct = std::make_unique<flatland::UberStruct>();
+  uber_struct->local_topology = {{root, 0}};
+  uber_struct_queue->Push(/*present_id=*/1, std::move(uber_struct),
+                          /*recompute_view_tree=*/false, /*recompute_scene_state=*/true);
+  uber_struct_system->ForceUpdateAllSessions();
+
+  bool callback_called = false;
+  engine.RenderScheduledFrame(
+      /*frame_number=*/1, /*presentation_time=*/zx::time(1000), flatland_display.get(),
+      [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  EXPECT_TRUE(callback_called);
+
+  auto first_snapshot = engine.GenerateViewTreeSnapshot(root);
+  EXPECT_TRUE(std::holds_alternative<std::unique_ptr<view_tree::SubtreeSnapshot>>(first_snapshot));
+
+  // Resolve a link through the engine's LinkSystem synchronously.
+  auto dispatcher_holder = std::make_shared<utils::UnownedDispatcherHolder>(dispatcher());
+  zx::channel endpoint1, endpoint2;
+  ASSERT_EQ(zx::channel::create(0, &endpoint1, &endpoint2), ZX_OK);
+  fuchsia_ui_views::ViewCreationToken child_token({.value = std::move(endpoint1)});
+  fuchsia_ui_views::ViewportCreationToken parent_token({.value = std::move(endpoint2)});
+
+  auto [parent_client_end, parent_server_end] =
+      fidl::Endpoints<fuchsia_ui_composition::ParentViewportWatcher>::Create();
+  fidl::Client<fuchsia_ui_composition::ParentViewportWatcher> parent_viewport_watcher(
+      std::move(parent_client_end), dispatcher());
+  const flatland::TransformHandle child_transform(uber_struct_system->GetNextInstanceId(), 1);
+  auto link_to_parent = link_system->CreateLinkToParent(
+      dispatcher_holder, std::move(child_token), /*view_identity=*/std::nullopt,
+      std::move(parent_server_end), child_transform,
+      [](const std::string& error_log) { GTEST_FAIL() << error_log; });
+
+  auto [child_client_end, child_server_end] =
+      fidl::Endpoints<fuchsia_ui_composition::ChildViewWatcher>::Create();
+  fidl::Client<fuchsia_ui_composition::ChildViewWatcher> child_view_watcher(
+      std::move(child_client_end), dispatcher());
+  fuchsia_ui_composition::ViewportProperties properties;
+  properties.logical_size(fuchsia_math::SizeU{{.width = 1, .height = 2}});
+  properties.inset(fuchsia_math::Inset{{.top = 0, .right = 0, .bottom = 0, .left = 0}});
+  const flatland::TransformHandle parent_transform(uber_struct_system->GetNextInstanceId(), 2);
+  auto link_to_child = link_system->CreateLinkToChild(
+      dispatcher_holder, std::move(parent_token), std::move(properties),
+      std::move(child_server_end), parent_transform,
+      [](const std::string& error_log) { GTEST_FAIL() << error_log; });
+
+  // Generate a view tree: expected "no diff", since scene_state_ has not changed.
+  auto intermediate_snapshot = engine.GenerateViewTreeSnapshot(root);
+  EXPECT_TRUE(std::holds_alternative<view_tree::SubtreeSnapshotNoDiff>(intermediate_snapshot));
+
+  // Render frame 2 and generate a view tree (expected: full snapshot).
+  callback_called = false;
+  engine.RenderScheduledFrame(
+      /*frame_number=*/2, /*presentation_time=*/zx::time(2000), flatland_display.get(),
+      [&callback_called](const scheduling::Timestamps&) { callback_called = true; });
+  EXPECT_TRUE(callback_called);
+
+  auto second_snapshot = engine.GenerateViewTreeSnapshot(root);
+  EXPECT_TRUE(std::holds_alternative<std::unique_ptr<view_tree::SubtreeSnapshot>>(second_snapshot));
 
   flatland_display.reset();
   RunLoopUntilIdle();

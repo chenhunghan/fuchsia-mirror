@@ -16,8 +16,8 @@ import shutil
 import sys
 from pathlib import Path
 
-INPUTS = []
-OUTPUTS = []
+INPUTS: list[Path] = []
+OUTPUTS: list[Path] = []
 
 
 def copy_build_output(output_dir: Path, build_output: Path) -> None:

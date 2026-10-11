@@ -108,6 +108,11 @@ fn test_fmt_sequence() {
 }
 
 #[test]
+fn test_fmt_not() {
+    assert_eq!(parse_cmd("! echo foo | grep bar"), "! echo foo | grep bar");
+}
+
+#[test]
 fn test_fmt_vars() {
     assert_eq!(parse_cmd("echo $VAR \"$QUOTED\""), "echo $VAR $QUOTED");
 }

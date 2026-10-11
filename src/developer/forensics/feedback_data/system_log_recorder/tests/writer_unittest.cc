@@ -106,7 +106,8 @@ TEST_F(WriterTest, VerifyFileOrdering) {
   const StorageSize kBlockSize = kMaxLogLineSize;
   const StorageSize kBufferSize = kMaxLogLineSize;
 
-  LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(), MakeIdentityEncoder());
+  LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(), MakeIdentityEncoder(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 4u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -169,7 +170,8 @@ TEST_F(WriterTest, VerifyEncoderInput) {
 
   auto encoder = std::unique_ptr<EncoderStub>(new EncoderStub());
   EncoderStub* encoder_ptr = encoder.get();
-  LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(), std::move(encoder));
+  LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(), std::move(encoder),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -200,7 +202,7 @@ TEST_F(WriterTest, WritesMessages) {
   // Set up the writer such that each file can fit 2 log messages and the "!!! DROPPED..."
   // string.
   LogMessageStore store(kMaxLogLineSize * 2, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -243,7 +245,7 @@ TEST_F(WriterTest, VerifyCompressionRatio) {
   memfs_manager.Create(kRootDirectory);
 
   LogMessageStore store(kMaxLogLineSize * 4, kMaxLogLineSize * 4, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -269,7 +271,7 @@ TEST_F(WriterTest, VerifyProductionEcoding) {
   // Set up the writer such that one file contains 5 log messages.
   auto encoder = std::unique_ptr<Encoder>(new ProductionEncoder());
   LogMessageStore store(kMaxLogLineSize * 5, kMaxLogLineSize * 5, GetIdentityRedactor(),
-                        std::move(encoder));
+                        std::move(encoder), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -305,7 +307,7 @@ TEST_F(WriterTest, FilesAlreadyPresent) {
     // Set up the writer such that one file contains at most 5 log messages.
     auto encoder = std::unique_ptr<Encoder>(new ProductionEncoder());
     LogMessageStore store(kMaxLogLineSize * 5, kMaxLogLineSize * 5, GetIdentityRedactor(),
-                          std::move(encoder));
+                          std::move(encoder), /*ignore_before_timestamp=*/std::nullopt);
     store.TurnOnRateLimiting();
 
     SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
@@ -318,7 +320,7 @@ TEST_F(WriterTest, FilesAlreadyPresent) {
     // Set up the writer such that one file contains at most 5 log messages.
     auto encoder = std::unique_ptr<Encoder>(new ProductionEncoder());
     LogMessageStore store(kMaxLogLineSize * 5, kMaxLogLineSize * 5, GetIdentityRedactor(),
-                          std::move(encoder));
+                          std::move(encoder), /*ignore_before_timestamp=*/std::nullopt);
     store.TurnOnRateLimiting();
 
     SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
@@ -351,7 +353,7 @@ TEST_F(WriterTest, FailCreateDirectory) {
   // Set up the writer such that each file can fit 2 log messages and the "!!! DROPPED..."
   // string.
   LogMessageStore store(kMaxLogLineSize * 2, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -392,7 +394,7 @@ TEST_F(WriterTest, DirectoryDisappears) {
   // Set up the writer such that each file can fit 2 log messages and the "!!! DROPPED..."
   // string.
   LogMessageStore store(kMaxLogLineSize * 2, kMaxLogLineSize * 2, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, 2u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
@@ -435,7 +437,7 @@ TEST_F(WriterTest, IgnoreNonNumericFiles) {
   ASSERT_TRUE(files::WriteFile(files::JoinPath(kWriteDirectory, "1"), "data"));
 
   LogMessageStore store(kMaxLogLineSize * 5, kMaxLogLineSize * 5, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, 5u, kTotalLogSize, std::make_unique<IdentityDecoder>());
 
   // Additional writes should continue from file 2, ignoring invalid files.
@@ -452,7 +454,7 @@ TEST_F(WriterTest, SavesMetadata) {
   const std::string metadata_path = files::JoinPath(kRootDirectory, "metadata.json");
 
   LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -478,7 +480,7 @@ TEST_F(WriterTest, SavesMetadataMultipleFiles) {
   const std::string metadata_path = files::JoinPath(kRootDirectory, "metadata.json");
 
   LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -506,7 +508,7 @@ TEST_F(WriterTest, SavesMetadataMultipleWritesInSingleBlock) {
 
   // Block size can hold 10 log messages; buffer size holds 1 log message.
   LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder());
+                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -556,7 +558,7 @@ TEST_F(WriterTest, RestoresMetadataOnRestart) {
 
   {
     LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                          MakeIdentityEncoder());
+                          MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
     SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/4u, kTotalLogSize,
                            std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -577,7 +579,7 @@ TEST_F(WriterTest, RestoresMetadataOnRestart) {
 
   {
     LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                          MakeIdentityEncoder());
+                          MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
     SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/4u, kTotalLogSize,
                            std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -603,7 +605,7 @@ TEST_F(WriterTest, RollsOutRestoredMetadataOnRotation) {
 
   {
     LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                          MakeIdentityEncoder());
+                          MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
     SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/4u, kTotalLogSize,
                            std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -631,7 +633,7 @@ TEST_F(WriterTest, RollsOutRestoredMetadataOnRotation) {
     // and triggers StartNewFile, causing file 1 to be deleted. Metadata saved after StartNewFile
     // reflects remaining files on disk (files 2, 3, 4) = only 2 msgs because file 3 is empty.
     LogMessageStore store(kMaxLogLineSize, kMaxLogLineSize, GetIdentityRedactor(),
-                          MakeIdentityEncoder());
+                          MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
     SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/4u, kTotalLogSize,
                            std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -659,7 +661,8 @@ TEST_F(WriterTest, FlushAndReadLogs) {
   const StorageSize kBufferSize = kMaxLogLineSize * 5;
 
   LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   store.TurnOnRateLimiting();
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
@@ -696,7 +699,8 @@ TEST_F(WriterTest, FlushAndReadLogsEmptyLogs) {
   const StorageSize kBufferSize = kMaxLogLineSize * 5;
 
   LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -717,7 +721,8 @@ TEST_F(WriterTest, FlushAndReadLogsDetectsCachePurgeOnLogsDirectoryDeletion) {
   const StorageSize kBufferSize = kMaxLogLineSize * 5;
 
   LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -743,7 +748,8 @@ TEST_F(WriterTest, FlushAndReadLogsSufficientCoverageAfterMinFilesWritten) {
   const StorageSize kBufferSize = kMaxLogLineSize;
 
   LogMessageStore store(kBlockSize, kBufferSize, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/8u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -784,7 +790,8 @@ TEST_F(WriterTest, WriteReturnsCachePurgedWhenLogsDirectoryDeleted) {
   const std::string metadata_path = files::JoinPath(kRootDirectory, "metadata.json");
 
   LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 
@@ -804,7 +811,8 @@ TEST_F(WriterTest, WriteReopensFileAfterPurge) {
   const std::string metadata_path = files::JoinPath(kRootDirectory, "metadata.json");
 
   LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        std::make_unique<IdentityEncoder>());
+                        std::make_unique<IdentityEncoder>(),
+                        /*ignore_before_timestamp=*/std::nullopt);
   SystemLogWriter writer(kWriteDirectory, /*max_num_files=*/2u, kTotalLogSize,
                          std::make_unique<IdentityDecoder>(), metadata_path);
 

@@ -13,7 +13,9 @@ use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle};
 use crate::object_store::extent_record::ExtentValue;
 use crate::object_store::object_manager::{ObjectManager, ReservationUpdate};
 use crate::object_store::object_record::{ObjectKey, ObjectValue};
-use crate::object_store::transaction::{AssociatedObject, LockKey, Mutation, lock_keys};
+use crate::object_store::transaction::{
+    AssociatedObject, LockKey, Mutation, ReservationOptions, lock_keys,
+};
 use crate::object_store::{
     AssocObj, DirectWriter, EncryptedMutations, HandleOptions, LastObjectId, LastObjectIdInfo,
     LockState, MAX_ENCRYPTED_MUTATIONS_SIZE, ObjectStore, Options, ReservedId, StoreInfo,
@@ -131,12 +133,9 @@ impl ObjectStore {
         let store_info_snapshot = StoreInfoSnapshot { store: self, store_info: OnceLock::new() };
 
         let filesystem = self.filesystem();
-        let object_manager = filesystem.object_manager();
-        let reservation = object_manager.metadata_reservation();
         let txn_options = Options {
             skip_journal_checks: true,
-            borrow_metadata_space: true,
-            allocator_reservation: Some(reservation),
+            reservation: ReservationOptions::BorrowedMetadataAndData,
             ..Default::default()
         };
 
@@ -359,12 +358,9 @@ impl ObjectStore {
     // Flushes a locked store.
     async fn flush_locked(&self) -> Result<(), Error> {
         let filesystem = self.filesystem();
-        let object_manager = filesystem.object_manager();
-        let reservation = object_manager.metadata_reservation();
         let txn_options = Options {
             skip_journal_checks: true,
-            borrow_metadata_space: true,
-            allocator_reservation: Some(reservation),
+            reservation: ReservationOptions::BorrowedMetadataAndData,
             ..Default::default()
         };
 

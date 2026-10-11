@@ -29,10 +29,6 @@ regio_common = {
 
 # TODO(https://fxbug.dev/548748442): remove when all fixed in the code
 regio_configs = []
-if (is_kernel) {
-  regio_configs += [ "//zircon/kernel/switch:allow-new-without-default" ]
-  regio_configs += [ "//zircon/kernel/switch:allow-doc-lazy-continuation" ]
-}
 
 rustc_library("regio") {
   forward_variables_from(regio_common, "*")

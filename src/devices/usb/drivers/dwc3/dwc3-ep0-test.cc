@@ -1232,7 +1232,7 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteComplete) {
   TearDownAndPowerOffDriver();
 }
 
-TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteDataOutOverflow) {
+TEST_F(UnmanagedTestFixture, ControlWriteDataOutOverflow) {
   SetUpAndPowerOnDriver();
 
   FakeUsbDciInterface fake_dci;
@@ -1268,15 +1268,21 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteDataOutOverflow) {
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 512u);
 
     dwc3_trb_t trb{};
-    trb.status = TRB_BUFSIZ(static_cast<uint32_t>(65536 - 16));
+    trb.status = TRB_BUFSIZ(static_cast<uint32_t>(Dwc3TestHelper::GetEp0CurTransferLen(drv) - 16));
     Dwc3TestHelper::PushTrbToSharedFifo(drv, trb);
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
 
     EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
+
+  dut_.runtime().RunUntilIdle();
+  EXPECT_FALSE(control_called->signaled());
+  EXPECT_EQ(callback_received_len->load(), 0u);
 
   if (binding.has_value()) {
     binding->Unbind();
@@ -1322,9 +1328,10 @@ TEST_F(UnmanagedTestFixture, ControlWriteShortPacketDataOut) {
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 512u);
 
     dwc3_trb_t trb{};
-    trb.status = TRB_BUFSIZ(static_cast<uint32_t>(65536 - 8));
+    trb.status = TRB_BUFSIZ(static_cast<uint32_t>(Dwc3TestHelper::GetEp0CurTransferLen(drv) - 8));
     Dwc3TestHelper::PushTrbToSharedFifo(drv, trb);
 
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
@@ -1377,64 +1384,6 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransferIn) {
     // With the FIDL limit fix, oversized requests are stalled and state returns to Setup.
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
-
-  if (binding.has_value()) {
-    binding->Unbind();
-    dut_.runtime().RunUntilIdle();
-  }
-
-  TearDownAndPowerOffDriver();
-}
-
-TEST_F(UnmanagedTestFixture, DISABLED_ZlpOutTransferRequired) {
-  FakeUsbDciInterface fake_dci;
-  SetUpAndPowerOnDriver();
-
-  std::optional<fidl::ServerBindingRef<fuchsia_hardware_usb_dci::UsbDciInterface>> binding;
-  auto control_call_count = std::make_shared<std::atomic<int>>(0);
-  fake_dci.SetControlCallback(
-      [control_call_count](fuchsia_hardware_usb_descriptor::wire::UsbSetup setup,
-                           cpp20::span<const uint8_t> data) { control_call_count->fetch_add(1); });
-
-  binding = BindDciInterface(&fake_dci);
-
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    Dwc3TestHelper::SetControllerStarted(drv, true);
-    Dwc3TestHelper::Ep0QueueSetup(drv);
-    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
-
-    // Setup packet with wLength = 512 (multiple of MPS)
-    fuchsia_hardware_usb_descriptor::wire::UsbSetup setup;
-    setup.bm_request_type = fdescriptor::EndpointDirection::kOut |
-                            fdescriptor::RequestType::kVendor |
-                            fdescriptor::RequestRecipient::kDevice;
-    setup.b_request = 0x01;
-    setup.w_length = 512;
-
-    // Use high-level primitive to simulate Setup received!
-    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
-  });
-
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    // Simulate Data OUT phase completion with 512 bytes!
-    Dwc3TestHelper::SimulateDataOutPhase(drv, 512);
-  });
-
-  dut_.RunInDriverContext([&](Dwc3& drv) {
-    // Driver should have read 512 bytes!
-    // Verify that the driver actually queued a TRB for the ZLP!
-    ASSERT_FALSE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
-
-    // State should now be WaitNrdyIn!
-    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
-  });
-
-  // Wait for callback to be executed deterministically
-  dut_.runtime().RunUntil([control_call_count]() { return control_call_count->load() != 0; });
-
-  // Expect 1 call to Control (for the 64 bytes - wait, the driver chunks it but the test just
-  // counts the callback)
-  EXPECT_EQ(control_call_count->load(), 1);
 
   if (binding.has_value()) {
     binding->Unbind();
@@ -1970,6 +1919,259 @@ TEST_F(UnmanagedTestFixture, Ep0InBabbleUnderflow) {
     EXPECT_EQ(Dwc3TestHelper::GetEp0InTotalBytes(drv), initial_bytes);
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyOut);
   });
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, ControlWriteMaxPacketMultipleDataOut) {
+  SetUpAndPowerOnDriver();
+
+  FakeUsbDciInterface fake_dci;
+  auto control_called = std::make_shared<libsync::Completion>();
+  auto received_data = std::make_shared<std::vector<uint8_t>>();
+
+  fake_dci.SetControlCallback(
+      [control_called, received_data](fuchsia_hardware_usb_descriptor::wire::UsbSetup setup,
+                                      cpp20::span<const uint8_t> data) {
+        received_data->assign(data.begin(), data.end());
+        control_called->Signal();
+      });
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 512);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 512u);
+    ASSERT_FALSE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    dwc3_trb_t* trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(trb->control), static_cast<uint32_t>(TRB_TRBCTL_CONTROL_DATA));
+    EXPECT_EQ(TRB_BUFSIZ(trb->status), 512u);
+
+    std::vector<uint8_t> payload(512, 0x5A);
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload.data(), 0, payload.size());
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 512);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
+  });
+
+  ASSERT_EQ(control_called->Wait(zx::sec(10)), ZX_OK);
+  ASSERT_EQ(received_data->size(), 512u);
+  for (uint8_t byte : *received_data) {
+    EXPECT_EQ(byte, 0x5A);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, ControlWriteHighSpeedMaxPacketMultipleDataOut) {
+  SetUpAndPowerOnDriver();
+
+  FakeUsbDciInterface fake_dci;
+  auto control_called = std::make_shared<libsync::Completion>();
+  auto received_data = std::make_shared<std::vector<uint8_t>>();
+
+  fake_dci.SetControlCallback(
+      [control_called, received_data](fuchsia_hardware_usb_descriptor::wire::UsbSetup setup,
+                                      cpp20::span<const uint8_t> data) {
+        received_data->assign(data.begin(), data.end());
+        control_called->Signal();
+      });
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetEp0MaxPacketSize(drv, 64);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x01, 0, 0, 64);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 64u);
+    ASSERT_FALSE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    dwc3_trb_t* trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(trb->control), static_cast<uint32_t>(TRB_TRBCTL_CONTROL_DATA));
+    EXPECT_EQ(TRB_BUFSIZ(trb->status), 64u);
+
+    std::vector<uint8_t> payload(64, 0x3C);
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload.data(), 0, payload.size());
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 64);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
+  });
+
+  ASSERT_EQ(control_called->Wait(zx::sec(10)), ZX_OK);
+  ASSERT_EQ(received_data->size(), 64u);
+  for (uint8_t byte : *received_data) {
+    EXPECT_EQ(byte, 0x3C);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, ControlWriteUnalignedWLengthRoundsUpToMaxPacketSize) {
+  SetUpAndPowerOnDriver();
+
+  FakeUsbDciInterface fake_dci;
+  auto control_called = std::make_shared<libsync::Completion>();
+  auto received_data = std::make_shared<std::vector<uint8_t>>();
+
+  fake_dci.SetControlCallback(
+      [control_called, received_data](fuchsia_hardware_usb_descriptor::wire::UsbSetup setup,
+                                      cpp20::span<const uint8_t> data) {
+        received_data->assign(data.begin(), data.end());
+        control_called->Signal();
+      });
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetEp0MaxPacketSize(drv, 512);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    // 6-byte unaligned vendor control-write at SuperSpeed (MPS = 512).
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x30, 0, 0, 6);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 512u);
+    ASSERT_FALSE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    dwc3_trb_t* trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(trb->control), static_cast<uint32_t>(TRB_TRBCTL_CONTROL_DATA));
+    EXPECT_EQ(TRB_BUFSIZ(trb->status), 512u);
+
+    std::vector<uint8_t> payload(6, 0xA5);
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload.data(), 0, payload.size());
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 6);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
+  });
+
+  ASSERT_EQ(control_called->Wait(zx::sec(10)), ZX_OK);
+  ASSERT_EQ(received_data->size(), 6u);
+  for (uint8_t byte : *received_data) {
+    EXPECT_EQ(byte, 0xA5);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, ControlWriteHighSpeedUnalignedMultiPacketRoundsUp) {
+  SetUpAndPowerOnDriver();
+
+  FakeUsbDciInterface fake_dci;
+  auto control_called = std::make_shared<libsync::Completion>();
+  auto received_data = std::make_shared<std::vector<uint8_t>>();
+
+  fake_dci.SetControlCallback(
+      [control_called, received_data](fuchsia_hardware_usb_descriptor::wire::UsbSetup setup,
+                                      cpp20::span<const uint8_t> data) {
+        received_data->assign(data.begin(), data.end());
+        control_called->Signal();
+      });
+
+  auto binding = BindDciInterface(&fake_dci);
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetEp0MaxPacketSize(drv, 64);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    // 100-byte unaligned multi-packet control-write at High-Speed (MPS = 64 -> TRB size = 128).
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x31, 0, 0, 100);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0CurTransferLen(drv), 128u);
+    ASSERT_FALSE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    dwc3_trb_t* trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(trb->control), static_cast<uint32_t>(TRB_TRBCTL_CONTROL_DATA));
+    EXPECT_EQ(TRB_BUFSIZ(trb->status), 128u);
+
+    std::vector<uint8_t> payload(100, 0x7E);
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload.data(), 0, payload.size());
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 100);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
+  });
+
+  ASSERT_EQ(control_called->Wait(zx::sec(10)), ZX_OK);
+  ASSERT_EQ(received_data->size(), 100u);
+  for (uint8_t byte : *received_data) {
+    EXPECT_EQ(byte, 0x7E);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
 
   TearDownAndPowerOffDriver();
 }

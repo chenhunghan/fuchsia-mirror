@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import atexit
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import fuchsia_controller_internal
@@ -26,6 +27,7 @@ __all__ = [
 ]
 
 from abc import ABC, abstractmethod
+from collections.abc import Buffer
 from typing import Any, Callable, Self
 
 # This is a placeholder to unblock the main thread from receiving signals in
@@ -141,7 +143,7 @@ class Socket(BaseHandle):
         else:
             self._socket = handle
 
-    def write(self, buffer: bytes) -> None:
+    def write(self, buffer: Buffer) -> None:
         """Writes data to the socket.
 
         Args:
@@ -216,14 +218,38 @@ class Context:
 
     def __init__(
         self,
-        config: dict[str, str] | None = None,
+        config: dict[str, Any] | None = None,
         isolate_dir: IsolateDir | None = None,
         target: str | None = None,
     ) -> None:
         if isolate_dir is None:
             isolate_dir = IsolateDir()
+        if target is not None:
+            if config is not None:
+                maybe_target = None
+                if "target.default" in config:
+                    maybe_target = config["target.default"]
+                elif "target" in config:
+                    if isinstance(config["target"], dict):
+                        if "default" in config["target"]:
+                            maybe_target = config["target"]["default"]
+                    else:
+                        maybe_target = config["target"]
+                if maybe_target is not None:
+                    raise RuntimeError(
+                        f"Context `target` parameter set to '{target}', but "
+                        f"config also contains 'target' / 'target.default' value set to '{maybe_target}'. You must only specify one"
+                    )
+            config = dict(config) if config else {}
+            config["target.default"] = target
+        if config is not None:
+            if not isinstance(config, dict):
+                raise TypeError("`config` must be a dictionary")
+            config_json = json.dumps(config)
+        else:
+            config_json = None
         self._handle = fuchsia_controller_internal.context_create(
-            config, isolate_dir.directory(), target
+            config_json, isolate_dir.directory()
         )
         self._directory = isolate_dir
 
@@ -396,7 +422,7 @@ class Channel(BaseHandle):
     def write(
         self,
         encoded_fidl_message: tuple[
-            bytes, list[tuple[int, int, int, int, int]]
+            Buffer, list[tuple[int, int, int, int, int]]
         ],
     ) -> None:
         """Writes data to the channel.

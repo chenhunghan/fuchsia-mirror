@@ -7,10 +7,9 @@ use crate::rights::Rights;
 use async_trait::async_trait;
 use clonable_error::ClonableError;
 use cm_rust::offer::OfferDeclCommon;
-use cm_rust::{CapabilityTypeName, ExposeDeclCommon, SourceName, UseDeclCommon};
-use cm_types::{Availability, LongName, Name, RelativePath};
+use cm_rust::{CapabilityTypeName, ExposeDeclCommon, GenericRef, SourceName, UseDeclCommon};
+use cm_types::{Availability, Name, RelativePath};
 use fidl_fuchsia_component as fcomponent;
-use fidl_fuchsia_component_decl as fdecl;
 use itertools::Itertools;
 use moniker::{ChildName, ExtendedMoniker, Moniker};
 use router_error::{Explain, RouterError};
@@ -199,77 +198,6 @@ impl From<&cm_rust::ResolverRegistration> for RouteVerb {
     }
 }
 
-#[derive(Clone, PartialEq, Debug, Error)]
-#[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-pub enum PrettyPrintRef {
-    Parent,
-    Self_,
-    Child(Name),
-    ChildInCollection(LongName, Name),
-    Collection(Name),
-    Framework,
-    Capability(Name),
-    Debug,
-    Void,
-    Environment,
-}
-
-impl std::fmt::Display for PrettyPrintRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PrettyPrintRef::Parent => write!(f, "parent"),
-            PrettyPrintRef::Self_ => write!(f, "self"),
-            PrettyPrintRef::Child(name) => write!(f, "child {name}"),
-            PrettyPrintRef::ChildInCollection(name, collection) => {
-                write!(f, "child {name} in collection {collection}")
-            }
-            PrettyPrintRef::Collection(name) => write!(f, "collection {name}"),
-            PrettyPrintRef::Framework => write!(f, "framework"),
-            PrettyPrintRef::Capability(name) => write!(f, "capability {name}"),
-            PrettyPrintRef::Debug => write!(f, "debug"),
-            PrettyPrintRef::Void => write!(f, "void"),
-            PrettyPrintRef::Environment => write!(f, "environment"),
-        }
-    }
-}
-
-impl From<fdecl::Ref> for PrettyPrintRef {
-    fn from(ref_: fdecl::Ref) -> Self {
-        match ref_ {
-            fdecl::Ref::Parent(_) => PrettyPrintRef::Parent,
-            fdecl::Ref::Self_(_) => PrettyPrintRef::Self_,
-            fdecl::Ref::Child(child_ref) if child_ref.collection.is_none() => {
-                PrettyPrintRef::Child(Name::new(child_ref.name).unwrap())
-            }
-            fdecl::Ref::Child(child_ref) => PrettyPrintRef::ChildInCollection(
-                LongName::new(child_ref.name).unwrap(),
-                Name::new(child_ref.collection.unwrap()).unwrap(),
-            ),
-            fdecl::Ref::Collection(collection) => {
-                PrettyPrintRef::Collection(Name::new(collection.name).unwrap())
-            }
-            fdecl::Ref::Framework(_) => PrettyPrintRef::Framework,
-            fdecl::Ref::Capability(capability) => {
-                PrettyPrintRef::Capability(Name::new(capability.name).unwrap())
-            }
-            fdecl::Ref::Debug(_) => PrettyPrintRef::Debug,
-            fdecl::Ref::VoidType(_) => PrettyPrintRef::Void,
-            fdecl::Ref::Environment(_) => PrettyPrintRef::Environment,
-            _ => panic!("unexpected fdecl::Ref variant found"),
-        }
-    }
-}
-
-impl From<ChildName> for PrettyPrintRef {
-    fn from(child_name: ChildName) -> Self {
-        if let Some(collection_name) = child_name.collection() {
-            Self::ChildInCollection(child_name.name().to_owned(), collection_name.to_owned())
-        } else {
-            Self::Child(Name::new(child_name.name()).unwrap())
-        }
-    }
-}
-
 /// Errors produced during routing.
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -281,7 +209,7 @@ pub enum RoutingError {
         moniker: Moniker,
         verb: RouteVerb,
         counter_verb: RouteVerb,
-        source: PrettyPrintRef,
+        source: GenericRef,
         capability_type: CapabilityTypeName,
         capability_name: RelativePath,
     },

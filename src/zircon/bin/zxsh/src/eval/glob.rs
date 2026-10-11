@@ -72,18 +72,6 @@ pub fn word_chars_to_bstring(word: &[WordChar]) -> BString {
     BString::from(bytes)
 }
 
-/// Checks whether a byte string pattern (treated as unquoted characters) matches the target text.
-///
-/// Supports POSIX shell wildcards: `*` (any sequence), `?` (any single byte), and bracket
-/// expressions `[...]`.
-pub fn match_glob(pattern: &BStr, text: &BStr) -> bool {
-    let mut chars = Vec::with_capacity(pattern.len());
-    for &b in pattern.as_bytes() {
-        chars.push(WordChar::Unquoted(b));
-    }
-    match_segment_glob(&chars, text)
-}
-
 fn match_char_class(target_byte: u8, class_name: &str) -> bool {
     match class_name {
         "alnum" => target_byte.is_ascii_alphanumeric(),
@@ -104,6 +92,12 @@ fn match_char_class(target_byte: u8, class_name: &str) -> bool {
 
 fn find_bracket_end(pattern: &[WordChar]) -> Option<usize> {
     let mut i = 1;
+    if i < pattern.len() && (pattern[i].is_wildcard(b'!') || pattern[i].is_wildcard(b'^')) {
+        i += 1;
+    }
+    if i < pattern.len() && pattern[i].is_wildcard(b']') {
+        i += 1;
+    }
     while i < pattern.len() {
         if pattern[i].is_wildcard(b']') {
             return Some(i);
@@ -148,11 +142,11 @@ fn eval_bracket_set(pattern: &[WordChar], target_byte: u8) -> Option<(bool, usiz
     let set_content = &pattern[1..end];
     let mut negate = false;
     let mut match_chars = set_content;
-    if !set_content.is_empty() {
-        if set_content[0].is_wildcard(b'!') {
-            negate = true;
-            match_chars = &set_content[1..];
-        }
+    if !set_content.is_empty()
+        && (set_content[0].is_wildcard(b'!') || set_content[0].is_wildcard(b'^'))
+    {
+        negate = true;
+        match_chars = &set_content[1..];
     }
     let mut found = false;
     let mut i = 0;
@@ -244,7 +238,21 @@ fn match_segment_helper(pattern: &[WordChar], target: &[u8]) -> bool {
     }
 }
 
-/// Performs filesystem glob expansion on a word composed of `WordChar` elements.
+fn join_glob_path(current_path: &Option<BString>, seg_bytes: &[u8]) -> BString {
+    match current_path {
+        Some(p) => {
+            let mut joined = Vec::with_capacity(p.len() + 1 + seg_bytes.len());
+            joined.extend_from_slice(p);
+            joined.push(b'/');
+            joined.extend_from_slice(seg_bytes);
+            BString::from(joined)
+        }
+        None => BString::from(seg_bytes),
+    }
+}
+
+/// Performs filesystem glob expansion on a word composed of `WordChar` elements,
+/// resolving relative patterns against `cwd`.
 ///
 /// Traverses the filesystem matching wildcard segments against directory contents.
 /// Results are sorted lexicographically. If no filesystem matches are found, or if `word`
@@ -253,7 +261,7 @@ fn match_segment_helper(pattern: &[WordChar], target: &[u8]) -> bool {
 /// Note: This implementation performs a purely string-based directory traversal and does
 /// not evaluate or follow symbolic links. This shell is designed specifically for Fuchsia
 /// native filesystems, which do not support symbolic links.
-pub fn expand_glob(word: &[WordChar]) -> Vec<BString> {
+pub fn expand_glob(word: &[WordChar], cwd: &std::path::Path) -> Vec<BString> {
     let has_wildcard = word.iter().any(|c| c.is_glob_wildcard());
     if !has_wildcard {
         return vec![word_chars_to_bstring(word)];
@@ -295,80 +303,50 @@ pub fn expand_glob(word: &[WordChar]) -> Vec<BString> {
             let seg_bytes = word_chars_to_bstring(seg);
 
             if seg_bytes.is_empty() {
-                traverse(base_dir, current_path, &segments[1..], results);
+                if base_dir.is_dir() {
+                    let next_path = join_glob_path(&current_path, b"");
+                    traverse(base_dir, Some(next_path), &segments[1..], results);
+                }
             } else {
                 let seg_bstr = seg_bytes.as_bstr();
                 if let Ok(path_seg) = seg_bstr.to_path() {
                     let next_dir = base_dir.join(path_seg);
                     if next_dir.exists() {
-                        let next_path = match &current_path {
-                            Some(p) => {
-                                if p == "/" {
-                                    let mut joined = Vec::from(p.clone());
-                                    joined.extend_from_slice(&seg_bytes);
-                                    BString::from(joined)
-                                } else {
-                                    let mut joined = Vec::from(p.clone());
-                                    joined.push(b'/');
-                                    joined.extend_from_slice(&seg_bytes);
-                                    BString::from(joined)
-                                }
-                            }
-                            None => seg_bytes,
-                        };
+                        let next_path = join_glob_path(&current_path, &seg_bytes);
                         traverse(&next_dir, Some(next_path), &segments[1..], results);
                     }
                 }
             }
-        } else {
-            if let Ok(entries) = std::fs::read_dir(base_dir) {
-                let mut entry_names = Vec::new();
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        let name_bytes = entry.file_name().as_bytes().to_vec();
-                        entry_names.push(BString::from(name_bytes));
-                    }
+        } else if let Ok(entries) = std::fs::read_dir(base_dir) {
+            let mut entry_names = Vec::new();
+            for entry in entries.flatten() {
+                let name_bytes = entry.file_name().as_bytes().to_vec();
+                entry_names.push(BString::from(name_bytes));
+            }
+            quick_sort(&mut entry_names, &|a, b| a.cmp(b));
+
+            for name_bstr in entry_names {
+                let is_dotfile = name_bstr.starts_with(b".");
+                let starts_with_dot_pattern = seg.first().map_or(false, |c| c.raw_byte() == b'.');
+                if is_dotfile && !starts_with_dot_pattern {
+                    continue;
                 }
-                quick_sort(&mut entry_names, &|a, b| a.cmp(b));
 
-                for name_bstr in entry_names {
-                    let is_dotfile = name_bstr.starts_with(b".");
-                    let starts_with_dot_pattern =
-                        seg.first().map_or(false, |c| c.raw_byte() == b'.');
-                    if is_dotfile && !starts_with_dot_pattern {
-                        continue;
-                    }
-
-                    if match_segment_glob(seg, name_bstr.as_ref()) {
-                        if let Ok(path_seg) = name_bstr.to_path() {
-                            let next_dir = base_dir.join(path_seg);
-                            let next_path = match &current_path {
-                                Some(p) => {
-                                    if p == "/" {
-                                        let mut joined = Vec::from(p.clone());
-                                        joined.extend_from_slice(&name_bstr);
-                                        BString::from(joined)
-                                    } else {
-                                        let mut joined = Vec::from(p.clone());
-                                        joined.push(b'/');
-                                        joined.extend_from_slice(&name_bstr);
-                                        BString::from(joined)
-                                    }
-                                }
-                                None => name_bstr.clone(),
-                            };
-                            traverse(&next_dir, Some(next_path), &segments[1..], results);
-                        }
-                    }
+                if match_segment_glob(seg, name_bstr.as_ref())
+                    && let Ok(path_seg) = name_bstr.to_path()
+                {
+                    let next_dir = base_dir.join(path_seg);
+                    let next_path = join_glob_path(&current_path, &name_bstr);
+                    traverse(&next_dir, Some(next_path), &segments[1..], results);
                 }
             }
         }
     }
 
     if is_absolute {
-        traverse(std::path::Path::new("/"), Some(BString::from("/")), &segments[1..], &mut results);
+        traverse(std::path::Path::new("/"), Some(BString::from("")), &segments[1..], &mut results);
     } else {
-        traverse(std::path::Path::new("."), None, &segments, &mut results);
+        traverse(cwd, None, &segments, &mut results);
     }
 
     if results.is_empty() { vec![word_chars_to_bstring(word)] } else { results }

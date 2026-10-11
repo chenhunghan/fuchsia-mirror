@@ -30,16 +30,13 @@ class Config(enum.Enum):
     key_test_failure_tracebacks = "test_failure_tracebacks"
     # Config names for controllers packaged in ACTS.
     key_access_point = "AccessPoint"
-    key_android_device = "AndroidDevice"
     key_attenuator = "Attenuator"
     key_bluetooth_pts_device = "BluetoothPtsDevice"
     key_fuchsia_device = "FuchsiaDevice"
     key_iperf_client = "IPerfClient"
     key_iperf_server = "IPerfServer"
-    key_openwrt_ap = "OpenWrtAP"
     key_packet_capture = "PacketCapture"
     key_pdu = "PduDevice"
-    key_sniffer = "Sniffer"
     # Internal keys, used internally, not exposed to user's config files.
     ikey_user_param = "user_params"
     ikey_testbed_name = "testbed_name"
@@ -48,16 +45,13 @@ class Config(enum.Enum):
     ikey_summary_writer = "summary_writer"
     # module name of controllers packaged in ACTS.
     m_key_access_point = "access_point"
-    m_key_android_device = "android_device"
     m_key_attenuator = "attenuator"
     m_key_bluetooth_pts_device = "bluetooth_pts_device"
     m_key_fuchsia_device = "fuchsia_device"
     m_key_iperf_client = "iperf_client"
     m_key_iperf_server = "iperf_server"
-    m_key_openwrt_ap = "openwrt_ap"
     m_key_packet_capture = "packet_capture"
     m_key_pdu = "pdu"
-    m_key_sniffer = "sniffer"
 
     # A list of keys whose values in configs should not be passed to test
     # classes without unpacking first.
@@ -66,16 +60,13 @@ class Config(enum.Enum):
     # Controller names packaged with ACTS.
     builtin_controller_names = [
         key_access_point,
-        key_android_device,
         key_attenuator,
         key_bluetooth_pts_device,
         key_fuchsia_device,
         key_iperf_client,
         key_iperf_server,
-        key_openwrt_ap,
         key_packet_capture,
         key_pdu,
-        key_sniffer,
     ]
 
 

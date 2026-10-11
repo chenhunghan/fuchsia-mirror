@@ -73,6 +73,8 @@ impl RedirectTag {
     /// Close a file descriptor (e.g. `>&-`).
     pub const CLOSE_FD: Self = Self(3);
     pub const HERE_DOC: Self = Self(4);
+    /// Open a file for reading and writing (e.g. `<> file`).
+    pub const READ_WRITE: Self = Self(5);
 }
 
 /// Discriminant tag indicating the type of a [`Command`] node.
@@ -119,6 +121,8 @@ impl CommandTag {
     pub const BACKGROUND: Self = Self(12);
     /// A sequence of commands (e.g. `a; b; c`).
     pub const SEQUENCE: Self = Self(13);
+    /// A negated pipeline or command (e.g. `! cmd`).
+    pub const NOT: Self = Self(14);
 
     /// Returns `true` if this command type should be formatted and traced during execution
     /// (`set -x` / `set -v`).

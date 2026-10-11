@@ -562,3 +562,12 @@ class TestArgs(unittest.TestCase):
             f"--help output ({output_bytes} bytes) exceeds the Antigravity limit of "
             f"{antigravity_max_output_bytes} bytes. Consider marking new flags with adv_help().",
         )
+
+    def test_parallel_zero_flag_rejected(self) -> None:
+        """Test that --parallel 0 is rejected during flag validation."""
+        flags = args.parse_args(["--parallel", "0"])
+        with self.assertRaises(args.FlagError) as ctx:
+            flags.validate()
+        self.assertIn(
+            "--parallel must be a positive number", str(ctx.exception)
+        )

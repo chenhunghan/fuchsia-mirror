@@ -5,6 +5,7 @@
 
 import itertools
 import logging
+import typing
 from collections.abc import MutableSequence
 
 from reporting import metrics
@@ -216,9 +217,11 @@ class SuspendMetricsProcessor(trace_metrics.MetricsProcessor):
     """Computes suspend/resume metrics."""
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         return EVENT_PATTERNS
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

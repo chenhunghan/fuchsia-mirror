@@ -36,7 +36,7 @@ use netstack3_device::socket::{DeviceSocketCounters, DeviceSocketId, HeldDeviceS
 use netstack3_device::{
     ArpCounters, BaseDeviceId, DeviceCollectionContext, DeviceConfigurationContext, DeviceCounters,
     DeviceId, DeviceLayerState, DeviceStateSpec, DeviceTxOffloadSpecContext, Devices, DevicesIter,
-    IpLinkDeviceState, IpLinkDeviceStateInner, Ipv6DeviceLinkLayerAddr, OriginTracker,
+    GroCounters, IpLinkDeviceState, IpLinkDeviceStateInner, Ipv6DeviceLinkLayerAddr, OriginTracker,
     OriginTrackerContext, WeakDeviceId, for_any_device_id,
 };
 use netstack3_filter::ProofOfEgressCheck;
@@ -1315,6 +1315,12 @@ where
 impl<BT: BindingsTypes, L> CounterContext<ArpCounters> for CoreCtx<'_, BT, L> {
     fn counters(&self) -> &ArpCounters {
         &self.unlocked_access::<crate::lock_ordering::UnlockedState>().device.arp_counters
+    }
+}
+
+impl<BT: BindingsTypes, L> CounterContext<GroCounters> for CoreCtx<'_, BT, L> {
+    fn counters(&self) -> &GroCounters {
+        &self.unlocked_access::<crate::lock_ordering::UnlockedState>().device.gro_counters
     }
 }
 

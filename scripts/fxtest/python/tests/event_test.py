@@ -3,7 +3,9 @@
 # found in the LICENSE file.
 
 import asyncio
+import typing
 import unittest
+from unittest import mock
 
 import environment
 import event
@@ -299,3 +301,33 @@ class TestEventSpan(unittest.IsolatedAsyncioTestCase):
             self._create_event_span(payload).category,
             event.EventStatCategory.IGNORE,
         )
+
+    async def test_event_recorder_iter_does_not_drop_concurrent_events(
+        self,
+    ) -> None:
+        """Test that events emitted while an iterator is being initialized are not dropped."""
+        recorder = event.EventRecorder()
+        recorder.emit_init()
+
+        orig_queue_cls = asyncio.Queue
+
+        def queue_factory(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> asyncio.Queue[typing.Any]:
+            q: asyncio.Queue[typing.Any] = orig_queue_cls(*args, **kwargs)
+            # Emitted while initializing the iterator before the queue is registered in _queues.
+            recorder.emit_info_message("concurrent event")
+            return q
+
+        with mock.patch("event.asyncio.Queue", side_effect=queue_factory):
+            it = recorder.iter()
+            recorder.emit_end()
+            received = [e async for e in it]
+
+        # The concurrent event must NOT be lost!
+        messages = [
+            e.payload.user_message.value
+            for e in received
+            if e.payload and e.payload.user_message
+        ]
+        self.assertIn("concurrent event", messages)

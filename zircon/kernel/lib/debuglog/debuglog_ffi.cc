@@ -7,6 +7,8 @@
 #include <lib/debuglog.h>
 #include <lib/object-constants.h>
 
+#include <kernel/ffi.h>
+
 static_assert(sizeof(DlogReader) == kDlogReaderStorageSize, "DlogReader size mismatch");
 static_assert(alignof(DlogReader) == kDlogReaderStorageAlign, "DlogReader alignment mismatch");
 
@@ -31,5 +33,11 @@ zx_status_t cpp_dlog_reader_read(DlogReader* reader, uint32_t flags, dlog_record
 
 void cpp_dlog_serial_write(const char* ptr, size_t len) { dlog_serial_write({ptr, len}); }
 void cpp_dlog_sync() { dlog_sync(); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dlog_panic_start() { dlog_panic_start(); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_dlog_bluescreen_init() { dlog_bluescreen_init(); }
 
 }  // extern "C"

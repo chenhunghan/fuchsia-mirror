@@ -5,13 +5,14 @@
 use crate::meta_as_dir::MetaAsDir;
 use crate::meta_subdir::MetaSubdir;
 use crate::non_meta_subdir::NonMetaSubdir;
-use crate::{Error, NonMetaStorageError, usize_to_u64_safe};
+use crate::{Error, NonMetaStorage as _, NonMetaStorageError, usize_to_u64_safe};
 use fidl_fuchsia_io as fio;
 use fuchsia_pkg::MetaContents;
 use log::error;
 use packed::PackedMap;
 use std::sync::Arc;
 use vfs::directory::entry::{EntryInfo, OpenRequest};
+use vfs::directory::entry_container::Directory as _;
 use vfs::directory::immutable::connection::ImmutableConnection;
 use vfs::directory::traversal_position::TraversalPosition;
 use vfs::execution_scope::ExecutionScope;
@@ -28,56 +29,25 @@ pub struct RootDir<S> {
     // The keys are object relative path expressions.
     pub(crate) non_meta_files: PackedMap<str, fuchsia_hash::Hash>,
     pub(crate) meta_far_vmo: zx::Vmo,
-    dropper: Option<Box<dyn crate::OnRootDirDrop>>,
 }
 
 impl<S: crate::NonMetaStorage> RootDir<S> {
     /// Loads the package metadata given by `hash` from `non_meta_storage`, returning an object
     /// representing the package, backed by `non_meta_storage`.
     pub async fn new(non_meta_storage: S, hash: fuchsia_hash::Hash) -> Result<Arc<Self>, Error> {
-        Ok(Arc::new(Self::new_raw(non_meta_storage, hash, None).await?))
+        Ok(Arc::new(Self::new_raw(non_meta_storage, hash).await?))
     }
 
     /// Loads the package metadata given by `hash` from `non_meta_storage`, returning an object
     /// representing the package, backed by `non_meta_storage`.
-    /// Takes `dropper`, which will be dropped when the returned `RootDir` is dropped.
-    pub async fn new_with_dropper(
-        non_meta_storage: S,
-        hash: fuchsia_hash::Hash,
-        dropper: Box<dyn crate::OnRootDirDrop>,
-    ) -> Result<Arc<Self>, Error> {
-        Ok(Arc::new(Self::new_raw(non_meta_storage, hash, Some(dropper)).await?))
-    }
-
-    /// Loads the package metadata given by `hash` from `non_meta_storage`, returning an object
-    /// representing the package, backed by `non_meta_storage`.
-    /// Takes `dropper`, which will be dropped when the returned `RootDir` is dropped.
-    /// Like `new_with_dropper` except the returned `RootDir` is not in an `Arc`.
-    pub async fn new_raw(
-        non_meta_storage: S,
-        hash: fuchsia_hash::Hash,
-        dropper: Option<Box<dyn crate::OnRootDirDrop>>,
-    ) -> Result<Self, Error> {
+    /// Like `new` except the returned `RootDir` is not in an `Arc`.
+    pub async fn new_raw(non_meta_storage: S, hash: fuchsia_hash::Hash) -> Result<Self, Error> {
         let meta_far_vmo = non_meta_storage.get_blob_vmo(&hash).await.map_err(|e| {
             if e.is_not_found_error() { Error::MissingMetaFar } else { Error::OpenMetaFar(e) }
         })?;
         let (meta_files, non_meta_files) = load_package_metadata(&meta_far_vmo)?;
 
-        Ok(RootDir { non_meta_storage, hash, meta_files, non_meta_files, meta_far_vmo, dropper })
-    }
-
-    /// Sets the dropper. If the dropper was already set, returns `dropper` in the error.
-    pub fn set_dropper(
-        &mut self,
-        dropper: Box<dyn crate::OnRootDirDrop>,
-    ) -> Result<(), Box<dyn crate::OnRootDirDrop>> {
-        match self.dropper {
-            Some(_) => Err(dropper),
-            None => {
-                self.dropper = Some(dropper);
-                Ok(())
-            }
-        }
+        Ok(RootDir { non_meta_storage, hash, meta_files, non_meta_files, meta_far_vmo })
     }
 
     /// Returns the contents, if present, of the file at object relative path expression `path`.
@@ -89,6 +59,27 @@ impl<S: crate::NonMetaStorage> RootDir<S> {
             self.meta_far_vmo
                 .read_to_vec(location.offset, location.length)
                 .map_err(ReadFileError::ReadMetaFile)
+        } else {
+            Err(ReadFileError::NoFileAtPath { path: path.to_string() })
+        }
+    }
+
+    /// Returns a read-only VMO and size in bytes, if present, of the file at object relative path
+    /// expression `path`.
+    /// https://fuchsia.dev/fuchsia-src/concepts/process/namespaces?hl=en#object_relative_path_expressions
+    pub async fn get_file_vmo(&self, path: &str) -> Result<(zx::Vmo, u64), ReadFileError> {
+        if let Some(hash) = self.non_meta_files.get(path) {
+            let vmo = self
+                .non_meta_storage
+                .get_blob_vmo(hash)
+                .await
+                .map_err(ReadFileError::GetBlobVmo)?;
+            let size = vmo.get_content_size().map_err(ReadFileError::GetContentSize)?;
+            Ok((vmo, size))
+        } else if let Some(location) = self.meta_files.get(path) {
+            let vmo =
+                self.create_meta_file_vmo(location).map_err(ReadFileError::CreateMetaFileVmo)?;
+            Ok((vmo, location.length))
         } else {
             Err(ReadFileError::NoFileAtPath { path: path.to_string() })
         }
@@ -138,8 +129,7 @@ impl<S: crate::NonMetaStorage> RootDir<S> {
         Ok(VmoFile::new_with_inode(vmo, /*inode*/ 1))
     }
 
-    /// Creates and returns a meta file if one exists at `path`.
-    pub(crate) fn get_meta_file(&self, path: &str) -> Result<Option<Arc<VmoFile>>, zx::Status> {
+    fn create_meta_file_vmo(&self, location: &MetaFileLocation) -> Result<zx::Vmo, zx::Status> {
         // The FAR spec requires 4 KiB alignment of content chunks [1], so offset will
         // always be page-aligned, because pages are required [2] to be a power of 2 and at
         // least 4 KiB.
@@ -149,29 +139,36 @@ impl<S: crate::NonMetaStorage> RootDir<S> {
         // zx_system_get_page_size() > 4K.
         assert_eq!(zx::system_get_page_size(), 4096);
 
+        self.meta_far_vmo.create_child(
+            zx::VmoChildOptions::SNAPSHOT_AT_LEAST_ON_WRITE | zx::VmoChildOptions::NO_WRITE,
+            location.offset,
+            location.length,
+        )
+    }
+
+    /// Creates and returns a meta file if one exists at `path`.
+    pub(crate) fn get_meta_file(&self, path: &str) -> Result<Option<Arc<VmoFile>>, zx::Status> {
         let location = match self.meta_files.get(path) {
             Some(location) => location,
             None => return Ok(None),
         };
-        let vmo = self
-            .meta_far_vmo
-            .create_child(
-                zx::VmoChildOptions::SNAPSHOT_AT_LEAST_ON_WRITE | zx::VmoChildOptions::NO_WRITE,
-                location.offset,
-                location.length,
-            )
-            .map_err(|e| {
-                error!("Error creating child vmo for meta file {:?}", e);
-                zx::Status::INTERNAL
-            })?;
+        let vmo = self.create_meta_file_vmo(location).map_err(|e| {
+            error!("Error creating child vmo for meta file {:?}", e);
+            zx::Status::INTERNAL
+        })?;
 
         Ok(Some(VmoFile::new_with_inode(vmo, /*inode*/ 1)))
     }
+}
+
+pub(crate) trait AsRootDir: Send + Sync + Sized + 'static {
+    type Storage: crate::NonMetaStorage;
+    fn as_root_dir(&self) -> &RootDir<Self::Storage>;
 
     /// Creates and returns a `MetaSubdir` if one exists at `path`. `path` must end in '/'.
-    pub(crate) fn get_meta_subdir(self: &Arc<Self>, path: String) -> Option<Arc<MetaSubdir<S>>> {
+    fn get_meta_subdir(self: &Arc<Self>, path: String) -> Option<Arc<MetaSubdir<Self>>> {
         debug_assert!(path.ends_with("/"));
-        if let Some((k, _)) = self.meta_files.range(path.as_str()..).next()
+        if let Some((k, _)) = self.as_root_dir().meta_files.range(path.as_str()..).next()
             && k.starts_with(&path)
         {
             return Some(MetaSubdir::new(self.clone(), path));
@@ -180,12 +177,9 @@ impl<S: crate::NonMetaStorage> RootDir<S> {
     }
 
     /// Creates and returns a `NonMetaSubdir` if one exists at `path`. `path` must end in '/'.
-    pub(crate) fn get_non_meta_subdir(
-        self: &Arc<Self>,
-        path: String,
-    ) -> Option<Arc<NonMetaSubdir<S>>> {
+    fn get_non_meta_subdir(self: &Arc<Self>, path: String) -> Option<Arc<NonMetaSubdir<Self>>> {
         debug_assert!(path.ends_with("/"));
-        if let Some((k, _)) = self.non_meta_files.range(path.as_str()..).next()
+        if let Some((k, _)) = self.as_root_dir().non_meta_files.range(path.as_str()..).next()
             && k.starts_with(&path)
         {
             return Some(NonMetaSubdir::new(self.clone(), path));
@@ -194,13 +188,29 @@ impl<S: crate::NonMetaStorage> RootDir<S> {
     }
 }
 
+impl<S: crate::NonMetaStorage> AsRootDir for RootDir<S> {
+    type Storage = S;
+    fn as_root_dir(&self) -> &RootDir<S> {
+        self
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ReadFileError {
     #[error("reading blob")]
     ReadBlob(#[source] NonMetaStorageError),
 
+    #[error("getting blob vmo")]
+    GetBlobVmo(#[source] NonMetaStorageError),
+
+    #[error("getting blob vmo content size")]
+    GetContentSize(#[source] zx::Status),
+
     #[error("reading meta file")]
     ReadMetaFile(#[source] zx::Status),
+
+    #[error("creating meta file child vmo")]
+    CreateMetaFileVmo(#[source] zx::Status),
 
     #[error("no file exists at path: {path:?}")]
     NoFileAtPath { path: String },
@@ -252,6 +262,83 @@ impl<S: crate::NonMetaStorage> vfs::node::Node for RootDir<S> {
     }
 }
 
+pub(crate) fn open_impl<R>(
+    this: Arc<R>,
+    scope: ExecutionScope,
+    path: vfs::Path,
+    flags: fio::Flags,
+    object_request: ObjectRequestRef<'_>,
+) -> Result<(), zx::Status>
+where
+    R: AsRootDir + vfs::directory::entry_container::Directory,
+{
+    if !flags.difference(crate::ALLOWED_FLAGS).is_empty() {
+        return Err(zx::Status::NOT_SUPPORTED);
+    }
+
+    // Handle case where the request is for this directory itself (e.g. ".").
+    if path.is_empty() {
+        // `ImmutableConnection` checks that only directory flags are specified.
+        object_request
+            .take()
+            .create_connection_sync::<ImmutableConnection<_>, _>(scope, this, flags);
+        return Ok(());
+    }
+
+    // `path` is relative, and may include a trailing slash.
+    let canonical_path = path.as_ref().strip_suffix('/').unwrap_or_else(|| path.as_ref());
+
+    if canonical_path == "meta" {
+        // This branch is done here instead of in MetaAsDir so that Clone'ing MetaAsDir yields
+        // MetaAsDir. See the MetaAsDir::open impl for more.
+
+        // TODO(https://fxbug.dev/328485661): consider retrieving the merkle root by retrieving
+        // the attribute instead of opening as a file to read the merkle root content.
+
+        // To remain POSIX compliant, we must default to opening meta as a file unless the
+        // directory protocol (i.e. O_DIRECTORY) is explicitly requested.
+        let open_meta_as_dir = flags.is_dir_allowed() && !flags.is_file_allowed();
+        if !open_meta_as_dir {
+            if path.is_dir() {
+                return Err(zx::Status::NOT_DIR);
+            }
+            let file = this.as_root_dir().create_meta_as_file().map_err(|e| {
+                error!("Error creating the meta file: {:?}", e);
+                zx::Status::INTERNAL
+            })?;
+            return vfs::file::serve(file, scope, &flags, object_request);
+        }
+        return MetaAsDir::new(this).open(scope, vfs::Path::dot(), flags, object_request);
+    }
+
+    if canonical_path.starts_with("meta/") {
+        if let Some(file) = this.as_root_dir().get_meta_file(canonical_path)? {
+            if path.is_dir() {
+                return Err(zx::Status::NOT_DIR);
+            }
+            return vfs::file::serve(file, scope, &flags, object_request);
+        }
+
+        if let Some(subdir) = this.get_meta_subdir(canonical_path.to_string() + "/") {
+            return subdir.open(scope, vfs::Path::dot(), flags, object_request);
+        }
+        return Err(zx::Status::NOT_FOUND);
+    }
+
+    if let Some(blob) = this.as_root_dir().non_meta_files.get(canonical_path) {
+        if path.is_dir() {
+            return Err(zx::Status::NOT_DIR);
+        }
+        return this.as_root_dir().non_meta_storage.open(blob, flags, scope, object_request);
+    }
+
+    if let Some(subdir) = this.get_non_meta_subdir(canonical_path.to_string() + "/") {
+        return subdir.open(scope, vfs::Path::dot(), flags, object_request);
+    }
+
+    Err(zx::Status::NOT_FOUND)
+}
+
 impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for RootDir<S> {
     fn open(
         self: Arc<Self>,
@@ -260,71 +347,7 @@ impl<S: crate::NonMetaStorage> vfs::directory::entry_container::Directory for Ro
         flags: fio::Flags,
         object_request: ObjectRequestRef<'_>,
     ) -> Result<(), zx::Status> {
-        if !flags.difference(crate::ALLOWED_FLAGS).is_empty() {
-            return Err(zx::Status::NOT_SUPPORTED);
-        }
-
-        // Handle case where the request is for this directory itself (e.g. ".").
-        if path.is_empty() {
-            // `ImmutableConnection` checks that only directory flags are specified.
-            object_request
-                .take()
-                .create_connection_sync::<ImmutableConnection<_>, _>(scope, self, flags);
-            return Ok(());
-        }
-
-        // `path` is relative, and may include a trailing slash.
-        let canonical_path = path.as_ref().strip_suffix('/').unwrap_or_else(|| path.as_ref());
-
-        if canonical_path == "meta" {
-            // This branch is done here instead of in MetaAsDir so that Clone'ing MetaAsDir yields
-            // MetaAsDir. See the MetaAsDir::open impl for more.
-
-            // TODO(https://fxbug.dev/328485661): consider retrieving the merkle root by retrieving
-            // the attribute instead of opening as a file to read the merkle root content.
-
-            // To remain POSIX compliant, we must default to opening meta as a file unless the
-            // directory protocol (i.e. O_DIRECTORY) is explicitly requested.
-            let open_meta_as_dir = flags.is_dir_allowed() && !flags.is_file_allowed();
-            if !open_meta_as_dir {
-                if path.is_dir() {
-                    return Err(zx::Status::NOT_DIR);
-                }
-                let file = self.create_meta_as_file().map_err(|e| {
-                    error!("Error creating the meta file: {:?}", e);
-                    zx::Status::INTERNAL
-                })?;
-                return vfs::file::serve(file, scope, &flags, object_request);
-            }
-            return MetaAsDir::new(self).open(scope, vfs::Path::dot(), flags, object_request);
-        }
-
-        if canonical_path.starts_with("meta/") {
-            if let Some(file) = self.get_meta_file(canonical_path)? {
-                if path.is_dir() {
-                    return Err(zx::Status::NOT_DIR);
-                }
-                return vfs::file::serve(file, scope, &flags, object_request);
-            }
-
-            if let Some(subdir) = self.get_meta_subdir(canonical_path.to_string() + "/") {
-                return subdir.open(scope, vfs::Path::dot(), flags, object_request);
-            }
-            return Err(zx::Status::NOT_FOUND);
-        }
-
-        if let Some(blob) = self.non_meta_files.get(canonical_path) {
-            if path.is_dir() {
-                return Err(zx::Status::NOT_DIR);
-            }
-            return self.non_meta_storage.open(blob, flags, scope, object_request);
-        }
-
-        if let Some(subdir) = self.get_non_meta_subdir(canonical_path.to_string() + "/") {
-            return subdir.open(scope, vfs::Path::dot(), flags, object_request);
-        }
-
-        Err(zx::Status::NOT_FOUND)
+        open_impl(self, scope, path, flags, object_request)
     }
 
     async fn read_dirents(
@@ -579,6 +602,24 @@ mod tests {
         assert_eq!(root_dir.read_file("meta/file").await.unwrap().as_slice(), b"meta-contents0");
         assert_matches!(
             root_dir.read_file("missing").await.unwrap_err(),
+            ReadFileError::NoFileAtPath{path} if path == "missing"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn get_file_vmo() {
+        let (_env, root_dir) = TestEnv::with_subpackages(None).await;
+
+        let (vmo, size) = root_dir.get_file_vmo("resource").await.unwrap();
+        assert_eq!(size, 13);
+        assert_eq!(vmo.read_to_vec::<u8>(0, size).unwrap().as_slice(), b"blob-contents");
+
+        let (vmo, size) = root_dir.get_file_vmo("meta/file").await.unwrap();
+        assert_eq!(size, 14);
+        assert_eq!(vmo.read_to_vec::<u8>(0, size).unwrap().as_slice(), b"meta-contents0");
+
+        assert_matches!(
+            root_dir.get_file_vmo("missing").await.unwrap_err(),
             ReadFileError::NoFileAtPath{path} if path == "missing"
         );
     }

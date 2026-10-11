@@ -41,6 +41,11 @@ void UberStructSystem::RemoveSession(scheduling::SessionId session_id) {
 
   pending_structs_queues_.erase(session_id);
   snapshot_.map.erase(session_id);
+  // The session's link, if any, is invalidated by the Flatland destructor on its own thread,
+  // possibly after this call; a frame in between would see the topology change without a link
+  // generation bump, so the removal itself must request a rebuild and a new view tree.
+  recompute_scene_state_ = true;
+  recompute_view_tree_ = true;
 }
 
 UberStructSystem::UpdateResults UberStructSystem::UpdateInstances(
@@ -70,18 +75,22 @@ UberStructSystem::UpdateResults UberStructSystem::UpdateInstances(
     auto pending_struct = queue_kv->second->Pop();
 
     bool queue_needs_recompute_view_tree = false;
+    bool queue_needs_recompute_scene_state = false;
     while (pending_struct.has_value()) {
       ++present_credits_returned;
 
-      // We may squash some UberStructs together; we must recompute the view tree if any of them
-      // required recomputation.
+      // We may squash some UberStructs together; we must recompute the view tree or scene state
+      // if any of them required recomputation.
       queue_needs_recompute_view_tree =
           queue_needs_recompute_view_tree || pending_struct->recompute_view_tree;
+      queue_needs_recompute_scene_state =
+          queue_needs_recompute_scene_state || pending_struct->recompute_scene_state;
 
       if (pending_struct->present_id == present_id) {
         FLATLAND_VERBOSE_LOG << "    Updating UberStruct for session_id=" << session_id
                              << " present_id=" << present_id
-                             << " recompute_view_tree=" << queue_needs_recompute_view_tree;
+                             << " recompute_view_tree=" << queue_needs_recompute_view_tree
+                             << " recompute_scene_state=" << queue_needs_recompute_scene_state;
         snapshot_.map[session_id] = std::move(pending_struct->uber_struct);
         successful_update = true;
         break;
@@ -95,6 +104,7 @@ UberStructSystem::UpdateResults UberStructSystem::UpdateInstances(
       pending_struct = queue_kv->second->Pop();
     }
     recompute_view_tree_ = recompute_view_tree_ || queue_needs_recompute_view_tree;
+    recompute_scene_state_ = recompute_scene_state_ || queue_needs_recompute_scene_state;
 
     FX_DCHECK(successful_update) << "No UberStruct found for session_id=" << session_id
                                  << " present_id=" << present_id;
@@ -110,6 +120,7 @@ void UberStructSystem::ForceUpdateAllSessions(size_t max_updates_per_queue) {
     while (auto pending_struct = queue->Pop()) {
       snapshot_.map[session_id] = std::move(pending_struct->uber_struct);
       recompute_view_tree_ = recompute_view_tree_ || pending_struct->recompute_view_tree;
+      recompute_scene_state_ = recompute_scene_state_ || pending_struct->recompute_scene_state;
       if (++update_count == max_updates_per_queue) {
         break;
       }
@@ -129,7 +140,7 @@ TransformHandle::InstanceId UberStructSystem::GetLatestInstanceId() const {
 
 void UberStructSystem::UberStructQueue::Push(scheduling::PresentId present_id,
                                              std::unique_ptr<const UberStruct> uber_struct,
-                                             bool recompute_view_tree) {
+                                             bool recompute_view_tree, bool recompute_scene_state) {
   FX_DCHECK(uber_struct);
 #ifndef NDEBUG
   // PresentIds must be strictly increasing
@@ -137,9 +148,12 @@ void UberStructSystem::UberStructQueue::Push(scheduling::PresentId present_id,
   last_present_id_.store(present_id);
 #endif
 
-  pending_structs_.Push(PendingUberStruct{.present_id = present_id,
-                                          .uber_struct = std::move(uber_struct),
-                                          .recompute_view_tree = recompute_view_tree});
+  pending_structs_.Push(PendingUberStruct{
+      .present_id = present_id,
+      .uber_struct = std::move(uber_struct),
+      .recompute_view_tree = recompute_view_tree,
+      .recompute_scene_state = recompute_scene_state,
+  });
 }
 
 std::optional<UberStructSystem::PendingUberStruct> UberStructSystem::UberStructQueue::Pop() {

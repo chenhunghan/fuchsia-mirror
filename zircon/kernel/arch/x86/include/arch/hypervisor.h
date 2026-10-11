@@ -68,7 +68,7 @@ class Guest {
 
   hypervisor::GuestPhysicalAspace gpa_;
   hypervisor::TrapMap traps_;
-  id_allocator::IdAllocator<uint16_t, kMaxGuestVcpus> vpid_allocator_;
+  id_allocator::IdAllocator<uint16_t, kMaxGuestVcpus + 1, 1> vpid_allocator_;
   VmxPage msr_bitmaps_page_;
 };
 

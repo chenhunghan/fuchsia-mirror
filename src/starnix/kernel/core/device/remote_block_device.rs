@@ -48,7 +48,7 @@ impl RemoteBlockDevice {
     ) -> Result<Arc<Self>, Errno> {
         let registry = &kernel.device_registry;
         let device_name = FsString::from(name);
-        let virtual_block_class = registry.objects.virtual_block_class();
+        let block_class = registry.objects.block_class();
         let block_client = SyncBlockClient::new(&kernel.kthreads, block)?;
         let device = Arc::new(Self { block_client });
         let device_weak = Arc::<RemoteBlockDevice>::downgrade(&device);
@@ -63,7 +63,8 @@ impl RemoteBlockDevice {
             // It is not generally true that all remote block devices are disks, but it is true for
             // the ones we currently support. Future work should allow us to set this dynamically.
             .with_devtype("disk"),
-            virtual_block_class,
+            /* parent = */ None,
+            block_class,
             |device, dir| build_block_device_directory(device, device_weak, dir),
         )?;
         Ok(device)

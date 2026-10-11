@@ -13,6 +13,11 @@ rustc_library(
         "src/zxio.rs",
     ],
     edition = "2024",
+    link_deps = [
+        # GN needs extra link configs for zxio; see group("zxio_static") in
+        # BUILD.gn.
+        "//sdk/lib/zxio",  # @bazel2gn:path_overwrite::zxio_static
+    ],
     lint_config = "//src/starnix/build:kernel_library_config",
     test_deps = [
         "//src/lib/fuchsia",
@@ -31,9 +36,6 @@ rustc_library(
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
-        # GN needs extra link configs for zxio; see group("zxio_static") in
-        # BUILD.gn.
-        "//sdk/lib/zxio",  # @bazel2gn:path_overwrite::zxio_static
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
         "//third_party/rust_crates/vendor:bitflags",

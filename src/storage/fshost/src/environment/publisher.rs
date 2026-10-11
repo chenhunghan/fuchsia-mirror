@@ -296,9 +296,6 @@ mod tests {
         async fn get_block_info(&self) -> Result<fidl_fuchsia_storage_block::BlockInfo, Error> {
             unimplemented!()
         }
-        fn is_nand(&self) -> bool {
-            unimplemented!()
-        }
         async fn content_format(&mut self) -> Result<DiskFormat, Error> {
             unimplemented!()
         }

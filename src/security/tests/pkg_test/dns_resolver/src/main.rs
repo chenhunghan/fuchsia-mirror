@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use argh::{from_env, FromArgs};
+use argh::{FromArgs, from_env};
 use fidl_fuchsia_net::{IpAddress, Ipv4Address};
 use fidl_fuchsia_net_name::{LookupRequest, LookupRequestStream, LookupResult};
 use fuchsia_async::Task;
@@ -42,7 +42,7 @@ async fn main() {
                 match request {
                     LookupRequest::LookupIp { hostname, options: _, responder } => {
                         assert_eq!(pkg_server_host, hostname);
-                        info!(hostname:%, localhost:? = localhost(); "LooupIp");
+                        info!(hostname:%, localhost:? = localhost(); "LookupIp");
                         responder
                             .send(Ok(&LookupResult {
                                 addresses: Some(vec![localhost()]),

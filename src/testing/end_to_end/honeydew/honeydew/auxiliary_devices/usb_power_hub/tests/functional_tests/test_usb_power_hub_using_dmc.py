@@ -42,26 +42,26 @@ class UsbPowerHubUsingDmcTest(fuchsia_base_test.FuchsiaBaseTest):
         # TODO(https://fxbug.dev/431799077): The USB data connection currently does not drop on
         # Sorrel when the USB is powered off, so this test reboots the dut into fastboot instead.
         # We should go back to testing ths behavior while booted in Fuchsia once the bug is fixed
-        await self.dut.fastboot.boot_to_fastboot_mode()
+        self.dut.fastboot.boot_to_fastboot_mode()
         try:
             self.dut.ffx.notify_intentional_disconnect()
             self._usb_power_hub.power_off()
             _LOGGER.info("Waiting 10 seconds for the usb to disconnect")
             await asyncio.sleep(10)
             expects.expect_false(
-                await self.dut.fastboot.is_in_fastboot_mode(),
+                self.dut.fastboot.is_in_fastboot_mode(),
                 "Fasboot device is still visible",
             )
         finally:
             self._usb_power_hub.power_on()
-            await self.dut.fastboot.wait_for_fastboot_mode()
+            self.dut.fastboot.wait_for_fastboot_mode()
             try:
                 # TODO(https://fxbug.dev/436414807): The `fastboot reboot` command sometimes
                 # reports an error, despite the command actually succeeding. Once this is fixed,
                 # we can remove the try/except block.
                 await self.dut.fastboot.boot_to_fuchsia_mode()
             except:
-                await self.dut.fastboot.wait_for_fuchsia_mode()
+                self.dut.fastboot.wait_for_fuchsia_mode()
                 await self.dut.wait_for_online()
                 await self.dut.on_device_boot()
 

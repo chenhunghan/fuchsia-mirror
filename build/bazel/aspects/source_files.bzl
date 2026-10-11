@@ -78,17 +78,6 @@ def _generate_source_files_list_impl(target, actx):
 
     actx.actions.write(output, json.encode_indent(content_json, indent = "  "))
 
-    # There is no way to get the path of the output file using cquery, because
-    # that command ignores aspect-generated providers.
-    # See https://github.com/bazelbuild/bazel/issues/22528
-    #
-    # To work around this, use print() here to print the execroot-related path
-    # to stderr, and ensure the caller can process this line to extract the file's
-    # location.
-    # LINT.IfChange(source_files_list_path_prefix)
-    print("FUCHSIA_SOURCES_MANIFEST_PATH=%s" % output.path)
-    # LINT.ThenChange(//build/bazel/scripts/bazel_action_impl.py:source_files_list_path_prefix)
-
     return [
         OutputGroupInfo(
             fuchsia_sources_manifest = depset([output]),
@@ -96,18 +85,7 @@ def _generate_source_files_list_impl(target, actx):
     ]
 
 generate_source_files_manifest = aspect(
-    doc = """Generate a manifest file describing source files for a given set of targets.
-
-Unfortunately, the Bazel stderr output must be filtered to extract the output
-file's location, relative to the Bazel execroot. Example usage from the
-command-line (this works with --config=quiet):
-
-    bazel build <config-args> <target> \
-        --output_groups=+fuchsia_sources_manifest \
-        --aspects=//build/bazel/aspects:source_files.bzl%generate_source_files_manifest \
-        2>&1 | grep '^DEBUG:.*FUCHSIA_SOURCES_MANIFEST_PATH=' | \
-        sed -e 's|.*FUCHSIA_SOURCES_MANIFEST_PATH||'
-""",
+    doc = """Generate a manifest file describing source files for a given set of targets.""",
     implementation = _generate_source_files_list_impl,
     # This aspect does not traverse, so no attr_aspects definition here.
     # Ensure that collect_debug_symbols_manifest_aspect is run first.

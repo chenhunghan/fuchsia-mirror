@@ -8,12 +8,17 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Platform configuration options for the starnix area.
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema, WalkPaths)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, JsonSchema, WalkPaths)]
 #[serde(default, deny_unknown_fields)]
 pub struct PowerConfig {
     /// Whether power suspend/resume is supported.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub suspend_enabled: bool,
+
+    /// Whether power management for the GPU subsystem is enabled.
+    /// Defaults to 'true'.
+    #[serde(skip_serializing_if = "bool::clone")]
+    pub gpu_power_management_enabled: bool,
 
     /// Deprecated and ignored. Storage power management is enabled by the
     /// `fuchsia::storage_power_management` and `fuchsia::suspending_token`
@@ -39,6 +44,18 @@ pub struct PowerConfig {
     pub metrics_logging_config: Option<Utf8PathBuf>,
 }
 
+impl Default for PowerConfig {
+    fn default() -> Self {
+        Self {
+            suspend_enabled: false,
+            gpu_power_management_enabled: true,
+            storage_power_management_enabled: None,
+            enable_non_hermetic_testing: false,
+            metrics_logging_config: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,6 +75,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
             serde_json::json!({ "suspend_enabled": true })
+        );
+    }
+
+    #[test]
+    fn test_gpu_power_management_enabled_default_and_override() {
+        let default_config: PowerConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(default_config.gpu_power_management_enabled);
+
+        let disabled_config: PowerConfig = serde_json::from_value(serde_json::json!({
+            "gpu_power_management_enabled": false,
+        }))
+        .unwrap();
+        assert!(!disabled_config.gpu_power_management_enabled);
+        assert_eq!(
+            serde_json::to_value(&disabled_config).unwrap(),
+            serde_json::json!({ "gpu_power_management_enabled": false })
         );
     }
 }

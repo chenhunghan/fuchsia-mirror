@@ -1,0 +1,59 @@
+{
+    "name": "echoctl_special_chars",
+    "initial_termios": {
+        "c_iflag": [],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "\u0016\u007f\u0016\n\r\u0001\u007f\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE",
+                    "ECHOK",
+                    "ECHOKE",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "a\u0001\u007f\n"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

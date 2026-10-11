@@ -341,6 +341,10 @@
 //! with a new packet. The buffer that the original packet was stored in can be
 //! used to serialize the new packet, avoiding any unnecessary allocation.
 
+#![no_std]
+
+extern crate alloc;
+
 /// Emits method impls for [`FragmentedBuffer`] which assume that the type is
 /// a contiguous buffer which implements [`AsRef`].
 macro_rules! fragmented_buffer_method_impls {
@@ -399,8 +403,9 @@ pub use crate::fragmented::*;
 pub use crate::serialize::*;
 pub use crate::util::*;
 
-use std::ops::{Bound, Range, RangeBounds};
-use std::{cmp, mem};
+use alloc::vec::Vec;
+use core::ops::{Bound, Range, RangeBounds};
+use core::{cmp, mem};
 
 use zerocopy::{
     FromBytes, FromZeros as _, Immutable, IntoBytes, KnownLayout, Ref, SplitByteSlice,
@@ -2010,7 +2015,7 @@ mod tests {
             let v = ascending(len);
             // Requires that |avoid_leaks| outlives this reference. In this case, we know
             // |test_parse_buffer| does not retain the reference beyond its run.
-            let s = unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) };
+            let s = unsafe { core::slice::from_raw_parts(v.as_ptr(), v.len()) };
             avoid_leaks.push(v);
             s
         });
@@ -2026,7 +2031,7 @@ mod tests {
             let mut v = ascending(len);
             // Requires that |avoid_leaks| outlives this reference. In this case, we know
             // |test_parse_buffer| does not retain the reference beyond its run.
-            let s = unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr(), v.len()) };
+            let s = unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr(), v.len()) };
             avoid_leaks.push(v);
             s
         });

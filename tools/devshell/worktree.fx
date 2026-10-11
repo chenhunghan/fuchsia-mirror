@@ -4,6 +4,7 @@
 
 #### CATEGORY=Source tree
 #### EXECUTABLE=${FUCHSIA_DIR}/tools/devshell/worktree/main.py
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### Manage Fuchsia worktrees
 ## usage: fx worktree <subcommand> [args]
 ##

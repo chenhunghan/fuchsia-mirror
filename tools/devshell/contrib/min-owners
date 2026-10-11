@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+#### CATEGORY=Source tree
+### Suggests a minimal set of code owners to review a commit.
+
+## Usage: fx min-owners [-v] [--all] [--include-root] [--author EMAIL] [--branch BRANCH] [REV]
+##
+## Looks up the owners of each file changed in REV (a commit or a range like
+## main..HEAD, default HEAD) using Gerrit's code-owners plugin, then finds the
+## fewest owners who together cover every file. Run it from inside the git repo
+## that the commit belongs to, e.g. vendor/google.
+##
+## Owners come from OWNERS files on the BRANCH branch, so OWNERS changes in
+## the commit itself aren't taken into account.
+##
+## If more than 5 reviewers are needed, it points to the docs for asking for
+## an owners override.
+##
+## Ties between equally good owners are broken randomly to spread out review
+## load. The randomness is seeded by today's date and the commit author, so
+## repeated runs on the same day give the same answer. (Very large changes
+## fall back to a simpler search that doesn't do this.)
+##
+## Owners whose calendar says they're out of office, and who won't be back
+## within 4 hours, are only suggested for files that nobody else can approve.
+## This check uses the prebuilt `luci-auth` (or one on PATH), which works
+## without logging in on cloudtops and needs `luci-auth login -scopes-gerrit`
+## elsewhere; without it, the check is skipped with a note.
+##
+## Flags:
+##   -v, --verbose     List the files each owner covers
+##   --all             List every smallest set of owners instead of just one
+##   --include-root    Consider root OWNERS members for every file, not just
+##                     for files with no other owners
+##   --author EMAIL    Email that gets implicit approval (default: the commit
+##                     author); set this if your git email differs from your
+##                     Gerrit account's
+##   --branch BRANCH   Branch whose OWNERS files to use (default: main)
+
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+source "$SCRIPT_DIR/../lib/vars.sh" || exit $?
+
+exec "${PREBUILT_PYTHON3}" "$SCRIPT_DIR/min_owners.py" "$@"

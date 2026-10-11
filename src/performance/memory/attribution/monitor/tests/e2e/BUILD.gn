@@ -22,6 +22,13 @@ if (is_host) {
 
   python_mobly_test("memory_monitor2_traces_e2e_test") {
     main_source = "memory_monitor2_traces_e2e_test.py"
+    honeydew_config = {
+      affordances = {
+        tracing = {
+          implementation = "ffx"
+        }
+      }
+    }
     libraries = [
       "//src/testing/end_to_end/honeydew",
       "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",

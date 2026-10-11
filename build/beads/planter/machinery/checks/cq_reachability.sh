@@ -11,10 +11,7 @@ set -euo pipefail
 #    in the migrated package must be wired into the package's `group("tests")`
 #    (or referenced by a test package in the same BUILD file that is wired into
 #    `tests`).
-# 2. The package must be registered in a Bazel verification list or parent BUILD
-#    file so CQ builds it. Note that the bazel2gn list .gni files only ensure
-#    that the GN (and maybe Bazel) file is processed; they do not ensure that
-#    any of the targets can be built successfully.
+# 2. The package must be registered in a parent BUILD file so CQ builds it.
 # 3. Every Bazel test that Fuchsia test runners can run (`fx_test`, `host_rustc_test`,
 #    `host_go_test`, `host_py_test`, `host_test`, `wrap_host_rust_test`, and the
 #    `<name>_test` host test of `rustc_*(with_unit_tests = "host"|"both")` or
@@ -30,21 +27,30 @@ set -euo pipefail
 #    it (`unpackaged_rust_device_test`).
 #    Only runs when the checkout has `build/bazel/rules/testing/fx_test.bzl` (older
 #    checkouts keep tests in GN).
+# 5. The change must merge cleanly onto `origin/main` without rebase conflicts
+#    (`git merge-tree --write-tree`) or leftover conflict markers so Gerrit CQ
+#    (`checkout|jiri patch`) does not fail with `Failed to rebase`.
 
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
+CHANGE_BASE="${PLANTER_CHANGE_BASE:-HEAD}"
 
-python3 - "$WORKDIR" "$TARGET_DIRS" <<'PYEOF'
+python3 - "$WORKDIR" "$TARGET_DIRS" "$CHANGE_BASE" <<'PYEOF'
 import ast
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 workdir = os.path.abspath(sys.argv[1])
 raw_dirs = sys.argv[2]
+change_base = sys.argv[3].strip() or "HEAD"
 target_dirs = [d.strip().strip("/") for d in re.split(r"[\s,]+", raw_dirs) if d.strip().strip("/")]
 
 TEST_RULES = {
@@ -55,6 +61,8 @@ TEST_RULES = {
     "fuchsia_unittest_package",
     "fuchsia_test_package",
 }
+
+FETCH_TTL_SECS = 600
 
 findings = []
 
@@ -248,6 +256,270 @@ def foreign_suite_tests(label, pkg, td, seen):
         out |= foreign_suite_tests(m, l_pkg, td, seen)
     return out
 
+
+def git_out(args):
+    try:
+        return subprocess.check_output(
+            ["git", "-C", workdir] + args, stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        return ""
+
+
+def git_lines(args):
+    out = git_out(args)
+    return [l.strip() for l in out.splitlines() if l.strip()]
+
+
+def is_ancestor(anc, desc):
+    if not anc or not desc:
+        return False
+    return subprocess.run(
+        ["git", "-C", workdir, "merge-base", "--is-ancestor", anc, desc],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def maybe_refresh_origin_main(parent_sha):
+    if os.environ.get("PLANTER_SKIP_FETCH", "").strip() not in ("", "0"):
+        return
+    origin_sha = git_out(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
+    stamp_name = (
+        "planter-origin-main-fetch-"
+        + hashlib.sha256(workdir.encode("utf-8")).hexdigest()[:16]
+        + ".stamp"
+    )
+    stamp_path = os.path.join(tempfile.gettempdir(), stamp_name)
+    now = time.time()
+    fresh_stamp = False
+    try:
+        if now - os.path.getmtime(stamp_path) < FETCH_TTL_SECS:
+            fresh_stamp = True
+    except OSError:
+        pass
+    fresh_ref = False
+    for ref_rel in ("logs/refs/remotes/origin/main", "refs/remotes/origin/main"):
+        gp = git_out(["rev-parse", "--git-path", ref_rel])
+        if gp:
+            abs_gp = gp if os.path.isabs(gp) else os.path.join(workdir, gp)
+            try:
+                if now - os.path.getmtime(abs_gp) < FETCH_TTL_SECS:
+                    fresh_ref = True
+                    break
+            except OSError:
+                pass
+    behind_parent = bool(
+        origin_sha
+        and parent_sha
+        and origin_sha != parent_sha
+        and is_ancestor(origin_sha, parent_sha)
+    )
+    if origin_sha and (fresh_stamp or fresh_ref) and not behind_parent:
+        return
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                workdir,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        pass
+    try:
+        with open(stamp_path, "w", encoding="utf-8") as sf:
+            sf.write(str(int(now)))
+    except OSError:
+        pass
+
+
+# 1. Check for unfinished git rebase/merge state or unmerged index entries.
+# Note: Do not check standalone `REBASE_HEAD`, which git can leave behind after `git rebase --continue`
+# finishes even when `rebase-merge` and `rebase-apply` are gone.
+active_rebase_or_merge = None
+for state_name in ("rebase-merge", "rebase-apply", "MERGE_HEAD"):
+    git_path = git_out(["rev-parse", "--git-path", state_name])
+    if git_path:
+        abs_git_path = git_path if os.path.isabs(git_path) else os.path.join(workdir, git_path)
+        if os.path.exists(abs_git_path):
+            active_rebase_or_merge = state_name
+            break
+unmerged = git_lines(["diff", "--name-only", "--diff-filter=U"])
+if active_rebase_or_merge or unmerged:
+    state_desc = active_rebase_or_merge or "unmerged index entries"
+    findings.append({
+        "source": "cq_reachability",
+        "category": "unresolved_rebase_or_conflict_markers",
+        "severity": "error",
+        "file": unmerged[0] if unmerged else "",
+        "line": 1,
+        "message": (
+            f"An unfinished git rebase/merge (`{state_desc}`) is in progress in the checkout"
+            + (f" with unmerged file(s): {', '.join(unmerged)}" if unmerged else "")
+            + "."
+        ),
+        "remediation": (
+            "Resolve all conflicted files (remove `<<<<<<<`/`=======`/`>>>>>>>` markers and keep entries sorted), "
+            "stage them with `git add <file>`, and finish the rebase with `git -c core.editor=true rebase --continue` "
+            "(or abort a broken rebase with `git rebase --abort` and re-run `git fetch origin main && git rebase origin/main`)."
+        ),
+    })
+
+head_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+parent_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"])
+maybe_refresh_origin_main(parent_sha)
+origin_main = git_out(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
+base_sha = git_out(["rev-parse", "--verify", "--quiet", f"{change_base}^{{commit}}"])
+effective_diff_base = change_base
+if parent_sha and (
+    not base_sha
+    or (base_sha == head_sha and head_sha != origin_main)
+    or not is_ancestor(base_sha, head_sha)
+):
+    effective_diff_base = "HEAD~1"
+
+# 2. Check changed and target files for leftover conflict markers.
+changed_files = set(git_lines(["diff", "--name-only", effective_diff_base]))
+changed_files.update(git_lines(["diff", "--name-only", "HEAD"]))
+changed_files.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+for td in target_dirs:
+    for bname in ("BUILD.bazel", "BUILD.gn"):
+        rel_p = os.path.join(td, bname)
+        if os.path.isfile(os.path.join(workdir, rel_p)):
+            changed_files.add(rel_p)
+
+CONFLICT_MARKER_RE = re.compile(r"^(?:<{7}\s|={7}\s*$|>{7}\s)")
+for rel_p in sorted(changed_files):
+    abs_p = os.path.join(workdir, rel_p)
+    if not os.path.isfile(abs_p):
+        continue
+    try:
+        with open(abs_p, "r", encoding="utf-8", errors="replace") as f:
+            for idx, line in enumerate(f, 1):
+                if CONFLICT_MARKER_RE.match(line):
+                    findings.append({
+                        "source": "cq_reachability",
+                        "category": "unresolved_rebase_or_conflict_markers",
+                        "severity": "error",
+                        "file": rel_p,
+                        "line": idx,
+                        "message": f"Leftover git merge conflict marker `{line.strip()}` in '{rel_p}' at line {idx}.",
+                        "remediation": (
+                            f"Edit '{rel_p}' to remove all `<<<<<<<`, `=======`, and `>>>>>>>` conflict markers, "
+                            "keep both upstream `origin/main` entries and this change's additions in sorted order, "
+                            "and stage the resolved file with `git add`."
+                        ),
+                    })
+                    break
+    except OSError:
+        pass
+
+# 3. Check whether the change merges cleanly onto `origin/main` (`git merge-tree --write-tree`).
+if origin_main and head_sha and head_sha != origin_main:
+    merge_base = git_out(["merge-base", origin_main, head_sha])
+    if merge_base and merge_base != origin_main:
+        dirty_tracked = git_lines(["status", "--porcelain", "--untracked-files=no"])
+        untracked_td = []
+        for td in target_dirs:
+            if os.path.isdir(os.path.join(workdir, td)):
+                untracked_td.extend(git_lines(["ls-files", "--others", "--exclude-standard", "--", td]))
+        worktree_tree = ""
+        if not dirty_tracked and not untracked_td:
+            worktree_tree = git_out(["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])
+        else:
+            git_dir = git_out(["rev-parse", "--absolute-git-dir"])
+            if git_dir and os.path.isdir(git_dir):
+                fd, tmp_idx = tempfile.mkstemp(dir=git_dir, prefix=".planter-cq-merge-index.")
+                os.close(fd)
+                try:
+                    real_idx = os.path.join(git_dir, "index")
+                    if os.path.isfile(real_idx):
+                        shutil.copyfile(real_idx, tmp_idx)
+                    else:
+                        os.unlink(tmp_idx)
+                    env = dict(os.environ, GIT_INDEX_FILE=tmp_idx)
+                    subprocess.run(
+                        ["git", "-C", workdir, "add", "-u"],
+                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                    )
+                    for td in target_dirs:
+                        if os.path.exists(os.path.join(workdir, td)):
+                            subprocess.run(
+                                ["git", "-C", workdir, "add", "-A", "--", td],
+                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                            )
+                    wt_proc = subprocess.run(
+                        ["git", "-C", workdir, "write-tree"],
+                        env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+                    )
+                    if wt_proc.returncode == 0:
+                        worktree_tree = wt_proc.stdout.strip()
+                finally:
+                    try:
+                        os.unlink(tmp_idx)
+                    except OSError:
+                        pass
+        if worktree_tree:
+            mt_proc = subprocess.run(
+                [
+                    "git", "-C", workdir, "merge-tree", "--write-tree", "--name-only",
+                    f"--merge-base={merge_base}", origin_main, worktree_tree,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if mt_proc.returncode != 0:
+                mt_lines = [l.strip() for l in (mt_proc.stdout or "").splitlines()]
+                conflicted_files = []
+                conflict_msgs = []
+                in_files = True
+                for idx, line in enumerate(mt_lines):
+                    if idx == 0 and re.fullmatch(r"[0-9a-f]{40}", line):
+                        continue
+                    if not line:
+                        in_files = False
+                        continue
+                    if in_files and not line.startswith(("Auto-merging ", "CONFLICT ")):
+                        if line not in conflicted_files:
+                            conflicted_files.append(line)
+                    elif line.startswith("CONFLICT "):
+                        conflict_msgs.append(line)
+                first_file = conflicted_files[0] if conflicted_files else ""
+                files_desc = ", ".join(f"'{f}'" for f in conflicted_files) if conflicted_files else "modified files"
+                detail_desc = f" ({'; '.join(conflict_msgs)})" if conflict_msgs else ""
+                findings.append({
+                    "source": "cq_reachability",
+                    "category": "upstream_rebase_conflict",
+                    "severity": "error",
+                    "file": first_file,
+                    "line": 1,
+                    "message": (
+                        f"Change based on {merge_base[:11]} has a merge conflict with upstream `origin/main` "
+                        f"({origin_main[:11]}) in {files_desc}{detail_desc}, which causes Gerrit CQ "
+                        "(`checkout|jiri patch`) to fail across all builders with `Failed to rebase`."
+                    ),
+                    "remediation": (
+                        "Rebase the change onto the latest `origin/main` so Gerrit CQ can patch it cleanly: "
+                        "run `git fetch origin main && git rebase origin/main` (commit or `git stash` any uncommitted edits first), "
+                        "resolve each conflicted file keeping both `origin/main`'s entries and this change's additions "
+                        "stage the resolved file(s) with `git add <file>`, and finish with "
+                        "`git -c core.editor=true rebase --continue` (preserving the existing `Change-Id` footer)."
+                    ),
+                })
 
 unwired_reported = set()  # (gn_rel, suite) already reported as unwired
 for td in target_dirs:

@@ -39,33 +39,57 @@ from honeydew.affordances.connectivity.bluetooth.utils import (
     types as bluetooth_types,
 )
 from honeydew.affordances.connectivity.wlan import wlan_policy, wlan_policy_ap
-from honeydew.affordances.device_knobs import device_knobs
 from honeydew.affordances.drivers import battery_manager
 from honeydew.affordances.drivers.fake_battery import (
-    fake_battery,
+    fake_battery as fake_battery_affordance,
+)
+from honeydew.affordances.drivers.fake_battery import (
     fake_battery_using_ffx,
 )
 from honeydew.affordances.drivers.hardware import power as hardware_power
-from honeydew.affordances.hello_world import hello_world, hello_world_using_ffx
-from honeydew.affordances.media import media, media_using_fc
+from honeydew.affordances.hello_world import (
+    hello_world as hello_world_affordance,
+)
+from honeydew.affordances.hello_world import (
+    hello_world_using_ffx,
+)
+from honeydew.affordances.media import media as media_affordance
+from honeydew.affordances.media import media_using_fc
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller as system_power_state_controller_interface,
 )
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller_using_starnix,
 )
-from honeydew.affordances.rtc import rtc, rtc_using_fc
-from honeydew.affordances.session import session, session_using_ffx
+from honeydew.affordances.rtc import rtc as rtc_affordance
+from honeydew.affordances.rtc import rtc_using_fc
+from honeydew.affordances.session import session as session_affordance
+from honeydew.affordances.session import (
+    session_using_ffx,
+)
 from honeydew.affordances.starnix import errors as starnix_errors
-from honeydew.affordances.starnix import starnix, starnix_using_ffx
+from honeydew.affordances.starnix import starnix as starnix_affordance
+from honeydew.affordances.starnix import (
+    starnix_using_ffx,
+)
+from honeydew.affordances.tracing import tracing as tracing_affordance
 from honeydew.affordances.tracing import (
-    tracing,
     tracing_using_fc,
     tracing_using_ffx,
 )
 from honeydew.affordances.tracing import types as tracing_types
-from honeydew.affordances.ui.screenshot import screenshot, screenshot_using_ffx
-from honeydew.affordances.ui.user_input import user_input, user_input_using_fc
+from honeydew.affordances.ui.screenshot import (
+    screenshot as screenshot_affordance,
+)
+from honeydew.affordances.ui.screenshot import (
+    screenshot_using_ffx,
+)
+from honeydew.affordances.ui.user_input import (
+    user_input as user_input_affordance,
+)
+from honeydew.affordances.ui.user_input import (
+    user_input_using_fc,
+)
 from honeydew.affordances.virtual_audio import (
     audio,
     audio_using_fuchsia_controller,
@@ -76,7 +100,6 @@ from honeydew.auxiliary_devices.power_switch import (
 from honeydew.auxiliary_devices.usb_power_hub import (
     usb_power_hub as usb_power_hub_interface,
 )
-from honeydew.transports.adb import adb as adb_transport
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx
@@ -136,7 +159,6 @@ _REBOOT_OFFLINE_TIMEOUT_SEC: int = 60
 
 
 class FuchsiaDevice(
-    device_knobs.DeviceKnobs,
     affordances_capable.RebootCapableDevice,
     affordances_capable.SuspendResumeCapableDevice,
     affordances_capable.FuchsiaDeviceLogger,
@@ -400,75 +422,6 @@ class FuchsiaDevice(
         return fuchsia_controller_obj
 
     @properties.Transport
-    def adb(self) -> adb_transport.Adb:
-        """Returns the ADB transport object.
-
-        Returns:
-            ADB transport interface implementation.
-
-        Raises:
-            errors.NotEnabledError: If ADB transport is not enabled.
-            errors.NotSupportedError: If ADB transport is not supported by Fuchsia device.
-        """
-        run_isolated_server = True
-        vendor_keys_path = None
-        enabled = True
-
-        if self._config:
-            adb_config = self._config.get("transports", {}).get("adb", {})
-            run_isolated_server = adb_config.get("run_isolated_server", True)
-            vendor_keys_path = adb_config.get("vendor_keys_path")
-            enabled = adb_config.get("enabled", True)
-
-        # Note - An existing ADB implementation in //vendor/google is used by
-        # some Lacewing tests. Running two ADB server implementations against
-        # the same device causes conflicts. Tests that manage ADB externally
-        # can set `enabled` to False to disable Honeydew's ADB transport.
-        # TODO(b/559563915): Delete this `enabled` config once legacy ADB
-        # server implementations are removed and all Lacewing tests use
-        # Honeydew's ADB transport.
-        if not enabled:
-            _LOGGER.warning(
-                "User has requested to not enable the ADB transport for '%s'",
-                self.device_name,
-            )
-            raise errors.NotEnabledError(
-                f"User has requested to not enable the ADB transport for '{self.device_name}'"
-            )
-
-        serial_number: str | None = self._device_info.serial_number
-        if serial_number is None:
-            try:
-                serial_number = self.ffx.serial_number
-            except Exception as err:
-                _LOGGER.debug(
-                    "Failed to get serial number from FFX for %s: %s",
-                    self.device_name,
-                    err,
-                )
-                serial_number = None
-
-        if serial_number is None:
-            _LOGGER.warning(
-                "ADB transport is not supported on %s as 'serial_number' was not provided and could not be retrieved via FFX",
-                self.device_name,
-            )
-            raise errors.NotSupportedError(
-                f"ADB transport is not supported on {self.device_name} "
-                f"as 'serial_number' was not provided and could not be retrieved via FFX"
-            )
-
-        adb_obj: adb_transport.Adb = adb_transport.Adb(
-            device_name=self.device_name,
-            serial_number=serial_number,
-            run_isolated_server=run_isolated_server,
-            vendor_keys_path=vendor_keys_path,
-            ffx_transport=self.ffx,
-        )
-        self.register_for_on_device_close(adb_obj.close)
-        return adb_obj
-
-    @properties.Transport
     def fastboot(self) -> fastboot.Fastboot:
         """Returns the Fastboot transport object.
 
@@ -478,12 +431,33 @@ class FuchsiaDevice(
         Raises:
             FuchsiaDeviceError: Failed to instantiate.
         """
+        fastboot_node_id: str | None = (
+            self._device_info.fastboot_node_id
+            or self._device_info.serial_number
+        )
+        if fastboot_node_id is None:
+            try:
+                fastboot_node_id = self.ffx.serial_number
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to get serial number from FFX for %s: %s",
+                    self.device_name,
+                    err,
+                )
+                fastboot_node_id = None
+
+        if fastboot_node_id is None:
+            raise errors.FuchsiaDeviceError(
+                f"Failed to get the fastboot node id of '{self.device_name}' as "
+                f"'fastboot_node_id' and 'serial_number' were not provided and "
+                f"could not be retrieved via FFX"
+            )
+
         fastboot_obj: fastboot.Fastboot = fastboot.Fastboot(
             device_name=self.device_name,
             reboot_affordance=self,
             ffx_transport=self.ffx,
-            fastboot_node_id=self._device_info.fastboot_node_id
-            or self._device_info.serial_number,
+            fastboot_node_id=fastboot_node_id,
         )
         return fastboot_obj
 
@@ -531,7 +505,7 @@ class FuchsiaDevice(
 
     # List all the affordances
     @properties.Affordance
-    def session(self) -> session.Session:
+    def session(self) -> session_affordance.Session:
         """Returns a session affordance object.
 
         Returns:
@@ -544,7 +518,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def screenshot(self) -> screenshot.Screenshot:
+    def screenshot(self) -> screenshot_affordance.Screenshot:
         """Returns a screenshot affordance object.
 
         Returns:
@@ -577,7 +551,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def starnix(self) -> starnix.Starnix:
+    def starnix(self) -> starnix_affordance.Starnix:
         """Returns a starnix affordance object.
 
         Returns:
@@ -609,7 +583,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def rtc(self) -> rtc.Rtc:
+    def rtc(self) -> rtc_affordance.Rtc:
         """Returns an RTC affordance object.
 
         Returns:
@@ -621,7 +595,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def tracing(self) -> tracing.Tracing:
+    def tracing(self) -> tracing_affordance.Tracing:
         """Returns a tracing affordance object.
 
         Returns:
@@ -641,7 +615,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def user_input(self) -> user_input.UserInput:
+    def user_input(self) -> user_input_affordance.UserInput:
         """Returns an user input affordance object.
 
         Returns:
@@ -771,7 +745,7 @@ class FuchsiaDevice(
         return self.battery
 
     @properties.Affordance
-    def fake_battery(self) -> fake_battery.FakeBattery:
+    def fake_battery(self) -> fake_battery_affordance.FakeBattery:
         """Returns a fake_battery affordance object.
 
         Returns:
@@ -828,7 +802,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def media(self) -> media.Media:
+    def media(self) -> media_affordance.Media:
         """Returns a media affordance object.
 
         Returns:
@@ -841,7 +815,7 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
-    def hello_world(self) -> hello_world.HelloWorld:
+    def hello_world(self) -> hello_world_affordance.HelloWorld:
         """Returns a HelloWorld affordance object.
 
         Returns:
@@ -882,22 +856,7 @@ class FuchsiaDevice(
                     self.device_name,
                 )
 
-                # Note - FFX need to be invoked first before FC as FC depends on the daemon that
-                # will be created by FFX
-                self.ffx.check_connection()
-
-                self.fuchsia_controller.check_connection()
-
-                if self._is_sl4f_needed:
-                    self.sl4f.check_connection()
-
-                try:
-                    self.adb.check_connection()
-                except (errors.NotSupportedError, errors.NotEnabledError):
-                    _LOGGER.info(
-                        "ADB is not supported or not enabled on %s, so skipping the ADB connection check.",
-                        self.device_name,
-                    )
+                self._check_connections()
 
                 _LOGGER.info(
                     "Completed the health check successfully on %s...",
@@ -912,6 +871,17 @@ class FuchsiaDevice(
                 f"health check failed on '{self._device_info.name}'"
             ) from err
             # LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
+
+    def _check_connections(self) -> None:
+        """Checks health of all device transports."""
+        # Note - FFX need to be invoked first before FC as FC depends on the daemon that
+        # will be created by FFX
+        self.ffx.check_connection()
+
+        self.fuchsia_controller.check_connection()
+
+        if self._is_sl4f_needed:
+            self.sl4f.check_connection()
 
     def get_inspect_data(
         self,
@@ -1012,14 +982,6 @@ class FuchsiaDevice(
 
         # Create a new Fuchsia controller context for new device connection.
         self.fuchsia_controller.create_context()
-
-        try:
-            self.adb.on_device_boot()
-        except (errors.NotSupportedError, errors.NotEnabledError):
-            _LOGGER.info(
-                "ADB is not supported or not enabled on %s, so skipping ADB on_device_boot.",
-                self.device_name,
-            )
 
         # Ensure device is healthy
         self.health_check()

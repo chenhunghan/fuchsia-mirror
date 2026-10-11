@@ -263,7 +263,7 @@ static void brcmf_proto_bcdc_hdrpopulate(struct brcmf_pub* drvr, int ifidx, uint
 
 static zx_status_t brcmf_proto_bcdc_hdrpull(struct brcmf_pub* drvr, brcmf_proto_bcdc_header* hdr,
                                             uint32_t size, struct brcmf_if** ifp,
-                                            uint32_t* shrinkage, int* priority) {
+                                            uint32_t* shrinkage, uint8_t* priority) {
   if (size <= BCDC_HEADER_LEN) {
     BRCMF_DBG(BCDC, "rx data too short (%u <= %d)", size, BCDC_HEADER_LEN);
     return ZX_ERR_IO_DATA_INTEGRITY;
@@ -306,7 +306,7 @@ static zx_status_t brcmf_proto_bcdc_hdrpull(struct brcmf_pub* drvr,
   auto hdr = reinterpret_cast<struct brcmf_proto_bcdc_header*>(frame.Data());
 
   uint32_t shrinkage = 0;
-  int priority = 0;
+  uint8_t priority = 0;
   zx_status_t err = brcmf_proto_bcdc_hdrpull(drvr, hdr, frame.Size(), ifp, &shrinkage, &priority);
 
   if (err == ZX_OK) {

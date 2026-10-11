@@ -266,7 +266,11 @@ static bool GetKernelLength(const zbi_header_t* zbi, size_t* kernel_len,
     return false;
   }
   *kernel_len = kernel->hdr_kernel.length + 2 * sizeof(zbi_header_t);
-  *kernel_and_scratch_memory_len = *kernel_len + kernel->data_kernel.reserve_memory_size;
+  uint64_t reserve = kernel->data_kernel.reserve_memory_size;
+  if (reserve > SIZE_MAX - *kernel_len) {
+    return false;
+  }
+  *kernel_and_scratch_memory_len = *kernel_len + (size_t)reserve;
   return true;
 }
 

@@ -405,7 +405,7 @@ void DeviceInterface::PortStatusChanged(
   }
   const uint8_t port_id = request->id;
   const netdev::wire::PortStatus& new_status = request->new_status;
-  WithPort(port_id, [&new_status, port_id](const std::unique_ptr<DevicePort>& port) {
+  WithPort(port_id, [&new_status, port_id](const std::shared_ptr<DevicePort>& port) {
     uint32_t flags(new_status.flags());
     if (!port) {
       LOGF_ERROR("StatusChanged on unknown port=%u flags=%u mtu=%u", port_id, flags,
@@ -450,7 +450,7 @@ void DeviceInterface::AddPort(netdriver::wire::NetworkDeviceIfcAddPortRequest* r
       this, dispatchers_.port_->async_dispatcher(), salted_id, std::move(port_client),
       dispatchers_.impl_->get(), [this](DevicePort& port) { OnPortTeardownComplete(port); },
       [this, port_id, salted_id,
-       completer = completer.ToAsync()](zx::result<std::unique_ptr<DevicePort>> result) mutable {
+       completer = completer.ToAsync()](zx::result<std::shared_ptr<DevicePort>> result) mutable {
         fdf::Arena arena('NETD');
         if (result.is_error()) {
           LOGF_ERROR("Failed to create port: %s", result.status_string());
@@ -489,7 +489,7 @@ void DeviceInterface::RemovePort(
     return;
   }
   WithPort(request->id,
-           [this](const std::unique_ptr<DevicePort>& port) __TA_REQUIRES_SHARED(control_lock_) {
+           [this](const std::shared_ptr<DevicePort>& port) __TA_REQUIRES_SHARED(control_lock_) {
              if (port) {
                for (auto& watcher : port_watchers_) {
                  watcher.PortRemoved(port->id());
@@ -1219,7 +1219,7 @@ void DeviceInterface::UnregisterForTx(
 void DeviceInterface::GetPort(GetPortRequestView request, GetPortCompleter::Sync& _completer) {
   SharedAutoLock lock(&control_lock_);
   WithPort(request->id.base, [req = std::move(request->port), salt = request->id.salt](
-                                 const std::unique_ptr<DevicePort>& port) mutable {
+                                 const std::shared_ptr<DevicePort>& port) mutable {
     if (port && port->id().salt == salt) {
       port->Bind(std::move(req));
     } else {
@@ -1749,7 +1749,7 @@ bool DeviceInterface::ContinueTeardown(network::internal::DeviceInterface::Teard
 }
 
 void DeviceInterface::NotifyPortRxFrame(uint8_t base_id, uint64_t frame_length) {
-  WithPort(base_id, [&frame_length](const std::unique_ptr<DevicePort>& port) {
+  WithPort(base_id, [&frame_length](const std::shared_ptr<DevicePort>& port) {
     if (port) {
       DevicePort::Counters& counters = port->counters();
       counters.rx_frames.fetch_add(1);
@@ -1762,7 +1762,7 @@ zx::result<AttachedPort> DeviceInterface::AcquirePort(
     netdev::wire::PortId port_id, cpp20::span<const netdev::wire::FrameType> rx_frame_types) {
   return WithPort(port_id.base,
                   [this, &rx_frame_types, salt = port_id.salt](
-                      const std::unique_ptr<DevicePort>& port) -> zx::result<AttachedPort> {
+                      const std::shared_ptr<DevicePort>& port) -> zx::result<AttachedPort> {
                     if (port == nullptr || port->id().salt != salt) {
                       return zx::error(ZX_ERR_NOT_FOUND);
                     }

@@ -12,7 +12,6 @@
 mod error;
 pub mod filesystem;
 pub mod format;
-pub mod partition;
 
 use crate::filesystem::BlockConnector;
 use fidl_fuchsia_fs_startup::{FormatOptions, StartOptions};

@@ -3,18 +3,20 @@
 // found in the LICENSE file.
 
 use crate::mutable_state::{state_accessor, state_implementation};
-use crate::task::{EventHandler, ProcessGroup, Session, WaitCanceler, WaitQueue, Waiter};
+use crate::task::{EventHandler, Pid, WaitCanceler, WaitQueue, Waiter};
 use crate::vfs::buffers::{InputBuffer, InputBufferExt as _, OutputBuffer};
 use crate::vfs::{DirEntryHandle, FsString, Mounts};
 use derivative::Derivative;
+pub use line_discipline::TerminalSide;
 use line_discipline::{LineDiscipline, PendingSignals};
 use macro_rules_attribute::apply;
 use starnix_sync::{DeviceTerminalsLock, LockDepMutex, LockDepRwLock, PtsIdsSetLock};
 use starnix_uapi::auth::FsCred;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
+use starnix_uapi::signals::{SIGCONT, SIGHUP, Signal};
 use starnix_uapi::vfs::FdEvents;
-use starnix_uapi::{errno, error, uapi};
+use starnix_uapi::{error, pid_t, uapi};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Weak};
 
@@ -51,9 +53,9 @@ impl TtyState {
 
     /// Release the terminal identifier into the set of available identifier.
     pub fn release_terminal(&self, id: u32) -> Result<(), Errno> {
-        // We need to remove this terminal id from the set of terminals before we release the
-        // identifier. Otherwise, the id might be reused for a new terminal and we'll remove
-        // the *new* terminal with that identifier instead of the old one.
+        // Remove this terminal id from the set of terminals before releasing the
+        // identifier. Otherwise, a new terminal might reuse the id and get removed
+        // instead.
         assert!(self.terminals.write().remove(&id).is_some());
         self.pts_ids_set.lock().release(id);
         Ok(())
@@ -78,8 +80,8 @@ pub struct TerminalMutableState {
     /// Wait queue for the replica side of the terminal.
     replica_wait_queue: WaitQueue,
 
-    /// The controller for the terminal.
-    pub controller: Option<TerminalController>,
+    /// The controlling session and foreground process group of the terminal.
+    pub controlling_session: Option<ControllingSession>,
 }
 
 /// State of a given terminal. This object handles both the main and the replica terminal.
@@ -131,7 +133,7 @@ impl Terminal {
     /// Sets the terminal configuration.
     pub fn set_termios(&self, termios: uapi::termios2) {
         let signals = self.write().set_termios(termios);
-        self.send_signals(signals);
+        self.send_signals(signals.signals());
     }
 
     pub fn flush(&self, is_main: bool, arg: u32) -> Result<(), Errno> {
@@ -175,7 +177,7 @@ impl Terminal {
     /// `write` implementation of the main side of the terminal.
     pub fn main_write(&self, data: &mut dyn InputBuffer) -> Result<usize, Errno> {
         let (bytes, signals) = self.write().main_write(data)?;
-        self.send_signals(signals);
+        self.send_signals(signals.signals());
         Ok(bytes)
     }
 
@@ -206,7 +208,9 @@ impl Terminal {
 
     /// `read` implementation of the replica side of the terminal.
     pub fn replica_read(&self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
-        self.write().replica_read(data)
+        let (bytes, signals) = self.write().replica_read(data)?;
+        self.send_signals(signals.signals());
+        Ok(bytes)
     }
 
     /// `write` implementation of the replica side of the terminal.
@@ -214,24 +218,51 @@ impl Terminal {
         self.write().replica_write(data)
     }
 
-    /// Send the pending signals to the associated foreground process groups if they exist.
-    fn send_signals(&self, signals: PendingSignals) {
-        let signals = signals.signals();
-        if !signals.is_empty() {
-            let process_group = {
-                let terminal_state = self.read();
-                let Some(controller) = terminal_state.controller.as_ref() else {
-                    return;
-                };
-                let Some(session) = controller.session.upgrade() else {
-                    return;
-                };
-                let Ok(process_group) = session.read().get_foreground_process_group() else {
-                    return;
-                };
-                process_group
-            };
-            process_group.send_signals(signals);
+    /// Disassociates the controlling session from the terminal.
+    ///
+    /// Clears the controlling session, clears `controlling_terminal` on all member
+    /// thread groups in the session, and sends SIGHUP and SIGCONT to the foreground
+    /// process group outside of any terminal locks.
+    pub fn disassociate_controlling_session(&self) {
+        self.disassociate_controlling_session_if(None, None);
+    }
+
+    /// Disassociates the controlling session from the terminal if `expected_session` matches
+    /// (or is `None`), clearing matching member `controlling_terminal` references and sending
+    /// `SIGHUP` and `SIGCONT` to the foreground process group outside of any terminal locks.
+    pub fn disassociate_controlling_session_if(
+        &self,
+        expected_session: Option<&Pid>,
+        side: Option<TerminalSide>,
+    ) {
+        let controlling_session = {
+            let mut terminal_state = self.write();
+            if expected_session.is_none_or(|sid| terminal_state.controlling_session() == Some(sid))
+            {
+                terminal_state.controlling_session.take()
+            } else {
+                None
+            }
+        };
+        if let Some(controlling_session) = controlling_session {
+            controlling_session.disassociate(self, side);
+        }
+    }
+
+    /// Sends the specified signals to the foreground process group of this terminal.
+    ///
+    /// The terminal state lock is held only to extract the foreground PID and is dropped
+    /// before signal dispatch to prevent lock inversion with ThreadGroup locks.
+    pub fn send_signals(&self, signals: &[Signal]) {
+        if signals.is_empty() {
+            return;
+        }
+        let foreground_pg = {
+            let state = self.read();
+            state.controlling_session.as_ref().map(|cs| cs.foreground_process_group.clone())
+        };
+        if let Some(pgid) = foreground_pg {
+            pgid.send_signals_to_pgid(signals);
         }
     }
 
@@ -256,6 +287,9 @@ impl<'a> line_discipline::InputBuffer for InputBufferWrapper<'a> {
 struct OutputBufferWrapper<'a>(&'a mut dyn crate::vfs::buffers::OutputBuffer);
 
 impl<'a> line_discipline::OutputBuffer for OutputBufferWrapper<'a> {
+    fn available(&self) -> usize {
+        self.0.available()
+    }
     fn write(&mut self, data: &[u8]) -> Result<usize, Errno> {
         self.0.write(data)
     }
@@ -263,6 +297,11 @@ impl<'a> line_discipline::OutputBuffer for OutputBufferWrapper<'a> {
 
 #[apply(state_implementation!)]
 impl TerminalMutableState<Base = Terminal> {
+    /// Returns the controlling session PID if one is associated.
+    pub fn controlling_session(&self) -> Option<&Pid> {
+        self.controlling_session.as_ref().map(|cs| &cs.session)
+    }
+
     /// Returns the terminal configuration.
     pub fn termios(&self) -> &uapi::termios2 {
         self.line_discipline.termios()
@@ -278,22 +317,18 @@ impl TerminalMutableState<Base = Terminal> {
     /// Returns the number of available bytes to read from the side of the terminal described by
     /// `is_main`.
     pub fn get_available_read_size(&self, is_main: bool) -> usize {
-        self.line_discipline.get_available_read_size(is_main)
+        self.line_discipline.get_available_read_size(TerminalSide::from(is_main))
     }
 
     /// Sets the terminal configuration.
     fn set_termios(&mut self, termios: uapi::termios2) -> PendingSignals {
-        let old_canon_enabled = self.line_discipline.is_canon_enabled();
         let signals = self.line_discipline.set_termios(termios);
-        let canon_disabled = old_canon_enabled && !self.line_discipline.is_canon_enabled();
-        if canon_disabled || self.line_discipline.has_packet_mode_pending_events() {
-            self.notify_waiters();
-        }
+        self.notify_waiters();
         signals
     }
 
     pub fn flush(&mut self, is_main: bool, arg: u32) -> Result<(), Errno> {
-        self.line_discipline.flush(is_main, arg)?;
+        self.line_discipline.flush(TerminalSide::from(is_main), arg)?;
         self.notify_waiters();
         Ok(())
     }
@@ -337,6 +372,8 @@ impl TerminalMutableState<Base = Terminal> {
     }
 
     /// `write` implementation of the main side of the terminal.
+    ///
+    /// Returns the number of bytes written and any signals generated while processing the input.
     fn main_write(&mut self, data: &mut dyn InputBuffer) -> Result<(usize, PendingSignals), Errno> {
         let mut wrapper = InputBufferWrapper(data);
         let (result, signals) = self.line_discipline.main_write(&mut wrapper)?;
@@ -371,11 +408,17 @@ impl TerminalMutableState<Base = Terminal> {
     }
 
     /// `read` implementation of the replica side of the terminal.
-    fn replica_read(&mut self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
+    ///
+    /// Returns the number of bytes read and any signals generated while draining waiting input
+    /// buffers.
+    fn replica_read(
+        &mut self,
+        data: &mut dyn OutputBuffer,
+    ) -> Result<(usize, PendingSignals), Errno> {
         let mut wrapper = OutputBufferWrapper(data);
-        let result = self.line_discipline.replica_read(&mut wrapper)?;
+        let (result, signals) = self.line_discipline.replica_read(&mut wrapper)?;
         self.notify_waiters();
-        Ok(result)
+        Ok((result, signals))
     }
 
     /// `write` implementation of the replica side of the terminal.
@@ -405,21 +448,57 @@ impl Drop for Terminal {
     }
 }
 
-/// The controlling session of a terminal. Is is associated to a single side of the terminal,
-/// either main or replica.
-#[derive(Debug)]
-pub struct TerminalController {
-    pub session: Weak<Session>,
+/// The controlling terminal of a process.
+#[derive(Clone, Debug)]
+pub struct ControllingTerminal {
+    /// The controlling terminal.
+    pub terminal: Arc<Terminal>,
+    /// The side of the terminal associated with the session.
+    pub side: TerminalSide,
 }
 
-impl TerminalController {
-    pub fn new(session: &Arc<Session>) -> Option<Self> {
-        Some(Self { session: Arc::downgrade(&session) })
+impl ControllingTerminal {
+    pub fn new(terminal: &Terminal, side: TerminalSide) -> Self {
+        Self { terminal: terminal.to_owned(), side }
     }
 
-    pub fn get_foreground_process_group(&self) -> Result<Arc<ProcessGroup>, Errno> {
-        let session = self.session.upgrade().ok_or_else(|| errno!(ESRCH))?;
-        session.read().get_foreground_process_group()
+    pub fn matches(&self, terminal: &Terminal, side: TerminalSide) -> bool {
+        std::ptr::eq(terminal, Arc::as_ptr(&self.terminal)) && side == self.side
+    }
+}
+
+/// The controlling session and foreground process group of a terminal.
+#[derive(Clone, Debug)]
+pub struct ControllingSession {
+    /// The controlling session leader PID.
+    pub session: Pid,
+
+    /// The foreground process group PID.
+    pub foreground_process_group: Pid,
+}
+
+impl ControllingSession {
+    pub fn new(session: &Pid, foreground_pgrp: &Pid) -> Self {
+        Self { session: Arc::clone(session), foreground_process_group: Arc::clone(foreground_pgrp) }
+    }
+
+    pub fn foreground_process_group(&self) -> &Pid {
+        &self.foreground_process_group
+    }
+
+    pub fn foreground_pgid(&self) -> pid_t {
+        self.foreground_process_group.id
+    }
+
+    pub fn set_foreground_process_group(&mut self, pgid: Pid) {
+        self.foreground_process_group = pgid;
+    }
+
+    /// Clears matching member `controlling_terminal` references and sends `SIGHUP` and `SIGCONT`
+    /// to the foreground process group after this session has been detached from `terminal`.
+    pub fn disassociate(self, terminal: &Terminal, side: Option<TerminalSide>) {
+        self.session.clear_controlling_terminal(Some((terminal, side)));
+        self.foreground_process_group.send_signals_to_pgid(&[SIGHUP, SIGCONT]);
     }
 }
 

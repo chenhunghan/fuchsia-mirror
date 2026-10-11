@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use argh::FromArgs;
 use driver_debug_lib::{connect_to_debug_protocol, execute_command, list_commands};
+use futures::TryFutureExt as _;
+use futures::io::AllowStdIo;
 use std::process::ExitCode;
 
 /// Debug CLI tool to interact with drivers via fuchsia.driver.debug.Debug.
@@ -42,22 +44,6 @@ impl Args {
     }
 }
 
-fn clone_as_socket(fd: impl std::os::fd::AsFd, name: &str) -> Result<zx::Socket> {
-    let handle = fdio::clone_fd(fd).with_context(|| format!("Failed to clone {name} fd"))?;
-    if handle.is_invalid() {
-        anyhow::bail!("{name} is an invalid handle");
-    }
-    let basic_info =
-        handle.basic_info().with_context(|| format!("Failed to query basic info for {name}"))?;
-    if basic_info.object_type != zx::ObjectType::SOCKET {
-        anyhow::bail!(
-            "{name} file descriptor is not backed by a socket (got {:?})",
-            basic_info.object_type
-        );
-    }
-    Ok(zx::Socket::from(handle))
-}
-
 #[fuchsia::main]
 async fn main() -> Result<ExitCode> {
     let args: Args = argh::from_env();
@@ -78,10 +64,16 @@ async fn main() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let stdout = clone_as_socket(&std::io::stdout(), "stdout")?;
-    let stderr = clone_as_socket(&std::io::stderr(), "stderr")?;
+    let (stdout, remote_stdout) = zx::Socket::create_stream();
+    let (stderr, remote_stderr) = zx::Socket::create_stream();
+    let mut out = AllowStdIo::new(std::io::stdout());
+    let mut err = AllowStdIo::new(std::io::stderr());
 
-    let exit_code = execute_command(&proxy, &args.args, stdout, stderr).await?;
+    let (exit_code, _, _) = futures::try_join!(
+        execute_command(&proxy, &args.args, remote_stdout, remote_stderr),
+        futures::io::copy(fuchsia_async::Socket::from_socket(stdout), &mut out).err_into(),
+        futures::io::copy(fuchsia_async::Socket::from_socket(stderr), &mut err).err_into(),
+    )?;
     let exit_u8 = (exit_code & 0xff) as u8;
     Ok(ExitCode::from(exit_u8))
 }

@@ -1,0 +1,13 @@
+--- a/third_party/bazel_vendor/rules_go+/go/private/context.bzl
++++ b/third_party/bazel_vendor/rules_go+/go/private/context.bzl
+@@ -118,6 +118,10 @@
+     "-fmax-errors=": None,
+     "-Wall": None,
+ 
++    "-Werror": None,
++    "-Werror=": None,
++    "-Wstrict-prototypes": None,
++    "-std=": None,
+     # Symbols are needed by Go, so keep them
+     "-g0": None,
+ 

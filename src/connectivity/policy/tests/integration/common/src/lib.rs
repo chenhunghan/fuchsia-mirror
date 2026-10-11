@@ -15,7 +15,7 @@ use futures::future::{FutureExt as _, LocalBoxFuture};
 use net_types::ip::Ip;
 use netemul::{TestEndpoint, TestNetwork, TestRealm};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Manager, ManagerConfig, Netstack, SocketProxyType, TestRealmExt,
+    KnownServiceProvider, Manager, ManagerConfig, Netstack3, SocketProxyType, TestRealmExt,
     TestSandboxExt, constants,
 };
 use netstack_testing_common::{
@@ -37,7 +37,6 @@ pub struct NetcfgOwnedDeviceArgs {
 /// interfaces watcher.
 pub async fn with_netcfg_owned_device<
     M: Manager,
-    N: Netstack,
     F: for<'a> FnOnce(
         u64,
         &'a netemul::TestNetwork<'a>,
@@ -55,7 +54,7 @@ pub async fn with_netcfg_owned_device<
         additional_args;
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             [
                 KnownServiceProvider::Manager {

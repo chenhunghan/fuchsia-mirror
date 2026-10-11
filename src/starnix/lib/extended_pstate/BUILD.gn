@@ -90,6 +90,13 @@ rustc_library("lib") {
   }
   crate_name = "extended_pstate"
   edition = "2024"
+  if (current_cpu == "x64") {
+    link_deps = [ ":x64_assembly" ]
+  } else if (current_cpu == "arm64") {
+    link_deps = [ ":aarch64_assembly" ]
+  } else if (current_cpu == "riscv64") {
+    link_deps = [ ":riscv64_assembly" ]
+  }
   lint_config = "//src/starnix/build:kernel_library_config"
   test_deps = [ "//src/lib/fuchsia" ]
   visibility = [
@@ -97,15 +104,7 @@ rustc_library("lib") {
     "//src/starnix/kernel/*",
   ]
   with_unit_tests = true
-  deps = []
-  deps += [ "//third_party/rust_crates:static_assertions" ]
-  if (current_cpu == "x64") {
-    deps += [ ":x64_assembly" ]
-  } else if (current_cpu == "arm64") {
-    deps += [ ":aarch64_assembly" ]
-  } else if (current_cpu == "riscv64") {
-    deps += [ ":riscv64_assembly" ]
-  }
+  deps = [ "//third_party/rust_crates:static_assertions" ]
 }
 rustc_binary("bin") {
   sources = [ "src/benchmark.rs" ]

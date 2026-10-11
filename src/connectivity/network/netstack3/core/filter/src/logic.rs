@@ -249,7 +249,7 @@ fn apply_transparent_proxy<I: IpExt, P: MaybeTransportPacket>(
             //
             // TODO(https://fxbug.dev/341128580): Revisit this once filtering is
             // able to rewrite a port to 0.
-            let Some(port) = NonZeroU16::new(transport_packet_data.dst_port()) else {
+            let Some(port) = NonZeroU16::new(transport_packet_data.dst_port_or_id()) else {
                 // TODO(https://fxbug.dev/517102537): This should have an
                 // Inspect counter.
                 debug!("attempted to TPROXY packet to port 0");
@@ -1020,6 +1020,10 @@ mod tests {
 
         fn marks(&self) -> &Marks {
             &self.marks
+        }
+
+        fn packet_type(&self) -> netstack3_base::PacketType {
+            netstack3_base::PacketType::Host
         }
     }
 

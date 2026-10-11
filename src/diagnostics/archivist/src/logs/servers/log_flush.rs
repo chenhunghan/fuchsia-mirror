@@ -74,7 +74,7 @@ impl LogFlushServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl::endpoints::create_proxy;
+    use fidl::endpoints::{Proxy, create_proxy};
     use futures::FutureExt;
     use futures::channel::mpsc::unbounded;
     use std::pin::pin;
@@ -103,5 +103,64 @@ mod tests {
 
         // The future should be ready now.
         flush_fut.await.unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn flush_completes_when_flush_receiver_dropped() {
+        let (flush_requester, flush_receiver) = unbounded();
+        // Drop receiver immediately (simulating configuration without serial).
+        drop(flush_receiver);
+        let server = LogFlushServer::new(Scope::new(), flush_requester);
+
+        let (proxy, stream) = create_proxy::<fdiagnostics::LogFlusherMarker>();
+        server.spawn(stream.into_stream());
+
+        // Calling wait_until_flushed should complete immediately.
+        proxy.wait_until_flushed().await.unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn unknown_method_closes_with_unavailable_epitaph() {
+        let (flush_requester, _flush_receiver) = unbounded();
+        let server = LogFlushServer::new(Scope::new(), flush_requester);
+
+        let (proxy, stream) = create_proxy::<fdiagnostics::LogFlusherMarker>();
+        server.spawn(stream.into_stream());
+
+        // Send a flexible one-way unknown method ordinal.
+        let header = fidl::encoding::TransactionHeader::new(
+            0,
+            0x1234_5678,
+            fidl::encoding::DynamicFlags::FLEXIBLE,
+        );
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &header as *const _ as *const u8,
+                std::mem::size_of_val(&header),
+            )
+        };
+        proxy.as_channel().write(bytes, &mut []).expect("write raw unknown method header");
+
+        let mut event_stream = proxy.take_event_stream();
+        let event = event_stream.next().await;
+        assert_matches::assert_matches!(
+            event,
+            Some(Err(fidl::Error::ClientChannelClosed {
+                epitaph: fidl::Epitaph::Explicit(Err(zx::Status::UNAVAILABLE)),
+                ..
+            }))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn stream_error_handling() {
+        let (flush_requester, _flush_receiver) = unbounded();
+        let (proxy, stream) = create_proxy::<fdiagnostics::LogFlusherMarker>();
+
+        // Write invalid header bytes (magic number 0xff) to cause a stream error.
+        proxy.as_channel().write(&[0xff; 16], &mut []).expect("write invalid bytes");
+
+        let result = LogFlushServer::handle_requests(stream.into_stream(), flush_requester).await;
+        assert_matches::assert_matches!(result, Err(LogsError::HandlingRequests { .. }));
     }
 }

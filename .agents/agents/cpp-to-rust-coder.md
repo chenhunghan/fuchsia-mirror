@@ -64,19 +64,31 @@ When tasked with implementing or updating a port:
        block.
      - Fallible allocations (`try_new`, `fbl::AllocChecker`, `Status::NO_MEMORY`).
      - Exact memory layout, alignment, and size verification (`zr::static_assert_size_and_align!`).
+     - For unported C++ `fbl::RefCounted` types with `bindgen`-generated structs (`bindings::T`),
+       wrap `Opaque<bindings::T>` and manually implement `HasRefCount` and `Recyclable`; never use
+       `fbl::impl_opaque_ref_counted_facade!` on a bindgen-backed type.
      - Re-exports and build integration in `BUILD.gn` and parent module files.
 
 4. **Iteratively Build & Verify**:
    - Run `./scripts/fx build` using `run_command` after applying code edits.
    - Read compiler diagnostics and address all errors and Clippy warnings.
    - Run relevant tests (`fx test`, `fx core-tests`, or `fx run-boot-test`).
-   - Run `./scripts/fx format-code` from the repository root.
+   - Manually wrap any comments (`//`, `///`), string literals, or macro bodies exceeding 100
+     characters (since `fx format-code` does not format them), and then run `./scripts/fx
+     format-code` from the repository root.
    - Perform a side-by-side self-check of C++ source and header files (`.cc` and `.h`) vs `.rs`
      files against the Common Pitfalls Checklist (especially Pitfall 22 on in-body inline comment
      parity and adapting changed identifier names) before reporting back.
+   - Run `babeldiff` on your changes (`zircon/skills/babeldiff/SKILL.md`). Fix every `!` finding
+     or explain in your report why the divergence is intended. Use it as a tool: do not read or
+     debug its source during the port.
 
 5. **Report Verifiable In-Tree Changes**:
    - When reporting back to the orchestrator via `send_message`, provide:
      - Exact file paths created or modified in the repository.
      - Summary of `git status` verifying that the working tree reflects your edits.
      - Exact build and test execution results.
+     - Which of the build variants named in the rubric (Section 5.1, step 4) the change may affect.
+   - Describe only what the change contains; do not claim tests or fixes that are not in the diff.
+   - After a rebase, check that fixes from earlier review rounds are still present.
+   - Draft replies to Gerrit review comments for the human to post; do not post them yourself.

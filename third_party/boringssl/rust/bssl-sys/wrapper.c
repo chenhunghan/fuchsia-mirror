@@ -27,6 +27,7 @@ void sk_void_zero__extern(struct stack_st_void *sk) { sk_void_zero(sk); }
 void *sk_void_value__extern(const struct stack_st_void *sk, size_t i) {
   return sk_void_value(sk, i);
 }
+void *sk_void_last__extern(const struct stack_st_void *sk) { return sk_void_last(sk); }
 void *sk_void_set__extern(struct stack_st_void *sk, size_t i, void *p) {
   return sk_void_set(sk, i, p);
 }
@@ -96,6 +97,9 @@ void sk_OPENSSL_STRING_zero__extern(struct stack_st_OPENSSL_STRING *sk) {
 }
 char *sk_OPENSSL_STRING_value__extern(const struct stack_st_OPENSSL_STRING *sk, size_t i) {
   return sk_OPENSSL_STRING_value(sk, i);
+}
+char *sk_OPENSSL_STRING_last__extern(const struct stack_st_OPENSSL_STRING *sk) {
+  return sk_OPENSSL_STRING_last(sk);
 }
 char *sk_OPENSSL_STRING_set__extern(struct stack_st_OPENSSL_STRING *sk, size_t i, char *p) {
   return sk_OPENSSL_STRING_set(sk, i, p);
@@ -173,6 +177,7 @@ struct stack_st_BIO *sk_BIO_new_null__extern(void) { return sk_BIO_new_null(); }
 size_t sk_BIO_num__extern(const struct stack_st_BIO *sk) { return sk_BIO_num(sk); }
 void sk_BIO_zero__extern(struct stack_st_BIO *sk) { sk_BIO_zero(sk); }
 BIO *sk_BIO_value__extern(const struct stack_st_BIO *sk, size_t i) { return sk_BIO_value(sk, i); }
+BIO *sk_BIO_last__extern(const struct stack_st_BIO *sk) { return sk_BIO_last(sk); }
 BIO *sk_BIO_set__extern(struct stack_st_BIO *sk, size_t i, BIO *p) { return sk_BIO_set(sk, i, p); }
 void sk_BIO_free__extern(struct stack_st_BIO *sk) { sk_BIO_free(sk); }
 void sk_BIO_pop_free__extern(struct stack_st_BIO *sk, sk_BIO_free_func free_func) {
@@ -236,6 +241,9 @@ size_t sk_ASN1_INTEGER_num__extern(const struct stack_st_ASN1_INTEGER *sk) {
 void sk_ASN1_INTEGER_zero__extern(struct stack_st_ASN1_INTEGER *sk) { sk_ASN1_INTEGER_zero(sk); }
 ASN1_INTEGER *sk_ASN1_INTEGER_value__extern(const struct stack_st_ASN1_INTEGER *sk, size_t i) {
   return sk_ASN1_INTEGER_value(sk, i);
+}
+ASN1_INTEGER *sk_ASN1_INTEGER_last__extern(const struct stack_st_ASN1_INTEGER *sk) {
+  return sk_ASN1_INTEGER_last(sk);
 }
 ASN1_INTEGER *sk_ASN1_INTEGER_set__extern(struct stack_st_ASN1_INTEGER *sk, size_t i,
                                           ASN1_INTEGER *p) {
@@ -321,6 +329,9 @@ void sk_ASN1_OBJECT_zero__extern(struct stack_st_ASN1_OBJECT *sk) { sk_ASN1_OBJE
 ASN1_OBJECT *sk_ASN1_OBJECT_value__extern(const struct stack_st_ASN1_OBJECT *sk, size_t i) {
   return sk_ASN1_OBJECT_value(sk, i);
 }
+ASN1_OBJECT *sk_ASN1_OBJECT_last__extern(const struct stack_st_ASN1_OBJECT *sk) {
+  return sk_ASN1_OBJECT_last(sk);
+}
 ASN1_OBJECT *sk_ASN1_OBJECT_set__extern(struct stack_st_ASN1_OBJECT *sk, size_t i, ASN1_OBJECT *p) {
   return sk_ASN1_OBJECT_set(sk, i, p);
 }
@@ -401,6 +412,9 @@ void sk_ASN1_TYPE_zero__extern(struct stack_st_ASN1_TYPE *sk) { sk_ASN1_TYPE_zer
 ASN1_TYPE *sk_ASN1_TYPE_value__extern(const struct stack_st_ASN1_TYPE *sk, size_t i) {
   return sk_ASN1_TYPE_value(sk, i);
 }
+ASN1_TYPE *sk_ASN1_TYPE_last__extern(const struct stack_st_ASN1_TYPE *sk) {
+  return sk_ASN1_TYPE_last(sk);
+}
 ASN1_TYPE *sk_ASN1_TYPE_set__extern(struct stack_st_ASN1_TYPE *sk, size_t i, ASN1_TYPE *p) {
   return sk_ASN1_TYPE_set(sk, i, p);
 }
@@ -479,6 +493,9 @@ size_t sk_ASN1_VALUE_num__extern(const struct stack_st_ASN1_VALUE *sk) {
 void sk_ASN1_VALUE_zero__extern(struct stack_st_ASN1_VALUE *sk) { sk_ASN1_VALUE_zero(sk); }
 ASN1_VALUE *sk_ASN1_VALUE_value__extern(const struct stack_st_ASN1_VALUE *sk, size_t i) {
   return sk_ASN1_VALUE_value(sk, i);
+}
+ASN1_VALUE *sk_ASN1_VALUE_last__extern(const struct stack_st_ASN1_VALUE *sk) {
+  return sk_ASN1_VALUE_last(sk);
 }
 ASN1_VALUE *sk_ASN1_VALUE_set__extern(struct stack_st_ASN1_VALUE *sk, size_t i, ASN1_VALUE *p) {
   return sk_ASN1_VALUE_set(sk, i, p);
@@ -564,6 +581,9 @@ void sk_CONF_VALUE_zero__extern(struct stack_st_CONF_VALUE *sk) { sk_CONF_VALUE_
 CONF_VALUE *sk_CONF_VALUE_value__extern(const struct stack_st_CONF_VALUE *sk, size_t i) {
   return sk_CONF_VALUE_value(sk, i);
 }
+CONF_VALUE *sk_CONF_VALUE_last__extern(const struct stack_st_CONF_VALUE *sk) {
+  return sk_CONF_VALUE_last(sk);
+}
 CONF_VALUE *sk_CONF_VALUE_set__extern(struct stack_st_CONF_VALUE *sk, size_t i, CONF_VALUE *p) {
   return sk_CONF_VALUE_set(sk, i, p);
 }
@@ -645,6 +665,9 @@ void sk_CRYPTO_BUFFER_zero__extern(struct stack_st_CRYPTO_BUFFER *sk) { sk_CRYPT
 CRYPTO_BUFFER *sk_CRYPTO_BUFFER_value__extern(const struct stack_st_CRYPTO_BUFFER *sk, size_t i) {
   return sk_CRYPTO_BUFFER_value(sk, i);
 }
+CRYPTO_BUFFER *sk_CRYPTO_BUFFER_last__extern(const struct stack_st_CRYPTO_BUFFER *sk) {
+  return sk_CRYPTO_BUFFER_last(sk);
+}
 CRYPTO_BUFFER *sk_CRYPTO_BUFFER_set__extern(struct stack_st_CRYPTO_BUFFER *sk, size_t i,
                                             CRYPTO_BUFFER *p) {
   return sk_CRYPTO_BUFFER_set(sk, i, p);
@@ -722,6 +745,7 @@ void sk_X509_zero__extern(struct stack_st_X509 *sk) { sk_X509_zero(sk); }
 X509 *sk_X509_value__extern(const struct stack_st_X509 *sk, size_t i) {
   return sk_X509_value(sk, i);
 }
+X509 *sk_X509_last__extern(const struct stack_st_X509 *sk) { return sk_X509_last(sk); }
 X509 *sk_X509_set__extern(struct stack_st_X509 *sk, size_t i, X509 *p) {
   return sk_X509_set(sk, i, p);
 }
@@ -789,6 +813,9 @@ size_t sk_GENERAL_NAME_num__extern(const struct stack_st_GENERAL_NAME *sk) {
 void sk_GENERAL_NAME_zero__extern(struct stack_st_GENERAL_NAME *sk) { sk_GENERAL_NAME_zero(sk); }
 GENERAL_NAME *sk_GENERAL_NAME_value__extern(const struct stack_st_GENERAL_NAME *sk, size_t i) {
   return sk_GENERAL_NAME_value(sk, i);
+}
+GENERAL_NAME *sk_GENERAL_NAME_last__extern(const struct stack_st_GENERAL_NAME *sk) {
+  return sk_GENERAL_NAME_last(sk);
 }
 GENERAL_NAME *sk_GENERAL_NAME_set__extern(struct stack_st_GENERAL_NAME *sk, size_t i,
                                           GENERAL_NAME *p) {
@@ -868,6 +895,9 @@ void sk_X509_CRL_zero__extern(struct stack_st_X509_CRL *sk) { sk_X509_CRL_zero(s
 X509_CRL *sk_X509_CRL_value__extern(const struct stack_st_X509_CRL *sk, size_t i) {
   return sk_X509_CRL_value(sk, i);
 }
+X509_CRL *sk_X509_CRL_last__extern(const struct stack_st_X509_CRL *sk) {
+  return sk_X509_CRL_last(sk);
+}
 X509_CRL *sk_X509_CRL_set__extern(struct stack_st_X509_CRL *sk, size_t i, X509_CRL *p) {
   return sk_X509_CRL_set(sk, i, p);
 }
@@ -943,6 +973,9 @@ size_t sk_X509_REVOKED_num__extern(const struct stack_st_X509_REVOKED *sk) {
 void sk_X509_REVOKED_zero__extern(struct stack_st_X509_REVOKED *sk) { sk_X509_REVOKED_zero(sk); }
 X509_REVOKED *sk_X509_REVOKED_value__extern(const struct stack_st_X509_REVOKED *sk, size_t i) {
   return sk_X509_REVOKED_value(sk, i);
+}
+X509_REVOKED *sk_X509_REVOKED_last__extern(const struct stack_st_X509_REVOKED *sk) {
+  return sk_X509_REVOKED_last(sk);
 }
 X509_REVOKED *sk_X509_REVOKED_set__extern(struct stack_st_X509_REVOKED *sk, size_t i,
                                           X509_REVOKED *p) {
@@ -1031,6 +1064,9 @@ X509_NAME_ENTRY *sk_X509_NAME_ENTRY_value__extern(const struct stack_st_X509_NAM
                                                   size_t i) {
   return sk_X509_NAME_ENTRY_value(sk, i);
 }
+X509_NAME_ENTRY *sk_X509_NAME_ENTRY_last__extern(const struct stack_st_X509_NAME_ENTRY *sk) {
+  return sk_X509_NAME_ENTRY_last(sk);
+}
 X509_NAME_ENTRY *sk_X509_NAME_ENTRY_set__extern(struct stack_st_X509_NAME_ENTRY *sk, size_t i,
                                                 X509_NAME_ENTRY *p) {
   return sk_X509_NAME_ENTRY_set(sk, i, p);
@@ -1118,6 +1154,9 @@ void sk_X509_NAME_zero__extern(struct stack_st_X509_NAME *sk) { sk_X509_NAME_zer
 X509_NAME *sk_X509_NAME_value__extern(const struct stack_st_X509_NAME *sk, size_t i) {
   return sk_X509_NAME_value(sk, i);
 }
+X509_NAME *sk_X509_NAME_last__extern(const struct stack_st_X509_NAME *sk) {
+  return sk_X509_NAME_last(sk);
+}
 X509_NAME *sk_X509_NAME_set__extern(struct stack_st_X509_NAME *sk, size_t i, X509_NAME *p) {
   return sk_X509_NAME_set(sk, i, p);
 }
@@ -1199,6 +1238,9 @@ void sk_X509_EXTENSION_zero__extern(struct stack_st_X509_EXTENSION *sk) {
 X509_EXTENSION *sk_X509_EXTENSION_value__extern(const struct stack_st_X509_EXTENSION *sk,
                                                 size_t i) {
   return sk_X509_EXTENSION_value(sk, i);
+}
+X509_EXTENSION *sk_X509_EXTENSION_last__extern(const struct stack_st_X509_EXTENSION *sk) {
+  return sk_X509_EXTENSION_last(sk);
 }
 X509_EXTENSION *sk_X509_EXTENSION_set__extern(struct stack_st_X509_EXTENSION *sk, size_t i,
                                               X509_EXTENSION *p) {
@@ -1291,6 +1333,9 @@ void sk_GENERAL_SUBTREE_zero__extern(struct stack_st_GENERAL_SUBTREE *sk) {
 GENERAL_SUBTREE *sk_GENERAL_SUBTREE_value__extern(const struct stack_st_GENERAL_SUBTREE *sk,
                                                   size_t i) {
   return sk_GENERAL_SUBTREE_value(sk, i);
+}
+GENERAL_SUBTREE *sk_GENERAL_SUBTREE_last__extern(const struct stack_st_GENERAL_SUBTREE *sk) {
+  return sk_GENERAL_SUBTREE_last(sk);
 }
 GENERAL_SUBTREE *sk_GENERAL_SUBTREE_set__extern(struct stack_st_GENERAL_SUBTREE *sk, size_t i,
                                                 GENERAL_SUBTREE *p) {
@@ -1387,6 +1432,10 @@ ACCESS_DESCRIPTION *sk_ACCESS_DESCRIPTION_value__extern(
     const struct stack_st_ACCESS_DESCRIPTION *sk, size_t i) {
   return sk_ACCESS_DESCRIPTION_value(sk, i);
 }
+ACCESS_DESCRIPTION *sk_ACCESS_DESCRIPTION_last__extern(
+    const struct stack_st_ACCESS_DESCRIPTION *sk) {
+  return sk_ACCESS_DESCRIPTION_last(sk);
+}
 ACCESS_DESCRIPTION *sk_ACCESS_DESCRIPTION_set__extern(struct stack_st_ACCESS_DESCRIPTION *sk,
                                                       size_t i, ACCESS_DESCRIPTION *p) {
   return sk_ACCESS_DESCRIPTION_set(sk, i, p);
@@ -1479,6 +1528,9 @@ void sk_DIST_POINT_zero__extern(struct stack_st_DIST_POINT *sk) { sk_DIST_POINT_
 DIST_POINT *sk_DIST_POINT_value__extern(const struct stack_st_DIST_POINT *sk, size_t i) {
   return sk_DIST_POINT_value(sk, i);
 }
+DIST_POINT *sk_DIST_POINT_last__extern(const struct stack_st_DIST_POINT *sk) {
+  return sk_DIST_POINT_last(sk);
+}
 DIST_POINT *sk_DIST_POINT_set__extern(struct stack_st_DIST_POINT *sk, size_t i, DIST_POINT *p) {
   return sk_DIST_POINT_set(sk, i, p);
 }
@@ -1562,6 +1614,9 @@ void sk_POLICYQUALINFO_zero__extern(struct stack_st_POLICYQUALINFO *sk) {
 POLICYQUALINFO *sk_POLICYQUALINFO_value__extern(const struct stack_st_POLICYQUALINFO *sk,
                                                 size_t i) {
   return sk_POLICYQUALINFO_value(sk, i);
+}
+POLICYQUALINFO *sk_POLICYQUALINFO_last__extern(const struct stack_st_POLICYQUALINFO *sk) {
+  return sk_POLICYQUALINFO_last(sk);
 }
 POLICYQUALINFO *sk_POLICYQUALINFO_set__extern(struct stack_st_POLICYQUALINFO *sk, size_t i,
                                               POLICYQUALINFO *p) {
@@ -1652,6 +1707,9 @@ void sk_POLICYINFO_zero__extern(struct stack_st_POLICYINFO *sk) { sk_POLICYINFO_
 POLICYINFO *sk_POLICYINFO_value__extern(const struct stack_st_POLICYINFO *sk, size_t i) {
   return sk_POLICYINFO_value(sk, i);
 }
+POLICYINFO *sk_POLICYINFO_last__extern(const struct stack_st_POLICYINFO *sk) {
+  return sk_POLICYINFO_last(sk);
+}
 POLICYINFO *sk_POLICYINFO_set__extern(struct stack_st_POLICYINFO *sk, size_t i, POLICYINFO *p) {
   return sk_POLICYINFO_set(sk, i, p);
 }
@@ -1735,6 +1793,9 @@ void sk_POLICY_MAPPING_zero__extern(struct stack_st_POLICY_MAPPING *sk) {
 POLICY_MAPPING *sk_POLICY_MAPPING_value__extern(const struct stack_st_POLICY_MAPPING *sk,
                                                 size_t i) {
   return sk_POLICY_MAPPING_value(sk, i);
+}
+POLICY_MAPPING *sk_POLICY_MAPPING_last__extern(const struct stack_st_POLICY_MAPPING *sk) {
+  return sk_POLICY_MAPPING_last(sk);
 }
 POLICY_MAPPING *sk_POLICY_MAPPING_set__extern(struct stack_st_POLICY_MAPPING *sk, size_t i,
                                               POLICY_MAPPING *p) {
@@ -1825,6 +1886,9 @@ void sk_X509_ALGOR_zero__extern(struct stack_st_X509_ALGOR *sk) { sk_X509_ALGOR_
 X509_ALGOR *sk_X509_ALGOR_value__extern(const struct stack_st_X509_ALGOR *sk, size_t i) {
   return sk_X509_ALGOR_value(sk, i);
 }
+X509_ALGOR *sk_X509_ALGOR_last__extern(const struct stack_st_X509_ALGOR *sk) {
+  return sk_X509_ALGOR_last(sk);
+}
 X509_ALGOR *sk_X509_ALGOR_set__extern(struct stack_st_X509_ALGOR *sk, size_t i, X509_ALGOR *p) {
   return sk_X509_ALGOR_set(sk, i, p);
 }
@@ -1908,6 +1972,9 @@ void sk_X509_ATTRIBUTE_zero__extern(struct stack_st_X509_ATTRIBUTE *sk) {
 X509_ATTRIBUTE *sk_X509_ATTRIBUTE_value__extern(const struct stack_st_X509_ATTRIBUTE *sk,
                                                 size_t i) {
   return sk_X509_ATTRIBUTE_value(sk, i);
+}
+X509_ATTRIBUTE *sk_X509_ATTRIBUTE_last__extern(const struct stack_st_X509_ATTRIBUTE *sk) {
+  return sk_X509_ATTRIBUTE_last(sk);
 }
 X509_ATTRIBUTE *sk_X509_ATTRIBUTE_set__extern(struct stack_st_X509_ATTRIBUTE *sk, size_t i,
                                               X509_ATTRIBUTE *p) {
@@ -1998,6 +2065,9 @@ void sk_X509_OBJECT_zero__extern(struct stack_st_X509_OBJECT *sk) { sk_X509_OBJE
 X509_OBJECT *sk_X509_OBJECT_value__extern(const struct stack_st_X509_OBJECT *sk, size_t i) {
   return sk_X509_OBJECT_value(sk, i);
 }
+X509_OBJECT *sk_X509_OBJECT_last__extern(const struct stack_st_X509_OBJECT *sk) {
+  return sk_X509_OBJECT_last(sk);
+}
 X509_OBJECT *sk_X509_OBJECT_set__extern(struct stack_st_X509_OBJECT *sk, size_t i, X509_OBJECT *p) {
   return sk_X509_OBJECT_set(sk, i, p);
 }
@@ -2078,6 +2148,9 @@ void sk_X509_INFO_zero__extern(struct stack_st_X509_INFO *sk) { sk_X509_INFO_zer
 X509_INFO *sk_X509_INFO_value__extern(const struct stack_st_X509_INFO *sk, size_t i) {
   return sk_X509_INFO_value(sk, i);
 }
+X509_INFO *sk_X509_INFO_last__extern(const struct stack_st_X509_INFO *sk) {
+  return sk_X509_INFO_last(sk);
+}
 X509_INFO *sk_X509_INFO_set__extern(struct stack_st_X509_INFO *sk, size_t i, X509_INFO *p) {
   return sk_X509_INFO_set(sk, i, p);
 }
@@ -2156,6 +2229,9 @@ size_t sk_SSL_CIPHER_num__extern(const struct stack_st_SSL_CIPHER *sk) {
 void sk_SSL_CIPHER_zero__extern(struct stack_st_SSL_CIPHER *sk) { sk_SSL_CIPHER_zero(sk); }
 const SSL_CIPHER *sk_SSL_CIPHER_value__extern(const struct stack_st_SSL_CIPHER *sk, size_t i) {
   return sk_SSL_CIPHER_value(sk, i);
+}
+const SSL_CIPHER *sk_SSL_CIPHER_last__extern(const struct stack_st_SSL_CIPHER *sk) {
+  return sk_SSL_CIPHER_last(sk);
 }
 const SSL_CIPHER *sk_SSL_CIPHER_set__extern(struct stack_st_SSL_CIPHER *sk, size_t i,
                                             const SSL_CIPHER *p) {
@@ -2245,6 +2321,10 @@ void sk_SRTP_PROTECTION_PROFILE_zero__extern(struct stack_st_SRTP_PROTECTION_PRO
 const SRTP_PROTECTION_PROFILE *sk_SRTP_PROTECTION_PROFILE_value__extern(
     const struct stack_st_SRTP_PROTECTION_PROFILE *sk, size_t i) {
   return sk_SRTP_PROTECTION_PROFILE_value(sk, i);
+}
+const SRTP_PROTECTION_PROFILE *sk_SRTP_PROTECTION_PROFILE_last__extern(
+    const struct stack_st_SRTP_PROTECTION_PROFILE *sk) {
+  return sk_SRTP_PROTECTION_PROFILE_last(sk);
 }
 const SRTP_PROTECTION_PROFILE *sk_SRTP_PROTECTION_PROFILE_set__extern(
     struct stack_st_SRTP_PROTECTION_PROFILE *sk, size_t i, const SRTP_PROTECTION_PROFILE *p) {
@@ -2336,6 +2416,9 @@ void sk_SSL_COMP_zero__extern(struct stack_st_SSL_COMP *sk) { sk_SSL_COMP_zero(s
 SSL_COMP *sk_SSL_COMP_value__extern(const struct stack_st_SSL_COMP *sk, size_t i) {
   return sk_SSL_COMP_value(sk, i);
 }
+SSL_COMP *sk_SSL_COMP_last__extern(const struct stack_st_SSL_COMP *sk) {
+  return sk_SSL_COMP_last(sk);
+}
 SSL_COMP *sk_SSL_COMP_set__extern(struct stack_st_SSL_COMP *sk, size_t i, SSL_COMP *p) {
   return sk_SSL_COMP_set(sk, i, p);
 }
@@ -2411,6 +2494,9 @@ size_t sk_TRUST_TOKEN_num__extern(const struct stack_st_TRUST_TOKEN *sk) {
 void sk_TRUST_TOKEN_zero__extern(struct stack_st_TRUST_TOKEN *sk) { sk_TRUST_TOKEN_zero(sk); }
 TRUST_TOKEN *sk_TRUST_TOKEN_value__extern(const struct stack_st_TRUST_TOKEN *sk, size_t i) {
   return sk_TRUST_TOKEN_value(sk, i);
+}
+TRUST_TOKEN *sk_TRUST_TOKEN_last__extern(const struct stack_st_TRUST_TOKEN *sk) {
+  return sk_TRUST_TOKEN_last(sk);
 }
 TRUST_TOKEN *sk_TRUST_TOKEN_set__extern(struct stack_st_TRUST_TOKEN *sk, size_t i, TRUST_TOKEN *p) {
   return sk_TRUST_TOKEN_set(sk, i, p);

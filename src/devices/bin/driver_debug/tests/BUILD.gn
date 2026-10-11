@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_test.gni")
+
+rustc_test("driver_debug_integration_test") {
+  edition = "2024"
+  source_root = "driver_debug_test.rs"
+  sources = [
+    "driver_debug_test.rs",
+    "test_driver.rs",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.driver.debug:fuchsia.driver.debug_rust",
+    "//sdk/lib/driver/component/rust",
+    "//sdk/lib/driver/debug/rust",
+    "//sdk/rust/zx",
+    "//src/devices/bin/driver_debug:driver_debug_lib",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:argh",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_unittest_package("driver_debug_integration_tests") {
+  deps = [ ":driver_debug_integration_test" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":driver_debug_integration_tests" ]
+}

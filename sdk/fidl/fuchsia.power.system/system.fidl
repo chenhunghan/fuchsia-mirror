@@ -43,15 +43,10 @@
 /// To prevent system suspension, a component can create an assertive dependency
 /// using the `assertive_dependency_token` from `ApplicationActivity`. If the
 /// dependency causes the power level of `ApplicationActivity` to be raised to
-/// [`fuchsia.power.system/ApplicationActivityPowerLevel.ACTIVE`], SAG  will not
-///  trigger system suspension until their power levels drop to `INACTIVE`.
+/// [`fuchsia.power.system/ApplicationActivityPowerLevel.ACTIVE`], SAG will not
+/// trigger system suspension until their power levels drop to `INACTIVE`.
 ///
-/// If a component is managing a power element that requires the platform to be
-/// in a specific state, an opportunistic dependency can be created on
-/// `ExecutionState`. When `ExecutionState` changes its power level, all
-/// dependent power elements will power down first. Ideally, this forces the
-/// entire system into a configuration with a lower power consumption as the
-/// power level of `ExecutionState` decreases.
+/// Alternatively, components can call [`fuchsia.power.system/ActivityGovernor.AcquireWakeLease`].
 @available(added=26)
 library fuchsia.power.system;
 
@@ -76,16 +71,6 @@ type AcquireWakeLeaseError = flexible enum : uint32 {
 };
 
 /// Execution state power levels
-///
-/// Elements should take an opportunistic dependency on `ExecutionStateLevel::ACTIVE`
-/// to ensure that the element will be suspended when the rest of the system
-/// suspends.
-///
-/// Drivers can take an opportunistic dependency on either
-/// `ExecutionStateLevel::SUSPENDING` or `ExecutionStateLevel::ACTIVE` and
-/// request a persistent lease on this state to ensure that their element's
-/// power level is always activated when the system comes out of a suspend
-/// state.
 @available(added=HEAD)
 type ExecutionStateLevel = flexible enum : uint8 {
     INACTIVE = 0;

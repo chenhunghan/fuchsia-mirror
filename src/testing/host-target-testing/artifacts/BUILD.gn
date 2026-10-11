@@ -24,6 +24,7 @@ if (is_host) {
       "archive.go",
       "archive_test.go",
       "build.go",
+      "build_test.go",
       "builder.go",
     ]
   }

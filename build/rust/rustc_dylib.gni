@@ -83,6 +83,11 @@ import("//build/rust/rustc_test.gni")
 #     except that these are always built in `$host_toolchain`. Used by
 #     Bazel-converted targets, see //build/tools/bazel2gn/README.md.
 #
+#   link_deps (optional)
+#     Native (e.g. C/C++) libraries to link against, has the same semantics
+#     as deps in GN. Used by Bazel-converted targets, see
+#     //build/tools/bazel2gn/README.md.
+#
 #   output_dir (optional)
 #     Directory that the resulting library should be placed in.
 #     See: `gn help output_dir`
@@ -176,6 +181,7 @@ template("rustc_dylib") {
                              "exclude_toolchain_tags",
                              "features",
                              "inputs",
+                             "link_deps",
                              "lint_config",
                              "output_dir",
                              "output_name",

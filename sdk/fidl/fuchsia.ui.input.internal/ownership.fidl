@@ -1,0 +1,106 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+@available(added=HEAD)
+library fuchsia.ui.input.internal;
+
+using fuchsia.ui.views;
+using zx;
+
+/// Errors returned by `InputOwnership.GetEvent`.
+@available(added=HEAD)
+type InputOwnershipError = flexible enum {
+    /// `target` was set to an unsupported variant or an unknown union variant.
+    INVALID_TARGET = 1;
+    /// The `ViewRef` is well-formed but names no view known to this server,
+    /// including a view destroyed before this call was handled.
+    UNKNOWN_VIEW = 2;
+    /// The caller is not permitted to observe ownership for `target`.
+    ACCESS_DENIED = 3;
+};
+
+/// Target identity when requesting direct input ownership.
+@available(added=HEAD)
+type InputOwnershipTarget = flexible resource union {
+    1: view_ref fuchsia.ui.views.ViewRef;
+    2: virtcon struct {};
+    3: platform struct {};
+};
+
+/// Orthogonal ownership signal bits asserted on `ownership_event`.
+///
+/// - User Signals 0..1 (`DISPLAY_UNOWNED`, `DISPLAY_PLATFORM_OWNED`) are controlled
+///   exclusively by Scenic's `DisplayManager` based on hardware Display
+///   Coordinator ownership.
+/// - User Signal 2 (`ZX_USER_SIGNAL_2 = 0x04000000`) is reserved for future display use.
+/// - User Signals 3..4 (`INPUT_CLIENT_OWNED`, `INPUT_PLATFORM_OWNED`) are controlled
+///   exclusively by Scenic's `ViewTree` evaluator based on single-view +
+///   full-screen criteria.
+@available(added=HEAD)
+type InputOwnershipSignal = flexible bits : uint32 {
+    /// Scenic does NOT own the hardware display (Virtcon owns display and input).
+    /// Controlled by `DisplayManager`. Corresponds to ZX_USER_SIGNAL_0 (0x01000000).
+    DISPLAY_UNOWNED = 0x01000000;
+
+    /// Platform (`Scenic`) owns the hardware display.
+    /// Controlled by `DisplayManager`. Corresponds to ZX_USER_SIGNAL_1 (0x02000000).
+    DISPLAY_PLATFORM_OWNED = 0x02000000;
+
+    // User Signal 2 (ZX_USER_SIGNAL_2 = 0x04000000) is reserved for future display use.
+
+    /// Target client view (`Starnix`) satisfies single-view + full-screen criteria.
+    /// Controlled by `ViewTree`. Corresponds to ZX_USER_SIGNAL_3 (0x08000000).
+    INPUT_CLIENT_OWNED = 0x08000000;
+
+    /// Platform (`SceneManager` / `InputPipeline`) handles `ViewTree` input.
+    /// Controlled by `ViewTree`. Corresponds to ZX_USER_SIGNAL_4 (0x10000000).
+    INPUT_PLATFORM_OWNED = 0x10000000;
+};
+
+/// Get information about ownership of input (replaces `DisplayOwnership`).
+///
+/// By default, user input is handled by the platform input pipeline
+/// (`SceneManager`) and delivered to applications via standard UI protocols
+/// (e.g. `fuchsia.ui.pointer.TouchSource`).
+///
+/// Low-level components (such as Starnix or Virtcon) that require direct access
+/// to hardware input devices via `fuchsia.input.report.Service` must observe this
+/// event to pause or resume reading from direct driver streams, preventing
+/// duplicate processing or input leakage.
+///
+/// This protocol intentionally assumes a system-wide singleton direct-client
+/// model where only one direct client or the platform pipeline consumes input
+/// at any given time.
+///
+/// During ownership transitions (e.g. switching display ownership or view
+/// focus), an intermediate state may occur where neither the direct client nor
+/// the platform pipeline owns input. During any unowned or transition state, all
+/// consumers (both direct clients and the platform pipeline) must pause reading
+/// and processing hardware input reports until their respective ownership signal
+/// is asserted.
+@discoverable
+@available(added=HEAD)
+closed protocol InputOwnership {
+    /// Gets a duplicate handle to the shared kernel `ownership_event` whose
+    /// orthogonal signals inform clients and the system pipeline when direct
+    /// driver input access (`fuchsia.input.report.Service`) is granted or revoked:
+    ///
+    /// - `Virtcon` (`target` = `virtcon: {}`): owns input iff
+    ///   `InputOwnershipSignal.DISPLAY_UNOWNED` is asserted.
+    /// - `Starnix` (`target` = `view_ref`): owns direct input iff both
+    ///   `InputOwnershipSignal.DISPLAY_PLATFORM_OWNED` and
+    ///   `InputOwnershipSignal.INPUT_CLIENT_OWNED` are asserted.
+    /// - `SceneManager` (`target` = `platform: {}`): owns platform pipeline
+    ///   input iff both `InputOwnershipSignal.DISPLAY_PLATFORM_OWNED` and
+    ///   `InputOwnershipSignal.INPUT_PLATFORM_OWNED` are asserted (pauses whenever
+    ///   `DISPLAY_UNOWNED` or `INPUT_CLIENT_OWNED` is asserted).
+    ///
+    /// If `target` is set to an unsupported or unknown variant, the call
+    /// returns `InputOwnershipError.INVALID_TARGET`.
+    strict GetEvent(resource struct {
+        target InputOwnershipTarget;
+    }) -> (resource struct {
+        ownership_event
+                zx.Handle:<EVENT, zx.Rights.TRANSFER | zx.Rights.DUPLICATE | zx.Rights.WAIT | zx.Rights.INSPECT>;
+    }) error InputOwnershipError;
+};

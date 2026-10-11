@@ -24,6 +24,7 @@ FFI_ALWAYS_INLINE PageQueues* cpp_pmm_page_queues() { return pmm_page_queues(); 
 FFI_ALWAYS_INLINE VmCompression* cpp_pmm_get_page_compression(void) {
   return Pmm::Node().GetPageCompression();
 }
+FFI_ALWAYS_INLINE Evictor* cpp_pmm_evictor() { return pmm_evictor(); }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_pmm_alloc_page(uint32_t flags, vm_page_t** out_page,
                                                  zx_paddr_t* out_paddr) {
@@ -58,6 +59,12 @@ FFI_ALWAYS_INLINE size_t cpp_pmm_num_arenas() { return pmm_num_arenas(); }
 FFI_ALWAYS_INLINE zx_status_t cpp_pmm_get_arena_info(size_t count, uint64_t i,
                                                      pmm_arena_info_t* buffer, size_t buffer_size) {
   return pmm_get_arena_info(count, i, buffer, buffer_size);
+}
+
+FFI_ALWAYS_INLINE void cpp_pmm_checker_init_from_cmdline() { pmm_checker_init_from_cmdline(); }
+
+FFI_ALWAYS_INLINE zx_status_t cpp_pmm_init(const memalloc::Range* ranges, size_t count) {
+  return pmm_init(ktl::span{ranges, count});
 }
 
 }  // extern "C"

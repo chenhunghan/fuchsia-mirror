@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(implicit-host-libs)
+# NOTE: The `rustflags` assume is_fuchsia=false, since this config is only used
+# by Linux toolchains.
+_IMPLICIT_HOST_LIBS_LDFLAGS = [
+    # Use static C++ standard library.
+    "-static-libstdc++",
+]
+
+compiler_build_flags(
+    name = "implicit-host-libs",
+    ldflags = _IMPLICIT_HOST_LIBS_LDFLAGS,
+    linker_flags = [
+        # Set rpath to find dynamically linked libraries placed next to
+        # executables in the host build directory.
+        "-rpath=$ORIGIN/",
+    ],
+    rustflags = ["-Clink-arg=" + flag for flag in _IMPLICIT_HOST_LIBS_LDFLAGS],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/linux/BUILD.gn:implicit-host-libs)

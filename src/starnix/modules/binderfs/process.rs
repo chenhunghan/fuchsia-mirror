@@ -38,7 +38,7 @@ use starnix_uapi::{
     binder_driver_command_protocol_BC_ACQUIRE_DONE, binder_driver_command_protocol_BC_DECREFS,
     binder_driver_command_protocol_BC_INCREFS, binder_driver_command_protocol_BC_INCREFS_DONE,
     binder_driver_command_protocol_BC_RELEASE, binder_frozen_state_info, binder_uintptr_t, errno,
-    error, pid_t,
+    error,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
@@ -217,7 +217,7 @@ impl Releasable for TransactionState {
                         // Panicking would be wrong, in case the client issued an extra strong decrement.
                         log_warn!(
                             "Error when dropping transaction state for process {}: {:?}",
-                            proc.key.id,
+                            proc.key,
                             error
                         );
                     }
@@ -849,8 +849,7 @@ impl<'a> BinderProcessGuard<'a> {
         &mut self,
         task: &Task,
     ) -> Result<OwnedRef<BinderThread>, Errno> {
-        let tid = task.get_tid();
-        if let Some(thread) = self.thread_pool.threads.get(&tid) {
+        if let Some(thread) = self.thread_pool.threads.get(&task.tid) {
             return Ok(OwnedRef::share(thread));
         }
         let running_state = task.running_state()?;
@@ -858,13 +857,13 @@ impl<'a> BinderProcessGuard<'a> {
             .thread
             .get()
             .map_or_else(|| Arc::new(zx::Thread::invalid()), |t| t.thread.clone());
-        let thread = BinderThread::new(self, tid, handle);
-        self.thread_pool.threads.insert(tid, OwnedRef::share(&thread));
+        let thread = BinderThread::new(self, task.tid.clone(), handle);
+        self.thread_pool.threads.insert(task.tid.clone(), OwnedRef::share(&thread));
         Ok(thread)
     }
 
     /// Unregister the `BinderThread` with the given `tid`.
-    pub fn unregister_thread(&mut self, current_task: &CurrentTask, tid: pid_t) {
+    pub fn unregister_thread(&mut self, current_task: &CurrentTask, tid: &Pid) {
         self.thread_pool.remove(current_task, tid);
     }
 
@@ -1028,7 +1027,7 @@ impl Releasable for BinderProcess {
 /// The set of threads that are interacting with the binder driver for a given process.
 #[derive(Debug, Default)]
 pub struct ThreadPool {
-    pub threads: BTreeMap<pid_t, OwnedRef<BinderThread>>,
+    pub threads: BTreeMap<Pid, OwnedRef<BinderThread>>,
     auxilliary_threads_count: usize,
 }
 
@@ -1048,8 +1047,8 @@ impl ThreadPool {
         self.auxilliary_threads_count += 1;
     }
 
-    pub fn remove(&mut self, current_task: &CurrentTask, tid: pid_t) {
-        if let Some(thread) = self.threads.remove(&tid) {
+    pub fn remove(&mut self, current_task: &CurrentTask, tid: &Pid) {
+        if let Some(thread) = self.threads.remove(tid) {
             if thread.registration.load(Ordering::Acquire) == RegistrationState::Auxilliary.to_u8()
             {
                 if self.auxilliary_threads_count > 0 {
@@ -1183,5 +1182,5 @@ impl HandleTable {
 
 /// Returns a task in the process keyed by `key`.
 fn get_task_for_thread_group(key: &Pid) -> Option<Arc<Task>> {
-    key.get_thread_group().ok().and_then(|tg| tg.read().get_running_task().ok())
+    key.get_thread_group().ok().and_then(|tg| tg.read().get_running_task_with_files().ok())
 }

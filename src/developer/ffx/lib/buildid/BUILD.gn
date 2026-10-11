@@ -44,11 +44,9 @@ if (is_host) {
     sources = [ "src/lib.rs" ]
     crate_name = "buildid"
     edition = "2024"
+    link_deps = [ "//src/developer/ffx/lib/buildid/cpp:buildid" ]
     version = "0.1.0"
     with_unit_tests = true
-    deps = [
-      "//src/developer/ffx/lib/buildid/cpp:buildid",
-      "//third_party/rust_crates:thiserror",
-    ]
+    deps = [ "//third_party/rust_crates:thiserror" ]
   }
 }

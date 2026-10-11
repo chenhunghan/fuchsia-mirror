@@ -29,10 +29,10 @@ struct DeferredLogBuffer {
   void Dump();
 };
 
-extern thread_local DeferredLogBuffer* const deffered_log;
+extern thread_local DeferredLogBuffer deferred_log;
 
 struct DeferredLogLine : public std::ostringstream {
-  ~DeferredLogLine() { deffered_log->Add(std::move(*this)); }
+  ~DeferredLogLine() override { deferred_log.Add(std::move(*this)); }
 };
 }  // namespace internal
 

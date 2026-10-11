@@ -23,9 +23,10 @@ set -uo pipefail
 #                              GN test after a dependency label or edge changed)
 #                              that Bazel builds and the default `fx build` miss.
 #                              Skipped when gn_build fails.
-#   3. bazel2gn_verifications: `fx build --host //build:bazel2gn_verifications`,
-#                              which fails if a BUILD.gn has drifted from what
-#                              `fx bazel2gn` generates from BUILD.bazel.
+#   3. verify_bazel2gn:        `fx host-tool shac check --only verify_bazel2gn
+#                              <changed dirs' BUILD.bazel/BUILD.gn>`, which fails
+#                              if a BUILD.gn has drifted from what `fx bazel2gn`
+#                              generates from BUILD.bazel.
 #   4. bazel_build_fuchsia:    `fx bazel build --config=fuchsia_platform //<dir>:all`
 #                              for every changed directory with a BUILD.bazel
 #                              (host-only targets are skipped as incompatible;
@@ -180,8 +181,8 @@ for d in dirs:
 LINKED_TEMPLATES = {"executable", "test", "rustc_binary", "rustc_test", "loadable_module", "shared_library", "rustc_cdylib", "fuchsia_driver"}
 LIBRARY_TEMPLATES = {"rustc_library", "rustc_macro", "rustc_staticlib", "static_library", "source_set"}
 GN_TARGET = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
-GN_DEP_LIST = re.compile(r"(?<![\w.])(?:public_deps|deps|non_rust_deps|test_deps|data_deps)\s*\+?=\s*\[([^\]]*)\]")
-GN_DEP_VAR = re.compile(r"(?<![\w.])(?:public_deps|deps|non_rust_deps|test_deps|data_deps)\s*\+?=\s*([A-Za-z_][^\n]*)")
+GN_DEP_LIST = re.compile(r"(?<![\w.])(?:public_deps|deps|non_rust_deps|link_deps|test_deps|data_deps)\s*\+?=\s*\[([^\]]*)\]")
+GN_DEP_VAR = re.compile(r"(?<![\w.])(?:public_deps|deps|non_rust_deps|link_deps|test_deps|data_deps)\s*\+?=\s*([A-Za-z_][^\n]*)")
 LIST_VAR = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\+?=\s*\[([^\]]*)\]")
 UNIT_TESTS = re.compile(r"(?<![\w.])with_unit_tests\s*=\s*true")
 
@@ -289,8 +290,7 @@ def load_toolchains():
     except (OSError, ValueError) as e:
         return None, str(e)
     toolchains = {}
-    for key in sorted(known):
-        outs = known[key]
+    for key, outs in sorted(known.items()):
         if isinstance(outs, list) and any(isinstance(o, str) and o.strip() for o in outs):
             toolchains.setdefault(key.split("(", 1)[0], []).append(key)
     return toolchains, None
@@ -328,7 +328,7 @@ def dependent_labels():
         dep_vars = {
             m.group(1)
             for m in LIST_VAR.finditer(gn_code(text))
-            if m.group(1) not in ("public_deps", "deps", "non_rust_deps", "test_deps", "data_deps", "visibility")
+            if m.group(1) not in ("public_deps", "deps", "non_rust_deps", "link_deps", "test_deps", "data_deps", "visibility")
             and names_changed(m.group(2))
         }
         for name, (tmpl, body) in sorted(gn_blocks(text).items()):
@@ -403,25 +403,51 @@ def bazel_tests_export_notes():
 
 FIDL_MACROS = {"fidl_library", "_fidl_library", "fidl_ir"}
 VALIDATE_JSON_MACROS = {"validate_json", "validate_json5", "_validate_json_action"}
+FDOMAIN_UNSUPPORTED_HANDLE_RE = re.compile(
+    r"\bzx\.Handle\s*:\s*(?:LOG|DEBUGLOG|INTERRUPT|MSI|IOMMU|BTI|PMT|PAGER|PCI_DEVICE|PROFILE|SUSPEND_TOKEN|VCPU)\b"
+)
+
+
+def _dir_has_fdomain_unsupported_handles(d):
+    abs_d = os.path.join(workdir, d)
+    try:
+        names = os.listdir(abs_d)
+    except OSError:
+        return False
+    for fn in sorted(names):
+        if fn.endswith(".fidl"):
+            content = read(f"{d}/{fn}") or ""
+            if FDOMAIN_UNSUPPORTED_HANDLE_RE.search(content):
+                return True
+    return False
 
 
 def validate_json_exclusions(d):
-    """Returns `-//<d>:<target>` exclusions for `_validate_json_action` targets in `d/BUILD.bazel`.
-    `//build/bazel/aspects:assert_no_deps.bzl` iterates `getattr(ctx.rule.attr, "data", [])`, which
-    crashes with `Error: type 'Target' is not iterable` when `:all` applies `assert_no_deps_aspect`
-    at the top level to `_validate_json_action` (`data = attr.label(...)`). Excluding `<name>_validate_ir_json`
-    from top-level `:all` still runs IR JSON validation via `:<name>`'s `_validation` output group."""
+    """Returns `-//<d>:<target>` exclusions for `_validate_json_action` targets in `d/BUILD.bazel`
+    (and `<name>_rust_fdomain{,_flex}` when `.fidl` sources use `zx.Handle` subtypes missing from
+    `fdomain_client`). `//build/bazel/aspects:assert_no_deps.bzl` iterates
+    `getattr(ctx.rule.attr, "data", [])`, which crashes with `Error: type 'Target' is not iterable`
+    when `:all` applies `assert_no_deps_aspect` at the top level to `_validate_json_action`
+    (`data = attr.label(...)`). Excluding `<name>_validate_ir_json` from top-level `:all` still runs
+    IR JSON validation via `:<name>`'s `_validation` output group."""
     text = read(f"{d}/BUILD.bazel")
     if not text:
         return []
     out = []
     seen = set()
+    skip_fdomain = _dir_has_fdomain_unsupported_handles(d)
 
     def _add(target):
         lbl = f"-//{d}:{target}"
         if lbl not in seen:
             seen.add(lbl)
             out.append(lbl)
+
+    def _add_fidl(tname, fn):
+        _add(f"{tname}_validate_ir_json" if fn in FIDL_MACROS else tname)
+        if fn in {"fidl_library", "_fidl_library"} and skip_fdomain:
+            _add(f"{tname}_rust_fdomain")
+            _add(f"{tname}_rust_fdomain_flex")
 
     try:
         tree = ast.parse(text)
@@ -435,8 +461,7 @@ def validate_json_exclusions(d):
                 continue
             for kw in node.keywords:
                 if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    tname = kw.value.value
-                    _add(f"{tname}_validate_ir_json" if fn in FIDL_MACROS else tname)
+                    _add_fidl(kw.value.value, fn)
     except SyntaxError:
         for m in re.finditer(
             r"\b(fidl_library|_fidl_library|fidl_ir|validate_json5?|_validate_json_action)\s*\(([^)]*)\)",
@@ -446,8 +471,7 @@ def validate_json_exclusions(d):
             fn, args_body = m.group(1), m.group(2)
             nm = re.search(r'\bname\s*=\s*"([^"]+)"', args_body)
             if nm:
-                tname = nm.group(1)
-                _add(f"{tname}_validate_ir_json" if fn in FIDL_MACROS else tname)
+                _add_fidl(nm.group(1), fn)
     return out
 
 
@@ -464,8 +488,12 @@ def fmt_cmd(cmd):
 steps = [
     ("gn_build", [fx, "build"]),
     ("gn_build_dependents", None),  # Labels are computed once gn_build has regenerated the GN graph.
-    ("bazel2gn_verifications", [fx, "build", "--host", "//build:bazel2gn_verifications"]),
 ]
+sync_files = [
+    os.path.join(d, f) for d in dirs for f in ("BUILD.bazel", "BUILD.gn") if os.path.isfile(os.path.join(workdir, d, f))
+]
+if sync_files:
+    steps.append(("verify_bazel2gn", [fx, "host-tool", "shac", "check", "--only", "verify_bazel2gn"] + sync_files))
 if bazel_dirs:
     steps.append(("bazel_build_fuchsia", [fx, "bazel", "build", "--config=fuchsia_platform"] + bazel_target_args(bazel_dirs)))
 if host_dirs:
@@ -517,8 +545,8 @@ REMEDIATION = {
                            "`gn_dep_parity` findings and \"Keep Every GN Dependency Label and Edge Kind\" in the coder "
                            "instructions), re-run `fx bazel2gn -d <dir>` and `fx build <failing label>`. Never edit sources "
                            "or the dependents' BUILD files to make it pass.",
-    "bazel2gn_verifications": "BUILD.gn no longer matches BUILD.bazel. Run `fx bazel2gn -d <dir>` for every dual-build directory "
-                              "you touched (never hand-edit below the BAZEL2GN SENTINEL) and re-run `fx build --host //build:bazel2gn_verifications`.",
+    "verify_bazel2gn": "BUILD.gn no longer matches BUILD.bazel. Run `fx bazel2gn -d <dir>` for every dual-build directory "
+                       "you touched (never hand-edit below the BAZEL2GN SENTINEL) and re-run this check.",
     "bazel_build_fuchsia": "Fix BUILD.bazel so the `bazel_build_fuchsia` command passes. If a dependency has no "
                            "Bazel target yet, migrate that dependency's directory in this change (see the coder instructions).",
     "bazel_build_host": "Fix BUILD.bazel so the `bazel_build_host` command passes. If a dependency has no Bazel target "
@@ -531,7 +559,13 @@ REMEDIATION = {
 }
 
 findings = []
-if change_base != "HEAD":
+head_sha = (git_lines(["rev-parse", "HEAD"]) or [""])[0]
+uploaded_commit_env = os.environ.get("PLANTER_UPLOADED_COMMIT", "").strip()
+worktree_dirty_vs_head = bool(
+    git_lines(["diff", "--name-only", "HEAD", "--"])
+    or [u for u in git_lines(["ls-files", "--others", "--exclude-standard"]) if any(u == d or u.startswith(d + "/") for d in dirs)]
+)
+if change_base != "HEAD" and not worktree_dirty_vs_head and (not uploaded_commit_env or head_sha != uploaded_commit_env):
     toolchains_map, _ = load_toolchains()
     commit_msg = "\n".join(git_lines(["log", "-1", "--format=%B", "HEAD"]))
     test_footer_lines = []
@@ -593,8 +627,6 @@ if change_base != "HEAD":
                     ),
                 })
         if toolchains_map is not None and "fx build" in m_line:
-            if "--host" in m_line and "//build:bazel2gn_verifications" in m_line:
-                continue
             bad_lbls = []
             for lbl in re.findall(r"//[^\s,;\"'`]+", m_line):
                 base_lbl = lbl.split("(", 1)[0]

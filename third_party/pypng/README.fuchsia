@@ -1,6 +1,6 @@
 Name: PyPNG
 URL: https://gitlab.com/drj11/pypng
-Revision: 5cdf3d95cc34fc4d87aa145f82380a0f59383d95
+Revision: f6899c489814c41c8a556681c0446e858b8d99c5
 License: MIT
 License File: src/LICENCE
 Description: PNG module for Python. PyPNG is written entirely in Python.

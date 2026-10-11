@@ -10,6 +10,7 @@
 #endif
 #include <optional>
 #include <unordered_map>
+#include <utility>
 
 #include "src/lib/containers/cpp/mpsc_queue.h"
 #include "src/ui/scenic/lib/flatland/transform_handle.h"
@@ -43,6 +44,7 @@ class UberStructSystem {
     scheduling::PresentId present_id;
     std::unique_ptr<const UberStruct> uber_struct;
     bool recompute_view_tree = true;
+    bool recompute_scene_state = true;
   };
 
   // An interface for UberStructSystem clients to queue UberStructs to be published into the
@@ -53,7 +55,7 @@ class UberStructSystem {
     // in the UberStructSystem by using different PresentIds. PresentIds must be increasing between
     // subsequent calls.
     void Push(scheduling::PresentId present_id, std::unique_ptr<const UberStruct> uber_struct,
-              bool recompute_view_tree = true);
+              bool recompute_view_tree = true, bool recompute_scene_state = true);
 
     // Pops a PendingUberStruct off of this Queue. If the queue is currently empty, returns
     // std::nullopt.
@@ -106,13 +108,11 @@ class UberStructSystem {
 
   // Returns true if the ViewTree needs to be recomputed.  Clears the stored value, so immediatlely
   // calling it a second time will always return false.
-  bool MustRecomputeViewTree() {
-    if (recompute_view_tree_) {
-      recompute_view_tree_ = false;
-      return true;
-    }
-    return false;
-  }
+  bool MustRecomputeViewTree() { return std::exchange(recompute_view_tree_, false); }
+
+  // Returns true if `SceneState` needs to be recomputed. Clears the stored value, so immediately
+  // calling it a second time will always return false.
+  bool MustRecomputeSceneState() { return std::exchange(recompute_scene_state_, false); }
 
  private:
   // The queue of UberStructs pending for each active session. Flatland instances push UberStructs
@@ -127,6 +127,9 @@ class UberStructSystem {
 
   // Track whether the ViewTree needs to be recomputed.
   bool recompute_view_tree_ = false;
+
+  // Track whether the global `SceneState` needs to be recomputed.
+  bool recompute_scene_state_ = false;
 
   // The InstanceId most recently returned from GetNextInstanceId().
   TransformHandle::InstanceId latest_instance_id_;

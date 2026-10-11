@@ -7,8 +7,8 @@ use core::fmt::Debug;
 use net_types::SpecifiedAddr;
 use net_types::ip::{IpVersion, Ipv4, Ipv6};
 
-pub use netstack3_base::Marks;
 pub use netstack3_base::socket::{EitherIpProto, SocketInfo};
+pub use netstack3_base::{FrameDestination, LocalFrameDestination, Marks, PacketType};
 use netstack3_base::{
     InstantBindingsTypes, InterfaceProperties, IpDeviceAddr, IpDeviceAddressIdContext,
     MatcherBindingsTypes, RngContext, TimerBindingsTypes, TimerContext, TxMetadataBindingsTypes,
@@ -163,6 +163,7 @@ pub trait SocketOpsFilter<D> {
         device: &D,
         socket_info: SocketInfo,
         marks: &Marks,
+        packet_type: PacketType,
     ) -> SocketIngressFilterResult;
 }
 

@@ -7,8 +7,8 @@
 use core::mem::MaybeUninit;
 
 use crate::object::{
-    BusTransactionInitiatorDispatcher, Dispatcher, HandleValue, IOMMU_FLAG_PERM_EXECUTE,
-    IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE, IommuDispatcher, VmObjectDispatcher, dev_vaddr_t,
+    BusTransactionInitiatorDispatcher, HandleValue, IOMMU_FLAG_PERM_EXECUTE, IOMMU_FLAG_PERM_READ,
+    IOMMU_FLAG_PERM_WRITE, IommuDispatcher, ProcessDispatcher, VmObjectDispatcher, dev_vaddr_t,
 };
 use crate::user_copy::UserOutPtr;
 use debug::ltracef;
@@ -83,7 +83,9 @@ pub fn sys_bti_create(
     }
 
     // TODO(teisenbe): This should probably have a right on it.
-    let iommu_dispatcher = Dispatcher::get_with_rights::<IommuDispatcher>(iommu, ZX_RIGHT_NONE)?;
+    let iommu_dispatcher = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<IommuDispatcher>(up, iommu, ZX_RIGHT_NONE)
+    })?;
 
     let (handle, rights) =
         BusTransactionInitiatorDispatcher::create(iommu_dispatcher.iommu(), bti_id)?;
@@ -95,8 +97,13 @@ pub fn sys_bti_create(
 pub fn sys_bti_release_quarantine(handle: HandleValue) -> Result<(), Status> {
     ltracef!("handle {:#x}\n", handle.raw_value());
 
-    let bti_dispatcher =
-        Dispatcher::get_with_rights::<BusTransactionInitiatorDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let bti_dispatcher = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<BusTransactionInitiatorDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     bti_dispatcher.release_quarantine();
     Ok(())
@@ -119,8 +126,13 @@ pub fn sys_bti_pin(
         vmo.raw_value(),
     );
 
+    let up = ProcessDispatcher::get_current();
     let bti_dispatcher =
-        Dispatcher::get_with_rights::<BusTransactionInitiatorDispatcher>(handle, ZX_RIGHT_MAP)?;
+        up.handle_table().get_dispatcher_with_rights::<BusTransactionInitiatorDispatcher>(
+            &up,
+            handle,
+            ZX_RIGHT_MAP,
+        )?;
 
     // Address count is currently limited to the amount of addresses that can fit on 64 pages. This
     // is large enough for all current usage of bti_pin, but protects against the case of an
@@ -133,8 +145,9 @@ pub fn sys_bti_pin(
         return Err(Status::INVALID_ARGS);
     }
 
-    let (vmo_dispatcher, vmo_rights) =
-        Dispatcher::get_with_rights_and_actual::<VmObjectDispatcher>(vmo, ZX_RIGHT_MAP)?;
+    let (vmo_dispatcher, vmo_rights) = up
+        .handle_table()
+        .get_dispatcher_with_rights_and_actual::<VmObjectDispatcher>(&up, vmo, ZX_RIGHT_MAP)?;
 
     // Convert requested permissions and check against VMO rights
     let mut iommu_perms = 0u32;

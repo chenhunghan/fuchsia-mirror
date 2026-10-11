@@ -75,17 +75,31 @@ template("fuchsia_audio_lib") {
 
 fuchsia_audio_lib("fuchsia_audio") {
   name = "fuchsia_audio"
-  deps = [
-    "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_flex",
-    "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_flex",
-    "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_flex",
-    "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_flex",
-    "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_flex",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
-    "//sdk/fidl/fuchsia.media:fuchsia.media_rust_flex",
-    "//src/lib/fdomain/client:flex_fidl",
-    "//src/lib/fuchsia-fs",
-  ]
+  if (is_fuchsia) {
+    deps = [
+      "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_flex",
+      "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_flex",
+      "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_flex",
+      "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_flex",
+      "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_flex",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
+      "//sdk/fidl/fuchsia.media:fuchsia.media_rust_flex",
+      "//src/lib/fdomain/client:flex_fidl",
+      "//src/lib/fuchsia-fs",
+    ]
+  } else {
+    deps = [
+      "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+      "//sdk/fidl/fuchsia.media:fuchsia.media_rust_fdomain_flex",
+      "//src/lib/fdomain/client:flex_fdomain",
+      "//src/lib/fuchsia-fs",
+    ]
+  }
   test_deps = [ "//src/storage/lib/vfs/rust:vfs" ]
 }
 

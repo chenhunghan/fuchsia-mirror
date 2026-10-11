@@ -21,7 +21,7 @@ use futures::{FutureExt as _, Stream, StreamExt as _};
 use log::{error, info};
 use schemars::JsonSchema;
 use serde::Serialize;
-use speedtest::{BytesFormatter, Throughput};
+use speedtest_fdomain::{BytesFormatter, Throughput};
 use target_connector::Connector;
 use target_holders::RemoteControlProxyHolder;
 

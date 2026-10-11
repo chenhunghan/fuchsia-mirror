@@ -3,8 +3,10 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.sysinfo/cpp/wire.h>
+#include <lib/arch/intrin.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/zx/vcpu.h>
+#include <zircon/features.h>
 #include <zircon/syscalls/hypervisor.h>
 #include <zircon/syscalls/port.h>
 
@@ -24,6 +26,11 @@ DECLARE_TEST_FUNCTION(vcpu_fp)
 DECLARE_TEST_FUNCTION(vcpu_fp_aarch32)
 DECLARE_TEST_FUNCTION(vcpu_psci_system_off)
 DECLARE_TEST_FUNCTION(vcpu_psci_system_reset)
+DECLARE_TEST_FUNCTION(vcpu_psci_cpu_on)
+DECLARE_TEST_FUNCTION(vcpu_system_registers)
+DECLARE_TEST_FUNCTION(vcpu_trapped_system_registers)
+DECLARE_TEST_FUNCTION(vcpu_timer_registers)
+DECLARE_TEST_FUNCTION(vcpu_el0_syscall)
 DECLARE_TEST_FUNCTION(vcpu_dc_set_way_ops)
 DECLARE_TEST_FUNCTION(vcpu_enable_mmu)
 DECLARE_TEST_FUNCTION(vcpu_enable_disable_mmu)
@@ -43,6 +50,12 @@ zx::result<fuchsia_sysinfo::InterruptControllerType> GetInterruptControllerType(
     return zx::error(result->status);
   }
   return zx::ok(result->info->type);
+}
+
+bool SupportsAarch32() {
+  uint32_t features = 0;
+  zx_status_t status = zx_system_get_features(ZX_FEATURE_KIND_CPU, &features);
+  return status == ZX_OK && (features & ZX_ARM64_FEATURE_ISA_ARM32) != 0;
 }
 
 TEST(Guest, VcpuReadWriteState) {
@@ -147,6 +160,10 @@ TEST(Guest, VcpuWfiPendingInterrupt) {
 }
 
 TEST(Guest, VcpuWfiAarch32) {
+  if (!SupportsAarch32()) {
+    GTEST_SKIP();
+  }
+
   TestCase test;
   ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_wfi_aarch32_start, vcpu_wfi_aarch32_end));
 
@@ -166,6 +183,10 @@ TEST(Guest, VcpuFp) {
 }
 
 TEST(Guest, VcpuFpAarch32) {
+  if (!SupportsAarch32()) {
+    GTEST_SKIP();
+  }
+
   TestCase test;
   ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_fp_aarch32_start, vcpu_fp_aarch32_end));
 
@@ -192,6 +213,82 @@ TEST(Guest, VcpuPsciSystemRestart) {
 
   zx_port_packet_t packet = {};
   ASSERT_EQ(test.vcpu.enter(&packet), ZX_ERR_CANCELED);
+}
+
+TEST(Guest, VcpuPsciCpuOn) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_psci_cpu_on_start, vcpu_psci_cpu_on_end));
+
+  zx_port_packet_t packet = {};
+  ASSERT_EQ(test.vcpu.enter(&packet), ZX_OK);
+  ASSERT_EQ(packet.type, ZX_PKT_TYPE_GUEST_VCPU);
+  ASSERT_EQ(packet.guest_vcpu.type, ZX_PKT_GUEST_VCPU_STARTUP);
+  EXPECT_EQ(packet.guest_vcpu.startup.target, 1u);
+  EXPECT_EQ(packet.guest_vcpu.startup.entry, 0x1000u);
+  EXPECT_EQ(packet.guest_vcpu.startup.context, 0xfeedfacedeadbeeful);
+
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
+}
+
+TEST(Guest, VcpuSystemRegisters) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(
+      SetupGuest(&test, vcpu_system_registers_start, vcpu_system_registers_end));
+
+  ASSERT_EQ(test.guest.set_trap(ZX_GUEST_TRAP_MEM, TRAP_ADDR, zx_system_get_page_size(), zx::port(),
+                                kTrapKey),
+            ZX_OK);
+
+  const uint64_t host_tpidr_el0 = __arm_rsr64("tpidr_el0");
+  const uint64_t host_tpidrro_el0 = __arm_rsr64("tpidrro_el0");
+
+  zx_port_packet_t packet = {};
+  ASSERT_EQ(test.vcpu.enter(&packet), ZX_OK);
+  ASSERT_EQ(packet.key, kTrapKey);
+  ASSERT_EQ(packet.type, ZX_PKT_TYPE_GUEST_MEM);
+  ASSERT_EQ(packet.guest_mem.addr, static_cast<zx_gpaddr_t>(TRAP_ADDR));
+  EXPECT_EQ(__arm_rsr64("tpidr_el0"), host_tpidr_el0);
+  EXPECT_EQ(__arm_rsr64("tpidrro_el0"), host_tpidrro_el0);
+
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
+  EXPECT_EQ(__arm_rsr64("tpidr_el0"), host_tpidr_el0);
+  EXPECT_EQ(__arm_rsr64("tpidrro_el0"), host_tpidrro_el0);
+}
+
+TEST(Guest, VcpuTrappedSystemRegisters) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(
+      SetupGuest(&test, vcpu_trapped_system_registers_start, vcpu_trapped_system_registers_end));
+
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
+}
+
+TEST(Guest, VcpuTimerRegisters) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_timer_registers_start, vcpu_timer_registers_end));
+
+  ASSERT_EQ(test.guest.set_trap(ZX_GUEST_TRAP_MEM, TRAP_ADDR, zx_system_get_page_size(), zx::port(),
+                                kTrapKey),
+            ZX_OK);
+
+  zx_port_packet_t packet = {};
+  ASSERT_EQ(test.vcpu.enter(&packet), ZX_OK);
+  ASSERT_EQ(packet.key, kTrapKey);
+  ASSERT_EQ(packet.type, ZX_PKT_TYPE_GUEST_MEM);
+  ASSERT_EQ(packet.guest_mem.addr, static_cast<zx_gpaddr_t>(TRAP_ADDR));
+  EXPECT_GT(__arm_rsr64("cntpct_el0"), 0u);
+  EXPECT_GT(__arm_rsr64("cntvct_el0"), 0u);
+
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
+  EXPECT_GT(__arm_rsr64("cntpct_el0"), 0u);
+  EXPECT_GT(__arm_rsr64("cntvct_el0"), 0u);
+}
+
+TEST(Guest, VcpuEl0SyscallExceptionRouting) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_el0_syscall_start, vcpu_el0_syscall_end));
+
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
 }
 
 TEST(Guest, VcpuWriteStateIoAarch32) {

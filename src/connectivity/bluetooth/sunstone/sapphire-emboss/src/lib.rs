@@ -5,12 +5,13 @@
 pub use pw_bluetooth_att_emb as att;
 pub use pw_bluetooth_hci_commands_emb as hci_commands;
 pub use pw_bluetooth_hci_common_emb as hci_common;
+pub use pw_bluetooth_hci_data_emb as hci_data;
 pub use pw_bluetooth_hci_h4_emb as hci_h4;
 pub use pw_bluetooth_l2cap_frames_emb as l2cap_frames;
 
 pub use emboss_runtime::{
     CheckComplete, CheckOk, CompleteState, Error, InfallibleRead, InfallibleWrite, IsComplete,
-    IsOk, MutStorage, OkState, State, Storage, UncheckedState,
+    IsOk, MutStorage, OkState, State, Storage, TryFromRaw, UncheckedState,
 };
 
 #[cfg(test)]

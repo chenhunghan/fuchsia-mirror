@@ -90,6 +90,22 @@ impl Default for AllocFailure {
     }
 }
 
+impl AllocFailure {
+    pub fn type_to_str(failure_type: AllocFailureType) -> &'static str {
+        match failure_type {
+            AllocFailureType::None => "None",
+            AllocFailureType::Pmm => "PMM",
+            AllocFailureType::Heap => "Heap",
+            AllocFailureType::Handle => "Handle",
+            AllocFailureType::Other => "Other",
+        }
+    }
+
+    pub fn type_str(&self) -> &'static str {
+        Self::type_to_str(self.r#type)
+    }
+}
+
 // Compile-time layout assertions against C++ AllocFailure
 zr::static_assert!(
     core::mem::size_of::<AllocFailure>() == core::mem::size_of::<bindings::PmmNode_AllocFailure>()

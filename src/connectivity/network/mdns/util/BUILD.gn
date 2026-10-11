@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
+import("//build/test.gni")
 
 group("util") {
   testonly = true
@@ -16,17 +17,26 @@ fuchsia_package("mdns-util") {
 executable("bin") {
   output_name = "mdns-util"
 
+  sources = [ "main.cc" ]
+
+  deps = [
+    ":source_set",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+  ]
+}
+
+source_set("source_set") {
   sources = [
     "commands.cc",
     "commands.h",
     "formatting.cc",
     "formatting.h",
-    "main.cc",
     "mdns_impl.cc",
     "mdns_impl.h",
   ]
 
-  deps = [
+  public_deps = [
     "//sdk/fidl/fuchsia.net.mdns:fuchsia.net.mdns_hlcpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
@@ -38,4 +48,24 @@ executable("bin") {
     "//src/lib/inet",
     "//src/lib/line_input",
   ]
+}
+
+test("mdns_util_test") {
+  sources = [ "test/mdns_impl_test.cc" ]
+
+  deps = [
+    ":source_set",
+    "//sdk/lib/sys/cpp/testing:cpp",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+fuchsia_unittest_package("mdns-util-tests") {
+  deps = [ ":mdns_util_test" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":mdns-util-tests" ]
 }

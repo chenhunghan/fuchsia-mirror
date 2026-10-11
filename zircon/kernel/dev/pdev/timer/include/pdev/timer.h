@@ -19,6 +19,9 @@ struct pdev_timer_ops {
   zx_status_t (*shutdown)();
 };
 
+static_assert(sizeof(pdev_timer_ops) == 32, "pdev_timer_ops size mismatch");
+static_assert(alignof(pdev_timer_ops) == 8, "pdev_timer_ops align mismatch");
+
 void pdev_register_timer(const pdev_timer_ops* ops);
 
 #endif  // ZIRCON_KERNEL_DEV_PDEV_TIMER_INCLUDE_PDEV_TIMER_H_

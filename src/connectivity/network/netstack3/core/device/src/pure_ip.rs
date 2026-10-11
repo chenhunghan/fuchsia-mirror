@@ -29,7 +29,8 @@ use crate::internal::queue::tx::{
 };
 use crate::internal::queue::{DequeueState, DeviceBufferSpec, TransmitQueueFrameError};
 use crate::internal::socket::{
-    DeviceSocketHandler, DeviceSocketMetadata, DeviceSocketSendTypes, Frame, IpFrame, ReceivedFrame,
+    DeviceSocketHandler, DeviceSocketMetadata, DeviceSocketSendTypes, Frame, IpFrame,
+    PURE_IP_PACKET_TYPE, ReceivedFrame,
 };
 use crate::internal::state::{DeviceStateSpec, IpLinkDeviceState};
 
@@ -235,7 +236,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv4>::new(
                         device_id,
                         None,
-                        DeviceIpLayerMetadata::new_for_rx_packet(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(PURE_IP_PACKET_TYPE),
                         parsing_context,
                         gso_info,
                     ),
@@ -251,7 +252,7 @@ where
                     RecvIpFrameMeta::<_, _, Ipv6>::new(
                         device_id,
                         None,
-                        DeviceIpLayerMetadata::new_for_rx_packet(),
+                        DeviceIpLayerMetadata::new_for_rx_packet(PURE_IP_PACKET_TYPE),
                         parsing_context,
                         gso_info,
                     ),

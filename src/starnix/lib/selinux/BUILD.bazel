@@ -1,0 +1,204 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "selinux",
+    srcs = [
+        "src/exceptions_config.rs",
+        "src/kernel/avc/cache_stats.rs",
+        "src/kernel/avc/concurrent_access_cache.rs",
+        "src/kernel/avc/concurrent_cache.rs",
+        "src/kernel/avc/local_cache.rs",
+        "src/kernel/avc/mod.rs",
+        "src/kernel/index.rs",
+        "src/kernel/mod.rs",
+        "src/kernel/permissions.rs",
+        "src/lib.rs",
+        "src/new_policy/access_vector.rs",
+        "src/new_policy/bitmap.rs",
+        "src/new_policy/booleans.rs",
+        "src/new_policy/classes.rs",
+        "src/new_policy/common_symbols.rs",
+        "src/new_policy/compute.rs",
+        "src/new_policy/constraints.rs",
+        "src/new_policy/context.rs",
+        "src/new_policy/error.rs",
+        "src/new_policy/filename_transitions.rs",
+        "src/new_policy/id_type.rs",
+        "src/new_policy/indexed.rs",
+        "src/new_policy/initial_sids.rs",
+        "src/new_policy/metadata.rs",
+        "src/new_policy/mls.rs",
+        "src/new_policy/mod.rs",
+        "src/new_policy/object_contexts.rs",
+        "src/new_policy/parser.rs",
+        "src/new_policy/permissions.rs",
+        "src/new_policy/policy_cap.rs",
+        "src/new_policy/roles.rs",
+        "src/new_policy/rules.rs",
+        "src/new_policy/security_context.rs",
+        "src/new_policy/traits.rs",
+        "src/new_policy/types.rs",
+        "src/new_policy/u24_index.rs",
+        "src/new_policy/users.rs",
+        "src/permission_check.rs",
+        "src/policy/error.rs",
+        "src/policy/mod.rs",
+        "src/policy/parsed_policy.rs",
+        "src/policy/parser.rs",
+        "src/security_server.rs",
+        "src/sid_table.rs",
+        "src/sync.rs",
+    ],
+    compile_data = [
+        "testdata/composite_policies/compiled/allow_fork_policy",
+        "testdata/composite_policies/compiled/class_defaults_policy",
+        "testdata/composite_policies/compiled/conditional_policy",
+        "testdata/composite_policies/compiled/exceptions_config_policy",
+        "testdata/composite_policies/compiled/genfscon_policy",
+        "testdata/composite_policies/compiled/handle_unknown_policy-allow",
+        "testdata/composite_policies/compiled/handle_unknown_policy-deny",
+        "testdata/composite_policies/compiled/handle_unknown_policy-reject",
+        "testdata/composite_policies/compiled/minimal_policy",
+        "testdata/composite_policies/compiled/range_transition_policy",
+        "testdata/composite_policies/compiled/role_transition_not_allowed_policy",
+        "testdata/composite_policies/compiled/role_transition_policy",
+        "testdata/composite_policies/compiled/type_transition_policy",
+        "testdata/composite_policies/compiled/with_additional_domain_policy",
+        "testdata/composite_policies/compiled/with_unlabeled_access_domain_policy",
+        "testdata/expectations/emulator",
+        "testdata/expectations/selinux_testsuite",
+        "testdata/micro_policies/allow_a_attr_b_attr_class0_perm0_policy",
+        "testdata/micro_policies/allow_a_t_a1_attr_class0_perm0_a2_attr_class0_perm1_policy",
+        "testdata/micro_policies/allow_a_t_b_attr_class0_perm0_policy",
+        "testdata/micro_policies/allow_a_t_b_t_class0_perm0_policy",
+        "testdata/micro_policies/allow_with_constraints_policy",
+        "testdata/micro_policies/allowxperm_policy",
+        "testdata/micro_policies/constraints_policy",
+        "testdata/micro_policies/file_no_defaults_policy",
+        "testdata/micro_policies/file_range_source_high_policy",
+        "testdata/micro_policies/file_range_source_low_high_policy",
+        "testdata/micro_policies/file_range_source_low_policy",
+        "testdata/micro_policies/file_range_target_high_policy",
+        "testdata/micro_policies/file_range_target_low_high_policy",
+        "testdata/micro_policies/file_range_target_low_policy",
+        "testdata/micro_policies/file_source_defaults_policy",
+        "testdata/micro_policies/file_target_defaults_policy",
+        "testdata/micro_policies/multiple_levels_and_categories_policy",
+        "testdata/micro_policies/no_allow_a_attr_b_attr_class0_perm0_policy",
+        "testdata/micro_policies/no_allow_a_t_b_attr_class0_perm0_policy",
+        "testdata/micro_policies/no_allow_a_t_b_t_class0_perm0_policy",
+        "testdata/micro_policies/security_context_tests_policy",
+        "testdata/micro_policies/security_server_tests_policy",
+        "testdata/policies/aosp_sepolicy",
+        "testdata/policies/emulator",
+        "testdata/policies/selinux_testsuite",
+    ],
+    crate_features = select({
+        "//build/bazel/platforms:is_host_os": [],
+        "//conditions:default": ["selinux_starnix"],
+    }),
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    proc_macro_deps = [
+        "//src/starnix/lib/selinux/src/new_policy/derive_macros",
+        "//third_party/rust_crates/vendor:paste",
+        "//third_party/rust_crates/vendor:strum_macros",
+    ],
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/modules/selinuxfs:__pkg__",
+        "//src/starnix/tests/selinux/bench:__pkg__",
+    ],
+    deps = [
+        "//src/lib/fuchsia-rcu",
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:crossbeam-utils",
+        "//third_party/rust_crates/vendor:hashbrown",
+        "//third_party/rust_crates/vendor:rapidhash",
+        "//third_party/rust_crates/vendor:strum",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": [
+            "//third_party/rust_crates/vendor:parking_lot",
+        ],
+        "//conditions:default": [
+            "//src/starnix/lib/starnix_sync",
+        ],
+    }),
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "selinux_lib_test",
+    crate = ":selinux",
+    crate_features = select({
+        "//build/bazel/platforms:is_host_os": [],
+        "//conditions:default": ["selinux_starnix"],
+    }),
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    deps = [
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json5",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "selinux_test_packaged_bin",
+    testonly = True,
+    binary = ":selinux_lib_test",
+    binary_name = "selinux_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "starnix-selinux-unit-tests-manifest",
+    testonly = True,
+    component_name = "starnix-selinux-unit-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/starnix_selinux_unit_tests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "starnix-selinux-unit-tests-component",
+    compiled_manifest = ":starnix-selinux-unit-tests-manifest",
+    component_name = "starnix-selinux-unit-tests",
+    deps = [":selinux_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "starnix-selinux-unit-tests-package",
+    package_name = "starnix-selinux-unit-tests",
+    test_components = [":starnix-selinux-unit-tests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "starnix-selinux-unit-tests",
+    package = ":starnix-selinux-unit-tests-package",
+)

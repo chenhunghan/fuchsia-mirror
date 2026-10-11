@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_GN} ${PREBUILT_NINJA} ${PREBUILT_PYTHON3}
 ### manually edit args.gn for the current build directory
 
 ## If FUCHSIA_BUILD_DIR is out/default, this is simply:

@@ -76,13 +76,19 @@ async fn do_resolve(
         })?;
     let component_info = abortable_scope
         .run(async {
-            let component_info = component
-                .perform_resolve(None, &component_address)
-                .await
-                .map_err(|err| ResolveActionError::ResolverError {
-                    url: component.component_url.clone(),
-                    err: Box::new(err),
-                })?;
+            let component_info = {
+                trace::duration!(
+                    "component_manager",
+                    "Actions::Resolve::perform_resolve",
+                    "moniker" => component.moniker.as_str()
+                );
+                component.perform_resolve(None, &component_address).await.map_err(|err| {
+                    ResolveActionError::ResolverError {
+                        url: component.component_url.clone(),
+                        err: Box::new(err),
+                    }
+                })?
+            };
             Component::resolve_with_config(component_info, component.config_parent_overrides())
         })
         .await
@@ -101,6 +107,11 @@ async fn do_resolve(
             err: Box::new(err),
         })?;
     {
+        trace::duration!(
+            "component_manager",
+            "Actions::Resolve::new_resolved_state",
+            "moniker" => component.moniker.as_str()
+        );
         let mut state = component.lock_state().await;
         let (instance_token_state, component_input_dict) = match state.deref_mut() {
             InstanceState::Resolved(_) => {

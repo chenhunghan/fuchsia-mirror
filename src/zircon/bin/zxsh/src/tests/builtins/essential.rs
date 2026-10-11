@@ -916,27 +916,59 @@ fn test_essential_dot_script() {
 #[test]
 fn test_essential_wait_stream() {
     let mut state = ShellState::new();
-    let mut in_stream = Cursor::new(b"");
-    let mut out = Vec::new();
-    let mut err = Vec::new();
+    let mut ctx = ExecutionContext::initial().unwrap();
 
-    let code = builtin_wait(&[], &mut state, &mut in_stream, &mut out, &mut err);
-    assert_eq!(code, 0);
+    let res = builtin_wait(&[], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(0));
 
-    let code = builtin_wait(&[BString::from("--")], &mut state, &mut in_stream, &mut out, &mut err);
-    assert_eq!(code, 0);
+    let res = builtin_wait(&[BString::from("--")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(0));
 
-    let code = builtin_wait(&[BString::from("%1")], &mut state, &mut in_stream, &mut out, &mut err);
-    assert_eq!(code, 127);
+    let res = builtin_wait(&[BString::from("%1")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(127));
 
-    let code = builtin_wait(
-        &[BString::from("invalid_pid")],
-        &mut state,
-        &mut in_stream,
-        &mut out,
-        &mut err,
-    );
-    assert_eq!(code, 2);
+    let res = builtin_wait(&[BString::from("999999999")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(127));
+
+    let res = builtin_wait(&[BString::from("invalid_pid")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(2));
+
+    let res = builtin_wait(&[BString::from("-z")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(2));
+
+    // Normal wait and fg on background jobs
+    crate::eval::eval_string(b"true &".as_bstr(), &mut state, &mut ctx).unwrap();
+    let res = builtin_wait(&[], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(0));
+
+    crate::eval::eval_string(b"false &".as_bstr(), &mut state, &mut ctx).unwrap();
+    let res = builtin_wait(&[BString::from("%1")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(1));
+
+    crate::eval::eval_string(b"true &".as_bstr(), &mut state, &mut ctx).unwrap();
+    let bg_pid = state.get_var(b"!").unwrap();
+    let res = builtin_wait(&[bg_pid], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(0));
+
+    crate::eval::eval_string(b"true &".as_bstr(), &mut state, &mut ctx).unwrap();
+    let res = builtin_fg(&[], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(0));
+
+    // Interrupted wait (0 args, %job) and fg when ShellSignals::INT is pending -> 130
+    crate::eval::eval_string(b"msleep 5000 &".as_bstr(), &mut state, &mut ctx).unwrap();
+    ctx.signal_state.set(crate::tty::ShellSignals::INT);
+    let res = builtin_wait(&[], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(128 + libc::SIGINT));
+
+    crate::eval::eval_string(b"msleep 5000 &".as_bstr(), &mut state, &mut ctx).unwrap();
+    ctx.signal_state.set(crate::tty::ShellSignals::INT);
+    let res = builtin_wait(&[BString::from("%1")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(128 + libc::SIGINT));
+
+    crate::eval::eval_string(b"msleep 5000 &".as_bstr(), &mut state, &mut ctx).unwrap();
+    ctx.signal_state.set(crate::tty::ShellSignals::INT);
+    let res = builtin_fg(&[BString::from("%1")], &mut state, &mut ctx).unwrap();
+    assert_eq!(res, EvalOutcome::Code(128 + libc::SIGINT));
 }
 
 #[test]

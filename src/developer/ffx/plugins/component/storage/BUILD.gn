@@ -25,6 +25,7 @@ ffx_plugin("ffx_component_storage") {
     "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
     "//src/lib/fdomain/local",
     "//src/lib/fuchsia",
+    "//third_party/rust_crates:serde_json",
   ]
 
   args_sources = [ "src/args.rs" ]

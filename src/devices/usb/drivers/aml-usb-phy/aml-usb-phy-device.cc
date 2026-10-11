@@ -4,6 +4,7 @@
 
 #include "src/devices/usb/drivers/aml-usb-phy/aml-usb-phy-device.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.registers/cpp/wire.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/component/cpp/node_add_args.h>
@@ -16,11 +17,72 @@
 #include <bind/fuchsia/platform/cpp/bind.h>
 
 #include "src/devices/usb/drivers/aml-usb-phy/aml-usb-phy.h"
+#include "src/devices/usb/drivers/aml-usb-phy/aml-usb-phy_parser.h"
 #include "src/devices/usb/drivers/aml-usb-phy/power-regs.h"
 #include "src/devices/usb/drivers/aml-usb-phy/usb-phy-regs.h"
 
 namespace aml_usb_phy {
 namespace {
+
+namespace aml_usb_phy_metadata = aml_usb_phy;
+
+fuchsia_hardware_usb_phy::ProtocolVersion ConvertProtocolVersion(
+    aml_usb_phy::ProtocolVersion protocol) {
+  switch (protocol) {
+    case aml_usb_phy::ProtocolVersion::kUsb20:
+      return fuchsia_hardware_usb_phy::ProtocolVersion::kUsb20;
+    case aml_usb_phy::ProtocolVersion::kUsb30:
+      return fuchsia_hardware_usb_phy::ProtocolVersion::kUsb30;
+  }
+}
+
+fuchsia_hardware_usb_phy::Mode ConvertMode(aml_usb_phy::Mode mode) {
+  switch (mode) {
+    case aml_usb_phy::Mode::kUnknown:
+      return fuchsia_hardware_usb_phy::Mode::kUnknown;
+    case aml_usb_phy::Mode::kHost:
+      return fuchsia_hardware_usb_phy::Mode::kHost;
+    case aml_usb_phy::Mode::kPeripheral:
+      return fuchsia_hardware_usb_phy::Mode::kPeripheral;
+    case aml_usb_phy::Mode::kOtg:
+      return fuchsia_hardware_usb_phy::Mode::kOtg;
+  }
+}
+
+fuchsia_hardware_usb_phy::AmlogicPhyType ConvertPhyType(aml_usb_phy::AmlogicPhyType phy_type) {
+  switch (phy_type) {
+    case aml_usb_phy::AmlogicPhyType::kG12A:
+      return fuchsia_hardware_usb_phy::AmlogicPhyType::kG12A;
+    case aml_usb_phy::AmlogicPhyType::kG12B:
+      return fuchsia_hardware_usb_phy::AmlogicPhyType::kG12B;
+  }
+}
+
+fuchsia_hardware_usb_phy::Metadata ConvertMetadata(
+    const aml_usb_phy_metadata::Aml_usb_phyMetadata& parsed) {
+  fuchsia_hardware_usb_phy::Metadata metadata;
+  if (parsed.phy_type.has_value()) {
+    metadata.phy_type(ConvertPhyType(*parsed.phy_type));
+  }
+  if (parsed.usb_phy_modes.has_value()) {
+    std::vector<fuchsia_hardware_usb_phy::UsbPhyMode> modes;
+    for (const auto& mode : *parsed.usb_phy_modes) {
+      fuchsia_hardware_usb_phy::UsbPhyMode phy_mode;
+      if (mode.protocol.has_value()) {
+        phy_mode.protocol(ConvertProtocolVersion(*mode.protocol));
+      }
+      if (mode.dr_mode.has_value()) {
+        phy_mode.dr_mode(ConvertMode(*mode.dr_mode));
+      }
+      if (mode.is_otg_capable.has_value()) {
+        phy_mode.is_otg_capable(*mode.is_otg_capable);
+      }
+      modes.push_back(std::move(phy_mode));
+    }
+    metadata.usb_phy_modes(std::move(modes));
+  }
+  return metadata;
+}
 
 [[maybe_unused]] void dump_power_regs(const fdf::MmioBuffer& mmio) {
   DUMP_REG(A0_RTI_GEN_PWR_SLEEP0, mmio)
@@ -123,10 +185,24 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
   }
   fdf::PDev pdev{std::move(pdev_client_end.value())};
 
-  zx::result usb_phy_metadata = pdev.GetFidlMetadata<fuchsia_hardware_usb_phy::Metadata>();
-  if (usb_phy_metadata.is_error()) {
-    fdf::error("Failed to get metadata: {}", usb_phy_metadata);
-    return usb_phy_metadata.take_error();
+  fuchsia_hardware_usb_phy::Metadata usb_phy_metadata;
+  auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.usb.phy.Metadata");
+  if (dict_result.is_ok()) {
+    auto parsed = aml_usb_phy_metadata::Aml_usb_phyMetadata::Parse(dict_result.value());
+    if (!parsed.has_value()) {
+      fdf::error("Failed to parse metadata from Dictionary");
+      return zx::error(ZX_ERR_INTERNAL);
+    }
+    usb_phy_metadata = ConvertMetadata(*parsed);
+  } else {
+    zx::result legacy_result = pdev.GetFidlMetadata<fuchsia_hardware_usb_phy::Metadata>();
+    if (legacy_result.is_error()) {
+      fdf::error("Failed to get metadata as Dictionary ({}) or Metadata ({})", dict_result,
+                 legacy_result);
+      return legacy_result.take_error();
+    }
+    usb_phy_metadata = std::move(legacy_result.value());
   }
 
   // Get mmio.
@@ -148,7 +224,7 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
   }
 
   uint32_t idx = 1;
-  const auto& usb_phy_modes = usb_phy_metadata.value().usb_phy_modes();
+  const auto& usb_phy_modes = usb_phy_metadata.usb_phy_modes();
   if (!usb_phy_modes.has_value()) {
     fdf::error("Metadata missing usb_phy_modes field");
     return zx::error(ZX_ERR_INTERNAL);
@@ -170,7 +246,7 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
       return zx::error(ZX_ERR_INTERNAL);
     }
     const auto& dr_mode = phy_mode.dr_mode();
-    if (!is_otg_capable.has_value()) {
+    if (!dr_mode.has_value()) {
       fdf::error("Phy-mode {} missing dr_mode field", i);
       return zx::error(ZX_ERR_INTERNAL);
     }
@@ -212,7 +288,7 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
   }
 
   // Create and initialize device
-  const auto& phy_type = usb_phy_metadata.value().phy_type();
+  const auto& phy_type = usb_phy_metadata.phy_type();
   if (!phy_type.has_value()) {
     fdf::error("Metadata missing phy_type field");
     return zx::error(ZX_ERR_INTERNAL);

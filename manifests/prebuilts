@@ -63,7 +63,7 @@
              path="prebuilt/third_party/android/aemu/release/{{.OS}}-arm64"/>
 
      <package name="fuchsia/third_party/android/aemu/release-gfxstream/${platform}"
-             version="bid:16438541"
+             version="bid:16566719"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/android/aemu/release-gfxstream/{{.OS}}-{{.Arch}}"/>
 
@@ -200,7 +200,7 @@
              path="prebuilt/tools/cgpt/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/futility/${platform}"
-             version="git_revision:843742639eb6c5c3a9c72d20530e1bef5bc0b136"
+             version="git_revision:1d0276d004b01cf5c262b5160fcb920293b75972"
              path="prebuilt/tools/futility/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/buildstats/${platform}"
@@ -267,12 +267,12 @@
              path="prebuilt/third_party/fonts"/>
     <!--   ICU time zone resource files -->
     <package name="fuchsia/third_party/tzres"
-             version="version:2024a"
+             version="version:2026a"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/tzres"/>
     <!--   IANA Time Zone DB -->
     <package name="fuchsia/third_party/zoneinfo"
-             version="version:2024a"
+             version="version:2026e"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/zoneinfo"/>
     <!--   Unicode UCD datafiles -->
@@ -523,20 +523,24 @@
     <!-- Packages in /infra/tools/ -->
     <package name="infra/tools/bb/${platform}"
              path="prebuilt/tools/buildbucket"
-             version="git_revision:b69414c917f17727b629e6b2e2e8cb37dc7b6933"
+             version="git_revision:32dfffc1feff5136b522112dbc1bdef230b20c5b"
              platforms="linux-amd64,linux-arm64"/>
     <package name="infra/tools/luci/gsutil/${platform}"
              path="prebuilt/tools/gsutil"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:b69414c917f17727b629e6b2e2e8cb37dc7b6933"/>
+             version="git_revision:32dfffc1feff5136b522112dbc1bdef230b20c5b"/>
     <package name="infra/tools/luci/logdog/logdog/${platform}"
              path="prebuilt/tools/logdog"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:b69414c917f17727b629e6b2e2e8cb37dc7b6933"/>
+             version="git_revision:32dfffc1feff5136b522112dbc1bdef230b20c5b"/>
     <package name="infra/tools/luci/cas/${platform}"
              path="prebuilt/tools/cas"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:b69414c917f17727b629e6b2e2e8cb37dc7b6933"/>
+             version="git_revision:32dfffc1feff5136b522112dbc1bdef230b20c5b"/>
+    <package name="infra/tools/luci-auth/${platform}"
+             path="prebuilt/tools/luci-auth"
+             platforms="linux-amd64,linux-arm64"
+             version="git_revision:32dfffc1feff5136b522112dbc1bdef230b20c5b"/>
     <package name="infra/tools/rdb/${platform}"
              path="prebuilt/tools/resultdb"
              platforms="linux-amd64,linux-arm64"
@@ -625,45 +629,45 @@
      <!-- Components built OOT -->
     <package name="fuchsia/prebuilt/bt-host/arm64"
              path="prebuilt/connectivity/bluetooth/bt-host/arm64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-host/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-host/x64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-host/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-host/riscv64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-riscv64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/arm64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/arm64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/x64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/riscv64"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"/>
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:d3e6fc160023dc105bf5d02a8e222eed926dd365"
+             version="git_revision:77eb35cd55f4b19caa0d2c854f4b742ab779918a"
              attributes="debug-symbols,debug-symbols-riscv64"/>
 
      <!-- Linux iptables binary used for Starnix tests.
@@ -685,6 +689,15 @@
              path="prebuilt/third_party/protobuf-py3-wheel"
              platforms="linux-amd64,linux-arm64"/>
 
+    <!-- The package below provides pathspec-py3 as a single wheel (.whl) file
+         which must be extracted by a Jiri hook defined in 'platform'.
+         See tools/build/scripts/extract_pathspec_wheel.sh
+    -->
+    <package name="infra/python/wheels/pathspec-py3"
+             version="version:1.0.4"
+             path="prebuilt/third_party/pathspec-py3-wheel"
+             platforms="linux-amd64,linux-arm64"/>
+
     <!-- pydantic_core is vendored as a precompiled wheel (.whl) file which must
          be extracted with a jiri hook similar to the above. The wheel contains
          a Rust shared library that exposes interfaces for the python wrapper to
@@ -692,8 +705,8 @@
          such that the .so is findable from python.
          See tools/build/scripts/extract_pydantic_core_wheel.sh.
     -->
-    <package name="infra/python/wheels/pydantic_core/linux-amd64_cp313_cp313"
-             version="version:2.33.2"
+    <package name="infra/python/wheels/pydantic_core/linux-amd64_cp314_cp314"
+             version="version:2.46.5"
              path="prebuilt/third_party/pydantic-core-wheel"
              platforms="linux-amd64"/>
 

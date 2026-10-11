@@ -6,7 +6,7 @@ use crate::log_formatter::{LogData, LogEntry};
 use crate::{InstanceGetter, LogCommand, LogError};
 use diagnostics_data::{LogsData, Severity};
 use flex_fuchsia_diagnostics::LogInterestSelector;
-use moniker::{EXTENDED_MONIKER_COMPONENT_MANAGER_STR, ExtendedMoniker};
+use moniker::{EXTENDED_MONIKER_COMPONENT_MANAGER_STR, ExtendedMoniker, Moniker};
 use selectors::SelectorExt;
 use std::borrow::Cow;
 use std::str::FromStr;
@@ -28,6 +28,102 @@ pub struct FuzzyMatchWarning {
     pub resolved: String,
 }
 
+/// Disambiguates candidate monikers matching a query by prioritizing exact matches,
+/// path suffix matches, contiguous segment matches, and ancestor monikers over descendants.
+pub fn disambiguate_queried_monikers(query: &str, instances: Vec<Moniker>) -> Vec<Moniker> {
+    if instances.len() <= 1 {
+        return instances;
+    }
+
+    let normalized_query = query
+        .strip_prefix("./")
+        .or_else(|| query.strip_prefix('/'))
+        .unwrap_or(query)
+        .trim_end_matches('/');
+
+    let exact_full_matches: Vec<&Moniker> = instances
+        .iter()
+        .filter(|m| {
+            let s = m.as_str();
+            s == normalized_query
+                || s == query
+                || (query == "/" && m.is_root())
+                || (normalized_query.is_empty() && m.is_root())
+        })
+        .collect();
+
+    if !exact_full_matches.is_empty() {
+        return exact_full_matches.into_iter().cloned().collect();
+    }
+
+    let query_segments: Vec<&str> = normalized_query.split('/').collect();
+    let q_len = query_segments.len();
+
+    let segment_matches = |seg: &moniker::BorrowedChildName, q_seg: &str| -> bool {
+        seg.as_ref() == q_seg || seg.name().as_str() == q_seg
+    };
+
+    let matches_suffix = |m: &Moniker| -> bool {
+        let path = m.path();
+        if path.len() < q_len {
+            return false;
+        }
+        let suffix = &path[path.len() - q_len..];
+        suffix.iter().zip(&query_segments).all(|(seg, q_seg)| segment_matches(seg, q_seg))
+    };
+
+    let try_select_unique_root =
+        |candidates: Vec<&Moniker>| -> Vec<Moniker> {
+            if candidates.len() <= 1 {
+                return candidates.into_iter().cloned().collect();
+            }
+            if let Some(root) = candidates.iter().min_by_key(|m| m.path().len()).filter(|&root| {
+                candidates.iter().all(|other| other == root || other.has_prefix(root))
+            }) {
+                return vec![(*root).clone()];
+            }
+            candidates.into_iter().cloned().collect()
+        };
+
+    let suffix_matches: Vec<&Moniker> = instances.iter().filter(|m| matches_suffix(m)).collect();
+
+    if !suffix_matches.is_empty() {
+        let exact_suffix_matches: Vec<&Moniker> = suffix_matches
+            .iter()
+            .filter(|&m| {
+                let path = m.path();
+                let suffix = &path[path.len() - q_len..];
+                suffix.iter().zip(&query_segments).all(|(seg, q_seg)| seg.as_ref() == *q_seg)
+            })
+            .copied()
+            .collect();
+
+        let candidates =
+            if !exact_suffix_matches.is_empty() { exact_suffix_matches } else { suffix_matches };
+
+        return try_select_unique_root(candidates);
+    }
+
+    let segment_subpath_matches: Vec<&Moniker> = instances
+        .iter()
+        .filter(|m| {
+            let path = m.path();
+            if path.len() < q_len {
+                return false;
+            }
+            path.windows(q_len).any(|window| {
+                window.iter().zip(&query_segments).all(|(seg, q_seg)| segment_matches(seg, q_seg))
+            })
+        })
+        .collect();
+
+    if !segment_subpath_matches.is_empty() {
+        return try_select_unique_root(segment_subpath_matches);
+    }
+
+    try_select_unique_root(instances.iter().collect())
+}
+
 impl MonikerFilters {
     fn new(queries: Vec<String>) -> Self {
         Self { queries, matched_monikers: vec![] }
@@ -46,7 +142,8 @@ impl MonikerFilters {
                 continue;
             }
 
-            let mut instances = getter.get_monikers_from_query(query).await?;
+            let instances = getter.get_monikers_from_query(query).await?;
+            let mut instances = disambiguate_queried_monikers(query, instances);
             if instances.len() > 1 {
                 return Err(LogError::too_many_fuzzy_matches(
                     instances.into_iter().map(|i| i.to_string()),
@@ -1491,5 +1588,167 @@ mod test {
         assert!(criteria.matches(&entry_no_match), "entry_no_match should NOT be filtered out");
 
         std::fs::remove_file(file_path).ok();
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_exact_full_match() {
+        let instances = vec![
+            Moniker::try_from("bootstrap/archivist").unwrap(),
+            Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("bootstrap/archivist", instances.clone()),
+            vec![Moniker::try_from("bootstrap/archivist").unwrap()]
+        );
+        assert_eq!(
+            disambiguate_queried_monikers("/bootstrap/archivist", instances),
+            vec![Moniker::try_from("bootstrap/archivist").unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_exact_leaf_match() {
+        let instances = vec![
+            Moniker::try_from("bootstrap/archivist").unwrap(),
+            Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("archivist", instances),
+            vec![Moniker::try_from("bootstrap/archivist").unwrap()]
+        );
+
+        let instances_with_extra = vec![
+            Moniker::try_from("core/network/netstack").unwrap(),
+            Moniker::try_from("core/network/netstack/child").unwrap(),
+            Moniker::try_from("core/network/netstack-extra").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("netstack", instances_with_extra),
+            vec![Moniker::try_from("core/network/netstack").unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_exact_path_suffix_match() {
+        let instances = vec![
+            Moniker::try_from("core/network/netstack").unwrap(),
+            Moniker::try_from("core/network/netstack/child").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("network/netstack", instances),
+            vec![Moniker::try_from("core/network/netstack").unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_trailing_slash() {
+        let instances = vec![
+            Moniker::try_from("bootstrap/archivist").unwrap(),
+            Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("archivist/", instances),
+            vec![Moniker::try_from("bootstrap/archivist").unwrap()]
+        );
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_ambiguous_distinct_roots() {
+        let instances = vec![
+            Moniker::try_from("bootstrap/archivist").unwrap(),
+            Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+            Moniker::try_from("core/archivist").unwrap(),
+        ];
+        // archivist matches leaf of bootstrap/archivist and core/archivist, but not archivist-pipelines
+        assert_eq!(
+            disambiguate_queried_monikers("archivist", instances),
+            vec![
+                Moniker::try_from("bootstrap/archivist").unwrap(),
+                Moniker::try_from("core/archivist").unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_disambiguate_queried_monikers_nested_root_preference() {
+        let instances = vec![
+            Moniker::try_from("bootstrap/archivist/pipelines").unwrap(),
+            Moniker::try_from("bootstrap/archivist/pipelines/sub").unwrap(),
+        ];
+        assert_eq!(
+            disambiguate_queried_monikers("archivist", instances),
+            vec![Moniker::try_from("bootstrap/archivist/pipelines").unwrap()]
+        );
+    }
+
+    struct MultiFakeInstanceGetter {
+        map: std::collections::HashMap<String, Vec<Moniker>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl InstanceGetter for MultiFakeInstanceGetter {
+        async fn get_monikers_from_query(&self, query: &str) -> Result<Vec<Moniker>, LogError> {
+            Ok(self.map.get(query).cloned().unwrap_or_default())
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_expand_monikers_resolves_archivist_subcomponents() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "archivist".to_string(),
+            vec![
+                Moniker::try_from("bootstrap/archivist").unwrap(),
+                Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+            ],
+        );
+        let getter = MultiFakeInstanceGetter { map };
+
+        let cmd = LogCommand {
+            filters: LogFilterArgs {
+                component: vec!["archivist".to_string()],
+                ..Default::default()
+            },
+            ..empty_dump_command()
+        };
+
+        let mut criteria = LogFilterCriteria::from(cmd);
+        let warnings = criteria.expand_monikers(&getter).await.unwrap();
+
+        assert_eq!(
+            warnings,
+            vec![FuzzyMatchWarning {
+                query: "archivist".to_string(),
+                resolved: "bootstrap/archivist".to_string(),
+            }]
+        );
+
+        assert!(
+            criteria.matches(&make_log_entry(
+                diagnostics_data::LogsDataBuilder::new(diagnostics_data::BuilderArgs {
+                    timestamp: Timestamp::from_nanos(0),
+                    component_url: Some("".into()),
+                    moniker: "bootstrap/archivist".try_into().unwrap(),
+                    severity: diagnostics_data::Severity::Info,
+                })
+                .set_message("log from archivist")
+                .build()
+                .into()
+            ))
+        );
+
+        assert!(
+            !criteria.matches(&make_log_entry(
+                diagnostics_data::LogsDataBuilder::new(diagnostics_data::BuilderArgs {
+                    timestamp: Timestamp::from_nanos(0),
+                    component_url: Some("".into()),
+                    moniker: "bootstrap/archivist/archivist-pipelines".try_into().unwrap(),
+                    severity: diagnostics_data::Severity::Info,
+                })
+                .set_message("log from pipeline")
+                .build()
+                .into()
+            ))
+        );
     }
 }

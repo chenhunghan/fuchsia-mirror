@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import asyncio
+import ipaddress
 import math
 import os
 import re
@@ -691,8 +692,6 @@ class TestExecution:
                         )
                         gemini_output = await run_command(
                             gemini_tool_path,
-                            "--api-key",
-                            api_key,
                             "--gemini-model",
                             flags.gemini_model,
                             "--verbosity",
@@ -701,6 +700,7 @@ class TestExecution:
                             parent=parent,
                             print_verbatim=True,
                             input_bytes=error_log.encode(),
+                            env={"GEMINI_API_KEY": api_key},
                         )
                         if not gemini_output or gemini_output.return_code != 0:
                             recorder.emit_warning_message(
@@ -796,6 +796,121 @@ class DeviceConfigError(Exception):
     """There was an error reading the device configuration"""
 
 
+def _parse_device_address(
+    target_line: str,
+    raw_output: str = "",
+    stderr: str = "",
+    return_code: int = 0,
+) -> tuple[str, str]:
+    """Parse and validate a device target address and port.
+
+    Args:
+        target_line: The raw address string (e.g. from `ffx target list`).
+        raw_output: Raw stdout from command, for error reporting.
+        stderr: Raw stderr from command, for error reporting.
+        return_code: Process return code, for error reporting.
+
+    Returns:
+        A tuple of (address, port).
+
+    Raises:
+        DeviceConfigError: If the address or port is invalid or cannot be parsed.
+    """
+    target_line = target_line.strip()
+    if ":" not in target_line:
+        raise DeviceConfigError(
+            f"Could not parse target address: {raw_output or target_line!r}.\n"
+            f"Expected 'ip:port' format.\n"
+            f"Return code: {return_code},\n"
+            f"Stderr: {stderr!r}"
+        )
+
+    if target_line.startswith("["):
+        closing_bracket = target_line.find("]")
+        if closing_bracket == -1:
+            raise DeviceConfigError(
+                f"Could not parse target address: {raw_output or target_line!r}.\n"
+                f"Missing closing bracket in IPv6 address.\n"
+                f"Return code: {return_code},\n"
+                f"Stderr: {stderr!r}"
+            )
+        ip_inside = target_line[1:closing_bracket].strip()
+        if not ip_inside:
+            raise DeviceConfigError(
+                f"Could not parse target address: {raw_output or target_line!r}.\n"
+                f"Empty IPv6 address in brackets."
+            )
+
+        base_ip = ip_inside
+        if "%" in ip_inside:
+            base_ip, scope_id = ip_inside.split("%", 1)
+            if not scope_id:
+                raise DeviceConfigError(
+                    f"Could not parse target address: {raw_output or target_line!r}.\n"
+                    f"Empty scope ID in IPv6 address."
+                )
+
+        try:
+            ipaddress.IPv6Address(base_ip)
+        except ValueError as e:
+            raise DeviceConfigError(
+                f"Invalid IPv6 address in target: {ip_inside!r}: {e}"
+            )
+
+        ip = target_line[0 : closing_bracket + 1]
+        remainder = target_line[closing_bracket + 1 :].strip()
+        if remainder:
+            if not remainder.startswith(":") or len(remainder) == 1:
+                raise DeviceConfigError(
+                    f"Could not parse target address: {raw_output or target_line!r}.\n"
+                    f"Invalid or missing port after closing bracket."
+                )
+            port = remainder[1:].strip()
+        else:
+            port = "22"
+    elif target_line.count(":") > 1:
+        # Unbracketed IPv6 address without port (e.g. fe80::1 or fe80::1%eth0)
+        base_ip = target_line
+        if "%" in target_line:
+            base_ip, scope_id = target_line.split("%", 1)
+            if not scope_id:
+                raise DeviceConfigError(
+                    f"Could not parse target address: {raw_output or target_line!r}.\n"
+                    f"Empty scope ID in IPv6 address."
+                )
+        try:
+            ipaddress.IPv6Address(base_ip)
+        except ValueError as e:
+            raise DeviceConfigError(
+                f"Invalid IPv6 address in target: {target_line!r}: {e}"
+            )
+        ip = target_line
+        port = "22"
+    else:
+        # IPv4 or hostname with port (e.g. 192.168.1.1:8022 or localhost:22)
+        last_colon_index = target_line.rfind(":")
+        ip = target_line[0:last_colon_index].strip()
+        port = target_line[last_colon_index + 1 :].strip()
+        if not ip:
+            raise DeviceConfigError(
+                f"Could not parse target address: {raw_output or target_line!r}.\n"
+                f"Missing host/IP before colon."
+            )
+        if not port:
+            raise DeviceConfigError(
+                f"Could not parse target address: {raw_output or target_line!r}.\n"
+                f"Missing port after colon."
+            )
+
+    if not port.isdigit() or not (1 <= int(port) <= 65535):
+        raise DeviceConfigError(
+            f"Invalid port in target address: {port!r}.\n"
+            f"Expected integer between 1 and 65535."
+        )
+
+    return ip, port
+
+
 async def get_device_environment_from_exec_env(
     exec_env: environment.ExecutionEnvironment,
     recorder: event.EventRecorder | None = None,
@@ -842,16 +957,12 @@ async def get_device_environment_from_exec_env(
         raise DeviceConfigError("Failed to get the ssh address of the target")
 
     target_line = ssh_output.stdout.strip().splitlines()[-1].strip()
-    last_colon_index = target_line.rfind(":")
-    if last_colon_index == -1:
-        raise DeviceConfigError(
-            f"Could not parse target address: {ssh_output.stdout!r}.\n"
-            f"Expected 'ip:port' format.\n"
-            f"Return code: {ssh_output.return_code},\n"
-            f"Stderr: {ssh_output.stderr!r}"
-        )
-    ip = target_line[0:last_colon_index].strip()
-    port = target_line[last_colon_index + 1 :].strip()
+    ip, port = _parse_device_address(
+        target_line,
+        raw_output=ssh_output.stdout,
+        stderr=ssh_output.stderr,
+        return_code=ssh_output.return_code,
+    )
 
     # get the configured private key. Ideally, the private key usage
     # should be an implementation detail internal to ffx commands.
@@ -935,8 +1046,14 @@ async def run_command(
     event_id: event.Id | None = None
     abort_task: asyncio.Task[None] | None = None
     if recorder is not None:
+        logged_env = env
+        if env:
+            logged_env = {
+                k: ("<REDACTED>" if "API_KEY" in k.upper() else v)
+                for k, v in env.items()
+            }
         event_id = recorder.emit_program_start(
-            name, list(args), env, parent=parent, quiet_mode=quiet_mode
+            name, list(args), logged_env, parent=parent, quiet_mode=quiet_mode
         )
     try:
         started = await command.AsyncCommand.create(

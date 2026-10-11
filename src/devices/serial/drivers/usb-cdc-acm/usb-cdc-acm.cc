@@ -5,12 +5,12 @@
 #include "usb-cdc-acm.h"
 
 #include <assert.h>
-#include <lib/ddk/binding_driver.h>
-#include <lib/ddk/debug.h>
-#include <lib/ddk/driver.h>
+#include <lib/driver/compat/cpp/banjo_client.h>
+#include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/driver/component/cpp/node_add_args.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/zx/time.h>
 
-#include <fbl/alloc_checker.h>
 #include <usb/cdc.h>
 #include <usb/request-cpp.h>
 #include <usb/usb-request.h>
@@ -44,19 +44,13 @@ struct usb_cdc_acm_line_coding_t {
   uint8_t bDataBits;
 } __PACKED;
 
-void UsbCdcAcmDevice::DdkUnbind(ddk::UnbindTxn txn) {
+void UsbCdcAcmDevice::Stop(fdf::StopCompleter completer) {
   CancelAll();
 
-  cancel_thread_ = std::thread([this, unbind_txn = std::move(txn)]() mutable {
-    usb_client_.CancelAll(bulk_in_addr_);
-    usb_client_.CancelAll(bulk_out_addr_);
-    unbind_txn.Reply();
-  });
-}
+  usb_client_.CancelAll(bulk_in_addr_);
+  usb_client_.CancelAll(bulk_out_addr_);
 
-void UsbCdcAcmDevice::DdkRelease() {
-  cancel_thread_.join();
-  delete this;
+  completer(zx::ok());
 }
 
 void UsbCdcAcmDevice::GetInfo(fdf::Arena& arena, GetInfoCompleter::Sync& completer) {
@@ -229,13 +223,13 @@ void UsbCdcAcmDevice::CancelAll(fdf::Arena& arena, CancelAllCompleter::Sync& com
 void UsbCdcAcmDevice::handle_unknown_method(
     fidl::UnknownMethodMetadata<fuchsia_hardware_serialimpl::Device> metadata,
     fidl::UnknownMethodCompleter::Sync& completer) {
-  zxlogf(ERROR, "Unknown method ordinal %lu", metadata.method_ordinal);
+  fdf::error("Unknown method ordinal {}", metadata.method_ordinal);
 }
 
 void UsbCdcAcmDevice::ReadComplete(usb_request_t* request) {
   usb::Request<> req(request, parent_req_size_);
   if (req.request()->response.status == ZX_ERR_IO_NOT_PRESENT) {
-    zxlogf(INFO, "usb-cdc-acm: remote closed");
+    fdf::info("usb-cdc-acm: remote closed");
     return;
   }
 
@@ -279,7 +273,7 @@ void UsbCdcAcmDevice::ReadComplete(usb_request_t* request) {
 void UsbCdcAcmDevice::WriteComplete(usb_request_t* request) {
   usb::Request<> req(request, parent_req_size_);
   if (req.request()->response.status == ZX_ERR_IO_NOT_PRESENT) {
-    zxlogf(INFO, "usb-cdc-acm: remote closed");
+    fdf::info("usb-cdc-acm: remote closed");
     return;
   }
 
@@ -351,7 +345,7 @@ zx_status_t UsbCdcAcmDevice::ConfigureDevice(uint32_t baud_rate, uint32_t flags)
       return status;
     }
     if (coding_length != sizeof(coding)) {
-      zxlogf(TRACE, "usb-cdc-acm: failed to fetch line coding");
+      fdf::trace("usb-cdc-acm: failed to fetch line coding");
     }
   } else {
     switch (flags & fuchsia_hardware_serialimpl::wire::kSerialStopBitsMask) {
@@ -410,18 +404,26 @@ zx_status_t UsbCdcAcmDevice::ConfigureDevice(uint32_t baud_rate, uint32_t flags)
   return status;
 }
 
-zx_status_t UsbCdcAcmDevice::Bind() {
-  zx_status_t status = ZX_OK;
+zx::result<> UsbCdcAcmDevice::Start(fdf::DriverContext context) {
+  std::shared_ptr<fdf::Namespace> incoming(context.take_incoming());
+
+  zx::result<ddk::UsbProtocolClient> usb_client =
+      compat::ConnectBanjo<ddk::UsbProtocolClient>(incoming);
+  if (usb_client.is_error()) {
+    fdf::error("Failed to connect to USB protocol: {}", usb_client);
+    return usb_client.take_error();
+  }
+  usb_client_ = *usb_client;
 
   if (!usb_client_.is_valid()) {
-    return ZX_ERR_PROTOCOL_NOT_SUPPORTED;
+    return zx::error(ZX_ERR_PROTOCOL_NOT_SUPPORTED);
   }
 
   // Enumerate available interfaces and find bulk-in and bulk-out endpoints.
   std::optional<usb::InterfaceList> usb_interface_list;
-  status = usb::InterfaceList::Create(usb_client_, true, &usb_interface_list);
+  zx_status_t status = usb::InterfaceList::Create(usb_client_, true, &usb_interface_list);
   if (status != ZX_OK) {
-    return status;
+    return zx::error(status);
   }
 
   fbl::AutoLock lock(&lock_);
@@ -444,8 +446,8 @@ zx_status_t UsbCdcAcmDevice::Bind() {
   }
 
   if (!bulk_in_address || !bulk_out_address) {
-    zxlogf(ERROR, "usb-cdc-acm: Bind() could not find bulk-in and bulk-out endpoints");
-    return ZX_ERR_NOT_SUPPORTED;
+    fdf::error("usb-cdc-acm: Start() could not find bulk-in and bulk-out endpoints");
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
   bulk_in_addr_ = bulk_in_address;
@@ -454,50 +456,31 @@ zx_status_t UsbCdcAcmDevice::Bind() {
 
   status = ConfigureDevice(kDefaultBaudRate, kDefaultConfig);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "usb-cdc-acm: failed to set default baud rate: %d", status);
-    return status;
+    fdf::error("usb-cdc-acm: failed to set default baud rate: {}", zx::make_result(status));
+    return zx::error(status);
   }
 
   serial_port_info_.serial_class = fuchsia_hardware_serial::Class::kGeneric;
 
   {
     fuchsia_hardware_serialimpl::Service::InstanceHandler handler({
-        .device = bindings_.CreateHandler(this, fdf::Dispatcher::GetCurrent()->get(),
-                                          fidl::kIgnoreBindingClosure),
+        .device =
+            bindings_.CreateHandler(this, driver_dispatcher()->get(), fidl::kIgnoreBindingClosure),
     });
-    auto result = outgoing_.AddService<fuchsia_hardware_serialimpl::Service>(std::move(handler));
+    zx::result<> result = outgoing()->AddService<fuchsia_hardware_serialimpl::Service>(
+        std::move(handler), kDriverName);
     if (result.is_error()) {
-      zxlogf(ERROR, "AddService failed: %s", result.status_string());
-      return result.error_value();
+      fdf::error("AddService failed: {}", result);
+      return result.take_error();
     }
   }
 
-  auto [directory_client, directory_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
-
-  {
-    auto result = outgoing_.Serve(std::move(directory_server));
-    if (result.is_error()) {
-      zxlogf(ERROR, "Failed to serve the outgoing directory: %s", result.status_string());
-      return result.error_value();
-    }
-  }
-
-  std::array<const char*, 1> fidl_service_offers{fuchsia_hardware_serialimpl::Service::Name};
-  status = DdkAdd(ddk::DeviceAddArgs("usb-cdc-acm")
-                      .set_outgoing_dir(directory_client.TakeChannel())
-                      .set_runtime_service_offers(fidl_service_offers));
-  if (status != ZX_OK) {
-    zxlogf(ERROR, "usb-cdc-acm: failed to create device: %d", status);
-    return status;
-  }
-
-  // Create and immediately queue read requests after successfully adding the device.
   for (int i = 0; i < kReadRequestCount; i++) {
     std::optional<usb::Request<>> request;
     status = usb::Request<>::Alloc(&request, kUsbBufferSize, bulk_in_addr_, parent_req_size_);
     if (status != ZX_OK) {
-      zxlogf(ERROR, "usb-cdc-acm: allocating reads failed %d", status);
-      return status;
+      fdf::error("usb-cdc-acm: allocating reads failed {}", zx::make_result(status));
+      return zx::error(status);
     }
     usb_client_.RequestQueue(request->take(), &read_request_complete_);
   }
@@ -506,44 +489,28 @@ zx_status_t UsbCdcAcmDevice::Bind() {
     std::optional<usb::Request<>> request;
     status = usb::Request<>::Alloc(&request, kUsbBufferSize, bulk_out_addr_, parent_req_size_);
     if (status != ZX_OK) {
-      zxlogf(ERROR, "usb-cdc-acm: allocating writes failed %d", status);
-      return status;
+      fdf::error("usb-cdc-acm: allocating writes failed {}", zx::make_result(status));
+      return zx::error(status);
     }
     free_write_queue_.push(*std::move(request));
   }
 
-  return ZX_OK;
+  {
+    std::array<fuchsia_driver_framework::Offer, 1> offers{
+        fdf::MakeOffer2<fuchsia_hardware_serialimpl::Service>(kDriverName),
+    };
+    std::array<fuchsia_driver_framework::NodeProperty2, 0> properties{};
+    zx::result result = AddChild(kDriverName, properties, offers);
+    if (result.is_error()) {
+      fdf::error("usb-cdc-acm: failed to create child node: {}", result);
+      return result.take_error();
+    }
+    controller_ = std::move(result.value());
+  }
+
+  return zx::ok();
 }
 
 }  // namespace usb_cdc_acm_serial
 
-namespace {
-
-zx_status_t cdc_acm_bind(void* /*ctx*/, zx_device_t* device) {
-  fbl::AllocChecker ac;
-  auto dev = fbl::make_unique_checked<usb_cdc_acm_serial::UsbCdcAcmDevice>(&ac, device);
-  if (!ac.check()) {
-    return ZX_ERR_NO_MEMORY;
-  }
-  auto status = dev->Bind();
-  if (status != ZX_OK) {
-    zxlogf(INFO, "usb-cdc-acm: failed to add serial driver %d", status);
-  }
-
-  // Devmgr is now in charge of the memory for dev.
-  [[maybe_unused]] auto ptr = dev.release();
-  return status;
-}
-
-constexpr zx_driver_ops_t cdc_acm_driver_ops = []() {
-  zx_driver_ops_t ops = {};
-  ops.version = DRIVER_OPS_VERSION;
-  ops.bind = cdc_acm_bind;
-  return ops;
-}();
-
-}  // namespace
-
-// clang-format off
-ZIRCON_DRIVER(cdc_acm, cdc_acm_driver_ops, "zircon", "0.1");
-// clang-form   at on
+FUCHSIA_DRIVER_EXPORT2(usb_cdc_acm_serial::UsbCdcAcmDevice);

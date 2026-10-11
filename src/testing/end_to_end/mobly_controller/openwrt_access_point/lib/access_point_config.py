@@ -12,6 +12,7 @@ import re
 import string
 from typing import Literal, Optional, Protocol, TypeAlias
 
+import fidl_fuchsia_wlan_internal as f_wlan_internal
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 from honeydew.typing.custom_types import MacAddress
 from openwrt_access_point.lib.hostapd_options import HostapdOptions
@@ -56,9 +57,6 @@ class Band(enum.StrEnum):
                 raise ValueError(f"Unsupported band: {self}")
 
 
-# TODO(https://fxbug.dev/487800358): Create to_fidl function.
-
-
 class Security(Protocol):
     """Protocol to abstract Wi-Fi security modes and their UCI mapping."""
 
@@ -69,6 +67,10 @@ class Security(Protocol):
 
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         """Returns the Fuchsia WLAN Policy FIDL SecurityType corresponding to this mode."""
+        ...
+
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        """Returns the Fuchsia WLAN core FIDL Protocol corresponding to this mode."""
         ...
 
     @property
@@ -88,6 +90,9 @@ class SecurityOpen:
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.NONE
 
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.OPEN
+
 
 @dataclasses.dataclass(frozen=True)
 class SecurityOwe:
@@ -103,6 +108,9 @@ class SecurityOwe:
             "OWE is not yet supported in fuchsia.wlan.policy.SecurityType (https://fxbug.dev/528397348)"
         )
 
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.OWE
+
 
 @dataclasses.dataclass(frozen=True)
 class SecurityOweTransition:
@@ -116,6 +124,9 @@ class SecurityOweTransition:
 
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.NONE
+
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.OPEN
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,6 +143,9 @@ class SecurityWpa:
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WPA
 
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WPA1
+
 
 @dataclasses.dataclass(frozen=True)
 class SecurityWpa2:
@@ -146,6 +160,9 @@ class SecurityWpa2:
 
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WPA2
+
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WPA2_PERSONAL
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,6 +179,9 @@ class SecurityWpa3:
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WPA3
 
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WPA3_PERSONAL
+
 
 @dataclasses.dataclass(frozen=True)
 class SecurityWpaWpa2Mixed:
@@ -176,6 +196,9 @@ class SecurityWpaWpa2Mixed:
 
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WPA2
+
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WPA2_PERSONAL
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,6 +215,9 @@ class SecurityWpa2Wpa3Mixed:
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WPA3
 
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WPA3_PERSONAL
+
 
 @dataclasses.dataclass(frozen=True)
 class SecurityWep:
@@ -204,6 +230,9 @@ class SecurityWep:
 
     def to_fidl_wlan_policy(self) -> f_wlan_policy.SecurityType:
         return f_wlan_policy.SecurityType.WEP
+
+    def to_fidl_wlan_internal(self) -> f_wlan_internal.Protocol:
+        return f_wlan_internal.Protocol.WEP
 
 
 Bandwidth: TypeAlias = Literal[20, 40, 80, 160, 320]

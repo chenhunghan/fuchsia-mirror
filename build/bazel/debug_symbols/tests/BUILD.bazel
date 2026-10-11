@@ -110,7 +110,7 @@ rust_binary(
     name = "a_rust_binary",
     srcs = ["a_main.rs"],
     edition = "2024",
-    deps = select({
+    link_deps = select({
         "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
         "//conditions:default": [],
     }),
@@ -119,7 +119,7 @@ rust_binary(
 rust_test(
     name = "a_rust_test",
     crate = ":a_rust_binary",
-    deps = select({
+    link_deps = select({
         "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
         "//conditions:default": [],
     }),

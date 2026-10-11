@@ -8,5 +8,9 @@ exports_files(
     [
         "elf_test_runner.shard.cml",
     ],
-    visibility = ["//build/bazel/rules/packages/tests:__pkg__"],
+    visibility = [
+        "//build/bazel/rules/packages/tests:__pkg__",
+        "//build/bazel/rules/testing:__pkg__",
+        "//src:__subpackages__",
+    ],
 )

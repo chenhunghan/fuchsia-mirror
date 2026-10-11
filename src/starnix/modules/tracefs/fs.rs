@@ -47,6 +47,10 @@ impl FileSystemOps for TraceFs {
     fn name(&self) -> &'static FsStr {
         "tracefs".into()
     }
+
+    fn manages_timestamps(&self) -> bool {
+        true
+    }
 }
 
 impl TraceFs {
@@ -278,7 +282,7 @@ impl TraceFile {
 mod tests {
     use super::*;
     use starnix_core::testing::spawn_kernel_and_run;
-    use starnix_core::vfs::buffers::VecOutputBuffer;
+    use starnix_core::vfs::buffers::{InputBuffer, VecInputBuffer, VecOutputBuffer};
     use starnix_core::vfs::{FsNodeInfo, NamespaceNode, OpenAccessCheck};
     use starnix_uapi::auth::FsCred;
     use starnix_uapi::file_mode::mode;
@@ -311,6 +315,70 @@ mod tests {
                 "Expected header_page to match exactly:\n{}\nGot:\n{}",
                 expected_content, content
             );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_trace_marker_write_small_and_large_and_disabled() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+            let event_queue_collection = TraceEventQueueList::from(kernel);
+            let fs = TraceFs::new_fs(current_task, FileSystemOptions::default())
+                .expect("create tracefs");
+            assert!(fs.manages_timestamps());
+            let info = FsNodeInfo::new(mode!(IFREG, 0o222), FsCred::root());
+            let node = fs.create_node_and_allocate_node_id(
+                TraceMarkerFile::new_node(event_queue_collection.clone()),
+                info,
+            );
+            let ns_node = NamespaceNode::new_anonymous_unrooted(current_task, node);
+            let file = ns_node
+                .open(current_task, OpenAccessCheck::skip(OpenFlags::WRONLY))
+                .expect("open trace_marker node");
+            let mtime_before = file.node().info().time_modify;
+
+            // 1. When disabled, write should drain the input buffer and return the full byte count.
+            event_queue_collection.disable().expect("disable queue");
+            let mut disabled_buf = VecInputBuffer::new(b"B|1234|disabled_slice\n");
+            let written = file.write(current_task, &mut disabled_buf).expect("write disabled");
+            assert_eq!(written, b"B|1234|disabled_slice\n".len());
+            assert_eq!(disabled_buf.available(), 0);
+            assert_eq!(file.node().info().time_modify, mtime_before);
+
+            // 2. When enabled, small writes (<= 128 bytes) use the inline SmallVec buffer,
+            // and large writes (> 128 bytes) spill to the heap. Write enough events across
+            // the per-CPU queues to overflow a full page on queue 0 so we can read it back.
+            event_queue_collection.enable().expect("enable queue");
+            let num_cpus = event_queue_collection.queues.len();
+            for _ in 0..num_cpus {
+                let mut small_buf = VecInputBuffer::new(b"B|1234|activityStart\n");
+                let written = file.write(current_task, &mut small_buf).expect("write small");
+                assert_eq!(written, b"B|1234|activityStart\n".len());
+                assert_eq!(small_buf.available(), 0);
+            }
+            let large_payload = vec![b'x'; 768];
+            for _ in 0..(6 * num_cpus) {
+                let mut large_buf = VecInputBuffer::new(&large_payload);
+                let written = file.write(current_task, &mut large_buf).expect("write large");
+                assert_eq!(written, large_payload.len());
+                assert_eq!(large_buf.available(), 0);
+            }
+            assert_eq!(file.node().info().time_modify, mtime_before);
+
+            let mut read_buf = VecOutputBuffer::new(*PAGE_SIZE as usize);
+            let bytes_read = event_queue_collection.queues[0]
+                .read(&mut read_buf)
+                .expect("read full page from queue 0");
+            assert_eq!(bytes_read, *PAGE_SIZE as usize);
+            let page_data = read_buf.data();
+            assert!(
+                page_data
+                    .windows(b"B|1234|activityStart\n".len())
+                    .any(|w| w == b"B|1234|activityStart\n")
+            );
+            assert!(page_data.windows(large_payload.len()).any(|w| w == large_payload.as_slice()));
+            event_queue_collection.disable().expect("disable queue after test");
         })
         .await;
     }

@@ -10,6 +10,9 @@
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
+#include <kernel/ffi.h>
+
+#include "vm/evictor.h"
 #include "vm/pmm.h"
 
 class VmCompression;
@@ -19,6 +22,7 @@ __BEGIN_CDECLS
 vm_page_t* cpp_paddr_to_vm_page(zx_paddr_t paddr);
 PageQueues* cpp_pmm_page_queues();
 VmCompression* cpp_pmm_get_page_compression(void);
+FFI_ALWAYS_INLINE Evictor* cpp_pmm_evictor();
 zx_status_t cpp_pmm_alloc_page(uint32_t flags, vm_page_t** out_page, zx_paddr_t* out_paddr);
 zx_status_t cpp_pmm_alloc_pages(size_t count, uint32_t flags, VmPageDoublyLinkedList* list);
 zx_status_t cpp_pmm_alloc_contiguous(size_t count, uint32_t flags, uint8_t align_log2,
@@ -29,6 +33,9 @@ void cpp_pmm_free_list(VmPageDoublyLinkedList* list);
 size_t cpp_pmm_num_arenas();
 zx_status_t cpp_pmm_get_arena_info(size_t count, uint64_t i, pmm_arena_info_t* buffer,
                                    size_t buffer_size);
+void cpp_pmm_checker_init_from_cmdline();
+// Initializes the PMM arenas from `count` memory ranges starting at `ranges`.
+zx_status_t cpp_pmm_init(const memalloc::Range* ranges, size_t count);
 
 __END_CDECLS
 

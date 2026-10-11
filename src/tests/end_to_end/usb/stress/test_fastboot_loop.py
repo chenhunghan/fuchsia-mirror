@@ -51,9 +51,9 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
                 )
                 await asyncio.sleep(disconnect_duration)
                 for attempt in range(15):
-                    if not await self.dut.fastboot.is_in_fastboot_mode():
+                    if not self.dut.fastboot.is_in_fastboot_mode():
                         await asyncio.sleep(2)
-                        if not await self.dut.fastboot.is_in_fastboot_mode():
+                        if not self.dut.fastboot.is_in_fastboot_mode():
                             break
                     _LOGGER.debug(
                         "Waiting for fastboot device to settle offline (attempt %d)...",
@@ -61,19 +61,18 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
                     )
                     await asyncio.sleep(1)
                 expects.expect_false(
-                    await self.dut.fastboot.is_in_fastboot_mode(),
+                    self.dut.fastboot.is_in_fastboot_mode(),
                     "Fastboot device is still visible",
                 )
             finally:
                 power_hub.power_on(port=self._usb_port)
                 _LOGGER.info("Waiting for device to re-enter fastboot...")
                 try:
-                    await asyncio.wait_for(
-                        self.dut.fastboot.wait_for_fastboot_mode(),
-                        timeout=fastboot_reconnect_timeout,
+                    self.dut.fastboot.wait_for_fastboot_mode(
+                        timeout=fastboot_reconnect_timeout
                     )
                     _LOGGER.info("Device successfully re-entered fastboot.")
-                except asyncio.TimeoutError as e:
+                except errors.HoneydewTimeoutError as e:
                     raise errors.FuchsiaDeviceError(
                         "Device failed to re-enter Fastboot after power-on. "
                         "It likely booted to Fuchsia/Android automatically. "

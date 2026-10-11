@@ -72,7 +72,7 @@ rust_library(
     }),
     version = "1.0.21",
     deps = [
-        "//third_party/rust_crates/vendor/zmij-1.0.21:build_script_build",
+        ":build_script_build",
     ],
 )
 
@@ -110,6 +110,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "zmij",
     rustc_flags = [
         "--cap-lints=allow",

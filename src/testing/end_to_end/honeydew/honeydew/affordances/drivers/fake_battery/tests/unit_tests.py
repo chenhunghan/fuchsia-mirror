@@ -10,7 +10,6 @@ from unittest import mock
 
 from honeydew import errors
 from honeydew.affordances.drivers.battery_manager.utils.types import (
-    ChargeStatus,
     HealthStatus,
     PowerSourceType,
 )
@@ -112,7 +111,6 @@ class FakeBatteryTests(unittest.TestCase):
 
         output = self.fake_battery.set(
             level=75.5,
-            status="charging",
             source="ac",
             voltage_mv=4200,
             current_ua=250000,
@@ -126,7 +124,7 @@ class FakeBatteryTests(unittest.TestCase):
         self.assertIn("Successfully updated", output)
 
         expected_cmd = (
-            "fake-battery-cli set --level 75.5 --status charging --source ac "
+            "fake-battery-cli set --level 75.5 --source ac "
             "--voltage-mv 4200 --current-ua 250000 --temp-mc 28000 --health good "
             "--remaining-uah 300000 --full-capacity-uah 400000 "
             "--time-remaining-sec 3600 --cycle-count 15"
@@ -151,14 +149,11 @@ class FakeBatteryTests(unittest.TestCase):
         )
 
         self.fake_battery.set(
-            status=ChargeStatus.CHARGING,
             source=PowerSourceType.USB,
             health=HealthStatus.HOT,
         )
 
-        expected_cmd = (
-            "fake-battery-cli set --status charging --source usb --health hot"
-        )
+        expected_cmd = "fake-battery-cli set --source usb --health hot"
         self.ffx_obj.run.assert_called_with(
             [
                 "component",
@@ -226,7 +221,7 @@ class FakeBatteryTests(unittest.TestCase):
                 "--tools",
                 _TOOL_URL,
                 "-c",
-                "fake-battery-cli set --status charging --source usb --voltage-mv 5000 --current-ua 1500000",
+                "fake-battery-cli set --source usb --voltage-mv 5000 --current-ua 1500000",
             ],
             machine=ffx_types.MachineFormat.RAW,
         )
@@ -246,7 +241,7 @@ class FakeBatteryTests(unittest.TestCase):
                 "--tools",
                 _TOOL_URL,
                 "-c",
-                "fake-battery-cli set --status discharging --source none --voltage-mv 3700 --current-ua -800000",
+                "fake-battery-cli set --source none --voltage-mv 3700 --current-ua -800000",
             ],
             machine=ffx_types.MachineFormat.RAW,
         )

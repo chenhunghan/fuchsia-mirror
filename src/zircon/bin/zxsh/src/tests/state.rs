@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::args::parse_args;
 use crate::collections::FlatMap;
-use crate::eval::testing::Frame;
+use crate::eval::testing::{Frame, StateBackupGuard};
 use crate::eval::{ExecutionContext, ShellState};
 use crate::fd::Fd;
 use bstr::{BStr, BString, ByteSlice};
@@ -122,6 +123,86 @@ fn test_shell_env() {
 }
 
 #[test]
+fn test_vars_resolves_local_variables_in_frames() {
+    let mut state = ShellState::new();
+    state.set_and_export_var(BStr::new("SHARED"), BStr::new("global_val"));
+
+    // Push outer function frame: `local FOO=local_val; export FOO` and `local SHARED=outer_val`
+    state.frames.push(Frame { local_vars: FlatMap::new(), args: vec![] });
+    state.declare_local(BStr::new("FOO"), Some(BStr::new("local_val")));
+    state.export_var(BStr::new("FOO"));
+    state.declare_local(BStr::new("SHARED"), Some(BStr::new("outer_val")));
+
+    let env = state.vars();
+    assert!(env.iter().any(|(k, v)| k == "FOO" && v == "local_val"));
+    assert!(env.iter().any(|(k, v)| k == "SHARED" && v == "outer_val"));
+
+    // Push inner function frame shadowing `FOO` and testing `opt_allexport` on `declare_local` & `set_var`
+    state.frames.push(Frame { local_vars: FlatMap::new(), args: vec![] });
+    state.declare_local(BStr::new("FOO"), Some(BStr::new("inner_val")));
+    state.opt_allexport = true;
+    state.declare_local(BStr::new("AUTO_LOCAL"), Some(BStr::new("auto_val")));
+    state.declare_local(BStr::new("LATER_LOCAL"), None);
+    state.set_var(BStr::new("LATER_LOCAL"), BStr::new("later_val"));
+    state.opt_allexport = false;
+
+    let inner_env = state.vars();
+    assert!(inner_env.iter().any(|(k, v)| k == "FOO" && v == "inner_val"));
+    assert!(inner_env.iter().any(|(k, v)| k == "SHARED" && v == "outer_val"));
+    assert!(inner_env.iter().any(|(k, v)| k == "AUTO_LOCAL" && v == "auto_val"));
+    assert!(inner_env.iter().any(|(k, v)| k == "LATER_LOCAL" && v == "later_val"));
+
+    // Pop inner frame
+    state.frames.pop();
+    let outer_env = state.vars();
+    assert!(outer_env.iter().any(|(k, v)| k == "FOO" && v == "local_val"));
+
+    // Pop outer frame: `FOO` has no global value so it is not in `vars()`, `SHARED` falls back to global
+    state.frames.pop();
+    let global_env = state.vars();
+    assert!(!global_env.iter().any(|(k, _)| k == "FOO"));
+    assert!(global_env.iter().any(|(k, v)| k == "SHARED" && v == "global_val"));
+}
+
+#[test]
+fn test_state_backup_guard_and_unexport_var() {
+    let mut state = ShellState::new();
+    // 1. Exported but unset variable (`export UNSET_EXP`)
+    state.export_var(BStr::new("UNSET_EXP"));
+    // 2. Unexported set variable
+    state.set_var(BStr::new("UNEXP_SET"), BStr::new("orig"));
+
+    {
+        let mut guard = StateBackupGuard::new(&mut state);
+        guard.backup_var(BStr::new("UNSET_EXP"));
+        guard.backup_var(BStr::new("UNSET_EXP")); // duplicate backup ignored
+        guard.state.set_and_export_var(BStr::new("UNSET_EXP"), BStr::new("temp"));
+
+        guard.backup_var(BStr::new("UNEXP_SET"));
+        guard.state.set_and_export_var(BStr::new("UNEXP_SET"), BStr::new("temp2"));
+
+        let debug_str = format!("{:?}", guard);
+        assert!(debug_str.contains("StateBackupGuard"));
+        assert_eq!(guard.backups.len(), 2);
+    }
+
+    // UNSET_EXP should be unset again, but still marked exported!
+    assert_eq!(state.get_var(BStr::new("UNSET_EXP")), None);
+    assert!(state.exported().contains(BStr::new("UNSET_EXP")));
+
+    // UNEXP_SET should be restored to "orig" and unexported!
+    assert_eq!(state.get_var(BStr::new("UNEXP_SET")), Some(BString::from("orig")));
+    assert!(!state.exported().contains(BStr::new("UNEXP_SET")));
+}
+
+#[test]
+#[should_panic(expected = "name cannot contain '='")]
+fn test_unexport_var_with_equals_panics() {
+    let mut state = ShellState::new();
+    state.unexport_var(BStr::new("A=B"));
+}
+
+#[test]
 fn test_variable_values_with_equals() {
     let mut state = ShellState::new();
     state.set_var(BStr::new("FOO"), BStr::new("bar=baz=qux"));
@@ -212,4 +293,209 @@ fn test_default_shell_variables_align_with_dash() {
     assert_eq!(state.get_var(BStr::new("PS1")), Some(BString::from(expected_ps1)));
     assert_eq!(state.get_var(BStr::new("PS2")), Some(BString::from("> ")));
     assert_eq!(state.get_var(BStr::new("PS4")), Some(BString::from("+ ")));
+}
+
+#[test]
+fn test_ifs_join_sep_and_star_at_get_var() {
+    let mut state = ShellState::new();
+    state.set_args(vec![BString::from("a"), BString::from("b"), BString::from("c")]);
+
+    // Default IFS (" \t\n") -> first byte is ' '
+    assert_eq!(state.ifs_join_sep(), Some(b' '));
+    assert_eq!(state.get_var(BStr::new("*")), Some(BString::from("a b c")));
+    assert_eq!(state.get_var(BStr::new("@")), Some(BString::from("a b c")));
+
+    // Custom IFS (":;") -> first byte is ':' for *, while @ always joins with ' '
+    state.set_var(BStr::new("IFS"), BStr::new(":;"));
+    assert_eq!(state.ifs_join_sep(), Some(b':'));
+    assert_eq!(state.get_var(BStr::new("*")), Some(BString::from("a:b:c")));
+    assert_eq!(state.get_var(BStr::new("@")), Some(BString::from("a b c")));
+
+    // Empty IFS ("") -> None for * (concatenated with no separator), while @ joins with ' '
+    state.set_var(BStr::new("IFS"), BStr::new(""));
+    assert_eq!(state.ifs_join_sep(), None);
+    assert_eq!(state.get_var(BStr::new("*")), Some(BString::from("abc")));
+    assert_eq!(state.get_var(BStr::new("@")), Some(BString::from("a b c")));
+
+    // Unset IFS -> falls back to ' '
+    state.unset_var(BStr::new("IFS"));
+    assert_eq!(state.ifs_join_sep(), Some(b' '));
+    assert_eq!(state.get_var(BStr::new("*")), Some(BString::from("a b c")));
+    assert_eq!(state.get_var(BStr::new("@")), Some(BString::from("a b c")));
+}
+
+#[test]
+fn test_state_serialization_preserves_frames() {
+    use crate::serialization::{Deserialize, Serialize};
+
+    let mut state = ShellState::new();
+    state.set_var(BStr::new("SHARED"), BStr::new("global_val"));
+    state.set_var(BStr::new("UNSET_IN_INNER"), BStr::new("global_u"));
+    state.set_args(vec![BString::from("top1"), BString::from("top2")]);
+
+    let mut outer_locals = FlatMap::new();
+    outer_locals.insert(BString::from("SHARED"), Some(BString::from("outer_val")));
+    outer_locals.insert(BString::from("OUTER_ONLY"), Some(BString::from("o1")));
+    outer_locals.insert(BString::from("UNSET_IN_INNER"), Some(BString::from("outer_u")));
+    state.frames.push(Frame {
+        local_vars: outer_locals,
+        args: vec![BString::from("outer_arg1"), BString::from("outer_arg2")],
+    });
+
+    let mut inner_locals = FlatMap::new();
+    inner_locals.insert(BString::from("SHARED"), Some(BString::from("inner_val")));
+    inner_locals.insert(BString::from("INNER_ONLY"), Some(BString::from("i1")));
+    inner_locals.insert(BString::from("UNSET_IN_INNER"), None);
+    state.frames.push(Frame { local_vars: inner_locals, args: vec![BString::from("inner_arg1")] });
+
+    let mut buf = Vec::new();
+    state.serialize_into(&mut buf);
+
+    let mut offset = 0;
+    let restored = ShellState::deserialize(&buf, &mut offset).unwrap();
+    assert_eq!(offset, buf.len());
+    assert_eq!(restored.frames, state.frames);
+    assert_eq!(restored.get_var(BStr::new("SHARED")), Some(BString::from("inner_val")));
+    assert_eq!(restored.get_var(BStr::new("OUTER_ONLY")), Some(BString::from("o1")));
+    assert_eq!(restored.get_var(BStr::new("INNER_ONLY")), Some(BString::from("i1")));
+    assert_eq!(restored.get_var(BStr::new("UNSET_IN_INNER")), None);
+    assert_eq!(restored.get_args(), vec![BString::from("inner_arg1")]);
+    assert_eq!(restored.get_var(BStr::new("1")), Some(BString::from("inner_arg1")));
+    assert_eq!(restored.get_var(BStr::new("#")), Some(BString::from("1")));
+    assert_eq!(restored.get_var(BStr::new("$")), state.get_var(BStr::new("$")));
+}
+
+#[test]
+fn test_local_unset_and_reassignment_scoping() {
+    use crate::eval::{EvalOutcome, eval_string};
+    use crate::process::{make_pipe, read_fd_to_end};
+
+    let mut state = ShellState::new();
+    state.set_and_export_var(BStr::new("X"), BStr::new("global_val"));
+
+    // 1. Direct state manipulation across nested frames
+    state.frames.push(Frame { local_vars: FlatMap::new(), args: vec![] });
+    state.declare_local(BStr::new("X"), Some(BStr::new("outer_val")));
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("outer_val")));
+
+    // Unsetting local X shadows global X (does not reveal global_val) and omits X from vars()
+    state.unset_var(BStr::new("X"));
+    assert_eq!(state.get_var(BStr::new("X")), None);
+    assert!(!state.vars().iter().any(|(k, _)| k == "X"));
+    assert_eq!(state.all_vars().get(BStr::new("X")), Some(&BString::from("global_val")));
+
+    // Reassigning X after unset keeps X local to the outer frame
+    state.set_var(BStr::new("X"), BStr::new("outer_reassigned"));
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("outer_reassigned")));
+    assert_eq!(state.all_vars().get(BStr::new("X")), Some(&BString::from("global_val")));
+
+    // Inner frame declares local X, unsets it, and reassigns it without affecting outer or global
+    state.frames.push(Frame { local_vars: FlatMap::new(), args: vec![] });
+    state.declare_local(BStr::new("X"), Some(BStr::new("inner_val")));
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("inner_val")));
+
+    state.unset_var(BStr::new("X"));
+    assert_eq!(state.get_var(BStr::new("X")), None);
+
+    state.set_var(BStr::new("X"), BStr::new("inner_reassigned"));
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("inner_reassigned")));
+
+    state.frames.pop();
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("outer_reassigned")));
+
+    state.frames.pop();
+    assert_eq!(state.get_var(BStr::new("X")), Some(BString::from("global_val")));
+    assert!(state.vars().iter().any(|(k, v)| k == "X" && v == "global_val"));
+
+    // 2. End-to-end shell evaluation including nested functions and subshell inside function
+    let mut ctx = ExecutionContext::initial().unwrap();
+    let (out_read, out_write) = make_pipe().unwrap();
+    ctx.set_fd(Fd::STDOUT, out_write);
+
+    let script = b"
+        x=global
+        inner() {
+            local x=inner_init
+            unset x
+            printf 'inner_unset=%s\n' \"${x-UNSET}\"
+            x=inner_reassigned
+            printf 'inner_reassigned=%s\n' \"$x\"
+        }
+        outer() {
+            local x=outer_init
+            unset x
+            printf 'outer_unset=%s\n' \"${x-UNSET}\"
+            ( printf 'subshell_unset=%s\n' \"${x-UNSET}\" )
+            x=outer_reassigned
+            inner
+            printf 'outer_after_inner=%s\n' \"$x\"
+        }
+        outer
+        printf 'global_after=%s\n' \"$x\"
+    ";
+    let res = eval_string(script.as_bstr(), &mut state, &mut ctx).unwrap();
+    ctx.close_fd(Fd::STDOUT);
+    assert_eq!(res, EvalOutcome::Code(0));
+
+    let out = String::from_utf8(read_fd_to_end(out_read).unwrap()).unwrap();
+    assert_eq!(
+        out,
+        "outer_unset=UNSET\n\
+         subshell_unset=UNSET\n\
+         inner_unset=UNSET\n\
+         inner_reassigned=inner_reassigned\n\
+         outer_after_inner=outer_reassigned\n\
+         global_after=global\n"
+    );
+}
+
+#[test]
+fn test_special_var_dash_and_arg0_and_login_option() {
+    let mut state = ShellState::new();
+    assert_eq!(state.get_var(BStr::new("-")), Some(BString::from("")));
+
+    // Enabling -I / ignoreeof reflects 'I' in $-
+    state.set_option_by_flag(b'I', true).unwrap();
+    assert_eq!(state.get_var(BStr::new("-")), Some(BString::from("I")));
+
+    state.set_option_by_name(BStr::new("ignoreeof"), false).unwrap();
+    assert_eq!(state.get_var(BStr::new("-")), Some(BString::from("")));
+
+    state.set_option_by_name(BStr::new("ignoreeof"), true).unwrap();
+    state.set_option_by_flag(b'e', true).unwrap();
+    assert_eq!(state.get_var(BStr::new("-")), Some(BString::from("eI")));
+
+    // set -l and set -o login are accepted as valid runtime options
+    assert!(state.set_option_by_flag(b'l', true).is_ok());
+    assert!(state.set_option_by_flag(b'l', false).is_ok());
+    assert!(state.set_option_by_name(BStr::new("login"), true).is_ok());
+    assert!(state.set_option_by_name(BStr::new("login"), false).is_ok());
+
+    // $0 defaults to argv[0] when invoked with -c without command_name operand
+    let parsed_c =
+        parse_args(&[BString::from("/boot/bin/sh"), BString::from("-c"), BString::from("echo $0")])
+            .unwrap();
+    let state_c = ShellState::with_args(parsed_c, FlatMap::new()).unwrap();
+    assert_eq!(state_c.get_var(BStr::new("0")), Some(BString::from("/boot/bin/sh")));
+
+    // $0 is overridden by command_name operand when provided after -c command_string
+    let parsed_c_named = parse_args(&[
+        BString::from("/boot/bin/sh"),
+        BString::from("-c"),
+        BString::from("echo $0"),
+        BString::from("custom_cmd_name"),
+        BString::from("arg1"),
+    ])
+    .unwrap();
+    let state_c_named = ShellState::with_args(parsed_c_named, FlatMap::new()).unwrap();
+    assert_eq!(state_c_named.get_var(BStr::new("0")), Some(BString::from("custom_cmd_name")));
+    assert_eq!(state_c_named.get_var(BStr::new("1")), Some(BString::from("arg1")));
+
+    // $0 defaults to argv[0] when invoked with -s
+    let parsed_s =
+        parse_args(&[BString::from("/boot/bin/zxsh"), BString::from("-s"), BString::from("pos1")])
+            .unwrap();
+    let state_s = ShellState::with_args(parsed_s, FlatMap::new()).unwrap();
+    assert_eq!(state_s.get_var(BStr::new("0")), Some(BString::from("/boot/bin/zxsh")));
+    assert_eq!(state_s.get_var(BStr::new("1")), Some(BString::from("pos1")));
 }

@@ -9,9 +9,11 @@ mod handle_types;
 mod object_type;
 mod rights;
 mod status;
+mod status_result;
 
 pub use self::handle::*;
 pub use self::handle_types::*;
 pub use self::object_type::*;
 pub use self::rights::*;
 pub use self::status::*;
+pub use self::status_result::*;

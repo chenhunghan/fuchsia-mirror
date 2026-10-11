@@ -107,6 +107,12 @@ impl RefCounted {
     }
 }
 
+impl Default for RefCounted {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Trait to be implemented by types that contain a `RefCounted` field.
 ///
 /// Used to locate the `RefCounted` field within a type.

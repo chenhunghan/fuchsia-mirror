@@ -47,6 +47,9 @@ pub struct Message<D: MessageData = Vec<u8>> {
     /// The address from which the message was sent.
     pub address: Option<SocketAddress>,
 
+    /// The Unix credentials associated with the message.
+    pub credentials: Option<uapi::ucred>,
+
     /// The ancillary data that is associated with this message.
     pub ancillary_data: Vec<AncillaryData>,
 }
@@ -56,9 +59,11 @@ impl<D: MessageData> Message<D> {
     pub fn new(
         data: D,
         address: Option<SocketAddress>,
+        credentials: Option<uapi::ucred>,
         ancillary_data: Vec<AncillaryData>,
     ) -> Self {
-        Message { data, address, ancillary_data }
+        debug_assert!(!ancillary_data.iter().any(AncillaryData::is_credentials));
+        Message { data, address, credentials, ancillary_data }
     }
 
     /// Returns the length of the message in bytes.
@@ -72,6 +77,7 @@ impl<D: MessageData> Message<D> {
         Message {
             data: self.data.clone_at_most(limit),
             address: self.address.clone(),
+            credentials: self.credentials,
             ancillary_data: self.ancillary_data.clone(),
         }
     }
@@ -82,11 +88,21 @@ impl<D: MessageData> Message<D> {
     pub fn truncate(&mut self, limit: usize) {
         self.data.truncate(limit);
     }
+
+    /// Splits the message at `index`, returning the remaining message if `index < self.len()`.
+    ///
+    /// The message's `address` and `credentials` metadata are preserved on the remaining message,
+    /// while one-shot ancillary data such as `SCM_RIGHTS` is only kept on `self`.
+    pub fn split_off(&mut self, index: usize) -> Option<Self> {
+        self.data.split_off(index).map(|remaining_data| {
+            Message::new(remaining_data, self.address.clone(), self.credentials, Vec::new())
+        })
+    }
 }
 
 impl<D: MessageData> From<D> for Message<D> {
     fn from(data: D) -> Self {
-        Message { data, address: None, ancillary_data: Vec::new() }
+        Message { data, address: None, credentials: None, ancillary_data: Vec::new() }
     }
 }
 
@@ -149,6 +165,19 @@ pub struct AncillaryDataConvertedToBytes {
 }
 
 impl AncillaryData {
+    /// Returns true if this ancillary data item represents `SCM_CREDENTIALS`.
+    pub fn is_credentials(&self) -> bool {
+        self.credentials().is_some()
+    }
+
+    /// Returns the `ucred` if this ancillary data item represents `SCM_CREDENTIALS`.
+    pub fn credentials(&self) -> Option<uapi::ucred> {
+        match self {
+            AncillaryData::Unix(UnixControlData::Credentials(creds)) => Some(*creds),
+            _ => None,
+        }
+    }
+
     /// Creates a new `AncillaryData` instance representing the data in `message`.
     ///
     /// # Parameters
@@ -441,12 +470,17 @@ impl UnixControlData {
         }
     }
 
+    /// Returns the default `ucred` used when `SO_PASSCRED` is enabled but no credentials were
+    /// captured when the message was sent.
+    pub fn unknown_ucred() -> uapi::ucred {
+        const NOBODY: u32 = 65534;
+        uapi::ucred { pid: 0, uid: NOBODY, gid: NOBODY }
+    }
+
     /// Returns a `UnixControlData` message that can be used when passcred is enabled but no
     /// credentials were sent.
     pub fn unknown_creds() -> Self {
-        const NOBODY: u32 = 65534;
-        let credentials = uapi::ucred { pid: 0, uid: NOBODY, gid: NOBODY };
-        UnixControlData::Credentials(credentials)
+        UnixControlData::Credentials(Self::unknown_ucred())
     }
 
     /// Constructs a ControlMsg for this control data, with a destination of `task`.

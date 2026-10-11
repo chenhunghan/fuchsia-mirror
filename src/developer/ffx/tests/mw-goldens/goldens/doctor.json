@@ -1,0 +1,73 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "DoctorResult",
+    "type": "object",
+    "properties": {
+        "steps": {
+            "$ref": "#/definitions/LedgerNode"
+        }
+    },
+    "required": [
+        "steps"
+    ],
+    "definitions": {
+        "LedgerNode": {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "$ref": "#/definitions/LedgerNodeValue"
+                },
+                "children": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/LedgerNode"
+                    }
+                }
+            },
+            "required": [
+                "value",
+                "children"
+            ]
+        },
+        "LedgerNodeValue": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "string"
+                },
+                "outcome": {
+                    "$ref": "#/definitions/LedgerOutcome"
+                },
+                "mode": {
+                    "$ref": "#/definitions/LedgerMode"
+                }
+            },
+            "required": [
+                "data",
+                "outcome",
+                "mode"
+            ]
+        },
+        "LedgerOutcome": {
+            "type": "string",
+            "enum": [
+                "valid_range_start",
+                "success",
+                "warning",
+                "failure",
+                "valid_range_end",
+                "automatic",
+                "soft_warning",
+                "info"
+            ]
+        },
+        "LedgerMode": {
+            "type": "string",
+            "enum": [
+                "normal",
+                "verbose",
+                "automatic"
+            ]
+        }
+    }
+}

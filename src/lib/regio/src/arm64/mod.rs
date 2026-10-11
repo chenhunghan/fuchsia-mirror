@@ -90,6 +90,16 @@ where
     }
 }
 
+impl<Spec, Layout> Default for SysReg<Spec, Layout>
+where
+    Spec: SystemRegisterSpec,
+    Layout: LayoutOver<u64>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An I/O backend for arm64 system registers.
 pub struct SysRegIo<Spec: SystemRegisterSpec>(PhantomData<Spec>);
 
@@ -99,6 +109,12 @@ impl<Spec: SystemRegisterSpec> SysRegIo<Spec> {
         // now.
         const { Spec::VALID };
         Self(PhantomData)
+    }
+}
+
+impl<Spec: SystemRegisterSpec> Default for SysRegIo<Spec> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

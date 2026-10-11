@@ -1,0 +1,104 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "sorted-vec-map",
+    srcs = [
+        "src/lib.rs",
+        "src/sorted_vec_map.rs",
+        "src/sorted_vec_set.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/starnix/modules/input:__subpackages__",
+        "//src/storage/ext4/lib/metadata:__pkg__",
+        "//src/sys/pkg/bin/pkg-cache:__pkg__",
+        "//src/sys/pkg/lib/system-image:__pkg__",
+        "//src/ui/bin/scene_manager:__pkg__",
+        "//src/ui/lib/input_pipeline:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+# TODO(https://fxbug.dev/566963647): Replace these targets with
+# `with_unit_tests` once it supports strings.
+#
+# The same unit test binary is wrapped for host runs below and packaged for
+# device runs. The tests are exported to GN via
+# `bazel_test_suite("sorted-vec-map-tests")` in BUILD.gn, so bazel2gn skips
+# them (it does not support `crate` on `rustc_test` or
+# `wrap_host_rust_test`).
+# @bazel2gn:skip
+rustc_test(
+    name = "sorted_vec_map_lib_test",
+    crate = ":sorted-vec-map",
+    edition = "2024",
+    deps = [
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:test-case",
+    ] + select({
+        # GN links fdio into every Fuchsia executable; Bazel does not.
+        # See https://fxbug.dev/42065890.
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)
+
+# @bazel2gn:skip
+wrap_host_rust_test(
+    name = "sorted-vec-map_test",
+    binary_name = "sorted_vec_map_lib_test",
+)
+
+fx_packaged_binary(
+    name = "sorted_vec_map_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":sorted_vec_map_lib_test",
+    binary_name = "sorted_vec_map_lib_test",
+)
+
+fx_component_manifest(
+    name = "sorted-vec-map-tests-manifest",
+    testonly = True,
+    component_name = "sorted-vec-map-tests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/sorted_vec_map_tests.cml",
+)
+
+fx_test_component(
+    name = "sorted-vec-map-tests-component",
+    compiled_manifest = ":sorted-vec-map-tests-manifest",
+    component_name = "sorted-vec-map-tests",
+    deps = [":sorted_vec_map_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "sorted-vec-map-tests-package",
+    package_name = "sorted-vec-map-tests",
+    test_components = [":sorted-vec-map-tests-component"],
+)
+
+fx_test(
+    name = "sorted-vec-map-tests",
+    package = ":sorted-vec-map-tests-package",
+)

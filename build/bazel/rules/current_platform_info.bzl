@@ -2,12 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Allow rule implementation functions to access the current build configuration's
-# operating system and cpu architecture names, using Fuchsia conventions.
-#
-# Sadly, it seems that it is not possible to directly access these using standard
-# Bazel mechanism, because constraint settings and constraint values do not act
-# as build settings.
+"""Allow rule implementation functions to access details about the
+current build configuration's platform details (os and cpu for now).
+
+The rule should use CURRENT_PLATFORM_ATTR_KWARGS in its `attrs` value
+then its implementation function can call get_current_platform() to
+retrieve the value. For example:
+
+load(
+  "//build/bazel/rules:current_platform_info.bzl",
+  "get_current_platform_info",
+  "CURRENT_PLATFORM_INFO_ATTRS",
+)
+
+def _my_rule_impl(ctx):
+    ...
+    current_platform = get_current_platform_info(ctx)
+    if current_platform.os == "fuchsia":
+        ...
+
+my_rule_impl = rule(
+    ...
+    attrs = {
+        ....
+    } | CURRENT_PLATFORM_INFO_ATTRS
+)
+"""
 
 CurrentPlatformInfo = provider(
     doc = """A provider exposing the current build configuration's os and cpu names.""",
@@ -16,6 +36,20 @@ CurrentPlatformInfo = provider(
         "cpu": "Target cpu architecture, using Fuchsia conventions.",
     },
 )
+
+CURRENT_PLATFORM_INFO_ATTRS = {
+    "_current_platform": attr.label(
+        doc = "Label to target providing CurrentPlatformInfo",
+        default = "@@//build/bazel:current_platform",
+        providers = [CurrentPlatformInfo],
+    ),
+}
+
+def get_current_platform_info(ctx):
+    """Return the CurrentPlatformInfo for this target's build configuration."""
+    return ctx.attr._current_platform[CurrentPlatformInfo]
+
+# Implementation details.
 
 def _current_platform_info_impl(ctx):
     return [

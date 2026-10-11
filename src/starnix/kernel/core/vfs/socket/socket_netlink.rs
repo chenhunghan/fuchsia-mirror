@@ -298,6 +298,9 @@ impl NetlinkSocketInner {
             return error!(EAGAIN);
         }
 
+        if let Some(creds) = info.credentials {
+            info.ancillary_data.insert(0, AncillaryData::Unix(UnixControlData::Credentials(creds)));
+        }
         if self.passcred {
             track_stub!(TODO("https://fxbug.dev/297373991"), "SCM_CREDENTIALS/SO_PASSCRED");
             info.ancillary_data.push(AncillaryData::Unix(UnixControlData::unknown_creds()));
@@ -310,14 +313,19 @@ impl NetlinkSocketInner {
         &mut self,
         data: &mut dyn InputBuffer,
         address: Option<NetlinkAddress>,
+        credentials: Option<ucred>,
         ancillary_data: &mut Vec<AncillaryData>,
     ) -> Result<usize, Errno> {
         let socket_address = match address {
             Some(addr) => Some(SocketAddress::Netlink(addr)),
             None => self.address.as_ref().map(|addr| SocketAddress::Netlink(addr.clone())),
         };
-        let bytes_written =
-            self.receive_buffer.write_datagram(data, socket_address, ancillary_data)?;
+        let bytes_written = self.receive_buffer.write_datagram(
+            data,
+            socket_address,
+            credentials,
+            ancillary_data,
+        )?;
         if bytes_written > 0 {
             self.waiters.notify_fd_events(FdEvents::POLLIN);
         }
@@ -620,15 +628,14 @@ pub fn send_fake_nflog_message(uid: u32) {
 
     // Broadcast to all listeners
     let listeners = NFLOG_LISTENERS.lock();
-    let ancillary_data = AncillaryData::Unix(UnixControlData::Credentials(Default::default()));
-    let mut ancillary_data = vec![ancillary_data];
 
     for listener in listeners.iter() {
         if let Some(socket) = listener.inner.upgrade() {
             let _ = socket.lock().write_to_queue(
                 &mut VecInputBuffer::new(&packet),
                 Some(NetlinkAddress { pid: 0, groups: 1 }),
-                &mut ancillary_data,
+                Some(Default::default()),
+                &mut Vec::new(),
             );
         }
     }
@@ -706,6 +713,7 @@ impl SocketOps for StubbedNetlinkSocket {
                     bytes_read,
                     message_length: msg_bytes.len(),
                     address: Some(SocketAddress::Netlink(NetlinkAddress::default())),
+                    credentials: None,
                     ancillary_data: vec![],
                 };
                 Ok(info)
@@ -742,7 +750,7 @@ impl SocketOps for StubbedNetlinkSocket {
             return Ok(data.drain());
         }
 
-        self.lock().write_to_queue(data, Some(NetlinkAddress::default()), ancillary_data)
+        self.lock().write_to_queue(data, Some(NetlinkAddress::default()), None, ancillary_data)
     }
 
     fn wait_async(
@@ -980,13 +988,12 @@ impl DeviceListener for Arc<LockDepMutex<NetlinkSocketInner, NetlinkSocketInnerL
         write!(&mut message, "{action}@/{path}\0", action = action, path = path).unwrap();
         message.extend_from_slice(flattened.as_ref());
 
-        let ancillary_data = AncillaryData::Unix(UnixControlData::Credentials(Default::default()));
-        let mut ancillary_data = vec![ancillary_data];
         // Ignore write errors
         let _ = self.lock().write_to_queue(
             &mut VecInputBuffer::new(&message),
             Some(NetlinkAddress { pid: 0, groups: 1 }),
-            &mut ancillary_data,
+            Some(Default::default()),
+            &mut Vec::new(),
         );
     }
 }
@@ -1060,6 +1067,7 @@ impl<M: Clone + NetlinkSerializable + Send> Sender<M> for NetlinkToClientSender<
                         .and_then(Result::<_, NoMappingFromModernToLegacyGroupError>::ok)
                         .map_or(0, |g| g.inner()),
                 }),
+                None,
                 &mut Vec::new(),
             )
             .unwrap_or_else(|e| {
@@ -1777,6 +1785,7 @@ impl SocketOps for AuditNetlinkSocket {
             bytes_read: size,
             message_length: size,
             address: Some(SocketAddress::Netlink(NetlinkAddress::default())),
+            credentials: None,
             ancillary_data: vec![],
         })
     }
@@ -1932,7 +1941,7 @@ mod tests {
 
         let mut sender = NetlinkToClientSender::<RouteNetlinkMessage>::new(socket_inner.clone());
         sender.send(message.clone(), Some(ModernGroup(MODERN_GROUP)));
-        let Message { data, address, ancillary_data: _ } =
+        let Message { data, address, credentials: _, ancillary_data: _ } =
             socket_inner.lock().read_message().expect("should read message");
 
         assert_eq!(

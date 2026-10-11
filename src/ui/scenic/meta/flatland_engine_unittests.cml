@@ -11,4 +11,10 @@
     program: {
         binary: "bin/flatland_engine_unittests",
     },
+    use: [
+        {
+            // Support for EXPECT_DEATH().
+            protocol: "fuchsia.process.Launcher",
+        },
+    ],
 }

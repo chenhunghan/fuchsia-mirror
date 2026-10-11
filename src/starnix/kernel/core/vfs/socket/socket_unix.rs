@@ -8,7 +8,8 @@ use crate::mm::MemoryAccessorExt;
 use crate::security;
 use crate::task::{CurrentTask, EventHandler, WaitCanceler, WaitQueue, Waiter};
 use crate::vfs::buffers::{
-    AncillaryData, InputBuffer, MessageQueue, MessageReadInfo, OutputBuffer, UnixControlData,
+    AncillaryData, InputBuffer, MessageQueue, MessageReadInfo, OutputBuffer, PasscredMode,
+    UnixControlData,
 };
 use crate::vfs::socket::{
     AcceptQueue, DEFAULT_LISTEN_BACKLOG, SockOptValue, Socket, SocketAddress, SocketBpfState,
@@ -113,7 +114,7 @@ struct UnixSocketInner {
     linger: uapi::linger,
 
     /// See SO_PASSCRED.
-    passcred: bool,
+    passcred: PasscredMode,
 
     /// See SO_PASSSEC.
     passsec: bool,
@@ -136,7 +137,8 @@ struct UnixSocketInner {
     /// See SO_ATTACH_BPF.
     bpf_program: Option<UnixSocketFilter>,
 
-    /// Unix credentials of the owner of this socket, for SO_PEERCRED.
+    /// Unix credentials of the peer of this socket, or of the listening socket itself, for
+    /// SO_PEERCRED.
     credentials: Option<ucred>,
 
     /// Socket state: a queue if this is a listening socket, or a peer if this is a connected
@@ -154,7 +156,7 @@ impl UnixSocket {
                 is_write_shutdown: false,
                 peer_closed_with_unread_data: false,
                 linger: uapi::linger::default(),
-                passcred: false,
+                passcred: PasscredMode::Disabled,
                 passsec: false,
                 broadcast: false,
                 no_check: false,
@@ -268,7 +270,7 @@ impl UnixSocket {
             )?;
             security::unix_stream_connect(current_task, socket, peer, &server)?;
             client.state = UnixSocketState::Connected(server.clone());
-            client.credentials = Some(current_task.current_ucred());
+            client.credentials = listener.credentials.clone();
             {
                 // This allow_subclass is safe because `server` is a newly created socket
                 // that hasn't been added to any public table or returned to the user yet.
@@ -278,7 +280,7 @@ impl UnixSocket {
                 server.state = UnixSocketState::Connected(socket.clone());
                 server.address = listener.address.clone();
                 server.messages.set_capacity(listener.messages.capacity())?;
-                server.credentials = listener.credentials.clone();
+                server.credentials = Some(current_task.current_ucred());
                 server.passcred = listener.passcred;
                 server.passsec = listener.passsec;
             }
@@ -383,12 +385,12 @@ impl UnixSocket {
         inner.linger = linger;
     }
 
-    fn get_passcred(&self) -> bool {
+    fn get_passcred(&self) -> PasscredMode {
         let inner = self.lock();
         inner.passcred
     }
 
-    fn set_passcred(&self, passcred: bool) {
+    fn set_passcred(&self, passcred: PasscredMode) {
         let mut inner = self.lock();
         inner.passcred = passcred;
     }
@@ -459,17 +461,7 @@ impl UnixSocket {
     }
 
     fn peer_cred(&self) -> Option<ucred> {
-        let peer = {
-            let inner = self.lock();
-            inner.peer().cloned()
-        };
-        if let Some(peer) = peer {
-            let unix_socket = downcast_socket_to_unix(&peer);
-            let unix_socket = unix_socket.lock();
-            unix_socket.credentials.clone()
-        } else {
-            None
-        }
+        self.lock().credentials.clone()
     }
 
     pub fn bind_socket_to_node(
@@ -526,20 +518,19 @@ impl SocketOps for UnixSocket {
             _ => return error!(EOPNOTSUPP),
         }
         let mut inner = self.lock();
-        inner.credentials = Some(credentials);
         let is_bound = inner.address.is_some();
         let backlog = if backlog < 0 { DEFAULT_LISTEN_BACKLOG } else { backlog as usize };
         match &mut inner.state {
             UnixSocketState::Disconnected if is_bound => {
                 inner.state = UnixSocketState::Listening(AcceptQueue::new(backlog));
-                Ok(())
             }
             UnixSocketState::Listening(queue) => {
                 queue.set_backlog(backlog)?;
-                Ok(())
             }
-            _ => error!(EINVAL),
+            _ => return error!(EINVAL),
         }
+        inner.credentials = Some(credentials);
+        Ok(())
     }
 
     fn accept(&self, socket: &Socket, _current_task: &CurrentTask) -> Result<SocketHandle, Errno> {
@@ -571,24 +562,37 @@ impl SocketOps for UnixSocket {
     fn read(
         &self,
         socket: &Socket,
-        _current_task: &CurrentTask,
+        current_task: &CurrentTask,
         data: &mut dyn OutputBuffer,
         flags: SocketMessageFlags,
     ) -> Result<MessageReadInfo, Errno> {
-        let info = self.lock().read(data, socket.socket_type, flags)?;
-        if info.bytes_read > 0 {
-            let peer = {
-                let inner = self.lock();
-                inner.peer().cloned()
-            };
-            if let Some(socket) = peer {
-                let unix_socket_peer = socket.downcast_socket::<UnixSocket>();
-                if let Some(socket) = unix_socket_peer {
-                    socket.waiters.notify_fd_events(FdEvents::POLLOUT);
-                }
+        let mut info = MessageReadInfo::default();
+        self.read_and_append(socket, current_task, &mut info, data, flags)?;
+        Ok(info)
+    }
+
+    fn read_and_append(
+        &self,
+        socket: &Socket,
+        _current_task: &CurrentTask,
+        read_info: &mut MessageReadInfo,
+        data: &mut dyn OutputBuffer,
+        flags: SocketMessageFlags,
+    ) -> Result<bool, Errno> {
+        let bytes_read_before = read_info.bytes_read;
+        let (can_coalesce, peer) = {
+            let mut inner = self.lock();
+            let can_coalesce = inner.read_and_append(read_info, data, socket.socket_type, flags)?;
+            let peer =
+                (read_info.bytes_read > bytes_read_before).then(|| inner.peer().cloned()).flatten();
+            (can_coalesce, peer)
+        };
+        if let Some(socket) = peer {
+            if let Some(socket) = socket.downcast_socket::<UnixSocket>() {
+                socket.waiters.notify_fd_events(FdEvents::POLLOUT);
             }
         }
-        Ok(info)
+        Ok(can_coalesce)
     }
 
     fn write(
@@ -599,12 +603,12 @@ impl SocketOps for UnixSocket {
         dest_address: &mut Option<SocketAddress>,
         ancillary_data: &mut Vec<AncillaryData>,
     ) -> Result<usize, Errno> {
-        let (connected_peer, local_address, creds, is_write_shutdown) = {
+        let (connected_peer, local_address, local_passcred, is_write_shutdown) = {
             let inner = self.lock();
             (
                 inner.peer().map(|p| p.clone()),
                 inner.address.clone(),
-                inner.credentials.clone(),
+                inner.passcred,
                 inner.is_write_shutdown,
             )
         };
@@ -615,6 +619,7 @@ impl SocketOps for UnixSocket {
 
         let peer = match (connected_peer, dest_address, socket.socket_type) {
             (Some(peer), None, _) => peer,
+            (Some(peer), Some(_), SocketType::SeqPacket) => peer,
             (None, Some(_), SocketType::Stream) => return error!(EOPNOTSUPP),
             (None, Some(_), SocketType::SeqPacket) => return error!(ENOTCONN),
             (Some(_), Some(_), _) => return error!(EISCONN),
@@ -625,24 +630,31 @@ impl SocketOps for UnixSocket {
             (None, None, _) => return error!(ENOTCONN),
         };
 
-        if socket.socket_type == SocketType::Datagram {
+        let dgram_security_context = if socket.socket_type == SocketType::Datagram {
             security::unix_may_send(current_task, socket, &peer)?;
-        }
+            // TODO: https://fxbug.dev/364568855 - Store the opaque LSM property value, and expand
+            // it to a string upon readmsg.
+            Some(security::socket_getpeersec_dgram(current_task, socket))
+        } else {
+            None
+        };
 
+        let peer_unaccepted = peer.fs_node().is_none();
         let unix_socket = downcast_socket_to_unix(&peer);
         let write_result = {
             let mut peer = unix_socket.lock();
-            if peer.passcred {
-                let creds = creds.unwrap_or_else(|| current_task.current_ucred());
-                ancillary_data.push(AncillaryData::Unix(UnixControlData::Credentials(creds)));
-            }
-            if socket.socket_type == SocketType::Datagram {
-                // TODO: https://fxbug.dev/364568855 - Store the opaque LSM property value, and expand
-                // it to a string upon readmsg.
-                let context = security::socket_getpeersec_dgram(current_task, socket);
-                ancillary_data.push(AncillaryData::Unix(UnixControlData::Security(context.into())));
-            }
-            peer.write(current_task, data, local_address, ancillary_data, socket.socket_type)
+            let default_creds =
+                (local_passcred.is_enabled() || peer.passcred.is_enabled() || peer_unaccepted)
+                    .then(|| current_task.current_ucred());
+            peer.write(
+                current_task,
+                data,
+                local_address,
+                default_creds,
+                dgram_security_context,
+                ancillary_data,
+                socket,
+            )
         };
 
         if let Err(ref err) = write_result {
@@ -891,7 +903,7 @@ impl SocketOps for UnixSocket {
                 }
                 SO_PASSCRED => {
                     let passcred: u32 = optval.read(current_task)?;
-                    self.set_passcred(passcred != 0);
+                    self.set_passcred(PasscredMode::from(passcred != 0));
                 }
                 SO_PASSSEC => {
                     let passsec: u32 = optval.read(current_task)?;
@@ -960,7 +972,7 @@ impl SocketOps for UnixSocket {
                 SO_SNDBUF => Ok((self.get_send_capacity() as socklen_t).to_ne_bytes().to_vec()),
                 SO_RCVBUF => Ok((self.get_receive_capacity() as socklen_t).to_ne_bytes().to_vec()),
                 SO_LINGER => Ok(self.get_linger().as_bytes().to_vec()),
-                SO_PASSCRED => Ok((self.get_passcred() as u32).as_bytes().to_vec()),
+                SO_PASSCRED => Ok((self.get_passcred().is_enabled() as u32).as_bytes().to_vec()),
                 SO_PASSSEC => Ok((self.get_passsec() as u32).as_bytes().to_vec()),
                 SO_BROADCAST => Ok((self.get_broadcast() as u32).as_bytes().to_vec()),
                 SO_NO_CHECK => Ok((self.get_no_check() as u32).as_bytes().to_vec()),
@@ -1070,9 +1082,9 @@ impl UnixSocketInner {
     ) -> Result<MessageReadInfo, Errno> {
         let (mut info, has_message) = if socket_type == SocketType::Stream {
             if flags.contains(SocketMessageFlags::PEEK) {
-                self.messages.peek_stream(data)?
+                self.messages.peek_stream(data, self.passcred)?
             } else {
-                self.messages.read_stream(data)?
+                self.messages.read_stream_with_passcred(data, self.passcred)?
             }
         } else if flags.contains(SocketMessageFlags::PEEK) {
             self.messages.peek_datagram(data)?
@@ -1090,22 +1102,13 @@ impl UnixSocketInner {
             }
         }
 
-        // Remove any credentials message, so that it can be moved to the front if passcred is
-        // enabled, or simply be removed if passcred is not enabled.
-        let creds_message;
-        if let Some(index) = info
-            .ancillary_data
-            .iter()
-            .position(|m| matches!(m, AncillaryData::Unix(UnixControlData::Credentials { .. })))
-        {
-            creds_message = info.ancillary_data.remove(index)
-        } else {
-            // If passcred is enabled credentials are returned even if they were not sent.
-            creds_message = AncillaryData::Unix(UnixControlData::unknown_creds());
-        }
-        if self.passcred {
+        if self.passcred.is_enabled() {
+            let creds = info.credentials.unwrap_or_else(UnixControlData::unknown_ucred);
+            info.credentials = Some(creds);
             // Allow credentials to take priority if they are enabled, so insert at 0.
-            info.ancillary_data.insert(0, creds_message);
+            info.ancillary_data.insert(0, AncillaryData::Unix(UnixControlData::Credentials(creds)));
+        } else {
+            info.credentials = None;
         }
 
         // Security labels are only delivered if passsec is currently enabled on this socket.
@@ -1115,6 +1118,27 @@ impl UnixSocketInner {
         }
 
         Ok(info)
+    }
+
+    fn read_and_append(
+        &mut self,
+        read_info: &mut MessageReadInfo,
+        data: &mut dyn OutputBuffer,
+        socket_type: SocketType,
+        flags: SocketMessageFlags,
+    ) -> Result<bool, Errno> {
+        if socket_type == SocketType::Stream
+            && !self.messages.can_coalesce_with(read_info, self.passcred)
+        {
+            return Ok(false);
+        }
+        let mut info = self.read(data, socket_type, flags)?;
+        let bytes_read = info.bytes_read;
+        read_info.append(&mut info);
+        if socket_type != SocketType::Stream || bytes_read == 0 {
+            return Ok(false);
+        }
+        Ok(self.messages.can_coalesce_with(read_info, self.passcred))
     }
 
     /// Writes the the contents of `InputBuffer` into this socket.
@@ -1130,11 +1154,13 @@ impl UnixSocketInner {
         current_task: &CurrentTask,
         data: &mut dyn InputBuffer,
         address: Option<SocketAddress>,
+        default_credentials: Option<ucred>,
+        dgram_security_context: Option<Vec<u8>>,
         ancillary_data: &mut Vec<AncillaryData>,
-        socket_type: SocketType,
+        socket: &Socket,
     ) -> Result<usize, Errno> {
         if matches!(self.state, UnixSocketState::Closed) {
-            if !socket_type.is_connection_oriented() {
+            if !socket.socket_type.is_connection_oriented() {
                 return error!(ECONNREFUSED);
             } else {
                 return error!(EPIPE);
@@ -1144,6 +1170,11 @@ impl UnixSocketInner {
             return error!(EPIPE);
         }
         let filter = |mut message: Message| {
+            if let Some(context) = dgram_security_context {
+                message
+                    .ancillary_data
+                    .push(AncillaryData::Unix(UnixControlData::Security(context.into())));
+            }
             let Some(bpf_program) = self.bpf_program.as_ref() else {
                 return Some(message);
             };
@@ -1160,10 +1191,22 @@ impl UnixSocketInner {
                 Some(message)
             }
         };
-        let bytes_written = if socket_type == SocketType::Stream {
-            self.messages.write_stream_with_filter(data, address, ancillary_data, filter)?
+        let bytes_written = if socket.socket_type == SocketType::Stream {
+            self.messages.write_stream_with_filter(
+                data,
+                address,
+                default_credentials,
+                ancillary_data,
+                filter,
+            )?
         } else {
-            self.messages.write_datagram_with_filter(data, address, ancillary_data, filter)?
+            self.messages.write_datagram_with_filter(
+                data,
+                address,
+                default_credentials,
+                ancillary_data,
+                filter,
+            )?
         };
         Ok(bytes_written)
     }

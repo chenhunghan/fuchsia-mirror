@@ -13,9 +13,7 @@ use zx_types::{
     ZX_SAMPLER_MAX_BUFFER_SIZE, ZX_SAMPLER_MIN_PERIOD, zx_sampler_config_t,
 };
 
-use crate::object::{
-    Dispatcher, HandleValue, ProcessDispatcher, SamplerDispatcher, validate_ranged_resource,
-};
+use crate::object::{HandleValue, ProcessDispatcher, SamplerDispatcher, validate_ranged_resource};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 
 const LOCAL_TRACE: u32 = 0;
@@ -77,7 +75,9 @@ pub fn sys_sampler_start(sampler_handle: HandleValue) -> Result<(), Status> {
 
     check_sampler_supported()?;
 
-    let sampler = Dispatcher::get_with_rights::<SamplerDispatcher>(sampler_handle, 0)?;
+    let sampler = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SamplerDispatcher>(up, sampler_handle, 0)
+    })?;
     sampler.start()?;
     Ok(())
 }
@@ -88,7 +88,9 @@ pub fn sys_sampler_stop(sampler_handle: HandleValue) -> Result<(), Status> {
 
     check_sampler_supported()?;
 
-    let sampler = Dispatcher::get_with_rights::<SamplerDispatcher>(sampler_handle, 0)?;
+    let sampler = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SamplerDispatcher>(up, sampler_handle, 0)
+    })?;
     sampler.stop()?;
     Ok(())
 }
@@ -104,7 +106,9 @@ pub fn sys_sampler_read(
 
     check_sampler_supported()?;
 
-    let sampler = Dispatcher::get_with_rights::<SamplerDispatcher>(sampler_handle, 0)?;
+    let sampler = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<SamplerDispatcher>(up, sampler_handle, 0)
+    })?;
     let (res, bytes_copied) = sampler.read_user(data, len);
 
     // We may have a partial read: some bytes were copied, but we received an error later on.

@@ -30,7 +30,7 @@ type FFXClient interface {
 	// High-level provisioning operations
 	SetupFfx(ctx context.Context, repoName string) error
 	ProductDownload(ctx context.Context, transferURL, outDir, authPath string) error
-	EmuStart(ctx context.Context, productDir, name, engine, device string) error
+	EmuStart(ctx context.Context, productDir, name, engine, device, gpu string) error
 	EmuStop(ctx context.Context) error
 	RepositoryCreate(ctx context.Context, repoDir string) error
 	RepositoryPublish(ctx context.Context, repoDir, productDir string, packageArchives []string) error
@@ -157,7 +157,7 @@ func (r *TestOrchestrator) Run(ctx context.Context, in *RunInput, testCmd []stri
 			}
 		} else if in.IsEmulator() {
 			fmt.Println("=== orchestrate - Starting Emulator (3/6) ===")
-			if err := r.startEmulator(ctx, productDir, in.Emulator.Engine, in.Emulator.Device); err != nil {
+			if err := r.startEmulator(ctx, productDir, in.Emulator.Engine, in.Emulator.Device, in.Emulator.Gpu); err != nil {
 				return fmt.Errorf("startEmulator: %w", err)
 			}
 			defer func() {
@@ -240,10 +240,10 @@ func (r *TestOrchestrator) flashDevice(ctx context.Context, productDir string) e
 	return nil
 }
 
-func (r *TestOrchestrator) startEmulator(ctx context.Context, productDir, engine, device string) error {
+func (r *TestOrchestrator) startEmulator(ctx context.Context, productDir, engine, device, gpu string) error {
 	emu_name := fmt.Sprintf("fuchsia-emulator-%d", os.Getpid())
 
-	if err := r.ffx.EmuStart(ctx, productDir, emu_name, engine, device); err != nil {
+	if err := r.ffx.EmuStart(ctx, productDir, emu_name, engine, device, gpu); err != nil {
 		return fmt.Errorf("ffx emu start: %w", err)
 	}
 

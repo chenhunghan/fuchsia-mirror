@@ -42,7 +42,6 @@ rustc_binary("fshost") {
     "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_rust",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",

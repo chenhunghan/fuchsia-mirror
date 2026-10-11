@@ -11,9 +11,9 @@ from datetime import datetime, timedelta
 
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion.controllers.access_point import setup_ap
-from antlion.controllers.ap_lib import hostapd_constants
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.access_point import setup_ap
+from legacy_access_point.ap_lib import hostapd_constants
+from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
 from mobly import asserts, signals, test_runner

@@ -98,7 +98,7 @@ struct BaseDirentSink<'a> {
 
 impl<'a> BaseDirentSink<'a> {
     fn add(&mut self, offset: off_t, buffer: &[u8]) -> Result<(), Errno> {
-        if self.actual + buffer.len() > self.user_capacity {
+        if self.user_capacity().is_none_or(|cap| self.actual + buffer.len() > cap) {
             return error!(ENOSPC);
         }
         self.current_task.write_memory((self.user_buffer + self.actual)?, buffer)?;
@@ -109,6 +109,12 @@ impl<'a> BaseDirentSink<'a> {
 
     fn offset(&self) -> off_t {
         *self.offset
+    }
+
+    // Validate `i32::MAX` lazily here rather than upfront in `sys_getdents`/`sys_getdents64` so
+    // `EBADF`, `ENOENT`, `EACCES`, and `ENOTDIR` checks in `FileObject::readdir` run first.
+    fn user_capacity(&self) -> Option<usize> {
+        if self.user_capacity > i32::MAX as usize { None } else { Some(self.user_capacity) }
     }
 
     // Converts result value received from `add()` to `getdents()` result.
@@ -182,7 +188,7 @@ impl DirentSink for DirentSink64<'_> {
     }
 
     fn user_capacity(&self) -> Option<usize> {
-        Some(self.base.user_capacity)
+        self.base.user_capacity()
     }
 }
 
@@ -274,7 +280,7 @@ mod x86_64 {
         }
 
         fn user_capacity(&self) -> Option<usize> {
-            Some(self.base.user_capacity)
+            self.base.user_capacity()
         }
     }
 }

@@ -424,68 +424,66 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 					}()
 				}
 			}
-			if experiments.Contains(botanist.UseFFXMonitor) {
-				ffx := primaryTarget.GetFFX()
-				port := strings.TrimSpace(os.Getenv(constants.FFXMonitorPort))
-				if len(port) == 0 {
-					logger.Warningf(ctx, "%s is empty, using default port %s", constants.FFXMonitorPort, constants.DefaultFFXMonitorPort)
-					port = constants.DefaultFFXMonitorPort
-				}
+			ffx := primaryTarget.GetFFX()
+			port := strings.TrimSpace(os.Getenv(constants.FFXMonitorPort))
+			if len(port) == 0 {
+				logger.Warningf(ctx, "%s is empty, using default port %s", constants.FFXMonitorPort, constants.DefaultFFXMonitorPort)
+				port = constants.DefaultFFXMonitorPort
+			}
 
-				const (
-					monitorName         = "ffx_monitor"
-					logFileName         = "device.status.json"
-					aggregationFilename = "aggregation.json"
-				)
+			const (
+				monitorName         = "ffx_monitor"
+				logFileName         = "device.status.json"
+				aggregationFilename = "aggregation.json"
+			)
 
-				// Create a new context for the monitor so that it isn't cancelled when the
-				// errgroup context is cancelled. This ensures that we can gracefully stop
-				// the monitor and flush logs.
-				monitorCtx, cancelMonitor := context.WithCancel(botanist.GetLoggerCtx(ctx))
+			// Create a new context for the monitor so that it isn't cancelled when the
+			// errgroup context is cancelled. This ensures that we can gracefully stop
+			// the monitor and flush logs.
+			monitorCtx, cancelMonitor := context.WithCancel(botanist.GetLoggerCtx(ctx))
 
-				// Stop the ffx monitor when done
-				defer func() {
-					// Use a separate timeout context for stopping
-					stopCtx, cancelStop := context.WithTimeout(botanist.GetLoggerCtx(ctx), time.Minute)
-					defer cancelStop()
-					if err := ffx.StopFFXMonitor(stopCtx); err != nil {
-						logger.Errorf(ctx, "failed to stop ffx monitor: %s", err)
-					} else {
-						logger.Debugf(ctx, "ffx monitor stopped")
-						// TODO(https://fxbug.dev/489556654): Move the writing of the summary.json to botanist
-						// Update summary.json to include the monitor aggregation file.
-						summaryPath := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), r.testrunnerOptions.OutDir, runtests.TestSummaryFilename)
-						if data, err := os.ReadFile(summaryPath); err == nil {
-							var summary runtests.TestSummary
-							if err := json.Unmarshal(data, &summary); err == nil {
-								summary.Tests = append(summary.Tests, runtests.TestDetails{
-									Name:      monitorName,
-									Status:    runtests.TestSuccess,
-									StartTime: time.Now(),
-									TestResult: runtests.TestResult{
-										OutputDir:   monitorName,
-										OutputFiles: []string{aggregationFilename},
-									},
-								})
-								if err := jsonutil.WriteToFile(summaryPath, summary); err != nil {
-									logger.Errorf(ctx, "failed to write updated summary.json: %s", err)
-								}
+			// Stop the ffx monitor when done
+			defer func() {
+				// Use a separate timeout context for stopping
+				stopCtx, cancelStop := context.WithTimeout(botanist.GetLoggerCtx(ctx), time.Minute)
+				defer cancelStop()
+				if err := ffx.StopFFXMonitor(stopCtx); err != nil {
+					logger.Errorf(ctx, "failed to stop ffx monitor: %s", err)
+				} else {
+					logger.Debugf(ctx, "ffx monitor stopped")
+					// TODO(https://fxbug.dev/489556654): Move the writing of the summary.json to botanist
+					// Update summary.json to include the monitor aggregation file.
+					summaryPath := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), r.testrunnerOptions.OutDir, runtests.TestSummaryFilename)
+					if data, err := os.ReadFile(summaryPath); err == nil {
+						var summary runtests.TestSummary
+						if err := json.Unmarshal(data, &summary); err == nil {
+							summary.Tests = append(summary.Tests, runtests.TestDetails{
+								Name:      monitorName,
+								Status:    runtests.TestSuccess,
+								StartTime: time.Now(),
+								TestResult: runtests.TestResult{
+									OutputDir:   monitorName,
+									OutputFiles: []string{aggregationFilename},
+								},
+							})
+							if err := jsonutil.WriteToFile(summaryPath, summary); err != nil {
+								logger.Errorf(ctx, "failed to write updated summary.json: %s", err)
 							}
 						}
 					}
-					cancelMonitor()
-				}()
-				go func() {
-					logDir := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), r.testrunnerOptions.OutDir, monitorName)
-					logFile := filepath.Join(logDir, logFileName)
-					aggregationsFile := filepath.Join(logDir, aggregationFilename)
-					if err := ffx.StartFFXMonitor(monitorCtx, port, logFile, aggregationsFile); err != nil && !errors.Is(err, context.Canceled) {
-						logger.Errorf(ctx, "failed to start ffx monitor: %s", err)
-					} else {
-						logger.Debugf(ctx, "ffx monitor process finished")
-					}
-				}()
-			}
+				}
+				cancelMonitor()
+			}()
+			go func() {
+				logDir := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), r.testrunnerOptions.OutDir, monitorName)
+				logFile := filepath.Join(logDir, logFileName)
+				aggregationsFile := filepath.Join(logDir, aggregationFilename)
+				if err := ffx.StartFFXMonitor(monitorCtx, port, logFile, aggregationsFile); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Errorf(ctx, "failed to start ffx monitor: %s", err)
+				} else {
+					logger.Debugf(ctx, "ffx monitor process finished")
+				}
+			}()
 		}
 
 		err = r.runAgainstTarget(ctx, primaryTarget, testsPath, testbedConfig, testbedConfigPath)
@@ -701,13 +699,8 @@ func (r *RunCommand) runAgainstTarget(ctx context.Context, t targets.FuchsiaTarg
 		testrunnerconstants.TestTimeoutScaleFactor: strconv.Itoa(r.testTimeoutScaleFactor),
 	}
 
-	if r.expectsSSH && botanist.GetExperiments(r.experiments).Contains(botanist.UseFFXMonitor) {
-		// The shared_data directory is currently only created when using ffx monitor
-		// so we should only add the env var if we expect it to exist.
-		testrunnerEnv[constants.FFXSharedDataEnvKey] = t.GetSharedData()
-	}
-
 	if r.expectsSSH {
+
 		ipv6, err := t.IPv6()
 		if err != nil {
 			return err
@@ -731,6 +724,8 @@ func (r *RunCommand) runAgainstTarget(ctx context.Context, t targets.FuchsiaTarg
 		// tools/integration/testsharder/task_requests.go registers the tools with
 		// test_sharder.
 		testrunnerEnv[constants.HostToolsEnvKey] = filepath.Dir(r.ffxPath)
+		// The shared data directory is created used by ffx monitor.
+		testrunnerEnv[constants.FFXSharedDataEnvKey] = t.GetSharedData()
 	}
 
 	// One would assume this should only be provisioned when paving, but

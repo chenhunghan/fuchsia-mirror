@@ -210,20 +210,6 @@ impl phy::WlanPhyLocalServerHandler for WlanPhyServer {
         }
     }
 
-    async fn power_down(&mut self, responder: Responder<phy::wlan_phy::PowerDown>) {
-        conn_log_method_call!(self.conn_id, "power_down");
-        if let Err(e) = responder.respond_err(Status::NOT_SUPPORTED).await {
-            conn_log_respond_error!(self.conn_id, "power_down", e);
-        }
-    }
-
-    async fn power_up(&mut self, responder: Responder<phy::wlan_phy::PowerUp>) {
-        conn_log_method_call!(self.conn_id, "power_up");
-        if let Err(e) = responder.respond_err(Status::NOT_SUPPORTED).await {
-            conn_log_respond_error!(self.conn_id, "power_up", e);
-        }
-    }
-
     async fn reset(&mut self, responder: Responder<phy::wlan_phy::Reset>) {
         conn_log_method_call!(self.conn_id, "reset");
         if let Err(e) = responder.respond_err(Status::NOT_SUPPORTED).await {

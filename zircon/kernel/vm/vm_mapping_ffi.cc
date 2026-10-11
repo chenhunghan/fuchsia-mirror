@@ -1,0 +1,69 @@
+// Copyright 2026 The Fuchsia Authors
+//
+// Use of this source code is governed by a MIT-style
+// license that can be found in the LICENSE file or at
+// https://opensource.org/licenses/MIT
+
+#include <zircon/types.h>
+
+#include <kernel/ffi.h>
+#include <ktl/utility.h>
+#include <vm/vm_address_region.h>
+#include <vm/vm_address_region_ffi.h>
+#include <vm/vm_object.h>
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" {
+FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
+    VmMapping* mapping) {
+  return mapping;
+}
+FFI_ALWAYS_INLINE void cpp_vm_mapping_free(VmMapping* mapping) { delete mapping; }
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping) {
+  return mapping->Destroy();
+}
+FFI_ALWAYS_INLINE const fbl::RefPtr<VmAspace>* cpp_vm_mapping_aspace(VmMapping* mapping) {
+  return &mapping->aspace();
+}
+FFI_ALWAYS_INLINE vaddr_t cpp_vm_mapping_base(VmMapping* mapping) { return mapping->base(); }
+FFI_ALWAYS_INLINE size_t cpp_vm_mapping_size(VmMapping* mapping) { return mapping->size(); }
+FFI_ALWAYS_INLINE uint32_t cpp_vm_mapping_flags(VmMapping* mapping) { return mapping->flags(); }
+FFI_ALWAYS_INLINE uint64_t cpp_vm_mapping_object_offset(VmMapping* mapping) {
+  return mapping->object_offset();
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_decommit_range(VmMapping* mapping, size_t offset,
+                                                            size_t len) {
+  return mapping->DecommitRange(offset, len);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_map_range(VmMapping* mapping, size_t offset,
+                                                       size_t len, bool commit,
+                                                       bool ignore_existing) {
+  return mapping->MapRange(offset, len, commit, ignore_existing);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_debug_unmap(VmMapping* mapping, vaddr_t base,
+                                                         size_t size) {
+  return mapping->DebugUnmap(base, size);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base,
+                                                           size_t size,
+                                                           arch_mmu_flags_t new_arch_mmu_flags) {
+  return mapping->DebugProtect(base, size, new_arch_mmu_flags);
+}
+FFI_ALWAYS_INLINE const VmObject* cpp_vm_mapping_vmo(VmMapping* mapping) {
+  fbl::RefPtr<VmObject> vmo = mapping->vmo();
+  return fbl::ExportToRawPtr(&vmo);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping,
+                                                            VmMapping** out_mapping) {
+  auto result = mapping->ForceWritable();
+  if (result.is_error()) {
+    return result.error_value();
+  }
+  auto res = *result;
+  *out_mapping = fbl::ExportToRawPtr(&res);
+  return ZX_OK;
+}
+FFI_ALWAYS_INLINE void cpp_vm_mapping_mark_mergeable(VmMapping* mapping) {
+  VmMapping::MarkMergeable(fbl::ImportFromRawPtr(mapping));
+}
+}  // extern "C"

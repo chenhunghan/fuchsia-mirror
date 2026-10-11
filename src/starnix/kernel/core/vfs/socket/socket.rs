@@ -19,7 +19,7 @@ use starnix_syscalls::{SyscallArg, SyscallResult};
 use starnix_types::time::{duration_from_timeval, timeval_from_duration};
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::as_any::AsAny;
-use starnix_uapi::auth::CAP_NET_RAW;
+use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_NET_RAW};
 use starnix_uapi::errors::{ENOTTY, Errno};
 use starnix_uapi::user_address::MappingMultiArchUserRef;
 use starnix_uapi::vfs::FdEvents;
@@ -27,8 +27,8 @@ use starnix_uapi::{
     SO_DOMAIN, SO_PROTOCOL, SO_RCVTIMEO, SO_SNDTIMEO, SO_TYPE, SOL_SOCKET, errno, error, uapi,
 };
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use zerocopy::FromBytes;
 
 pub const DEFAULT_LISTEN_BACKLOG: usize = 1024;
@@ -89,6 +89,21 @@ pub trait SocketOps: Send + Sync + AsAny {
         data: &mut dyn OutputBuffer,
         flags: SocketMessageFlags,
     ) -> Result<MessageReadInfo, Errno>;
+
+    /// Reads from the socket and appends to `read_info`, returning whether a `MSG_WAITALL` stream
+    /// read may continue waiting for more data.
+    fn read_and_append(
+        &self,
+        socket: &Socket,
+        current_task: &CurrentTask,
+        read_info: &mut MessageReadInfo,
+        data: &mut dyn OutputBuffer,
+        flags: SocketMessageFlags,
+    ) -> Result<bool, Errno> {
+        let mut info = self.read(socket, current_task, data, flags)?;
+        read_info.append(&mut info);
+        Ok(true)
+    }
 
     /// Writes the data in the provided user buffers to this socket.
     ///
@@ -220,6 +235,10 @@ pub struct Socket {
 
     state: LockDepMutex<SocketState, SocketStateLock>,
 
+    /// Reference to the [`crate::vfs::FsNode`] to which this `Socket` is attached.
+    /// Uninitialized until the `Socket` is wrapped into a [`crate::vfs::FileObject`].
+    fs_node: OnceLock<FsNodeHandle>,
+
     /// Security module state associated with this socket. Note that the socket's security label is
     /// applied to the associated `fs_node`.
     pub security: security::SocketState,
@@ -232,11 +251,6 @@ struct SocketState {
 
     /// The value for SO_SNDTIMEO.
     send_timeout: Option<zx::MonotonicDuration>,
-
-    /// Reference to the [`crate::vfs::FsNode`] to which this `Socket` is attached.
-    /// `None` until the `Socket` is wrapped into a [`crate::vfs::FileObject`] (e.g. while it is
-    /// still held in a listen queue).
-    fs_node: Option<FsNodeHandle>,
 
     /// Socket state passed to eBPF programs in `bpf_sock.state` field.
     /// TODO(https://fxbug.dev/549754529): State tracking logic is incomplete
@@ -299,6 +313,10 @@ fn create_socket_ops(
             Ok(Box::new(ZxioBackedSocket::new(current_task, domain, socket_type, protocol)?))
         }
         SocketDomain::Key => {
+            // Require CAP_NET_ADMIN to create key management sockets.
+            // See the "Deny capability { net_admin }" case in
+            // https://github.com/SELinuxProject/selinux-testsuite/blob/main/tests/key_socket/test.
+            security::check_task_capable(current_task, CAP_NET_ADMIN)?;
             track_stub!(
                 TODO("https://fxbug.dev/323365389"),
                 "Returning a UnixSocket instead of a KeySocket"
@@ -447,14 +465,13 @@ impl Socket {
             socket_type,
             protocol,
             state: Default::default(),
+            fs_node: OnceLock::new(),
             security: security::SocketState::default(),
         })
     }
 
     pub(super) fn set_fs_node(&self, node: &FsNodeHandle) {
-        let mut locked_state = self.state.lock();
-        assert!(locked_state.fs_node.is_none());
-        locked_state.fs_node = Some(node.clone());
+        assert!(self.fs_node.set(node.clone()).is_ok());
     }
 
     /// Returns the Socket that this FileHandle refers to. If this file is not a socket file,
@@ -600,6 +617,16 @@ impl Socket {
         self.ops.read(self, current_task, data, flags)
     }
 
+    pub(super) fn read_and_append_unchecked(
+        &self,
+        current_task: &CurrentTask,
+        read_info: &mut MessageReadInfo,
+        data: &mut dyn OutputBuffer,
+        flags: SocketMessageFlags,
+    ) -> Result<bool, Errno> {
+        self.ops.read_and_append(self, current_task, read_info, data, flags)
+    }
+
     pub fn write(
         &self,
         current_task: &CurrentTask,
@@ -608,6 +635,16 @@ impl Socket {
         ancillary_data: &mut Vec<AncillaryData>,
     ) -> Result<usize, Errno> {
         security::check_socket_sendmsg_access(current_task, self)?;
+        self.write_unchecked(current_task, data, dest_address, ancillary_data)
+    }
+
+    pub(super) fn write_unchecked(
+        &self,
+        current_task: &CurrentTask,
+        data: &mut dyn InputBuffer,
+        dest_address: &mut Option<SocketAddress>,
+        ancillary_data: &mut Vec<AncillaryData>,
+    ) -> Result<usize, Errno> {
         self.ops.write(self, current_task, data, dest_address, ancillary_data)
     }
 
@@ -650,8 +687,8 @@ impl Socket {
     /// Returns the [`crate::vfs::FsNode`] unique to this `Socket`.
     // TODO: https://fxbug.dev/414583985 - Create `FsNode` at `Socket` creation and make this
     // infallible.
-    pub fn fs_node(&self) -> Option<FsNodeHandle> {
-        self.state.lock().fs_node.clone()
+    pub fn fs_node(&self) -> Option<&FsNodeHandle> {
+        self.fs_node.get()
     }
 
     pub fn bpf_state(&self) -> SocketBpfState {

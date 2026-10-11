@@ -180,7 +180,6 @@ impl FshostBuilder {
             ("starnix_volume_name", "fuchsia.fshost.StarnixVolumeName"),
             ("inline_crypto", "fuchsia.fshost.InlineCrypto"),
             ("provision_fxfs", "fuchsia.fshost.ProvisionFxfs"),
-            ("watch_deprecated_v1_drivers", "fuchsia.fshost.WatchDeprecatedV1Drivers"),
         ]);
 
         if self.create_starnix_volume_crypt {

@@ -13,7 +13,7 @@ use product_bundle::{ProductBundle, Type};
 use schemars::JsonSchema;
 use sdk_metadata::VirtualDeviceManifest;
 use serde::{Deserialize, Serialize};
-use utf8_path::path_relative_from;
+use utf8_path as _;
 
 mod args;
 pub use args::GetArtifactsCommand;
@@ -104,8 +104,11 @@ impl PbGetArtifactsTool {
 
     fn compute_path(&self, artifact_path: &Utf8Path) -> Result<Utf8PathBuf> {
         if self.cmd.relative_path {
-            path_relative_from(artifact_path, &self.cmd.product_bundle.as_ref().unwrap())
-                .map_err(Into::into)
+            product_bundle::relativize_bundle_path(
+                self.cmd.product_bundle.as_ref().unwrap(),
+                artifact_path,
+            )
+            .map_err(Into::into)
         } else {
             Ok(artifact_path.into())
         }
@@ -224,8 +227,12 @@ impl PbGetArtifactsTool {
             artifacts.push(self.compute_path(&path)?);
 
             // Also append the virtual device paths mentioned in manifest
-            let virtual_device =
-                VirtualDeviceManifest::from_path(&product_bundle.virtual_devices_path)?;
+            let pb_source = self.cmd.product_bundle.as_deref().unwrap_or_else(|| Utf8Path::new(""));
+            let virtual_device: VirtualDeviceManifest =
+                product_bundle::load_virtual_device_manifest(
+                    pb_source,
+                    &product_bundle.virtual_devices_path,
+                )?;
             let devices = virtual_device.device_paths.values().cloned();
             for device in devices {
                 artifacts.push(
@@ -866,5 +873,48 @@ mod tests {
         expected_artifacts.dedup();
 
         assert_eq!(expected_artifacts, artifacts);
+    }
+
+    #[fuchsia::test]
+    async fn test_get_artifacts_gcs_dir_and_zip() {
+        let env = ffx_config::test_init().expect("test env");
+        let make_pb = |zbi: &str| {
+            ProductBundle::V2(ProductBundleV2 {
+                product_name: "gcs".to_string(),
+                product_version: "1".to_string(),
+                partitions: PartitionsConfig::default(),
+                sdk_version: "1".to_string(),
+                system_a: Some(vec![Image::ZBI { path: Utf8PathBuf::from(zbi), signed: false }]),
+                system_b: None,
+                system_r: None,
+                platform_tools_a: vec![],
+                platform_tools_b: vec![],
+                platform_tools_r: vec![],
+                repositories: vec![],
+                update_package_hash: None,
+                virtual_devices_path: None,
+                release_info: None,
+            })
+        };
+        let dir_pb = make_pb("gs://my-bucket/pb/system_a/fuchsia.zbi");
+        let zip_pb = make_pb("system_a/fuchsia.zbi");
+        for (pb, pb_arg, rel, want_zbi) in [
+            (&dir_pb, "gs://my-bucket/pb", false, "gs://my-bucket/pb/system_a/fuchsia.zbi"),
+            (&dir_pb, "gs://my-bucket/pb", true, "system_a/fuchsia.zbi"),
+            (&zip_pb, "gs://my-bucket/pb.zip", true, "system_a/fuchsia.zbi"),
+        ] {
+            let tool = PbGetArtifactsTool {
+                cmd: GetArtifactsCommand {
+                    product_bundle: Some(Utf8PathBuf::from(pb_arg)),
+                    relative_path: rel,
+                    artifacts_group: Type::Flash,
+                },
+                env: env.context.clone(),
+            };
+            assert_eq!(
+                tool.extract_flashing_artifacts(pb.clone()).unwrap(),
+                vec!["product_bundle.json".to_string(), want_zbi.to_string()]
+            );
+        }
     }
 }

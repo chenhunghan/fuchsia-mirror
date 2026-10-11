@@ -40,10 +40,24 @@ unsafe extern "C" {
     /// `thread` must point to an initialized `ThreadDispatcher`.
     pub(crate) fn cpp_test_thread_is_dying_or_dead(thread: *const ThreadDispatcher) -> bool;
 
+    /// Starts the singleton `RootJobObserver` watching the root job.
+    ///
+    /// # Safety
+    ///
+    /// Must be called once during userboot initialization after the root job has at least one child.
+    pub(crate) fn cpp_start_root_job_observer();
+
     /// Checks if a process is in RUNNING state.
     ///
     /// # Safety
     ///
     /// `process` must point to an initialized `ProcessDispatcher`.
     pub(crate) fn cpp_test_process_is_running(process: *const ProcessDispatcher) -> bool;
+}
+
+/// Starts the `RootJobObserver`. Must be called after the root job has at least one child process
+/// or child job.
+pub fn start_root_job_observer() {
+    // SAFETY: `cpp_start_root_job_observer` starts the root job observer during userboot init.
+    unsafe { cpp_start_root_job_observer() }
 }

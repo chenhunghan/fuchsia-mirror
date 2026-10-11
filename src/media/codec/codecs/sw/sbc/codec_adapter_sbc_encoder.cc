@@ -90,10 +90,11 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
       events_->onCoreCodecMidStreamOutputConstraintsChange(
           /*output_re_config_required=*/true);
     } else if (input_item.is_end_of_stream()) {
-      ZX_DEBUG_ASSERT(context_);
-      if (EncodeInput(nullptr) == kShouldTerminate) {
-        // A failure was reported through `events_` or the stream was stopped.
-        return;
+      if (context_) {
+        if (EncodeInput(nullptr) == kShouldTerminate) {
+          // A failure was reported through `events_` or the stream was stopped.
+          return;
+        }
       }
       events_->onCoreCodecOutputEndOfStream(/*error_detected_before=*/false);
     } else if (input_item.is_packet()) {
@@ -185,11 +186,10 @@ CodecAdapterSbcEncoder::CoreCodecGetBufferCollectionConstraints2(
     per_packet_buffer_bytes_min = kInputPerPacketBufferBytesMin;
     per_packet_buffer_bytes_max = kInputPerPacketBufferBytesMax;
   } else {
-    ZX_ASSERT(context_.has_value());
-    ZX_ASSERT(context_->sbc_frame_length() <= std::numeric_limits<uint32_t>::max());
+    ZX_ASSERT(min_output_buffer_size_.has_value());
     ZX_DEBUG_ASSERT(port == kOutputPort);
 
-    per_packet_buffer_bytes_min = static_cast<uint32_t>(context_->sbc_frame_length());
+    per_packet_buffer_bytes_min = *min_output_buffer_size_;
     // At least for now, don't cap the per-packet buffer size for output.
     per_packet_buffer_bytes_max = 0xFFFFFFFF;
   }
@@ -318,6 +318,11 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
        .is_msbc = is_msbc,
        .params = params,
        .precomputed_sbc_frame_length = Context::ComputeSbcFrameLength(channel_mode, params)}};
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    ZX_ASSERT(context_->sbc_frame_length() <= std::numeric_limits<uint32_t>::max());
+    min_output_buffer_size_ = static_cast<uint32_t>(context_->sbc_frame_length());
+  }
   chunk_input_stream_.emplace(
       context_->pcm_batch_size(),
       format_details.has_timebase()

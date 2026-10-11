@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use super::dispatcher::{
-    Dispatcher, DispatcherOps, PeerHolder, PeerHolderMuClass, PeeredState,
+    DispatcherOps, PeerHolder, PeerHolderMuClass, PeeredState,
     impl_peered_dispatcher_facade_with_state,
 };
 use super::handle::{HandleValue, KernelHandle};
@@ -13,6 +13,7 @@ use super::io_buffer_dispatcher_ffi::{
     cpp_io_buffer_dispatcher_as_child_observer, cpp_io_buffer_dispatcher_create,
 };
 use super::io_buffer_shared_region_dispatcher::IoBufferSharedRegionDispatcher;
+use super::process_dispatcher::ProcessDispatcher;
 use super::vm_object_dispatcher::VmObjectDispatcher;
 use crate::counters::define_kcounter;
 use crate::kernel::koid;
@@ -598,10 +599,13 @@ impl IoBufferDispatcher {
                 if shared_region.options != 0 || region_config.size != 0 {
                     return Err(Status::INVALID_ARGS);
                 }
-                let sr = Dispatcher::get_with_rights::<IoBufferSharedRegionDispatcher>(
-                    HandleValue::new(shared_region.shared_region),
-                    ZX_RIGHT_NONE,
-                )?;
+                let sr = ProcessDispatcher::with_current(|up| {
+                    up.handle_table().get_dispatcher_with_rights::<IoBufferSharedRegionDispatcher>(
+                        up,
+                        HandleValue::new(shared_region.shared_region),
+                        ZX_RIGHT_NONE,
+                    )
+                })?;
                 let vmo = sr.vmo();
                 let paged_vmo =
                     VmObject::downcast_paged(vmo.clone()).ok_or(Status::INVALID_ARGS)?;
@@ -723,7 +727,7 @@ impl IoBufferDispatcher {
                     kernel_vmo,
                     0,
                     ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-                    c"IOBuffer region (ID allocator)",
+                    b"IOBuffer region (ID allocator)",
                 )?;
                 let allocator = IobRegionIdAllocator::new(
                     ep0_vmo,

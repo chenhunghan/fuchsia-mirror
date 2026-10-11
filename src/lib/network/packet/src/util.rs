@@ -190,6 +190,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString as _;
 
     impl<T> MaybeParsed<T, T> {
         /// Creates a `MaybeParsed` instance taking `n` bytes from the front of

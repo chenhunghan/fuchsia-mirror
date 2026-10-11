@@ -86,12 +86,11 @@ zx_status_t MapUnalignedRegion(VmAspace* aspace, paddr_t base, size_t size, cons
     return status;
   }
 
-  if (arch_mmu_flags & ARCH_MMU_FLAG_UNCACHED_DEVICE) {
-    status = vmo->SetMappingCachePolicy(ZX_CACHE_POLICY_UNCACHED_DEVICE);
-    if (status != ZX_OK) {
-      return status;
-    }
+  status = vmo->SetMappingCachePolicy(arch_mmu_flags & ARCH_MMU_FLAG_CACHE_MASK);
+  if (status != ZX_OK) {
+    return status;
   }
+  arch_mmu_flags &= ~ARCH_MMU_FLAG_CACHE_MASK;
 
   uint32_t vmar_flags = VMAR_FLAG_SPECIFIC_OVERWRITE;
   if (arch_mmu_flags & ARCH_MMU_FLAG_PERM_READ) {
@@ -207,16 +206,19 @@ zx_status_t InitEfiServices(uint64_t efi_system_table) {
         // are allowed to be set.
         //
         // We assume double-negatives apply sensibly: "not read-only" implies
-        // writable and "not execute-protected" implies executable.
+        // writable and "not execute-protected" implies executable (except for
+        // MMIO, which is never executable).
         arch_mmu_flags_t arch_mmu_flags = ARCH_MMU_FLAG_PERM_READ;
         if ((desc->Attribute & EFI_MEMORY_RO) == 0) {
           arch_mmu_flags |= ARCH_MMU_FLAG_PERM_WRITE;
         }
-        if ((desc->Attribute & EFI_MEMORY_XP) == 0) {
-          arch_mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
-        }
         if (desc->Type == EfiMemoryMappedIO) {
           arch_mmu_flags |= ARCH_MMU_FLAG_UNCACHED_DEVICE;
+        } else {
+          arch_mmu_flags |= ARCH_MMU_FLAG_CACHED;
+          if ((desc->Attribute & EFI_MEMORY_XP) == 0) {
+            arch_mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
+          }
         }
 
         zx_status_t result =

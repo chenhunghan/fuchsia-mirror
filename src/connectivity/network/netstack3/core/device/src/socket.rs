@@ -16,7 +16,7 @@ use netstack3_base::socket::SocketCookie;
 use netstack3_base::sync::{Mutex, PrimaryRc, RwLock, StrongRc, WeakRc};
 use netstack3_base::{
     AnyDevice, ContextPair, Counter, Device, DeviceIdContext, FrameDestination, Inspectable,
-    Inspector, InspectorDeviceExt, InspectorExt, NetworkSerializer, ReferenceNotifiers,
+    Inspector, InspectorDeviceExt, InspectorExt, NetworkSerializer, PacketType, ReferenceNotifiers,
     ReferenceNotifiersExt as _, RemoveResourceResultWithContext, ResourceCounterContext,
     SendFrameContext, SendFrameErrorReason, StrongDeviceIdentifier, TxMetadataBindingsTypes,
     WeakDeviceIdentifier as _,
@@ -691,6 +691,8 @@ pub enum ReceivedFrame<B> {
         destination: FrameDestination,
         /// The parsed ethernet frame.
         frame: EthernetFrame<B>,
+        /// The packet type.
+        packet_type: PacketType,
     },
     /// An IP frame received on a device.
     ///
@@ -755,7 +757,11 @@ impl<B> IpFrame<B> {
     }
 }
 
-/// A frame sent or received on a device
+// All packets received through pure_ip device are marked with
+// `PacketType::Host` (i.e. `PACKET_HOST`).
+pub const PURE_IP_PACKET_TYPE: PacketType = PacketType::Host;
+
+/// A frame sent or received on a device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Frame<B> {
     /// A sent frame.
@@ -792,17 +798,31 @@ impl<'a> ReceivedFrame<&'a [u8]> {
     pub(crate) fn from_ethernet(
         frame: packet_formats::ethernet::EthernetFrame<&'a [u8]>,
         destination: FrameDestination,
+        packet_type: PacketType,
     ) -> Self {
-        Self::Ethernet { destination, frame: frame.into() }
+        Self::Ethernet { destination, frame: frame.into(), packet_type }
     }
 }
 
 impl<B> Frame<B> {
+    /// Returns the packet type for the frame.
+    pub fn packet_type(&self) -> PacketType {
+        match self {
+            Self::Sent(_) => PacketType::Outgoing,
+            Self::Received(ReceivedFrame::Ethernet { destination: _, frame: _, packet_type }) => {
+                *packet_type
+            }
+            Self::Received(ReceivedFrame::Ip(_)) => PURE_IP_PACKET_TYPE,
+        }
+    }
+
     /// Returns ether type for the packet if it's known.
     pub fn protocol(&self) -> Option<u16> {
         let ethertype = match self {
             Self::Sent(SentFrame::Ethernet(frame))
-            | Self::Received(ReceivedFrame::Ethernet { destination: _, frame }) => frame.ethertype,
+            | Self::Received(ReceivedFrame::Ethernet { destination: _, frame, packet_type: _ }) => {
+                frame.ethertype
+            }
             Self::Sent(SentFrame::Ip(frame)) | Self::Received(ReceivedFrame::Ip(frame)) => {
                 Some(frame.ethertype())
             }
@@ -813,7 +833,7 @@ impl<B> Frame<B> {
     /// Convenience method for consuming the `Frame` and producing the body.
     pub fn into_body(self) -> B {
         match self {
-            Self::Received(ReceivedFrame::Ethernet { destination: _, frame })
+            Self::Received(ReceivedFrame::Ethernet { destination: _, frame, packet_type: _ })
             | Self::Sent(SentFrame::Ethernet(frame)) => frame.body,
             Self::Received(ReceivedFrame::Ip(frame)) | Self::Sent(SentFrame::Ip(frame)) => {
                 frame.body
@@ -824,7 +844,7 @@ impl<B> Frame<B> {
     /// Returns the offset of the body within the frame.
     pub fn body_offset(&self) -> usize {
         match self {
-            Self::Received(ReceivedFrame::Ethernet { destination: _, frame })
+            Self::Received(ReceivedFrame::Ethernet { destination: _, frame, packet_type: _ })
             | Self::Sent(SentFrame::Ethernet(frame)) => frame.body_offset,
             Self::Received(ReceivedFrame::Ip(_)) | Self::Sent(SentFrame::Ip(_)) => 0,
         }
@@ -1019,12 +1039,15 @@ mod testutil {
                 Self::Sent(SentFrame::Ethernet(frame)) => {
                     Frame::Sent(SentFrame::Ethernet(frame.cloned()))
                 }
-                Self::Received(super::ReceivedFrame::Ethernet { destination, frame }) => {
-                    Frame::Received(super::ReceivedFrame::Ethernet {
-                        destination,
-                        frame: frame.cloned(),
-                    })
-                }
+                Self::Received(super::ReceivedFrame::Ethernet {
+                    destination,
+                    frame,
+                    packet_type,
+                }) => Frame::Received(super::ReceivedFrame::Ethernet {
+                    destination,
+                    frame: frame.cloned(),
+                    packet_type,
+                }),
                 Self::Sent(SentFrame::Ip(frame)) => Frame::Sent(SentFrame::Ip(frame.cloned())),
                 Self::Received(super::ReceivedFrame::Ip(frame)) => {
                     Frame::Received(super::ReceivedFrame::Ip(frame.cloned()))
@@ -1748,6 +1771,7 @@ mod tests {
             super::ReceivedFrame::from_ethernet(
                 TestData::frame(),
                 FrameDestination::Individual { local: true },
+                PacketType::Host,
             )
             .into(),
             &mut ctx,
@@ -1880,6 +1904,7 @@ mod tests {
                 super::ReceivedFrame::from_ethernet(
                     TestData::frame(),
                     FrameDestination::Individual { local: true },
+                    PacketType::Host,
                 )
                 .into(),
                 TestData::BUFFER,
@@ -1912,7 +1937,8 @@ mod tests {
                             ethertype: Some(TestData::PROTO.get().into()),
                             body_offset: TestData::BUFFER_OFFSET,
                             body: Vec::from(TestData::BODY),
-                        }
+                        },
+                        packet_type: PacketType::Host,
                     }),
                     raw: TestData::BUFFER.into()
                 };
@@ -1951,6 +1977,7 @@ mod tests {
             super::ReceivedFrame::from_ethernet(
                 TestData::frame(),
                 FrameDestination::Individual { local: true },
+                PacketType::Host,
             )
             .into(),
             TestData::BUFFER,

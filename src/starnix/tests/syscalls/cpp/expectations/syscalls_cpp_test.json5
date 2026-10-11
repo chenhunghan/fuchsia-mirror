@@ -12,10 +12,6 @@
                 // TODO(https://fxbug.dev/493672905): Bug in Starnix invalidation handling.
                 "FuseServerTest.InvalidateMountDir",
 
-                // TODO(https://fxbug.dev/342416456): Rework the test to take
-                // into account logs from the system.
-                "SyslogTest.ProcKmsgPoll",
-
                 // TODO(https://fxbug.dev/391599171): Some features of userfaultfd that Starnix
                 // can't support with its current implementation. Enable as support is extended.
                 "UffdTest.PopulateFromAnotherUffd",
@@ -64,6 +60,11 @@
         {
             type: "expect_failure",
             matchers: [
+                // TODO(https://fxbug.dev/567514429): `loop` sysfs attribute group is created on
+                // device creation rather than when a backing file is attached, and not removed on
+                // LOOP_CLR_FD.
+                "LoopTest.SysfsLoopDirectoryLifecycle",
+
                 // TODO(https://fxbug.dev/564489293): Target error does not deliver EPOLLERR.
                 "EpollTest.TargetErrorDeliversEpollErr",
 
@@ -88,10 +89,6 @@
 
                 // TODO(https://fxbug.dev/297438799)
                 "MmapTest.CanMprotectNonExecMmapToExecutable",
-
-                // TODO(https://fxbug.dev/42179751): Make these tests pass in Starnix.
-                "MapGrowsdownTest.SyscallReadsBelowGrowsdown",
-                "MapGrowsdownTest.SyscallWritesBelowGrowsdown",
 
                 // TODO(https://fxbug.dev/297438799)
                 "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_rwx",
@@ -138,9 +135,6 @@
 
                 // TODO(https://fxbug.dev/495916611)
                 "ProcfsTest.ProcSysNetInvalidWriteReturnsEinval",
-
-                // TODO(https://fxbug.dev/566141223)
-                "ProcTaskDirTest.PidDirNotAccessibleAfterExitWithOpenChildFd",
 
                 // TODO(https://fxbug.dev/394934526)
                 "PtraceThreadTracerTest.SiblingThreadCannotIssuePtraceCommands",
@@ -199,6 +193,15 @@
                 // quietly succeeds on writes instead of issuing EINVAL.
                 "SysctlTest/SysctlNodeTest.CapDacOverrideHasNoEffectOnRootWrite/kernel_modules_disabled",
                 "SysctlTest/SysctlNodeTest.RootCanWriteWithoutCapDacOverrideAndNetAdmin/kernel_modules_disabled",
+
+                // TODO(https://fxbug.dev/565365826): Unlinking the watched hard link first still pins its
+                // DirEntryHandle in InotifyState::watches.
+                "InotifyTest.UnlinkWatchedHardLinkFirstEmitsDeleteSelfOnLastUnlink",
+
+                // TODO(https://fxbug.dev/397371605): Align RLIMIT_* defaults with Linux.
+                "KernelDefaults/RLimitDefaultTest.CurAndMaxDefaults/NOFILE",
+                "KernelDefaults/RLimitDefaultTest.CurAndMaxDefaults/STACK",
+                "RLimitScaledDefaultTest.NProcAndSigpending",
             ],
         },
     ],

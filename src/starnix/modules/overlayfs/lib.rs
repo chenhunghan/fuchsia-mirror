@@ -18,9 +18,9 @@ use starnix_core::vfs::{
     DirectoryEntryType, DirectoryMode, DirentSink, FallocMode, FileHandle, FileObject, FileOps,
     FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode,
     FsNodeFlags, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo,
-    OutputBuffer, RenameContext, RenameFlags, SeekTarget, SymlinkTarget, UnlinkKind, ValueOrSize,
-    VecInputBuffer, VecOutputBuffer, XattrOp, default_seek, emit_dotdot, fileops_impl_directory,
-    fileops_impl_noop_sync, fileops_impl_seekable,
+    OutputBuffer, RenameContext, RenameFlags, SeekTarget, StatxFlags, SymlinkTarget, UnlinkKind,
+    ValueOrSize, VecInputBuffer, VecOutputBuffer, XattrOp, default_seek, emit_dotdot,
+    fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_seekable,
 };
 use starnix_logging::{log_error, log_warn, track_stub};
 use starnix_sync::{
@@ -556,7 +556,7 @@ impl FsNodeOps for OverlayNodeOps {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -605,7 +605,7 @@ impl FsNodeOps for OverlayNodeOps {
                 return error!(ENOENT);
             }
 
-            Ok(self.node.init_fs_node_for_child(node, lower, upper))
+            Ok(self.node.init_fs_node_for_child(&entry.node, lower, upper))
         })
     }
 
@@ -761,13 +761,15 @@ impl FsNodeOps for OverlayNodeOps {
         _node: &FsNode,
         current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
+        flags: StatxFlags,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
         self.node.as_mounter(current_task, || {
             let underlying_node = &self.node.main_entry().entry().node;
             // Work-around to ensure that mounter `getattr` access is required when a caller tries
             // to `stat()` a file.
             security::check_fs_node_getattr_access(current_task, underlying_node)?;
-            let real_info = underlying_node.fetch_and_refresh_info(current_task)?.clone();
+            let real_info =
+                underlying_node.fetch_and_refresh_info_with_flags(current_task, flags)?.clone();
             let mut lock = info.write();
             *lock = real_info;
             Ok(LockDepWriteGuard::downgrade(lock))

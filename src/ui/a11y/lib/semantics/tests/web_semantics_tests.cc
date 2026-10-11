@@ -185,10 +185,12 @@ class WebSemanticsTest : public SemanticsIntegrationTestV2 {
                        .targets = {ChildRef{kMemoryPressureSignaler}, ChildRef{kWebView}}});
     realm()->AddRoute({.capabilities = {Protocol{fuchsia::kernel::RootJobForInspect::Name_},
                                         Protocol{fuchsia::kernel::Stats::Name_},
-                                        Protocol{fuchsia::scheduler::RoleManager::Name_},
                                         Protocol{fuchsia::tracing::provider::Registry::Name_}},
                        .source = ParentRef(),
                        .targets = {ChildRef{kMemoryPressureSignaler}}});
+    realm()->AddRoute({.capabilities = {Protocol{fuchsia::scheduler::RoleManager::Name_}},
+                       .source = ParentRef(),
+                       .targets = {ChildRef{kMemoryPressureSignaler}, ChildRef{kWebView}}});
     realm()->AddRoute({.capabilities = {Protocol{fuchsia::posix::socket::Provider::Name_}},
                        .source = ChildRef{kNetstack},
                        .targets = {ChildRef{kWebView}}});

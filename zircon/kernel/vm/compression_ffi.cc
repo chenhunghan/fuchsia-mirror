@@ -42,4 +42,8 @@ FFI_ALWAYS_INLINE VmCompressor* cpp_vmcompression_compressor_guard_get(
   return &guard->get();
 }
 
+FFI_ALWAYS_INLINE void cpp_vmcompression_free_reference(VmCompression* compression, uint32_t ref) {
+  compression->Free(VmCompression::CompressedRef(ref));
+}
+
 }  // extern "C"

@@ -223,16 +223,24 @@ pub struct KeyValueFetcher {
     pub map: JsonMap<String, JsonValue>,
 }
 
-impl TryFrom<&str> for KeyValueFetcher {
-    type Error = anyhow::Error;
+impl FromStr for KeyValueFetcher {
+    type Err = anyhow::Error;
 
-    fn try_from(json_text: &str) -> Result<Self, Self::Error> {
+    fn from_str(json_text: &str) -> Result<Self, Self::Err> {
         let raw_json =
             json_text.parse::<JsonValue>().context("Couldn't parse KeyValue text as JSON.")?;
         match raw_json {
             JsonValue::Object(map) => Ok(KeyValueFetcher { map }),
             _ => bail!("Bad json KeyValue data needs to be Object (map)."),
         }
+    }
+}
+
+impl TryFrom<&str> for KeyValueFetcher {
+    type Error = anyhow::Error;
+
+    fn try_from(json_text: &str) -> Result<Self, Self::Error> {
+        json_text.parse()
     }
 }
 
@@ -297,16 +305,24 @@ pub struct InspectFetcher {
     pub component_errors: Vec<anyhow::Error>,
 }
 
-impl TryFrom<&str> for InspectFetcher {
-    type Error = anyhow::Error;
+impl FromStr for InspectFetcher {
+    type Err = anyhow::Error;
 
-    fn try_from(json_text: &str) -> Result<Self, Self::Error> {
+    fn from_str(json_text: &str) -> Result<Self, Self::Err> {
         let raw_json =
             json_text.parse::<JsonValue>().context("Couldn't parse Inspect text as JSON.")?;
         match raw_json {
             JsonValue::Array(list) => Self::try_from(list),
             _ => bail!("Bad json inspect data needs to be array."),
         }
+    }
+}
+
+impl TryFrom<&str> for InspectFetcher {
+    type Error = anyhow::Error;
+
+    fn try_from(json_text: &str) -> Result<Self, Self::Error> {
+        json_text.parse()
     }
 }
 

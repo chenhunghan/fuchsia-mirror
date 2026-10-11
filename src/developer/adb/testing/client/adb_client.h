@@ -42,6 +42,7 @@ class AdbClientImpl : public fidl::Server<fuchsia_testing_adb::Client>,
   zx_status_t ConnectEndpoints();
   zx_status_t SendPacket(apacket* p);
   zx_status_t QueueReadRequest();
+  void ResetSessionState(zx_status_t status);
 
   async_dispatcher_t* dispatcher_;
   bool usb_connected_ = false;

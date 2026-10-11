@@ -12,11 +12,21 @@ use wlan_power_manager::{PowerManager, WakeLease};
 pub struct TestPowerManager {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub active_leases: Arc<Mutex<Vec<(String, fsystem::LeaseToken)>>>,
+    pub mock_power_element_lease_result: Arc<Mutex<Result<(), String>>>,
 }
 
 impl TestPowerManager {
     pub fn new() -> Self {
-        Self { calls: Arc::new(Mutex::new(vec![])), active_leases: Arc::new(Mutex::new(vec![])) }
+        Self {
+            calls: Arc::new(Mutex::new(vec![])),
+            active_leases: Arc::new(Mutex::new(vec![])),
+            mock_power_element_lease_result: Arc::new(Mutex::new(Ok(()))),
+        }
+    }
+
+    pub fn mock_power_element_lease_failure(&self) {
+        *self.mock_power_element_lease_result.lock() =
+            Err("mocked power element lease failure".to_string());
     }
 
     pub fn is_lease_dropped(&self, name: &str) -> bool {
@@ -51,6 +61,9 @@ impl PowerManager for TestPowerManager {
         _dependency_level: u8,
     ) -> Result<fidl_fuchsia_power_broker::LeaseToken, Error> {
         self.calls.lock().push(lease_name.to_string());
+        if let Err(e) = self.mock_power_element_lease_result.lock().as_ref() {
+            anyhow::bail!("{e}");
+        }
         let (local_token, remote_token) = zx::EventPair::create();
         self.active_leases.lock().push((lease_name.to_string(), remote_token));
         Ok(local_token)

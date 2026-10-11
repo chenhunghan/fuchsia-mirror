@@ -16,7 +16,6 @@ class HostapdOptions(TypedDict, total=False):
         chan_util_avg_period: Channel utilization average period.
         wmm_ac_*: WMM parameters for different access categories (BK, BE, VI, VO).
         assocresp_elements: Vendor-specific information elements for Association Response.
-        country3: 3rd byte of country code (e.g., 'O' for outdoor).
     """
 
     bss_load_update_period: int
@@ -49,9 +48,6 @@ class HostapdOptions(TypedDict, total=False):
 
     # Vendor IEs
     assocresp_elements: str
-
-    # Regulatory
-    country3: str
 
     obss_interval: int
 
@@ -205,16 +201,9 @@ class WmmAcm:
     BE: HostapdOptions = {"wmm_ac_be_acm": True}
     VI: HostapdOptions = {"wmm_ac_vi_acm": True}
     VO: HostapdOptions = {"wmm_ac_vo_acm": True}
+    ALL: HostapdOptions = BK | BE | VI | VO
 
 
 class AssocRespIe:
     CORRECT_LENGTH: HostapdOptions = {"assocresp_elements": "dd0411223301"}
     ZERO_LENGTH_WITHOUT_DATA: HostapdOptions = {"assocresp_elements": "dd00"}
-
-
-class Country3:
-    ALL: HostapdOptions = {"country3": "0x20"}
-    OUTDOOR: HostapdOptions = {"country3": "0x4f"}
-    INDOOR: HostapdOptions = {"country3": "0x49"}
-    NONCOUNTRY: HostapdOptions = {"country3": "0x58"}
-    GLOBAL: HostapdOptions = {"country3": "0x04"}

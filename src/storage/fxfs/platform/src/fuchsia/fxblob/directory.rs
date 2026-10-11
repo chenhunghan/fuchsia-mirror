@@ -56,7 +56,7 @@ pub struct BlobDirectory {
 
 /// Instead of constantly switching back and forth between strings and hashes. Do it once and then
 /// just pass around a reference to that.
-pub(crate) struct Identifier {
+pub struct Identifier {
     pub string: String,
     pub hash: Hash,
 }

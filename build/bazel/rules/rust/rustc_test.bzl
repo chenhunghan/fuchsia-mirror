@@ -6,7 +6,7 @@
 
 load("@fuchsia_rules_common//build_flags:rust.bzl", "BUILD_FLAGS_RUST_ATTRS_KWARGS", "wrap_rust_macro_args_with_build_flags")
 load("@rules_rust//rust:defs.bzl", "rust_test")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rustc_flags")
+load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_stdlib_link_deps", "with_fuchsia_rustc_flags")
 
 def _rustc_test_impl(
         name,
@@ -18,6 +18,7 @@ def _rustc_test_impl(
         lint_config = "//build/config/rust/lints:clippy_warn_default"
 
     kwargs["rustc_flags"] = with_fuchsia_rustc_flags(rustc_flags)
+    kwargs["link_deps"] = with_fuchsia_rust_stdlib_link_deps(kwargs.get("link_deps"))
 
     wrapped_kwargs = wrap_rust_macro_args_with_build_flags(
         kwargs = kwargs,

@@ -1661,6 +1661,135 @@ mod tests {
         Ok(())
     }
 
+    /// When `Topology.Lease` is given an invalid `LeaseSchema`, it should report the specific
+    /// error for the field at fault rather than a generic failure. Covers every field the
+    /// request is rejected on.
+    #[fuchsia::test]
+    async fn test_lease_errors() -> Result<(), Error> {
+        let realm = build_power_broker_realm().await?;
+        let topology: TopologyProxy = realm.root.connect_to_protocol_at_exposed_dir()?;
+
+        // Create a root element to depend on.
+        let earth_token = zx::Event::create();
+        let (element_runner_client, _element_runner_server) =
+            create_endpoints::<ElementRunnerMarker>();
+        let (element_control, element_control_server) = create_proxy::<ElementControlMarker>();
+        topology
+            .add_element(ElementSchema {
+                element_name: Some("Earth".into()),
+                initial_current_level: Some(BinaryPowerLevel::Off.into_primitive()),
+                valid_levels: Some(BINARY_POWER_LEVELS.to_vec()),
+                element_control: Some(element_control_server),
+                element_runner: Some(element_runner_client),
+                ..Default::default()
+            })
+            .await?
+            .expect("add_element failed");
+        element_control
+            .register_dependency_token(
+                earth_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
+            )
+            .await?
+            .expect("register_dependency_token failed");
+
+        let earth_dependency = || fpb::LeaseDependency {
+            requires_token: Some(
+                earth_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
+            ),
+            requires_level: Some(BinaryPowerLevel::On.into_primitive()),
+            ..Default::default()
+        };
+
+        // Omitting lease_token yields LeaseError::INVALID_ARGUMENT.
+        assert_matches!(
+            topology
+                .lease(fpb::LeaseSchema {
+                    lease_name: Some("no_token".into()),
+                    dependencies: Some(vec![earth_dependency()]),
+                    ..Default::default()
+                })
+                .await,
+            Ok(Err(fpb::LeaseError::InvalidArgument))
+        );
+
+        // Omitting lease_name yields LeaseError::INVALID_ARGUMENT.
+        let (_lease_token_client, lease_token_server) = zx::EventPair::create();
+        assert_matches!(
+            topology
+                .lease(fpb::LeaseSchema {
+                    lease_token: Some(lease_token_server),
+                    dependencies: Some(vec![earth_dependency()]),
+                    ..Default::default()
+                })
+                .await,
+            Ok(Err(fpb::LeaseError::InvalidArgument))
+        );
+
+        // Omitting dependencies yields LeaseError::INVALID_ARGUMENT.
+        let (_lease_token_client, lease_token_server) = zx::EventPair::create();
+        assert_matches!(
+            topology
+                .lease(fpb::LeaseSchema {
+                    lease_token: Some(lease_token_server),
+                    lease_name: Some("no_dependencies".into()),
+                    ..Default::default()
+                })
+                .await,
+            Ok(Err(fpb::LeaseError::InvalidArgument))
+        );
+
+        // An empty dependencies vector also yields LeaseError::INVALID_ARGUMENT.
+        let (_lease_token_client, lease_token_server) = zx::EventPair::create();
+        assert_matches!(
+            topology
+                .lease(fpb::LeaseSchema {
+                    lease_token: Some(lease_token_server),
+                    lease_name: Some("empty_dependencies".into()),
+                    dependencies: Some(vec![]),
+                    ..Default::default()
+                })
+                .await,
+            Ok(Err(fpb::LeaseError::InvalidArgument))
+        );
+
+        // A dependency that specifies neither requires_level nor
+        // requires_level_by_preference yields LeaseError::INVALID_LEVEL.
+        let (_lease_token_client, lease_token_server) = zx::EventPair::create();
+        assert_matches!(
+            topology
+                .lease(fpb::LeaseSchema {
+                    lease_token: Some(lease_token_server),
+                    lease_name: Some("no_level".into()),
+                    dependencies: Some(vec![fpb::LeaseDependency {
+                        requires_token: Some(
+                            earth_token
+                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                                .expect("dup failed")
+                        ),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                })
+                .await,
+            Ok(Err(fpb::LeaseError::InvalidLevel))
+        );
+
+        // A fully specified lease is accepted.
+        let (_lease_token_client, lease_token_server) = zx::EventPair::create();
+        topology
+            .lease(fpb::LeaseSchema {
+                lease_token: Some(lease_token_server),
+                lease_name: Some("valid".into()),
+                dependencies: Some(vec![earth_dependency()]),
+                should_return_pending_lease: Some(true),
+                ..Default::default()
+            })
+            .await?
+            .expect("lease failed");
+
+        Ok(())
+    }
+
     /// Verifies that dropping an element's `ElementControl` channel removes the element and closes
     /// any associated `Status` channels.
     #[fuchsia::test]

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use argh::{ArgsInfo, FromArgs};
-use fdomain_fuchsia_fxfs::DebugProxy;
+use fdomain_fuchsia_fxfs::{DebugProxy, ProfileIdentifier};
 use ffx_writer::SimpleWriter;
 use fho::{Error, Result};
 use zx_status::Status;
@@ -16,6 +16,7 @@ use zx_status::Status;
 )]
 pub struct CompactSubCommand {}
 
+// TODO(https://fxbug.dev/507875809): Update delete_profile to support node associated profiles.
 #[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
 #[argh(
     subcommand,
@@ -57,16 +58,21 @@ pub struct RecordAndReplayProfileSubCommand {
     name = "replay_xor_record_profile",
     example = "ffx storage fxfs replay_xor_record_profile --volume data startup 60 ",
     description = "Replays a profile for a named unlocked volume if one exists, otherwise it \
-        starts recording one. Fails during active profile recording and/or replay."
+        starts recording one. The identifier is either a uint node id, or 64 character hex \
+        encoding of blob root hash, for the latter specify -b. Fails during active profile \
+        recording and/or replay."
 )]
 pub struct ReplayXorRecordProfileSubCommand {
     #[argh(positional)]
-    profile: String,
+    identifier: String,
     #[argh(positional)]
     duration_secs: u32,
     #[argh(option, short = 'v')]
     /// the volume to affect.
     volume: String,
+    #[argh(switch, short = 'b')]
+    /// whether the identifier is a 64-character hex blob hash instead of an object ID.
+    blob: bool,
 }
 
 #[derive(ArgsInfo, FromArgs, Debug, PartialEq)]
@@ -127,8 +133,26 @@ pub async fn handle_cmd(
                 .map_err(|e| Error::User(Status::err_from_raw(e).into()))?;
         }
         FxfsSubCommand::ReplayXorRecordProfile(args) => {
+            let identifier = if args.blob {
+                let mut array = [0u8; 32];
+                let bytes = hex::decode(&args.identifier)
+                    .map_err(|_| Error::User(anyhow::anyhow!("Invalid hex string")))?;
+                if bytes.len() != 32 {
+                    return Err(Error::User(anyhow::anyhow!(
+                        "Blob hash must be 32 bytes (64 hex characters)"
+                    )));
+                }
+                array.copy_from_slice(&bytes);
+                ProfileIdentifier::BlobHash(array)
+            } else {
+                let oid = args
+                    .identifier
+                    .parse::<u64>()
+                    .map_err(|_| Error::User(anyhow::anyhow!("Invalid object ID")))?;
+                ProfileIdentifier::ObjectId(oid)
+            };
             fxfs_proxy
-                .replay_xor_record_profile(&args.volume, &args.profile, args.duration_secs)
+                .replay_xor_record_profile(&args.volume, &identifier, args.duration_secs)
                 .await
                 .map_err(|e| Error::User(e.into()))?
                 .map_err(|e| Error::User(Status::err_from_raw(e).into()))?;

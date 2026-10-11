@@ -30,8 +30,6 @@ const NETWORK_TEST_REALM_MONIKER = "/" + NETWORK_TEST_REALM_TEST_COLLECTION_MONI
 
 const NETWORK_TEST_REALM_URL = "fuchsia-pkg://fuchsia.com/network-test-realm#meta/controller.cm"
 
-const NETSTACK_VERSION = "v2"
-
 func TestEmulatorWorksWithFfx(t *testing.T) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -184,12 +182,10 @@ func TestEmulatorWorksWithFfx(t *testing.T) {
 			"net-test-realm",
 			NETWORK_TEST_REALM_MONIKER,
 			"start-hermetic-network-realm",
-			NETSTACK_VERSION,
 		); err != nil {
 			t.Fatalf(
-				"ffx net-test-realm %s start-hermetic-network-realm %s = %s",
+				"ffx net-test-realm %s start-hermetic-network-realm = %s",
 				NETWORK_TEST_REALM_MONIKER,
-				NETSTACK_VERSION,
 				err,
 			)
 		}

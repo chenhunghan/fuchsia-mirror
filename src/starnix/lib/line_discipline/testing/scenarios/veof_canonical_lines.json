@@ -1,0 +1,106 @@
+{
+    "name": "veof_canonical_lines",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "IXON"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ISIG",
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "abc"
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave",
+            "expect_block": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0004"
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave",
+            "expect_block": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0004"
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 0
+        },
+        {
+            "action": "check_poll",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave",
+            "expect_block": true
+        },
+        {
+            "action": "write_to_master",
+            "data": "first\u0004second\n\u0004third\n"
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave",
+            "expect_block": true
+        },
+        {
+            "action": "read_from_master"
+        }
+    ]
+}

@@ -882,6 +882,22 @@ mod tests {
     }
 
     #[test]
+    fn test_named_rcp_and_phy_props() {
+        use openthread_sys::spinel::{
+            SPINEL_PROP_RADIO_CAPS, SPINEL_PROP_RADIO_COEX_ENABLE, SPINEL_PROP_RCP_API_VERSION,
+        };
+
+        for (prop, value) in [
+            (Prop::Rcp(PropRcp::ApiVersion), SPINEL_PROP_RCP_API_VERSION),
+            (Prop::Phy(PropPhy::RadioCaps), SPINEL_PROP_RADIO_CAPS),
+            (Prop::Phy(PropPhy::RadioCoexEnable), SPINEL_PROP_RADIO_COEX_ENABLE),
+        ] {
+            assert_eq!(u32::from(prop), value);
+            assert_eq!(Prop::from(value), prop);
+        }
+    }
+
+    #[test]
     fn test_header() {
         assert_eq!(Header::new(0, None), Some(Header(0x80)));
         assert_eq!(Header::new(3, None), Some(Header(0xb0)));

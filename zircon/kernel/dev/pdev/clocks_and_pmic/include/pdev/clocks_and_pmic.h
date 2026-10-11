@@ -17,6 +17,9 @@ struct pdev_clocks_and_pmic_ops {
   zx_status_t (*wakeup_from_suspend)();
 };
 
+static_assert(sizeof(pdev_clocks_and_pmic_ops) == 16, "pdev_clocks_and_pmic_ops size mismatch");
+static_assert(alignof(pdev_clocks_and_pmic_ops) == 8, "pdev_clocks_and_pmic_ops align mismatch");
+
 void pdev_register_clocks_and_pmic(const pdev_clocks_and_pmic_ops* ops);
 
 #endif  // ZIRCON_KERNEL_DEV_PDEV_CLOCKS_AND_PMIC_INCLUDE_PDEV_CLOCKS_AND_PMIC_H_

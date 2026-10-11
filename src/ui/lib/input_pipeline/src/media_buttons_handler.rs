@@ -140,6 +140,8 @@ impl MediaButtonsHandler {
                     .expect("failed to duplicate event pair")
             }),
             trace_flow_id: Some(trace_flow_id.into()),
+            volume_up: event.volume_up,
+            volume_down: event.volume_down,
             ..Default::default()
         }
     }
@@ -182,9 +184,13 @@ impl MediaButtonsHandler {
 
         for button in &device_descriptor.buttons {
             match button {
-                fidl_fuchsia_input::ConsumerControlButton::VolumeUp
-                | fidl_fuchsia_input::ConsumerControlButton::VolumeDown => {
-                    new_event.volume = Some(0)
+                fidl_fuchsia_input::ConsumerControlButton::VolumeUp => {
+                    new_event.volume = Some(0);
+                    new_event.volume_up = Some(false);
+                }
+                fidl_fuchsia_input::ConsumerControlButton::VolumeDown => {
+                    new_event.volume = Some(0);
+                    new_event.volume_down = Some(false);
                 }
                 fidl_fuchsia_input::ConsumerControlButton::MicMute => {
                     new_event.mic_mute = Some(false)
@@ -205,9 +211,11 @@ impl MediaButtonsHandler {
             match button {
                 fidl_fuchsia_input::ConsumerControlButton::VolumeUp => {
                     new_event.volume = Some(new_event.volume.unwrap_or(0).saturating_add(1));
+                    new_event.volume_up = Some(true);
                 }
                 fidl_fuchsia_input::ConsumerControlButton::VolumeDown => {
                     new_event.volume = Some(new_event.volume.unwrap_or(0).saturating_sub(1));
+                    new_event.volume_down = Some(true);
                 }
                 fidl_fuchsia_input::ConsumerControlButton::MicMute => {
                     new_event.mic_mute = Some(true);
@@ -385,6 +393,34 @@ mod tests {
         power: Option<bool>,
         function: Option<bool>,
     ) -> fidl_ui_input::MediaButtonsEvent {
+        let (volume_up, volume_down) = match volume {
+            Some(1) => (Some(true), Some(false)),
+            Some(-1) => (Some(false), Some(true)),
+            Some(0) => (Some(false), Some(false)),
+            _ => (None, None),
+        };
+        create_ui_input_media_buttons_event_with_volume_buttons(
+            volume,
+            mic_mute,
+            pause,
+            camera_disable,
+            power,
+            function,
+            volume_up,
+            volume_down,
+        )
+    }
+
+    fn create_ui_input_media_buttons_event_with_volume_buttons(
+        volume: Option<i8>,
+        mic_mute: Option<bool>,
+        pause: Option<bool>,
+        camera_disable: Option<bool>,
+        power: Option<bool>,
+        function: Option<bool>,
+        volume_up: Option<bool>,
+        volume_down: Option<bool>,
+    ) -> fidl_ui_input::MediaButtonsEvent {
         fidl_ui_input::MediaButtonsEvent {
             volume,
             mic_mute,
@@ -393,6 +429,8 @@ mod tests {
             power,
             function,
             device_id: Some(0),
+            volume_up,
+            volume_down,
             ..Default::default()
         }
     }
@@ -507,8 +545,10 @@ mod tests {
             event_time,
             &descriptor,
         )];
-        let expected_events = vec![create_ui_input_media_buttons_event(
+        let expected_events = vec![create_ui_input_media_buttons_event_with_volume_buttons(
             Some(0),
+            Some(true),
+            Some(true),
             Some(true),
             Some(true),
             Some(true),

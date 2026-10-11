@@ -117,24 +117,24 @@ impl FsNodeOps for BinderFsDir {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if name == FEATURES_DIR {
-            Ok(node.fs().create_node_and_allocate_node_id(
+            Ok(entry.node.fs().create_node_and_allocate_node_id(
                 BinderFeaturesDir::new(),
                 FsNodeInfo::new(mode!(IFDIR, 0o755), FsCred::root()),
             ))
         } else if name == BINDER_CONTROL_DEVICE {
             let mut info = FsNodeInfo::new(mode!(IFCHR, 0o600), FsCred::root());
             info.rdev = self.control_device;
-            Ok(node.fs().create_node_and_allocate_node_id(SpecialNode, info))
+            Ok(entry.node.fs().create_node_and_allocate_node_id(SpecialNode, info))
         } else if let Some(dev) = self.state.devices.lock().get(name) {
             let mode = if name == "remote" { mode!(IFCHR, 0o444) } else { mode!(IFCHR, 0o600) };
             let mut info = FsNodeInfo::new(mode, FsCred::root());
             info.rdev = *dev;
-            Ok(node.fs().create_node_and_allocate_node_id(SpecialNode, info))
+            Ok(entry.node.fs().create_node_and_allocate_node_id(SpecialNode, info))
         } else {
             error!(ENOENT, format!("looking for {name}"))
         }
@@ -260,12 +260,12 @@ impl FsNodeOps for BinderFeaturesDir {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         if let Some(enable) = self.features.get(name) {
-            return Ok(node.fs().create_node_and_allocate_node_id(
+            return Ok(entry.node.fs().create_node_and_allocate_node_id(
                 BytesFile::new_node(if *enable { b"1\n" } else { b"0\n" }.to_vec()),
                 FsNodeInfo::new(mode!(IFREG, 0o444), FsCred::root()),
             ));

@@ -373,12 +373,20 @@ TEST_F(FlatlandManagerTest, CreateViewportedFlatlands) {
 
     RunLoopUntilIdle();
     EXPECT_EQ(manager_->GetSessionCount(), 2ul);
-    RunLoopUntil([this] { return !link_system_->GetResolvedTopologyLinks().empty(); });
+    RunLoopUntil([this] {
+      GlobalTopologyData::LinkTopologyMap links;
+      link_system_->GetResolvedTopologyLinks(links);
+      return !links.empty();
+    });
 
     EXPECT_CALL(*mock_flatland_presenter_, RemoveSession(_, _, _));
   }
 
-  RunLoopUntil([this] { return link_system_->GetResolvedTopologyLinks().empty(); });
+  RunLoopUntil([this] {
+    GlobalTopologyData::LinkTopologyMap links;
+    link_system_->GetResolvedTopologyLinks(links);
+    return links.empty();
+  });
 }
 
 TEST_F(FlatlandManagerTest, ClientDiesBeforeManager) {

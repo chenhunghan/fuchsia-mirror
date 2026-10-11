@@ -21,31 +21,6 @@ using lib::statusor::StatusOr;
 
 namespace {
 
-fuchsia::net::http::Request MakeRequest(const lib::HTTPRequest& request, zx::time deadline) {
-  fuchsia::net::http::Request fx_request;
-  fx_request.set_method("POST");
-  fx_request.set_url(request.url);
-
-  fsl::SizedVmo data;
-  auto result = fsl::VmoFromString(request.body, &data);
-  FX_CHECK(result);
-
-  fx_request.mutable_body()->set_buffer(std::move(data).ToTransport());
-
-  for (const auto& header : request.headers) {
-    fuchsia::net::http::Header hdr;
-    std::vector<uint8_t> name(header.first.begin(), header.first.end());
-    hdr.name = name;
-
-    std::vector<uint8_t> value(header.second.begin(), header.second.end());
-    hdr.value = value;
-    fx_request.mutable_headers()->push_back(std::move(hdr));
-  }
-
-  fx_request.set_deadline(deadline.get());
-  return fx_request;
-}
-
 StatusOr<HTTPResponse> ReadResponse(fuchsia::net::http::Response fx_response, zx::time deadline) {
   HTTPResponse response;
 
@@ -135,8 +110,51 @@ FuchsiaHTTPClient::FuchsiaHTTPClient(
     fit::function<::fuchsia::net::http::LoaderSyncPtr()> loader_factory)
     : loader_factory_(std::move(loader_factory)) {}
 
+fuchsia::net::http::Request FuchsiaHTTPClient::MakeRequest(const lib::HTTPRequest& request,
+                                                           Method method, zx::time deadline) {
+  fuchsia::net::http::Request fx_request;
+  switch (method) {
+    case Method::kGet:
+      fx_request.set_method("GET");
+      break;
+    case Method::kPost: {
+      fx_request.set_method("POST");
+      fsl::SizedVmo data;
+      bool result = fsl::VmoFromString(request.body, &data);
+      FX_CHECK(result);
+
+      fx_request.mutable_body()->set_buffer(std::move(data).ToTransport());
+      break;
+    }
+  }
+  fx_request.set_url(request.url);
+
+  for (const auto& header : request.headers) {
+    fuchsia::net::http::Header hdr;
+    std::vector<uint8_t> name(header.first.begin(), header.first.end());
+    hdr.name = name;
+
+    std::vector<uint8_t> value(header.second.begin(), header.second.end());
+    hdr.value = value;
+    fx_request.mutable_headers()->push_back(std::move(hdr));
+  }
+
+  fx_request.set_deadline(deadline.get());
+  return fx_request;
+}
+
 StatusOr<HTTPResponse> FuchsiaHTTPClient::PostSync(HTTPRequest request,
                                                    std::chrono::steady_clock::time_point deadline) {
+  return SendRequest(request, Method::kPost, deadline);
+}
+
+StatusOr<HTTPResponse> FuchsiaHTTPClient::GetSync(HTTPRequest request,
+                                                  std::chrono::steady_clock::time_point deadline) {
+  return SendRequest(request, Method::kGet, deadline);
+}
+
+StatusOr<HTTPResponse> FuchsiaHTTPClient::SendRequest(
+    const HTTPRequest& request, Method method, std::chrono::steady_clock::time_point deadline) {
   if (!loader_.is_bound()) {
     loader_ = loader_factory_();
   }
@@ -147,7 +165,7 @@ StatusOr<HTTPResponse> FuchsiaHTTPClient::PostSync(HTTPRequest request,
                                           .count()));
 
   fuchsia::net::http::Response fx_response;
-  auto status = loader_->Fetch(MakeRequest(request, zx_deadline), &fx_response);
+  zx_status_t status = loader_->Fetch(MakeRequest(request, method, zx_deadline), &fx_response);
 
   if (status != ZX_OK) {
     std::ostringstream ss;

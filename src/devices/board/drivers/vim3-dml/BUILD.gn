@@ -82,7 +82,6 @@ fuchsia_rust_driver("vim3-dml-driver") {
     "src/lib.rs",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.buttons:fuchsia.buttons_rust",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
     "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_rust",
@@ -93,10 +92,7 @@ fuchsia_rust_driver("vim3-dml-driver") {
     "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_rust",
     "//sdk/fidl/fuchsia.hardware.sdmmc:fuchsia.hardware.sdmmc_rust",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
-    "//sdk/fidl/fuchsia.hardware.trippoint:fuchsia.hardware.trippoint_rust",
-    "//sdk/fidl/fuchsia.hardware.usb.phy:fuchsia.hardware.usb.phy_rust",
     "//sdk/fidl/fuchsia.hardware.vreg:fuchsia.hardware.vreg_rust",
-    "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/lib/driver/component/rust",
     "//sdk/lib/driver/runtime/rust/fidl",

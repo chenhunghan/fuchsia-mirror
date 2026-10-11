@@ -2,8 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
+import("//build/bazel/bazel_test_suite.gni")
 
 source_set("predicates") {
   testonly = true
@@ -23,24 +22,13 @@ source_set("predicates") {
   ]
 }
 
-test("predicates-lib-unittests") {
-  sources = [ "predicates_test.cc" ]
-  deps = [
-    ":predicates",
-    "//src/lib/fxl/test:gtest_main",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
-fuchsia_unittest_package("predicates-lib-test") {
-  deps = [ ":predicates-lib-unittests" ]
-
-  test_specs = {
-    environments = [ emu_env ]
+if (is_fuchsia) {
+  bazel_test_suite("predicates-lib-test") {
+    target_tests = [ "//src/lib/testing/predicates:predicates-lib-test" ]
   }
-}
 
-group("tests") {
-  testonly = true
-  deps = [ ":predicates-lib-test" ]
+  group("tests") {
+    testonly = true
+    deps = [ ":predicates-lib-test" ]
+  }
 }

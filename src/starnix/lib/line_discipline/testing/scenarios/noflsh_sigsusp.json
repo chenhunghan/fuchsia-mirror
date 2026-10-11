@@ -1,5 +1,6 @@
 {
     "name": "noflsh_sigsusp",
+    "capture_signals": true,
     "initial_termios": {
         "c_iflag": [
             "ICRNL"
@@ -20,7 +21,8 @@
     "events": [
         {
             "action": "write_to_master",
-            "data": "foo\u001a\n"
+            "data": "foo\u001a\n",
+            "expect_signal": true
         },
         {
             "action": "read_from_master"

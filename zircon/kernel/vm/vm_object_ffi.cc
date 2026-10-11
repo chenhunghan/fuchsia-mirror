@@ -12,6 +12,7 @@
 #include <kernel/ffi.h>
 
 #include "vm/page_source.h"
+#include "vm/stream_size_manager.h"
 #include "vm/vm_object.h"
 #include "vm/vm_object_paged.h"
 
@@ -32,6 +33,10 @@ FFI_ALWAYS_INLINE uint64_t cpp_vm_object_size_locked(const VmObject* vmo)
 
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_resizable(const VmObject* vmo) {
   return vmo->is_resizable();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_object_is_discardable(const VmObject* vmo) {
+  return vmo->is_discardable();
 }
 
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_contiguous(const VmObject* vmo) {
@@ -264,6 +269,72 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_supply_pages(VmObject* vmo, uint64_t
                                                          uint64_t len, VmPageSpliceList* pages,
                                                          SupplyOptions options) {
   return vmo->SupplyPages(offset, len, pages, options);
+}
+
+zx_status_t cpp_vm_object_enumerate_dirty_ranges(VmObject* vmo, uint64_t offset, uint64_t len,
+                                                 void* ctx,
+                                                 cpp_vm_object_dirty_range_fn dirty_range_fn) {
+  return vmo->EnumerateDirtyRanges(
+      offset, len, [ctx, dirty_range_fn](uint64_t range_offset, uint64_t range_len, bool is_zero) {
+        return dirty_range_fn(ctx, range_offset, range_len, is_zero);
+      });
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_fail_page_requests(VmObject* vmo, uint64_t offset,
+                                                               uint64_t len,
+                                                               zx_status_t error_status) {
+  return vmo->FailPageRequests(offset, len, error_status);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_query_pager_vmo_stats(VmObject* vmo, bool reset,
+                                                                  zx_pager_vmo_stats_t* stats) {
+  return vmo->QueryPagerVmoStats(reset, stats);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_koid_t cpp_vm_object_get_page_source_koid(const VmObject* vmo) {
+  return vmo->GetPageSourceKoid().value_or(ZX_KOID_INVALID);
+}
+
+FFI_ALWAYS_INLINE uint32_t cpp_vm_object_num_mappings(const VmObject* vmo) {
+  return vmo->num_mappings();
+}
+
+FFI_ALWAYS_INLINE uint32_t cpp_vm_object_share_count(const VmObject* vmo) {
+  return vmo->share_count();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_object_is_user_pager_backed(const VmObject* vmo) {
+  return vmo->is_user_pager_backed();
+}
+
+FFI_ALWAYS_INLINE VmObject::ChildType cpp_vm_object_child_type(const VmObject* vmo) {
+  return vmo->child_type();
+}
+
+FFI_ALWAYS_INLINE uint64_t cpp_vm_object_heap_allocation_bytes(const VmObject* vmo) {
+  return vmo->HeapAllocationBytes();
+}
+
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_cache_op(VmObject* vmo, uint64_t offset, uint64_t len,
+                                                     VmObject::CacheOpType type) {
+  return vmo->CacheOp(offset, len, type);
+}
+
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_prefetch_range(VmObject* vmo, uint64_t offset,
+                                                           uint64_t len) {
+  return vmo->PrefetchRange(offset, len);
+}
+
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_zero_range_untracked(VmObject* vmo, uint64_t offset,
+                                                                 uint64_t len) {
+  return vmo->ZeroRangeUntracked(offset, len);
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_object_set_user_stream_size(VmObject* vmo, StreamSizeManager* ssm) {
+  vmo->SetUserStreamSize(fbl::ImportFromRawPtr(ssm));
 }
 
 }  // extern "C"

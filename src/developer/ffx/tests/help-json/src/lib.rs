@@ -165,6 +165,25 @@ mod tests {
 
     #[fixture(base_fixture)]
     #[fuchsia::test]
+    async fn test_help_all(ctx: TestContext) {
+        let output = ctx.isolate().ffx(&["help", "--all"]).await.expect("help --all");
+        assert!(output.status.success());
+        assert!(output.stdout.starts_with("Usage:"), "expected Usage header");
+        assert!(output.stdout.contains("Built-in Commands:"), "expected Built-in Commands header");
+        assert!(output.stdout.contains("\n  debug "), "expected debug command");
+        assert!(
+            output.stdout.contains("\n    symbolize "),
+            "expected symbolize subcommand under debug"
+        );
+
+        let output_dash_all = ctx.isolate().ffx(&["--help", "--all"]).await.expect("--help --all");
+        assert!(output_dash_all.status.success());
+        assert!(output_dash_all.stdout.starts_with("Usage:"));
+        assert!(output_dash_all.stdout.contains("\n    symbolize "));
+    }
+
+    #[fixture(base_fixture)]
+    #[fuchsia::test]
     async fn test_unknown_subtool_machine_format(ctx: TestContext) {
         // Tests that `ffx --machine json <unknown_tool>` produces valid JSON error output.
         let output = ctx

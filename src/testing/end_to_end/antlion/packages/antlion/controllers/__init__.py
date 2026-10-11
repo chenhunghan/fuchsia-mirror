@@ -8,33 +8,27 @@ from iperf import (
     iperf_client,
     iperf_server,
 )
+from legacy_access_point import (
+    access_point,
+    ap_lib,
+)
 
 from . import (
-    access_point,
-    adb,
-    android_device,
     attenuator,
-    fastboot,
     fuchsia_device,
-    openwrt_ap,
     packet_capture,
     pdu,
-    sniffer,
 )
 
 # Reexport so static type checkers can find these modules when importing and
 # using antlion.controllers instead of "from antlion.controller import ..."
 __all__ = [
     "access_point",
-    "adb",
-    "android_device",
+    "ap_lib",
     "attenuator",
-    "fastboot",
     "fuchsia_device",
     "iperf_client",
     "iperf_server",
-    "openwrt_ap",
     "packet_capture",
     "pdu",
-    "sniffer",
 ]

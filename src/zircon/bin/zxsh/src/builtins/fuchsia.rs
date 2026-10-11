@@ -50,7 +50,7 @@ fn run_statecontrol_shutdown(action: fidl_power::ShutdownAction, stdout: &mut dy
         }
         Ok(Err(error_value)) => {
             let _ = writeln!(stdout, "Command failed: {}", error_value);
-            EXIT_SUCCESS
+            EXIT_FAILURE
         }
         Ok(Ok(())) => EXIT_SUCCESS,
     }

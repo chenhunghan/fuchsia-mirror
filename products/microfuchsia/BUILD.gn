@@ -16,7 +16,9 @@ board_name = target_cpu
 
 group("products") {
   testonly = true
-  deps = [ ":microfuchsia_eng.${board_name}_product_config" ]
+  if (target_cpu == "x64" || target_cpu == "arm64") {
+    deps = [ ":microfuchsia_eng.${board_name}_product_config" ]
+  }
 }
 
 group("microfuchsia") {

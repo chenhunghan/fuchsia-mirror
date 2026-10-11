@@ -10,6 +10,7 @@ declare_args() {
 _all_named_fuchsia_envs = []
 _all_named_host_envs = []
 
+# LINT.IfChange(device_types)
 # The 'enum' of supported device types. These values, like all referenced under
 # environment dimensions, are known to Infrastructure.
 device_types = {
@@ -41,8 +42,12 @@ host_device_types = {
   lattepanda_sigma_cell = "LATTEPANDA_SIGMA_CELL"
 }
 
+# LINT.ThenChange(//build/testing/environments/device_types.bzl:device_types)
+
 ### Individual test environments
 # Please keep alphabetized.
+
+# LINT.IfChange(environments)
 
 aemu_env = {
   dimensions = {
@@ -68,21 +73,17 @@ _all_named_fuchsia_envs += [
   },
 ]
 
-crosvm_env = {
+crosvm_arm64_env = {
   dimensions = {
     device_type = device_types.crosvm
+    host_device_type = host_device_types.gcp_c4a_highmem_96_bm
   }
 }
 
-# TODO(https://fxbug.dev/371274109): Unconditionally add when arm64 crosvm
-# support is present.
-if (target_cpu == "x64") {
-  _all_named_fuchsia_envs += [
-    {
-      name = "crosvm"
-      env = crosvm_env
-    },
-  ]
+crosvm_x64_env = {
+  dimensions = {
+    device_type = device_types.crosvm
+  }
 }
 
 bt_lacewing_sherlock_env = {
@@ -528,6 +529,27 @@ _all_named_fuchsia_envs += [
     env = emu_env
   },
 ]
+
+# LINT.ThenChange(//build/testing/environments/BUILD.bazel:environments)
+
+if (target_cpu == "x64") {
+  crosvm_env = crosvm_x64_env
+} else if (target_cpu == "arm64") {
+  crosvm_env = crosvm_arm64_env
+} else {
+  crosvm_env = crosvm_x64_env
+}
+
+# TODO(https://fxbug.dev/371274109): Unconditionally add when arm64 crosvm
+# support is present.
+if (target_cpu == "x64") {
+  _all_named_fuchsia_envs += [
+    {
+      name = "crosvm"
+      env = crosvm_env
+    },
+  ]
+}
 
 with_display_envs = [
   aemu_env,

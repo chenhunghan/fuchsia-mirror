@@ -16,16 +16,15 @@ from typing import Any
 
 import fidl_fuchsia_wlan_wlanix as fidl_wlanix
 import wlanix_testing.base_test as base_test
-from antlion import utils
-from antlion.controllers.access_point import AccessPoint, setup_ap
-from antlion.controllers.ap_lib.hostapd_constants import (
+from fuchsia_controller_py import Channel
+from legacy_access_point.access_point import AccessPoint, setup_ap
+from legacy_access_point.ap_lib.hostapd_constants import (
     AP_DEFAULT_CHANNEL_2G,
     AP_SSID_LENGTH_2G,
 )
-from antlion.controllers.ap_lib.hostapd_security import (
+from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
-from fuchsia_controller_py import Channel
 from mobly import signals, test_runner
 from mobly.asserts import assert_equal, assert_true
 from openwrt_access_point import OpenWrtAP
@@ -62,7 +61,7 @@ class ConnectToApTest(base_test.ConnectionBaseTestClass):
     async def _test_logic(
         self, security: Security, password: str | None
     ) -> None:
-        ssid = utils.rand_ascii_str(AP_SSID_LENGTH_2G)
+        ssid = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
 
         ap = self.access_point()
         if isinstance(ap, OpenWrtAP):

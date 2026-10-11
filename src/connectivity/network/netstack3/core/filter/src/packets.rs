@@ -249,44 +249,12 @@ pub trait IpPacket<I: FilterIpExt> {
                 conntrack::PacketMetadata::new_from_icmp_error(
                     payload.src_ip,
                     payload.dst_ip,
-                    payload.src_port,
-                    payload.dst_port,
-                    I::map_ip(payload.proto, |proto| proto.into(), |proto| proto.into()),
+                    payload.transport,
                 )
             })
         } else {
-            self.maybe_transport_packet().transport_packet_data().and_then(|transport_data| {
-                let protocol =
-                    I::map_ip(self.protocol()?, |proto| proto.into(), |proto| proto.into());
-                match (protocol, &transport_data) {
-                    (conntrack::TransportProtocol::Tcp, TransportPacketData::Tcp { .. }) => {}
-                    // If the IP protocol is TCP, but we failed to parse the TCP header,
-                    // we fall back to generic transport info. In that case, we do not want
-                    // to track the packet, so we return `None`.
-                    (conntrack::TransportProtocol::Tcp, TransportPacketData::Generic { .. }) => {
-                        return None
-                    }
-                    (
-                        conntrack::TransportProtocol::Udp
-                        | conntrack::TransportProtocol::Icmp
-                        | conntrack::TransportProtocol::Other(_),
-                        TransportPacketData::Generic { .. },
-                    ) => {}
-                    (
-                        conntrack::TransportProtocol::Udp
-                        | conntrack::TransportProtocol::Icmp
-                        | conntrack::TransportProtocol::Other(_),
-                        TransportPacketData::Tcp { .. },
-                    ) => unreachable!(
-                        "non-TCP packet with TCP transport data: proto={protocol:?}, data={transport_data:?}"
-                    ),
-                }
-                Some(conntrack::PacketMetadata::new(
-                    self.src_addr(),
-                    self.dst_addr(),
-                    protocol,
-                    transport_data,
-                ))
+            self.maybe_transport_packet().transport_packet_data().map(|transport_data| {
+                conntrack::PacketMetadata::new(self.src_addr(), self.dst_addr(), transport_data)
             })
         }
     }
@@ -614,29 +582,50 @@ where
 #[derive(Debug, Clone, GenericOverIp, PartialEq, Eq)]
 #[generic_over_ip()]
 pub enum TransportPacketData {
-    Tcp { src_port: u16, dst_port: u16, segment: SegmentHeader, payload_len: usize },
-    Generic { src_port: u16, dst_port: u16 },
+    Tcp {
+        src_port: u16,
+        dst_port: u16,
+        /// The segment header and payload length.
+        ///
+        /// Is `None` if a TCP packet couldn't be parsed but still contained the
+        /// ports.
+        header_and_payload_len: Option<(SegmentHeader, usize)>,
+    },
+    Udp {
+        src_port: u16,
+        dst_port: u16,
+    },
+    IcmpEcho {
+        id: u16,
+        direction: conntrack::IcmpMessageDirection,
+    },
 }
 
 impl TransportPacketData {
-    pub fn src_port(&self) -> u16 {
+    pub fn src_port_or_id(&self) -> u16 {
         match self {
             TransportPacketData::Tcp { src_port, .. }
-            | TransportPacketData::Generic { src_port, .. } => *src_port,
+            | TransportPacketData::Udp { src_port, .. } => *src_port,
+            TransportPacketData::IcmpEcho { id, .. } => *id,
         }
     }
 
-    pub fn dst_port(&self) -> u16 {
+    pub fn dst_port_or_id(&self) -> u16 {
         match self {
             TransportPacketData::Tcp { dst_port, .. }
-            | TransportPacketData::Generic { dst_port, .. } => *dst_port,
+            | TransportPacketData::Udp { dst_port, .. } => *dst_port,
+            TransportPacketData::IcmpEcho { id, .. } => *id,
         }
     }
 
-    pub fn tcp_segment_and_len(&self) -> Option<(&SegmentHeader, usize)> {
+    pub fn unwrap_tcp_header_and_len(&self) -> Option<(&SegmentHeader, usize)> {
         match self {
-            TransportPacketData::Tcp { segment, payload_len, .. } => Some((&segment, *payload_len)),
-            TransportPacketData::Generic { .. } => None,
+            TransportPacketData::Tcp { header_and_payload_len, .. } => {
+                header_and_payload_len.as_ref().map(|(header, len)| (header, *len))
+            }
+            TransportPacketData::Udp { .. } | TransportPacketData::IcmpEcho { .. } => {
+                unreachable!("expected TCP transport data, got {self:?}")
+            }
         }
     }
 
@@ -1732,7 +1721,7 @@ impl<I: FilterIpExt> IcmpErrorMut<I> for ! {
 
 impl<A: IpAddress, Inner> MaybeTransportPacket for Nested<Inner, UdpPacketBuilder<A>> {
     fn transport_packet_data(&self) -> Option<TransportPacketData> {
-        Some(TransportPacketData::Generic {
+        Some(TransportPacketData::Udp {
             src_port: self.outer().src_port().map_or(0, NonZeroU16::get),
             dst_port: self.outer().dst_port().map_or(0, NonZeroU16::get),
         })
@@ -1796,8 +1785,7 @@ impl<'a, A: IpAddress, Inner: PayloadLen> MaybeTransportPacket
         Some(TransportPacketData::Tcp {
             src_port: self.outer().src_port().map_or(0, NonZeroU16::get),
             dst_port: self.outer().dst_port().map_or(0, NonZeroU16::get),
-            segment: self.outer().try_into().ok()?,
-            payload_len: self.inner().len(),
+            header_and_payload_len: Some((self.outer().try_into().ok()?, self.inner().len())),
         })
     }
 }
@@ -1978,18 +1966,15 @@ pub trait IcmpMessage<I: IpExt>: icmp::IcmpMessage<I> + MaybeTransportPacket {
     }
 
     /// Sets the ICMP ID for the message, returning the previous value.
-    ///
-    /// The ICMP ID is both the *src* AND *dst* ports for conntrack entries.
     fn update_icmp_id(&mut self, id: u16) -> u16;
 }
 
-// TODO(https://fxbug.dev/341128580): connection tracking will probably want to
-// special case ICMP echo packets to ensure that a new connection is only ever
-// created from an echo request, and not an echo response. We need to provide a
-// way for conntrack to differentiate between the two.
 impl MaybeTransportPacket for IcmpEchoReply {
     fn transport_packet_data(&self) -> Option<TransportPacketData> {
-        Some(TransportPacketData::Generic { src_port: self.id(), dst_port: self.id() })
+        Some(TransportPacketData::IcmpEcho {
+            id: self.id(),
+            direction: conntrack::IcmpMessageDirection::Reply,
+        })
     }
 }
 
@@ -2003,13 +1988,12 @@ impl<I: IpExt> IcmpMessage<I> for IcmpEchoReply {
     }
 }
 
-// TODO(https://fxbug.dev/341128580): connection tracking will probably want to
-// special case ICMP echo packets to ensure that a new connection is only ever
-// created from an echo request, and not an echo response. We need to provide a
-// way for conntrack to differentiate between the two.
 impl MaybeTransportPacket for IcmpEchoRequest {
     fn transport_packet_data(&self) -> Option<TransportPacketData> {
-        Some(TransportPacketData::Generic { src_port: self.id(), dst_port: self.id() })
+        Some(TransportPacketData::IcmpEcho {
+            id: self.id(),
+            direction: conntrack::IcmpMessageDirection::Request,
+        })
     }
 }
 
@@ -2567,7 +2551,7 @@ fn parse_transport_header_in_ipv6_packet<B: ParseBuffer>(
 
 fn parse_udp_header<B: ParseBuffer, I: Ip>(mut body: B) -> Option<TransportPacketData> {
     let packet = body.parse_with::<_, UdpPacketRaw<_>>(I::VERSION_MARKER).ok()?;
-    Some(TransportPacketData::Generic {
+    Some(TransportPacketData::Udp {
         src_port: packet.src_port().map(NonZeroU16::get).unwrap_or(0),
         // NB: UDP packets must have a specified (nonzero) destination port, so
         // if this packet has a destination port of 0, it is malformed.
@@ -2591,8 +2575,11 @@ fn parse_tcp_header<B: ParseBuffer, I: IpExt>(
     let packet = body.parse::<TcpSegmentRaw<_>>().ok()?;
 
     let (fallback_src_port, fallback_dst_port) = packet.flow_header().src_dst();
-    let fallback =
-        TransportPacketData::Generic { src_port: fallback_src_port, dst_port: fallback_dst_port };
+    let fallback = TransportPacketData::Tcp {
+        src_port: fallback_src_port,
+        dst_port: fallback_dst_port,
+        header_and_payload_len: None,
+    };
 
     // TODO(https://fxbug.dev/328064909): When we enable configurable dropping of
     // invalid packets, we're going to want to bubble up the detection of a
@@ -2619,8 +2606,7 @@ fn parse_tcp_header<B: ParseBuffer, I: IpExt>(
     Some(TransportPacketData::Tcp {
         src_port: builder.src_port().map(NonZeroU16::get).unwrap_or(0),
         dst_port: builder.dst_port().map(NonZeroU16::get).unwrap_or(0),
-        segment,
-        payload_len: body.len(),
+        header_and_payload_len: Some((segment, body.len())),
     })
 }
 
@@ -2756,12 +2742,10 @@ impl<'a, I: IpExt> ParsedTransportHeaderMut<'a, I> {
 pub struct ParsedIcmpErrorPayload<I: IpExt> {
     src_ip: I::Addr,
     dst_ip: I::Addr,
-    // Hold the ports directly instead of TransportPacketData. In case of an
-    // ICMP error, we don't update conntrack connection state, so there's no
-    // reason to keep the extra information.
-    src_port: u16,
-    dst_port: u16,
-    proto: I::Proto,
+    // Hold the transport tuple directly instead of TransportPacketData. In case
+    // of an ICMP error, we don't update conntrack connection state, so there's
+    // no reason to keep the extra information.
+    transport: conntrack::TransportTuple,
 }
 
 impl ParsedIcmpErrorPayload<Ipv4> {
@@ -2805,13 +2789,8 @@ impl ParsedIcmpErrorPayload<Ipv4> {
             proto,
             packet.body().into_inner(),
         )?;
-        Some(Self {
-            src_ip,
-            dst_ip,
-            src_port: transport_data.src_port(),
-            dst_port: transport_data.dst_port(),
-            proto,
-        })
+        let transport = conntrack::TransportTuple::from(&transport_data);
+        Some(Self { src_ip, dst_ip, transport })
     }
 }
 
@@ -2857,13 +2836,8 @@ impl ParsedIcmpErrorPayload<Ipv6> {
             proto,
             packet.body().ok()?.into_inner(),
         )?;
-        Some(Self {
-            src_ip,
-            dst_ip,
-            src_port: transport_data.src_port(),
-            dst_port: transport_data.dst_port(),
-            proto,
-        })
+        let transport = conntrack::TransportTuple::from(&transport_data);
+        Some(Self { src_ip, dst_ip, transport })
     }
 }
 
@@ -3348,8 +3322,7 @@ pub mod testutil {
                 Some(TransportPacketData::Tcp {
                     src_port: self.src_port,
                     dst_port: self.dst_port,
-                    segment: self.segment.clone(),
-                    payload_len: self.payload_len,
+                    header_and_payload_len: Some((self.segment.clone(), self.payload_len)),
                 })
             }
         }
@@ -3423,10 +3396,7 @@ pub mod testutil {
 
         impl MaybeTransportPacket for &FakeUdpPacket {
             fn transport_packet_data(&self) -> Option<TransportPacketData> {
-                Some(TransportPacketData::Generic {
-                    src_port: self.src_port,
-                    dst_port: self.dst_port,
-                })
+                Some(TransportPacketData::Udp { src_port: self.src_port, dst_port: self.dst_port })
             }
         }
 
@@ -3530,7 +3500,10 @@ pub mod testutil {
 
         impl MaybeTransportPacket for &FakeIcmpEchoRequest {
             fn transport_packet_data(&self) -> Option<TransportPacketData> {
-                Some(TransportPacketData::Generic { src_port: self.id, dst_port: 0 })
+                Some(TransportPacketData::IcmpEcho {
+                    id: self.id,
+                    direction: conntrack::IcmpMessageDirection::Request,
+                })
             }
         }
 
@@ -3851,8 +3824,7 @@ mod tests {
             Some(TransportPacketData::Tcp {
                 src_port: TcpSegmentBuilder::src_port(self.outer()).map_or(0, NonZeroU16::get),
                 dst_port: TcpSegmentBuilder::dst_port(self.outer()).map_or(0, NonZeroU16::get),
-                segment: self.outer().try_into().ok()?,
-                payload_len: self.inner().len(),
+                header_and_payload_len: Some((self.outer().try_into().ok()?, self.inner().len())),
             })
         }
     }
@@ -4003,6 +3975,7 @@ mod tests {
         Tcp,
         Udp,
         IcmpEchoRequest,
+        IcmpEchoReply,
     }
 
     impl TransportPacketDataProtocol {
@@ -4012,6 +3985,9 @@ mod tests {
                 TransportPacketDataProtocol::Udp => Udp::make_packet::<I>(src_ip, dst_ip),
                 TransportPacketDataProtocol::IcmpEchoRequest => {
                     IcmpEchoRequest::make_packet::<I>(src_ip, dst_ip)
+                }
+                TransportPacketDataProtocol::IcmpEchoReply => {
+                    IcmpEchoReply::make_packet::<I>(src_ip, dst_ip)
                 }
             }
         }
@@ -4036,6 +4012,11 @@ mod tests {
                         src_ip, dst_ip, src_port, dst_port, data,
                     )
                 }
+                TransportPacketDataProtocol::IcmpEchoReply => {
+                    IcmpEchoReply::make_ip_packet_with_ports_data::<I>(
+                        src_ip, dst_ip, src_port, dst_port, data,
+                    )
+                }
             }
         }
 
@@ -4043,8 +4024,42 @@ mod tests {
             match self {
                 TransportPacketDataProtocol::Tcp => Tcp::proto::<I>(),
                 TransportPacketDataProtocol::Udp => Udp::proto::<I>(),
-                TransportPacketDataProtocol::IcmpEchoRequest => IcmpEchoRequest::proto::<I>(),
+                TransportPacketDataProtocol::IcmpEchoRequest
+                | TransportPacketDataProtocol::IcmpEchoReply => IcmpEchoRequest::proto::<I>(),
             }
+        }
+
+        fn expected_transport_packet_data(&self) -> TransportPacketData {
+            match self {
+                TransportPacketDataProtocol::Tcp => TransportPacketData::Tcp {
+                    src_port: SRC_PORT.get(),
+                    dst_port: DST_PORT.get(),
+                    header_and_payload_len: Some((
+                        SegmentHeader {
+                            seq: SeqNum::new(SEQ_NUM),
+                            ack: ACK_NUM.map(SeqNum::new),
+                            wnd: UnscaledWindowSize::from(WINDOW_SIZE),
+                            ..Default::default()
+                        },
+                        3,
+                    )),
+                },
+                TransportPacketDataProtocol::Udp => {
+                    TransportPacketData::Udp { src_port: SRC_PORT.get(), dst_port: DST_PORT.get() }
+                }
+                TransportPacketDataProtocol::IcmpEchoRequest => TransportPacketData::IcmpEcho {
+                    id: SRC_PORT.get(),
+                    direction: conntrack::IcmpMessageDirection::Request,
+                },
+                TransportPacketDataProtocol::IcmpEchoReply => TransportPacketData::IcmpEcho {
+                    id: DST_PORT.get(),
+                    direction: conntrack::IcmpMessageDirection::Reply,
+                },
+            }
+        }
+
+        fn expected_transport_tuple(&self) -> conntrack::TransportTuple {
+            conntrack::TransportTuple::from(&self.expected_transport_packet_data())
         }
     }
 
@@ -4052,27 +4067,8 @@ mod tests {
     #[test_case(TransportPacketDataProtocol::Udp)]
     #[test_case(TransportPacketDataProtocol::Tcp)]
     #[test_case(TransportPacketDataProtocol::IcmpEchoRequest)]
+    #[test_case(TransportPacketDataProtocol::IcmpEchoReply)]
     fn transport_packet_data_from_serialized<I: TestIpExt>(proto: TransportPacketDataProtocol) {
-        let expected_data = match proto {
-            TransportPacketDataProtocol::Tcp => TransportPacketData::Tcp {
-                src_port: SRC_PORT.get(),
-                dst_port: DST_PORT.get(),
-                segment: SegmentHeader {
-                    seq: SeqNum::new(SEQ_NUM),
-                    ack: ACK_NUM.map(SeqNum::new),
-                    wnd: UnscaledWindowSize::from(WINDOW_SIZE),
-                    ..Default::default()
-                },
-                payload_len: 3,
-            },
-            TransportPacketDataProtocol::Udp => {
-                TransportPacketData::Generic { src_port: SRC_PORT.get(), dst_port: DST_PORT.get() }
-            }
-            TransportPacketDataProtocol::IcmpEchoRequest => {
-                TransportPacketData::Generic { src_port: SRC_PORT.get(), dst_port: SRC_PORT.get() }
-            }
-        };
-
         let buf = proto.make_packet::<I>(I::SRC_IP, I::DST_IP);
         let parsed_data = TransportPacketData::parse_in_ip_packet::<I, _>(
             I::SRC_IP,
@@ -4082,7 +4078,7 @@ mod tests {
         )
         .expect("failed to parse transport packet data");
 
-        assert_eq!(parsed_data, expected_data);
+        assert_eq!(parsed_data, proto.expected_transport_packet_data());
     }
 
     // Regression test for https://fxbug.dev/518696592.
@@ -4114,7 +4110,7 @@ mod tests {
 
         assert_matches!(
             parsed_data,
-            Some(TransportPacketData::Tcp { src_port, dst_port, .. }) => {
+            Some(TransportPacketData::Tcp { src_port, dst_port, header_and_payload_len: Some(_) }) => {
                 assert_eq!(src_port, SRC_PORT.get());
                 assert_eq!(dst_port, DST_PORT.get());
             }
@@ -4122,7 +4118,7 @@ mod tests {
     }
 
     // Regression test for https://fxbug.dev/518696592.
-    // Verifies that we still extract port information (as Generic packet data)
+    // Verifies that we still extract port information (with `header_and_payload_len: None`)
     // even if TCP header parsing fails due to malformed (mutually exclusive) flags.
     #[ip_test(I)]
     fn transport_packet_data_from_serialized_malformed_tcp_flags<I: TestIpExt>() {
@@ -4145,9 +4141,10 @@ mod tests {
 
         assert_matches!(
             parsed_data,
-            Some(TransportPacketData::Generic { src_port, dst_port }) => {
+            Some(TransportPacketData::Tcp { src_port, dst_port, header_and_payload_len }) => {
                 assert_eq!(src_port, SRC_PORT.get());
                 assert_eq!(dst_port, DST_PORT.get());
+                assert_matches!(header_and_payload_len, None);
             }
         );
     }
@@ -4163,6 +4160,7 @@ mod tests {
             TransportPacketDataProtocol::Udp,
             TransportPacketDataProtocol::Tcp,
             TransportPacketDataProtocol::IcmpEchoRequest,
+            TransportPacketDataProtocol::IcmpEchoReply,
         ],
         [
             PacketType::FullyParsed,
@@ -4176,36 +4174,11 @@ mod tests {
         for<'a> I::Packet<&'a mut [u8]>: IpPacket<I>,
         for<'a> I::PacketRaw<&'a mut [u8]>: IpPacket<I>,
     {
-        let expected_data = match proto {
-            TransportPacketDataProtocol::Tcp => conntrack::PacketMetadata::new(
-                I::SRC_IP,
-                I::DST_IP,
-                conntrack::TransportProtocol::Tcp,
-                TransportPacketData::Tcp {
-                    src_port: SRC_PORT.get(),
-                    dst_port: DST_PORT.get(),
-                    segment: SegmentHeader {
-                        seq: SeqNum::new(SEQ_NUM),
-                        ack: ACK_NUM.map(SeqNum::new),
-                        wnd: UnscaledWindowSize::from(WINDOW_SIZE),
-                        ..Default::default()
-                    },
-                    payload_len: 3,
-                },
-            ),
-            TransportPacketDataProtocol::Udp => conntrack::PacketMetadata::new(
-                I::SRC_IP,
-                I::DST_IP,
-                conntrack::TransportProtocol::Udp,
-                TransportPacketData::Generic { src_port: SRC_PORT.get(), dst_port: DST_PORT.get() },
-            ),
-            TransportPacketDataProtocol::IcmpEchoRequest => conntrack::PacketMetadata::new(
-                I::SRC_IP,
-                I::DST_IP,
-                conntrack::TransportProtocol::Icmp,
-                TransportPacketData::Generic { src_port: SRC_PORT.get(), dst_port: SRC_PORT.get() },
-            ),
-        };
+        let expected_data = conntrack::PacketMetadata::new(
+            I::SRC_IP,
+            I::DST_IP,
+            proto.expected_transport_packet_data(),
+        );
 
         let mut buf = proto.make_ip_packet_with_ports_data::<I>(
             I::SRC_IP,
@@ -4624,6 +4597,7 @@ mod tests {
             TransportPacketDataProtocol::Udp,
             TransportPacketDataProtocol::Tcp,
             TransportPacketDataProtocol::IcmpEchoRequest,
+            TransportPacketDataProtocol::IcmpEchoReply,
         ],
         [
             PacketType::FullyParsed,
@@ -4680,27 +4654,10 @@ mod tests {
             }
         };
 
-        let expected = match proto {
-            TransportPacketDataProtocol::Tcp | TransportPacketDataProtocol::Udp => {
-                ParsedIcmpErrorPayload {
-                    src_ip: I::SRC_IP,
-                    dst_ip: I::DST_IP,
-                    src_port: SRC_PORT.get(),
-                    dst_port: DST_PORT.get(),
-                    proto: proto.proto::<I>(),
-                }
-            }
-            TransportPacketDataProtocol::IcmpEchoRequest => {
-                ParsedIcmpErrorPayload {
-                    src_ip: I::SRC_IP,
-                    dst_ip: I::DST_IP,
-                    // NOTE: These are intentionally the same because of how
-                    // ICMP tracking works.
-                    src_port: SRC_PORT.get(),
-                    dst_port: SRC_PORT.get(),
-                    proto: proto.proto::<I>(),
-                }
-            }
+        let expected = ParsedIcmpErrorPayload {
+            src_ip: I::SRC_IP,
+            dst_ip: I::DST_IP,
+            transport: proto.expected_transport_tuple(),
         };
 
         assert_eq!(icmp_payload, expected);
@@ -4715,6 +4672,7 @@ mod tests {
             TransportPacketDataProtocol::Udp,
             TransportPacketDataProtocol::Tcp,
             TransportPacketDataProtocol::IcmpEchoRequest,
+            TransportPacketDataProtocol::IcmpEchoReply,
         ],
         [
             false,
@@ -4746,25 +4704,10 @@ mod tests {
         let actual =
             serializer.icmp_error_payload().expect("serializer should contain an IP packet");
 
-        let expected = match proto {
-            TransportPacketDataProtocol::Tcp | TransportPacketDataProtocol::Udp => {
-                ParsedIcmpErrorPayload::<I> {
-                    src_ip: I::SRC_IP,
-                    dst_ip: I::DST_IP,
-                    src_port: SRC_PORT.get(),
-                    dst_port: DST_PORT.get(),
-                    proto: proto.proto::<I>(),
-                }
-            }
-            TransportPacketDataProtocol::IcmpEchoRequest => ParsedIcmpErrorPayload::<I> {
-                src_ip: I::SRC_IP,
-                dst_ip: I::DST_IP,
-                // NOTE: These are intentionally the same because of how ICMP
-                // tracking works.
-                src_port: SRC_PORT.get(),
-                dst_port: SRC_PORT.get(),
-                proto: proto.proto::<I>(),
-            },
+        let expected = ParsedIcmpErrorPayload::<I> {
+            src_ip: I::SRC_IP,
+            dst_ip: I::DST_IP,
+            transport: proto.expected_transport_tuple(),
         };
 
         assert_eq!(actual, expected);
@@ -4779,6 +4722,7 @@ mod tests {
             TransportPacketDataProtocol::Udp,
             TransportPacketDataProtocol::Tcp,
             TransportPacketDataProtocol::IcmpEchoRequest,
+            TransportPacketDataProtocol::IcmpEchoReply,
         ],
         [
             PacketType::FullyParsed,
@@ -4830,28 +4774,11 @@ mod tests {
             }
         };
 
-        let expected = match proto {
-            TransportPacketDataProtocol::Tcp | TransportPacketDataProtocol::Udp => {
-                conntrack::PacketMetadata::new_from_icmp_error(
-                    I::SRC_IP,
-                    I::DST_IP,
-                    SRC_PORT.get(),
-                    DST_PORT.get(),
-                    I::map_ip(proto.proto::<I>(), |proto| proto.into(), |proto| proto.into()),
-                )
-            }
-            TransportPacketDataProtocol::IcmpEchoRequest => {
-                conntrack::PacketMetadata::new_from_icmp_error(
-                    I::SRC_IP,
-                    I::DST_IP,
-                    // NOTE: These are intentionally the same because of how
-                    // ICMP tracking works.
-                    SRC_PORT.get(),
-                    SRC_PORT.get(),
-                    I::map_ip(proto.proto::<I>(), |proto| proto.into(), |proto| proto.into()),
-                )
-            }
-        };
+        let expected = conntrack::PacketMetadata::new_from_icmp_error(
+            I::SRC_IP,
+            I::DST_IP,
+            proto.expected_transport_tuple(),
+        );
 
         assert_eq!(conntrack_packet, expected);
     }

@@ -354,4 +354,15 @@ zx_status_t HandleTable::ForEachHandleBatched(Func&& func) {
   return ZX_OK;
 }
 
+extern "C" {
+void* cpp_handle_table_lock(const HandleTable* handle_table);
+zx_koid_t cpp_handle_table_koid(const HandleTable* handle_table);
+zx_handle_t cpp_handle_table_map_handle_to_value(const HandleTable* handle_table,
+                                                 const Handle* handle);
+Handle* cpp_handle_table_get_handle_locked(HandleTable* handle_table, ProcessDispatcher* caller,
+                                           zx_handle_t handle_value);
+void cpp_handle_table_add_handle_locked(HandleTable* handle_table, Handle* handle);
+Handle* cpp_handle_table_remove_handle_locked(HandleTable* handle_table, Handle* handle);
+}
+
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_HANDLE_TABLE_H_

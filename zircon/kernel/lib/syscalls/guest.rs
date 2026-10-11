@@ -5,8 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, GuestDispatcher, HandleValue, PortDispatcher, ProcessDispatcher,
-    validate_ranged_resource,
+    GuestDispatcher, HandleValue, PortDispatcher, ProcessDispatcher, validate_ranged_resource,
 };
 use syscalls_macro::syscall;
 use zx_status::Status;
@@ -47,10 +46,19 @@ pub fn sys_guest_set_trap(
     port_handle: HandleValue,
     key: u64,
 ) -> Result<(), Status> {
-    let guest = Dispatcher::get_with_rights::<GuestDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let up = ProcessDispatcher::get_current();
+    let guest = up.handle_table().get_dispatcher_with_rights::<GuestDispatcher>(
+        &up,
+        handle,
+        ZX_RIGHT_WRITE,
+    )?;
 
     let port = if port_handle.raw_value() != ZX_HANDLE_INVALID {
-        Some(Dispatcher::get_with_rights::<PortDispatcher>(port_handle, ZX_RIGHT_WRITE)?)
+        Some(up.handle_table().get_dispatcher_with_rights::<PortDispatcher>(
+            &up,
+            port_handle,
+            ZX_RIGHT_WRITE,
+        )?)
     } else {
         None
     };

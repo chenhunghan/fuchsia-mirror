@@ -78,6 +78,9 @@ const (
 
 	// The default timeout for package resolution.
 	defaultPackageResolutionTimeout = 2 * time.Minute
+
+	// The default timeout for power-cycling the target in ProcessResult.
+	defaultPowerCycleTimeout = 2 * time.Minute
 )
 
 // Tester describes the interface for all different types of testers.
@@ -125,14 +128,20 @@ func BaseTestResultFromTest(test testsharder.Test) *runtests.TestDetails {
 	}
 }
 
+type subprocessTestRun struct {
+	profileRelDir   string
+	needsPowerCycle bool
+}
+
 // SubprocessTester executes tests in local subprocesses.
 type SubprocessTester struct {
-	env            []string
-	dir            string
-	localOutputDir string
-	sProps         *sandboxingProps
-	testRuns       map[string]string
-	target         targets.FuchsiaTarget
+	env               []string
+	dir               string
+	localOutputDir    string
+	sProps            *sandboxingProps
+	testRuns          map[string]subprocessTestRun
+	target            targets.FuchsiaTarget
+	powerCycleTimeout time.Duration
 }
 
 type sandboxingProps struct {
@@ -156,11 +165,12 @@ type SubprocessTesterOptions struct {
 // locally with a given working directory and environment.
 func NewSubprocessTester(opts SubprocessTesterOptions) (Tester, error) {
 	s := &SubprocessTester{
-		dir:            opts.Dir,
-		env:            opts.Env,
-		localOutputDir: opts.OutputDir,
-		testRuns:       make(map[string]string),
-		target:         opts.Target,
+		dir:               opts.Dir,
+		env:               opts.Env,
+		localOutputDir:    opts.OutputDir,
+		testRuns:          make(map[string]subprocessTestRun),
+		target:            opts.Target,
+		powerCycleTimeout: defaultPowerCycleTimeout,
 	}
 	// If the caller provided a path to NsJail, then intialize sandboxing properties.
 	if opts.NsjailPath != "" {
@@ -190,16 +200,12 @@ func (t *SubprocessTester) SetupTest(_ context.Context, _ testsharder.Test) erro
 	return nil
 }
 
-func (t *SubprocessTester) setTestRun(test testsharder.Test, profileRelDir string) {
-	t.testRuns[test.Path] = profileRelDir
+func (t *SubprocessTester) setTestRun(test testsharder.Test, run subprocessTestRun) {
+	t.testRuns[test.Path] = run
 }
 
-func (t *SubprocessTester) getTestRun(test testsharder.Test) string {
-	profileRelDir, ok := t.testRuns[test.Path]
-	if !ok {
-		return ""
-	}
-	return profileRelDir
+func (t *SubprocessTester) getTestRun(test testsharder.Test) subprocessTestRun {
+	return t.testRuns[test.Path]
 }
 
 func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdout io.Writer, stderr io.Writer, outDir string) (*runtests.TestDetails, error) {
@@ -259,9 +265,10 @@ func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdo
 		runnerEnv = append(runnerEnv, fmt.Sprintf("%s=%s", key, value))
 	}
 	r := newRunner(t.dir, runnerEnv)
+	testCmdCtx := ctx
 	if test.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, test.Timeout)
+		testCmdCtx, cancel = context.WithTimeout(ctx, test.Timeout)
 		defer cancel()
 	}
 	// './' is a package-level construct in os/exec whose use is recommended
@@ -495,26 +502,21 @@ func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdo
 			return testResult, nil
 		}
 	}
-	err := r.Run(ctx, testCmd, subprocess.RunOptions{Stdout: stdout, Stderr: stderr, Setpgid: true})
-	t.setTestRun(test, profileRelDir)
+	err := r.Run(testCmdCtx, testCmd, subprocess.RunOptions{Stdout: stdout, Stderr: stderr, Setpgid: true})
 	var exitErr *exec.ExitError
+	// Exit code 40 signals that the device is in a bad state and needs to be
+	// power-cycled (see https://fxbug.dev/425675837). We record this here and
+	// execute the power cycle in ProcessResult so it runs outside the per-test
+	// timeout and grace period budget.
+	needsPowerCycle := againstDevice() && errors.As(err, &exitErr) && exitErr.ExitCode() == 40
+	t.setTestRun(test, subprocessTestRun{
+		profileRelDir:   profileRelDir,
+		needsPowerCycle: needsPowerCycle,
+	})
 	if err == nil {
 		testResult.Status = runtests.TestSuccess
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		testResult.Status = runtests.TestAborted
-	} else if againstDevice() && errors.As(err, &exitErr) {
-		// Exit code 40 signals that the device is in a bad state and
-		// needs to be power-cycled. See https://fxbug.dev/425675837.
-		// A device in this state may still pass the generic health
-		// check that's run in between tests so we explicitly check for
-		// it here so that we can recover the device before the next test.
-		if exitErr.ExitCode() == 40 {
-			r := &subprocess.Runner{Env: os.Environ()}
-			if err := setPowerState(ctx, r, "cycle"); err != nil {
-				return testResult, fmt.Errorf("failed to power cycle target: %w", err)
-			}
-		}
-		testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
 	} else {
 		testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
 	}
@@ -539,7 +541,25 @@ func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdo
 }
 
 func (t *SubprocessTester) ProcessResult(ctx context.Context, test testsharder.Test, outDir string, testResult *runtests.TestDetails, err error) (*runtests.TestDetails, error) {
-	profileRelDir := t.getTestRun(test)
+	testRun := t.getTestRun(test)
+	if testRun.needsPowerCycle {
+		// Exit code 40 signals that the device is in a bad state and
+		// needs to be power-cycled. See https://fxbug.dev/425675837.
+		// A device in this state may still pass the generic health
+		// check that's run in between tests so we explicitly check for
+		// it here so that we can recover the device before the next test.
+		powerCycleTimeout := defaultPowerCycleTimeout
+		if t.powerCycleTimeout > 0 {
+			powerCycleTimeout = t.powerCycleTimeout
+		}
+		powerCycleCtx, cancel := context.WithTimeout(ctx, powerCycleTimeout)
+		defer cancel()
+		r := newRunner(t.dir, t.env)
+		if powerCycleErr := setPowerState(powerCycleCtx, r, "cycle"); powerCycleErr != nil {
+			return testResult, fmt.Errorf("failed to power cycle target: %w", powerCycleErr)
+		}
+	}
+	profileRelDir := testRun.profileRelDir
 	if profileRelDir == "" {
 		return testResult, err
 	}
@@ -675,7 +695,6 @@ type FFXTester struct {
 type ffxTestRun struct {
 	result        *ffxutil.TestRunResult
 	output        string
-	errOutput     string
 	totalDuration time.Duration
 }
 
@@ -842,9 +861,8 @@ func (t *FFXTester) testWithFile(ctx context.Context, test testsharder.Test, std
 	origStdout := t.ffx.Stdout()
 	origStderr := t.ffx.Stderr()
 	var buf bytes.Buffer
-	var errBuf bytes.Buffer
 	stdout = io.MultiWriter(stdout, &buf)
-	stderr = io.MultiWriter(stderr, &buf, &errBuf)
+	stderr = io.MultiWriter(stderr, &buf)
 	t.ffx.SetStdoutStderr(stdout, stderr)
 	defer t.ffx.SetStdoutStderr(origStdout, origStderr)
 
@@ -857,7 +875,7 @@ func (t *FFXTester) testWithFile(ctx context.Context, test testsharder.Test, std
 	if runResult == nil && err == nil {
 		err = fmt.Errorf("no test result was found")
 	}
-	t.testRuns[test.PackageURL] = ffxTestRun{runResult, buf.String(), errBuf.String(), clock.Now(ctx).Sub(startTime)}
+	t.testRuns[test.PackageURL] = ffxTestRun{runResult, buf.String(), clock.Now(ctx).Sub(startTime)}
 	return err
 }
 
@@ -876,7 +894,7 @@ func (t *FFXTester) ProcessResult(ctx context.Context, test testsharder.Test, ou
 	if testRun.result != nil {
 		testOutDir := testRun.result.GetTestOutputDir()
 		t.testOutDirs = append(t.testOutDirs, testOutDir)
-		testResult, err = processTestResult(testRun.result, test, testRun.errOutput, testRun.totalDuration, false)
+		testResult, err = processTestResult(testRun.result, test, testRun.totalDuration, false)
 		if !finalTestResult.IsMultipliedRun {
 			t.wg.Add(1)
 			go func() {
@@ -922,7 +940,7 @@ func (t *FFXTester) ProcessResult(ctx context.Context, test testsharder.Test, ou
 // failureReason returns a FailureReason for a test suite or test case if
 // status is a failure, or nil otherwise. It uses the first non-empty string in
 // stderr if available, and otherwise falls back to a synthetic timeout message
-// (when status is TestAborted) or "unknown failure reason".
+// when status is TestAborted.
 func failureReason(status runtests.TestStatus, timeout time.Duration, stderr ...string) *runtests.FailureReason {
 	if !runtests.IsFailure(status) {
 		return nil
@@ -934,20 +952,19 @@ func failureReason(status runtests.TestStatus, timeout time.Duration, stderr ...
 			}
 		}
 	}
-	msg := "unknown failure reason"
 	if status == runtests.TestAborted {
+		msg := "test timed out"
 		if timeout > 0 {
 			msg = fmt.Sprintf("test timed out after %s", timeout)
-		} else {
-			msg = "test timed out"
+		}
+		return &runtests.FailureReason{
+			Errors: []*runtests.FailureReasonError{{Message: msg}},
 		}
 	}
-	return &runtests.FailureReason{
-		Errors: []*runtests.FailureReasonError{{Message: msg}},
-	}
+	return nil
 }
 
-func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, errOutput string, totalDuration time.Duration, removeProfiles bool) (*runtests.TestDetails, error) {
+func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, totalDuration time.Duration, removeProfiles bool) (*runtests.TestDetails, error) {
 	testOutDir := runResult.GetTestOutputDir()
 	suiteResults, err := runResult.GetSuiteResults()
 	if err != nil {
@@ -970,7 +987,7 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 	default:
 		testResult.Status = runtests.TestFailure
 	}
-	testResult.FailureReason = failureReason(testResult.Status, test.Timeout, errOutput)
+	testResult.FailureReason = failureReason(testResult.Status, test.Timeout)
 	testResult.Tags = append(testResult.Tags, build.TestTag{Key: "test_outcome", Value: suiteResult.Outcome})
 
 	var suiteArtifacts []string
@@ -1036,7 +1053,7 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 			DisplayName:   testCase.Name,
 			CaseName:      testCase.Name,
 			Status:        status,
-			FailureReason: failureReason(status, test.Timeout, caseStderr, errOutput),
+			FailureReason: failureReason(status, test.Timeout, caseStderr),
 			Format:        "FTF",
 			OutputFiles:   artifacts,
 			OutputDir:     testCaseArtifactDir,

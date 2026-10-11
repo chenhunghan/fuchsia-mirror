@@ -65,7 +65,7 @@ pub async fn connect_socket_to_stdio(
     stdout: Stdout<'_>,
 ) -> anyhow::Result<()> {
     connect_socket_to_stdio_impl(
-        fuchsia_async::Socket::from_socket(socket),
+        fidl::AsyncSocket::from_socket(socket),
         || std::io::stdin().lock(),
         stdout,
     )?
@@ -155,13 +155,13 @@ mod tests {
     #[fuchsia::test]
     async fn stdin_to_socket() {
         let (socket, socket_remote) = fidl::Socket::create_stream();
-        let socket_remote = fuchsia_async::Socket::from_socket(socket_remote);
+        let socket_remote = fidl::AsyncSocket::from_socket(socket_remote);
 
         let connect_fut =
             connect_socket_to_stdio_impl(socket_remote, || &b"test input"[..], vec![]).unwrap();
 
         let (connect_res, bytes_from_socket) = futures::join!(connect_fut, async move {
-            let mut socket = fuchsia_async::Socket::from_socket(socket);
+            let mut socket = fidl::AsyncSocket::from_socket(socket);
             let mut out = vec![0u8; 100];
             let bytes_read = socket.read(&mut out).await.unwrap();
             drop(socket);
@@ -181,7 +181,7 @@ mod tests {
         let mut stdout = vec![];
         let (unblocker, block_until) = std::sync::mpsc::channel();
 
-        let socket_remote = fuchsia_async::Socket::from_socket(socket_remote);
+        let socket_remote = fidl::AsyncSocket::from_socket(socket_remote);
         let () = connect_socket_to_stdio_impl(
             socket_remote,
             move || {

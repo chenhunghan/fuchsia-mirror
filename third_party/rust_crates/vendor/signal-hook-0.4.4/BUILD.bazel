@@ -80,8 +80,8 @@ rust_library(
     }),
     version = "0.4.4",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/forks/libc-0.2.189:libc",
-        "//third_party/rust_crates/vendor/signal-hook-0.4.4:build_script_build",
         "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
     ],
 )
@@ -125,6 +125,7 @@ cargo_build_script(
         ],
     ),
     edition = "2018",
+    emit_warnings = False,
     pkg_name = "signal-hook",
     rustc_flags = [
         "--cap-lints=allow",

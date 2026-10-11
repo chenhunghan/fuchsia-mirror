@@ -1467,7 +1467,7 @@ mod tests {
 
                 fn lookup(
                     &self,
-                    _node: &FsNode,
+                    _entry: &DirEntry,
                     _current_task: &CurrentTask,
                     _name: &FsStr,
                 ) -> Result<FsNodeHandle, Errno> {

@@ -9,7 +9,8 @@
 #include "physload.h"
 
 void ArchPhysloadBeforeInitMemory() {
-  // Ensure we drop to EL1 first so that we set up our address space there so
-  // we can hand that off to the kernel proper without reconstruction.
-  arch::ArmDropToEl1WithoutEl2Monitor();
+  // Ensure we configure EL2 (staying in EL2 with VHE if supported, or dropping
+  // to EL1 otherwise) first so that we set up our address space there and can
+  // hand that off to the kernel proper without reconstruction.
+  arch::ArmDropToEl1();
 }

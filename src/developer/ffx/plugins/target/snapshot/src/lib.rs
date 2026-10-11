@@ -14,7 +14,7 @@ use fdomain_fuchsia_io as fio;
 use ffx_config::EnvironmentContext;
 use ffx_snapshot_args::SnapshotCommand;
 use ffx_writer::VerifiedMachineWriter;
-use fho::{Error, FfxMain, FfxTool, Result, bug, return_bug, return_user_error};
+use fho::{Error, FfxMain, FfxTool, Result, bug, return_bug, return_user_error, user_error};
 use futures::stream::{FuturesOrdered, StreamExt};
 use gcs::error::GcsError;
 use pbms::{AuthFlowChoice, handle_new_access_token};
@@ -237,7 +237,11 @@ pub async fn snapshot_impl(
         Some(file_dir) => {
             let dir = Path::new(&file_dir);
             if !dir.is_dir() {
-                return_user_error!("Path provided is not a directory: {file_dir}");
+                if dir.exists() {
+                    return_user_error!("Path provided is not a directory: {file_dir}");
+                }
+                fs::create_dir_all(&dir)
+                    .map_err(|e| user_error!("Failed to create directory {file_dir}: {e}"))?;
             }
             dir.to_path_buf()
         }
@@ -495,5 +499,46 @@ mod test {
         \x20       name: default-board\n"
         );
         Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_snapshot_creates_missing_dir() {
+        let client = fdomain_local::local_client_empty();
+        let annotations = Annotations::default();
+        let data_provider_proxy = setup_fake_data_provider_server(client, annotations);
+        let tempdir = tempfile::tempdir().expect("temp dir");
+        let custom_dir = tempdir.path().join("snapshots").join("2025-11-27:15:31:31");
+
+        let cmd = SnapshotCommand {
+            output_file: Some(custom_dir.to_string_lossy().to_string()),
+            dump_annotations: false,
+            upload: false,
+        };
+        let result = snapshot_impl(data_provider_proxy, cmd, EnvironmentContext::default()).await;
+        let output = result.expect("snapshot path");
+        assert_eq!(output, custom_dir.join("snapshot.zip"));
+        assert!(output.is_file());
+    }
+
+    #[fuchsia::test]
+    async fn test_snapshot_fails_when_dir_is_file() {
+        let client = fdomain_local::local_client_empty();
+        let annotations = Annotations::default();
+        let data_provider_proxy = setup_fake_data_provider_server(client, annotations);
+        let tempdir = tempfile::tempdir().expect("temp dir");
+        let file_path = tempdir.path().join("existing_file");
+        fs::File::create(&file_path).expect("create file");
+
+        let cmd = SnapshotCommand {
+            output_file: Some(file_path.to_string_lossy().to_string()),
+            dump_annotations: false,
+            upload: false,
+        };
+        let result = snapshot_impl(data_provider_proxy, cmd, EnvironmentContext::default()).await;
+        let err = result.expect_err("expected error when dir is a file");
+        assert!(
+            err.to_string().contains("Path provided is not a directory"),
+            "unexpected error: {err}"
+        );
     }
 }

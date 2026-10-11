@@ -40,6 +40,7 @@ class MainServiceTest : public UnitTestFixture {
                           "",
                           "",
                           "",
+                          /*enable_periodic_system_time_writes=*/false,
                           LastReboot::Options{
                               .is_first_instance = kIsFirstInstance,
                               .reboot_log = RebootLog(FinalShutdownInfo(FinalShutdownReason::kCold,

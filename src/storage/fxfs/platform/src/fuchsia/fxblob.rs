@@ -13,4 +13,4 @@ mod writer;
 #[cfg(test)]
 pub mod testing;
 
-pub use crate::fxblob::directory::BlobDirectory;
+pub use crate::fxblob::directory::{BlobDirectory, Identifier};

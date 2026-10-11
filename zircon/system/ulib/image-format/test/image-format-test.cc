@@ -2165,6 +2165,35 @@ TEST(ImageFormat, RoundUpWidthForCallersChecked) {
   // Lowest value that's 17 or larger and divisible by 8.
   EXPECT_EQ(24u, minimum_row_bytes.ValueOrDie());
 }
+
+TEST(ImageFormat, RoundUpNearLimitChecked) {
+  sysmem_v2::ImageFormatConstraints constraints;
+  constraints.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  constraints.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  constraints.min_size() = {1u, 1u};
+  constraints.max_size() = {0xFFFFFFFF, 0xFFFFFFFF};
+  constraints.bytes_per_row_divisor() = 344064;
+
+  // Stride is 4 bytes for B8G8R8A8.
+  // 1073737728 * 4 = 4294950912 (0xFFFC0000), which is a multiple of 344064.
+  // Previously CheckRoundUp computed val + multiple - 1, which was
+  // 4294950912 + 344063 = 4295294975 > 0xFFFFFFFF, causing a false overflow.
+  constexpr uint32_t kAlignedWidth = 1073737728;
+  auto aligned_row_bytes = ImageFormatMinimumRowBytesChecked(constraints, kAlignedWidth);
+  ASSERT_TRUE(aligned_row_bytes.IsValid());
+  EXPECT_EQ(4294950912u, aligned_row_bytes.ValueOrDie());
+
+  // Non-aligned width that rounds up to 4294950912.
+  constexpr uint32_t kNonAlignedWidth = 1073737727;
+  auto non_aligned_row_bytes = ImageFormatMinimumRowBytesChecked(constraints, kNonAlignedWidth);
+  ASSERT_TRUE(non_aligned_row_bytes.IsValid());
+  EXPECT_EQ(4294950912u, non_aligned_row_bytes.ValueOrDie());
+
+  // Width that actually overflows when rounded up.
+  constexpr uint32_t kOverflowWidth = 1073737729;
+  auto overflow_row_bytes = ImageFormatMinimumRowBytesChecked(constraints, kOverflowWidth);
+  EXPECT_FALSE(overflow_row_bytes.IsValid());
+}
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(32)
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(30)
@@ -2182,3 +2211,24 @@ TEST(ImageFormat, IsNonTiledSinglePlaneTest) {
   EXPECT_TRUE(ImageFormatIsNonTiledSinglePlane(bgra32));
 }
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(30)
+
+// The image-format asserts are enabled in all build types, so misuse crashes consistently instead
+// of returning a meaningless value in release builds.
+TEST(ImageFormat, UnsupportedPixelFormatPropertiesCrash) {
+  PixelFormatAndModifier unsupported(fuchsia_images2::PixelFormat::kB8G8R8A8,
+                                     fuchsia_images2::PixelFormatModifier::kDoNotCare);
+  ASSERT_FALSE(ImageFormatIsSupported(unsupported));
+  ASSERT_DEATH([&] { ImageFormatBitsPerPixel(unsupported); });
+  ASSERT_DEATH([&] { ImageFormatStrideBytesPerWidthPixel(unsupported); });
+  ASSERT_DEATH([&] { ImageFormatSurfaceWidthMinDivisor(unsupported); });
+  ASSERT_DEATH([&] { ImageFormatSurfaceHeightMinDivisor(unsupported); });
+  ASSERT_DEATH([&] { ImageFormatSampleAlignment(unsupported); });
+}
+
+TEST(ImageFormat, LinearImageSizeWithoutBytesPerRowCrashes) {
+  fuchsia_images2::ImageFormat image_format;
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kNv12;
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  image_format.size() = {64u, 64u};
+  ASSERT_DEATH([&] { ImageFormatImageSize(image_format); });
+}

@@ -651,7 +651,7 @@ func runHealthCheck(ctx context.Context, t Tester) error {
 	return t.Reconnect(ctx)
 }
 
-func setPowerState(ctx context.Context, r *subprocess.Runner, state string) error {
+func setPowerState(ctx context.Context, r cmdRunner, state string) error {
 	cmd := []string{
 		os.Getenv(constants.DMCPathEnvKey),
 		"set-power-state",

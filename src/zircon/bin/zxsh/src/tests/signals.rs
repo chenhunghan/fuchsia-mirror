@@ -113,10 +113,10 @@ fn test_run_exit_trap() {
 
     // Normal exit trap execution
     state.traps.insert(BString::from("EXIT"), BString::from("CLEANUP=done"));
-    run_exit_trap(&mut state, &mut ctx);
+    assert_eq!(run_exit_trap(&mut state, &mut ctx, 0), 0);
     assert_eq!(state.get_var(BStr::new("CLEANUP")).unwrap(), "done");
 
     // Exit trap error handling
     state.traps.insert(BString::from("EXIT"), BString::from("syntax_error ( invalid"));
-    run_exit_trap(&mut state, &mut ctx);
+    assert_eq!(run_exit_trap(&mut state, &mut ctx, 0), 0);
 }

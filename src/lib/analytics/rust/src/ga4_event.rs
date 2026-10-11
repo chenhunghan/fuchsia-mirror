@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const POST_EVENT_COUNT_MAX: usize = 25;
+pub(crate) const POST_EVENT_COUNT_MAX: usize = 25;
 const EVENT_PARAM_COUNT_MAX: usize = 100;
 const EVENT_NAME_LENGTH_MAX: usize = 40;
 

@@ -22,12 +22,11 @@ rustc_library(
         "//src/starnix/lib/starnix_uapi",
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:serde_json",
-        "//third_party/rust_crates/vendor:utf8parse",
     ],
 )
 
 # Note: testing/scenarios_list.json is strict JSON parsed by GN's read_file()
-# and Python's json.load(), so it cannot contain LINT.IfChange comments.
+# and Python's json.load(), so it cannot contain IFTTT lint comments.
 # @bazel2gn:skip
 _SCENARIOS = [
     # LINT.IfChange
@@ -36,10 +35,12 @@ _SCENARIOS = [
     "canon_kill_line",
     "canon_simple_echo",
     "canon_word_erase",
+    "canonical_partial_read",
     "echo_extended",
     "echo_nl",
     "echo_prt",
     "echo_prt_two_chars",
+    "echoctl_special_chars",
     "echonl_echoprt",
     "echoprt_backspace_multi_aln",
     "echoprt_backspace_multi_nl",
@@ -49,31 +50,38 @@ _SCENARIOS = [
     "echoprt_backspace_nl_space",
     "echoprt_kill",
     "echoprt_kill_nl_aln",
+    "echoprt_utf8_and_kill",
     "echoprt_word_erase",
     "echoprt_word_erase_nl_aln",
     "echoprt_word_erase_nl_nl",
     "echoprt_word_erase_space",
     "echoprt_word_erase_tab",
     "echoprt_word_erase_typing",
+    "extproc_basic",
     "flush_sigint",
     "flush_sigint_after_newline",
     "flush_sigint_after_newline_separate_writes",
     "flush_sigquit",
     "flush_sigsusp",
+    "icanon_toggle_state",
     "input_icrnl_prec",
     "input_igncr",
     "input_inlcr",
     "input_inlcr_icrnl_swap",
+    "istrip_basic",
     "iuclc_simple",
     "iutf8_backspace",
     "ixany_basic",
     "ixon_basic",
+    "ixon_flow_control_and_packet_mode",
     "no_iutf8_backspace",
     "noflsh_echoctl_mixed",
     "noflsh_sigint",
     "noflsh_sigquit",
     "noflsh_sigsusp",
+    "noncanon_no_special_chars",
     "olcuc_simple",
+    "onlcr_resets_column_onocr",
     "output_direct_ocrnl",
     "output_direct_onlret_onocr",
     "output_ocrnl",
@@ -82,6 +90,11 @@ _SCENARIOS = [
     "output_onocr",
     "output_xtabs",
     "packet_mode_basic",
+    "parmrk_ff_doubling",
+    "pty_close_main",
+    "pty_close_replica",
+    "signals_and_packet_mode",
+    "tab_erase_columns",
     "tcflush_packet_mode",
     "tciflush",
     "tciflush_buffer_full",
@@ -90,6 +103,7 @@ _SCENARIOS = [
     "tcioflush_canon",
     "tcoflush",
     "vdiscard_basic",
+    "veof_canonical_lines",
     "veol2_basic",
     "veol2_no_iexten",
     "veol_basic",
@@ -97,7 +111,9 @@ _SCENARIOS = [
     "vlnext_echoctl",
     "vlnext_no_echoctl",
     "vreprint_basic",
-    # LINT.ThenChange(testing/scenarios_list.json, BUILD.gn)
+    "vreprint_no_echo_and_echoprt",
+    "werase_punctuation_and_no_echoe",
+    # LINT.ThenChange(testing/scenarios_list.json)
 ]
 
 # @bazel2gn:skip

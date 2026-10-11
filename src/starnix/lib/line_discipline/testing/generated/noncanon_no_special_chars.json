@@ -1,0 +1,51 @@
+{
+    "name": "noncanon_no_special_chars",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "a\u0016b\u0012c\u007fd\u0017e\u0015f\u0004\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "a^Vb^Rc^?d^We^Uf^D^J"
+        },
+        {
+            "type": "read_from_slave",
+            "data": "a\u0016b\u0012c\u007fd\u0017e\u0015f\u0004\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ECHO",
+            "ECHOE",
+            "ECHOK",
+            "ECHOCTL",
+            "ECHOKE",
+            "IEXTEN"
+        ]
+    }
+}

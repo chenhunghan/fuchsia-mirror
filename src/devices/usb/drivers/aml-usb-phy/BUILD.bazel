@@ -11,9 +11,16 @@ load(
     "fuchsia_package",
     "fuchsia_unittest_package",
 )
+load("//build/bazel/rules:drivers/fuchsia_driver_dml.bzl", "dml_cc_library")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
+
+dml_cc_library(
+    name = "aml-usb-phy-metadata",
+    dml = "meta/aml-usb-phy.dml",
+    driver_name = "aml-usb-phy",
+)
 
 fuchsia_driver_bind_bytecode(
     name = "aml-usb-phy-bind",
@@ -51,11 +58,13 @@ fx_cc_library(
         "_ALL_SOURCE",
     ],
     deps = [
+        ":aml-usb-phy-metadata",
         "//src/devices/lib/amlogic",
         "//zircon/system/ulib/ddk-platform-defs",
         "@fuchsia_sdk//bind/fuchsia.amlogic.platform:fuchsia.amlogic.platform_cc",
         "@fuchsia_sdk//bind/fuchsia:fuchsia_cc",
         "@fuchsia_sdk//bind/fuchsia.platform:fuchsia.platform_cc",
+        "@fuchsia_sdk//fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.registers:fuchsia.hardware.registers_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.usb.phy:fuchsia.hardware.usb.phy_cpp",

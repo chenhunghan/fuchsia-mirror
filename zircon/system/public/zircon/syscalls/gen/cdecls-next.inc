@@ -9,6 +9,12 @@
 #error "<zircon/syscalls-next.h> is the public API header"
 #endif
 
+_ZX_SYSCALL_DECL(debug_resume, zx_status_t, _ZX_SYSCALL_EXTERN_C, 1, (resource),
+                 (_ZX_SYSCALL_ANNO(use_handle("Fuchsia")) zx_handle_t resource))
+
+_ZX_SYSCALL_DECL(debug_suspend, zx_status_t, _ZX_SYSCALL_EXTERN_C, 1, (resource),
+                 (_ZX_SYSCALL_ANNO(use_handle("Fuchsia")) zx_handle_t resource))
+
 _ZX_SYSCALL_DECL(iob_allocate_id, zx_status_t, _ZX_SYSCALL_EXTERN_C, 6,
                  (handle, options, region_index, blob, blob_size, id),
                  (_ZX_SYSCALL_ANNO(use_handle("Fuchsia")) zx_handle_t handle,

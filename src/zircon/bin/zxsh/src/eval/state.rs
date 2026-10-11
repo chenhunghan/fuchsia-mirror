@@ -5,7 +5,7 @@
 use super::EvalOutcome;
 use crate::args::Args;
 use crate::collections::{FlatMap, FlatSet};
-use crate::serialization::{BStrExt, Deserialize, Serialize};
+use crate::serialization::{BStrExt, Deserialize, Serialize, deserialize_vec, serialize_slice};
 use crate::string::{parse_int, path_buf_to_bstring};
 use bstr::{BStr, BString, ByteSlice};
 use std::ffi::{CString, NulError};
@@ -23,12 +23,44 @@ pub struct BgJob {
     pub cmd: BString,
 }
 
-/// A RAII guard that temporarily modifies variable state and restores the original values on drop.
+/// A RAII guard that temporarily modifies variable state and restores the original values and
+/// export status on drop.
 pub struct StateBackupGuard<'a> {
     /// Mutable reference to the active shell state.
     pub state: &'a mut ShellState,
-    /// List of backed-up variables: `(var_name, previous_value_or_none_if_unset)`.
-    pub backups: Vec<(BString, Option<BString>)>,
+    /// List of backed-up variables: `(var_name, previous_value_or_none_if_unset, was_exported)`.
+    pub backups: Vec<(BString, Option<BString>, bool)>,
+}
+
+impl<'a> StateBackupGuard<'a> {
+    /// Creates a new `StateBackupGuard` wrapping the given shell state.
+    pub fn new(state: &'a mut ShellState) -> Self {
+        Self { state, backups: Vec::new() }
+    }
+
+    /// Records the current value and export status of `name` if not already backed up by this
+    /// guard.
+    pub fn backup_var(&mut self, name: impl VarName) {
+        let name = name.to_bstr();
+        if self.backups.iter().any(|(backed_up_name, _, _)| backed_up_name.as_bstr() == name) {
+            return;
+        }
+        let old_val = self.state.get_var(name);
+        let was_exported = self.state.exported().contains(name);
+        self.backups.push((name.to_owned(), old_val, was_exported));
+    }
+
+    /// Commits the variable modifications made under this guard to the underlying shell state so
+    /// their values are not reverted on drop, restoring only unexported status unless `allexport`
+    /// (`set -a`) is enabled.
+    pub fn commit(&mut self) {
+        let allexport = self.state.opt_allexport;
+        for (var_name, _, was_exported) in self.backups.drain(..) {
+            if !was_exported && !allexport {
+                self.state.unexport_var(var_name.as_bstr());
+            }
+        }
+    }
 }
 
 impl<'a> std::fmt::Debug for StateBackupGuard<'a> {
@@ -39,11 +71,16 @@ impl<'a> std::fmt::Debug for StateBackupGuard<'a> {
 
 impl<'a> Drop for StateBackupGuard<'a> {
     fn drop(&mut self) {
-        for (var_name, old_val) in &self.backups {
+        for (var_name, old_val, was_exported) in self.backups.iter().rev() {
             if let Some(val) = old_val {
-                let _ = self.state.set_var(var_name.as_bstr(), val.as_bstr());
+                self.state.set_var(var_name.as_bstr(), val.as_bstr());
             } else {
-                let _ = self.state.unset_var(var_name.as_bstr());
+                self.state.unset_var(var_name.as_bstr());
+            }
+            if *was_exported {
+                self.state.export_var(var_name.as_bstr());
+            } else {
+                self.state.unexport_var(var_name.as_bstr());
             }
         }
     }
@@ -114,12 +151,39 @@ impl<'a> std::ops::DerefMut for LoopNestGuard<'a> {
 }
 
 /// Represents a variable call stack frame (e.g. inside a shell function invocation).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-    /// Variables declared as local within this function frame.
-    pub local_vars: FlatMap<BString, BString>,
+    /// Variables declared as local within this function frame (`None` when locally unset).
+    pub local_vars: FlatMap<BString, Option<BString>>,
     /// Positional parameters (`$1`, `$2`, etc.) active within this frame.
     pub args: Vec<BString>,
+}
+
+impl Serialize for Frame {
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
+        self.local_vars.serialize_into(buf);
+        self.args.serialize_into(buf);
+    }
+}
+
+impl Deserialize for Frame {
+    fn deserialize(bytes: &[u8], offset: &mut usize) -> Result<Self, String> {
+        let local_vars = FlatMap::deserialize(bytes, offset)?;
+        let args = Vec::<BString>::deserialize(bytes, offset)?;
+        Ok(Self { local_vars, args })
+    }
+}
+
+impl Serialize for Vec<Frame> {
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
+        serialize_slice(self, buf);
+    }
+}
+
+impl Deserialize for Vec<Frame> {
+    fn deserialize(bytes: &[u8], offset: &mut usize) -> Result<Self, String> {
+        deserialize_vec(bytes, offset)
+    }
 }
 
 /// An entry in the cached resolved command table (hash table).
@@ -290,6 +354,14 @@ pub struct ShellState {
     pub optopt_offset: usize,
     /// Counter tracking loop nesting depth for `break` and `continue`.
     pub loop_nest: u32,
+    /// Exit status of the most recent command substitution (`$(...)` or `` `...` ``) during the
+    /// current command evaluation.
+    last_cmd_sub_status: Option<i32>,
+    /// Exit status of the command immediately preceding the active trap action, used by bare
+    /// `exit` / `return` inside traps per POSIX.
+    trap_exit_status: Option<i32>,
+    /// Process ID (koid) of the invoked root shell (`$$`), preserved across subshells.
+    root_pid: zx::Koid,
 }
 
 impl ShellState {
@@ -350,6 +422,7 @@ impl Serialize for ShellState {
         self.vars.serialize_into(buf);
         self.exported.serialize_into(buf);
         self.functions.serialize_into(buf);
+        self.frames.serialize_into(buf);
         self.aliases.serialize_into(buf);
         self.readonly.serialize_into(buf);
         self.umask.serialize_into(buf);
@@ -360,6 +433,7 @@ impl Serialize for ShellState {
         self.traps.serialize_into(buf);
         self.cwd.serialize_into(buf);
         (self.optopt_offset as u32).serialize_into(buf);
+        self.root_pid.serialize_into(buf);
     }
 }
 
@@ -368,6 +442,7 @@ impl Deserialize for ShellState {
         let vars = FlatMap::deserialize(bytes, offset)?;
         let exported = FlatSet::deserialize(bytes, offset)?;
         let functions = FlatMap::deserialize(bytes, offset)?;
+        let frames = Vec::<Frame>::deserialize(bytes, offset)?;
         let aliases = FlatMap::deserialize(bytes, offset)?;
         let readonly = FlatSet::deserialize(bytes, offset)?;
         let umask = u32::deserialize(bytes, offset)?;
@@ -378,12 +453,13 @@ impl Deserialize for ShellState {
         let traps = FlatMap::deserialize(bytes, offset)?;
         let cwd = BString::deserialize(bytes, offset)?;
         let optopt_offset = u32::deserialize(bytes, offset)? as usize;
+        let root_pid = zx::Koid::deserialize(bytes, offset)?;
 
         let mut state = ShellState {
             vars,
             exported,
             functions,
-            frames: Vec::new(),
+            frames,
             aliases,
             umask,
             readonly,
@@ -408,6 +484,9 @@ impl Deserialize for ShellState {
             last_bg_pid: None,
             optopt_offset,
             loop_nest: 0,
+            last_cmd_sub_status: None,
+            trap_exit_status: None,
+            root_pid,
         };
         state.set_options_from_string(options_str.as_ref());
 
@@ -491,7 +570,11 @@ impl ShellState {
             readonly.insert(BString::from("PPID"));
         }
 
-        let script_name = args.script_name.unwrap_or_else(|| BString::from(DEFAULT_SHELL_NAME));
+        let script_name =
+            args.script_name.or(args.arg0).unwrap_or_else(|| BString::from(DEFAULT_SHELL_NAME));
+        let root_pid = fuchsia_runtime::process_self()
+            .koid()
+            .unwrap_or(zx::Koid::from_raw(zx::sys::ZX_KOID_INVALID));
 
         let mut state = Self {
             vars,
@@ -535,6 +618,9 @@ impl ShellState {
             last_bg_pid: None,
             optopt_offset: 1,
             loop_nest: 0,
+            last_cmd_sub_status: None,
+            trap_exit_status: None,
+            root_pid,
         };
 
         for opt in &args.options_to_set {
@@ -591,10 +677,37 @@ impl ShellState {
         self.cwd = new_cwd;
     }
 
+    /// Returns the separator byte used when joining positional parameters (`"$*"`, etc.):
+    /// the first byte of `IFS` if set and non-empty, `None` if `IFS` is set to empty (`IFS=""`),
+    /// or `Some(b' ')` if `IFS` is unset.
+    pub fn ifs_join_sep(&self) -> Option<u8> {
+        match self.lookup_var(BStr::new(b"IFS")) {
+            None => Some(b' '),
+            Some(val) => val.first().copied(),
+        }
+    }
+
+    fn join_args(&self, sep: Option<u8>) -> BString {
+        let current_args = self.active_args();
+        let mut joined = Vec::new();
+        for (i, arg) in current_args.iter().enumerate() {
+            if i > 0 {
+                if let Some(s) = sep {
+                    joined.push(s);
+                }
+            }
+            joined.extend_from_slice(arg.as_bytes());
+        }
+        BString::from(joined)
+    }
+
     /// Looks up a variable or special parameter value by name (e.g. `$?`, `$#`, `$1`, `$-`,
     /// `$VAR`).
     pub fn get_var(&self, name: impl VarName) -> Option<BString> {
-        let name = name.to_bstr();
+        self.get_var_impl(name.to_bstr())
+    }
+
+    fn get_var_impl(&self, name: &BStr) -> Option<BString> {
         if let Some(idx) = parse_int::<usize>(name) {
             if idx == 0 {
                 return Some(self.script_name.clone());
@@ -614,20 +727,10 @@ impl ShellState {
                 return Some(BString::from(current_args.len().to_string()));
             }
             b"?" => return self.vars.get(BStr::new(b"?")).cloned(),
-            b"@" | b"*" => {
-                let current_args = self.active_args();
-                let mut joined = Vec::new();
-                for (i, arg) in current_args.iter().enumerate() {
-                    if i > 0 {
-                        joined.push(b' ');
-                    }
-                    joined.extend_from_slice(arg.as_bytes());
-                }
-                return Some(BString::from(joined));
-            }
+            b"@" => return Some(self.join_args(Some(b' '))),
+            b"*" => return Some(self.join_args(self.ifs_join_sep())),
             b"$" => {
-                let koid = fuchsia_runtime::process_self().koid().unwrap().raw_koid();
-                return Some(BString::from(koid.to_string()));
+                return Some(BString::from(self.root_pid.raw_koid().to_string()));
             }
             b"!" => {
                 if let Some(pid) = self.last_bg_pid {
@@ -635,47 +738,20 @@ impl ShellState {
                 }
                 return Some(BString::default());
             }
-            b"-" => {
-                let mut opts = String::new();
-                if self.opt_errexit {
-                    opts.push('e');
-                }
-                if self.opt_xtrace {
-                    opts.push('x');
-                }
-                if self.opt_nounset {
-                    opts.push('u');
-                }
-                if self.opt_noglob {
-                    opts.push('f');
-                }
-                if self.opt_allexport {
-                    opts.push('a');
-                }
-                if self.opt_interactive {
-                    opts.push('i');
-                }
-                if self.opt_noclobber {
-                    opts.push('C');
-                }
-                if self.opt_noexec {
-                    opts.push('n');
-                }
-                if self.opt_verbose {
-                    opts.push('v');
-                }
-                return Some(BString::from(opts));
-            }
+            b"-" => return Some(self.options_string()),
             _ => {}
         }
 
+        self.lookup_var(name).cloned()
+    }
+
+    fn lookup_var(&self, name: &BStr) -> Option<&BString> {
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.local_vars.get(name) {
-                return Some(val.clone());
+                return val.as_ref();
             }
         }
-
-        self.vars.get(name).cloned()
+        self.vars.get(name)
     }
 
     /// Returns `true` if the specified variable is marked read-only.
@@ -690,7 +766,10 @@ impl ShellState {
 
     /// Marks the specified variable as read-only.
     pub fn make_readonly(&mut self, name: impl VarName) {
-        let name = name.to_bstr();
+        self.make_readonly_impl(name.to_bstr());
+    }
+
+    fn make_readonly_impl(&mut self, name: &BStr) {
         assert_valid_name(name);
         self.readonly.insert(name.to_owned());
     }
@@ -710,29 +789,37 @@ impl ShellState {
 
     /// Sets the value of a variable in the innermost active local frame or global scope.
     pub fn set_var(&mut self, name: impl VarName, val: impl VarName) {
-        let name = name.to_bstr();
-        let val = val.to_bstr();
+        self.set_var_impl(name.to_bstr(), val.to_bstr());
+    }
+
+    fn set_var_impl(&mut self, name: &BStr, val: &BStr) {
         if !self.prepare_var_mutation(name) {
             return;
         }
+        let mut updated_frame = false;
         for frame in self.frames.iter_mut().rev() {
-            if frame.local_vars.contains_key(name) {
-                frame.local_vars.insert(name.to_owned(), val.to_owned());
-                return;
+            if let Some(slot) = frame.local_vars.get_mut(name) {
+                *slot = Some(val.to_owned());
+                updated_frame = true;
+                break;
             }
         }
-        self.vars.insert(name.to_owned(), val.to_owned());
+        if !updated_frame {
+            self.vars.insert(name.to_owned(), val.to_owned());
+        }
         if self.opt_allexport {
-            self.export_var(name);
+            self.export_var_impl(name);
         }
     }
 
     /// Sets the value of a variable and marks it for export to child environment processes.
-    #[allow(dead_code)]
     pub fn set_and_export_var(&mut self, name: impl VarName, val: impl VarName) {
-        let name = name.to_bstr();
-        self.set_var(name, val);
-        self.export_var(name);
+        self.set_and_export_var_impl(name.to_bstr(), val.to_bstr());
+    }
+
+    fn set_and_export_var_impl(&mut self, name: &BStr, val: &BStr) {
+        self.set_var_impl(name, val);
+        self.export_var_impl(name);
     }
 
     /// Sets the special status variable `?` to the given numerical exit code.
@@ -740,22 +827,66 @@ impl ShellState {
         self.vars.insert(BString::from("?"), BString::from(status.to_string()));
     }
 
+    /// Returns the numeric value of the special status variable `?` (defaulting to `0`).
+    pub fn last_status(&self) -> i32 {
+        self.vars
+            .get(BStr::new(b"?"))
+            .and_then(|v| parse_int::<i32>(v.as_bytes()))
+            .unwrap_or(EXIT_SUCCESS)
+    }
+
+    /// Sets the pre-trap exit status used by bare `exit` / `return` inside trap actions,
+    /// returning the previous value.
+    pub fn set_trap_exit_status(&mut self, status: Option<i32>) -> Option<i32> {
+        std::mem::replace(&mut self.trap_exit_status, status)
+    }
+
+    /// Returns the pre-trap exit status if currently executing inside a trap action.
+    pub fn trap_exit_status(&self) -> Option<i32> {
+        self.trap_exit_status
+    }
+
+    /// Records the exit status code of a completed command substitution (`$(...)` or `` `...` ``).
+    pub fn record_cmd_sub_status(&mut self, status: i32) {
+        self.set_last_status(status);
+        self.last_cmd_sub_status = Some(status);
+    }
+
+    /// Takes and clears the most recent command substitution exit status recorded during the
+    /// current command evaluation.
+    pub fn take_cmd_sub_status(&mut self) -> Option<i32> {
+        self.last_cmd_sub_status.take()
+    }
+
     /// Marks the specified variable for export to child environment processes.
     pub fn export_var(&mut self, name: impl VarName) {
-        let name = name.to_bstr();
+        self.export_var_impl(name.to_bstr());
+    }
+
+    fn export_var_impl(&mut self, name: &BStr) {
         assert_valid_name(name);
         self.exported.insert(name.to_owned());
     }
 
+    /// Removes the export mark from the specified variable without unsetting its value.
+    pub fn unexport_var(&mut self, name: impl VarName) {
+        let name = name.to_bstr();
+        assert_valid_name(name);
+        self.exported.remove(name);
+    }
+
     /// Removes a variable from the innermost active local frame or global scope.
     pub fn unset_var(&mut self, name: impl VarName) {
-        let name = name.to_bstr();
+        self.unset_var_impl(name.to_bstr());
+    }
+
+    fn unset_var_impl(&mut self, name: &BStr) {
         if !self.prepare_var_mutation(name) {
             return;
         }
         for frame in self.frames.iter_mut().rev() {
-            if frame.local_vars.contains_key(name) {
-                frame.local_vars.remove(name);
+            if let Some(slot) = frame.local_vars.get_mut(name) {
+                *slot = None;
                 return;
             }
         }
@@ -802,7 +933,8 @@ impl ShellState {
             b"nounset" => self.opt_nounset = enable,
             b"interactive" => self.opt_interactive = enable,
             b"ignoreeof" => self.opt_ignoreeof = enable,
-            b"monitor" | b"notify" | b"nolog" | b"debug" | b"vi" | b"emacs" | b"stdin" => {}
+            b"monitor" | b"notify" | b"nolog" | b"debug" | b"vi" | b"emacs" | b"stdin"
+            | b"login" => {}
             _ => return Err(format!("unknown option: {}", name)),
         }
         Ok(())
@@ -821,7 +953,7 @@ impl ShellState {
             b'v' => self.opt_verbose = enable,
             b'x' => self.opt_xtrace = enable,
             b'I' => self.opt_ignoreeof = enable,
-            b'm' | b'b' | b's' | b'V' | b'E' => {}
+            b'm' | b'b' | b's' | b'V' | b'E' | b'l' => {}
             _ => return Err(()),
         }
         Ok(())
@@ -888,7 +1020,10 @@ impl ShellState {
         if let Some(frame) = self.frames.last_mut() {
             frame
                 .local_vars
-                .insert(name.to_owned(), val.unwrap_or_else(|| BStr::new(b"")).to_owned());
+                .insert(name.to_owned(), Some(val.unwrap_or_else(|| BStr::new(b"")).to_owned()));
+            if val.is_some() && self.opt_allexport {
+                self.export_var(name);
+            }
         }
     }
 
@@ -896,7 +1031,7 @@ impl ShellState {
     pub fn vars(&self) -> ShellEnv {
         let mut res = Vec::new();
         for k in self.exported.iter() {
-            if let Some(v) = self.vars.get(k) {
+            if let Some(v) = self.lookup_var(k.as_bstr()) {
                 res.push((k.clone(), v.clone()));
             }
         }

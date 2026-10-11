@@ -25,7 +25,7 @@ use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use log::info;
 use net_declare::fidl_ip_v6;
 use net_types::ip::{Ip, Ipv4};
-use netstack_testing_common::realms::{self, Manager, ManagerConfig, Netstack3, SocketProxyType};
+use netstack_testing_common::realms::{self, Manager, ManagerConfig, SocketProxyType};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
     wait_for_component_stopped,
@@ -178,7 +178,7 @@ async fn watch_default_and_record_properties<F, R>(
 async fn test_track_socket_marks<M: Manager>(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -320,7 +320,7 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
     const DNS_SERVER_LIST: [fnet::Ipv6Address; 3] =
         [NDP_DNS_SERVER1, NDP_DNS_SERVER2, NDP_DNS_SERVER3];
 
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -527,7 +527,7 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
 #[netstack_test]
 #[variant(M, Manager)]
 async fn test_network_token_correlation<M: Manager>(name: &str) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -632,7 +632,7 @@ const TEST_MARK_2: u32 = 456;
 async fn test_network_registry_dns_propagation<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
@@ -760,7 +760,7 @@ async fn test_network_registry_dns_propagation<M: Manager>(
 #[netstack_test]
 #[variant(M, Manager)]
 async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
@@ -935,7 +935,7 @@ async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) 
 async fn test_network_registry_fuchsia_priority<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -1085,7 +1085,7 @@ async fn test_network_registry_fuchsia_priority<M: Manager>(
 async fn test_network_token_peer_closed_on_removal<M: Manager>(
     name: &str,
 ) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -1188,7 +1188,7 @@ async fn test_network_token_peer_closed_on_removal<M: Manager>(
 async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
@@ -1384,7 +1384,7 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
 #[netstack_test]
 #[variant(M, Manager)]
 async fn test_network_removal_reports_network_gone<M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -1529,7 +1529,7 @@ async fn test_reachability_monitor_default_network_validation<M: Manager>(name: 
     const TEST_NETWORK_ID: u32 = 123;
     const TEST_MARK: u32 = 321;
 
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {

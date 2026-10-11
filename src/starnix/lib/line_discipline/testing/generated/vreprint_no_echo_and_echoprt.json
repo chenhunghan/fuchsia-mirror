@@ -1,0 +1,79 @@
+{
+    "name": "vreprint_no_echo_and_echoprt",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "IEXTEN"
+        ]
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": "ab\u0012c\n"
+        },
+        {
+            "type": "read_once_from_master_blocked",
+            "size": 4096
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "ab\u0012c\n"
+        },
+        {
+            "type": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOPRT",
+                    "ECHOCTL",
+                    "IEXTEN"
+                ]
+            }
+        },
+        {
+            "type": "write_to_master",
+            "data": "ab\u007f\u0012c\u007f\u0016d\n"
+        },
+        {
+            "type": "read_from_master",
+            "data": "ab\\b/^R\r\nac\\c/^\bd\r\n"
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": "ad\n"
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOCTL",
+            "ECHOPRT",
+            "IEXTEN"
+        ]
+    }
+}

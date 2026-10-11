@@ -1,6 +1,6 @@
 # Rust Migration Reference
 
-GN `rustc_binary` and `rustc_library` map to Bazel `rustc_binary` and `rustc_library` (loaded from `//build/bazel/rules/rust:defs.bzl`).
+GN `rustc_binary`, `rustc_library`, and `rustc_dylib` map directly to the Bazel macros of the same names in `//build/bazel/rules/rust:defs.bzl`.
 
 ## Field Mapping Gotchas
 
@@ -12,11 +12,45 @@ Only key field differences are listed here. Standard fields like `sources` -> `s
 | `with_unit_tests = true` | `with_host_unit_tests = True` | Set to `True` to enable host unit tests.                   |
 | `features`               | `crate_features`              | Features enabled for this crate.                           |
 | `lint_config`            | `lint_config`                 | Target-specific lints config. Same label on both sides.    |
+| `deps` (C/C++ targets)   | `link_deps`                   | rules_rust only allows Rust targets in `deps`; see below.  |
 
 A GN target written as `configs += [ "//build/config/rust/lints:X" ]` should be
 migrated to `lint_config = "//build/config/rust/lints:X"` in Bazel. Note that
 `lint_config` takes a single label, so a target that needs several lints configs
 still has to use `configs` in GN and cannot be migrated as-is.
+
+The `build_flags` attribute of the `rustc_*` macros can't take a `select()`
+(it's deliberately non-configurable; see https://fxbug.dev/516778625). To vary
+Rust flags by configuration, define a local `build_flags()` target whose
+`subflags` use `select()`, and pass that target instead. The `rustc_*` macros
+deduplicate their `build_flags` list by label, but `subflags` are appended
+as-is, so don't list the same `build_flags()` target both in `subflags` and
+directly in the Rust target's `build_flags`.
+
+### Native (C/C++) dependencies
+
+rules_rust only allows Rust targets in `deps` (and warns, then fails, on
+`cc_library`/`fx_cc_library`/`cc_import` and similar targets there). List native
+libraries linked into a Rust target in `link_deps` instead. bazel2gn emits
+`link_deps` unchanged, and GN `rustc_*` templates treat it the same as `deps`,
+so moving a C/C++ label from GN `deps` to Bazel `link_deps` keeps GN parity.
+`link_deps` also supports `select()` and `# @bazel2gn:path_overwrite:` comments.
+Unit tests generated with `with_unit_tests`/`with_host_unit_tests` inherit
+`link_deps`. `rustc_proc_macro` does not support `link_deps`.
+
+Do not add `//sdk/lib/fdio` just to satisfy the Rust standard library: the
+`rustc_*` macros already link it into every Fuchsia Rust executable, test and
+dylib, like GN's `BUILDCONFIG.gn` does.
+
+```bzl
+rustc_library(
+    name = "foo",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    link_deps = ["//zircon/system/ulib/trace-engine"],
+    deps = ["//third_party/rust_crates/vendor:anyhow"],
+)
+```
 
 > **Note:** GN *appends* `lint_config` to the lint configs the `rustc_*()`
 > templates already apply, while Bazel *replaces* the macro default with it. The
@@ -191,3 +225,7 @@ fx test {plugin_name}_lib_test
 fx bazel run --config=host //src/developer/ffx/frontends/ffx:ffx -- --isolate-dir /tmp/ffx-iso <subcommand>
 fx bazel run --config=host //{plugin_path}:{subtool_target_name} <subcommand>
 ```
+
+### 6. Missing Ruleset Features
+
+If rules_rust (or any other `rules_*` ruleset) seems to lack something a migration needs, check the vendored copy in `//third_party/bazel_vendor/` before assuming it doesn't exist. Don't patch a ruleset to make a migration work. Patches go in `//build/bazel/vendor_patches/`, but talk to the build team first. Never hand-edit anything in `//third_party/bazel_vendor/` (see its [README](../../../../../../third_party/bazel_vendor/README.md)).

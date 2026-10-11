@@ -29,35 +29,53 @@ _LOCAL_FUCHSIA_SDK_DIRECTORY = "LOCAL_FUCHSIA_SDK_DIRECTORY"
 #     <LOCAL_FUCHSIA_IDK_DIRECTORY>/"meta/manifest.json"
 _LOCAL_FUCHSIA_IDK_DIRECTORY = "LOCAL_FUCHSIA_IDK_DIRECTORY"
 
+def _get_local_idk_version_file(attrs):
+    """Returns the IDK version file label, accepting the deprecated local_sdk_version_file alias.
+
+    local_sdk_version_file is still accepted so that existing petal workspaces
+    don't break before they migrate.
+
+    Args:
+        attrs: A repository rule `ctx.attr` or a module extension tag.
+    Returns:
+        The version file label, or None if neither attribute is set.
+    """
+
+    # TODO(https://fxbug.dev/566262167): Remove local_sdk_version_file once petals have migrated.
+    if attrs.local_idk_version_file and attrs.local_sdk_version_file:
+        fail("local_sdk_version_file is a deprecated alias for local_idk_version_file; set only local_idk_version_file.")
+    return attrs.local_idk_version_file or attrs.local_sdk_version_file
+
 def _instantiate_local_path(ctx, manifests):
-    local_sdks = []
+    local_idks = []
     for local_path in ctx.attr.local_paths:
-        # Copies the SDK from a local Fuchsia platform build.
+        # Copies the IDK from a local Fuchsia platform build.
         if local_path[0] == "@":
             # Assume this is a file path inside the repository, e.g. @fuchsia_idk//:BUILD.bazel
-            local_sdk = ctx.path(Label(local_path)).dirname
-            ctx.report_progress("Copying local IDK from %s" % local_sdk)
+            local_idk = ctx.path(Label(local_path)).dirname
+            ctx.report_progress("Copying local IDK from %s" % local_idk)
         else:
-            local_sdk_path = workspace_path(ctx, local_path)
-            ctx.report_progress("Copying local SDK from %s" % local_sdk_path)
-            local_sdk = ctx.path(local_sdk_path)
-        local_sdks.append(local_sdk)
+            local_idk_path = workspace_path(ctx, local_path)
+            ctx.report_progress("Copying local IDK from %s" % local_idk_path)
+            local_idk = ctx.path(local_idk_path)
+        local_idks.append(local_idk)
 
-    for local_sdk_repo in ctx.attr.local_idk_repos:
+    for local_idk_repo in ctx.attr.local_idk_repos:
         # Assume this is a target at the root of the repository, e.g. @fuchsia_idk//:BUILD.bazel.
-        local_sdk = ctx.path(local_sdk_repo).dirname
-        ctx.report_progress("Copying local IDK from %s" % local_sdk)
-        local_sdks.append(local_sdk)
+        local_idk = ctx.path(local_idk_repo).dirname
+        ctx.report_progress("Copying local IDK from %s" % local_idk)
+        local_idks.append(local_idk)
 
-    for local_sdk in local_sdks:
-        if not local_sdk.exists:
-            fail("Cannot find SDK in local directory: %s\n\nPlease build it with\n\n\t\t'fx build //sdk:final_fuchsia_sdk' or similar." % local_sdk)
+    for local_idk in local_idks:
+        if not local_idk.exists:
+            fail("Cannot find IDK in local directory: %s\n\nPlease build it with\n\n\t\t'fx build //sdk:final_fuchsia_idk' or similar." % local_idk)
 
-        manifests.append({"root": "%s/." % local_sdk, "manifest": "meta/manifest.json"})
+        manifests.append({"root": "%s/." % local_idk, "manifest": "meta/manifest.json"})
 
-    # If local_sdk_version_file is specified, make Bazel pick it up as a dep.
-    if ctx.attr.local_sdk_version_file:
-        ctx.path(ctx.attr.local_sdk_version_file)
+    # If a version file is specified, make Bazel pick it up as a dep.
+    local_idk_version_file = _get_local_idk_version_file(ctx.attr)
+    if local_idk_version_file:
+        ctx.path(local_idk_version_file)
 
 def _instantiate_local_env(ctx):
     local_fuchsia_sdk = ctx.os.environ.get(_LOCAL_FUCHSIA_SDK_DIRECTORY)
@@ -204,7 +222,7 @@ Loads a particular version of the Fuchsia IDK.
             mandatory = False,
         ),
         "local_paths": attr.string_list(
-            doc = "Paths to local SDK directories.",
+            doc = "Paths to local IDK directories.",
         ),
         "local_idk_repos": attr.label_list(
             doc = """Repositories containing local IDK directories.
@@ -216,8 +234,12 @@ Loads a particular version of the Fuchsia IDK.
             the caller's repo mapping, so apparent repository names work.
             """,
         ),
+        "local_idk_version_file": attr.label(
+            doc = "An optional file used to mark the version of the IDK pointed to by local_paths or local_idk_repos.",
+            allow_single_file = True,
+        ),
         "local_sdk_version_file": attr.label(
-            doc = "An optional file used to mark the version of the SDK pointed to by local_paths.",
+            doc = "Deprecated alias for local_idk_version_file.",
             allow_single_file = True,
         ),
         "buildifier": attr.label(
@@ -258,7 +280,7 @@ Loads a particular version of the Fuchsia IDK.
 
 def _fuchsia_sdk_repository_ext(ctx):
     local_paths = None
-    local_sdk_version_file = None
+    local_idk_version_file = None
     buildifier = None
     visibility_templates = None
 
@@ -271,12 +293,13 @@ def _fuchsia_sdk_repository_ext(ctx):
                 if p.path:
                     local_paths.append(p.path)
 
-                if local_sdk_version_file and p.local_sdk_version_file:
-                    fail("local_sdk_version_file set multiple times, got:\n{}\n{}".format(
-                        local_sdk_version_file,
-                        p.local_sdk_version_file,
+                tag_local_idk_version_file = _get_local_idk_version_file(p)
+                if local_idk_version_file and tag_local_idk_version_file:
+                    fail("local_idk_version_file set multiple times, got:\n{}\n{}".format(
+                        local_idk_version_file,
+                        tag_local_idk_version_file,
                     ))
-                local_sdk_version_file = p.local_sdk_version_file
+                local_idk_version_file = tag_local_idk_version_file
 
                 if buildifier and p.buildifier:
                     fail("buildifier set multiple times, got:\n{}\n{}".format(
@@ -295,7 +318,7 @@ def _fuchsia_sdk_repository_ext(ctx):
     fuchsia_sdk_repository(
         name = "fuchsia_sdk",
         local_paths = local_paths,
-        local_sdk_version_file = local_sdk_version_file,
+        local_idk_version_file = local_idk_version_file,
         buildifier = buildifier,
         visibility_templates = visibility_templates,
     )
@@ -305,15 +328,19 @@ def _fuchsia_sdk_repository_ext(ctx):
         toolchain_path = "@fuchsia_sdk//:fuchsia_toolchain_info",
     )
 
-# A tag used to specify a local Fuchsia SDK repository.
+# A tag used to specify a local Fuchsia IDK directory.
 _local_tag = tag_class(
     attrs = {
         "path": attr.string(
-            doc = "Path to local SDK directory, relative to the workspace root",
+            doc = "Path to local IDK directory, relative to the workspace root",
             mandatory = True,
         ),
+        "local_idk_version_file": attr.label(
+            doc = "An optional file used to mark the version of the IDK pointed to by path.",
+            allow_single_file = True,
+        ),
         "local_sdk_version_file": attr.label(
-            doc = "An optional file used to mark the version of the SDK pointed to by local_paths.",
+            doc = "Deprecated alias for local_idk_version_file.",
             allow_single_file = True,
         ),
         "buildifier": attr.label(

@@ -6,9 +6,7 @@
 
 #[cfg(target_arch = "x86_64")]
 use crate::arch_rs::x86::vm::is_vaddr_canonical;
-use crate::object::{
-    Dispatcher, HandleValue, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher,
-};
+use crate::object::{HandleValue, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use boot_options::BootOptions;
 use core::mem::MaybeUninit;
@@ -65,8 +63,13 @@ pub fn sys_thread_create(
     ltracef!("name {}\n", core::str::from_utf8(slice).unwrap_or("<non-utf8>"));
 
     // convert process handle to process dispatcher
-    let process =
-        Dispatcher::get_with_rights::<ProcessDispatcher>(process_handle, ZX_RIGHT_MANAGE_THREAD)?;
+    let process = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+            up,
+            process_handle,
+            ZX_RIGHT_MANAGE_THREAD,
+        )
+    })?;
     // create the thread dispatcher
     let (handle, rights) = ThreadDispatcher::create(process, options, slice)?;
     handle.dispatcher().initialize()?;
@@ -94,7 +97,13 @@ pub fn sys_thread_start_regs(
         arg2
     );
 
-    let thread = Dispatcher::get_with_rights::<ThreadDispatcher>(handle, ZX_RIGHT_MANAGE_THREAD)?;
+    let thread = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_MANAGE_THREAD,
+        )
+    })?;
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -124,7 +133,9 @@ pub fn sys_thread_read_state(
     ltracef!("handle {:#x}, kind {}\n", handle.raw_value(), kind);
 
     // TODO(https://fxbug.dev/42105831): debug rights
-    let thread = Dispatcher::get_with_rights::<ThreadDispatcher>(handle, ZX_RIGHT_READ)?;
+    let thread = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(up, handle, ZX_RIGHT_READ)
+    })?;
     thread.read_state(kind, buffer.reinterpret::<core::ffi::c_void>().as_ptr(), buffer_size)?;
     Ok(())
 }
@@ -143,7 +154,9 @@ pub fn sys_thread_write_state(
     }
 
     // TODO(https://fxbug.dev/42105831): debug rights
-    let thread = Dispatcher::get_with_rights::<ThreadDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let thread = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(up, handle, ZX_RIGHT_WRITE)
+    })?;
     thread.write_state(kind, buffer.reinterpret::<core::ffi::c_void>().as_ptr(), buffer_size)?;
     Ok(())
 }
@@ -193,10 +206,13 @@ pub fn sys_thread_set_rseq(vmo_handle: HandleValue, offset: u64, size: u64) -> R
     }
 
     // Get the VMO dispatcher.
-    let vmo_dispatcher = Dispatcher::get_with_rights::<VmObjectDispatcher>(
-        vmo_handle,
-        ZX_RIGHT_READ | ZX_RIGHT_WRITE | ZX_RIGHT_DUPLICATE,
-    )?;
+    let vmo_dispatcher = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+            up,
+            vmo_handle,
+            ZX_RIGHT_READ | ZX_RIGHT_WRITE | ZX_RIGHT_DUPLICATE,
+        )
+    })?;
 
     // SAFETY: `vmo_dispatcher` is a valid `VmObjectDispatcher` reference.
     let status = unsafe { cpp_thread_set_rseq(&vmo_dispatcher, offset) };

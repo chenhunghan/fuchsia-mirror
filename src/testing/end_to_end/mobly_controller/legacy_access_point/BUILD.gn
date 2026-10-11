@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/python/python_library.gni")
+
+if (is_host) {
+  python_library("legacy_access_point") {
+    testonly = true
+    library_name = "legacy_access_point"
+    source_root = "."
+    sources = [
+      "__init__.py",
+      "access_point.py",
+      "ap_lib/__init__.py",
+      "ap_lib/ap_get_interface.py",
+      "ap_lib/ap_iwconfig.py",
+      "ap_lib/dhcp_config.py",
+      "ap_lib/dhcp_server.py",
+      "ap_lib/extended_capabilities.py",
+      "ap_lib/hostapd.py",
+      "ap_lib/hostapd_ap_preset.py",
+      "ap_lib/hostapd_bss_settings.py",
+      "ap_lib/hostapd_config.py",
+      "ap_lib/hostapd_constants.py",
+      "ap_lib/hostapd_security.py",
+      "ap_lib/hostapd_utils.py",
+      "ap_lib/radio_measurement.py",
+      "ap_lib/radvd.py",
+      "ap_lib/radvd_config.py",
+      "ap_lib/radvd_constants.py",
+      "ap_lib/regulatory_channels.py",
+      "ap_lib/third_party_ap_profiles/__init__.py",
+      "ap_lib/third_party_ap_profiles/actiontec.py",
+      "ap_lib/third_party_ap_profiles/asus.py",
+      "ap_lib/third_party_ap_profiles/belkin.py",
+      "ap_lib/third_party_ap_profiles/linksys.py",
+      "ap_lib/third_party_ap_profiles/netgear.py",
+      "ap_lib/third_party_ap_profiles/securifi.py",
+      "ap_lib/third_party_ap_profiles/tplink.py",
+      "ap_lib/wireless_network_management.py",
+    ]
+    library_deps = [
+      "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
+      "//src/testing/end_to_end/honeydew",
+      "//src/testing/end_to_end/libs",
+      "//third_party/github.com/jd/tenacity",
+      "//third_party/mobly",
+    ]
+  }
+}

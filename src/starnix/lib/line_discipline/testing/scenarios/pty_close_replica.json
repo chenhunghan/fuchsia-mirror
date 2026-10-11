@@ -1,0 +1,56 @@
+{
+    "name": "pty_close_replica",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    },
+    "events": [
+        {
+            "action": "set_packet_mode",
+            "enabled": true
+        },
+        {
+            "action": "write_to_slave",
+            "data": "abc\n"
+        },
+        {
+            "action": "flush",
+            "side": "replica",
+            "queue_selector": "TCIFLUSH"
+        },
+        {
+            "action": "close",
+            "side": "replica"
+        },
+        {
+            "action": "check_poll",
+            "side": "main"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "check_poll",
+            "side": "main"
+        },
+        {
+            "action": "read_once_from_master"
+        },
+        {
+            "action": "check_poll",
+            "side": "main"
+        },
+        {
+            "action": "read_once_from_master"
+        }
+    ]
+}

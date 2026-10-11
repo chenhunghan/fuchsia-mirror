@@ -2,12 +2,82 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@rules_rust//rust:defs.bzl", "rust_lint_config")
 
 package(
     default_applicable_licenses = ["//:license"],
     default_visibility = ["//visibility:public"],
 )
+
+# LINT.IfChange(allow_default)
+build_flags(
+    name = "allow_default",
+    rustflags = ["-Aunknown_lints"],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:allow_default)
+
+# TODO(https://fxbug.dev/42055130): Delete this config when all unused
+# dependencies are removed.
+#
+# PLEASE DO NOT USE.
+# LINT.IfChange(allow_unused_crate_dependencies)
+build_flags(
+    name = "allow_unused_crate_dependencies",
+    rustflags = ["-Aunused_crate_dependencies"],
+    # Please do not add to this list.
+    visibility = [
+        "//build:__subpackages__",
+        "//examples:__subpackages__",
+        "//sdk:__subpackages__",
+        "//src:__subpackages__",
+        "//tools:__subpackages__",
+        "//vendor:__subpackages__",
+        "//zircon:__subpackages__",
+    ],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:allow_unused_crate_dependencies)
+
+# LINT.IfChange(deny_default)
+build_flags(
+    name = "deny_default",
+    rustflags = [
+        "-Dderef_nullptr",
+        "-Dinvalid_value",
+        "-Dunused_must_use",
+    ],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:deny_default)
+
+# LINT.IfChange(deny_unused_results)
+build_flags(
+    name = "deny_unused_results",
+    rustflags = ["-Dunused_results"],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:deny_unused_results)
+
+# LINT.IfChange(toolchain_roll_exceptions)
+build_flags(
+    name = "toolchain_roll_exceptions",
+    rustflags = [
+        "-Arenamed_and_removed_lints",
+        "-Anon_local_definitions",
+        "-Amismatched_lifetime_syntaxes",
+        "-Arustdoc::redundant_explicit_links",
+    ],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:toolchain_roll_exceptions)
+
+# LINT.IfChange(warn_default)
+build_flags(
+    name = "warn_default",
+    rustflags = [
+        "-Wmissing_unsafe_on_extern",
+        "-Wunsafe_attr_outside_unsafe",
+        "-Wunused_crate_dependencies",
+    ],
+)
+# LINT.ThenChange(//build/config/rust/lints/BUILD.gn:warn_default)
 
 _CLIPPY_WARN_DEFAULT = {
     # Allow everything by default, except for the ones explicitly configured.
@@ -43,26 +113,26 @@ _CLIPPY_WARN_PRODUCTION = _CLIPPY_WARN_DEFAULT | {
 _RUSTC_LINT_CONFIGS = {
     # LINT.IfChange(rustc_allow_default)
     "unknown_lints": "allow",
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:rustc_allow_default)
+    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:allow_default)
 
     # LINT.IfChange(rustc_warn_default)
     "missing_unsafe_on_extern": "warn",
     "unsafe_attr_outside_unsafe": "warn",
     "unused_crate_dependencies": "warn",
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:rustc_warn_default)
+    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:warn_default)
 
     # LINT.IfChange(rustc_deny_default)
     "deref_nullptr": "deny",
     "invalid_value": "deny",
     "unused_must_use": "deny",
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:rustc_deny_default)
+    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:deny_default)
 
     # LINT.IfChange(rustc_toolchain_roll_exceptions)
     "mismatched_lifetime_syntaxes": "allow",
     "non_local_definitions": "allow",
     "renamed_and_removed_lints": "allow",
     "rustdoc::redundant_explicit_links": "allow",
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:rustc_toolchain_roll_exceptions)
+    # LINT.ThenChange(//build/config/rust/lints/BUILD.gn:toolchain_roll_exceptions)
 }
 
 rust_lint_config(

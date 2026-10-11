@@ -6,11 +6,14 @@
 
 //! Implementation of the `zx_object_get_property` and `zx_object_set_property` syscalls in Rust.
 //!
-//! Handles property queries and modifications for dispatcher types ported to Rust (e.g. `Dispatcher`,
-//! `ProcessDispatcher`, `SocketDispatcher`, `JobDispatcher`), delegating unported or subsystem-specific
-//! property queries to C++ FFI helpers.
+//! Handles property queries and modifications for dispatcher types ported to Rust (e.g.
+//! `Dispatcher`, `ProcessDispatcher`, `SocketDispatcher`, `JobDispatcher`, `VmObjectDispatcher`),
+//! delegating unported or subsystem-specific property queries to C++ FFI helpers.
 
-use crate::object::{Dispatcher, HandleValue, JobDispatcher, ProcessDispatcher, SocketDispatcher};
+use crate::object::{
+    Dispatcher, ExceptionDispatcher, HandleValue, JobDispatcher, ProcessDispatcher,
+    SocketDispatcher, VmObjectDispatcher,
+};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use boot_options::BootOptions;
 use core::mem::MaybeUninit;
@@ -18,10 +21,14 @@ use syscalls_macro::syscall;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 use zx_status::Status;
 use zx_types::{
-    ZX_MAX_NAME_LEN, ZX_PROP_JOB_KILL_ON_OOM, ZX_PROP_NAME, ZX_PROP_PROCESS_BREAK_ON_LOAD,
-    ZX_PROP_PROCESS_DEBUG_ADDR, ZX_PROP_PROCESS_HW_TRACE_CONTEXT_ID,
+    ZX_EXCEPTION_CHANNEL_TYPE_DEBUGGER, ZX_EXCEPTION_STATE_HANDLED, ZX_EXCEPTION_STATE_THREAD_EXIT,
+    ZX_EXCEPTION_STATE_TRY_NEXT, ZX_EXCEPTION_STRATEGY_FIRST_CHANCE,
+    ZX_EXCEPTION_STRATEGY_SECOND_CHANCE, ZX_MAX_NAME_LEN, ZX_PROP_EXCEPTION_STATE,
+    ZX_PROP_EXCEPTION_STRATEGY, ZX_PROP_JOB_KILL_ON_OOM, ZX_PROP_NAME,
+    ZX_PROP_PROCESS_BREAK_ON_LOAD, ZX_PROP_PROCESS_DEBUG_ADDR, ZX_PROP_PROCESS_HW_TRACE_CONTEXT_ID,
     ZX_PROP_PROCESS_VDSO_BASE_ADDRESS, ZX_PROP_SOCKET_RX_THRESHOLD, ZX_PROP_SOCKET_TX_THRESHOLD,
-    ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_SET_PROPERTY, zx_rights_t, zx_status_t,
+    ZX_PROP_VMO_CONTENT_SIZE, ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_WRITE,
+    zx_rights_t, zx_status_t,
 };
 
 const LOCAL_TRACE: u32 = 0;
@@ -106,8 +113,13 @@ pub fn sys_object_get_property(
         return Err(Status::INVALID_ARGS);
     }
 
-    let dispatcher =
-        Dispatcher::get_with_rights::<Dispatcher>(handle_value, ZX_RIGHT_GET_PROPERTY)?;
+    let dispatcher = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<Dispatcher>(
+            up,
+            handle_value,
+            ZX_RIGHT_GET_PROPERTY,
+        )
+    })?;
 
     macro_rules! get_scalar_property {
         ($type:ty, $getter:ident) => {{
@@ -147,6 +159,18 @@ pub fn sys_object_get_property(
         }
         ZX_PROP_SOCKET_RX_THRESHOLD => get_scalar_property!(SocketDispatcher, get_read_threshold),
         ZX_PROP_SOCKET_TX_THRESHOLD => get_scalar_property!(SocketDispatcher, get_write_threshold),
+        ZX_PROP_VMO_CONTENT_SIZE => get_scalar_property!(VmObjectDispatcher, get_stream_size),
+        ZX_PROP_EXCEPTION_STATE => get_scalar_property!(ExceptionDispatcher, get_disposition),
+        ZX_PROP_EXCEPTION_STRATEGY => {
+            let exception =
+                dispatcher.downcast::<ExceptionDispatcher>().ok_or(Status::WRONG_TYPE)?;
+            let strategy = if exception.is_second_chance() {
+                ZX_EXCEPTION_STRATEGY_SECOND_CHANCE
+            } else {
+                ZX_EXCEPTION_STRATEGY_FIRST_CHANCE
+            };
+            copy_scalar_to_user(value, size, strategy)
+        }
         #[cfg(target_arch = "x86_64")]
         ZX_PROP_REGISTER_FS | ZX_PROP_REGISTER_GS => {
             require_current_thread(&dispatcher)?;
@@ -158,7 +182,7 @@ pub fn sys_object_get_property(
             };
             copy_scalar_to_user(value, size, val as usize)
         }
-        // C++-only dispatchers (e.g. ExceptionDispatcher, StreamDispatcher, VmObjectDispatcher)
+        // C++-only dispatchers (e.g. StreamDispatcher)
         _ => {
             // SAFETY: Call C++ FFI helper for properties on C++ dispatchers.
             let status = unsafe {
@@ -185,10 +209,13 @@ pub fn sys_object_set_property(
         return Err(Status::INVALID_ARGS);
     }
 
-    let (dispatcher, rights) = Dispatcher::get_dispatcher_and_rights(handle_value)?;
-    if (rights & ZX_RIGHT_SET_PROPERTY) == 0 {
-        return Err(Status::ACCESS_DENIED);
-    }
+    let (dispatcher, rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights_and_actual::<Dispatcher>(
+            up,
+            handle_value,
+            ZX_RIGHT_SET_PROPERTY,
+        )
+    })?;
 
     macro_rules! set_scalar_property {
         ($type:ty, $setter:ident) => {{
@@ -233,6 +260,12 @@ pub fn sys_object_set_property(
         ZX_PROP_SOCKET_TX_THRESHOLD => {
             set_scalar_property!(SocketDispatcher, set_write_threshold)
         }
+        ZX_PROP_VMO_CONTENT_SIZE => {
+            if (rights & ZX_RIGHT_WRITE) == 0 {
+                return Err(Status::ACCESS_DENIED);
+            }
+            set_scalar_property!(VmObjectDispatcher, set_stream_size)
+        }
         ZX_PROP_JOB_KILL_ON_OOM => {
             let job = dispatcher.downcast::<JobDispatcher>().ok_or(Status::WRONG_TYPE)?;
             let val = copy_scalar_from_user::<usize>(value, size)?;
@@ -245,7 +278,48 @@ pub fn sys_object_set_property(
             }
             Ok(())
         }
-        // C++-only dispatchers (e.g. ExceptionDispatcher, StreamDispatcher, VmObjectDispatcher)
+        ZX_PROP_EXCEPTION_STATE => {
+            if size < core::mem::size_of::<u32>() {
+                return Err(Status::BUFFER_TOO_SMALL);
+            }
+            let exception =
+                dispatcher.downcast::<ExceptionDispatcher>().ok_or(Status::WRONG_TYPE)?;
+            let val = copy_scalar_from_user::<u32>(value, size)?;
+            match val {
+                ZX_EXCEPTION_STATE_HANDLED
+                | ZX_EXCEPTION_STATE_TRY_NEXT
+                | ZX_EXCEPTION_STATE_THREAD_EXIT => {
+                    exception.set_disposition(val);
+                    Ok(())
+                }
+                _ => Err(Status::INVALID_ARGS),
+            }
+        }
+        ZX_PROP_EXCEPTION_STRATEGY => {
+            if size < core::mem::size_of::<u32>() {
+                return Err(Status::BUFFER_TOO_SMALL);
+            }
+            let exception =
+                dispatcher.downcast::<ExceptionDispatcher>().ok_or(Status::WRONG_TYPE)?;
+            let info = exception.thread().get_info_for_userspace();
+            // Invalid if the exception handle is not held by a debugger.
+            if info.wait_exception_channel_type != ZX_EXCEPTION_CHANNEL_TYPE_DEBUGGER {
+                return Err(Status::BAD_STATE);
+            }
+            let val = copy_scalar_from_user::<u32>(value, size)?;
+            match val {
+                ZX_EXCEPTION_STRATEGY_FIRST_CHANCE => {
+                    exception.set_whether_second_chance(false);
+                    Ok(())
+                }
+                ZX_EXCEPTION_STRATEGY_SECOND_CHANCE => {
+                    exception.set_whether_second_chance(true);
+                    Ok(())
+                }
+                _ => Err(Status::INVALID_ARGS),
+            }
+        }
+        // C++-only dispatchers (e.g. StreamDispatcher)
         _ => {
             // SAFETY: Call C++ FFI helper for properties on C++ dispatchers.
             let status = unsafe {

@@ -34,10 +34,10 @@ class GicRedistributor : public IoHandler {
   bool last_;
 
   // Tracks whether SGIs and PPIs are enabled.
-  uint32_t enabled_;
+  uint32_t enabled_ = 0;
 
   // Tracks whether SGIs and PPIs are activated.
-  uint32_t is_active_;
+  uint32_t is_active_ = 0;
 };
 
 // Implements GIC distributor.

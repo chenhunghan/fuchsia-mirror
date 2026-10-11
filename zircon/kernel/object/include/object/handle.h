@@ -234,6 +234,8 @@ class KernelHandle {
 };
 
 extern "C" {
+Handle* cpp_handle_make(KernelHandle<Dispatcher>* kernel_handle, zx_rights_t rights);
+Handle* cpp_handle_make_from_ref(Dispatcher* dispatcher, zx_rights_t rights);
 Handle* cpp_handle_dup(const Handle* handle, zx_rights_t rights);
 void cpp_handle_destroy(Handle* handle);
 bool cpp_handle_has_rights(const Handle* handle, zx_rights_t rights);

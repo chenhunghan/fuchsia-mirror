@@ -2,7 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load(
+    "@bazel_skylib//rules:common_settings.bzl",
+    "bool_flag",
+    "int_flag",
+    "string_flag",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -12,3 +17,19 @@ bool_flag(
     build_setting_default = False,
     visibility = ["//visibility:public"],
 )
+
+# LINT.IfChange(dwarf_version)
+int_flag(
+    name = "dwarf_version",
+    build_setting_default = 5,
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/compiler.gni:dwarf_version)
+
+# LINT.IfChange(compress_debuginfo)
+string_flag(
+    name = "compress_debuginfo",
+    build_setting_default = "",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(//build/config/compiler.gni:compress_debuginfo)

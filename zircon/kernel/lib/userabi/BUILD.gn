@@ -24,8 +24,24 @@ static_library("userabi") {
 
 kernel_rust_mod("userabi-rs") {
   output_name = "userabi"
-  source_root = "vdso.rs"
-  sources = [ "vdso.rs" ]
+  source_root = "userabi.rs"
+  sources = [
+    "elf.rs",
+    "resource.rs",
+    "userabi.rs",
+    "userabi_ffi.rs",
+    "vdso.rs",
+  ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/zr",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
+  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 library_headers("headers") {
@@ -187,16 +203,10 @@ if (is_kernel) {
   # Loading and launching userboot, which loads and launches "real" userland.
   source_set("userboot") {
     visibility = [ ":*" ]
-    sources = [
-      "elf.cc",
-      "elf.h",
-      "resource.cc",
-      "userboot.cc",
-    ]
+    sources = [ "userabi_ffi.cc" ]
 
     deps = [
       ":headers",
-      "//src/lib/elfldltl",
       "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/console",
       "//zircon/kernel/lib/counters",

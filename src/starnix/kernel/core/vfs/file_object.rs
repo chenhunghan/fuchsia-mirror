@@ -1019,8 +1019,9 @@ pub fn default_vfs_ioctl(
             error!(ENODATA)
         }
         FS_IOC_GET_ENCRYPTION_POLICY_EX => {
-            let attributes = file.node().fetch_and_refresh_info(current_task)?;
-            let Some(node_policy) = attributes.encryption_policy else {
+            let Some(node_policy) =
+                file.node().fetch_and_refresh_info(current_task)?.encryption_policy
+            else {
                 return error!(ENODATA);
             };
 
@@ -1369,7 +1370,9 @@ impl FileAsyncOwner {
         } else {
             let pgid = pid.checked_neg().ok_or_else(|| errno!(EINVAL))?;
             let entry = current_task.kernel().pids.get(pgid)?;
-            entry.get_process_group()?;
+            if !entry.is_process_group(&fuchsia_rcu::RcuReadScope::new()) {
+                return error!(ESRCH);
+            }
             Ok(Self::ProcessGroup(Some(entry)))
         }
     }
@@ -1385,7 +1388,9 @@ impl FileAsyncOwner {
             } else {
                 let entry = pids.get(requested_owner.pid)?;
                 if lookup_pg {
-                    entry.get_process_group()?;
+                    if !entry.is_process_group(&fuchsia_rcu::RcuReadScope::new()) {
+                        return error!(ESRCH);
+                    }
                 } else {
                     entry.get_task()?;
                 }
@@ -1697,11 +1702,12 @@ impl FileObject {
     where
         R: FnOnce() -> Result<usize, Errno>,
     {
-        security::file_permission(current_task, self, security::PermissionFlags::READ)?;
-
         if !self.can_read() {
             return error!(EBADF);
         }
+
+        security::file_permission(current_task, self, security::PermissionFlags::READ)?;
+
         let bytes_read = read()?;
 
         // TODO(steveaustin) - omit updating time_access to allow info to be immutable
@@ -1757,8 +1763,6 @@ impl FileObject {
         offset: usize,
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
-        security::file_permission(current_task, self, security::PermissionFlags::WRITE)?;
-
         // We need to cap the size of `data` to prevent us from growing the file too large,
         // according to <https://man7.org/linux/man-pages/man2/write.2.html>:
         //
@@ -1777,6 +1781,7 @@ impl FileObject {
         if !self.can_write() {
             return error!(EBADF);
         }
+        security::file_permission(current_task, self, security::PermissionFlags::WRITE)?;
         self.node().clear_suid_and_sgid_bits(current_task)?;
         let bytes_written = write()?;
         self.node().update_ctime_mtime();
@@ -1914,6 +1919,12 @@ impl FileObject {
         current_task: &CurrentTask,
         sink: &mut dyn DirentSink,
     ) -> Result<(), Errno> {
+        if !self.node().is_dir() {
+            return error!(ENOTDIR);
+        }
+        if !self.can_read() {
+            return error!(EBADF);
+        }
         if self.name.entry.is_dead() {
             return error!(ENOENT);
         }

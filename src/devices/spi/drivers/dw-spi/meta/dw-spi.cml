@@ -6,12 +6,14 @@
 {
     include: [
         "driver/platform-device.shard.cml",
+        "driver_component/power_managed_dispatchers.shard.cml",
         "inspect/client.shard.cml",
         "syslog/client.shard.cml",
     ],
     program: {
         runner: "driver",
         binary: "driver/dw-spi.so",
+        default_dispatcher_scheduler_role: "fuchsia.devices.spi.drivers.spi.bus",
         bind: "meta/bind/dw-spi.bindbc",
     },
     capabilities: [

@@ -38,9 +38,8 @@ async def reboot_to_fastboot_mode(
         usb_power_hub.power_on(port=usb_port)
 
     try:
-        if await dut.fastboot.is_in_fastboot_mode():
+        if dut.fastboot.is_in_fastboot_mode():
             _LOGGER.info("Device is already in Fastboot mode.")
-            dut.fastboot._ready = True
             return
     except Exception as e:
         _LOGGER.debug("Check is_in_fastboot_mode error: %s", e)
@@ -51,13 +50,6 @@ async def reboot_to_fastboot_mode(
         "/bootstrap/shutdown_shim",
         "fuchsia.hardware.power.statecontrol.Admin",
     )
-
-    # TODO(b/527657910): Remove private _get_fastboot_node() call once Honeydew adds retry
-    # polling inside _get_fastboot_node() when queried mid-reboot.
-    try:
-        await dut.fastboot._get_fastboot_node()
-    except Exception as e:
-        _LOGGER.debug("Pre-populating fastboot node ID raised exception: %s", e)
 
     try:
         dut.ffx.notify_intentional_disconnect()
@@ -79,11 +71,8 @@ async def reboot_to_fastboot_mode(
 
     _LOGGER.info("Waiting for device to enter fastboot mode...")
     try:
-        await asyncio.wait_for(
-            dut.fastboot.wait_for_fastboot_mode(),
-            timeout=timeout_sec,
-        )
-    except asyncio.TimeoutError:
+        dut.fastboot.wait_for_fastboot_mode(timeout=timeout_sec)
+    except errors.HoneydewTimeoutError:
         _LOGGER.warning(
             "Device did not enter fastboot mode after FIDL shutdown. Attempting fallback via FFX reboot..."
         )
@@ -96,13 +85,10 @@ async def reboot_to_fastboot_mode(
             )
         except Exception as e:
             _LOGGER.debug("FFX reboot to bootloader exception: %s", e)
-        await asyncio.wait_for(
-            dut.fastboot.wait_for_fastboot_mode(),
-            timeout=timeout_sec,
-        )
+        dut.fastboot.wait_for_fastboot_mode(timeout=timeout_sec)
 
-    # Populate fastboot_node_id if needed and mark fastboot transport ready
-    if dut.fastboot._fastboot_node_id is None:
+    # Populate fastboot_node_id if needed
+    if not dut.fastboot._fastboot_node_id:
         try:
             fb_devices_output = (
                 host_shell.run(cmd=[dut.fastboot._fastboot_binary, "devices"])
@@ -132,8 +118,6 @@ async def reboot_to_fastboot_mode(
                 "Could not resolve fastboot serial from fastboot devices: %s",
                 e,
             )
-
-    dut.fastboot._ready = True
 
 
 async def recover_to_fuchsia_mode(
@@ -166,7 +150,7 @@ async def recover_to_fuchsia_mode(
 
     was_in_fastboot = False
     try:
-        if await dut.fastboot.is_in_fastboot_mode():
+        if dut.fastboot.is_in_fastboot_mode():
             was_in_fastboot = True
             _LOGGER.info(
                 "Device is in Fastboot mode; issuing fastboot reboot to Fuchsia..."

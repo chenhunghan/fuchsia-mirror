@@ -795,10 +795,11 @@ void WakeReportTests<Flavor>::DoBadReportRequests() {
     }
   }
 
-  // The DISCARD and REPORT_ONLY flags are the only valid flags right now.  Make
-  // sure that all other flags are rejected.
-  constexpr uint64_t kValidFlags =
-      ZX_SYSTEM_SUSPEND_OPTION_DISCARD | ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY;
+  // The DISCARD, REPORT_ONLY, and DEEP flags are the only valid flags right
+  // now.  Make sure that all other flags are rejected.
+  constexpr uint64_t kValidFlags = ZX_SYSTEM_SUSPEND_OPTION_DISCARD |
+                                   ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY |
+                                   ZX_SYSTEM_SUSPEND_OPTION_DEEP;
   for (uint32_t i = 0; i < (sizeof(uint64_t) << 3); ++i) {
     const uint64_t bad_flag = uint64_t{1} << i;
     if ((bad_flag & kValidFlags) != 0) {
@@ -810,6 +811,17 @@ void WakeReportTests<Flavor>::DoBadReportRequests() {
               zx_system_suspend_enter(system_cpu_resource().get(), deadline.get(), bad_flag,
                                       &report_hdr(), entry_buffer().data(), kWakeSourceCount,
                                       &actual_entries));
+  }
+
+  // DEEP may not be combined with any other flag.
+  for (uint64_t other_flags :
+       {ZX_SYSTEM_SUSPEND_OPTION_DISCARD, ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY,
+        ZX_SYSTEM_SUSPEND_OPTION_DISCARD | ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY}) {
+    uint32_t actual_entries;
+    EXPECT_EQ(ZX_ERR_INVALID_ARGS,
+              zx_system_suspend_enter(system_cpu_resource().get(), deadline.get(),
+                                      ZX_SYSTEM_SUSPEND_OPTION_DEEP | other_flags, &report_hdr(),
+                                      entry_buffer().data(), kWakeSourceCount, &actual_entries));
   }
 
   // If a user wants to only generate a report, and not actually attempt to

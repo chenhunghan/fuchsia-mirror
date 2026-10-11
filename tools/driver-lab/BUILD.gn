@@ -31,8 +31,8 @@ python_library("driver_lab") {
   ]
   library_deps = [
     "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_python",
-    "//src/developer/ffx/lib/fuchsia-controller:fidl_bindings",
-    "//src/developer/ffx/lib/fuchsia-controller:fuchsia_controller_py",
+    "//src/developer/fuchsia-controller:fidl_bindings",
+    "//src/developer/fuchsia-controller:fuchsia_controller_py",
     "//src/devices/driver-lab/fidl:fuchsia.driver.lab_python",
   ]
 }

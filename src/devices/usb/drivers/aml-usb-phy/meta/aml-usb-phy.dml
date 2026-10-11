@@ -1,0 +1,103 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "aml-usb-phy",
+    capabilities: [
+        { service: "fuchsia.hardware.usb.phy.Service" },
+        {
+            driver_config: "fuchsia.hardware.usb.phy.Metadata",
+            defs: {
+                ProtocolVersion: {
+                    type: "string",
+                    enum: [
+                        "USB_2_0",
+                        "USB_3_0",
+                    ],
+                },
+                Mode: {
+                    type: "string",
+                    enum: [
+                        "HOST",
+                        "OTG",
+                        "PERIPHERAL",
+                        "UNKNOWN",
+                    ],
+                },
+                AmlogicPhyType: {
+                    type: "string",
+                    enum: [
+                        "G12_A",
+                        "G12_B",
+                    ],
+                },
+                UsbPhyMode: {
+                    type: "object",
+                    properties: {
+                        protocol: { ref: "#/ProtocolVersion" },
+                        dr_mode: { ref: "#/Mode" },
+                        is_otg_capable: { type: "bool" },
+                    },
+                },
+            },
+            properties: {
+                phy_type: { ref: "#/AmlogicPhyType" },
+                usb_phy_modes: {
+                    type: "vector",
+                    element: { ref: "#/UsbPhyMode" },
+                    max_count: "MAX",
+                },
+            },
+        },
+    ],
+    use: [
+        {
+            name: "pdev",
+            service: "fuchsia.hardware.platform.device.Service",
+            primary: true,
+            bind: {
+                one_of: [
+                    {
+                        compat: [
+                            "amlogic,g12a-usb-phy",
+                            "amlogic,g12b-usb-phy",
+                        ],
+                        did: "fuchsia.platform.BIND_PLATFORM_DEV_DID.DEVICETREE",
+                        vid: "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                    },
+                    {
+                        protocol: "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                        vid: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_VID.AMLOGIC",
+                        did: "fuchsia.amlogic.platform.BIND_PLATFORM_DEV_DID.USB_PHY_V2",
+                        rules: { "fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID": 0 },
+                    },
+                ],
+            },
+        },
+        {
+            name: "register-reset",
+            service: "fuchsia.hardware.registers.Service",
+        },
+        {
+            name: "gpio-init-0",
+            service: "fuchsia.gpio.Init",
+            availability: "optional",
+        },
+        {
+            name: "clock-init",
+            service: "fuchsia.clock.Init",
+            availability: "optional",
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            availability: "optional",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.usb.phy.Service",
+            from: "self",
+        },
+    ],
+}

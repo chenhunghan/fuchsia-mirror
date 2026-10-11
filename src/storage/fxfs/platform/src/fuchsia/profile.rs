@@ -178,15 +178,25 @@ impl RecordingHandle for FileRecordingHandle {
 pub struct AttributeRecordingHandle {
     volume: Arc<FxVolume>,
     handle: DataObjectHandle<FxVolume>,
+    /// Ensure that the associated node cannot be deleted while we write to the attribute.
+    _node: OpenedNode<dyn FxNode>,
 }
 
 impl AttributeRecordingHandle {
-    /// Create the profile handle to be stored as an attribute on the object to keep thehe profile
+    /// Create the profile handle to be stored as an attribute on the object to keep the profile
     /// associated with the object and tie the profile lifetime to the object as well.
-    pub async fn new(object_id: u64, volume: Arc<FxVolume>) -> Result<Self, Error> {
+    pub async fn new(node: OpenedNode<dyn FxNode>, volume: Arc<FxVolume>) -> Result<Self, Error> {
         let store = volume.store();
+        let object_id = node.object_id();
 
-        let mut transaction = store.new_transaction(lock_keys![], Options::default()).await?;
+        // Prevent concurrent modification of the object while we add the recording attribute.
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), object_id)],
+                Options::default(),
+            )
+            .await?;
+
         transaction.add(
             store.store_object_id(),
             Mutation::replace_or_insert_object(
@@ -222,7 +232,7 @@ impl AttributeRecordingHandle {
             &[],
         );
 
-        Ok(Self { volume, handle })
+        Ok(Self { volume, handle, _node: node })
     }
 
     pub async fn commit_impl(&self) -> Result<(), Error> {
@@ -263,6 +273,8 @@ impl RecordingHandle for AttributeRecordingHandle {
     }
 
     fn abort_cleanup(self: Box<Self>) {
+        // TODO(https://fxbug.dev/507875809): How is this going to be cleaned up if it fails part
+        // way? How will we know that it is invalid and should be replaced?
         self.volume.store().filesystem().graveyard().queue_tombstone_attribute(
             self.volume.store().store_object_id(),
             self.handle.object_id(),
@@ -501,17 +513,13 @@ impl RecordedVolume for FileVolume {
     }
 
     async fn open(&self, id: Self::IdType) -> Result<OpenedNode<Self::NodeType>, Error> {
-        self.volume
-            .get_or_load_node(id, ObjectDescriptor::File, None)
-            .await?
-            .into_any()
-            .downcast::<FxFile>()
-            .map_err(|_| anyhow!("Non-file opened"))?
-            .into_opened_node()
-            .ok_or_else(|| anyhow!("File being purged"))
+        self.volume.open_file_by_id(id).await
     }
 
     async fn file_is_replayable(&self, id: &Self::IdType) -> bool {
+        if self.volume.store().crypt().is_none() {
+            return true;
+        }
         match self.volume.store().get_keys(*id).await {
             // If any keys are not the volume key id, then the file may not be readable later.
             // If there's more than one, then at least one is not the volume key.
@@ -908,8 +916,8 @@ impl<T: RecordedVolume> ProfileState for ProfileStateImpl<T> {
 mod tests {
     use super::{
         AttributeRecordingHandle, BlobMessage, BlobVolume, FileMessage, FileRecordingHandle,
-        FileVolume, IO_SIZE, Message, MutPtrByteSlice, PtrByteSlice, RecordedVolume, Request,
-        new_profile_state,
+        FileVolume, IO_SIZE, Message, MutPtrByteSlice, PtrByteSlice, RecordedVolume,
+        RecordingHandle, Request, new_profile_state,
     };
     use crate::fuchsia::file::FxFile;
     use crate::fuchsia::fxblob::blob::FxBlob;
@@ -1206,8 +1214,12 @@ mod tests {
 
             {
                 // Drop recorder when finished writing to flush data.
-                let handle =
-                    AttributeRecordingHandle::new(blob.object_id(), volume.clone()).await.unwrap();
+                let handle = AttributeRecordingHandle::new(
+                    OpenedNode::new(blob.clone()).into_dyn(),
+                    volume.clone(),
+                )
+                .await
+                .unwrap();
                 let mut recorder = state.record_new(volume, Box::new(handle));
                 recorder.record(blob.clone(), 0).unwrap();
             }
@@ -1230,6 +1242,62 @@ mod tests {
 
             assert_eq!(size, BLOCK_SIZE as u64);
         }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_attribute_recording_handle_prevents_purge_until_dropped() {
+        let fixture = TestFixture::new_unencrypted().await;
+        let root = fixture.root();
+        let file_proxy = open_file_checked(
+            root,
+            "test_file",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+
+        let object_id = file_proxy
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .unwrap()
+            .expect("get_id")
+            .1
+            .id
+            .expect("Missing id");
+
+        let volume = fixture.volume().volume();
+        let node = volume.get_or_load_node(object_id, ObjectDescriptor::File, None).await.unwrap();
+        let file = node.into_any().downcast::<FxFile>().unwrap();
+        let opened_node = file.into_opened_node().unwrap();
+
+        let handle =
+            AttributeRecordingHandle::new(opened_node.into_dyn(), volume.clone()).await.unwrap();
+
+        // Close file_proxy so only AttributeRecordingHandle holds the node open.
+        drop(file_proxy);
+
+        // Unlink the file from root.
+        root.unlink("test_file", &fio::UnlinkOptions::default())
+            .await
+            .unwrap()
+            .expect("unlink failed");
+
+        // The file was unlinked, but because AttributeRecordingHandle holds OpenedNode,
+        // it must not be tombstoned yet. Appending to the handle must succeed.
+        {
+            let mut buf = handle.allocate_buffer(handle.block_size()).await;
+            buf.as_mut_ptr_slice().fill(1);
+            handle.append(buf.as_ref()).await.expect("Append should succeed while handle is held");
+        }
+
+        // Now drop the recording handle (via commit).
+        handle.commit_impl().await.expect("commit_impl failed");
+        drop(handle);
+
         fixture.close().await;
     }
 
@@ -1802,6 +1870,105 @@ mod tests {
             // The tombstoned file should not have anything committed because it shouldn't be able
             // to open.
             assert_eq!(tombstoned_file.vmo().info().unwrap().committed_bytes, 0);
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_replay_file_unlinked_while_open_is_not_replayed() {
+        let fixture = TestFixture::new().await;
+        let mut buff = vec![0u8; IO_SIZE];
+
+        let unlinked_file_id = write_file(&fixture, "unlinked", &[1, 2, 3, 4]).await;
+        let message = FileMessage { id: unlinked_file_id, offset: 0 };
+        message.encode_to_impl((&mut buff[0..size_of::<FileMessage>()]).try_into().unwrap());
+
+        let remaining_file_id = write_file(&fixture, "remaining", &[5, 6, 7, 8]).await;
+        let message = FileMessage { id: remaining_file_id, offset: 0 };
+        message.encode_to_impl(
+            (&mut buff[size_of::<FileMessage>()..(size_of::<FileMessage>() * 2)])
+                .try_into()
+                .unwrap(),
+        );
+
+        let device = fixture.close().await;
+        device.ensure_unique();
+
+        device.reopen(false);
+        let fixture =
+            TestFixture::open(device, TestFixtureOptions { format: false, ..Default::default() })
+                .await;
+        {
+            // Open the file so that it has an active connection and open count > 0.
+            let file_proxy = open_file_checked(
+                fixture.root(),
+                "unlinked",
+                fio::PERM_READABLE | fio::Flags::PROTOCOL_FILE,
+                &Default::default(),
+            )
+            .await;
+
+            // Unlink it while open. It is now in the graveyard, but still held open.
+            fixture
+                .root()
+                .unlink("unlinked", &fio::UnlinkOptions::default())
+                .await
+                .unwrap()
+                .expect("Unlinking failed");
+
+            let store = fixture.volume().volume().store();
+            assert!(
+                matches!(
+                    store
+                        .tree()
+                        .find_value(&ObjectKey::graveyard_entry(
+                            store.graveyard_directory_object_id(),
+                            unlinked_file_id,
+                        ))
+                        .await
+                        .unwrap(),
+                    Some(ObjectValue::Some)
+                ),
+                "File should be in graveyard awaiting purge"
+            );
+
+            let mut state = new_profile_state(false);
+            let volume = fixture.volume().volume();
+
+            let replay_handle = Box::new(FakeReaderWriter::new());
+            replay_handle.inner.lock().data = buff;
+
+            state.replay_profile(
+                replay_handle,
+                volume.clone(),
+                volume.scope().try_active_guard().unwrap(),
+            );
+
+            // Wait for remaining_file to be replayed and paged in.
+            let remaining_file = fixture
+                .volume()
+                .volume()
+                .get_or_load_node(remaining_file_id, ObjectDescriptor::File, None)
+                .await
+                .expect("Opening remaining file")
+                .into_any()
+                .downcast::<FxFile>()
+                .unwrap();
+            while remaining_file.vmo().info().unwrap().committed_bytes == 0 {
+                fasync::Timer::new(Duration::from_millis(25)).await;
+            }
+
+            // The unlinked file in the graveyard should NOT have been replayed/committed.
+            let node = fixture
+                .volume()
+                .volume()
+                .get_or_load_node(unlinked_file_id, ObjectDescriptor::File, None)
+                .await
+                .unwrap();
+            let unlinked_file = node.into_any().downcast::<FxFile>().unwrap();
+            assert_eq!(unlinked_file.vmo().info().unwrap().committed_bytes, 0);
+
+            drop(file_proxy);
         }
         fixture.close().await;
     }

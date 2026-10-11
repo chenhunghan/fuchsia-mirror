@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Run, inspect and debug
+#### PREBUILTS=${PREBUILT_PYTHON3}
 ### generate a report of CPU stats from a snapshot
 
 # usage: fx cpu-stats [-f json|html] [-o OUTPUT_FILE] [INPUT_FILES...]

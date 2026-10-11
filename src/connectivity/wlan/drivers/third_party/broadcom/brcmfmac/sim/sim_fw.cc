@@ -188,6 +188,7 @@ zx_status_t SimFirmware::SetupIovarTable() {
       {"rxchain", sizeof(uint32_t), nullptr, &SimFirmware::IovarRxchainGet},
       {"snr", sizeof(int32_t), nullptr, &SimFirmware::IovarSnrGet},
       {"ssid", sizeof(brcmf_ssid_le), &SimFirmware::IovarSsidSet, nullptr},
+      {"sta_info", sizeof(brcmf_sta_info_le), nullptr, &SimFirmware::IovarStaInfoGet},
       {"stbc_tx", sizeof(int32_t), &SimFirmware::IovarStbcTxSet, &SimFirmware::IovarStbcTxGet},
       {"target_bss_info", std::nullopt, nullptr, &SimFirmware::IovarTargetBssInfoGet},
       {"tlv", sizeof(sim_iface_entry_t::tlv), &SimFirmware::IovarIfaceVarSet,
@@ -285,7 +286,9 @@ zx_status_t SimFirmware::SetupInternalVmo() {
 SimFirmware::SimFirmware(brcmf_simdev* simdev) : simdev_(simdev), hw_(simdev->env) {
   // Configure the chanspec encode/decoder
   d11_inf_.io_type = kIoType;
-  brcmu_d11_attach(&d11_inf_);
+  if (brcmu_d11_attach(&d11_inf_) != ZX_OK) {
+    ZX_PANIC("Unable to attach D11");
+  }
 
   // Configure the (simulated) hardware => (simulated) firmware callbacks
   SimHardware::EventHandlers handlers = {
@@ -429,8 +432,15 @@ zx_status_t SimFirmware::BusTxCtl(unsigned char* msg, unsigned int len) {
 
   zx_status_t status;
   bcme_status_t fw_err;
-  if (err_inj_.CheckIfErrInjCmdEnabled(dcmd->cmd, &status, &fw_err, ifidx)) {
+  const std::vector<uint8_t>* err_inj_alt_value = nullptr;
+  if (err_inj_.CheckIfErrInjCmdEnabled(dcmd->cmd, &status, &fw_err, &err_inj_alt_value, ifidx)) {
     if (status == ZX_OK) {
+      if (err_inj_alt_value != nullptr) {
+        // Use provided replacement data, zeroing out any remaining bytes.
+        const size_t alt_data_size = std::min(err_inj_alt_value->size(), data_len);
+        std::memcpy(data, err_inj_alt_value->data(), alt_data_size);
+        std::memset(&data[alt_data_size], 0, data_len - alt_data_size);
+      }
       // If the transmission status is ZX_OK, customize the firmware error code which will be
       // sent back through bcdc response.
       if (fw_err != BCME_OK) {
@@ -491,7 +501,7 @@ zx_status_t SimFirmware::BusTxCtl(unsigned char* msg, unsigned int len) {
       break;
     }
     case BRCMF_C_GET_RATE: {
-      uint32_t rate = 130;  // 65 Mbps (130 * 500kbps)
+      uint32_t rate = kDefaultSimFwTxRate;
       if ((status = SIM_FW_CHK_CMD_LEN(dcmd->len, sizeof(rate))) == ZX_OK) {
         std::memcpy(data, &rate, sizeof(rate));
       }
@@ -757,7 +767,7 @@ zx_status_t SimFirmware::BusTxCtl(unsigned char* msg, unsigned int len) {
     }
     case BRCMF_C_GET_RSSI: {
       if ((status = SIM_FW_CHK_CMD_LEN(dcmd->len, sizeof(int32_t))) == ZX_OK) {
-        int32_t rssi = -20;
+        int32_t rssi = kDefaultSimFwRssi;
         std::memcpy(data, &rssi, sizeof(rssi));
       }
       break;
@@ -1009,6 +1019,11 @@ void SimFirmware::TriggerFirmwareReassocEvent(const MacAddr& bssid) {
 void SimFirmware::TriggerFirmwareRoamEvent(const MacAddr& bssid) {
   SendEventToDriver(0, nullptr, BRCMF_E_ROAM, BRCMF_E_STATUS_NO_NETWORKS, kClientIfidx, 0, 0, 0,
                     bssid);
+}
+
+void SimFirmware::TriggerFirmwareLinkDownEvent() {
+  SendEventToDriver(0, nullptr, BRCMF_E_LINK, BRCMF_E_STATUS_SUCCESS, kClientIfidx, nullptr, 0,
+                    BRCMF_E_REASON_LINK_DISASSOC);
 }
 
 // Process an RX CTL message. We simply pass back the results of the previous TX CTL
@@ -1793,7 +1808,9 @@ fuchsia_wlan_ieee80211::wire::ChannelNumber SimFirmware::GetIfChannel(bool is_ap
   uint16_t chanspec = iface_tbl_[kClientIfidx].chanspec;
   ZX_ASSERT_MSG(chanspec != 0, "No chanspec assigned to client.");
 
-  return chanspec_to_operating_channel_number(&d11_inf_, chanspec);
+  const auto ch = chanspec_to_channel(&d11_inf_, chanspec);
+  ZX_ASSERT_MSG(ch.is_ok(), "Failed to decode client chanspec: 0x%x", chanspec);
+  return ch->primary;
 }
 
 fuchsia_wlan_ieee80211::wire::ChannelBandwidth SimFirmware::GetIfChannelBandwidth(bool is_ap) {
@@ -1802,7 +1819,9 @@ fuchsia_wlan_ieee80211::wire::ChannelBandwidth SimFirmware::GetIfChannelBandwidt
   uint16_t chanspec = iface_tbl_[kClientIfidx].chanspec;
   ZX_ASSERT_MSG(chanspec != 0, "No chanspec assigned to client.");
 
-  return chanspec_to_channel_bandwidth(&d11_inf_, chanspec);
+  const auto ch = chanspec_to_channel(&d11_inf_, chanspec);
+  ZX_ASSERT_MSG(ch.is_ok(), "Failed to decode client chanspec: 0x%x", chanspec);
+  return ch->cbw;
 }
 
 fuchsia_wlan_ieee80211::wire::ChannelNumber SimFirmware::GetIfSecondary80(bool is_ap) {
@@ -1811,7 +1830,9 @@ fuchsia_wlan_ieee80211::wire::ChannelNumber SimFirmware::GetIfSecondary80(bool i
   uint16_t chanspec = iface_tbl_[kClientIfidx].chanspec;
   ZX_ASSERT_MSG(chanspec != 0, "No chanspec assigned to client.");
 
-  return chanspec_to_secondary80(&d11_inf_, chanspec);
+  const auto ch = chanspec_to_channel(&d11_inf_, chanspec);
+  ZX_ASSERT_MSG(ch.is_ok(), "Failed to decode client chanspec: 0x%x", chanspec);
+  return {.band = ch->primary.band, .number = 0};
 }
 
 // This routine for now only handles Disassoc Request meant for the SoftAP IF.
@@ -2566,7 +2587,7 @@ zx_status_t SimFirmware::IovarsGet(uint16_t ifidx, const char* name, void* value
     *fw_err = BCME_OK;
   }
 
-  const std::vector<uint8_t>* err_inj_alt_value;
+  const std::vector<uint8_t>* err_inj_alt_value = nullptr;
   if (err_inj_.CheckIfErrInjIovarEnabled(name, &status, fw_err, &err_inj_alt_value, ifidx)) {
     if (err_inj_alt_value != nullptr) {
       // Use provided replacement data
@@ -2677,6 +2698,20 @@ zx_status_t SimFirmware::IovarStbcTxSet(SimIovarSetReq* req) {
 zx_status_t SimFirmware::IovarStbcTxGet(SimIovarGetReq* req) {
   BRCMF_DBG(SIM, "get stbc_tx value: %u", stbc_tx_);
   memcpy(req->value, &stbc_tx_, sizeof(stbc_tx_));
+  return ZX_OK;
+}
+
+zx_status_t SimFirmware::IovarStaInfoGet(SimIovarGetReq* req) {
+  if (req->value_len < sizeof(brcmf_sta_info_le)) {
+    return ZX_ERR_INVALID_ARGS;
+  }
+  struct brcmf_sta_info_le sta_info = {
+      .ver = 4,
+      .len = sizeof(brcmf_sta_info_le),
+      .tx_rate = kDefaultSimFwStaInfoTxRateKbps,
+      .rx_rate = kDefaultSimFwStaInfoRxRateKbps,
+  };
+  std::memcpy(req->value, &sta_info, sizeof(sta_info));
   return ZX_OK;
 }
 
@@ -2908,7 +2943,7 @@ zx_status_t SimFirmware::IovarSnrGet(SimIovarGetReq* req) {
   if (!iface_tbl_[req->ifidx].allocated) {
     return ZX_ERR_BAD_STATE;
   }
-  int32_t sim_snr = 40;
+  int32_t sim_snr = kDefaultSimFwSnr;
   memcpy(req->value, &sim_snr, sizeof(sim_snr));
   return ZX_OK;
 }
@@ -3806,10 +3841,14 @@ void SimFirmware::ResetSimFirmware() {
 }
 
 SimFirmware::DerivedChannelInfo SimFirmware::ExtractChannelInfo(uint16_t chanspec) {
+  const auto ch = chanspec_to_channel(&d11_inf_, chanspec);
+  if (ch.is_error()) {
+    return {};
+  }
   return {
-      .primary = chanspec_to_operating_channel_number(&d11_inf_, chanspec),
-      .bandwidth = chanspec_to_channel_bandwidth(&d11_inf_, chanspec),
-      .vht_secondary_80_channel = chanspec_to_secondary80(&d11_inf_, chanspec),
+      .primary = ch->primary,
+      .bandwidth = ch->cbw,
+      .vht_secondary_80_channel = {.band = ch->primary.band, .number = 0},
   };
 }
 

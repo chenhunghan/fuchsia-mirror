@@ -32,6 +32,10 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
+#ifndef CAP_PERFMON
+#define CAP_PERFMON 38
+#endif
+
 #ifndef CAP_BPF
 #define CAP_BPF 39
 #endif
@@ -166,6 +170,23 @@ class BpfTestBase : public testing::Test {
     attr.log_level = 1;
 
     return fbl::unique_fd(SAFE_SYSCALL(bpf(BPF_PROG_LOAD, &attr)));
+  }
+
+  fbl::unique_fd TryLoadProgram(const bpf_insn* program, size_t len, uint32_t prog_type,
+                                uint32_t expected_attach_type) {
+    char buffer[4096];
+    union bpf_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.prog_type = prog_type;
+    attr.expected_attach_type = expected_attach_type;
+    attr.insns = reinterpret_cast<uint64_t>(program);
+    attr.insn_cnt = static_cast<uint32_t>(len);
+    attr.license = reinterpret_cast<uint64_t>("N/A");
+    attr.log_buf = reinterpret_cast<uint64_t>(buffer);
+    attr.log_size = 4096;
+    attr.log_level = 1;
+
+    return fbl::unique_fd(bpf(BPF_PROG_LOAD, &attr));
   }
 
   fbl::unique_fd CreateMap(uint32_t type, uint32_t key_size, uint32_t value_size,
@@ -1398,12 +1419,202 @@ TEST_P(BpfMapCapabilityTest, MapCreation) {
   });
 }
 
+std::string BpfMapCapabilityTestName(
+    const testing::TestParamInfo<BpfMapCapabilityTest::ParamType>& info) {
+  auto [map_type, unpriv_bpf_disabled, has_bpf, has_net_admin, has_sys_admin] = info.param;
+  std::string name;
+  switch (map_type) {
+    case BPF_MAP_TYPE_HASH:
+      name = "hash";
+      break;
+    case BPF_MAP_TYPE_RINGBUF:
+      name = "ringbuf";
+      break;
+    case BPF_MAP_TYPE_SK_STORAGE:
+      name = "sk_storage";
+      break;
+    case BPF_MAP_TYPE_LPM_TRIE:
+      name = "lpm_trie";
+      break;
+    case BPF_MAP_TYPE_LRU_HASH:
+      name = "lru_hash";
+      break;
+    case BPF_MAP_TYPE_DEVMAP_HASH:
+      name = "devmap_hash";
+      break;
+    default:
+      name = std::to_string(map_type);
+      break;
+  }
+  name += unpriv_bpf_disabled ? "_unpriv_disabled" : "_unpriv_enabled";
+  std::string caps;
+  if (has_bpf) {
+    caps += "_bpf";
+  }
+  if (has_net_admin) {
+    caps += "_net_admin";
+  }
+  if (has_sys_admin) {
+    caps += "_sys_admin";
+  }
+  if (caps.empty()) {
+    caps = "_no_caps";
+  }
+  name += caps;
+  return name;
+}
+
 INSTANTIATE_TEST_SUITE_P(
     BpfMapCapabilityTests, BpfMapCapabilityTest,
     ::testing::Combine(::testing::Values(BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_RINGBUF,
                                          BPF_MAP_TYPE_SK_STORAGE, BPF_MAP_TYPE_LPM_TRIE,
                                          BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_DEVMAP_HASH),
-                       ::testing::Bool(), ::testing::Bool(), ::testing::Bool(), ::testing::Bool()));
+                       ::testing::Bool(), ::testing::Bool(), ::testing::Bool(), ::testing::Bool()),
+    BpfMapCapabilityTestName);
+
+class BpfProgramCapabilityTest
+    : public BpfTestBase,
+      public ::testing::WithParamInterface<std::tuple<uint32_t, bool, bool, bool, bool, bool>> {
+ protected:
+  void SetUp() override {
+    if (!test_helper::HasSysAdmin()) {
+      GTEST_SKIP() << "bpf() system call requires CAP_SYS_ADMIN";
+    }
+  }
+
+  void TearDown() override {
+    if (restore_unpriv_bpf_disabled) {
+      SetUnprivilegedBpfDisabled(restore_unpriv_bpf_disabled.value());
+    }
+  }
+
+  void GetUnprivilegedBpfDisabled(int* out_result) {
+    std::ifstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
+    ASSERT_TRUE(file.is_open());
+    ASSERT_TRUE(file >> *out_result);
+  }
+
+  void SetUnprivilegedBpfDisabled(int value) {
+    std::ofstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
+    ASSERT_TRUE(file.is_open());
+    ASSERT_TRUE(file << value);
+  }
+
+  std::optional<int> restore_unpriv_bpf_disabled;
+};
+
+TEST_P(BpfProgramCapabilityTest, ProgramLoad) {
+  auto [prog_type, unpriv_bpf_disabled, has_bpf, has_perfmon, has_net_admin, has_sys_admin] =
+      GetParam();
+
+  int current_unpriv_bpf_disabled = {};
+  ASSERT_NO_FATAL_FAILURE(GetUnprivilegedBpfDisabled(&current_unpriv_bpf_disabled));
+
+  bool update_unpriv_bpf_disabled = unpriv_bpf_disabled != (current_unpriv_bpf_disabled != 0);
+  if (current_unpriv_bpf_disabled == 1 && update_unpriv_bpf_disabled) {
+    GTEST_SKIP() << "/proc/sys/kernel/unprivileged_bpf_disabled is set to 1";
+  }
+
+  if (update_unpriv_bpf_disabled) {
+    ASSERT_NO_FATAL_FAILURE(SetUnprivilegedBpfDisabled(unpriv_bpf_disabled ? 2 : 0));
+    restore_unpriv_bpf_disabled = current_unpriv_bpf_disabled;
+  }
+
+  bool allow_unpriv = !unpriv_bpf_disabled && (prog_type == BPF_PROG_TYPE_SOCKET_FILTER ||
+                                               prog_type == BPF_PROG_TYPE_CGROUP_SKB);
+
+  bool bpf_ok = allow_unpriv || has_bpf || has_sys_admin;
+  bool perfmon_ok = has_perfmon || has_sys_admin;
+  bool net_admin_ok = has_net_admin || has_sys_admin;
+
+  bool expect_success = bpf_ok;
+  if (prog_type == BPF_PROG_TYPE_SCHED_CLS) {
+    expect_success = bpf_ok && net_admin_ok;
+  } else if (prog_type == BPF_PROG_TYPE_KPROBE || prog_type == BPF_PROG_TYPE_TRACEPOINT) {
+    expect_success = bpf_ok && perfmon_ok;
+  }
+
+  bpf_insn program_insns[] = {
+      BPF_MOV_IMM(0, 1),
+      BPF_RETURN(),
+  };
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    if (!has_bpf) {
+      test_helper::UnsetCapabilityEffective(CAP_BPF);
+    }
+    if (!has_perfmon) {
+      test_helper::UnsetCapabilityEffective(CAP_PERFMON);
+    }
+    if (!has_net_admin) {
+      test_helper::UnsetCapabilityEffective(CAP_NET_ADMIN);
+    }
+    if (!has_sys_admin) {
+      test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    }
+
+    auto fd = TryLoadProgram(program_insns, sizeof(program_insns) / sizeof(program_insns[0]),
+                             prog_type, 0);
+    if (expect_success) {
+      EXPECT_THAT(fd.get(), SyscallSucceeds());
+    } else {
+      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EPERM));
+    }
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+std::string BpfProgramCapabilityTestName(
+    const testing::TestParamInfo<BpfProgramCapabilityTest::ParamType>& info) {
+  auto [prog_type, unpriv_bpf_disabled, has_bpf, has_perfmon, has_net_admin, has_sys_admin] =
+      info.param;
+  std::string name;
+  switch (prog_type) {
+    case BPF_PROG_TYPE_SOCKET_FILTER:
+      name = "socket_filter";
+      break;
+    case BPF_PROG_TYPE_CGROUP_SKB:
+      name = "cgroup_skb";
+      break;
+    case BPF_PROG_TYPE_SCHED_CLS:
+      name = "sched_cls";
+      break;
+    case BPF_PROG_TYPE_KPROBE:
+      name = "kprobe";
+      break;
+    default:
+      name = std::to_string(prog_type);
+      break;
+  }
+  name += unpriv_bpf_disabled ? "_unpriv_disabled" : "_unpriv_enabled";
+  std::string caps;
+  if (has_bpf) {
+    caps += "_bpf";
+  }
+  if (has_perfmon) {
+    caps += "_perfmon";
+  }
+  if (has_net_admin) {
+    caps += "_net_admin";
+  }
+  if (has_sys_admin) {
+    caps += "_sys_admin";
+  }
+  if (caps.empty()) {
+    caps = "_no_caps";
+  }
+  name += caps;
+  return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    BpfProgramCapabilityTests, BpfProgramCapabilityTest,
+    ::testing::Combine(::testing::Values(BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_CGROUP_SKB,
+                                         BPF_PROG_TYPE_SCHED_CLS, BPF_PROG_TYPE_KPROBE),
+                       ::testing::Bool(), ::testing::Bool(), ::testing::Bool(), ::testing::Bool(),
+                       ::testing::Bool()),
+    BpfProgramCapabilityTestName);
 
 class BpfCgroupTest : public BpfTestBase {
  protected:

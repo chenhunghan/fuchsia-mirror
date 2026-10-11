@@ -4,7 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::arch_rs::{arch_copy_from_user, arch_copy_to_user};
+use crate::arch_rs::{
+    CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user, arch_copy_to_user,
+    arch_copy_to_user_capture_faults,
+};
 use core::mem::MaybeUninit;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 use zx_status::Status;
@@ -221,6 +224,23 @@ impl<T> UserOutPtr<T> {
                 self.ptr as *mut core::ffi::c_void,
                 src_bytes.as_ptr() as *const core::ffi::c_void,
                 src_bytes.len(),
+            )
+        }
+    }
+
+    /// Copies a single element from `src` to userspace, capturing any page faults.
+    pub fn copy_to_user_capture_faults(&self, src: &T) -> Result<(), UserCopyCaptureFaultsError>
+    where
+        T: IntoBytes + Immutable,
+    {
+        let src_bytes = src.as_bytes();
+        // SAFETY: `src_bytes.as_ptr()` points to `src_bytes.len()` bytes of valid kernel memory.
+        unsafe {
+            arch_copy_to_user_capture_faults(
+                self.ptr as *mut core::ffi::c_void,
+                src_bytes.as_ptr() as *const core::ffi::c_void,
+                src_bytes.len(),
+                CopyContext::BlockingAllowed,
             )
         }
     }

@@ -71,7 +71,7 @@ rust_library(
     }),
     version = "0.1.1",
     deps = [
-        "//third_party/rust_crates/vendor/valuable-0.1.1:build_script_build",
+        ":build_script_build",
     ],
 )
 
@@ -109,6 +109,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "valuable",
     rustc_flags = [
         "--cap-lints=allow",

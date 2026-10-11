@@ -8,7 +8,6 @@
 
 #include <zircon/types.h>
 
-#include <fbl/ref_ptr.h>
 #include <kernel/event.h>
 #include <kernel/ffi.h>
 #include <ktl/memory.h>
@@ -24,37 +23,6 @@ FFI_ALWAYS_INLINE void cpp_page_queues_stop_threads(PageQueues* queues) { queues
 
 FFI_ALWAYS_INLINE void cpp_page_queues_init(ffi::Uninitialized<PageQueues>* queues) {
   queues->Initialize();
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_wired(PageQueues* queues, vm_page_t* page,
-                                                 VmCowPages* cow, uint64_t offset) {
-  queues->SetWired(page, cow, offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_anonymous(PageQueues* queues, vm_page_t* page,
-                                                     VmCowPages* cow, uint64_t offset,
-                                                     bool skip_reclaim) {
-  queues->SetAnonymous(page, cow, offset, skip_reclaim);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_reclaim(PageQueues* queues, vm_page_t* page,
-                                                   VmCowPages* cow, uint64_t offset) {
-  queues->SetReclaim(page, cow, offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_pager_backed_dirty(PageQueues* queues, vm_page_t* page,
-                                                              VmCowPages* cow, uint64_t offset) {
-  queues->SetPagerBackedDirty(page, cow, offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_anonymous_zero_fork(PageQueues* queues, vm_page_t* page,
-                                                               VmCowPages* cow, uint64_t offset) {
-  queues->SetAnonymousZeroFork(page, cow, offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_set_high_priority(PageQueues* queues, vm_page_t* page,
-                                                         VmCowPages* cow, uint64_t offset) {
-  queues->SetHighPriority(page, cow, offset);
 }
 
 FFI_ALWAYS_INLINE void cpp_page_queues_move_to_wired(PageQueues* queues, vm_page_t* page) {
@@ -91,32 +59,6 @@ FFI_ALWAYS_INLINE void cpp_page_queues_move_anonymous_to_anonymous_zero_fork(Pag
 
 FFI_ALWAYS_INLINE void cpp_page_queues_compress_failed(PageQueues* queues, vm_page_t* page) {
   queues->CompressFailed(page);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_change_object_offset(PageQueues* queues, vm_page_t* page,
-                                                            VmCowPages* cow, uint64_t page_offset) {
-  queues->ChangeObjectOffset(page, cow, page_offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_change_object_offset_array(
-    PageQueues* queues, vm_page_t** pages, VmCowPages* cow, const uint64_t* offsets, size_t count) {
-  queues->ChangeObjectOffsetArray(pages, cow, const_cast<uint64_t*>(offsets), count);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_change_object_offset_locked_list(
-    PageQueues* queues, vm_page_t* page, VmCowPages* cow,
-    uint64_t offset) TA_NO_THREAD_SAFETY_ANALYSIS {
-  queues->ChangeObjectOffsetLockedList(page, cow, offset);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_remove(PageQueues* queues, vm_page_t* page) {
-  queues->Remove(page);
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_remove_array_into_list(PageQueues* queues, vm_page_t** pages,
-                                                              size_t count,
-                                                              VmPageDoublyLinkedList* out_list) {
-  queues->RemoveArrayIntoList(pages, count, out_list);
 }
 
 FFI_ALWAYS_INLINE void cpp_page_queues_mark_accessed(PageQueues* queues, vm_page_t* page) {
@@ -169,22 +111,7 @@ FFI_ALWAYS_INLINE bool cpp_page_queues_get_cow_for_loaned_page(
   return true;
 }
 
-FFI_ALWAYS_INLINE void cpp_page_queues_get_reclaim_queue_counts(
-    const PageQueues* queues, PageQueues::ReclaimCounts* out_counts) {
-  *out_counts = queues->GetReclaimQueueCounts();
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_queue_counts(const PageQueues* queues,
-                                                    PageQueues::Counts* out_counts) {
-  *out_counts = queues->QueueCounts();
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_get_active_inactive_counts(
-    const PageQueues* queues, PageQueues::ActiveInactiveCounts* out_counts) {
-  *out_counts = queues->GetActiveInactiveCounts();
-}
-
-FFI_ALWAYS_INLINE void cpp_page_queues_dump(PageQueues* queues) { queues->Dump(); }
+FFI_ALWAYS_INLINE void cpp_page_queues_dump(const PageQueues* queues) { queues->Dump(); }
 
 FFI_ALWAYS_INLINE uint64_t cpp_page_queues_get_lru_pages_compressed(void) {
   return PageQueues::GetLruPagesCompressed();
@@ -193,55 +120,6 @@ FFI_ALWAYS_INLINE uint64_t cpp_page_queues_get_lru_pages_compressed(void) {
 FFI_ALWAYS_INLINE void cpp_page_queues_enable_anonymous_reclaim(PageQueues* queues,
                                                                 bool zero_forks) {
   queues->EnableAnonymousReclaim(zero_forks);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_reclaim_is_only_pager_backed(const PageQueues* queues) {
-  return queues->ReclaimIsOnlyPagerBacked();
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_is_page_reclaimable(const vm_page_t* page) {
-  return PageQueues::IsPageReclaimable(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_reclaim(const PageQueues* queues,
-                                                             const vm_page_t* page,
-                                                             size_t* out_queue) {
-  return queues->DebugPageIsReclaim(page, out_queue);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_reclaim_isolate(const PageQueues* queues,
-                                                                     const vm_page_t* page) {
-  return queues->DebugPageIsReclaimIsolate(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_pager_backed_dirty(const PageQueues* queues,
-                                                                        const vm_page_t* page) {
-  return queues->DebugPageIsPagerBackedDirty(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_anonymous(const PageQueues* queues,
-                                                               const vm_page_t* page) {
-  return queues->DebugPageIsAnonymous(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_anonymous_zero_fork(const PageQueues* queues,
-                                                                         const vm_page_t* page) {
-  return queues->DebugPageIsAnonymousZeroFork(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_any_anonymous(const PageQueues* queues,
-                                                                   const vm_page_t* page) {
-  return queues->DebugPageIsAnyAnonymous(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_wired(const PageQueues* queues,
-                                                           const vm_page_t* page) {
-  return queues->DebugPageIsWired(page);
-}
-
-FFI_ALWAYS_INLINE bool cpp_page_queues_debug_page_is_high_priority(const PageQueues* queues,
-                                                                   const vm_page_t* page) {
-  return queues->DebugPageIsHighPriority(page);
 }
 
 FFI_ALWAYS_INLINE void cpp_page_queues_start_threads(PageQueues* queues,

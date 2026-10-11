@@ -19,13 +19,33 @@ pub mod syscalls;
 use crate::bpf::attachments::EbpfAttachments;
 use crate::bpf::map::{BpfMapHandle, BpfMapId, WeakBpfMapHandle};
 use crate::bpf::program::{ProgramHandle, ProgramId, WeakProgramHandle};
+use crate::security;
+use crate::task::CurrentTask;
 use ebpf::MapFlags;
 use starnix_sync::{EbpfStateLock, LockDepMutex};
+use starnix_uapi::auth::{CAP_SYS_ADMIN, Capabilities};
+use starnix_uapi::errors::Errno;
 use starnix_uapi::{bpf_map_type, bpf_map_type_BPF_MAP_TYPE_SK_STORAGE};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
 use zerocopy::IntoBytes as _;
+
+/// Checks if `current_task` has either `capability` or [`CAP_SYS_ADMIN`], matching Linux
+/// capability auditing behavior.
+///
+/// In Linux, `capability` is checked first with auditing. If `capability` is absent, an audit
+/// denial is generated for `capability`, and [`CAP_SYS_ADMIN`] is checked as a fallback with auditing.
+/// If [`CAP_SYS_ADMIN`] is also absent, an audit denial is generated for [`CAP_SYS_ADMIN`].
+pub(crate) fn check_cap_or_sys_admin(
+    current_task: &CurrentTask,
+    capability: Capabilities,
+) -> Result<(), Errno> {
+    if security::check_task_capable(current_task, capability).is_ok() {
+        return Ok(());
+    }
+    security::check_task_capable(current_task, CAP_SYS_ADMIN)
+}
 
 struct WeakMapWithType {
     map_type: bpf_map_type,

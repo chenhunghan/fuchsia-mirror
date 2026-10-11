@@ -344,8 +344,9 @@ TEST_F(CrashRecoveryTest, ResetAfterCrashRecovery) {
   ASSERT_TRUE(res.is_ok());
 }
 
-TEST_F(CrashRecoveryTest, RecoveryFailureDetachesCleanly) {
+TEST_F(CrashRecoveryTest, RecoveryFailureDestroysIfaces) {
   InitWithInterface();
+  uint32_t dev_count = DeviceCount();
 
   // Simulate bus recovery failing (e.g., SDIO timeout during brcmf_bus_started).
   SetRecoveryHook([]() { return ZX_ERR_TIMED_OUT; });
@@ -360,18 +361,13 @@ TEST_F(CrashRecoveryTest, RecoveryFailureDetachesCleanly) {
   GetInspectCount(&count, "fw_recovered");
   EXPECT_EQ(0U, count);
 
-  // Verify that calling NetworkPort callbacks (MacSetMode, MacGetAddress) and Fullmac methods
-  // on the interface after recovery failure does not crash
+  // Even though recovery failed, all interfaces must be destroyed, just like on a successful
+  // recovery. This guarantees that no WlanInterface can outlive its net_device/wdev.
+  WaitForDeviceCount(dev_count - 1);
   WithSimDevice([&](brcmfmac::SimDevice* device) {
-    wlan::drivers::components::NetworkPort::Callbacks* port_callbacks =
-        device->GetClientInterface();
-    ASSERT_NOT_NULL(port_callbacks);
-    port_callbacks->MacSetMode(fuchsia_hardware_network::wire::MacFilterMode::kMulticastPromiscuous,
-                               {});
-    fuchsia_net::MacAddress mac;
-    port_callbacks->MacGetAddress(&mac);
+    EXPECT_NULL(device->GetClientInterface());
+    EXPECT_NULL(device->GetSoftApInterface());
   });
-  client_ifc_.Query();
 }
 
 }  // namespace wlan::brcmfmac

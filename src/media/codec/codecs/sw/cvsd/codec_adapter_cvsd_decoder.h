@@ -30,7 +30,8 @@ class CodecAdapterCvsdDecoder : public CodecAdapterSWImpl<CvsdParams> {
   // Buffer size required to process one input chunk.
   size_t MinOutputBufferSize() override { return kOutputFrameSize; }
 
-  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port) override;
+  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+      __TA_REQUIRES(lock_) override;
 
   TimestampExtrapolator CreateTimestampExtrapolator(
       const fuchsia::media::FormatDetails& format_details) override {

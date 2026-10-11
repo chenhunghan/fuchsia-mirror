@@ -214,11 +214,12 @@ zx_status_t VmAddressRegion::CreateSubVmarInner(size_t offset, size_t size, uint
       DEBUG_ASSERT(aspace_->is_user() || aspace_->is_guest_physical() ||
                    vmar_flags & VMAR_FLAG_DEBUG_DYNAMIC_KERNEL_MAPPING ||
                    vmo->DebugIsRangePinned(vmo_offset, size));
-      vmar = fbl::AdoptRef(new (&ac) VmMapping(*this, false, new_base, size, vmar_flags,
-                                               ktl::move(vmo), is_upper_bound ? 0 : vmo_offset,
-                                               arch_mmu_flags, VmMapping::Mergeable::NO));
+      vmar = fbl::AdoptRef<VmAddressRegionOrMapping>(new (&ac) VmMapping(
+          *this, false, new_base, size, vmar_flags, ktl::move(vmo), is_upper_bound ? 0 : vmo_offset,
+          arch_mmu_flags, VmMapping::Mergeable::NO));
     } else {
-      vmar = fbl::AdoptRef(new (&ac) VmAddressRegion(*this, new_base, size, vmar_flags, name));
+      vmar = fbl::AdoptRef<VmAddressRegionOrMapping>(
+          new (&ac) VmAddressRegion(*this, new_base, size, vmar_flags, name));
     }
 
     Guard<CriticalMutex> guard{lock()};
@@ -388,7 +389,7 @@ zx_status_t VmAddressRegion::OverwriteVmMappingLocked(
 
   AssertHeld(vmar->lock_ref());
   AssertHeld(vmar->region_lock_ref());
-  status = vmar->Activate();
+  status = vmar->ActivateImpl();
   if (status != ZX_OK) {
     // Activation can fail if an allocation needed to happen. Nothing can be done to rollback here
     // so the only option is to propagate the ZX_ERR_NO_MEMORY up. If this is happening in response
@@ -402,11 +403,11 @@ zx_status_t VmAddressRegion::OverwriteVmMappingLocked(
   // lock and just made it alive, so that cannot happen.
   vmar->SetMemoryPriorityLocked(memory_priority_);
 
-  *out = ktl::move(vmar);
+  *out = fbl::RefPtr<VmAddressRegionOrMapping>(vmar.get());
   return ZX_OK;
 }
 
-zx_status_t VmAddressRegion::DestroyLocked() {
+zx_status_t VmAddressRegion::DestroyLockedImpl() {
   canary_.Assert();
   LTRACEF("%p '%s'\n", this, name_);
 
@@ -634,7 +635,7 @@ bool VmAddressRegion::has_parent() const {
   return parent_ != nullptr;
 }
 
-void VmAddressRegion::DumpLocked(uint depth, bool verbose) const {
+void VmAddressRegion::DumpLockedImpl(uint depth, bool verbose) const {
   canary_.Assert();
   for (uint i = 0; i < depth; ++i) {
     printf("  ");
@@ -644,11 +645,12 @@ void VmAddressRegion::DumpLocked(uint depth, bool verbose) const {
          subregions_.size_slow());
   for (const auto& child : subregions_) {
     AssertHeld(child.second->lock_ref());
+    AssertHeld(child.second->region_lock_ref());
     child.second->DumpLocked(depth + 1, verbose);
   }
 }
 
-zx_status_t VmAddressRegion::Activate() {
+zx_status_t VmAddressRegion::ActivateImpl() {
   DEBUG_ASSERT(state_ == LifeCycleState::NOT_READY);
 
   AssertHeld(parent_->lock_ref());
@@ -1217,7 +1219,7 @@ zx_status_t VmAddressRegion::SetMemoryPriority(MemoryPriority priority) {
   // unless we know we didn't have any children at the point we set the priority to avoid a needless
   // lock acquisition and pass.
   if (priority == MemoryPriority::HIGH && have_children) {
-    CommitHighMemoryPriority();
+    CommitHighMemoryPriorityImpl();
   }
   return ZX_OK;
 }
@@ -1256,7 +1258,7 @@ zx_status_t VmAddressRegion::SetMemoryPriorityLocked(MemoryPriority priority) {
   return ZX_OK;
 }
 
-void VmAddressRegion::CommitHighMemoryPriority() {
+void VmAddressRegion::CommitHighMemoryPriorityImpl() {
   canary_.Assert();
 
   Guard<CriticalMutex> guard{lock()};
@@ -1288,99 +1290,11 @@ void VmAddressRegion::CommitHighMemoryPriority() {
     }
     enumerator.pause();
     guard.CallUnlocked(
-        [mapping = ktl::move(mapping)]() mutable { mapping->CommitHighMemoryPriority(); });
+        [mapping = ktl::move(mapping)]() mutable { mapping->CommitHighMemoryPriorityImpl(); });
     // Since the lock was dropped we must re-validate before doing anything else.
     if (!validate()) {
       return;
     }
     enumerator.resume();
   }
-}
-
-extern "C" {
-fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_address_region_get_ref_counted(
-    VmAddressRegion* vmar);
-void cpp_vm_address_region_free(VmAddressRegion* vmar);
-zx_status_t cpp_vm_address_region_destroy(VmAddressRegion* vmar);
-vaddr_t cpp_vm_address_region_base(VmAddressRegion* vmar);
-size_t cpp_vm_address_region_size(VmAddressRegion* vmar);
-uint32_t cpp_vm_address_region_flags(VmAddressRegion* vmar);
-const char* cpp_vm_address_region_name(VmAddressRegion* vmar);
-bool cpp_vm_address_region_has_parent(VmAddressRegion* vmar);
-zx_status_t cpp_vm_address_region_set_memory_priority(VmAddressRegion* vmar,
-                                                      VmAddressRegion::MemoryPriority priority);
-zx_status_t cpp_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base, size_t size,
-                                        VmAddressRegionOpChildren op_children);
-zx_status_t cpp_vm_address_region_protect(VmAddressRegion* vmar, vaddr_t base, size_t size,
-                                          arch_mmu_flags_t new_arch_mmu_flags,
-                                          VmAddressRegionOpChildren op_children);
-zx_status_t cpp_vm_address_region_reserve_space(VmAddressRegion* vmar, const char* name,
-                                                size_t base, size_t size,
-                                                arch_mmu_flags_t arch_mmu_flags);
-VmAddressRegion* cpp_vm_address_region_create_sub_vmar(VmAddressRegion* vmar, size_t offset,
-                                                       size_t size, uint8_t align_pow2,
-                                                       uint32_t vmar_flags, const char* name,
-                                                       zx_status_t* out_status);
-VmMapping* cpp_vm_address_region_create_vm_mapping(
-    VmAddressRegion* vmar, size_t mapping_offset, size_t size, uint8_t align_pow2,
-    uint32_t vmar_flags, const VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-    const char* name, vaddr_t* out_base, zx_status_t* out_status);
-const fbl::RefPtr<VmAspace>* cpp_vm_address_region_aspace(VmAddressRegion* vmar);
-
-fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_address_region_get_ref_counted(
-    VmAddressRegion* vmar) {
-  return vmar;
-}
-void cpp_vm_address_region_free(VmAddressRegion* vmar) { delete vmar; }
-zx_status_t cpp_vm_address_region_destroy(VmAddressRegion* vmar) { return vmar->Destroy(); }
-const fbl::RefPtr<VmAspace>* cpp_vm_address_region_aspace(VmAddressRegion* vmar) {
-  return &vmar->aspace();
-}
-vaddr_t cpp_vm_address_region_base(VmAddressRegion* vmar) { return vmar->base(); }
-size_t cpp_vm_address_region_size(VmAddressRegion* vmar) { return vmar->size(); }
-uint32_t cpp_vm_address_region_flags(VmAddressRegion* vmar) { return vmar->flags(); }
-const char* cpp_vm_address_region_name(VmAddressRegion* vmar) { return vmar->name(); }
-bool cpp_vm_address_region_has_parent(VmAddressRegion* vmar) { return vmar->has_parent(); }
-zx_status_t cpp_vm_address_region_set_memory_priority(VmAddressRegion* vmar,
-                                                      VmAddressRegion::MemoryPriority priority) {
-  return vmar->SetMemoryPriority(priority);
-}
-zx_status_t cpp_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base, size_t size,
-                                        VmAddressRegionOpChildren op_children) {
-  return vmar->Unmap(base, size, op_children);
-}
-zx_status_t cpp_vm_address_region_protect(VmAddressRegion* vmar, vaddr_t base, size_t size,
-                                          arch_mmu_flags_t new_arch_mmu_flags,
-                                          VmAddressRegionOpChildren op_children) {
-  return vmar->Protect(base, size, new_arch_mmu_flags, op_children);
-}
-zx_status_t cpp_vm_address_region_reserve_space(VmAddressRegion* vmar, const char* name,
-                                                size_t base, size_t size,
-                                                arch_mmu_flags_t arch_mmu_flags) {
-  return vmar->ReserveSpace(name, base, size, arch_mmu_flags);
-}
-VmAddressRegion* cpp_vm_address_region_create_sub_vmar(VmAddressRegion* vmar, size_t offset,
-                                                       size_t size, uint8_t align_pow2,
-                                                       uint32_t vmar_flags, const char* name,
-                                                       zx_status_t* out_status) {
-  fbl::RefPtr<VmAddressRegion> sub_vmar;
-  *out_status = vmar->CreateSubVmar(offset, size, align_pow2, vmar_flags, name, &sub_vmar);
-  return fbl::ExportToRawPtr(&sub_vmar);
-}
-VmMapping* cpp_vm_address_region_create_vm_mapping(
-    VmAddressRegion* vmar, size_t mapping_offset, size_t size, uint8_t align_pow2,
-    uint32_t vmar_flags, const VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-    const char* name, vaddr_t* out_base, zx_status_t* out_status) {
-  fbl::RefPtr<VmObject> vmo_ref = fbl::ImportFromRawPtr(const_cast<VmObject*>(vmo));
-  auto result = vmar->CreateVmMapping(mapping_offset, size, align_pow2, vmar_flags,
-                                      ktl::move(vmo_ref), vmo_offset, arch_mmu_flags, name);
-  if (result.is_error()) {
-    *out_status = result.status_value();
-    return nullptr;
-  }
-  *out_status = ZX_OK;
-  *out_base = result->base;
-  fbl::RefPtr<VmMapping> mapping = ktl::move(result->mapping);
-  return fbl::ExportToRawPtr(&mapping);
-}
 }

@@ -75,7 +75,7 @@ impl Graveyard {
         transaction: &mut Transaction<'_>,
         store: &ObjectStore,
     ) -> Result<u64, Error> {
-        let reserved_object_id = store.get_next_object_id().await?;
+        let reserved_object_id = store.get_next_object_id(transaction).await?;
         let object_id = reserved_object_id.get();
         let now = Timestamp::now();
         transaction.add(

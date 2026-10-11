@@ -5,6 +5,7 @@
 #include "aml-trip.h"
 
 #include <fidl/fuchsia.driver.framework/cpp/wire_types.h>
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.clock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.platform.bus/cpp/driver/fidl.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/wire.h>
@@ -28,6 +29,7 @@
 #include <optional>
 
 #include <src/devices/temperature/drivers/aml-trip/aml-trip-device.h>
+#include <src/devices/temperature/drivers/aml-trip/aml-trip_parser.h>
 
 #include "lib/driver/compat/cpp/metadata.h"
 #include "src/devices/temperature/drivers/aml-trip/util.h"
@@ -46,14 +48,27 @@ zx::result<> AmlTrip::Start(fdf::DriverContext context) {
   }
   fdf::PDev pdev{std::move(pdev_client.value())};
 
-  zx::result metadata = pdev.GetFidlMetadata<fuchsia_hardware_trippoint::TripDeviceMetadata>();
-  if (metadata.is_error()) {
-    if (metadata.status_value() != ZX_ERR_NOT_FOUND) {
-      fdf::error("Failed to get trip sensor metadata: {}", metadata);
-      return zx::error(metadata.status_value());
+  auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.trippoint.TripDeviceMetadata");
+  if (dict_result.is_ok()) {
+    auto parsed = aml_trip_metadata::Aml_tripMetadata::Parse(dict_result.value());
+    if (!parsed.has_value()) {
+      fdf::error("Failed to parse TripDeviceMetadata from Dictionary");
+      return zx::error(ZX_ERR_INTERNAL);
+    }
+    if (parsed->critical_temp_celsius.has_value()) {
+      critical_temperature = static_cast<float>(*parsed->critical_temp_celsius);
     }
   } else {
-    critical_temperature = metadata->critical_temp_celsius();
+    zx::result metadata = pdev.GetFidlMetadata<fuchsia_hardware_trippoint::TripDeviceMetadata>();
+    if (metadata.is_error()) {
+      if (metadata.status_value() != ZX_ERR_NOT_FOUND) {
+        fdf::error("Failed to get trip sensor metadata: {}", metadata);
+        return zx::error(metadata.status_value());
+      }
+    } else {
+      critical_temperature = metadata->critical_temp_celsius();
+    }
   }
 
   // Stash a name for this device to be returned by `GetSensorName`

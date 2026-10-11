@@ -173,8 +173,7 @@ impl FileOps for GpioLineFile {
 
 pub fn register_gpio_chip_device(kernel: &Kernel, name: &str) {
     let registry = &kernel.device_registry;
-    let device_class =
-        registry.objects.get_or_create_class("gpio".into(), registry.objects.virtual_bus());
+    let device_class = registry.objects.get_or_create_class("gpio".into());
     registry
         .register_dyn_device(kernel, name.as_bytes().into(), device_class, GpioChipDevice)
         .expect("Can register GPIO chip device");

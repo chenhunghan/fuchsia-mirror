@@ -257,7 +257,8 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
   void TearDown() override {
     RunLoopUntilIdle();
 
-    auto link_topologies = link_system_->GetResolvedTopologyLinks();
+    GlobalTopologyData::LinkTopologyMap link_topologies;
+    link_system_->GetResolvedTopologyLinks(link_topologies);
     EXPECT_TRUE(link_topologies.empty());
 
     buffer_collection_importer_.reset();
@@ -508,7 +509,8 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
   // The parent transform must be a topology root or ComputeGlobalTopologyData() will crash.
   bool IsDescendantOf(TransformHandle parent, TransformHandle child) {
     auto snapshot = uber_struct_system_->Snapshot();
-    auto links = link_system_->GetResolvedTopologyLinks();
+    GlobalTopologyData::LinkTopologyMap links;
+    link_system_->GetResolvedTopologyLinks(links);
     auto data = GlobalTopologyData::ComputeGlobalTopologyData(
         snapshot.map, links, link_system_->GetInstanceId(), parent);
     for (auto handle : data.topology_vector) {
@@ -547,7 +549,8 @@ class FlatlandTest : public LoggingEventLoop, public ::testing::Test {
 
     // This is a replica of the core render loop.
     const auto snapshot = uber_struct_system_->Snapshot();
-    const auto links = link_system_->GetResolvedTopologyLinks();
+    GlobalTopologyData::LinkTopologyMap links;
+    link_system_->GetResolvedTopologyLinks(links);
     const auto data = GlobalTopologyData::ComputeGlobalTopologyData(
         snapshot.map, links, link_system_->GetInstanceId(), root_transform);
     const auto matrices =
@@ -807,7 +810,8 @@ class Flatland2Test : public FlatlandTest {
 
   std::vector<ResolvedLayer> ComputeResolvedLayers(Flatland* flatland) {
     auto snapshot = uber_struct_system_->Snapshot();
-    auto links = link_system_->GetResolvedTopologyLinks();
+    GlobalTopologyData::LinkTopologyMap links;
+    link_system_->GetResolvedTopologyLinks(links);
     auto root_transform = flatland->GetRoot();
     auto topology_data = GlobalTopologyData::ComputeGlobalTopologyData(
         snapshot.map, links, link_system_->GetInstanceId(), root_transform);

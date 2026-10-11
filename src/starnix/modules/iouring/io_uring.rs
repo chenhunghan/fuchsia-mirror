@@ -984,7 +984,10 @@ impl IoUringFileObject {
 
                     // Zero out the prefix of the buffer that will contain the header, name and
                     // control bytes.
-                    current_task.zero(buffer.address, buffer_adjustment as usize)?;
+                    let prefix_len = buffer_adjustment as usize;
+                    if current_task.zero(buffer.address, prefix_len)? != prefix_len {
+                        return error!(EFAULT);
+                    }
 
                     let msg_hdr = WithAlternateBuffer::WithAux(
                         msg_hdr,

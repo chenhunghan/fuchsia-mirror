@@ -18,7 +18,4 @@ source_set("chipset") {
     "//zircon/system/ulib/zx",
   ]
   friend = [ "test/*" ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
 }

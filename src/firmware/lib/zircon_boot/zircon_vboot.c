@@ -293,14 +293,56 @@ static bool ZirconVBootSlotVerifyInternal(ZirconBootOps* zb_ops, zbi_header_t* i
   }
 
   if (unlocked) {
-    zircon_boot_dlog("Device unlocked: not checking verification result.\n");
-    return true;
-  }
-
-  if (result != AVB_SLOT_VERIFY_RESULT_OK) {
+    zircon_boot_dlog("Device unlocked\n");
+    if (result != AVB_SLOT_VERIFY_RESULT_OK) {
+      zircon_boot_dlog("Verification failed, will boot anyway\n");
+      return true;
+    }
+  } else if (result != AVB_SLOT_VERIFY_RESULT_OK) {
     zircon_boot_dlog("Failed to verify slot: %s, err_code: %s\n", ab_suffix,
                      avb_slot_verify_result_to_string(result));
     return false;
+  }
+
+  // libavb returns OK if everything *described* in the signed vbmeta verified;
+  // it does not guarantee that everything we *requested* was described. Assert
+  // that the preloaded 'zircon' image was actually hashed, otherwise a
+  // PSK-signed vbmeta lacking a 'zircon' hash descriptor would let an
+  // arbitrary on-flash ZBI through on a locked device.
+  bool zircon_verified = false;
+  for (size_t i = 0; i < verify_data->num_loaded_partitions; ++i) {
+    const AvbPartitionData* p = &verify_data->loaded_partitions[i];
+    if (strcmp(p->partition_name, GPT_ZIRCON_SLOTLESS_NAME) == 0 && p->data == (uint8_t*)image) {
+      zircon_verified = true;
+      break;
+    }
+  }
+  if (!zircon_verified) {
+    zircon_boot_dlog(
+        "vbmeta verified but contained no 'zircon' hash descriptor; "
+        "rejecting slot: %s\n",
+        ab_suffix);
+    return false;
+  }
+
+  if (!unlocked) {
+    // On a locked device, reject any vbmeta whose top-level header carries
+    // HASHTREE_DISABLED or VERIFICATION_DISABLED. avb_slot_verify() returns OK
+    // for a validly-signed vbmeta with VERIFICATION_DISABLED even under
+    // AVB_SLOT_VERIFY_FLAGS_NONE, having loaded "zircon" with no hash check.
+    if (verify_data->num_vbmeta_images < 1) {
+      zircon_boot_dlog("No top-level vbmeta image returned\n");
+      return false;
+    }
+    AvbVBMetaImageHeader toplevel;
+    avb_vbmeta_image_header_to_host_byte_order(
+        (const AvbVBMetaImageHeader*)verify_data->vbmeta_images[0].vbmeta_data, &toplevel);
+    if (toplevel.flags != 0) {
+      zircon_boot_dlog(
+          "Rejecting slot %s on locked device: top-level vbmeta flags=0x%x (must be 0)\n",
+          ab_suffix, toplevel.flags);
+      return false;
+    }
   }
 
   // Increase rollback index values to match the verified slot only if

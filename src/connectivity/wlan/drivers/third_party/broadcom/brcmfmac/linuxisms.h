@@ -49,34 +49,35 @@ typedef uint64_t __be64;
 #define GENMASK1(val) ((1UL << (val)) - 1)
 #define GENMASK(start, end) ((GENMASK1((start) + 1) & ~GENMASK1(end)))
 
-#define WARN(cond, msg)                                                                       \
+#define WARN(cond, msg)                                                                         \
+  ({                                                                                            \
+    const bool _evaluated_cond = cond;                                                          \
+    if (_evaluated_cond) {                                                                      \
+      BRCMF_WARN("brcmfmac: unexpected condition '%s' warns %s at %s:%d", #cond, msg, __FILE__, \
+                 __LINE__);                                                                     \
+    }                                                                                           \
+    _evaluated_cond;                                                                            \
+  })
+
+#define WARN_ON(cond)                                                                        \
+  ({                                                                                         \
+    const bool _evaluated_cond = cond;                                                       \
+    if (_evaluated_cond) {                                                                   \
+      BRCMF_WARN("brcmfmac: unexpected condition '%s' at %s:%d", #cond, __FILE__, __LINE__); \
+    }                                                                                        \
+    _evaluated_cond;                                                                         \
+  })
+
+#define WARN_ON_ONCE(cond)                                                                    \
   ({                                                                                          \
-    bool ret_cond = cond;                                                                     \
-    if (ret_cond) {                                                                           \
-      BRCMF_WARN("brcmfmac: unexpected condition %s warns %s at %s:%d", #cond, msg, __FILE__, \
-                 __LINE__);                                                                   \
+    static bool warn_next = true;                                                             \
+    const bool _evaluated_cond = cond;                                                        \
+    if (_evaluated_cond && warn_next) {                                                       \
+      BRCMF_WARN("brcmfmac: unexpected condition '%s' (future warnings suppressed) at %s:%d", \
+                 #cond, __FILE__, __LINE__);                                                  \
+      warn_next = false;                                                                      \
     }                                                                                         \
-    ret_cond;                                                                                 \
-  })
-
-// TODO(cphoenix): Looks like these evaluate cond multiple times. And maybe should
-// pass cond, not #cond, into WARN.
-#define WARN_ON(cond)          \
-  ({                           \
-    if (cond) {                \
-      WARN(#cond, "it's bad"); \
-    }                          \
-    cond;                      \
-  })
-
-#define WARN_ON_ONCE(cond)                         \
-  ({                                               \
-    static bool warn_next = true;                  \
-    if (cond && warn_next) {                       \
-      WARN(#cond, "(future warnings suppressed)"); \
-      warn_next = false;                           \
-    }                                              \
-    cond;                                          \
+    _evaluated_cond;                                                                          \
   })
 
 #define iowrite32(value, addr)                          \

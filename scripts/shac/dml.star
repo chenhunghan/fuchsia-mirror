@@ -12,9 +12,12 @@ def _dml_format(ctx):
     Args:
       ctx: A ctx instance.
     """
+    dml_files = ctx.scm.affected_files(glob = "*.dml")
+    if not dml_files:
+        return
     exe = compiled_tool_path(ctx, "cmc")
     procs = []
-    for f in ctx.scm.affected_files(glob = "*.dml"):
+    for f in dml_files:
         procs.append((f, os_exec(ctx, [exe, "format", f])))
 
     for f, proc in procs:

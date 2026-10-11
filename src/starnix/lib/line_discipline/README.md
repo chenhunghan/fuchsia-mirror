@@ -6,10 +6,10 @@ This crate implements the terminal line discipline logic for Starnix.
 
 The line discipline is responsible for the intermediate processing of characters between the terminal device (e.g., a PTY master or a real serial port) and the reading process (e.g., bash). Its responsibilities include:
 
-*   **Canonical Mode Processing**: Buffering input line-by-line, handling backspace (`\x08` or `\x7f`), line kill (`^U`), etc.
-*   **Echoing**: Echoing typed characters back to the output, potentially transforming them (e.g., echoing `^C` for `SIGINT`).
-*   **Signal Generation**: Detecting special control characters (like `^C`, `^\`, `^Z`) and generating corresponding signals (`SIGINT`, `SIGQUIT`, `SIGSTOP`).
-*   **Output Processing**: Transforming output characters (e.g., converting `\n` to `\r\n`).
+*   **Canonical Mode Processing**: Buffering input line-by-line, handling backspace (`\x08` or `\x7f`), word erase (`^W`), line kill (`^U`), literal-next (`^V`), reprint (`^R`), and EOF/EOL delimiters (`^D`, `VEOL`, `VEOL2`).
+*   **Echoing**: Echoing typed characters back to the output, potentially transforming them (e.g., `ECHOCTL`, `ECHOE`, `ECHOK`, `ECHOKE`, `ECHONL`, `ECHOPRT`).
+*   **Signal Generation**: Detecting special control characters (like `^C`, `^\`, `^Z`) and generating corresponding signals (`SIGINT`, `SIGQUIT`, `SIGTSTP`).
+*   **Input & Output Processing**: Transforming input (`ISTRIP`, `PARMRK`, `INLCR`, `IGNCR`, `ICRNL`, `IUCLC`, `IXON`, `IXANY`, `IUTF8`) and output (`OPOST`, `OLCUC`, `ONLCR`, `OCRNL`, `ONOCR`, `ONLRET`, `TABDLY`/`XTABS`) characters, as well as `EXTPROC` and `TIOCPKT` packet mode.
 
 ## Notes on Flow Control
 
@@ -26,4 +26,4 @@ Key components:
 
 ## Testing
 
-Tests are defined in `lib.rs` and run as part of the `line_discipline_tests` package.
+Unit tests are defined in `lib.rs` (`line_discipline_tests`), and Linux cross-tested trace scenarios are defined in `testing/` (`line_discipline_scenarios_tests`).

@@ -1,0 +1,265 @@
+{
+    "name": "icanon_toggle_state",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON"
+        ]
+    },
+    "events": [
+        {
+            "action": "write_to_master",
+            "data": "line1\n\u0004partial"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": []
+            }
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "abc"
+        },
+        {
+            "action": "write_to_master",
+            "data": "def"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON",
+                    "ECHO",
+                    "ECHOE"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u007fxy\n"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "read_from_master"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "abc\u0004"
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": []
+            }
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "xyz\u0004"
+        },
+        {
+            "action": "read_once_from_slave",
+            "size": 2
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": []
+            }
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON"
+                ]
+            }
+        },
+        {
+            "action": "write_to_master",
+            "data": "done\u0004"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": []
+            }
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "write_to_master",
+            "data": "tail\u0000"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON"
+                ]
+            }
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        },
+        {
+            "action": "write_to_master",
+            "data": "\u0004"
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": []
+            }
+        },
+        {
+            "action": "set_termios",
+            "termios": {
+                "c_iflag": [
+                    "ICRNL"
+                ],
+                "c_oflag": [
+                    "OPOST",
+                    "ONLCR"
+                ],
+                "c_lflag": [
+                    "ICANON"
+                ]
+            }
+        },
+        {
+            "action": "check_readable_size",
+            "side": "replica"
+        },
+        {
+            "action": "read_once_from_slave"
+        }
+    ]
+}

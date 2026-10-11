@@ -256,13 +256,8 @@ pub async fn mark_point_of_failure(failure_point: impl Into<CustomEvent>) {
         Ok(_) => {}
         Err(e) => {
             log::warn!("Unable to stage analytics: {e}");
-            // No sense in sending analytics if we were unable to stage them.
-            return;
         }
     }
-    // If this occurs frequently enough, we may wish to inform the user via notifier that
-    // analytics failed to send.
-    let _ = client.send_events().await.map_err(|e| log::warn!("Unable to send analytics: {e}"));
 }
 
 #[cfg(test)]

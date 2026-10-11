@@ -38,53 +38,9 @@ zx_status_t FvmInitPreallocated(fidl::UnownedClientEnd<fuchsia_storage_block::Bl
                                 uint64_t initial_volume_size, uint64_t max_volume_size,
                                 size_t slice_size);
 
-// Allocates a new vpartition in the fvm, and waits for it to become accessible.
-zx::result<fidl::ClientEnd<fuchsia_device::Controller>> FvmAllocatePartition(
-    fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> fvm, uint64_t slice_count,
-    uuid::Uuid type_guid, uuid::Uuid instance_guid, std::string_view name, uint32_t flags);
-zx::result<fidl::ClientEnd<fuchsia_device::Controller>> FvmAllocatePartitionWithDevfs(
-    fidl::UnownedClientEnd<fuchsia_io::Directory> devfs_root,
-    fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> fvm, uint64_t slice_count,
-    uuid::Uuid type_guid, uuid::Uuid instance_guid, std::string_view name, uint32_t flags);
-
 // Query the volume manager for info.
 zx::result<fuchsia_storage_block::wire::VolumeManagerInfo> FvmQuery(
     fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> fvm);
-
-// Set of parameters to use for identifying the correct partition to open via |OpenPartition| or
-// to destroy via |DestroyPartition|.
-//
-// If multiple matchers are specified, the first partition that satisfies any set of matchers will
-// be used. At least one of |type_guids|, |instance_guids|, |labels|, |detected_formats|, or
-// |parent_device| must be specified.
-struct PartitionMatcher {
-  // Set of type GUIDs the partition must match. Ignored if empty.
-  std::vector<uuid::Uuid> type_guids;
-  // Set of instance GUIDs the partition must match. Ignored if empty.
-  std::vector<uuid::Uuid> instance_guids;
-  // Set of labels the partition name must match. Ignored if empty.
-  std::vector<std::string_view> labels;
-  // Set of on-disk formats the partition must match, via content sniffing. Ignored if empty.
-  std::vector<DiskFormat> detected_formats;
-  // Match only children of the given parent via topological path.
-  std::string_view parent_device;
-  // If set, topological path **must not** start with this prefix.
-  std::string_view ignore_prefix;
-  // If set, topological path **must not** contain this substring.
-  std::string_view ignore_if_path_contains;
-};
-
-// Waits for a partition to appear which matches |matcher|, and opens it.
-zx::result<fidl::ClientEnd<fuchsia_device::Controller>> OpenPartition(
-    const PartitionMatcher& matcher, bool wait = true);
-zx::result<fidl::ClientEnd<fuchsia_device::Controller>> OpenPartitionWithDevfs(
-    fidl::UnownedClientEnd<fuchsia_io::Directory> devfs_root, const PartitionMatcher& matcher,
-    bool wait = true);
-
-// Finds and destroys the first partition that matches |matcher|, if any.
-zx::result<> DestroyPartition(const PartitionMatcher& matcher, bool wait);
-zx::result<> DestroyPartitionWithDevfs(int devfs_root_fd, const PartitionMatcher& matcher,
-                                       bool wait);
 
 // Marks one partition as active and optionally another as inactive in one atomic operation.
 // If both partition GUID are the same, the partition will be activated and

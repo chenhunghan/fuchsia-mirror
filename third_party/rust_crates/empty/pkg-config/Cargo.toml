@@ -4,5 +4,5 @@
 
 [package]
 name = "pkg-config"
-version = "0.3.30"
+version = "0.3.32"
 authors = ["The Fuchsia Authors <rust-fuchsia@fuchsia.com>"]

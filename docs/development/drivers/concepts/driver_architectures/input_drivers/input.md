@@ -6,9 +6,6 @@
 
 # Fuchsia input drivers
 
-Caution: This page may contain information that is specific to the legacy
-version of the driver framework (DFv1).
-
 Fuchsia's [input drivers](/docs/reference/hardware/drivers.md) implement the
 [fuchsia.input.report](/sdk/fidl/fuchsia.input.report) FIDL API. Input drivers
 cover a range of input devices like mice, keyboards, touchscreens, consumer
@@ -97,4 +94,3 @@ Factory Data Reset (FDR) button enum, which we need to support).
 It is easier to be consistent by explicitly not using HID enums than to be
 inconsistent and use HID enums for some cases but add additional values in
 others.
-

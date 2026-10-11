@@ -11,9 +11,6 @@ use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock, Weak};
 
-#[cfg(not(target_os = "fuchsia"))]
-use fuchsia_emulated_handle::zx_handle_t;
-#[cfg(target_os = "fuchsia")]
 use zx::sys::zx_handle_t;
 
 /// A wrapper around zircon handles that allows them to be temporarily cloned. These temporary

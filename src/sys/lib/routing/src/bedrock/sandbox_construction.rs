@@ -21,13 +21,12 @@ use capability_source::{
     CapabilitySource, ComponentCapability, ComponentSource, FilteredAggregateProviderSource,
     InternalCapability, InternalEventStreamCapability, VoidSource,
 };
-use cm_rust::offer::OfferDeclCommon;
+use cm_rust::offer::{OfferDeclCommon, OfferTarget};
 use cm_rust::{
-    CapabilityTypeName, DictionaryValue, ExposeDeclCommon, FidlIntoNative, NativeIntoFidl,
-    SourceName, SourcePath, UseDeclCommon,
+    CapabilityTypeName, DictionaryValue, ExposeDeclCommon, ExposeTarget, FidlIntoNative,
+    GenericRef, SourceName, SourcePath, UseDeclCommon,
 };
-use cm_types::{IterablePath, Name, RelativePath};
-use fidl::endpoints::DiscoverableProtocolMarker;
+use cm_types::{BorrowedName, IterablePath, Name, RelativePath};
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_component_runtime as fruntime;
 use fuchsia_sync::Mutex;
@@ -41,6 +40,9 @@ use runtime_capabilities::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::{Arc, LazyLock};
+
+#[cfg(target_os = "fuchsia")]
+use fuchsia_trace as trace;
 
 /// This type comes from `UseEventStreamDecl`.
 pub type EventStreamFilter = Option<BTreeMap<String, DictionaryValue>>;
@@ -324,6 +326,12 @@ pub fn build_component_sandbox<C: ComponentInstanceInterface + 'static>(
     aggregate_router_fn: &AggregateRouterFn<C>,
     event_stream_use_router_fn: &EventStreamUseRouterFn<C>,
 ) -> ComponentSandbox {
+    #[cfg(target_os = "fuchsia")]
+    trace::duration!(
+        "component_manager",
+        "build_component_sandbox",
+        "moniker" => component.moniker().as_str()
+    );
     let sandbox = ComponentSandbox {
         framework_router: Mutex::new(framework_router),
         component_input,
@@ -467,7 +475,7 @@ pub fn build_component_sandbox<C: ComponentInstanceInterface + 'static>(
                 install_router_to_target(
                     &sandbox,
                     aggregate_router.into(),
-                    first_offer.target().clone().native_into_fidl(),
+                    first_offer.target(),
                     vec![first_offer.target_name().clone()].into(),
                 );
             }
@@ -528,8 +536,7 @@ where
             // filtering rules, as they will not be contributing any instances to the
             // aggregate.
             continue;
-        } else if let fdecl::Ref::Collection(fdecl::CollectionRef { name }) = decl.to_source() {
-            let collection_name = Name::new(name).unwrap();
+        } else if let GenericRef::Collection(collection_name) = decl.to_source() {
             aggregate_sources.push(AggregateSource::Collection { collection_name });
         } else {
             let router_capability = new_intermediate_router(component, sandbox, *decl);
@@ -537,11 +544,13 @@ where
                 .try_into()
                 .expect("invalid type returned by new_intermediate_router");
             let source_instance = match decl.to_source() {
-                fdecl::Ref::Self_(_) => AggregateInstance::Self_,
-                fdecl::Ref::Parent(_) => AggregateInstance::Parent,
-                fdecl::Ref::Child(child_ref) => {
-                    let child_ref: cm_rust::ChildRef = child_ref.fidl_into_native();
-                    AggregateInstance::Child(child_ref.into())
+                GenericRef::Self_ => AggregateInstance::Self_,
+                GenericRef::Parent => AggregateInstance::Parent,
+                GenericRef::Child(name) => {
+                    AggregateInstance::Child(ChildName::new(name.to_long(), None))
+                }
+                GenericRef::ChildInCollection(name, collection) => {
+                    AggregateInstance::Child(ChildName::new(name, Some(collection)))
                 }
                 other_source => {
                     warn!("unsupported source found in offer aggregate: {:?}", other_source);
@@ -780,60 +789,42 @@ fn extend_dict_with_event_stream_uses<C: ComponentInstanceInterface + 'static>(
     assert!(prev.is_none(), "failed to insert {target_path}: preexisting value");
 }
 
-use std::borrow::Borrow;
-
 fn new_intermediate_router_inner(
     moniker: Moniker,
-    type_name: CapabilityTypeName,
+    _type_name: CapabilityTypeName,
     sandbox: &ComponentSandbox,
     request: RouteRequest,
     default_token: Arc<WeakInstanceToken>,
     verb: RouteVerb,
-    ref_: fdecl::Ref,
+    ref_: GenericRef,
     source_path: RelativePath,
 ) -> Capability {
     let source: WeakDictionaryOrRouter = match &ref_ {
-        fdecl::Ref::Parent(_) => Arc::downgrade(&sandbox.component_input.capabilities()).into(),
-        fdecl::Ref::Self_(_) => {
-            let fruntime_dictionary_router_name =
-                Name::new(fidl_fuchsia_component_runtime::DictionaryRouterMarker::PROTOCOL_NAME)
-                    .unwrap();
-            let fsandbox_dictionary_router_name =
-                Name::new(fidl_fuchsia_component_sandbox::DictionaryRouterMarker::PROTOCOL_NAME)
-                    .unwrap();
-            if type_name == CapabilityTypeName::Dictionary {
-                if !source_path.split().contains(&&fruntime_dictionary_router_name.borrow())
-                    && !source_path.split().contains(&&fsandbox_dictionary_router_name.borrow())
-                {
-                    Arc::downgrade(&sandbox.program_output_dict).into()
-                } else {
-                    Arc::downgrade(&sandbox.program_output_dict).into()
-                }
-            } else {
-                Arc::downgrade(&sandbox.program_output_dict).into()
-            }
+        GenericRef::Parent => Arc::downgrade(&sandbox.component_input.capabilities()).into(),
+        GenericRef::Self_ => Arc::downgrade(&sandbox.program_output_dict).into(),
+        GenericRef::Child(name) => {
+            let guard = sandbox.child_outputs.lock();
+            let router = guard.get(name.as_str()).expect("reference to non-existent child");
+            Arc::downgrade(&router).into()
         }
-        fdecl::Ref::Child(child) => {
-            let child_ref: cm_rust::ChildRef = child.clone().fidl_into_native();
-            let child_name = moniker::ChildName::from(child_ref);
+        GenericRef::ChildInCollection(name, collection) => {
+            let child_name = moniker::ChildName::new(name.clone(), Some(collection.clone()));
             let guard = sandbox.child_outputs.lock();
             let router = guard.get(&child_name).expect("reference to non-existent child");
             Arc::downgrade(&router).into()
         }
-        fdecl::Ref::Collection(_) => unimplemented!(),
-        fdecl::Ref::Framework(_) => Arc::downgrade(&*sandbox.framework_router.lock()).into(),
-        fdecl::Ref::Capability(_) => {
+        GenericRef::Collection(_) => unimplemented!(),
+        GenericRef::Framework => Arc::downgrade(&*sandbox.framework_router.lock()).into(),
+        GenericRef::Capability(_) => {
             Arc::downgrade(&sandbox.capability_sourced_capabilities_dict).into()
         }
-        fdecl::Ref::Debug(_) => {
-            Arc::downgrade(&sandbox.component_input.environment().debug()).into()
-        }
-        fdecl::Ref::VoidType(_) => {
+        GenericRef::Debug => Arc::downgrade(&sandbox.component_input.environment().debug()).into(),
+        GenericRef::Void => {
             let source_name = source_path.basename().expect("invalid source capability path");
             let type_name = request.build_type_name;
             return UnavailableRouter::new_from_type_name(source_name.into(), type_name, moniker);
         }
-        fdecl::Ref::Environment(_) => {
+        GenericRef::Environment => {
             let type_name = request.build_type_name;
             match type_name {
                 CapabilityTypeName::Runner => {
@@ -845,7 +836,6 @@ fn new_intermediate_router_inner(
                 _ => unreachable!("other capability types may not have an environment source"),
             }
         }
-        _ => unreachable!("unexpected ref type"),
     };
     IntermediateRouter::new(source, source_path, request, default_token, moniker, verb, ref_)
 }
@@ -988,7 +978,7 @@ fn install_offer_in_sandbox<C: ComponentInstanceInterface + 'static>(
     install_router_to_target(
         sandbox,
         intermediate_router,
-        offer.target().clone().native_into_fidl(),
+        offer.target(),
         vec![offer.target_name().clone()].into(),
     );
 }
@@ -996,47 +986,26 @@ fn install_offer_in_sandbox<C: ComponentInstanceInterface + 'static>(
 fn install_router_to_target(
     sandbox: &ComponentSandbox,
     router: Capability,
-    target: fdecl::Ref,
+    target: &OfferTarget,
     target_path: RelativePath,
 ) {
     let target_dictionary = match target {
-        fdecl::Ref::Parent(_) => sandbox.component_output.capabilities(),
-        fdecl::Ref::Self_(_) => {
-            unimplemented!("use is handled elsewhere");
+        OfferTarget::Child(child) => {
+            let child_name = BorrowedName::new(child.name.as_str())
+                .expect("child is static so name is not long");
+            sandbox.child_inputs.get(child_name).expect("invalid child ref").capabilities()
         }
-        fdecl::Ref::Child(child) => {
-            let child_name =
-                Name::new(child.name.as_str()).expect("child is static so name is not long");
-            sandbox.child_inputs.get(&child_name).expect("invalid child ref").capabilities()
-        }
-        fdecl::Ref::Collection(collection) => {
-            let collection_name = Name::new(collection.name.as_str()).unwrap();
-            sandbox
-                .collection_inputs
-                .get(&collection_name)
-                .expect("invalid collection ref")
-                .capabilities()
-        }
-        fdecl::Ref::Framework(_) => sandbox.component_output.framework(),
-        fdecl::Ref::Capability(capability) => {
-            let capability_name = Name::new(capability.name.as_str()).unwrap();
-            sandbox
-                .declared_dictionaries
-                .get(&capability_name)
-                .expect("capability target doesn't exist")
-                .try_into()
-                .expect("unexpected capability type")
-        }
-        fdecl::Ref::Debug(_) => {
-            unimplemented!("debug registrations are handled elsewhere");
-        }
-        fdecl::Ref::VoidType(_) => {
-            unimplemented!("it's not possible to route to void, only from");
-        }
-        fdecl::Ref::Environment(_) => {
-            unimplemented!("environment registrations are handled elsewhere");
-        }
-        _ => unreachable!("unexpected ref type"),
+        OfferTarget::Collection(collection_name) => sandbox
+            .collection_inputs
+            .get(collection_name)
+            .expect("invalid collection ref")
+            .capabilities(),
+        OfferTarget::Capability(capability_name) => sandbox
+            .declared_dictionaries
+            .get(capability_name)
+            .expect("capability target doesn't exist")
+            .try_into()
+            .expect("unexpected capability type"),
     };
     let prev = target_dictionary.insert_capability(&target_path, router);
     assert!(prev.is_none(), "failed to insert {target_path}: preexisting value");
@@ -1076,16 +1045,14 @@ where
 {
     let source = decl.to_source();
     let source_path = match &source {
-        fdecl::Ref::Capability(fdecl::CapabilityRef { name })
-            if decl.source_path().basename
-                == &Name::new("fuchsia.component.StorageAdmin").unwrap()
-                || decl.source_path().basename
-                    == &Name::new("fuchsia.sys2.StorageAdmin").unwrap() =>
+        GenericRef::Capability(name)
+            if decl.source_path().basename.as_str() == "fuchsia.component.StorageAdmin"
+                || decl.source_path().basename.as_str() == "fuchsia.sys2.StorageAdmin" =>
         {
             let mut path: RelativePath =
                 decl.source_path().iter_segments().collect::<Vec<_>>().into();
             path = path.parent().unwrap_or(path);
-            let not_too_long = path.push(Name::new(name).unwrap());
+            let not_too_long = path.push(name.clone());
             assert!(not_too_long);
             path
         }
@@ -1122,12 +1089,13 @@ fn install_expose_in_sandbox<C: ComponentInstanceInterface + 'static>(
     expose: &cm_rust::ExposeDecl,
 ) {
     let router = new_intermediate_router(component, sandbox, expose);
-    install_router_to_target(
-        sandbox,
-        router,
-        expose.target().clone().native_into_fidl(),
-        vec![expose.target_name().clone()].into(),
-    );
+    let target_dictionary = match expose.target() {
+        ExposeTarget::Parent => sandbox.component_output.capabilities(),
+        ExposeTarget::Framework => sandbox.component_output.framework(),
+    };
+    let target_path: RelativePath = vec![expose.target_name().clone()].into();
+    let prev = target_dictionary.insert_capability(&target_path, router);
+    assert!(prev.is_none(), "failed to insert {target_path}: preexisting value");
 }
 
 struct UnavailableRouter {

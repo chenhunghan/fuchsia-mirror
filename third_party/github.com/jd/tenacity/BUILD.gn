@@ -9,9 +9,10 @@ python_library("tenacity") {
   source_root = "src/tenacity"
   sources = [
     "__init__.py",
-    "_asyncio.py",
     "_utils.py",
     "after.py",
+    "asyncio/__init__.py",
+    "asyncio/retry.py",
     "before.py",
     "before_sleep.py",
     "nap.py",

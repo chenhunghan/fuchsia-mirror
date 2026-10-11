@@ -17,6 +17,7 @@ pub struct ArchSavedNormalState {
 zr::static_assert!(core::mem::size_of::<ArchSavedNormalState>() == 16);
 zr::static_assert!(core::mem::align_of::<ArchSavedNormalState>() == 8);
 
+pub mod cache;
 pub mod vm;
 
 use crate::kernel::types::cpu_num_t;
@@ -26,7 +27,9 @@ use debug::ltrace::KernelConsoleWriter;
 use debug::ltracef;
 use zx_status::Status;
 #[allow(unused_imports)]
-use zx_types::{zx_restricted_state_t, zx_status_t, zx_thread_state_general_regs_t};
+use zx_types::{
+    ZX_ARM64_FEATURE_ISA_ARM32, zx_restricted_state_t, zx_status_t, zx_thread_state_general_regs_t,
+};
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -127,7 +130,6 @@ pub const ARM64_USER_RESTRICTED_VISIBLE_FLAGS: u32 = ARM_NCZV_FLAGS | ARM64_BTYP
 pub const ARM32_USER_RESTRICTED_VISIBLE_FLAGS: u32 =
     ARM_NCZV_FLAGS | ARM32_BIT_MODE | ARM32_BIT_THUMB_MODE | ARM32_GE_Q_BITS | ARM32_IT_BITS; // 0xfe0f_fc30
 pub const ARM32_BIT_MODE_REGISTER_COUNT: usize = 15;
-pub const ZX_ARM64_FEATURE_ISA_ARM32: u32 = 1 << 5;
 
 #[inline]
 fn arm64_feature_test(feature: u32) -> bool {
@@ -449,122 +451,6 @@ pub fn enter_full(
         cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
         cpp_arm64_enter_uspace(&iframe);
     }
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_dump(state: *const zx_restricted_state_t) {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees `state` is a valid pointer.
-    let state = unsafe { &*state };
-    dump(state);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_validate_state_pre_restricted_entry(
-    state: *const zx_restricted_state_t,
-) -> zx_status_t {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees `state` is a valid pointer.
-    let state = unsafe { &*state };
-    Status::result_into_raw(validate_state_pre_restricted_entry(state))
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_state_pre_restricted_entry(
-    state: *mut ArchSavedNormalState,
-) {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees `state` is valid.
-    let state = unsafe { &mut *state };
-    save_state_pre_restricted_entry(state);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_enter_restricted(state: *const zx_restricted_state_t) -> ! {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees `state` is valid.
-    let state = unsafe { &*state };
-    enter_restricted(state);
-}
-
-/// # Safety
-/// Caller guarantees `state` and `regs` are valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_syscall_state(
-    state: *mut zx_restricted_state_t,
-    regs: *const SyscallRegs,
-) {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    debug_assert!(!regs.is_null(), "regs pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees pointers are valid.
-    let state = unsafe { &mut *state };
-    let regs = unsafe { &*regs };
-    save_restricted_syscall_state(state, regs);
-}
-
-/// # Safety
-/// Caller guarantees `state` and `frame` are valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_iframe_state(
-    state: *mut zx_restricted_state_t,
-    frame: *const Iframe,
-) {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    debug_assert!(!frame.is_null(), "frame pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees pointers are valid.
-    let state = unsafe { &mut *state };
-    let frame = unsafe { &*frame };
-    save_restricted_iframe_state(state, frame);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_exception_state(
-    state: *mut zx_restricted_state_t,
-) {
-    debug_assert!(!state.is_null(), "state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees pointer is valid.
-    let state = unsafe { &mut *state };
-    save_restricted_exception_state(state);
-}
-
-/// # Safety
-/// Caller guarantees `arch_state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_redirect_restricted_exception_to_normal(
-    arch_state: *const ArchSavedNormalState,
-    vector_table: usize,
-    context: usize,
-    reason: u64,
-) {
-    debug_assert!(!arch_state.is_null(), "arch_state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees pointer is valid.
-    let arch_state = unsafe { &*arch_state };
-    redirect_restricted_exception_to_normal(arch_state, vector_table, context, reason);
-}
-
-/// # Safety
-/// Caller guarantees `arch_state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_enter_full(
-    arch_state: *const ArchSavedNormalState,
-    vector_table: usize,
-    context: usize,
-    code: u64,
-) -> ! {
-    debug_assert!(!arch_state.is_null(), "arch_state pointer passed across FFI must not be null");
-    // SAFETY: Caller guarantees pointer is valid.
-    let arch_state = unsafe { &*arch_state };
-    enter_full(arch_state, vector_table, context, code);
 }
 
 #[cfg(ktest)]

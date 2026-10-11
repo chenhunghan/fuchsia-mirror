@@ -5,9 +5,11 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_UI_STATE_PROVIDER_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_UI_STATE_PROVIDER_H_
 
-#include <fuchsia/ui/activity/cpp/fidl.h>
+#include <fidl/fuchsia.ui.activity/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
-#include <lib/fidl/cpp/binding.h>
+#include <lib/async/dispatcher.h>
+#include <lib/fidl/cpp/client.h>
+#include <lib/fidl/cpp/wire/channel.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/zx/time.h>
@@ -16,6 +18,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <variant>
 
 #include "src/developer/forensics/feedback/annotations/provider.h"
@@ -26,7 +29,8 @@
 namespace forensics::feedback {
 
 // Caches the UI activity state and dynamically computes the duration since the last state change
-class UIStateProvider : public fuchsia::ui::activity::Listener,
+class UIStateProvider : public fidl::Server<fuchsia_ui_activity::Listener>,
+                        public fidl::AsyncEventHandler<fuchsia_ui_activity::Provider>,
                         public CachedAsyncAnnotationProvider,
                         public DynamicSyncAnnotationProvider {
  public:
@@ -42,11 +46,17 @@ class UIStateProvider : public fuchsia::ui::activity::Listener,
 
   // Sets the most recent UI activity state with |callback|
   void GetOnUpdate(::fit::function<void(Annotations)> callback) override;
-  void OnStateChanged(fuchsia::ui::activity::State state, int64_t transition_time,
-                      OnStateChangedCallback callback) override;
+
+  // |fidl::Server<fuchsia_ui_activity::Listener>|
+  void OnStateChanged(OnStateChangedRequest& request,
+                      OnStateChangedCompleter::Sync& completer) override;
+
+  // |fidl::AsyncEventHandler<fuchsia_ui_activity::Provider>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
 
  private:
-  void OnDisconnect();
+  void OnListenerClosed(fidl::UnbindInfo info);
+  void OnDisconnect(zx_status_t status, std::string_view interface_name);
   void StartListening();
 
   async_dispatcher_t* dispatcher_;
@@ -59,8 +69,8 @@ class UIStateProvider : public fuchsia::ui::activity::Listener,
 
   ::fit::function<void(Annotations)> on_update_;
 
-  fuchsia::ui::activity::ProviderPtr provider_ptr_;
-  fidl::Binding<fuchsia::ui::activity::Listener> binding_{this};
+  fidl::Client<fuchsia_ui_activity::Provider> provider_;
+  std::optional<fidl::ServerBinding<fuchsia_ui_activity::Listener>> binding_;
   async::TaskClosureMethod<UIStateProvider, &UIStateProvider::StartListening> reconnect_task_{this};
 };
 

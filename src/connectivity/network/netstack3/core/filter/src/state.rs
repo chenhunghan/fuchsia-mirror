@@ -17,7 +17,7 @@ use derivative::Derivative;
 use net_types::ip::{GenericOverIp, Ip};
 use netstack3_base::{
     CoreTimerContext, Inspectable, InspectableValue, Inspector as _, MarkDomain, Marks,
-    MatcherBindingsTypes, TimerContext,
+    MatcherBindingsTypes, PacketType, TimerContext,
 };
 use packet_formats::ip::IpExt;
 
@@ -592,6 +592,8 @@ pub trait FilterPacketMetadata {
     fn socket_info(&self) -> Option<SocketInfo>;
     /// Socket marks.
     fn marks(&self) -> &Marks;
+    /// Packet type.
+    fn packet_type(&self) -> PacketType;
 }
 
 /// Testing utilities for filtering state.
@@ -601,21 +603,21 @@ pub mod testutil {
 
     /// Fake implementation of `FilterIpMetadata` and `FilterPacketMetadata`
     /// traits.
-    #[derive(Default)]
     pub struct FakePacketMetadata {
         marks: Marks,
+        packet_type: PacketType,
+    }
+
+    impl Default for FakePacketMetadata {
+        fn default() -> Self {
+            Self { marks: Marks::default(), packet_type: PacketType::Host }
+        }
     }
 
     impl FakePacketMetadata {
         /// Creates a new `FakePacketMetadata` with the specified marks.
-        pub fn new(marks: Marks) -> Self {
-            Self { marks }
-        }
-    }
-
-    impl From<Marks> for FakePacketMetadata {
-        fn from(marks: Marks) -> Self {
-            Self { marks }
+        pub fn new(marks: Marks, packet_type: PacketType) -> Self {
+            Self { marks, packet_type }
         }
     }
 
@@ -646,6 +648,10 @@ pub mod testutil {
 
         fn marks(&self) -> &Marks {
             &self.marks
+        }
+
+        fn packet_type(&self) -> PacketType {
+            self.packet_type
         }
     }
 }

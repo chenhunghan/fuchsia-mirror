@@ -101,7 +101,8 @@ impl GceClient {
         Self { http: HttpClient::new(access_token) }
     }
 
-    /// Fetches a GCE image by name, returning `Ok(None)` if the image does not exist (`404 Not Found`).
+    /// Fetches a GCE image by name, returning `Ok(None)` if the image does not exist
+    /// (`404 Not Found`).
     pub async fn get_image(&self, project: &str, image_name: &str) -> Result<Option<Image>> {
         self.http.get_optional_json(endpoints::image(project, image_name)?).await
     }
@@ -114,7 +115,8 @@ impl GceClient {
         self.http.delete_json(endpoints::image(project, image_name)?).await
     }
 
-    /// Fetches a GCE instance by name, returning `Ok(None)` if the instance does not exist (`404 Not Found`).
+    /// Fetches a GCE instance by name, returning `Ok(None)` if the instance does not exist
+    /// (`404 Not Found`).
     pub async fn get_instance(
         &self,
         project: &str,
@@ -243,7 +245,8 @@ impl GceClient {
         self.wait_for_operation(project, OperationScope::Zone(zone), op).await
     }
 
-    /// Fetches a GCE firewall rule by name, returning `Ok(None)` if the rule does not exist (`404 Not Found`).
+    /// Fetches a GCE firewall rule by name, returning `Ok(None)` if the rule does not exist
+    /// (`404 Not Found`).
     pub async fn get_firewall_rule(
         &self,
         project: &str,
@@ -272,12 +275,14 @@ impl GceClient {
         network: &str,
         warn: &mut dyn std::io::Write,
     ) -> Result<()> {
-        let rule_name = ssh_firewall_rule_name(network);
-
-        // A failure here already names the firewall rule URL that was queried.
-        if self.get_firewall_rule(project, &rule_name).await?.is_some() {
-            return Ok(());
+        let candidate_names = ssh_firewall_candidate_names(network);
+        for candidate in &candidate_names {
+            // A failure here already names the firewall rule URL that was queried.
+            if self.get_firewall_rule(project, candidate).await?.is_some() {
+                return Ok(());
+            }
         }
+        let rule_name = ssh_firewall_rule_name(network);
 
         let trimmed_network = network.trim_matches('/');
         let network = if trimmed_network.starts_with("global/networks/")
@@ -316,20 +321,26 @@ impl GceClient {
     }
 
     /// Ensures the specified GCS bucket exists by attempting to create it directly
-    /// and treating `409 Conflict` (already exists) as success.
+    /// and treating `409 Conflict` (already exists) and `403 Forbidden` (caller lacks
+    /// `storage.buckets.create` on a shared project with pre-provisioned buckets, e.g., only has
+    /// `roles/storage.objectAdmin`) as non-fatal.
     ///
-    /// Note that GCS bucket names are globally unique, so `409 Conflict` can also mean the name is
-    /// owned by a different project. That case surfaces as a `403 Forbidden` on the subsequent
-    /// upload, which [`remediation_hint`] annotates with advice to pick a different bucket.
+    /// Note that GCS bucket names are globally unique, so `409 Conflict` or `403 Forbidden` can
+    /// also mean the name is owned by a different project or does not exist yet. Those cases
+    /// surface on the subsequent `upload_gcs_file` call, which [`remediation_hint`] annotates with
+    /// advice to pick a different bucket.
     pub async fn ensure_bucket(&self, project: &str, bucket: &str) -> Result<()> {
         let url = endpoints::create_bucket(project)?;
         let body = serde_json::to_vec(&serde_json::json!({ "name": bucket }))
             .map_err(GceError::JsonSerialize)?;
-        self.http.post_raw(url, "application/json", body, &[StatusCode::CONFLICT]).await
+        self.http
+            .post_raw(url, "application/json", body, &[StatusCode::CONFLICT, StatusCode::FORBIDDEN])
+            .await
     }
 
-    /// Uploads a local file to GCS using the GCS Resumable Upload protocol (`uploadType=resumable`),
-    /// streaming the file in fixed-size chunks to avoid loading large disk images into memory at once.
+    /// Uploads a local file to GCS using the GCS Resumable Upload protocol
+    /// (`uploadType=resumable`), streaming the file in fixed-size chunks to avoid loading large
+    /// disk images into memory at once.
     pub async fn upload_gcs_file(
         &self,
         bucket: &str,
@@ -456,6 +467,27 @@ fn ssh_firewall_rule_name(network: &str) -> String {
     format!("allow-ssh-ingress-{network_suffix}")
 }
 
+/// Returns firewall rule names to check for pre-existing SSH ingress on `network`.
+///
+/// For the `default` VPC network, GCP projects typically pre-provision `default-allow-ssh`
+/// (`tcp:22` ingress), so checking both `allow-ssh-ingress-default` and `default-allow-ssh`
+/// avoids a spurious `compute.firewalls.create` attempt (and `403 Forbidden` warning) when
+/// `default-allow-ssh` is already present.
+fn ssh_firewall_candidate_names(network: &str) -> Vec<String> {
+    let network_suffix = network
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
+    let primary = format!("allow-ssh-ingress-{network_suffix}");
+    if network_suffix == "default" {
+        vec![primary, "default-allow-ssh".to_string()]
+    } else {
+        vec![primary]
+    }
+}
+
 /// Reads from `reader` until `buf` is completely filled or EOF is reached.
 fn read_full_chunk(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total_read = 0;
@@ -470,7 +502,8 @@ fn read_full_chunk(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<us
     Ok(total_read)
 }
 
-/// Parses a GCS `Range` header (e.g., `bytes=0-8388607`) and returns the next byte offset (`8388608`).
+/// Parses a GCS `Range` header (e.g., `bytes=0-8388607`) and returns the next byte offset
+/// (`8388608`).
 fn parse_range_header(range_header: &str) -> Option<u64> {
     let range = range_header.trim().strip_prefix("bytes=")?;
     let (_, end_str) = range.split_once('-')?;
@@ -1170,6 +1203,19 @@ mod tests {
         );
         assert_eq!(super::ssh_firewall_rule_name(""), "allow-ssh-ingress-default");
         assert_eq!(super::ssh_firewall_rule_name("///"), "allow-ssh-ingress-default");
+
+        assert_eq!(
+            super::ssh_firewall_candidate_names("default"),
+            vec!["allow-ssh-ingress-default", "default-allow-ssh"]
+        );
+        assert_eq!(
+            super::ssh_firewall_candidate_names("global/networks/default"),
+            vec!["allow-ssh-ingress-default", "default-allow-ssh"]
+        );
+        assert_eq!(
+            super::ssh_firewall_candidate_names("global/networks/custom-net/"),
+            vec!["allow-ssh-ingress-custom-net"]
+        );
     }
 
     #[fuchsia::test]

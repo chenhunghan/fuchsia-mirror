@@ -141,11 +141,15 @@ unsafe extern "C" {
         actual: *mut usize,
     ) -> zx_status_t;
 
+    pub fn zx_debug_resume(resource: zx_handle_t) -> zx_status_t;
+
     pub fn zx_debug_send_command(
         resource: zx_handle_t,
         buffer: *const u8,
         buffer_size: usize,
     ) -> zx_status_t;
+
+    pub fn zx_debug_suspend(resource: zx_handle_t) -> zx_status_t;
 
     pub fn zx_debug_write(buffer: *const u8, buffer_size: usize) -> zx_status_t;
 

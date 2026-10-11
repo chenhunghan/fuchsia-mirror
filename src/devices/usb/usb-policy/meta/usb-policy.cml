@@ -27,10 +27,18 @@
             ],
         },
         {
+            service: "fuchsia.hardware.power.usb.DebugService",
+            availability: "optional",
+        },
+        {
             protocol: [ "fuchsia.diagnostics.ArchiveAccessor" ],
         },
         {
-            protocol: [ "fuchsia.hwinfo.Device" ],
+            protocol: [
+                "fuchsia.hwinfo.Device",
+                "fuchsia.power.system.ActivityGovernor",
+                "fuchsia.time.alarms.WakeAlarms",
+            ],
             availability: "optional",
         },
     ],

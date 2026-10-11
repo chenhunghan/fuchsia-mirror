@@ -197,7 +197,8 @@ class FlatlandDisplayTest : public FlatlandTest {
 
   CommonTopologyState ComputeCommonTopologyState(TransformHandle root_transform) {
     auto snapshot = uber_struct_system_->Snapshot();
-    auto links = link_system_->GetResolvedTopologyLinks();
+    GlobalTopologyData::LinkTopologyMap links;
+    link_system_->GetResolvedTopologyLinks(links);
     auto topology_data = GlobalTopologyData::ComputeGlobalTopologyData(
         snapshot.map, links, link_system_->GetInstanceId(), root_transform);
 
@@ -234,9 +235,11 @@ class FlatlandDisplayTest : public FlatlandTest {
     auto [snapshot, topology_data, global_matrices, clip_regions] =
         ComputeCommonTopologyState(root_transform);
 
-    return GlobalTopologyData::GenerateViewTreeSnapshot(
-        topology_data, snapshot.map, {}, clip_regions, global_matrices,
-        link_system_->GetLinkChildToParentTransformMap().first);
+    GlobalTopologyData::ChildToParentTransformMap link_child_to_parent_transform_map;
+    link_system_->GetLinkChildToParentTransformMap(link_child_to_parent_transform_map);
+    return GlobalTopologyData::GenerateViewTreeSnapshot(topology_data, snapshot.map, {},
+                                                        clip_regions, global_matrices,
+                                                        link_child_to_parent_transform_map);
   }
 };
 
@@ -1849,7 +1852,8 @@ TEST_F(FlatlandTest, ViewportClippingPersistsAcrossInstances) {
   // that the root of the child instance has a global clip region equivalent to that of the
   // logical size of the parent viewport's properties.
   const auto snapshot = uber_struct_system_->Snapshot();
-  const auto links = link_system_->GetResolvedTopologyLinks();
+  GlobalTopologyData::LinkTopologyMap links;
+  link_system_->GetResolvedTopologyLinks(links);
   const auto link_system_id = link_system_->GetInstanceId();
 
   const auto topology_data = flatland::GlobalTopologyData::ComputeGlobalTopologyData(
@@ -2120,6 +2124,76 @@ TEST_F(FlatlandTest, ManuallyAddedMaximalHitRegionPersists) {
   types::RectangleF expected_rect(
       {.x = FLT_MIN, .y = FLT_MIN, .width = FLT_MAX, .height = FLT_MAX});
   EXPECT_EQ(rect, expected_rect);
+}
+
+TEST_F(FlatlandTest, DeadTransformsAndClearEraseHitRegions) {
+  std::shared_ptr<Flatland> flatland = CreateFlatland();
+  const auto session_id = flatland->GetSessionId();
+
+  const TransformId kRoot(1);
+  const TransformId kChild(2);
+  const TransformHandle root_handle(session_id, 1);
+  const TransformHandle child_handle(session_id, 2);
+
+  flatland->CreateTransform(kRoot);
+  flatland->CreateTransform(kChild);
+  flatland->SetRootTransform(kRoot);
+  flatland->AddChild(kRoot, kChild);
+  flatland->SetHitRegions(kChild,
+                          {{{0, 1, 2, 3}, fuchsia_ui_composition::HitTestInteraction::kDefault}});
+  Present(flatland, true);
+  {
+    auto uber_struct = GetUberStruct(flatland.get());
+    EXPECT_TRUE(uber_struct->local_hit_regions_map.contains(root_handle));
+    EXPECT_TRUE(uber_struct->local_hit_regions_map.contains(child_handle));
+  }
+
+  // Releasing `kChild` while it is still attached to `kRoot` keeps it alive in the topology, so
+  // its hit region entry remains until it is detached.
+  flatland->ReleaseTransform(kChild);
+  Present(flatland, true);
+  {
+    auto uber_struct = GetUberStruct(flatland.get());
+    EXPECT_TRUE(uber_struct->local_hit_regions_map.contains(child_handle));
+  }
+
+  // Detaching `kChild` makes it a dead transform, so `ProcessDeadTransforms()` erases its hit
+  // region entry.
+  flatland->ReplaceChildren(kRoot, {});
+  Present(flatland, true);
+  {
+    auto uber_struct = GetUberStruct(flatland.get());
+    EXPECT_TRUE(uber_struct->local_hit_regions_map.contains(root_handle));
+    EXPECT_FALSE(uber_struct->local_hit_regions_map.contains(child_handle));
+  }
+
+  // Clearing the root transform via `SetRootTransform(kInvalidTransformId)` and releasing `kRoot`
+  // leaves `local_hit_regions_map` empty (no default infinite hit region is synthesized for the
+  // cleared root).
+  flatland->SetRootTransform(kInvalidTransformId);
+  flatland->ReleaseTransform(kRoot);
+  Present(flatland, true);
+  {
+    auto uber_struct = GetUberStruct(flatland.get());
+    EXPECT_TRUE(uber_struct->local_hit_regions_map.empty());
+  }
+
+  // Re-populate a root and child with hit regions, then verify `Clear()` + `Present()` leaves
+  // `local_hit_regions_map` empty.
+  const TransformId kNewRoot(3);
+  const TransformId kNewChild(4);
+  flatland->CreateTransform(kNewRoot);
+  flatland->CreateTransform(kNewChild);
+  flatland->SetRootTransform(kNewRoot);
+  flatland->AddChild(kNewRoot, kNewChild);
+  flatland->SetHitRegions(kNewChild,
+                          {{{4, 5, 6, 7}, fuchsia_ui_composition::HitTestInteraction::kDefault}});
+  Present(flatland, true);
+  ASSERT_EQ(GetUberStruct(flatland.get())->local_hit_regions_map.size(), 2u);
+
+  flatland->Clear();
+  Present(flatland, true);
+  EXPECT_TRUE(GetUberStruct(flatland.get())->local_hit_regions_map.empty());
 }
 
 TEST_F(FlatlandTest, ChildViewWatcherFailsIdCollision) {
@@ -5594,7 +5668,8 @@ TEST_F(FlatlandTest, MultithreadedLinkResolution) {
 
   ApplySessionUpdatesAndSignalFences();
   UpdateLinks(parent_flatland->GetRoot());
-  auto links = link_system_->GetResolvedTopologyLinks();
+  GlobalTopologyData::LinkTopologyMap links;
+  link_system_->GetResolvedTopologyLinks(links);
   EXPECT_EQ(links.size(), 0U);
 
   // We post this task onto the other Flatland's thread, so that we can have a *chance* of locking
@@ -5622,7 +5697,7 @@ TEST_F(FlatlandTest, MultithreadedLinkResolution) {
   // handled properly).
   ApplySessionUpdatesAndSignalFences();
   UpdateLinks(parent_flatland->GetRoot());
-  links = link_system_->GetResolvedTopologyLinks();
+  link_system_->GetResolvedTopologyLinks(links);
   // One of these will be true, but we don't know which one.
   // EXPECT_EQ(links.size(), 0U);
   // EXPECT_EQ(links.size(), 1U);
@@ -5634,7 +5709,7 @@ TEST_F(FlatlandTest, MultithreadedLinkResolution) {
 
   ApplySessionUpdatesAndSignalFences();
   UpdateLinks(parent_flatland->GetRoot());
-  links = link_system_->GetResolvedTopologyLinks();
+  link_system_->GetResolvedTopologyLinks(links);
   EXPECT_EQ(links.size(), 1U);
 
   // Need to destroy the child Flatland on the correct thread, so the FIDL binding doesn't CHECK.
@@ -8415,7 +8490,8 @@ TEST_F(Flatland2Test, InvisibleLayerInStack) {
   // Scene dump prints without crashing.
   std::ostringstream str;
   auto snapshot = uber_struct_system_->Snapshot();
-  auto links = link_system_->GetResolvedTopologyLinks();
+  GlobalTopologyData::LinkTopologyMap links;
+  link_system_->GetResolvedTopologyLinks(links);
   auto root_transform = flatland->GetRoot();
   auto topology_data = GlobalTopologyData::ComputeGlobalTopologyData(
       snapshot.map, links, link_system_->GetInstanceId(), root_transform);
@@ -13538,6 +13614,433 @@ TEST_F(FlatlandTest, SetSolidFillOnImageRejected) {
                          fuchsia_math::wire::SizeU{100, 200});
 
   Present(flatland, false);
+}
+
+// Verifies that every mutator in the "Sets the signal" classification table sets
+// `Flatland::scene_state_dirty_` and publishes `recompute_scene_state = true` through
+// `UberStructSystem::MustRecomputeSceneState()`.
+TEST_F(FlatlandTest, TransformGraphMutatorsSetDirtySignal) {
+  std::shared_ptr<Flatland> flatland = CreateFlatland();
+
+  const TransformId kRootTransform{1};
+  const TransformId kChildTransform1{2};
+  const TransformId kChildTransform2{3};
+  const ContentId kRectId{10};
+  const ContentId kViewportId1{11};
+  const ContentId kViewportId2{12};
+
+  flatland->CreateTransform(kRootTransform);
+  flatland->CreateTransform(kChildTransform1);
+  flatland->CreateTransform(kChildTransform2);
+  flatland->AddChild(kRootTransform, kChildTransform1);
+  flatland->SetRootTransform(kRootTransform);
+  flatland->CreateFilledRect(kRectId);
+
+  // Create initial viewport and view so `SetViewportProperties`, `ReleaseViewport`, and
+  // `ReleaseView` can be tested on an already-presented session. The first viewport's view token
+  // outlives the cases so that its link stays valid: `SetViewportProperties` on an invalidated
+  // link changes nothing.
+  auto [viewport1_view_token, viewport1_token] = scenic::cpp::ViewCreationTokenPair::New();
+  {
+    fidl::Arena arena;
+    auto props = fuchsia_ui_composition::wire::ViewportProperties::Builder(arena)
+                     .logical_size({100, 100})
+                     .Build();
+    auto [watcher_client, watcher_server] = fidl::Endpoints<ChildViewWatcher>::Create();
+    flatland->CreateViewport(kViewportId1, ToWire(std::move(viewport1_token)), props,
+                             std::move(watcher_server));
+  }
+  {
+    auto [view_token, viewport_token] = scenic::cpp::ViewCreationTokenPair::New();
+    auto [watcher_client, watcher_server] = fidl::Endpoints<ParentViewportWatcher>::Create();
+    flatland->CreateView2(ToWire(std::move(view_token)), NewWireViewIdentityOnCreation(),
+                          NoViewProtocols(), std::move(watcher_server));
+  }
+
+  // Initial Present consumes the startup dirty flag.
+  Present(flatland, true);
+  EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  // No-op Present leaves the signal clear.
+  Present(flatland, true);
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  struct Case {
+    const char* name;
+    std::function<void()> mutate;
+  };
+  const std::vector<Case> cases = {
+      {"SetTranslation", [&] { flatland->SetTranslation(kChildTransform1, {10, 20}); }},
+      {"SetOrientation",
+       [&] { flatland->SetOrientation(kChildTransform1, Orientation::kCcw90Degrees); }},
+      {"SetScale", [&] { flatland->SetScale(kChildTransform1, {2.f, 3.f}); }},
+      {"SetOpacity", [&] { flatland->SetOpacity(kChildTransform1, 0.5f); }},
+      {"SetClipBoundary",
+       [&] {
+         flatland->SetClipBoundary(kChildTransform1, fuchsia_math::wire::Rect{0, 0, 50, 50});
+       }},
+      {"SetClipBoundary_Clear", [&] { flatland->SetClipBoundary(kChildTransform1, std::nullopt); }},
+      {"AddChild", [&] { flatland->AddChild(kRootTransform, kChildTransform2); }},
+      {"RemoveChild", [&] { flatland->RemoveChild(kRootTransform, kChildTransform2); }},
+      {"ReplaceChildren",
+       [&] { flatland->ReplaceChildren(kRootTransform, {kChildTransform1, kChildTransform2}); }},
+      {"SetRootTransform", [&] { flatland->SetRootTransform(kChildTransform1); }},
+      {"SetRootTransform_Clear", [&] { flatland->SetRootTransform(TransformId{0}); }},
+      // Restores a root so that later cases keep a traversable graph.
+      {"SetRootTransform_Restore", [&] { flatland->SetRootTransform(kChildTransform1); }},
+      {"SetContent", [&] { flatland->SetContent(kChildTransform1, kRectId); }},
+      {"SetContent_Clear", [&] { flatland->SetContent(kChildTransform1, ContentId(0)); }},
+      {"SetViewportProperties",
+       [&] {
+         fidl::Arena arena;
+         auto props = fuchsia_ui_composition::wire::ViewportProperties::Builder(arena)
+                          .logical_size({200, 200})
+                          .Build();
+         flatland->SetViewportProperties(kViewportId1, props);
+       }},
+      {"CreateViewport",
+       [&] {
+         auto [view_token, viewport_token] = scenic::cpp::ViewCreationTokenPair::New();
+         fidl::Arena arena;
+         auto props = fuchsia_ui_composition::wire::ViewportProperties::Builder(arena)
+                          .logical_size({120, 120})
+                          .Build();
+         auto [watcher_client, watcher_server] = fidl::Endpoints<ChildViewWatcher>::Create();
+         flatland->CreateViewport(kViewportId2, ToWire(std::move(viewport_token)), props,
+                                  std::move(watcher_server));
+       }},
+      {"ReleaseViewport", [&] { flatland->ReleaseViewport(kViewportId2, [](auto) {}); }},
+      {"ReleaseView", [&] { flatland->ReleaseView(); }},
+      {"CreateView2",
+       [&] {
+         auto [view_token, viewport_token] = scenic::cpp::ViewCreationTokenPair::New();
+         auto [watcher_client, watcher_server] = fidl::Endpoints<ParentViewportWatcher>::Create();
+         flatland->CreateView2(ToWire(std::move(view_token)), NewWireViewIdentityOnCreation(),
+                               NoViewProtocols(), std::move(watcher_server));
+       }},
+      {"Clear", [&] { flatland->Clear(); }},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    test_case.mutate();
+    Present(flatland, true);
+    EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+    EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+  }
+}
+
+// Verifies that every mutator in the "Leaves it clear" classification table leaves
+// `Flatland::scene_state_dirty_` clear (`MustRecomputeSceneState() == false`) on an
+// otherwise-unchanged transform graph.
+TEST_F(FlatlandTest, LayerMutatorsLeaveDirtySignalClear) {
+  std::shared_ptr<Flatland> flatland = CreateFlatland();
+  std::shared_ptr<Allocator> allocator = CreateAllocator();
+
+  const TransformId kRootTransform{1};
+  const TransformId kChildTransform{2};
+  const TransformId kUnattachedTransform{3};
+  const TransformId kCreatedTransform{4};
+  const ContentId kAttachedImageId{10};
+  const ContentId kAttachedRectId{11};
+  const ContentId kUnattachedImageId{12};
+  const ContentId kUnattachedRectId{13};
+
+  flatland->CreateTransform(kRootTransform);
+  flatland->CreateTransform(kChildTransform);
+  flatland->AddChild(kRootTransform, kChildTransform);
+  flatland->SetRootTransform(kRootTransform);
+
+  // The unattached transform carries entries in `matrices_`, `opacity_values_`,
+  // `clip_regions_`, and `hit_regions_`, so releasing it gives `ProcessDeadTransforms()` entries
+  // to erase.
+  flatland->CreateTransform(kUnattachedTransform);
+  flatland->SetTranslation(kUnattachedTransform, {7, 9});
+  flatland->SetOpacity(kUnattachedTransform, 0.5f);
+  flatland->SetClipBoundary(kUnattachedTransform, fuchsia_math::wire::Rect{0, 0, 10, 10});
+  flatland->SetHitRegions(kUnattachedTransform,
+                          {{.region = {.x = 0, .y = 0, .width = 5, .height = 5},
+                            .hit_test = fuchsia_ui_composition::HitTestInteraction::kDefault}});
+  const TransformHandle unattached_handle =
+      flatland->GetTransformHandle(kUnattachedTransform).value();
+
+  CreateImage(flatland.get(), allocator.get(), kAttachedImageId,
+              BufferCollectionImportExportTokens::New(),
+              fuchsia_ui_composition::ImageProperties{{.size = SizeU{100, 100}}});
+  flatland->CreateFilledRect(kAttachedRectId);
+  flatland->SetSolidFill(kAttachedRectId, {1.f, 0.f, 0.f, 1.f}, {50, 50});
+
+  flatland->SetContent(kRootTransform, kAttachedImageId);
+  flatland->SetContent(kChildTransform, kAttachedRectId);
+
+  // Initial Present consumes the startup dirty flag.
+  Present(flatland, true);
+  EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  struct Case {
+    const char* name;
+    std::function<void()> mutate;
+    // Runs after the case's `Present()`, if set.
+    std::function<void()> verify = nullptr;
+  };
+  const std::vector<Case> cases = {
+      {.name = "SetImageDestinationSize",
+       .mutate = [&] { flatland->SetImageDestinationSize(kAttachedImageId, {64, 64}); }},
+      {.name = "SetImageSampleRegion",
+       .mutate =
+           [&] {
+             flatland->SetImageSampleRegion(kAttachedImageId,
+                                            types::RectangleF({0.f, 0.f, 32.f, 32.f}));
+           }},
+      {.name = "SetImageBlendMode",
+       .mutate =
+           [&] {
+             flatland->SetImageBlendMode(kAttachedImageId, types::BlendMode::kPremultipliedAlpha());
+           }},
+      {.name = "SetImageOpacity",
+       .mutate = [&] { flatland->SetImageOpacity(kAttachedImageId, 0.75f); }},
+      {.name = "SetImageFlip",
+       .mutate =
+           [&] {
+             flatland->SetImageFlip(kAttachedImageId,
+                                    fuchsia_ui_composition::ImageFlip::kLeftRight);
+           }},
+      {.name = "SetSolidFill",
+       .mutate =
+           [&] { flatland->SetSolidFill(kAttachedRectId, {0.2f, 0.4f, 0.6f, 0.8f}, {40, 40}); }},
+      {.name = "CreateImage",
+       .mutate =
+           [&] {
+             CreateImage(flatland.get(), allocator.get(), kUnattachedImageId,
+                         BufferCollectionImportExportTokens::New(),
+                         fuchsia_ui_composition::ImageProperties{{.size = SizeU{32, 32}}});
+           }},
+      {.name = "ReleaseImage_Attached",
+       .mutate = [&] { flatland->ReleaseImage(kAttachedImageId); }},
+      {.name = "ReleaseImage_Unattached",
+       .mutate =
+           [&] {
+             EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(_)).Times(1);
+             flatland->ReleaseImage(kUnattachedImageId);
+           }},
+      {.name = "CreateFilledRect",
+       .mutate = [&] { flatland->CreateFilledRect(kUnattachedRectId); }},
+      {.name = "ReleaseFilledRect_Attached",
+       .mutate = [&] { flatland->ReleaseFilledRect(kAttachedRectId); }},
+      {.name = "ReleaseFilledRect_Unattached",
+       .mutate = [&] { flatland->ReleaseFilledRect(kUnattachedRectId); }},
+      {.name = "CreateTransform", .mutate = [&] { flatland->CreateTransform(kCreatedTransform); }},
+      {.name = "ReleaseTransform_Attached",
+       .mutate = [&] { flatland->ReleaseTransform(kChildTransform); }},
+      {.name = "ReleaseTransform_Unattached",
+       .mutate =
+           [&] {
+             const auto uber_struct = GetUberStruct(flatland.get());
+             EXPECT_TRUE(uber_struct->local_matrices.contains(unattached_handle));
+             EXPECT_TRUE(uber_struct->local_opacity_values.contains(unattached_handle));
+             EXPECT_TRUE(uber_struct->local_clip_regions.contains(unattached_handle));
+             EXPECT_TRUE(uber_struct->local_hit_regions_map.contains(unattached_handle));
+             flatland->ReleaseTransform(kUnattachedTransform);
+           },
+       // The following `Present()` erases the released transform's entries.
+       .verify =
+           [&] {
+             const auto uber_struct = GetUberStruct(flatland.get());
+             EXPECT_FALSE(uber_struct->local_matrices.contains(unattached_handle));
+             EXPECT_FALSE(uber_struct->local_opacity_values.contains(unattached_handle));
+             EXPECT_FALSE(uber_struct->local_clip_regions.contains(unattached_handle));
+             EXPECT_FALSE(uber_struct->local_hit_regions_map.contains(unattached_handle));
+           }},
+      {.name = "SetHitRegions",
+       .mutate =
+           [&] {
+             flatland->SetHitRegions(
+                 kRootTransform,
+                 {{.region = {.x = 0, .y = 0, .width = 10, .height = 10},
+                   .hit_test = fuchsia_ui_composition::HitTestInteraction::kDefault}});
+           }},
+      {.name = "SetInfiniteHitRegion",
+       .mutate =
+           [&] {
+             flatland->SetInfiniteHitRegion(kRootTransform,
+                                            fuchsia_ui_composition::HitTestInteraction::kDefault);
+           }},
+      {.name = "SetDebugName", .mutate = [&] { flatland->SetDebugName("test_client"); }},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    test_case.mutate();
+    Present(flatland, true);
+    EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+    if (test_case.verify) {
+      test_case.verify();
+    }
+  }
+
+  // Clean up remaining attached image when flatland is destroyed.
+  EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(_)).Times(1);
+}
+
+// Verifies that the Flatland2 mutators that change a transform's priority child (attaching,
+// swapping, and detaching a layer stack) set `Flatland::scene_state_dirty_` and publish
+// `recompute_scene_state = true` through `UberStructSystem::MustRecomputeSceneState()`.
+TEST_F(Flatland2Test, TransformGraphMutatorsSetDirtySignal) {
+  std::optional<std::string> error_log;
+  auto flatland = CreateFlatland2(&error_log);
+
+  const TransformId kRoot(1);
+  const LayerStackId kStackA(1);
+  const LayerStackId kStackB(2);
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+  flatland->CreateLayerStack(kStackA);
+  flatland->CreateLayerStack(kStackB);
+
+  // Initial Present consumes the startup dirty flag.
+  Present(flatland, true);
+  EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  struct Case {
+    const char* name;
+    std::function<void()> mutate;
+  };
+  const std::vector<Case> cases = {
+      {.name = "SetTransformContent_Attach",
+       .mutate = [&] { flatland->SetTransformContent(kRoot, kStackA); }},
+      {.name = "SetTransformContent_Swap",
+       .mutate = [&] { flatland->SetTransformContent(kRoot, kStackB); }},
+      {.name = "ClearTransformContent", .mutate = [&] { flatland->ClearTransformContent(kRoot); }},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    test_case.mutate();
+    Present(flatland, true);
+    EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+    EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+  }
+  EXPECT_FALSE(error_log.has_value());
+}
+
+// Verifies that the Flatland2 image, layer, and layer stack mutators leave
+// `Flatland::scene_state_dirty_` clear (`MustRecomputeSceneState() == false`): the layer stage
+// reads stack membership, order, and every layer property fresh, so none of them is a
+// transform-graph change.
+TEST_F(Flatland2Test, LayerMutatorsLeaveDirtySignalClear) {
+  std::optional<std::string> error_log;
+  auto flatland = CreateFlatland2(&error_log);
+  auto allocator = CreateAllocator();
+
+  auto ref_pair = BufferCollectionImportExportTokens::New();
+  RegisterBufferCollection(allocator, std::move(ref_pair.export_token), CreateToken(), true);
+
+  const TransformId kRoot(1);
+  const ImageId kImage1(1);
+  const ImageId kImage2(2);
+  const LayerId kLayer1(1);
+  const LayerId kLayer2(2);
+  const LayerId kLayer3(3);
+  const LayerStackId kStackA(1);
+  const LayerStackId kUnattachedStack(2);
+  const LayerStackId kUnattachedStack2(3);
+
+  fidl::Arena arena;
+  auto image_properties = fuchsia_ui_composition::wire::ImageProperties::Builder(arena)
+                              .size(fuchsia_math::wire::SizeU{.width = 100, .height = 200})
+                              .Build();
+
+  flatland->CreateTransform(kRoot);
+  flatland->SetRootTransform(kRoot);
+
+  EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+      .WillOnce(ReturnPromise(fpromise::ok()));
+  flatland->CreateImage2(kImage1, ToWire(ref_pair.DuplicateImportToken()), 0, image_properties);
+  RunLoopUntilIdle();
+  const auto global_image_id1 = flatland->GetGlobalImageIdForTest(kImage1);
+
+  flatland->CreateLayer(kLayer1);
+  flatland->CreateLayer(kLayer2);
+  flatland->SetLayerImage(kLayer1, kImage1, std::nullopt, std::nullopt);
+  flatland->CreateLayerStack(kStackA);
+  flatland->SetStackLayers(kStackA, {kLayer1, kLayer2});
+  flatland->SetTransformContent(kRoot, kStackA);
+  flatland->CreateLayerStack(kUnattachedStack);
+
+  // Initial Present consumes the startup dirty flag.
+  Present(flatland, true);
+  EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  struct Case {
+    const char* name;
+    std::function<void()> mutate;
+  };
+  const std::vector<Case> cases = {
+      {.name = "CreateImage2",
+       .mutate =
+           [&] {
+             EXPECT_CALL(*mock_buffer_collection_importer_, ImportBufferImage(_, _))
+                 .WillOnce(ReturnPromise(fpromise::ok()));
+             flatland->CreateImage2(kImage2, ToWire(ref_pair.DuplicateImportToken()), 0,
+                                    image_properties);
+             RunLoopUntilIdle();
+           }},
+      {.name = "SetLayerImage",
+       .mutate = [&] { flatland->SetLayerImage(kLayer2, kImage2, std::nullopt, std::nullopt); }},
+      {.name = "SetLayerProperties",
+       .mutate =
+           [&] {
+             fuchsia_ui_composition::LayerProperties props;
+             props.display_rect(fuchsia_math::RectU{10, 20, 30, 40});
+             props.opacity(0.5f);
+             flatland->SetLayerProperties(kLayer1, fidl::ToWire(arena, std::move(props)));
+           }},
+      {.name = "ResetLayer", .mutate = [&] { flatland->ResetLayer(kLayer2); }},
+      {.name = "SetStackLayers_Reorder",
+       .mutate = [&] { flatland->SetStackLayers(kStackA, {kLayer2, kLayer1}); }},
+      {.name = "SetStackLayers_Remove",
+       .mutate = [&] { flatland->SetStackLayers(kStackA, {kLayer1}); }},
+      {.name = "SetStackLayers_Add",
+       .mutate = [&] { flatland->SetStackLayers(kStackA, {kLayer1, kLayer2}); }},
+      {.name = "CreateLayer", .mutate = [&] { flatland->CreateLayer(kLayer3); }},
+      {.name = "ReleaseLayer", .mutate = [&] { flatland->ReleaseLayer(kLayer3); }},
+      {.name = "CreateLayerStack",
+       .mutate = [&] { flatland->CreateLayerStack(kUnattachedStack2); }},
+      {.name = "ReleaseLayerStack_Unattached",
+       .mutate = [&] { flatland->ReleaseLayerStack(kUnattachedStack); }},
+      // The root keeps the released stack alive.
+      {.name = "ReleaseLayerStack_Attached",
+       .mutate = [&] { flatland->ReleaseLayerStack(kStackA); }},
+      // `ResetLayer()` unbound the second image, so releasing it frees it.
+      {.name = "ReleaseImage2_Unbound",
+       .mutate =
+           [&] {
+             EXPECT_CALL(*mock_buffer_collection_importer_,
+                         ReleaseBufferImage(flatland->GetGlobalImageIdForTest(kImage2)))
+                 .Times(1);
+             flatland->ReleaseImage2(kImage2);
+           }},
+      // The first image stays bound to `kLayer1`, which keeps it alive.
+      {.name = "ReleaseImage2_Bound", .mutate = [&] { flatland->ReleaseImage2(kImage1); }},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    test_case.mutate();
+    Present(flatland, true);
+    EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+  }
+  EXPECT_FALSE(error_log.has_value());
+
+  // The Flatland destructor releases the first image.
+  EXPECT_CALL(*mock_buffer_collection_importer_, ReleaseBufferImage(global_image_id1)).Times(1);
+  flatland.reset();
+  RunLoopUntilIdle();
 }
 
 }  // namespace flatland::test

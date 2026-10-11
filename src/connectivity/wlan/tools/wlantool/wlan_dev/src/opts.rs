@@ -232,14 +232,7 @@ pub enum PhyCmd {
         /// id of the phy to get its power state
         phy_id: u16,
     },
-    #[command(name = "set-power-state")]
-    /// sets the on/off state of the phy
-    SetPowerState {
-        /// id of the phy to get its power state
-        phy_id: u16,
-        /// desired state of the phy
-        state: OnOffArg,
-    },
+
     #[command(name = "get-powersave-mode")]
     /// gets the power save mode of the phy
     GetPowerSaveMode {

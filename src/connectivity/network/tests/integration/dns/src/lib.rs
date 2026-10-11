@@ -279,7 +279,7 @@ async fn discovered_ndp_dns<M: Manager>(name: &str, check_type: DnsCheckType) {
     let name = name.to_string();
     // The device must be installed by netcfg in order to start the NDP watcher
     // on the interface.
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
@@ -343,7 +343,7 @@ async fn discovered_dhcpv4_dns<M: Manager>(name: &str, check_type: DnsCheckType)
     // The device must be installed by netcfg in order to start the DHCPv4 client
     // on the interface, as the DHCPv4 DNS servers are found through the DHCPv4
     // client configuration and not the DnsServerWatcher.
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         &name.clone(),
         ManagerConfig::Empty,
         NetcfgOwnedDeviceArgs {
@@ -477,7 +477,7 @@ async fn discovered_dhcpv6_dns<M: Manager>(name: &str, check_type: DnsCheckType)
     let name = name.to_string();
     // Install the device into the Netstack via netcfg so that the DHCPv6
     // client is started on the interface.
-    let _if_name = with_netcfg_owned_device::<M, Netstack3, _>(
+    let _if_name = with_netcfg_owned_device::<M, _>(
         &name.clone(),
         ManagerConfig::Dhcpv6,
         NetcfgOwnedDeviceArgs {

@@ -176,12 +176,14 @@ impl Resolver {
         context: fpkg::ResolutionContext,
         dir: ServerEnd<fio::DirectoryMarker>,
     ) -> Result<fpkg::ResolutionContext, Error> {
-        self.resolve_with_context_and_serve(
-            &PackageUrl::parse(package_url).map_err(Error::InvalidUrl)?,
-            context,
-            dir,
-        )
-        .await
+        let (context, _) = self
+            .resolve_with_context_and_serve(
+                &PackageUrl::parse(package_url).map_err(Error::InvalidUrl)?,
+                context,
+                dir,
+            )
+            .await?;
+        Ok(context)
     }
 
     async fn resolve_with_context_and_serve(
@@ -189,7 +191,7 @@ impl Resolver {
         url: &PackageUrl,
         context: fpkg::ResolutionContext,
         dir: ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Error> {
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Error> {
         let root_dir = match url {
             PackageUrl::Absolute(url) => {
                 if !context.bytes.is_empty() {
@@ -201,8 +203,8 @@ impl Resolver {
         }?;
         let hash = *root_dir.hash();
         let flags = self.executability_decider.decide(hash).into();
-        vfs::directory::serve_on(root_dir, flags, self.scope.clone(), dir);
-        Ok(self.authenticator.clone().create(&hash))
+        vfs::directory::serve_on(Arc::clone(&root_dir), flags, self.scope.clone(), dir);
+        Ok((self.authenticator.clone().create(&hash), root_dir))
     }
 
     async fn resolve_unparsed_and_serve(
@@ -210,25 +212,27 @@ impl Resolver {
         url: &str,
         dir: ServerEnd<fio::DirectoryMarker>,
     ) -> Result<fpkg::ResolutionContext, Error> {
-        self.resolve_and_serve(&url.parse().map_err(Error::InvalidUrl)?, dir).await
+        let (context, _) =
+            self.resolve_and_serve(&url.parse().map_err(Error::InvalidUrl)?, dir).await?;
+        Ok(context)
     }
 
     async fn resolve_and_serve(
         &self,
         url: &AbsolutePackageUrl,
         dir: ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Error> {
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Error> {
         let root_dir = self.resolve_manage_inspect(url).await?;
         let hash = *root_dir.hash();
         let flags = self.executability_decider.decide(hash).into();
-        vfs::directory::serve_on(root_dir, flags, self.scope.clone(), dir);
-        Ok(self.authenticator.clone().create(&hash))
+        vfs::directory::serve_on(Arc::clone(&root_dir), flags, self.scope.clone(), dir);
+        Ok((self.authenticator.clone().create(&hash), root_dir))
     }
 
     async fn resolve_manage_inspect(
         &self,
         url: &AbsolutePackageUrl,
-    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+    ) -> Result<Arc<crate::root_dir::CachedRootDir>, Error> {
         let inspect = self.inspect_active.create_child(
             self.request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed).to_string(),
         );
@@ -236,7 +240,7 @@ impl Resolver {
         inspect.record_string(
             "result",
             res.as_ref().err().map_or(Cow::Borrowed("success"), |e| {
-                format!("error: {}", stringify_error(e)).into()
+                format!("error: {}", crate::stringify_error(e)).into()
             }),
         );
         inspect.record_int("end_boot_ns", zx::BootInstant::get().into_nanos());
@@ -248,7 +252,7 @@ impl Resolver {
         &self,
         url: &AbsolutePackageUrl,
         inspect: &finspect::Node,
-    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+    ) -> Result<Arc<crate::root_dir::CachedRootDir>, Error> {
         inspect.record_int("start_boot_ns", zx::BootInstant::get().into_nanos());
         inspect.record_string("url", url.to_string());
         let (pkg_id, blob_source) = self.lookup(url, inspect).await?;
@@ -260,7 +264,7 @@ impl Resolver {
         if let Some(blob_source) = blob_source {
             return self
                 .package_fetcher
-                .fetch(pkg_id, blob_source, fpkg::GcProtection::OpenPackageTracking)
+                .fetch_with_open_package_tracking(pkg_id, blob_source)
                 .await
                 .map_err(Error::PackageFetcher);
         }
@@ -355,7 +359,7 @@ impl Resolver {
         &self,
         url: &fuchsia_url::RelativePackageUrl,
         context: fpkg::ResolutionContext,
-    ) -> Result<Arc<crate::root_dir::RootDir>, Error> {
+    ) -> Result<Arc<crate::root_dir::CachedRootDir>, Error> {
         let super_hash = self
             .authenticator
             .clone()
@@ -453,7 +457,7 @@ impl crate::component_resolver::PackageResolver for Resolver {
         &self,
         url: &AbsolutePackageUrl,
         dir: ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Error> {
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Error> {
         self.resolve_and_serve(url, dir).await
     }
 
@@ -462,7 +466,7 @@ impl crate::component_resolver::PackageResolver for Resolver {
         url: &PackageUrl,
         context: fpkg::ResolutionContext,
         dir: ServerEnd<fio::DirectoryMarker>,
-    ) -> Result<fpkg::ResolutionContext, Error> {
+    ) -> Result<(fpkg::ResolutionContext, Arc<crate::root_dir::CachedRootDir>), Error> {
         self.resolve_with_context_and_serve(url, context, dir).await
     }
 }
@@ -690,21 +694,4 @@ fn internal_to_toolbox_error(err: fpkg::ResolveError) -> fpkg_resolution::Resolv
         InvalidUrl => Err::InvalidUrl,
         InvalidContext => Err::InvalidContext,
     }
-}
-
-// Replicates `format!("{:#}", anyhow!(err))` but without consuming `err` or converting it into an
-// `anyhow::Error`, so that the original, un-type-erased error can be propagated.
-// Normally errors should either be propagated XOR logged, but in this case we are duplicating the
-// log into inspect and doing so at the package resolver level instead of component resolver level
-// so that the history contains resolves performed on behalf of:
-//   1. the full component resolver that is in this component and uses the trait
-//   2. external clients that use the FIDL interface
-fn stringify_error(mut err: &dyn std::error::Error) -> String {
-    let mut result = err.to_string();
-    while let Some(source) = err.source() {
-        use std::fmt::Write as _;
-        let _ = write!(result, ": {source}");
-        err = source;
-    }
-    result
 }

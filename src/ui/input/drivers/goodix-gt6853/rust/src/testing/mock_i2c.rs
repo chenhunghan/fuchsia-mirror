@@ -189,7 +189,7 @@ mod tests {
         }];
 
         let result = client.transfer(&transactions).await.expect("FIDL call failed");
-        assert_eq!(result.unwrap_err().err(), Some(zx::Status::IO_REFUSED));
+        assert_eq!(result.unwrap_err(), zx::Status::IO_REFUSED);
         mock.check_all_expectations_replayed();
     }
 

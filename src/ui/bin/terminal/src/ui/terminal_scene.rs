@@ -2,14 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::ui::terminal_scroll_bar::ScrollBar;
 use crate::ui::TerminalMessages;
+use crate::ui::terminal_scroll_bar::ScrollBar;
 use carnelian::input::{self};
 use carnelian::{
-    make_message, AppSender, Coord, MessageTarget, Point, Rect, Size, ViewAssistantContext, ViewKey,
+    AppSender, Coord, MessageTarget, Point, Rect, Size, ViewAssistantContext, ViewKey, make_message,
 };
+use fuchsia_async as fasync;
+use fuchsia_trace as ftrace;
 use std::time::{Duration, Instant};
-use {fuchsia_async as fasync, fuchsia_trace as ftrace};
 
 // Hide scroll thumb after 1 second of scrolling or mouse leaving
 // the scroll bar frame.
@@ -221,11 +222,11 @@ impl TerminalScene {
             let event = input::pointer::Event::new_from_contact(contact);
             match event.phase {
                 input::pointer::Phase::Down(point) => {
-                    self.active_pointer_id = Some(event.pointer_id.clone());
+                    self.active_pointer_id = Some(event.pointer_id);
                     self.start_pointer_location = point.to_f32();
                 }
                 input::pointer::Phase::Moved(location) => {
-                    if Some(event.pointer_id.clone()) == self.active_pointer_id {
+                    if Some(event.pointer_id) == self.active_pointer_id {
                         let location_offset = location.to_f32() - self.start_pointer_location;
                         fn div_and_trunc(value: f32, divisor: f32) -> isize {
                             (value / divisor).trunc() as isize
@@ -243,7 +244,7 @@ impl TerminalScene {
                 input::pointer::Phase::Up
                 | input::pointer::Phase::Remove
                 | input::pointer::Phase::Cancel => {
-                    if Some(event.pointer_id.clone()) == self.active_pointer_id {
+                    if Some(event.pointer_id) == self.active_pointer_id {
                         self.active_pointer_id = None;
                     }
                 }

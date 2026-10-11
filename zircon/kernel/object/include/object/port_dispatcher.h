@@ -15,6 +15,7 @@
 
 #include <fbl/canary.h>
 #include <fbl/intrusive_double_list.h>
+#include <kernel/ffi.h>
 #include <kernel/mutex.h>
 #include <kernel/semaphore.h>
 #include <kernel/spinlock.h>
@@ -339,5 +340,11 @@ class PortDispatcher final : public SoloDispatcher<PortDispatcher, ZX_DEFAULT_PO
 };
 
 inline bool PortObserver::DispatcherLockIsHeld() const { return port_->DispatcherLockIsHeld(); }
+
+extern "C" {
+zx_status_t cpp_port_dispatcher_create(uint32_t options,
+                                       ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
+                                       zx_rights_t* rights_out);
+}
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_PORT_DISPATCHER_H_

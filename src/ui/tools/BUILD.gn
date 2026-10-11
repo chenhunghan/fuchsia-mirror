@@ -12,19 +12,13 @@ group("scenic") {
 }
 
 group("tools") {
-  deps = [
-    ":input",
-    "print-input-report",
-  ]
+  deps = [ ":input" ]
 }
 
 group("tests") {
   testonly = true
 
-  deps = [
-    "print-input-report:print-input-report-test",
-    "print-input-report-new:tests",
-  ]
+  deps = [ "print-input-report:tests" ]
 }
 
 # Non-component tools contains the names of shell command tools that do not

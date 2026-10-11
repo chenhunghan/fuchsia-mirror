@@ -7,6 +7,7 @@
 import dataclasses
 import itertools
 import logging
+import typing
 from collections.abc import Iterator, MutableSequence, Sequence
 from typing import Callable
 
@@ -164,9 +165,11 @@ class PowerMetricsProcessor(trace_metrics.MetricsProcessor):
         self._good_suspend_pred = good_suspend_pred
 
     @property
+    @typing.override
     def event_patterns(self) -> set[str]:
         return suspend_metrics.EVENT_PATTERNS
 
+    @typing.override
     def process_metrics(
         self, model: trace_model.Model
     ) -> MutableSequence[metrics.TestCaseResult]:

@@ -82,8 +82,8 @@ rust_library(
     }),
     version = "7.2.4",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/forks/zstd-sys:zstd_sys",
-        "//third_party/rust_crates/vendor/zstd-safe-7.2.4:build_script_build",
     ],
 )
 
@@ -128,6 +128,7 @@ cargo_build_script(
         ],
     ),
     edition = "2018",
+    emit_warnings = False,
     pkg_name = "zstd-safe",
     rustc_flags = [
         "--cap-lints=allow",

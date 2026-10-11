@@ -23,7 +23,7 @@ impl Command for ListAccessorsCommand {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ListAccessorsResult(Vec<String>);
 
 impl fmt::Display for ListAccessorsResult {

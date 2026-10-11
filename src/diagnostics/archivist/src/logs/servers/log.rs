@@ -7,11 +7,12 @@ use crate::logs::listener::Listener;
 use crate::logs::repository::LogsRepository;
 use fidl::endpoints::DiscoverableProtocolMarker;
 use fidl_fuchsia_diagnostics::StreamMode;
+use fidl_fuchsia_logger as flogger;
+use fuchsia_async as fasync;
 use futures::StreamExt;
 use log::warn;
 use std::pin::pin;
 use std::sync::Arc;
-use {fidl_fuchsia_logger as flogger, fuchsia_async as fasync};
 
 pub struct LogServer {
     /// The repository holding the logs.
@@ -63,5 +64,51 @@ impl LogServer {
         }
         logs_repo.finish_interest_connection(connection_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logs::shared_buffer::create_ring_buffer;
+    use fidl::endpoints::{Proxy, create_proxy_and_stream};
+
+    fn init_repo() -> Arc<LogsRepository> {
+        LogsRepository::new(
+            create_ring_buffer(65536),
+            std::iter::empty(),
+            &Default::default(),
+            fasync::Scope::new(),
+        )
+    }
+
+    #[fuchsia::test]
+    async fn listen_safe_and_disconnect() {
+        let repo = init_repo();
+        let scope = fasync::Scope::new();
+        let server = LogServer::new(Arc::clone(&repo), scope);
+
+        let (proxy, stream) = create_proxy_and_stream::<flogger::LogMarker>();
+        server.spawn(stream);
+
+        let (client_end, _server_end) =
+            fidl::endpoints::create_endpoints::<flogger::LogListenerSafeMarker>();
+        proxy.listen_safe(client_end, None).unwrap();
+
+        drop(proxy);
+        fasync::Timer::new(std::time::Duration::from_millis(10)).await;
+    }
+
+    #[fuchsia::test]
+    async fn stream_error_handling() {
+        let repo = init_repo();
+        let scope = fasync::Scope::new();
+        let (proxy, stream) = create_proxy_and_stream::<flogger::LogMarker>();
+
+        // Write invalid bytes to cause a stream error.
+        proxy.as_channel().write(&[0xff; 16], &mut []).expect("write invalid bytes");
+
+        let result = LogServer::handle_requests(repo, stream, scope.to_handle()).await;
+        assert_matches::assert_matches!(result, Err(LogsError::HandlingRequests { .. }));
     }
 }

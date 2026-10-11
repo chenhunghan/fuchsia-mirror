@@ -13,11 +13,16 @@ fn to_bstrings(args: &[&str]) -> Vec<BString> {
 fn test_parse_empty() {
     let args = to_bstrings(&["zxsh"]);
     let parsed = parse_args(&args).unwrap();
+    assert_eq!(parsed.arg0.as_ref().unwrap(), "zxsh");
     assert!(parsed.command.is_none());
     assert!(!parsed.stdin);
     assert!(!parsed.opt_interactive);
     assert!(parsed.script_name.is_none());
     assert!(parsed.positional_args.is_empty());
+
+    let empty_args: Vec<BString> = Vec::new();
+    let parsed_empty = parse_args(&empty_args).unwrap();
+    assert!(parsed_empty.arg0.is_none());
 }
 
 #[test]

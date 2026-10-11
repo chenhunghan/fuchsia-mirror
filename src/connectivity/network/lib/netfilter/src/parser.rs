@@ -5,10 +5,19 @@
 use pest::Parser;
 use pest::iterators::Pair;
 
-use fidl_fuchsia_net as fnet;
+#[cfg(not(feature = "fdomain"))]
 use fidl_fuchsia_net_filter_ext as filter_ext;
+#[cfg(feature = "fdomain")]
+use fidl_fuchsia_net_filter_ext_fdomain as filter_ext;
+#[cfg(not(feature = "fdomain"))]
 use fidl_fuchsia_net_interfaces_ext as fnet_interfaces_ext;
+#[cfg(feature = "fdomain")]
+use fidl_fuchsia_net_interfaces_ext_fdomain as fnet_interfaces_ext;
+#[cfg(not(feature = "fdomain"))]
 use fidl_fuchsia_net_matchers_ext as fnet_matchers_ext;
+#[cfg(feature = "fdomain")]
+use fidl_fuchsia_net_matchers_ext_fdomain as fnet_matchers_ext;
+use flex_fuchsia_net as fnet;
 
 use crate::grammar::{Error, FilterRuleParser, InvalidReason, Rule};
 use crate::util;

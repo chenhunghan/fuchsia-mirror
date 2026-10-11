@@ -81,6 +81,8 @@ class Environment : public fdf_testing::Environment {
     return zx::ok();
   }
 
+  fake_mmio::FakeMmioRegRegion& mmio() { return mmio_; }
+
  private:
   // A class which manages a poor emulation of the global reset register (for
   // core silicon versions < 4.20a).  The only thing this emulation does is look
@@ -186,6 +188,30 @@ class Dwc2Test : public testing::Test {
     driver.QueueNextRequest(ep);
   }
 
+  void SetRemainingTransferSize(uint8_t ep_num, uint32_t xfersize) {
+    dut_.RunInEnvironmentTypeContext([ep_num, xfersize](Environment& env) {
+      env.mmio()[DEPTSIZ::Get(ep_num).addr()].SetReadCallback([ep_num, xfersize]() -> uint64_t {
+        return DEPTSIZ::Get(ep_num).FromValue(0).set_xfersize(xfersize).reg_value();
+      });
+    });
+  }
+
+  void SetReqXferSize(uint8_t ep_num, uint32_t req_xfersize) {
+    dut_.RunInDriverContext([ep_num, req_xfersize](Dwc2& driver) {
+      ASSERT_TRUE(driver.endpoints_[ep_num].has_value());
+      driver.endpoints_[ep_num]->req_xfersize = req_xfersize;
+    });
+  }
+
+  uint32_t ReadTransferred(uint8_t ep_num) {
+    uint32_t transferred = 0;
+    dut_.RunInDriverContext([ep_num, &transferred](Dwc2& driver) {
+      ZX_ASSERT(driver.endpoints_[ep_num].has_value());
+      transferred = driver.ReadTransferred(&*driver.endpoints_[ep_num]);
+    });
+    return transferred;
+  }
+
   void SetConnectedState(Dwc2& driver, bool connected) { driver.connected_.store(connected); }
 
   bool IsConnected(const Dwc2& driver) const { return driver.connected_.load(); }
@@ -248,6 +274,35 @@ TEST_F(Dwc2Test, GetHardwareInfo) {
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(1).max_packet_size_limit(), 1024u);
   EXPECT_EQ(info.endpoints()->at(5).supported_types()->at(1).endpoint_type(),
             fdescriptor::EndpointType::kInterrupt);
+}
+
+TEST_F(Dwc2Test, ReadTransferred) {
+  constexpr uint8_t kEpNum = 1;
+  constexpr uint32_t kReqXferSize = 100;
+
+  ASSERT_NO_FATAL_FAILURE(SetReqXferSize(kEpNum, kReqXferSize));
+
+  // Case 1: remaining > ep->req_xfersize.
+  // Hardware reports more remaining bytes (150) than programmed (100).
+  // ReadTransferred logs a warning, clamps remaining to req_xfersize to avoid underflow, and
+  // returns 0.
+  SetRemainingTransferSize(kEpNum, 150);
+  EXPECT_EQ(ReadTransferred(kEpNum), 0u);
+
+  // Case 2: remaining == ep->req_xfersize.
+  // 100 remaining out of 100 programmed bytes means 0 bytes transferred.
+  SetRemainingTransferSize(kEpNum, kReqXferSize);
+  EXPECT_EQ(ReadTransferred(kEpNum), 0u);
+
+  // Case 3: remaining < ep->req_xfersize.
+  // 40 remaining out of 100 programmed bytes means 60 bytes transferred.
+  SetRemainingTransferSize(kEpNum, 40);
+  EXPECT_EQ(ReadTransferred(kEpNum), 60u);
+
+  // Case 4: remaining == 0.
+  // 0 remaining out of 100 programmed bytes means 100 bytes transferred.
+  SetRemainingTransferSize(kEpNum, 0);
+  EXPECT_EQ(ReadTransferred(kEpNum), kReqXferSize);
 }
 
 TEST_F(Dwc2Test, PendingZlp_SetOnInShortTransfer) {

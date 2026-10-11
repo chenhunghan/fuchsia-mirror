@@ -17,7 +17,10 @@ use version_history::AbiRevision;
 use zx_status as zx;
 
 #[cfg(target_os = "fuchsia")]
-use cm_rust::{FidlIntoNative, NativeIntoFidl};
+use {
+    cm_rust::{FidlIntoNative, NativeIntoFidl},
+    fuchsia_trace as trace,
+};
 
 /// The prefix for relative URLs internally represented as url::Url.
 const RELATIVE_URL_PREFIX: &str = "relative:///";
@@ -135,6 +138,7 @@ pub fn read_and_validate_manifest_bytes(
     bytes: &[u8],
     dependencies: &mut DirectedGraph<DependencyNode>,
 ) -> Result<cm_rust::ComponentDecl, ResolverError> {
+    trace::duration!("component_manager", "read_and_validate_manifest_bytes");
     let component_decl: fidl_fuchsia_component_decl::Component =
         fidl::unpersist(bytes).map_err(ResolverError::manifest_invalid)?;
     cm_fidl_validator::validate(&component_decl, dependencies)

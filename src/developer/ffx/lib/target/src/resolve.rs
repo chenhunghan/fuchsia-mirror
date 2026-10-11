@@ -7,7 +7,7 @@ use anyhow::Result;
 use discovery::query::TargetInfoQuery;
 use discovery::{Discovery, DiscoveryBuilder, DiscoverySources, TargetEvent, TargetHandle};
 use fdomain_fuchsia_developer_remotecontrol::{IdentifyHostResponse, RemoteControlProxy};
-use ffx_command_error::{NonFatalError, user_error};
+use ffx_command_error::user_error;
 use ffx_config::{EnvironmentContext, TryFromEnvContext, keys};
 use ffx_diagnostics_analytics::ResultExt;
 use ffx_diagnostics_formatting::TargetInfoQueryExt;
@@ -1060,7 +1060,7 @@ impl Resolution {
         let resolution = resolver
             .resolve_target_address(&spec, use_cache, env, source)
             .await
-            .map_err(|e| ffx_command_error::Error::User(NonFatalError(e.into()).into()))?;
+            .map_err(|e| crate::FfxTargetCrateError::from(e).into_command_error())?;
         Ok(resolution)
     }
 
@@ -1513,5 +1513,73 @@ mod test {
             err,
             FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::TargetNotFound, .. }
         ));
+    }
+
+    fn assert_open_target_error(err: ffx_command_error::Error, expected: ffx::OpenTargetError) {
+        let ffx_command_error::Error::User(e) = err else {
+            panic!("Expected Error::User, got {err:?}");
+        };
+        let Some(errors::FfxError::OpenTargetError { err, .. }) =
+            e.downcast_ref::<errors::FfxError>()
+        else {
+            panic!("Expected FfxError::OpenTargetError, got {e:?}");
+        };
+        let Some(target_errors::FfxTargetError::OpenTargetError { err: actual, .. }) =
+            err.downcast_ref::<target_errors::FfxTargetError>()
+        else {
+            panic!("Expected FfxTargetError::OpenTargetError, got {err:?}");
+        };
+        assert_eq!(*actual, expected);
+    }
+
+    #[fuchsia::test]
+    async fn test_try_from_env_context_target_not_found() {
+        let mut env = ffx_config::test_init().unwrap();
+        let mut resolver = MockTargetResolver::new();
+        resolver.expect_try_resolve_manual_target().return_once(|_, _| Ok(None));
+        resolver.expect_discovered_targets().return_once(|_| Ok(vec![]));
+
+        env.context.override_target_specifier(&Some("foo".to_string()));
+
+        let err = Resolution::try_from_env_context_with_resolver(&resolver, &env.context, false)
+            .await
+            .unwrap_err();
+        assert_open_target_error(err, ffx::OpenTargetError::TargetNotFound);
+    }
+
+    #[fuchsia::test]
+    async fn test_try_from_env_context_query_ambiguous() {
+        let mut env = ffx_config::test_init().unwrap();
+        let mut resolver = MockTargetResolver::new();
+        resolver.expect_try_resolve_manual_target().return_once(|_, _| Ok(None));
+        resolver.expect_discovered_targets().return_once(|_| {
+            Ok(vec![
+                make_target_handle_for_product("foo", "127.0.0.1:8080".parse().unwrap()),
+                make_target_handle_for_product("foo", "127.0.0.1:8081".parse().unwrap()),
+            ])
+        });
+
+        env.context.override_target_specifier(&Some("foo".to_string()));
+
+        let err = Resolution::try_from_env_context_with_resolver(&resolver, &env.context, false)
+            .await
+            .unwrap_err();
+        assert_open_target_error(err, ffx::OpenTargetError::QueryAmbiguous);
+    }
+
+    #[fuchsia::test]
+    async fn test_try_from_env_context_explicit_address() {
+        let mut env = ffx_config::test_init().unwrap();
+        // Skip discovery, because explicit address is used, MockTargetResolver expectations will
+        // panic if methods are called.
+        let resolver = MockTargetResolver::new();
+
+        env.context.override_target_specifier(&Some("127.0.0.1:8082".to_string()));
+
+        let res = Resolution::try_from_env_context_with_resolver(&resolver, &env.context, false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.addr().unwrap(), "127.0.0.1:8082".parse::<SocketAddr>().unwrap());
     }
 }

@@ -326,10 +326,15 @@ def wrap_cc_macro_args_with_build_flags(
     )
 
     # Add the response files to the corresponding action attributes.
+    # Move any `copts` after the response files in `cxxopts` and `conlyopts` so
+    # that target-specific `copts` (e.g. `-Wno-...`) are not overridden by
+    # default warning flags in the response files (since Bazel places `copts`
+    # before `cxxopts` and `conlyopts` on the compiler command line).
     result = dict(kwargs)
+    copts = result.pop("copts", None) or []
 
-    result["cxxopts"] = ["@$(location {})".format(cxx_response_name)] + (kwargs.get("cxxopts") or [])
-    result["conlyopts"] = ["@$(location {})".format(conly_response_name)] + (kwargs.get("conlyopts") or [])
+    result["cxxopts"] = ["@$(location {})".format(cxx_response_name)] + copts + (kwargs.get("cxxopts") or [])
+    result["conlyopts"] = ["@$(location {})".format(conly_response_name)] + copts + (kwargs.get("conlyopts") or [])
 
     # TODO(https://fxbug.dev/1650836). Use "additional_compiler_inputs" when Bazel 9.1 or higher
     # is used (Fuchsia hasn't upgraded yet). In the meantime, the workaround is to export CcInfo

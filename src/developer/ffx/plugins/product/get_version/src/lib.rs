@@ -39,11 +39,14 @@ impl FfxMain for PbGetVersionTool {
 
     async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
         let artifact_path = &self.cmd.artifact;
+        let product_bundle = ProductBundle::try_load_from(artifact_path);
         let info: VersionInfoWithDependencies =
-            if let Ok(product_bundle) = ProductBundle::try_load_from(artifact_path) {
-                match product_bundle {
-                    ProductBundle::V2(pb) => load_product_bundle_v2(&pb),
-                }
+            if let Ok(ProductBundle::V2(ref product_bundle)) = product_bundle {
+                load_product_bundle_v2(product_bundle)
+            } else if let Err(e) = product_bundle
+                && product_bundle::is_gcs_uri(artifact_path)
+            {
+                return Err(fho::Error::User(anyhow!("Failed to load product bundle: {e}")));
             } else if artifact_path.join("platform_artifacts.json").exists() {
                 load_platform(artifact_path)?.into_version_with_deps()
             } else if artifact_path.join("product_configuration.json").exists() {
@@ -513,5 +516,14 @@ mod tests {
                 "bib_set".to_string(),
             )
         );
+    }
+
+    #[test]
+    fn test_load_product_bundle_v2_without_release_info() {
+        let mut pb = generate_test_product_bundle();
+        pb.release_info = None;
+        let version_info = load_product_bundle_v2(&pb);
+        assert_eq!(version_info.version.human, "fake_version");
+        assert!(version_info.version_with_deps.machine.is_empty());
     }
 }

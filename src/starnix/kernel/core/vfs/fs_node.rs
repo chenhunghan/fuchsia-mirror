@@ -13,11 +13,11 @@ use crate::vfs::pipe::{Pipe, PipeHandle};
 use crate::vfs::rw_queue::{RwQueue, RwQueueReadGuard, RwQueueWriteGuard};
 use crate::vfs::socket::SocketHandle;
 use crate::vfs::{
-    CheckAccessReason, DefaultDirEntryOps, DirEntryOps, FileObject, FileObjectState, FileOps,
-    FileSystem, FileSystemHandle, FileWriteGuardMode, FileWriteGuardRef, FileWriteGuardState,
-    FsLockDepType, FsStr, FsString, MAX_LFS_FILESIZE, MountInfo, NamespaceNode, OPathOps,
-    OpenAccessCheck, RecordLockCommand, RecordLockOwner, RecordLocks, WeakFileHandle,
-    checked_add_offset_and_length, inotify_hook,
+    CheckAccessReason, DefaultDirEntryOps, DirEntry, DirEntryOps, FileObject, FileObjectState,
+    FileOps, FileSystem, FileSystemHandle, FileWriteGuardMode, FileWriteGuardRef,
+    FileWriteGuardState, FsLockDepType, FsStr, FsString, MAX_LFS_FILESIZE, MountInfo,
+    NamespaceNode, OPathOps, OpenAccessCheck, RecordLockCommand, RecordLockOwner, RecordLocks,
+    WeakFileHandle, checked_add_offset_and_length, inotify_hook,
 };
 use bitflags::bitflags;
 use fuchsia_runtime::UtcInstant;
@@ -593,13 +593,10 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
         flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno>;
 
-    /// Find an existing child node and populate the child parameter. Return the node.
-    ///
-    /// The child parameter is an empty node. Operations other than initialize may panic before
-    /// initialize is called.
+    /// Finds an existing child node matching `name` within the parent directory `entry`.
     fn lookup(
         &self,
-        _node: &FsNode,
+        _entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -613,17 +610,17 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
         false
     }
 
-    /// Find multiple children nodes in sequence.
+    /// Finds multiple children nodes in sequence.
     ///
     /// This can be used to pipeline lookups in filesystems that support it.
     ///
     /// Each name in `names` is looked up in the node found for the previous name, starting with
-    /// `node`, and the results are returned in the same order as `names`. Lookups stop at the
+    /// `entry`, and the results are returned in the same order as `names`. Lookups stop at the
     /// first error, so fewer results than `names` may be returned, but at least one result must
     /// be returned if `names` is not empty.
     fn lookup_pipelined(
         &self,
-        _node: &FsNode,
+        _entry: &DirEntry,
         _current_task: &CurrentTask,
         _names: &[&FsStr],
     ) -> LookupVec<Result<FsNodeHandle, Errno>> {
@@ -778,6 +775,7 @@ pub trait FsNodeOps: Send + Sync + AsAny + 'static {
         _node: &FsNode,
         _current_task: &CurrentTask,
         info: &'a DynamicLockDepRwLock<FsNodeInfo>,
+        _flags: StatxFlags,
     ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
         Ok(info.read())
     }
@@ -923,33 +921,8 @@ macro_rules! fs_node_impl_symlink {
 }
 
 #[macro_export]
-macro_rules! fs_node_impl_dir_readonly {
+macro_rules! fs_node_impl_dir_readonly_ops {
     () => {
-        fn check_access(
-            &self,
-            node: &$crate::vfs::FsNode,
-            current_task: &$crate::task::CurrentTask,
-            permission_flags: $crate::security::PermissionFlags,
-            info: &starnix_sync::DynamicLockDepRwLock<$crate::vfs::FsNodeInfo>,
-            reason: $crate::vfs::CheckAccessReason,
-            audit_context: $crate::security::Auditable<'_>,
-        ) -> Result<(), starnix_uapi::errors::Errno> {
-            let access = permission_flags.as_access();
-            if access.contains(starnix_uapi::file_mode::Access::WRITE) {
-                return starnix_uapi::error!(
-                    EROFS,
-                    format!("check_access failed: read-only directory")
-                );
-            }
-            node.default_check_access_impl(
-                current_task,
-                permission_flags,
-                reason,
-                info.read(),
-                audit_context,
-            )
-        }
-
         fn mkdir(
             &self,
             _node: &$crate::vfs::FsNode,
@@ -1002,6 +975,38 @@ macro_rules! fs_node_impl_dir_readonly {
             _child: &$crate::vfs::FsNodeHandle,
         ) -> Result<(), starnix_uapi::errors::Errno> {
             starnix_uapi::error!(EROFS, format!("unlink failed: {:?}", name))
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! fs_node_impl_dir_readonly {
+    () => {
+        $crate::vfs::fs_node_impl_dir_readonly_ops!();
+
+        fn check_access(
+            &self,
+            node: &$crate::vfs::FsNode,
+            current_task: &$crate::task::CurrentTask,
+            permission_flags: $crate::security::PermissionFlags,
+            info: &starnix_sync::DynamicLockDepRwLock<$crate::vfs::FsNodeInfo>,
+            reason: $crate::vfs::CheckAccessReason,
+            audit_context: $crate::security::Auditable<'_>,
+        ) -> Result<(), starnix_uapi::errors::Errno> {
+            let access = permission_flags.as_access();
+            if access.contains(starnix_uapi::file_mode::Access::WRITE) {
+                return starnix_uapi::error!(
+                    EROFS,
+                    format!("check_access failed: read-only directory")
+                );
+            }
+            node.default_check_access_impl(
+                current_task,
+                permission_flags,
+                reason,
+                info.read(),
+                audit_context,
+            )
         }
     };
 }
@@ -1095,7 +1100,7 @@ macro_rules! fs_node_impl_not_dir {
     () => {
         fn lookup(
             &self,
-            _node: &$crate::vfs::FsNode,
+            _entry: &$crate::vfs::DirEntry,
             _current_task: &$crate::task::CurrentTask,
             _name: &$crate::vfs::FsStr,
         ) -> Result<$crate::vfs::FsNodeHandle, starnix_uapi::errors::Errno> {
@@ -1157,6 +1162,7 @@ pub enum TimeUpdateType {
 
 // Public re-export of macros allows them to be used like regular rust items.
 pub use fs_node_impl_dir_readonly;
+pub use fs_node_impl_dir_readonly_ops;
 pub use fs_node_impl_not_dir;
 pub use fs_node_impl_symlink;
 pub use fs_node_impl_xattr_delegate;
@@ -1245,6 +1251,10 @@ impl FsNode {
 
     pub fn fs(&self) -> FileSystemHandle {
         self.fs.upgrade().expect("FileSystem did not live long enough")
+    }
+
+    pub fn try_fs(&self) -> Option<FileSystemHandle> {
+        self.fs.upgrade()
     }
 
     pub fn ops(&self) -> &dyn FsNodeOps {
@@ -1382,22 +1392,6 @@ impl FsNode {
             FileMode::IFSOCK => error!(ENXIO),
             _ => self.create_file_ops(current_task, flags),
         }
-    }
-
-    pub fn lookup(
-        &self,
-        current_task: &CurrentTask,
-        mount: &MountInfo,
-        name: &FsStr,
-    ) -> Result<FsNodeHandle, Errno> {
-        self.check_access(
-            current_task,
-            mount,
-            Access::EXEC,
-            CheckAccessReason::InternalPermissionChecks,
-            &[Auditable::Name(name), std::panic::Location::caller().into()],
-        )?;
-        self.ops().lookup(self, current_task, name)
     }
 
     pub fn create_node(
@@ -1550,6 +1544,10 @@ impl FsNode {
     // This method does not attempt to update the atime of the node.
     // Use `NamespaceNode::readlink` which checks the mount flags and updates the atime accordingly.
     pub fn readlink(&self, current_task: &CurrentTask) -> Result<SymlinkTarget, Errno> {
+        // Only symbolic links can be read, so other nodes fail before any access checks.
+        if !self.is_lnk() {
+            return error!(EINVAL);
+        }
         // TODO: 378864856 - Is there a permission check here other than security checks?
         security::check_fs_node_read_link_access(current_task, self)?;
         self.ops().readlink(self, current_task)
@@ -1637,11 +1635,12 @@ impl FsNode {
         name: &FsStr,
         child: &FsNodeHandle,
     ) -> Result<(), Errno> {
-        // The user must be able to search and write to the directory.
+        // The user must be able to write to the directory; search permission was already
+        // verified when looking up `child`.
         self.check_access(
             current_task,
             mount,
-            Access::EXEC | Access::WRITE,
+            Access::WRITE,
             CheckAccessReason::InternalPermissionChecks,
             security::Auditable::Name(name),
         )?;
@@ -2206,11 +2205,7 @@ impl FsNode {
         security::check_fs_node_getattr_access(current_task, self)?;
 
         // Ignore mask for now and fill in all of the fields.
-        let info = if flags.contains(StatxFlags::AT_STATX_DONT_SYNC) {
-            self.info()
-        } else {
-            self.fetch_and_refresh_info(current_task)?
-        };
+        let info = self.fetch_and_refresh_info_with_flags(current_task, flags)?;
         if mask & STATX__RESERVED == STATX__RESERVED {
             return error!(EINVAL);
         }
@@ -2412,7 +2407,15 @@ impl FsNode {
         &self,
         current_task: &CurrentTask,
     ) -> Result<LockDepReadGuard<'_, FsNodeInfo>, Errno> {
-        self.ops().fetch_and_refresh_info(self, current_task, &self.info)
+        self.fetch_and_refresh_info_with_flags(current_task, StatxFlags::empty())
+    }
+
+    pub fn fetch_and_refresh_info_with_flags(
+        &self,
+        current_task: &CurrentTask,
+        flags: StatxFlags,
+    ) -> Result<LockDepReadGuard<'_, FsNodeInfo>, Errno> {
+        self.ops().fetch_and_refresh_info(self, current_task, &self.info, flags)
     }
 
     pub fn update_info<F, T>(&self, mutator: F) -> T

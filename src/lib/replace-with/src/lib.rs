@@ -4,7 +4,13 @@
 
 //! `replace-with` provides the [`replace_with`] function.
 
-use std::{mem, ptr};
+#![no_std]
+
+// Refer to `abort_on_panic` for details on why `std` is required.
+#[cfg(any(test, not(panic = "abort")))]
+extern crate std;
+
+use core::ptr;
 
 /// Uses `f` to replace the referent of `dst` with a new value.
 ///
@@ -93,39 +99,58 @@ pub fn replace_with_and<T, R, F: FnOnce(T) -> (T, R)>(dst: &mut T, f: F) -> R {
 
 /// Calls `f` or aborts the process if `f` panics.
 fn abort_on_panic<T, F: FnOnce() -> T>(f: F) -> T {
-    struct CallOnDrop<O, F: Fn() -> O>(F);
-    impl<O, F: Fn() -> O> Drop for CallOnDrop<O, F> {
-        #[cold]
-        fn drop(&mut self) {
-            (self.0)();
-        }
+    #[cfg(panic = "abort")]
+    {
+        // When the panic strategy is "abort", any panic will immediately abort
+        // the process. There is no unwinding, so the drop bomb is unnecessary.
+        f()
     }
+    #[cfg(not(panic = "abort"))]
+    {
+        use core::mem;
 
-    let backtrace_and_abort_on_drop = CallOnDrop(|| {
-        // SAFETY: This guard ensures that we abort in both of the following two
-        // cases:
-        // - The code executes normally (the guard is dropped at the end of the
-        //   function)
-        // - The backtrace code panics (the guard is dropped during unwinding)
-        //
-        // No functions called from the backtrace code are documented to panic,
-        // but this serves as a hedge in case there are undocumented panic
-        // conditions.
-        let abort_on_drop = CallOnDrop(std::process::abort);
+        struct CallOnDrop<O, F: Fn() -> O>(F);
+        impl<O, F: Fn() -> O> Drop for CallOnDrop<O, F> {
+            #[cold]
+            fn drop(&mut self) {
+                (self.0)();
+            }
+        }
 
-        use std::io::Write as _;
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let mut stderr = std::io::stderr().lock();
-        // We treat backtrace-printing as best-effort, so we ignore any errors.
-        let _ = write!(&mut stderr, "replace_with: callback panicked; backtrace:\n{backtrace}\n");
-        let _ = stderr.flush();
+        // NOTE: If the panic strategy is not "abort", a panic will attempt to
+        // unwind the stack, which would leave `dst` uninitialized and violate
+        // memory safety. To prevent this, we must abort the process on drop.
+        // Doing so with a backtrace requires `std`. In a `no_std` environment,
+        // we cannot ensure safety if panics can unwind without `std` support.
+        let backtrace_and_abort_on_drop = CallOnDrop(#[inline(never)] || {
+            // SAFETY: This guard ensures that we abort in both of the following
+            // two cases:
+            // - The code executes normally (the guard is dropped at the end of
+            //   the function)
+            // - The backtrace code panics (the guard is dropped during
+            //   unwinding)
+            //
+            // No functions called from the backtrace code are documented to
+            // panic, but this serves as a hedge in case there are undocumented
+            // panic conditions.
+            let abort_on_drop = CallOnDrop(std::process::abort);
 
-        mem::drop(abort_on_drop);
-    });
+            use std::io::Write as _;
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let mut stderr = std::io::stderr().lock();
+            // We treat backtrace-printing as best-effort, so we ignore any
+            // errors.
+            let _ =
+                write!(&mut stderr, "replace_with: callback panicked; backtrace:\n{backtrace}\n");
+            let _ = stderr.flush();
 
-    let t = f();
-    mem::forget(backtrace_and_abort_on_drop);
-    t
+            mem::drop(abort_on_drop);
+        });
+
+        let t = f();
+        mem::forget(backtrace_and_abort_on_drop);
+        t
+    }
 }
 
 #[cfg(test)]

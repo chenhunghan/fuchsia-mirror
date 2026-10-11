@@ -7,9 +7,9 @@ use crate::fuchsia::directory::FxDirectory;
 use crate::fuchsia::dirent_cache::DirentCache;
 use crate::fuchsia::file::{FlushType, FxFile};
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
-use crate::fuchsia::node::{FxNode, GetResult, NodeCache};
+use crate::fuchsia::node::{FxNode, GetResult, NodeCache, OpenedNode};
 use crate::fuchsia::pager::Pager;
-use crate::fuchsia::profile::{FileRecordingHandle, ProfileState};
+use crate::fuchsia::profile::{AttributeRecordingHandle, FileRecordingHandle, ProfileState};
 use crate::fuchsia::symlink::FxSymlink;
 use crate::fuchsia::volumes_directory::VolumesDirectory;
 use anyhow::{Error, bail, ensure};
@@ -32,11 +32,14 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::{self, SyncOptions, TruncateGuard};
 use fxfs::future_with_guard::FutureWithGuard;
 use fxfs::log::*;
+use fxfs::object_handle::ReadObjectHandle;
 use fxfs::object_store::directory::Directory;
+use fxfs::object_store::object_record::ObjectItem;
 use fxfs::object_store::project_id::ProjectIdExt;
-use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+use fxfs::object_store::transaction::{LockKey, Options, ReservationOptions, lock_keys};
 use fxfs::object_store::{
-    DirType, HandleOptions, HandleOwner, ObjectDescriptor, ObjectStore, ProjectId,
+    AttributeId, AttributeKey, DataObjectHandle, DirType, HandleOptions, HandleOwner,
+    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue, ProjectId,
 };
 use refaults_vmo::PageRefaultCounter;
 use std::future::Future;
@@ -355,34 +358,49 @@ impl FxVolume {
     pub async fn replay_xor_record_profile(
         self: &Arc<Self>,
         mut state: Box<dyn ProfileState>,
-        name: &str,
+        node: OpenedNode<dyn FxNode>,
     ) -> Result<(), Error> {
-        let profile_dir = self.get_profile_directory().await?;
-        let replay_handle = if let Some((id, descriptor, _)) = profile_dir.lookup(name).await? {
-            ensure!(matches!(descriptor, ObjectDescriptor::File), FxfsError::Inconsistent);
-            Some(Box::new(
-                ObjectStore::open_object(self, id, HandleOptions::default(), None).await?,
-            ))
-        } else {
-            None
-        };
+        let object_id = node.object_id();
+        let key = ObjectKey::attribute(
+            object_id,
+            AttributeId::PROFILE_RECORDING,
+            AttributeKey::Attribute,
+        );
+
+        let replay_handle =
+            if let Some(ObjectItem { value: ObjectValue::Attribute { size, .. }, .. }) =
+                self.store().tree().find(&key).await?
+            {
+                Some(Box::new(DataObjectHandle::new(
+                    self.clone(),
+                    object_id,
+                    false,
+                    AttributeId::PROFILE_RECORDING,
+                    size,
+                    HandleOptions::default(),
+                    false,
+                    &[],
+                )) as Box<dyn ReadObjectHandle>)
+            } else {
+                None
+            };
 
         if let Some(handle) = replay_handle {
             let mut profile_state = self.profile_state.lock();
             if let Some(guard) = self.scope().try_active_guard() {
                 state.replay_profile(handle, self.clone(), guard);
                 info!(
-                    "Replaying existing profile '{name}' for volume object {}",
+                    "Replaying existing profile for object {object_id} in volume object {}",
                     self.store.store_object_id()
                 );
             }
             *profile_state = Some(state);
         } else {
             info!(
-                "Recording new profile '{name}' for volume object {}",
+                "Recording new profile for object {object_id} in volume object {}",
                 self.store.store_object_id()
             );
-            let recording_handle = FileRecordingHandle::new(name, self.clone()).await?;
+            let recording_handle = AttributeRecordingHandle::new(node, self.clone()).await?;
             let mut profile_state = self.profile_state.lock();
             self.pager.set_recorder(Some(state.record_new(self, Box::new(recording_handle))));
             *profile_state = Some(state);
@@ -487,6 +505,70 @@ impl FxVolume {
         }
     }
 
+    /// Opens a linked regular file by object ID, returning a node with an open count held.
+    ///
+    /// Opening by ID skips the directory traversal that normally prevents open races, so this
+    /// performs the equivalent checks itself while holding a read lock on the object.
+    ///
+    /// The graveyard is checked before the node is loaded so that we never publish an `FxFile` in
+    /// the node cache for an object that is about to be destroyed.
+    ///
+    /// Returns [`FxfsError::NotFound`] if the object does not exist or is awaiting purge, and
+    /// [`FxfsError::NotSupported`] if it is not a regular file.
+    pub async fn open_file_by_id(
+        self: &Arc<Self>,
+        object_id: u64,
+    ) -> Result<OpenedNode<FxFile>, Error> {
+        let store = self.store();
+        let fs = store.filesystem();
+        // A read lock blocks the commit of any transaction that would modify the object,
+        // including deletion. So the object cannot be unlinked or purged while the checks below
+        // run.
+        let _guard = fs
+            .lock_manager()
+            .read_lock(lock_keys![LockKey::object(store.store_object_id(), object_id)])
+            .await;
+
+        match store.tree().find(&ObjectKey::object(object_id)).await? {
+            Some(ObjectItem {
+                value: ObjectValue::Object { kind: ObjectKind::File { .. }, .. },
+                ..
+            }) => {}
+            Some(_) => bail!(FxfsError::NotSupported),
+            None => bail!(FxfsError::NotFound),
+        }
+
+        // An object with no remaining links is kept alive solely by its graveyard entry, and is
+        // either awaiting purge or is an unnamed temporary file. Its object record is
+        // indistinguishable from that of a linked file, because `adjust_refs` leaves `refs` at one
+        // for objects in the graveyard, so the graveyard entry is the only way to tell them apart.
+        // TODO(https:///fxbug.dev/570648396): Consider adding a permanent in-memory copy of the
+        // graveyard to make this faster.
+        if matches!(
+            store
+                .tree()
+                .find_value(&ObjectKey::graveyard_entry(
+                    store.graveyard_directory_object_id(),
+                    object_id,
+                ))
+                .await?,
+            Some(ObjectValue::Some)
+        ) {
+            bail!(FxfsError::NotFound);
+        }
+
+        let node = self
+            .get_or_load_node(object_id, ObjectDescriptor::File, None)
+            .await
+            .map_err(|_| FxfsError::NotFound)?;
+        let Ok(file) = node.into_any().downcast::<FxFile>() else {
+            bail!(FxfsError::NotSupported);
+        };
+        // The open count must be taken before `_guard` is released. Once the open count is held,
+        // any later unlink defers the tombstone until the returned node is dropped.
+        file.into_opened_node().ok_or_else(|| FxfsError::NotFound.into())
+    }
+
     /// Marks the given directory deleted.
     pub fn mark_directory_deleted(&self, object_id: u64) {
         if let Some(node) = self.cache.get(object_id) {
@@ -514,7 +596,8 @@ impl FxVolume {
             return Ok(());
         }
         // If this fails, the graveyard should clean it up on next mount.
-        let txn_options = Options { borrow_metadata_space: true, ..Default::default() };
+        let txn_options =
+            Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() };
         self.store.tombstone_object(object_id, txn_options, truncate_guard).await?;
         Ok(())
     }

@@ -84,14 +84,19 @@ TEST_F(ErrInjTest, CheckIfErrInjCmdEnabledWorks) {
 
     const auto expected_status = ZX_ERR_SHOULD_WAIT;
     const auto expected_fw_err = BCME_BUSY;
-    sim->sim_fw->err_inj_.AddErrInjCmd(BRCMF_C_GET_RATE, expected_status, expected_fw_err);
+    const std::vector<uint8_t> expected_inj_data = {0};
+    sim->sim_fw->err_inj_.AddErrInjCmd(BRCMF_C_GET_RATE, expected_status, expected_fw_err,
+                                       ifp->ifidx, &expected_inj_data);
 
     zx_status_t status;
     bcme_status_t fw_err;
+    const std::vector<uint8_t>* inj_data = nullptr;
     ASSERT_TRUE(sim->sim_fw->err_inj_.CheckIfErrInjCmdEnabled(BRCMF_C_GET_RATE, &status, &fw_err,
-                                                              ifp->ifidx));
+                                                              &inj_data, ifp->ifidx));
     EXPECT_EQ(status, expected_status);
     EXPECT_EQ(fw_err, expected_fw_err);
+    ASSERT_NOT_NULL(inj_data);
+    EXPECT_EQ(*inj_data, expected_inj_data);
   });
 }
 

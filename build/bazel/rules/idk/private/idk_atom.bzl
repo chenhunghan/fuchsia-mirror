@@ -7,7 +7,11 @@
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@fuchsia_build_info//:args.bzl", "target_cpu", "warn_on_sdk_changes")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load("//build/bazel/rules:golden_files.bzl", "verify_golden_files")
 load("//build/bazel/rules/cc:providers.bzl", "PrebuiltLibraryInfo")
 load(
@@ -158,8 +162,7 @@ def _verify_supported_configuration_for_atom(ctx):
 
 def _get_current_cpu_arch(ctx):
     """Returns the CPU architecture of the current build."""
-    current_platform = ctx.attr._current_platform[CurrentPlatformInfo]
-    return current_platform.cpu
+    return get_current_platform_info(ctx).cpu
 
 def _get_prebuilt_libraries_dir_name(cpu_arch, target_api_level):
     """Returns the IDK directory name for prebuilt libraries."""
@@ -599,11 +602,7 @@ Possible values, from most restrictive to least restrictive:
         "_current_api_level": attr.label(
             default = "@//build/bazel/versioning:api_level",
         ),
-        "_current_platform": attr.label(
-            providers = [CurrentPlatformInfo],
-            default = "@//build/bazel:current_platform",
-        ),
-    },
+    } | CURRENT_PLATFORM_INFO_ATTRS,
 )
 
 def _idk_atom_impl(

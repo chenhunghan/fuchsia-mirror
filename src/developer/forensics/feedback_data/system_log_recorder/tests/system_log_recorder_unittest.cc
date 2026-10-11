@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include "src/developer/forensics/feedback_data/constants.h"
+#include "src/developer/forensics/feedback_data/system_log_recorder/disk_backed_logs_metadata.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/identity_decoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/identity_encoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/production_encoding.h"
@@ -56,12 +57,13 @@ TEST(Encoding, VerifyProductionEncoderDecoderVersion) {
   EXPECT_EQ(encoder.GetEncodingVersion(), decoder.GetEncodingVersion());
 }
 
-std::string BuildLogMessage(const std::string& message) {
+std::string BuildLogMessage(const std::string& message,
+                            const zx::duration timestamp_offset = zx::nsec(0)) {
   constexpr char fmt[] = R"JSON(
 [
   {
     "metadata": {
-      "timestamp": 15604000000000,
+      "timestamp": %ld,
       "severity": "INFO",
       "pid": 7559,
       "tid": 7687
@@ -77,7 +79,7 @@ std::string BuildLogMessage(const std::string& message) {
 ]
 )JSON";
 
-  return fxl::StringPrintf(fmt, message.c_str());
+  return fxl::StringPrintf(fmt, (zx::sec(15604) + timestamp_offset).to_nsecs(), message.c_str());
 }
 
 using SystemLogRecorderSingleDispatcherTest = UnitTestFixture;
@@ -135,8 +137,8 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   InjectServiceProvider(&archive, kArchiveAccessorName);
 
   files::ScopedTempDir temp_dir;
-  files::ScopedTempDir metadata_dir;
-  const std::string metadata_path = files::JoinPath(metadata_dir.path(), "metadata.json");
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
 
   const StorageSize kWriteSize = kMaxLogLineSize * 2 + kDroppedFormatStrSize;
 
@@ -144,7 +146,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
                              SystemLogRecorder::WriteParameters{
                                  .period = kWriterPeriod,
                                  .max_write_size = kWriteSize,
-                                 .logs_dir = temp_dir.path(),
+                                 .logs_dir = logs_dir,
                                  .max_num_files = 2u,
                                  .total_log_size = 2u * kWriteSize,
                                  .metadata_path = metadata_path,
@@ -164,7 +166,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -178,7 +180,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -193,7 +195,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -209,7 +211,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 8
@@ -224,7 +226,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 8
@@ -240,7 +242,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SmokeTest) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 8
@@ -297,8 +299,8 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SingleThreaded_Flush) {
   InjectServiceProvider(&archive, kArchiveAccessorName);
 
   files::ScopedTempDir temp_dir;
-  files::ScopedTempDir metadata_dir;
-  const std::string metadata_path = files::JoinPath(metadata_dir.path(), "metadata.json");
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
 
   const std::string kFlushStr = "FLUSH\n";
 
@@ -309,7 +311,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SingleThreaded_Flush) {
                              SystemLogRecorder::WriteParameters{
                                  .period = kWriterPeriod,
                                  .max_write_size = kWriteSize,
-                                 .logs_dir = temp_dir.path(),
+                                 .logs_dir = logs_dir,
                                  .max_num_files = 2u,
                                  .total_log_size = 2u * kWriteSize,
                                  .metadata_path = metadata_path,
@@ -340,7 +342,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, SingleThreaded_Flush) {
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -356,7 +358,7 @@ FLUSH
   {
     float compression_ratio;
     const fit::result<ReaderError, std::string> result =
-        Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+        Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
     ASSERT_TRUE(result.is_ok());
     EXPECT_EQ(compression_ratio, 1.0);
     EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -388,8 +390,8 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, MultipleFlushes) {
   InjectServiceProvider(&archive, kArchiveAccessorName);
 
   files::ScopedTempDir temp_dir;
-  files::ScopedTempDir metadata_dir;
-  const std::string metadata_path = files::JoinPath(metadata_dir.path(), "metadata.json");
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
 
   const std::string kFlushStr1 = "FLUSH 1\n";
   const std::string kFlushStr2 = "FLUSH 2\n";
@@ -401,7 +403,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, MultipleFlushes) {
                              SystemLogRecorder::WriteParameters{
                                  .period = kWriterPeriod,
                                  .max_write_size = kWriteSize,
-                                 .logs_dir = temp_dir.path(),
+                                 .logs_dir = logs_dir,
                                  .max_num_files = 2u,
                                  .total_log_size = 2u * kWriteSize,
                                  .metadata_path = metadata_path,
@@ -427,7 +429,7 @@ TEST_F(SystemLogRecorderSingleDispatcherTest, MultipleFlushes) {
 
   float compression_ratio;
   const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+      Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
   ASSERT_TRUE(result.is_ok());
   EXPECT_EQ(compression_ratio, 1.0);
   EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
@@ -463,8 +465,8 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, RecordsLogs) {
   InjectServiceProvider(&archive, kArchiveAccessorName);
 
   files::ScopedTempDir temp_dir;
-  files::ScopedTempDir metadata_dir;
-  const std::string metadata_path = files::JoinPath(metadata_dir.path(), "metadata.json");
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
 
   const StorageSize kWriteSize = kMaxLogLineSize * 2;
 
@@ -472,7 +474,7 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, RecordsLogs) {
                              SystemLogRecorder::WriteParameters{
                                  .period = kWriterPeriod,
                                  .max_write_size = kWriteSize,
-                                 .logs_dir = temp_dir.path(),
+                                 .logs_dir = logs_dir,
                                  .max_num_files = 2u,
                                  .total_log_size = 2u * kWriteSize,
                                  .metadata_path = metadata_path,
@@ -489,7 +491,7 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, RecordsLogs) {
 
   float compression_ratio;
   const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+      Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
   ASSERT_TRUE(result.is_ok());
   EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
 [15604.000][07559][07687][] INFO: line 1
@@ -842,6 +844,176 @@ TEST_F(SystemLogRecorderMultiDispatcherTest, ResumesPersistingAfterCachePurge) {
   EXPECT_THAT(*result, HasSubstr("line 3"));
   EXPECT_THAT(*result, HasSubstr("line 4"));
   EXPECT_THAT(*result, HasSubstr("line 5"));
+}
+
+TEST_F(SystemLogRecorderMultiDispatcherTest, RestartWritesMessageAndAppendsLogs) {
+  std::unique_ptr<async::LoopInterface> write_loop = test_loop().StartNewLoop();
+
+  const zx::duration kArchivePeriod = zx::msec(750);
+  const zx::duration kWriterPeriod = zx::sec(1);
+
+  const std::vector<std::string> first_batch({
+      BuildLogMessage("line 0", zx::sec(0)),
+      BuildLogMessage("line 1", zx::sec(1)),
+  });
+  const std::vector<std::string> second_batch({
+      BuildLogMessage("line 0", zx::sec(0)),
+      BuildLogMessage("line 1", zx::sec(1)),
+      BuildLogMessage("line 2", zx::sec(2)),
+      BuildLogMessage("line 3", zx::sec(3)),
+  });
+
+  std::vector<std::unique_ptr<stubs::DiagnosticsBatchIteratorBase>> iterators;
+  iterators.push_back(
+      std::make_unique<stubs::DiagnosticsBatchIteratorNeverRespondsAfterOneBatch>(first_batch));
+  iterators.push_back(
+      std::make_unique<stubs::DiagnosticsBatchIteratorNeverRespondsAfterOneBatch>(second_batch));
+
+  stubs::DiagnosticsArchiveSequentialIterators archive(dispatcher(), std::move(iterators));
+  InjectServiceProvider(&archive, kArchiveAccessorName);
+
+  files::ScopedTempDir temp_dir;
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
+  const StorageSize kWriteSize = StorageSize::Kilobytes(1);
+
+  {
+    SystemLogRecorder recorder(dispatcher(), write_loop->dispatcher(), services(),
+                               SystemLogRecorder::WriteParameters{
+                                   .period = kWriterPeriod,
+                                   .max_write_size = kWriteSize,
+                                   .logs_dir = logs_dir,
+                                   .max_num_files = 4u,
+                                   .total_log_size = 4u * kWriteSize,
+                                   .metadata_path = metadata_path,
+                                   .fallback_buffer_size = kFallbackLogBufferSize,
+                               },
+                               std::make_unique<IdentityRedactor>(inspect::BoolProperty()),
+                               std::make_unique<ProductionEncoder>(),
+                               std::make_unique<ProductionDecoder>());
+    recorder.Start();
+
+    // Run the loop just long enough to write the first batch.
+    RunLoopFor(kArchivePeriod);
+    RunLoopFor(kWriterPeriod);
+  }
+
+  RunLoopUntilIdle();
+
+  {
+    SystemLogRecorder recorder(dispatcher(), write_loop->dispatcher(), services(),
+                               SystemLogRecorder::WriteParameters{
+                                   .period = kWriterPeriod,
+                                   .max_write_size = kWriteSize,
+                                   .logs_dir = logs_dir,
+                                   .max_num_files = 4u,
+                                   .total_log_size = 4u * kWriteSize,
+                                   .metadata_path = metadata_path,
+                                   .fallback_buffer_size = kFallbackLogBufferSize,
+                               },
+                               std::make_unique<IdentityRedactor>(inspect::BoolProperty()),
+                               std::make_unique<ProductionEncoder>(),
+                               std::make_unique<ProductionDecoder>());
+    recorder.Start();
+
+    RunLoopFor(kArchivePeriod);
+    RunLoopFor(kWriterPeriod);
+  }
+
+  ProductionDecoder decoder;
+  float compression_ratio;
+  const fit::result<ReaderError, std::string> result =
+      Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
+[15605.000][07559][07687][] INFO: line 1
+!!! MESSAGES MAY BE MISSING BECAUSE LOG PERSISTENCE STOPPED !!!
+[15606.000][07559][07687][] INFO: line 2
+[15607.000][07559][07687][] INFO: line 3
+)");
+
+  const std::optional<DiskBackedLogsMetadata> metadata =
+      DiskBackedLogsMetadata::FromFile(metadata_path, SystemLogWriter::kFirstFileNumber);
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_EQ(metadata->MessageCount(), 4u);
+  EXPECT_EQ(metadata->DeduplicatedMessageCount(), 4u);
+}
+
+TEST_F(SystemLogRecorderMultiDispatcherTest, RestartResumesPersistingAfterCachePurge) {
+  std::unique_ptr<async::LoopInterface> write_loop = test_loop().StartNewLoop();
+
+  const zx::duration kArchivePeriod = zx::msec(750);
+  const zx::duration kWriterPeriod = zx::sec(1);
+
+  // Use substrings of the restart message ("!!! MESSAGES MAY BE MISSING BECAUSE LOG PERSISTENCE
+  // STOPPED !!!\n"), which is encoded into the LZ4 stream dictionary during `Start()` and then
+  // discarded when the writer detects the cache purge. If the encoder's dictionary is not reset
+  // upon detecting the purge, LZ4 will compress these messages as back-references to the discarded
+  // restart message and decompression of the new file will fail.
+  const std::vector<std::vector<std::string>> json_batches({
+      {
+          BuildLogMessage("MESSAGES MAY BE MISSING", zx::sec(0)),
+          BuildLogMessage("LOG PERSISTENCE STOPPED", zx::sec(1)),
+      },
+      {},
+  });
+
+  stubs::DiagnosticsArchive archive(
+      dispatcher(),
+      std::make_unique<stubs::DiagnosticsBatchIteratorDelayedBatches>(
+          dispatcher(), json_batches, kWriterPeriod, kArchivePeriod, /*strict=*/false));
+  InjectServiceProvider(&archive, kArchiveAccessorName);
+
+  files::ScopedTempDir temp_dir;
+  const std::string logs_dir = files::JoinPath(temp_dir.path(), "logs");
+  const std::string metadata_path = files::JoinPath(temp_dir.path(), "metadata.json");
+  ASSERT_TRUE(files::CreateDirectory(logs_dir));
+
+  const DiskBackedLogsMetadata initial_metadata(
+      {
+          {
+              SystemLogWriter::kFirstFileNumber,
+              LogStats(/*message_count=*/1, /*deduplicated_message_count=*/1,
+                       /*first_timestamp=*/zx::time_boot(zx::sec(15604).to_nsecs()),
+                       /*last_timestamp=*/zx::time_boot(zx::sec(15605).to_nsecs())),
+          },
+      },
+      SystemLogWriter::kFirstFileNumber);
+  ASSERT_TRUE(initial_metadata.ToFile(metadata_path));
+
+  const StorageSize kWriteSize = StorageSize::Kilobytes(1);
+
+  SystemLogRecorder recorder(dispatcher(), write_loop->dispatcher(), services(),
+                             SystemLogRecorder::WriteParameters{
+                                 .period = kWriterPeriod,
+                                 .max_write_size = kWriteSize,
+                                 .logs_dir = logs_dir,
+                                 .max_num_files = 4u,
+                                 .total_log_size = 4u * kWriteSize,
+                                 .metadata_path = metadata_path,
+                                 .fallback_buffer_size = kFallbackLogBufferSize,
+                             },
+                             std::make_unique<IdentityRedactor>(inspect::BoolProperty()),
+                             std::make_unique<ProductionEncoder>(),
+                             std::make_unique<ProductionDecoder>());
+
+  // Allow SystemLogWriter constructor to run on write_loop, then simulate a cache purge before
+  // Start() writes the restart message.
+  RunLoopUntilIdle();
+  ASSERT_TRUE(files::DeletePath(temp_dir.path(), /*recursive=*/true));
+
+  recorder.Start();
+  RunLoopFor(kWriterPeriod);
+  RunLoopFor(kWriterPeriod);
+
+  ProductionDecoder decoder;
+  float compression_ratio;
+  const fit::result<ReaderError, std::string> result =
+      Concatenate(logs_dir, kMaxDecompressedSize, &decoder, &compression_ratio);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: MESSAGES MAY BE MISSING
+[15605.000][07559][07687][] INFO: LOG PERSISTENCE STOPPED
+)");
 }
 
 }  // namespace

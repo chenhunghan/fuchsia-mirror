@@ -6,6 +6,8 @@
 #include <lib/io.h>
 #include <lib/jtrace/jtrace.h>
 
+#include <kernel/ffi.h>
+
 #include "jtrace_internal.h"
 
 namespace jtrace {
@@ -306,3 +308,15 @@ STATIC_COMMAND_START
 STATIC_COMMAND("jtrace", "dump the current or recovered jtrace", &cmd_jtrace)
 STATIC_COMMAND_END(jtrace)
 #endif
+
+extern "C" {
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_jtrace_set_location(void* ptr, size_t len) {
+  jtrace_set_location(ptr, len);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_jtrace_dump_current() { jtrace_dump(jtrace::TraceBufferType::Current); }
+
+}  // extern "C"

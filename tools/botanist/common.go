@@ -37,12 +37,11 @@ type Experiment string
 
 const (
 	UseFFXTestParallel Experiment = "use_ffx_test_parallel"
-	UseFFXMonitor      Experiment = "use_ffx_monitor"
 	ForceFFXUSB        Experiment = "force_ffx_usb"
 	UseFFXRepository   Experiment = "use_ffx_repository"
 )
 
-var SupportedExperiments = []Experiment{UseFFXTestParallel, UseFFXMonitor, ForceFFXUSB, UseFFXRepository}
+var SupportedExperiments = []Experiment{UseFFXTestParallel, ForceFFXUSB, UseFFXRepository}
 
 // GetLoggerCtx returns a new context with the logger of the provided ctx.
 func GetLoggerCtx(ctx context.Context) context.Context {

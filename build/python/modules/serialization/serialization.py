@@ -270,6 +270,7 @@ def _parse_value_into(
             result: dict[str, Any] = {}
             for key, dict_value in value.items():
                 key = _parse_value_into(key, dict_key_type)
+                assert isinstance(key, str)
                 result[key] = _parse_value_into(dict_value, dict_value_type)
             return result
         else:
@@ -316,10 +317,6 @@ def _parse_value_into(
             raise TypeError(
                 f"cannot parse {cls} from a non-list value ({type(value)})"
             )
-
-    elif _has_field_types(cls):
-        # Create an object from this value
-        return instance_from_dict(cls, value)
 
     elif (
         typing.get_origin(cls) is Union
@@ -374,21 +371,13 @@ def _parse_value_into(
             f"Unable to create an instance of {cls}, from {value}: {errors}"
         )
 
+    elif typing.get_type_hints(cls):
+        # Create an object from this value
+        return instance_from_dict(cls, value)
+
     else:
         # It's probably a simple type, so directly instantiate it
         return cls(value)
-
-
-def _has_field_types(cls: type[Any]) -> bool:
-    """Returns True if the class in question has member field type annotations.
-
-    This is akin to [`typing.get_type_hints()`], except that this doesn't raise
-    any errors on types that don't support annotations at all (like ['Union']).
-    """
-    for name, value in inspect.getmembers(cls):
-        if name == "__annotations__":
-            return True
-    return False
 
 
 ####
@@ -458,7 +447,7 @@ def make_dict_value_for(obj: Any) -> dict[str, Any] | list[Any] | str | int:
         # representation the set's contents are sorted when creating the list.
         return [make_dict_value_for(value) for value in sorted(obj)]
 
-    elif _has_field_types(type(obj)):
+    elif typing.get_type_hints(type(obj)):
         # It's something else, and it has field type annotations, so let's use
         # those to get a dictionary.
         return instance_to_dict(obj)

@@ -10,7 +10,7 @@ import re
 
 import dhcp_testing
 import fuchsia_wlan_base_test
-from antlion.controllers.ap_lib import dhcp_config
+from legacy_access_point.ap_lib import dhcp_config
 from mobly import asserts, test_runner
 from openwrt_access_point.lib.dhcp_config import DhcpConfig, Lan
 

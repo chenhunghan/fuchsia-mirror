@@ -134,6 +134,32 @@ TEST(SystemSuspend, TimeoutIsPast) {
   VerifyTimeout();
 }
 
+// ZX_SYSTEM_SUSPEND_OPTION_DEEP is a request, not a requirement, so it must be accepted (on its
+// own) even on systems which do not support deep suspend.
+TEST(SystemSuspend, DeepOption) {
+  NEEDS_NEXT_SKIP(zx_system_suspend_enter);
+
+  const zx::result resource_result = GetSystemCpuResource();
+  ASSERT_OK(resource_result.status_value());
+
+  // With a deadline in the past, the call should behave just as it does without the option.
+  zx_wake_source_report_header_t hdr{};
+  std::array<zx_wake_source_report_entry_t, 4> entries{};
+  uint32_t actual_entries = 0;
+  EXPECT_OK(zx_system_suspend_enter(resource_result->get(), ZX_TIME_INFINITE_PAST,
+                                    ZX_SYSTEM_SUSPEND_OPTION_DEEP, &hdr, entries.data(),
+                                    entries.size(), &actual_entries));
+  ASSERT_LE(actual_entries, entries.size());
+  bool found_timeout = false;
+  for (uint32_t i = 0; i < actual_entries; ++i) {
+    if (entries[i].koid == ZX_KOID_KERNEL) {
+      found_timeout = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_timeout);
+}
+
 TEST(SystemSuspend, SuspendAndResumeByTimer) {
   NEEDS_NEXT_SKIP(zx_system_suspend_enter);
 

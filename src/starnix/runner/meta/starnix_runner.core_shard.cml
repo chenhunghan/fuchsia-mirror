@@ -225,6 +225,7 @@
                 "fuchsia.hardware.adb.Service",
                 "fuchsia.hardware.cpu.ctrl.Service",
                 "fuchsia.hardware.google.nanohub.StarnixDataChannelService",
+                "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.power.stats.Service",
             ],
             from: "parent",

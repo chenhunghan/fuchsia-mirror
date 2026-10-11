@@ -1,1 +1,2 @@
-sbalana@google.com
+include /src/connectivity/wlan/OWNERS
+include /src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/OWNERS

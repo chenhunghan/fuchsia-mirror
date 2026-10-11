@@ -19,6 +19,8 @@ rustc_library("fidl-fuchsia-update-installer-ext") {
     "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
     "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_fdomain",
     "//src/sys/pkg/lib/event-queue",
+    "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
+    "//third_party/cobalt/src/lib/client/rust:cobalt-client",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:http",
     "//third_party/rust_crates:log",

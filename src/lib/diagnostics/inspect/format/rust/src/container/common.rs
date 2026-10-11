@@ -115,7 +115,7 @@ impl BlockContainer for Vec<u8> {
     /// The number of bytes in the buffer.
     #[inline]
     fn len(&self) -> usize {
-        self.as_slice().len()
+        self.len()
     }
 }
 

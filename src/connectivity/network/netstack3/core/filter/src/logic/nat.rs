@@ -22,7 +22,7 @@ use rand::RngExt as _;
 
 use crate::FilterBindingsContext;
 use crate::conntrack::{
-    CompatibleWith, Connection, ConnectionDirection, ConnectionExclusive, Table, TransportProtocol,
+    CompatibleWith, Connection, ConnectionDirection, ConnectionExclusive, Table, TransportTuple,
     Tuple,
 };
 use crate::context::{FilterBindingsTypes, NatContext};
@@ -902,11 +902,7 @@ where
         (range, true)
     } else {
         let reply_tuple = conn.reply_tuple();
-        let Some(range) =
-            similar_port_or_id_range(reply_tuple.protocol, reply_tuple.dst_port_or_id)
-        else {
-            return Verdict::Stop(DropPacket);
-        };
+        let range = similar_port_or_id_range(reply_tuple.transport, ReplyTuplePort::Destination);
         (range, false)
     };
     rewrite_reply_tuple_port(
@@ -927,23 +923,24 @@ where
 /// The heuristics used in this function are chosen to roughly match those used
 /// by Netstack2/gVisor and Linux.
 fn similar_port_or_id_range(
-    protocol: TransportProtocol,
-    port_or_id: u16,
-) -> Option<RangeInclusive<NonZeroU16>> {
-    match protocol {
-        TransportProtocol::Tcp | TransportProtocol::Udp => Some(match port_or_id {
-            _ if port_or_id < 512 => NonZeroU16::MIN..=NonZeroU16::new(511).unwrap(),
-            _ if port_or_id < 1024 => NonZeroU16::MIN..=NonZeroU16::new(1023).unwrap(),
-            _ => NonZeroU16::new(1024).unwrap()..=NonZeroU16::MAX,
-        }),
-        // TODO(https://fxbug.dev/341128580): allow rewriting ICMP echo ID to zero.
-        TransportProtocol::Icmp => Some(NonZeroU16::MIN..=NonZeroU16::MAX),
-        TransportProtocol::Other(p) => {
-            error!(
-                "cannot rewrite port or ID of unsupported transport protocol {p}; dropping packet"
-            );
-            None
+    transport: TransportTuple,
+    which_port: ReplyTuplePort,
+) -> RangeInclusive<NonZeroU16> {
+    match transport {
+        TransportTuple::Tcp { src_port, dst_port, .. }
+        | TransportTuple::Udp { src_port, dst_port, .. } => {
+            let port = match which_port {
+                ReplyTuplePort::Source => src_port,
+                ReplyTuplePort::Destination => dst_port,
+            };
+            match port {
+                _ if port < 512 => NonZeroU16::MIN..=NonZeroU16::new(511).unwrap(),
+                _ if port < 1024 => NonZeroU16::MIN..=NonZeroU16::new(1023).unwrap(),
+                _ => NonZeroU16::new(1024).unwrap()..=NonZeroU16::MAX,
+            }
         }
+        // TODO(https://fxbug.dev/341128580): allow rewriting ICMP echo ID to zero.
+        TransportTuple::IcmpEcho { .. } => NonZeroU16::MIN..=NonZeroU16::MAX,
     }
 }
 
@@ -979,8 +976,8 @@ where
     // conflicts with another connection in the table, or if the port must be
     // rewritten to fall in the specified range.
     let current_port = match which_port {
-        ReplyTuplePort::Source => conn.reply_tuple().src_port_or_id,
-        ReplyTuplePort::Destination => conn.reply_tuple().dst_port_or_id,
+        ReplyTuplePort::Source => conn.reply_tuple().transport.src_port_or_id(),
+        ReplyTuplePort::Destination => conn.reply_tuple().transport.dst_port_or_id(),
     };
     let already_in_range = !ensure_port_in_range
         || NonZeroU16::new(current_port).map(|port| port_range.contains(&port)).unwrap_or(false);
@@ -1174,12 +1171,12 @@ where
                 NatType::Destination => rewrite_packet_for_src_nat(
                     &mut inner_packet,
                     tuple.src_addr,
-                    tuple.src_port_or_id,
+                    tuple.transport.src_port_or_id(),
                 ),
                 NatType::Source => rewrite_packet_for_dst_nat(
                     &mut inner_packet,
                     tuple.dst_addr,
-                    tuple.dst_port_or_id,
+                    tuple.transport.dst_port_or_id(),
                 ),
             };
 
@@ -1239,9 +1236,11 @@ where
 
     match nat {
         NatType::Destination => {
-            rewrite_packet_for_dst_nat(packet, tuple.src_addr, tuple.src_port_or_id)
+            rewrite_packet_for_dst_nat(packet, tuple.src_addr, tuple.transport.src_port_or_id())
         }
-        NatType::Source => rewrite_packet_for_src_nat(packet, tuple.dst_addr, tuple.dst_port_or_id),
+        NatType::Source => {
+            rewrite_packet_for_src_nat(packet, tuple.dst_addr, tuple.transport.dst_port_or_id())
+        }
     }
 }
 
@@ -1257,7 +1256,7 @@ mod tests {
     use netstack3_base::testutil::FakeMatcherDeviceId;
     use netstack3_base::{
         IntoCoreTimerCtx, Mark, MarkDomain, MarkMatcher, MarkMatchers, Marks,
-        NetworkSerializationContext, TimerContext,
+        NetworkSerializationContext, PacketType, TimerContext,
     };
     use packet::{EmptyBuf, NestablePacketBuilder as _, NestableSerializer as _, Serializer};
     use packet_formats::ip::{IpPacketBuilder, IpProto};
@@ -1684,7 +1683,8 @@ mod tests {
             }],
         };
 
-        let mut metadata = FakePacketMetadata::new(Marks::new([(MarkDomain::Mark1, 100)]));
+        let mut metadata =
+            FakePacketMetadata::new(Marks::new([(MarkDomain::Mark1, 100)]), PacketType::OtherHost);
         assert_eq!(
             configure_nat::<LocalEgressHook, _, _, _, _, _>(
                 &mut core_ctx,
@@ -1988,7 +1988,7 @@ mod tests {
         assert_eq!(conn.original_tuple(), &original);
         let mut reply = Tuple { src_addr: redirect_addr, ..original.invert() };
         if let Some(port) = dst_port {
-            reply.src_port_or_id = port.get();
+            reply.transport.set_src_port_or_id(port.get());
         }
         assert_eq!(conn.reply_tuple(), &reply);
 
@@ -2082,7 +2082,7 @@ mod tests {
         assert_eq!(conn.original_tuple(), &original);
         let mut reply = Tuple { dst_addr: I::SRC_IP_2, ..original.invert() };
         if let Some(port) = src_port {
-            reply.dst_port_or_id = port.get();
+            reply.transport.set_dst_port_or_id(port.get());
         }
         assert_eq!(conn.reply_tuple(), &reply);
 
@@ -2171,8 +2171,8 @@ mod tests {
         );
         let reply_tuple = conn.reply_tuple();
         assert_eq!(reply_tuple.dst_addr, I::SRC_IP_2);
-        assert_ne!(reply_tuple.dst_port_or_id, src_port);
-        assert!(expected_range.contains(&reply_tuple.dst_port_or_id));
+        assert_ne!(reply_tuple.transport.dst_port_or_id(), src_port);
+        assert!(expected_range.contains(&reply_tuple.transport.dst_port_or_id()));
     }
 
     #[ip_test(I)]
@@ -2642,11 +2642,8 @@ mod tests {
         assert_eq!(conn.external_data().source.get(), None, "SNAT should not be configured");
         assert_eq!(conn.original_tuple(), &original_tuple);
 
-        let reply_tuple = Tuple {
-            src_addr: redirect_addr,
-            src_port_or_id: LOCAL_PORT.get(),
-            ..original_tuple.invert()
-        };
+        let mut reply_tuple = Tuple { src_addr: redirect_addr, ..original_tuple.invert() };
+        reply_tuple.transport.set_src_port_or_id(LOCAL_PORT.get());
         assert_eq!(conn.reply_tuple(), &reply_tuple);
 
         let mut error_packet = IE::make_serializer(
@@ -2803,19 +2800,16 @@ mod tests {
         );
         assert_eq!(conn.external_data().source.get(), None, "SNAT should not be configured");
         assert_eq!(conn.original_tuple(), &original_tuple);
-        let reply_tuple = Tuple {
-            src_addr: redirect_addr,
-            src_port_or_id: LOCAL_PORT.get(),
-            ..original_tuple.invert()
-        };
+        let mut reply_tuple = Tuple { src_addr: redirect_addr, ..original_tuple.invert() };
+        reply_tuple.transport.set_src_port_or_id(LOCAL_PORT.get());
         assert_eq!(conn.reply_tuple(), &reply_tuple);
 
         let mut reply_packet = EmptyBuf
             .wrap_in(UdpPacketBuilder::new(
                 reply_tuple.src_addr,
                 reply_tuple.dst_addr,
-                Some(NonZeroU16::new(reply_tuple.src_port_or_id).unwrap()),
-                NonZeroU16::new(reply_tuple.dst_port_or_id).unwrap(),
+                Some(NonZeroU16::new(reply_tuple.transport.src_port_or_id()).unwrap()),
+                NonZeroU16::new(reply_tuple.transport.dst_port_or_id()).unwrap(),
             ))
             .wrap_in(I::PacketBuilder::new(
                 reply_tuple.src_addr,
@@ -3027,11 +3021,8 @@ mod tests {
         );
         assert_eq!(conn.external_data().destination.get(), None, "DNAT should not be configured");
         assert_eq!(conn.original_tuple(), &original_tuple);
-        let reply_tuple = Tuple {
-            dst_addr: I::NETSTACK,
-            dst_port_or_id: LOCAL_PORT.get(),
-            ..original_tuple.invert()
-        };
+        let mut reply_tuple = Tuple { dst_addr: I::NETSTACK, ..original_tuple.invert() };
+        reply_tuple.transport.set_dst_port_or_id(LOCAL_PORT.get());
         assert_eq!(conn.reply_tuple(), &reply_tuple);
 
         // The packet sent from S -> D was invalid and triggered an ICMP error
@@ -3174,11 +3165,8 @@ mod tests {
         );
         assert_eq!(conn.external_data().destination.get(), None, "DNAT should not be configured");
         assert_eq!(conn.original_tuple(), &original_tuple);
-        let reply_tuple = Tuple {
-            dst_addr: I::NETSTACK,
-            dst_port_or_id: LOCAL_PORT.get(),
-            ..original_tuple.invert()
-        };
+        let mut reply_tuple = Tuple { dst_addr: I::NETSTACK, ..original_tuple.invert() };
+        reply_tuple.transport.set_dst_port_or_id(LOCAL_PORT.get());
         assert_eq!(conn.reply_tuple(), &reply_tuple);
 
         // When a reply to the original packet arrives at INGRESS, it should
@@ -3188,8 +3176,8 @@ mod tests {
             .wrap_in(UdpPacketBuilder::new(
                 reply_tuple.src_addr,
                 reply_tuple.dst_addr,
-                Some(NonZeroU16::new(reply_tuple.src_port_or_id).unwrap()),
-                NonZeroU16::new(reply_tuple.dst_port_or_id).unwrap(),
+                Some(NonZeroU16::new(reply_tuple.transport.src_port_or_id()).unwrap()),
+                NonZeroU16::new(reply_tuple.transport.dst_port_or_id()).unwrap(),
             ))
             .wrap_in(I::PacketBuilder::new(
                 reply_tuple.src_addr,

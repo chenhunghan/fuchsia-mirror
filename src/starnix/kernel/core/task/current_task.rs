@@ -11,11 +11,10 @@ use crate::signals::{SignalDetail, SignalInfo, send_signal_first, send_standard_
 use crate::task::loader::{
     ResolvedProgram, load_executable, resolve_elf_interpreter, resolve_executable,
 };
-use crate::task::waiter::WaiterOptions;
 use crate::task::{
     CurrentTaskCredentialsWriteGuard, ExitStatus, PageFaultExceptionReport, RobustListHeadPtr,
     RunState, SeccompFilter, SeccompFilterContainer, SeccompState, SeccompStateValue, Task,
-    TaskFlags, TaskRunningState, ThreadState, Waiter,
+    TaskRunningState, ThreadState, Waiter,
 };
 use crate::vfs::{
     AccessCheck, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle, FileMapping,
@@ -34,8 +33,8 @@ use starnix_task_command::TaskCommand;
 use starnix_types::futex_address::FutexAddress;
 use starnix_types::ownership::{Releasable, release_on_error};
 use starnix_uapi::auth::{
-    CAP_KILL, CAP_SYS_ADMIN, CAP_SYS_PTRACE, Credentials, FsCred, PTRACE_MODE_FSCREDS,
-    PTRACE_MODE_REALCREDS, PtraceAccessMode,
+    CAP_KILL, CAP_SYS_ADMIN, Credentials, FsCred, PTRACE_MODE_FSCREDS, PTRACE_MODE_REALCREDS,
+    PtraceAccessMode,
 };
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
@@ -455,11 +454,7 @@ impl CurrentTask {
     where
         F: FnOnce(&CurrentTask) -> Result<T, Errno>,
     {
-        {
-            let mut state = self.write();
-            state.set_flags(TaskFlags::TEMPORARY_SIGNAL_MASK, true);
-            state.set_temporary_signal_mask(signal_mask);
-        }
+        self.write().set_temporary_signal_mask(signal_mask);
         wait_function(self)
     }
 
@@ -551,15 +546,12 @@ impl CurrentTask {
             let mut state = self.write();
             assert!(!state.is_blocked());
 
-            if matches!(run_state, RunState::Frozen(_)) {
-                // Freeze is a kernel signal and is handled before other user signals. A frozen task
-                // ignores all other signals except SIGKILL until it is thawed.
+            if run_state.ignores_signals() {
+                // Tasks frozen or stopped ignore all other signals except SIGKILL.
                 if state.has_signal_pending(SIGKILL) {
                     return error!(EINTR);
                 }
-            } else if state.is_any_signal_pending() && !state.is_ptrace_listening() {
-                // A note on PTRACE_LISTEN - the thread cannot be scheduled
-                // regardless of pending signals.
+            } else if state.is_any_signal_pending() {
                 return error!(EINTR);
             }
             state.set_run_state(run_state.clone());
@@ -1191,7 +1183,7 @@ impl CurrentTask {
             //   under PR_SET_DUMPABLE in prctl(2).
             let dumpable =
                 if resolved_program.secure_exec { DumpPolicy::Disable } else { DumpPolicy::User };
-            *mm.dumpable.lock() = dumpable;
+            mm.dumpable.store(dumpable);
 
             state.set_sigaltstack(None);
             state.robust_list_head = RobustListHeadPtr::null(self);
@@ -1684,8 +1676,6 @@ impl CurrentTask {
                 } else {
                     self.thread_group().signal_actions.fork()
                 };
-                let process_group = thread_group_state.process_group.clone();
-
                 let task_info = {
                     fuchsia_trace::duration!(CATEGORY_STARNIX, "create_zircon_process");
                     create_zircon_process(
@@ -1693,7 +1683,6 @@ impl CurrentTask {
                         Some(thread_group_state),
                         pid.clone(),
                         child_exit_signal,
-                        process_group,
                         signal_actions,
                         command.clone(),
                     )?
@@ -1728,6 +1717,11 @@ impl CurrentTask {
             abstract_vsock_namespace = running_state.abstract_vsock_namespace.clone();
         }
 
+        let (pgid_pid, sid_pid) = {
+            let tg_state = thread_group.read();
+            (tg_state.process_group.clone(), tg_state.session.clone())
+        };
+
         let mut child = TaskBuilder::new(Task::new(
             pid,
             command,
@@ -1757,7 +1751,6 @@ impl CurrentTask {
             // and removing it from the pids table itself requires the pids lock, so an early exit
             // would cause a self deadlock.
             pids.add_task(Arc::clone(&child.task));
-            std::mem::drop(pids);
 
             // Child lock must be taken before this lock. Drop the lock on the task, take a writable
             // lock on the child and take the current state back.
@@ -1778,14 +1771,31 @@ impl CurrentTask {
 
             if clone_thread {
                 self.thread_group().add(Arc::clone(&child.task))?;
+                std::mem::drop(pids);
             } else {
                 child.thread_group().add(Arc::clone(&child.task))?;
+                pids.attach_pgid(&pgid_pid, child.thread_group());
+                pids.attach_sid(&sid_pid, child.thread_group());
+                std::mem::drop(pids);
+
+                // Inherit `controlling_terminal` from the parent now that `child` is attached to
+                // `sid_pid`. Holding `child.thread_group().write()` across `terminal.read()`
+                // ensures any concurrent terminal disassociation or steal either already updated
+                // `terminal.write()` before this check or visits `child` afterward in
+                // `sid_thread_groups`.
+                if let Some(ct) = self.thread_group().controlling_terminal() {
+                    let mut child_state = child.thread_group().write();
+                    if child_state.session == sid_pid
+                        && ct.terminal.read().controlling_session() == Some(&sid_pid)
+                    {
+                        child_state.controlling_terminal = Some(ct);
+                    }
+                }
 
                 // These manipulations of the signal handling state appear to be related to
-                // CLONE_SIGHAND and CLONE_VM rather than CLONE_THREAD. However, we do not support
-                // all the combinations of these flags, which means doing these operations here
-                // might actually be correct. However, if you find a test that fails because of the
-                // placement of this logic here, we might need to move it.
+                // CLONE_SIGHAND and CLONE_VM rather than CLONE_THREAD. However, Starnix does not
+                // support all combinations of these flags, so performing these operations here
+                // might be sufficient unless a test requires moving this logic.
                 let (sigaltstack, signal_mask) = {
                     let state = self.read();
                     (state.sigaltstack(), state.signal_mask())
@@ -1796,8 +1806,8 @@ impl CurrentTask {
             }
 
             if !clone_vm {
-                // We do not support running threads in the same process with different
-                // MemoryManagers.
+                // Running threads in the same process with different MemoryManagers is not
+                // supported.
                 assert!(!clone_thread);
                 let child_mm = MemoryManager::snapshot_of(
                     &self.mm()?,
@@ -1857,7 +1867,6 @@ impl CurrentTask {
     pub fn set_stopped_and_notify(&self, stopped: StopState, siginfo: Option<SignalInfo>) {
         let maybe_signal_info = {
             let mut state = self.write();
-            state.copy_state_from(self);
             state.set_stopped(stopped, siginfo, Some(self), None);
             state.prepare_signal_info(stopped)
         };
@@ -1887,28 +1896,24 @@ impl CurrentTask {
     /// Returns true if the task was stopped and blocked (and has now woken up),
     /// or false if it was not stopped and returned immediately.
     pub fn block_if_stopped(&mut self) -> bool {
-        if self.finalize_stop_state() {
-            self.block_while_stopped();
-            true
-        } else {
-            false
+        if !self.finalize_stop_state() {
+            return false;
         }
-    }
+        self.block_while_stopped();
 
-    /// If the task is stopping, set it as stopped. return whether the caller
-    /// should stop.  The task might also be waking up.
-    fn finalize_stop_state(&mut self) -> bool {
-        let stopped = self.load_stopped();
-
-        if !stopped.is_stopping_or_stopped() {
-            // If we are waking up, potentially write back state a tracer may have modified.
-            let captured_state = self.write().take_captured_state();
-            if let Some(captured) = captured_state {
-                if captured.dirty {
-                    self.thread_state.replace_registers(&captured.thread_state);
-                }
+        // When coming back from a stop, write modified register state to the ThreadState.
+        let captured_state = self.write().take_captured_state();
+        if let Some(captured) = captured_state {
+            if captured.dirty {
+                self.thread_state.replace_registers(&captured.thread_state);
             }
         }
+        true
+    }
+
+    /// If the task is stopping, set it as stopped. Return whether the caller should stop.
+    fn finalize_stop_state(&self) -> bool {
+        let stopped = self.load_stopped();
 
         // Stopping because the thread group is stopping.
         // Try to flip to GroupStopped - will fail if we shouldn't.
@@ -1936,7 +1941,7 @@ impl CurrentTask {
     /// Block the execution of `current_task` as long as the task is stopped and
     /// not terminated.
     fn block_while_stopped(&mut self) {
-        let waiter = Waiter::with_options(WaiterOptions::IGNORE_SIGNALS);
+        let waiter = Waiter::new();
         loop {
             // If we've exited, unstop the threads and return without notifying
             // waiters.
@@ -1950,8 +1955,7 @@ impl CurrentTask {
                 return;
             }
 
-            // Do the wait. Result is not needed, as this is not in a syscall.
-            let _: Result<(), Errno> = waiter.wait(self);
+            waiter.stop(self);
 
             // Maybe go from stopping to stopped, if we are currently stopping
             // again.
@@ -2094,15 +2098,23 @@ impl CurrentTask {
         //
         //      -  The caller has the CAP_SYS_PTRACE capability in the user
         //         namespace of the target.
-        let target_creds = target.persistent_info.lock_creds();
-        if !(target_creds.uid == uid
-            && target_creds.euid == uid
-            && target_creds.saved_uid == uid
-            && target_creds.gid == gid
-            && target_creds.egid == gid
-            && target_creds.saved_gid == gid)
-        {
-            security::check_task_capable(self, CAP_SYS_PTRACE)?;
+        let creds_match = {
+            let check = |target_creds: &Credentials| {
+                target_creds.uid == uid
+                    && target_creds.euid == uid
+                    && target_creds.saved_uid == uid
+                    && target_creds.gid == gid
+                    && target_creds.egid == gid
+                    && target_creds.saved_gid == gid
+            };
+            if mode.contains(PtraceAccessMode::ATTACH) {
+                check(&target.persistent_info.lock_creds())
+            } else {
+                check(&target.real_creds())
+            }
+        };
+        if !creds_match {
+            security::check_task_ptrace_capable(self, mode)?;
         }
 
         // (4)  Deny access if the target process "dumpable" attribute has a
@@ -2110,10 +2122,16 @@ impl CurrentTask {
         //      PR_SET_DUMPABLE in prctl(2)), and the caller does not have
         //      the CAP_SYS_PTRACE capability in the user namespace of the
         //      target process.
-        let dumpable = *target.mm()?.dumpable.lock();
-        match dumpable {
-            DumpPolicy::User => (),
-            DumpPolicy::Disable => security::check_task_capable(self, CAP_SYS_PTRACE)?,
+        //      Kernel threads and zombies do not have an `mm`, and are treated
+        //      as dumpable like in Linux's `__ptrace_may_access`.
+        if let Ok(mm) = target.mm() {
+            let dumpable = mm.dumpable.load();
+            match dumpable {
+                DumpPolicy::User => (),
+                DumpPolicy::Disable => {
+                    security::check_task_ptrace_capable(self, mode)?;
+                }
+            }
         }
 
         // (5)  The kernel LSM security_ptrace_access_check() interface is
@@ -2156,8 +2174,8 @@ impl CurrentTask {
         }
 
         if Signal::try_from(unchecked_signal) == Ok(SIGCONT) {
-            let target_session = target.thread_group().read().process_group.session.leader.clone();
-            let self_session = self.thread_group().read().process_group.session.leader.clone();
+            let target_session = target.thread_group().read().session.clone();
+            let self_session = self.thread_group().read().session.clone();
             if target_session == self_session {
                 return Ok(());
             }
@@ -2231,8 +2249,10 @@ fn split_path(path: &FsStr) -> LookupVec<&FsStr> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::ptrace::{PtraceAttachType, ptrace_attach};
     use crate::testing::{create_task, spawn_kernel_and_run};
-    use starnix_uapi::auth::Credentials;
+    use starnix_uapi::auth::{Credentials, PTRACE_MODE_READ_FSCREDS};
     use std::sync::Arc;
 
     // This test will run `override_creds` and check it doesn't crash. This ensures that the
@@ -2261,6 +2281,67 @@ mod tests {
 
             assert!(running_state.fs().is_err());
             assert!(fs.upgrade().is_none(), "FsContext should be dropped by exit()");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_check_ptrace_access_mode() {
+        spawn_kernel_and_run(async move |current_task| {
+            let system_tg = current_task.kernel().kthreads.system_thread_group();
+            let system_task = system_tg.leader.get_task().unwrap();
+            let mode = PTRACE_MODE_READ_FSCREDS;
+
+            // Even root cannot ptrace_attach to the kernel system_task (which has no mm).
+            assert_eq!(
+                ptrace_attach(
+                    current_task,
+                    &system_tg.leader,
+                    PtraceAttachType::Attach,
+                    UserAddress::NULL
+                ),
+                error!(EPERM)
+            );
+
+            // Root has CAP_SYS_PTRACE and passes check_ptrace_access_mode on a kernel thread.
+            assert_eq!(current_task.check_ptrace_access_mode(mode, &system_task), Ok(()));
+
+            // Unprivileged caller cannot access a root-owned kernel thread.
+            let unpriv_creds = Arc::new(Credentials::with_ids(1000, 1000));
+            let res = current_task.override_creds(unpriv_creds.clone(), || {
+                current_task.check_ptrace_access_mode(mode, &system_task)
+            });
+            assert_eq!(res, error!(EPERM));
+
+            // Non-dumpable target requires CAP_SYS_PTRACE even with matching UID/GID.
+            let target_task = create_task(&current_task.kernel(), "target");
+            target_task.set_creds(Credentials::with_ids(1000, 1000));
+            target_task.mm().unwrap().dumpable.store(DumpPolicy::Disable);
+
+            let res = current_task.override_creds(unpriv_creds.clone(), || {
+                current_task.check_ptrace_access_mode(mode, &target_task)
+            });
+            assert_eq!(res, error!(EPERM));
+
+            assert_eq!(current_task.check_ptrace_access_mode(mode, &target_task), Ok(()));
+
+            // Non-running (exited/zombie) task has no `mm` and is treated as dumpable.
+            let exited_task_ref = Arc::clone(&target_task.task);
+            std::mem::drop(target_task);
+            assert!(exited_task_ref.mm().is_err());
+
+            let res = current_task.override_creds(unpriv_creds, || {
+                current_task.check_ptrace_access_mode(mode, &exited_task_ref)
+            });
+            assert_eq!(res, Ok(()));
+
+            let other_creds = Arc::new(Credentials::with_ids(2000, 2000));
+            let res = current_task.override_creds(other_creds, || {
+                current_task.check_ptrace_access_mode(mode, &exited_task_ref)
+            });
+            assert_eq!(res, error!(EPERM));
+
+            assert_eq!(current_task.check_ptrace_access_mode(mode, &exited_task_ref), Ok(()));
         })
         .await;
     }

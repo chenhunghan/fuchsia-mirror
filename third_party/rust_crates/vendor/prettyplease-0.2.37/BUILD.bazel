@@ -75,7 +75,7 @@ rust_library(
     }),
     version = "0.2.37",
     deps = [
-        "//third_party/rust_crates/vendor/prettyplease-0.2.37:build_script_build",
+        ":build_script_build",
         "//third_party/rust_crates/vendor/proc-macro2-1.0.107:proc_macro2",
         "//third_party/rust_crates/vendor/syn-2.0.119:syn",
     ],
@@ -115,6 +115,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     links = "prettyplease02",
     pkg_name = "prettyplease",
     rustc_flags = [

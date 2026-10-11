@@ -171,6 +171,10 @@ import("//build/toolchain/rbe.gni")
 #        procedural macros run as compiler plugins on the build machine.
 #        Entries must not specify a toolchain.
 #
+#      link_deps (optional)
+#        Native (e.g. C/C++) libraries to link against, has the same semantics
+#        as deps in GN.
+#
 # Example of usage:
 #
 #   rustc_binary("foo-bar") {
@@ -355,6 +359,7 @@ template("rustc_binary") {
                              "features",
                              "inputs",
                              "link_args",
+                             "link_deps",
                              "lint_config",
                              "output_dir",
                              "output_extension",

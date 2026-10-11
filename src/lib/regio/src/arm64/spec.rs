@@ -271,7 +271,7 @@ macro_rules! for_each_spec {
         $macro!(HCRX_EL2, 0b11, 0b100, 0b0001, 0b0010, 0b010, RwSafe);
 
         $macro!(HDBSSBR_EL2, 0b11, 0b100, 0b0010, 0b0011, 0b010, RwSafe);
-        $macro!(HDBSSPRoD_EL2, 0b11, 0b100, 0b0010, 0b0011, 0b011, RwSafe);
+        $macro!(HDBSSPROD_EL2, 0b11, 0b100, 0b0010, 0b0011, 0b011, RwSafe);
         $macro!(HDFGRTR_EL2, 0b11, 0b100, 0b0011, 0b0001, 0b100, RwSafe);
         $macro!(HDFGRTR2_EL2, 0b11, 0b100, 0b0011, 0b0001, 0b000, RwSafe);
         $macro!(HDFGWTR_EL2, 0b11, 0b100, 0b0011, 0b0001, 0b101, RwSafe);
@@ -538,7 +538,7 @@ macro_rules! for_each_spec {
         $macro!(SPMINTENSET_EL1, 0b10, 0b000, 0b1001, 0b1110, 0b001, RwSafe);
         $macro!(SPMOVSCLR_EL0, 0b10, 0b011, 0b1001, 0b1100, 0b011, RwSafe);
         $macro!(SPMOVSSET_EL0, 0b10, 0b011, 0b1001, 0b1110, 0b011, RwSafe);
-        $macro!(SPMRoOTCR_EL3, 0b10, 0b110, 0b1001, 0b1110, 0b111, RwSafe);
+        $macro!(SPMROOTCR_EL3, 0b10, 0b110, 0b1001, 0b1110, 0b111, RwSafe);
         $macro!(SPMSCR_EL1, 0b10, 0b111, 0b1001, 0b1110, 0b111, RwSafe);
         $macro!(SPMSELR_EL0, 0b10, 0b011, 0b1001, 0b1100, 0b101, RwSafe);
         $macro!(SPMZR_EL0, 0b10, 0b011, 0b1001, 0b1100, 0b100, WoSafe);
@@ -584,7 +584,7 @@ macro_rules! for_each_spec {
         $macro!(TPIDR_EL1, 0b11, 0b000, 0b1101, 0b0000, 0b100, RwSafe);
         $macro!(TPIDR_EL2, 0b11, 0b100, 0b1101, 0b0000, 0b010, RwSafe);
         $macro!(TPIDR_EL3, 0b11, 0b110, 0b1101, 0b0000, 0b010, RwSafe);
-        $macro!(TPIDRRo_EL0, 0b11, 0b011, 0b1101, 0b0000, 0b011, RwSafe);
+        $macro!(TPIDRRO_EL0, 0b11, 0b011, 0b1101, 0b0000, 0b011, RwSafe);
         $macro!(TPIDR2_EL0, 0b11, 0b011, 0b1101, 0b0000, 0b101, RwSafe);
         $macro!(TRBBASER_EL1, 0b11, 0b000, 0b1001, 0b1011, 0b010, RwSafe);
         $macro!(TRBIDR_EL1, 0b11, 0b000, 0b1001, 0b1011, 0b111, Ro);

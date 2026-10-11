@@ -204,6 +204,16 @@
             from: "self",
             to: [ "#bt-fastpair-provider" ],
         },
+        {
+            config: [
+                "fuchsia.bluetooth.FastPairFirmwareRevision",
+                "fuchsia.bluetooth.FastPairModelId",
+                "fuchsia.bluetooth.FastPairPrivateKey",
+            ],
+            from: "void",
+            to: [ "#bt-fastpair-provider" ],
+            availability: "optional",
+        },
     ],
     expose: [
         {

@@ -627,3 +627,115 @@ pub fn expose_decl_common_with_availability_derive(
 ) -> proc_macro::TokenStream {
     expose_decl_common_availability_always_required_derive_impl(parse_macro_input!(input)).into()
 }
+
+#[derive(FromVariant, Clone)]
+#[darling(forward_attrs(cfg))]
+struct ToGenericRefVariant {
+    ident: Ident,
+    attrs: Vec<syn::Attribute>,
+    fields: ast::Fields<Type>,
+}
+
+#[derive(FromDeriveInput)]
+#[darling(supports(enum_unit, enum_newtype))]
+struct ToGenericRefOpts {
+    ident: Ident,
+    data: ast::Data<ToGenericRefVariant, ()>,
+}
+
+fn is_type_ident(ty: &Type, ident: &str) -> bool {
+    if let Type::Path(pt) = ty {
+        if pt.qself.is_none() && pt.path.leading_colon.is_none() && pt.path.segments.len() == 1 {
+            let segment = &pt.path.segments[0];
+            if segment.arguments.is_none() && segment.ident == ident {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn to_generic_ref_derive_impl(input: syn::DeriveInput) -> TokenStream {
+    let opts = match ToGenericRefOpts::from_derive_input(&input) {
+        Ok(opts) => opts,
+        Err(e) => return e.write_errors(),
+    };
+    let enum_ident = &opts.ident;
+    let ast::Data::Enum(variants) = opts.data else {
+        unreachable!("supports(enum_unit, enum_newtype) ensures enum")
+    };
+    let mut match_arms = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let ident = &variant.ident;
+        let attrs = &variant.attrs;
+        let arm = match variant.fields.style {
+            ast::Style::Unit => {
+                quote_spanned! {ident.span()=>
+                    #(#attrs)*
+                    Self::#ident => GenericRef::#ident,
+                }
+            }
+            ast::Style::Tuple => {
+                let field_ty = &variant.fields.fields[0];
+                if ident == "Child" {
+                    if is_type_ident(field_ty, "ChildRef") {
+                        quote_spanned! {ident.span()=>
+                            #(#attrs)*
+                            Self::Child(c) => c.to_generic(),
+                        }
+                    } else if is_type_ident(field_ty, "Name") {
+                        quote_spanned! {ident.span()=>
+                            #(#attrs)*
+                            Self::Child(name) => GenericRef::Child(name),
+                        }
+                    } else if is_type_ident(field_ty, "String") {
+                        // Used by `StorageDirectorySource::Child(String)` and
+                        // `RegistrationSource::Child(String)`.
+                        quote_spanned! {ident.span()=>
+                            #(#attrs)*
+                            Self::Child(name) => GenericRef::Child(Name::new(name).unwrap()),
+                        }
+                    } else {
+                        return darling::Error::custom(
+                            "unsupported Child variant field type for ToGenericRef",
+                        )
+                        .with_span(field_ty)
+                        .write_errors();
+                    }
+                } else {
+                    quote_spanned! {ident.span()=>
+                        #(#attrs)*
+                        Self::#ident(inner) => GenericRef::#ident(inner),
+                    }
+                }
+            }
+            ast::Style::Struct => {
+                unreachable!("supports(enum_unit, enum_newtype) disallows struct variants")
+            }
+        };
+        match_arms.push(arm);
+    }
+
+    quote! {
+        impl ToGenericRef for #enum_ident {
+            fn to_generic(self) -> GenericRef {
+                match self {
+                    #(#match_arms)*
+                }
+            }
+        }
+
+        impl NativeIntoFidl<fdecl::Ref> for #enum_ident {
+            fn native_into_fidl(self) -> fdecl::Ref {
+                self.to_generic().native_into_fidl()
+            }
+        }
+    }
+}
+
+/// A derive-macro that generates implementations of `ToGenericRef` and `NativeIntoFidl<fdecl::Ref>`
+/// for reference enums whose variants correspond to `GenericRef`.
+#[proc_macro_derive(ToGenericRef)]
+pub fn to_generic_ref_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    to_generic_ref_derive_impl(parse_macro_input!(input)).into()
+}

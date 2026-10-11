@@ -88,6 +88,5 @@ group("tests") {
     ":fidl-fuchsia-net-neighbor-ext-fdomain-test",
     ":fidl-fuchsia-net-neighbor-ext-test",
     ":fidl_fuchsia_net_neighbor_ext_fdomain_test($host_toolchain)",
-    ":fidl_fuchsia_net_neighbor_ext_test($host_toolchain)",
   ]
 }

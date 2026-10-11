@@ -19,10 +19,12 @@ __BEGIN_CDECLS
 struct hw_rng_ops {
   size_t (*hw_rng_get_entropy)(void* buf, size_t len);
 };
+static_assert(sizeof(hw_rng_ops) == 8, "hw_rng_ops size mismatch");
+static_assert(alignof(hw_rng_ops) == 8, "hw_rng_ops align mismatch");
 
-// Draw entropy from hardware RNG. 
+// Draw entropy from hardware RNG.
 //
-// The caller is responsible to check that the return value equals len. 
+// The caller is responsible to check that the return value equals len.
 // Otherwise it means the operation failed.
 __WARN_UNUSED_RESULT size_t hw_rng_get_entropy(void* buf, size_t len);
 

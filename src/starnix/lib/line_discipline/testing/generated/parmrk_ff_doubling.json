@@ -1,0 +1,157 @@
+{
+    "name": "parmrk_ff_doubling",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL",
+            "PARMRK"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ],
+        "c_cc": {
+            "VEOL": 255
+        }
+    },
+    "events": [
+        {
+            "type": "write_to_master",
+            "data": [
+                97,
+                22,
+                255,
+                98,
+                10
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": [
+                97,
+                255,
+                255,
+                98,
+                10
+            ]
+        },
+        {
+            "type": "write_to_master",
+            "data": [
+                99,
+                255
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": [
+                99,
+                255,
+                255
+            ]
+        },
+        {
+            "type": "read_from_master",
+            "data": [
+                97,
+                94,
+                8,
+                255,
+                98,
+                13,
+                10,
+                99,
+                255
+            ]
+        },
+        {
+            "type": "write_to_master",
+            "data": [
+                22,
+                255,
+                127,
+                10
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": [
+                255,
+                10
+            ]
+        },
+        {
+            "type": "read_from_master",
+            "data": [
+                94,
+                8,
+                255,
+                8,
+                32,
+                8,
+                13,
+                10
+            ]
+        },
+        {
+            "type": "write_to_master",
+            "data": [
+                22,
+                255,
+                18,
+                10
+            ]
+        },
+        {
+            "type": "read_once_from_slave",
+            "size": 4096,
+            "data": [
+                255,
+                255,
+                10
+            ]
+        },
+        {
+            "type": "read_from_master",
+            "data": [
+                94,
+                8,
+                255,
+                94,
+                82,
+                13,
+                10,
+                255,
+                255,
+                13,
+                10
+            ]
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "PARMRK",
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO",
+            "ECHOE",
+            "ECHOCTL",
+            "IEXTEN"
+        ]
+    }
+}

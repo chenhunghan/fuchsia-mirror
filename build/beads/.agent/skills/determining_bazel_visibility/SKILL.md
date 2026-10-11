@@ -20,6 +20,15 @@ visibility is critical:
 - **Bazel Visibility Convention:** Bazel targets default to **private**
   (`["//visibility:private"]`), visible only within the same package (`BUILD.bazel`).
 
+Visibility states who should be allowed to use a target. It is not a golden file of who uses
+it today. Use the current consumers found below as evidence of the target's audience, then widen
+the list to that audience (for example, a whole subsystem) so the next legitimate user doesn't
+have to edit it. More than about five entries usually means the list is tracking consumers
+rather than describing an audience; group them or use a `package_group`.
+
+The exception is deprecated targets. For those, list exactly the current users, however many
+there are, so the visibility list blocks new usages.
+
 > [!TIP]
 > **Subagent Delegation:** Determining visibility involves running queries across the
 > dependency graph, discovering consumers across the codebase, and applying grouping
@@ -46,7 +55,7 @@ visibility is critical:
 - **Do NOT use overly broad ancestor wildcards:** Avoid `//:__subpackages__` or
   `//src:__subpackages__` as a lazy shortcut. Such broad wildcards should only be
   considered for truly common libraries with widespread platform usage where specific package
-  paths or package groups cannot be applied.
+  paths or package groups cannot be applied (see Case G).
 
 ---
 
@@ -74,7 +83,8 @@ specifies an explicit `visibility` declaration:
 ### Step 2: Discover Reverse Dependencies (Dependers)
 
 If the GN target did not specify restricted visibility, identify all existing targets in the
-codebase that depend on it.
+codebase that depend on it. These consumers show who the target's audience is. Step 3 turns
+them into a description of that audience instead of copying the list.
 
 #### 1. Primary Tool: `fx gn refs`
 
@@ -204,7 +214,9 @@ concise, idiomatic Bazel visibility expressions using these heuristics:
         "//src/devices:__subpackages__",
     ]
     ```
-  - For visibility shared across multiple packages, a `package_group` can be defined and referenced.
+  - If several packages would repeat the same long visibility list, define a
+    `package_group` once and reference it from each target instead. See
+    [Use package groups for common non-trivial visibility definitions](../../../../../docs/development/languages/bazel/style/common.md).
 
 #### Case G: Widely Consumed Platform Libraries / Disparate Top-Level Trees
 - **Condition:** Consumers span 3 or 4 disparate top-level trees (e.g., `//src`, `//tools`,
@@ -221,6 +233,12 @@ concise, idiomatic Bazel visibility expressions using these heuristics:
         "//vendor:__subpackages__",
     ]
     ```
+  - For foundational libraries that nearly every part of the tree may use (for
+    example, base libraries like `//zircon/system/ulib/fbl`), use
+    `["//:__subpackages__"]`. This is especially useful when the GN target is
+    public (`"*"`): Bazel and GN visibility then match.
+  - Needing a `# @bazel2gn:raw_overwrite:` annotation on `visibility` is a smell. Avoid it
+    unless something about the path really is GN-specific.
 
 ---
 
@@ -235,7 +253,9 @@ concise, idiomatic Bazel visibility expressions using these heuristics:
 | Test targets for parent `test_suite` | `["//tools:__pkg__"]` (or parent package) |
 | 2-3 distinct subsystems | `["//src/subsys1:__subpackages__", "//src/subsys2:__subpackages__"]` |
 | 1-2 specific sibling packages | `["//src/foo/pkg_a:__pkg__", "//src/foo/pkg_b:__pkg__"]` |
-| SDK atom / widespread repo-wide usage | TBD |
+| Foundational library used tree-wide | `["//:__subpackages__"]` |
+| Same long list repeated across packages | A shared `package_group` |
+| SDK atom | Same as any other target (the `_idk` atom target gets the visibility it needs automatically) |
 
 ---
 

@@ -5,9 +5,9 @@
 use pest::Parser;
 use pest::iterators::Pair;
 
-use fidl_fuchsia_hardware_network as fhnet;
-use fidl_fuchsia_net as net;
-use fidl_fuchsia_net_filter_deprecated as filter;
+use flex_fuchsia_hardware_network as fhnet;
+use flex_fuchsia_net as net;
+use flex_fuchsia_net_filter_deprecated as filter;
 
 use crate::grammar::{Error, FilterRuleParser, InvalidReason, Rule};
 use crate::util;

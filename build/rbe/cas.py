@@ -19,7 +19,7 @@ _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
 
 PROJECT_ROOT = fuchsia.project_root_dir()
-PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, Path(start=os.curdir))
+PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=Path(os.curdir))
 
 # default path to `cas` tool
 _CAS_TOOL = PROJECT_ROOT_REL / "prebuilt" / "tools" / "cas" / "cas"

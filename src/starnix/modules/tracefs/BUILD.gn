@@ -39,6 +39,7 @@ rustc_library("tracefs") {
     "//src/starnix/lib/starnix_sync",
     "//src/starnix/lib/starnix_types",
     "//src/starnix/lib/starnix_uapi",
+    "//third_party/rust_crates:smallvec",
   ]
 
   test_deps = [ "//src/lib/fuchsia" ]

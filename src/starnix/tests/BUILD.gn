@@ -24,6 +24,7 @@ group("tests") {
     "memory_attribution:tests",
     "nanohub:tests",
     "netstack:tests",
+    "odpm:tests",
     "perf_event_open:tests",
     "psi:tests",
     "qipcrtr:tests",

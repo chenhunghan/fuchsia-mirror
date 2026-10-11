@@ -96,7 +96,7 @@ impl<T: Clone + PartialEq + Hash + Ord + Debug + Display> DirectedGraph<T> {
 
     /// Returns the nodes of the graph in reverse topological order, or an error if the graph
     /// contains a cycle.
-    pub fn topological_sort<'a>(&'a self) -> Result<Vec<&'a T>, Error<'_, T>> {
+    pub fn topological_sort<'a>(&'a self) -> Result<Vec<&'a T>, Error<'a, T>> {
         TarjanSCC::new(self).run()
     }
 

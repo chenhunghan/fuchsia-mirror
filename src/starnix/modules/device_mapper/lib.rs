@@ -190,7 +190,7 @@ impl DmDevice {
         let kernel = current_task.kernel();
         let registry = &kernel.device_registry;
         let dm_device_name = FsString::from(format!("dm-{minor}"));
-        let virtual_block_class = registry.objects.virtual_block_class();
+        let block_class = registry.objects.block_class();
         let device = Arc::new(Self {
             number: DeviceId::new(DEVICE_MAPPER_MAJOR, minor),
             ..Default::default()
@@ -205,7 +205,8 @@ impl DmDevice {
                 DeviceMode::Block,
             )
             .with_devtype("disk"),
-            virtual_block_class,
+            /* parent = */ None,
+            block_class,
             |device, dir| build_block_device_directory(device, device_weak, dir),
         )?;
         {

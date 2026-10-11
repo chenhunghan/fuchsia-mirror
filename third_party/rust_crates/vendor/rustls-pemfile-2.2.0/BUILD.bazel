@@ -42,7 +42,7 @@ rust_library(
         allow_empty = False,
     ),
     aliases = {
-        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.0:rustls_pki_types": "pki_types",
+        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.1:rustls_pki_types": "pki_types",
     },
     compile_data = glob(
         include = ["**"],
@@ -82,6 +82,6 @@ rust_library(
     }),
     version = "2.2.0",
     deps = [
-        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.0:rustls_pki_types",
+        "//third_party/rust_crates/vendor/rustls-pki-types-1.15.1:rustls_pki_types",
     ],
 )

@@ -459,10 +459,10 @@ zx_status_t brcmf_sdiod_read(brcmf_sdio_dev* sdiodev, const sdio_protocol_t* pro
     return status;
   }
 
-  uint32_t remaining = size;
+  size_t remaining = size;
   size_t offset = 0;
   for (auto frame = frames.begin(); remaining > 0 && frame != frames.end(); ++frame) {
-    uint32_t to_copy = std::min(remaining, frame->Size());
+    const size_t to_copy = std::min<size_t>(remaining, frame->Size());
     memcpy(reinterpret_cast<uint8_t*>(data) + offset, frame->Data(), to_copy);
     remaining -= to_copy;
     offset += to_copy;

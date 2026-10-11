@@ -68,9 +68,19 @@ FFI_ALWAYS_INLINE void* cpp_page_request_provider_node(PageRequest* request) {
 }
 
 // PageSource failure & helper shims
+FFI_ALWAYS_INLINE void cpp_page_source_free(PageSource* src) { delete src; }
+
+FFI_ALWAYS_INLINE void* cpp_page_source_get_ref_counted(PageSource* src) {
+  return static_cast<fbl::RefCounted<PageRequestInterface>*>(src);
+}
+
 FFI_ALWAYS_INLINE void cpp_page_source_on_pages_failed(PageSource* page_source, uint64_t offset,
                                                        uint64_t len, zx_status_t error_status) {
   page_source->OnPagesFailed(offset, len, error_status);
+}
+
+FFI_ALWAYS_INLINE bool cpp_page_source_is_valid_external_failure_code(zx_status_t error_status) {
+  return PageSource::IsValidExternalFailureCode(error_status);
 }
 
 FFI_ALWAYS_INLINE bool cpp_page_source_is_valid_internal_failure_code(zx_status_t status) {

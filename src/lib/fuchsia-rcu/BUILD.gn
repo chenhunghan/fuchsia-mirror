@@ -76,6 +76,7 @@ _COMMON_SRCS = [
   "src/lib.rs",
   "src/rcu_arc.rs",
   "src/rcu_box.rs",
+  "src/rcu_callback.rs",
   "src/rcu_droppable.rs",
   "src/rcu_droppable_arc.rs",
   "src/rcu_option_arc.rs",

@@ -124,10 +124,10 @@ void DynamicIfTest::ChannelCheck() {
   EXPECT_EQ(softap_chanspec, client_chanspec);
   WithSimDevice([&](brcmfmac::SimDevice* device) {
     brcmf_simdev* sim = device->GetSim();
-    fuchsia_wlan_ieee80211::wire::ChannelNumber channel =
-        chanspec_to_operating_channel_number(&sim->drvr->config->d11inf, softap_chanspec);
+    const auto ch = chanspec_to_channel(&sim->drvr->config->d11inf, softap_chanspec);
+    ASSERT_TRUE(ch.is_ok());
     EXPECT_GE(softap_ifc_.stats_.csa_indications.size(), 1U);
-    EXPECT_EQ(channel.number,
+    EXPECT_EQ(ch->primary.number,
               softap_ifc_.stats_.csa_indications.front().new_primary_channel.number);
   });
 }

@@ -33,7 +33,8 @@ impl ChildGuard {
         self.child.as_ref().map(|c| c.id()).unwrap_or(0)
     }
 
-    /// Checks whether the child process has exited or is no longer valid, reaping its exit status if available.
+    /// Checks whether the child process has exited or is no longer valid, reaping its exit status
+    /// if available.
     fn has_exited(&mut self) -> bool {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -138,6 +139,15 @@ fn ssh_failure_remediation(log_content: &str) -> Option<&'static str> {
             "The corp SSH relay requires fresh SSO credentials. Run `gcert` and try again.",
         );
     }
+    if log_content.contains("IAPAS deny")
+        || log_content.contains("You do not have access to the requested resource")
+    {
+        return Some(
+            "The corp SSH relay (BeyondCorp IAP) denied access to this VM (`IAPAS deny`). Grant \
+             your account `roles/iap.tunnelResourceAccessor` and `roles/compute.osLogin` on the \
+             GCP project (see go/gce-beyondcorp-ssh).",
+        );
+    }
     if log_content.contains("Could not resolve hostname")
         || log_content.contains("Name or service not known")
     {
@@ -208,6 +218,13 @@ const SUPERVISOR_ESTABLISHED_SECS: u32 = 30;
 
 /// Number of consecutive short-lived `ssh` sessions after which the supervisor gives up.
 const SUPERVISOR_MAX_FAILURES: u32 = 3;
+
+/// How long an interactive SSH serial session (when `follow == false`) waits for new output
+/// after receiving the initial buffered serial console data before closing the connection.
+const SSH_SERIAL_IDLE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Maximum time to wait for initial output from the SSH serial console when `follow == false`.
+const SSH_SERIAL_INITIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration options for establishing a local background SSH tunnel to a GCE instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,7 +297,8 @@ impl GceTunnel {
     /// Starts a background SSH port forwarding tunnel process to GCE VM port 22 and waits for it
     /// to bind a local port and be discovered by [`GceWatcher`].
     ///
-    /// By default, sets up reverse port forwarding for the package repository port configured in `ctx`.
+    /// By default, sets up reverse port forwarding for the package repository port configured in
+    /// `ctx`.
     pub async fn start_tunnel(
         ctx: &EnvironmentContext,
         project: &str,
@@ -291,8 +309,9 @@ impl GceTunnel {
         Self::start_tunnel_with_config(ctx, config).await
     }
 
-    /// Starts a background SSH port forwarding tunnel process using the provided [`GceTunnelConfig`],
-    /// writes the instance state file, and waits for [`GceWatcher`] to discover the target.
+    /// Starts a background SSH port forwarding tunnel process using the provided
+    /// [`GceTunnelConfig`], writes the instance state file, and waits for [`GceWatcher`] to
+    /// discover the target.
     pub async fn start_tunnel_with_config(
         ctx: &EnvironmentContext,
         config: GceTunnelConfig,
@@ -563,6 +582,167 @@ impl GceTunnel {
         let instance = gce_watcher::Instance::new(project, zone, instance_name)?;
         instance.stop(ctx).io_context(|| format!("Failed to stop GCE tunnel for {}", instance.name))
     }
+
+    /// Streams serial port output from `instance_name` over the GCE interactive SSH serial console
+    /// gateway (`<region>-ssh-serialport.googleapis.com:9600`).
+    ///
+    /// This is used as a fallback when `instances.getSerialPortOutput` returns `403 Forbidden`
+    /// (for example, on `google.com` projects where REST `getSerialPortOutput` requires JVS
+    /// breakglass justification while interactive SSH serial console access is permitted for
+    /// instance admins).
+    pub async fn stream_ssh_serial<W: std::io::Write>(
+        ctx: &EnvironmentContext,
+        project: &str,
+        zone: &str,
+        instance_name: &str,
+        port: u32,
+        follow: bool,
+        writer: &mut W,
+    ) -> Result<()> {
+        Self::stream_ssh_serial_with_binary(
+            ctx,
+            project,
+            zone,
+            instance_name,
+            port,
+            follow,
+            std::path::Path::new("ssh"),
+            writer,
+        )
+        .await
+    }
+
+    /// Streams serial port output over the GCE SSH serial console gateway using `ssh_binary`.
+    pub async fn stream_ssh_serial_with_binary<W: std::io::Write>(
+        ctx: &EnvironmentContext,
+        project: &str,
+        zone: &str,
+        instance_name: &str,
+        port: u32,
+        follow: bool,
+        ssh_binary: &std::path::Path,
+        writer: &mut W,
+    ) -> Result<()> {
+        use futures::FutureExt as _;
+        use tokio::io::AsyncReadExt as _;
+
+        let instance = gce_watcher::Instance::new(project, zone, instance_name)?;
+        let private_key = load_ssh_keys(ctx)?.private_key;
+        let args =
+            ssh_serial_args(&instance.project, &instance.zone, &instance.name, port, &private_key);
+
+        let mut cmd = Command::new(ssh_binary);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+
+        let mut child = cmd
+            .spawn()
+            .io_context(|| format!("Failed to spawn SSH serial console for {}", instance.name))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .map(tokio::process::ChildStdout::from_std)
+            .transpose()
+            .io_context(|| "Failed to register async SSH serial stdout".to_string())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .map(tokio::process::ChildStderr::from_std)
+            .transpose()
+            .io_context(|| "Failed to register async SSH serial stderr".to_string())?;
+        let _guard = ChildGuard::new(child);
+
+        let mut buf = [0u8; 4096];
+        let mut received_any = false;
+        if let Some(ref mut stdout) = stdout {
+            loop {
+                let read_res = if follow {
+                    Some(stdout.read(&mut buf).await)
+                } else {
+                    let timeout = if received_any {
+                        SSH_SERIAL_IDLE_TIMEOUT
+                    } else {
+                        SSH_SERIAL_INITIAL_TIMEOUT
+                    };
+                    stdout
+                        .read(&mut buf)
+                        .map(Some)
+                        .on_timeout(MonotonicInstant::now() + timeout, || None)
+                        .await
+                };
+
+                match read_res {
+                    Some(Ok(0)) => {
+                        if !received_any {
+                            if let Some(ref mut stderr) = stderr {
+                                let mut stderr_out = String::new();
+                                let _ = stderr.read_to_string(&mut stderr_out).await;
+                                let trimmed = stderr_out.trim();
+                                if !trimmed.is_empty() {
+                                    if let Some(remediation) = ssh_failure_remediation(trimmed) {
+                                        return Err(GceError::SshUnrecoverable { remediation });
+                                    }
+                                    return Err(GceError::TunnelFailed {
+                                        attempts: 1,
+                                        detail: trimmed.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Some(Ok(n)) => {
+                        received_any = true;
+                        writer
+                            .write_all(&buf[..n])
+                            .io_context(|| "Failed to write SSH serial output".to_string())?;
+                        writer
+                            .flush()
+                            .io_context(|| "Failed to flush SSH serial output".to_string())?;
+                    }
+                    Some(Err(e)) => {
+                        return Err(e)
+                            .io_context(|| "Failed to read SSH serial output".to_string());
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Builds the `ssh` CLI arguments to connect to the GCE interactive serial console gateway.
+fn ssh_serial_args(
+    project: &str,
+    zone: &str,
+    instance_name: &str,
+    port: u32,
+    private_key: &std::path::Path,
+) -> Vec<String> {
+    let endpoint = crate::context::get_serial_endpoint(zone);
+    let (host, ssh_port) = endpoint.rsplit_once(':').unwrap_or((&endpoint, "9600"));
+    let target = format!("{project}.{zone}.{instance_name}.fuchsia.port={port}@{host}");
+    vec![
+        "-T".to_string(),
+        "-p".to_string(),
+        ssh_port.to_string(),
+        "-i".to_string(),
+        private_key.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=no".to_string(),
+        "-o".to_string(),
+        "UserKnownHostsFile=/dev/null".to_string(),
+        "-o".to_string(),
+        format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"),
+        "-o".to_string(),
+        "LogLevel=ERROR".to_string(),
+        target,
+    ]
 }
 
 /// Loads the configured FFX SSH key files, creating them if they do not exist yet.
@@ -687,7 +867,8 @@ mod tests {
         };
         instance.write(&env.context, &data).expect("write instance data");
 
-        // Starting the tunnel should detect the running healthy instance via GceWatcher and reuse it immediately.
+        // Starting the tunnel should detect the running healthy instance via GceWatcher and reuse
+        // it immediately.
         let reused =
             GceTunnel::start_tunnel(&env.context, "my-project", "us-central1-a", "running-vm")
                 .await
@@ -891,6 +1072,13 @@ sys.exit(255)
     fn test_ssh_failure_remediation() {
         assert!(ssh_failure_remediation("ERROR: try running gcert\n").unwrap().contains("gcert"),);
         assert!(
+            ssh_failure_remediation(
+                "You do not have access to the requested resource. Reason: [IAPAS deny]\n"
+            )
+            .unwrap()
+            .contains("roles/iap.tunnelResourceAccessor")
+        );
+        assert!(
             ssh_failure_remediation("ssh: Could not resolve hostname nic0.vm.internal.gcpnode.com")
                 .unwrap()
                 .contains("corp-ssh-helper")
@@ -903,5 +1091,77 @@ sys.exit(255)
         // Transient failures stay retryable.
         assert_eq!(ssh_failure_remediation("ssh: connect to host ...: Connection timed out"), None);
         assert_eq!(ssh_failure_remediation(""), None);
+    }
+
+    #[fuchsia::test]
+    fn test_ssh_serial_args() {
+        let args = ssh_serial_args(
+            "my-proj",
+            "us-central1-a",
+            "my-vm",
+            1,
+            std::path::Path::new("/tmp/id_ed25519"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-T",
+                "-p",
+                "9600",
+                "-i",
+                "/tmp/id_ed25519",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "LogLevel=ERROR",
+                "my-proj.us-central1-a.my-vm.fuchsia.port=1@us-central1-ssh-serialport.googleapis.com",
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_stream_ssh_serial_with_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let auth_keys_path = temp.path().join("authorized_keys");
+        let priv_key_path = temp.path().join("private_key");
+
+        let mock_ssh_path = temp.path().join("mock_ssh_serial.py");
+        let script = r#"#!/usr/bin/python3
+import sys
+import time
+
+sys.stdout.write("[00000.000] Welcome to Zircon!\n")
+sys.stdout.flush()
+time.sleep(60)
+"#;
+        std::fs::write(&mock_ssh_path, script).expect("write mock ssh script");
+        std::fs::set_permissions(&mock_ssh_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod mock ssh script");
+
+        let env = ffx_config::test_env()
+            .runtime_config(ffx_config::keys::SSH_PUB_KEY, auth_keys_path.to_str().unwrap())
+            .runtime_config(ffx_config::keys::SSH_PRIVATE_KEY, priv_key_path.to_str().unwrap())
+            .build()
+            .expect("test env");
+
+        let mut buf = Vec::new();
+        GceTunnel::stream_ssh_serial_with_binary(
+            &env.context,
+            "my-proj",
+            "us-central1-a",
+            "my-vm",
+            1,
+            false,
+            &mock_ssh_path,
+            &mut buf,
+        )
+        .await
+        .expect("stream ssh serial should succeed");
+
+        assert_eq!(String::from_utf8(buf).unwrap(), "[00000.000] Welcome to Zircon!\n");
     }
 }

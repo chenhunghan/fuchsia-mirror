@@ -4,10 +4,15 @@
 
 """Aspects related to debug symbols for the Fuchsia build system."""
 
+load("@rules_cc//cc/common:debug_package_info.bzl", "DebugPackageInfo")
 load("@rules_fuchsia//fuchsia/private:providers.bzl", "FuchsiaUnstrippedBinariesInfo", "FuchsiaUnstrippedBinaryInfo")
 load("@rules_rust//rust:rust_common.bzl", "CrateInfo")
 load("//build/bazel/aspects:utils.bzl", "get_target_deps_from_attributes")
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 
 DebugSymbolManifestEntryInfo = provider(
     doc = "A provider matching a single //:debug_symbols entry.",
@@ -38,7 +43,7 @@ def _collect_debug_symbols_manifest_aspect_impl(target, aspect_ctx):
     dest_paths = []
 
     kind = aspect_ctx.rule.kind
-    current_platform = aspect_ctx.attr._current_platform[CurrentPlatformInfo]
+    current_platform = get_current_platform_info(aspect_ctx)
 
     # On Fuchsia, calling the SDK fuchsia_cc_binary() macro or fx_packaged_binary()
     # will instantiate a wrapper target (_fuchsia_cc() or _fx_packaged_binary())
@@ -135,12 +140,7 @@ collect_debug_symbols_manifest_aspect = aspect(
     implementation = _collect_debug_symbols_manifest_aspect_impl,
     attr_aspects = ["*"],
     provides = [DebugSymbolManifestInfo],
-    attrs = {
-        "_current_platform": attr.label(
-            providers = [CurrentPlatformInfo],
-            default = "@//build/bazel:current_platform",
-        ),
-    },
+    attrs = CURRENT_PLATFORM_INFO_ATTRS,
 )
 
 # Second, a non-propagating aspect that requires the first one and will use
@@ -193,17 +193,6 @@ def _generate_manifest_impl(target, actx):
 
     actx.actions.write(output, json.encode_indent(manifest, indent = "  "))
 
-    # There is no way to get the path of the output file using cquery, because
-    # that command ignores aspect-generated providers.
-    # See https://github.com/bazelbuild/bazel/issues/22528
-    #
-    # To work around this, use print() here to print the execroot-related path
-    # to stderr, and ensure the caller can process this line to extract the file's
-    # location.
-    # LINT.IfChange(debug_symbols_manifest_prefix)
-    print("DEBUG_SYMBOLS_MANIFEST_PATH=%s" % output.path)
-    # LINT.ThenChange(//build/bazel/scripts/bazel_action_impl.py:debug_symbols_manifest_prefix)
-
     return [
         OutputGroupInfo(
             debug_symbol_files = depset(files),
@@ -212,18 +201,7 @@ def _generate_manifest_impl(target, actx):
     ]
 
 generate_manifest = aspect(
-    doc = """Generate a debug symbols manifest and materialize debug binaries.
-
-Unfortunately, the Bazel stderr output must be filtered to extract the output
-file's location, relative to the Bazel execroot. Example usage from the
-command-line (this works with --config=quiet):
-
-    bazel build <config-args> <target> \
-        --output_groups=+debug_symbol_files \
-        --aspects=//build/bazel/debug_symbols:aspects.bzl%generate_manifest \
-        2>&1 | grep '^DEBUG:.*DEBUG_SYMBOLS_MANIFEST_PATH=' | \
-        sed -e 's|.*DEBUG_SYMBOLS_MANIFEST_PATH||'
-""",
+    doc = """Generate a debug symbols manifest and materialize debug binaries.""",
     implementation = _generate_manifest_impl,
     # This aspect does not traverse, so no attr_aspects definition here.
     # Ensure that collect_debug_symbols_manifest_aspect is run first.

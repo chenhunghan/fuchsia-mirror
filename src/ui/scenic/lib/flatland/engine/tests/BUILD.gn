@@ -18,6 +18,7 @@ cc_test_executable("unittests") {
     "display_compositor_unittest.cc",
     "mock_display_coordinator.h",
     "release_fence_manager_unittest.cc",
+    "scene_state_unittest.cc",
   ]
 
   deps = [

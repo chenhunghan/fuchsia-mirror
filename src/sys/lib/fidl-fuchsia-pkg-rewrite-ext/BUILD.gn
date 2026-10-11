@@ -80,6 +80,5 @@ group("tests") {
   deps = [
     ":fidl-fuchsia-pkg-rewrite-ext-tests",
     ":fidl-fuchsia-pkg-rewrite-ext_fdomain_test($host_toolchain)",
-    ":fidl-fuchsia-pkg-rewrite-ext_test($host_toolchain)",
   ]
 }

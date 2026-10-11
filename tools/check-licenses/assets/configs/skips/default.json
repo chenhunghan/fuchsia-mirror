@@ -321,6 +321,12 @@
         },
         {
             "paths": [
+                "prebuilt/third_party/pathspec-py3-wheel"
+            ],
+            "description": "The infra/python/wheels/pathspec-py3 CIPD package installs to a single \nPython wheel file, a zip archive which is extracted by a Jiri hook into \nprebuilt/third_party/pathspec-py3, which has all licensing information."
+        },
+        {
+            "paths": [
                 "sdk/lib/c/include/gen"
             ],
             "description": "//sdk/lib/c/include/BUILD.gn populates this with headers\ngenerated from llvm-libc sources with the LLVM license."

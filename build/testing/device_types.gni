@@ -73,7 +73,7 @@ if (allowed_device_types == []) {
 
 # If the build specified no test host device types, add the default set.
 if (allowed_host_device_types == []) {
-  if (board_name == "arm64") {
+  if (board_name == "arm64" || board_name == "qemu-arm64") {
     allowed_host_device_types = [ host_device_types.gcp_c4a_highmem_96_bm ]
   }
 }

@@ -11,9 +11,7 @@ from unittest import mock
 
 from iperf import iperf_client
 from iperf.iperf_client import (
-    IPerfClient,
     IPerfClientBase,
-    IPerfClientOverAdb,
     IPerfClientOverSsh,
 )
 from libs.types import ControllerConfig
@@ -44,10 +42,9 @@ class IPerfClientModuleTest(unittest.TestCase):
         self.assertIsInstance(clients[0], IPerfClientOverSsh)
         self.assertEqual(clients[0].test_interface, "wlan0")
 
-    def test_create_can_create_local_client(self) -> None:
-        clients = iperf_client.create([{}])
-        self.assertEqual(len(clients), 1)
-        self.assertIsInstance(clients[0], IPerfClient)
+    def test_create_raises_value_error_without_ssh_config(self) -> None:
+        with self.assertRaises(ValueError):
+            iperf_client.create([{}])
 
 
 class IPerfClientBaseTest(unittest.TestCase):
@@ -71,29 +68,6 @@ class IPerfClientBaseTest(unittest.TestCase):
             os.path.dirname(full_file_path),
             mock_makedirs.call_args[ARGS][0],
             "The parent directory of the full file path was not created.",
-        )
-
-
-class IPerfClientTest(unittest.TestCase):
-    """Tests iperf.iperf_client.IPerfClient."""
-
-    @mock.patch("builtins.open")
-    @mock.patch("subprocess.call")
-    def test_start_writes_to_full_file_path(
-        self, mock_call: mock.Mock, mock_open: mock.Mock
-    ) -> None:
-        client = IPerfClient()
-        file_path = "/path/to/foo"
-        with mock.patch.object(
-            client, "_get_full_file_path", return_value=file_path
-        ):
-            client.start("127.0.0.1", "IPERF_ARGS", "TAG")
-
-        mock_open.assert_called_with(file_path, "w")
-        self.assertEqual(
-            mock_call.call_args[KWARGS]["stdout"],
-            mock_open().__enter__.return_value,
-            "IPerfClient did not write the logs to the expected file.",
         )
 
 
@@ -244,27 +218,6 @@ class IPerfClientOverSshTest(unittest.TestCase):
         ):
             client.start("192.168.1.1", "-t 10", "tag1", timeout=10)
             mock_file().write.assert_called_once_with(b"")
-
-
-class IPerfClientOverAdbTest(unittest.TestCase):
-    """Test mobly_controller.iperf.iperf_client.IPerfClientOverAdb."""
-
-    @mock.patch("builtins.open")
-    def test_start_writes_output_to_full_file_path(
-        self, mock_open: mock.Mock
-    ) -> None:
-        mock_adb = mock.Mock()
-        mock_adb.adb.shell.return_value = "output"
-        client = IPerfClientOverAdb(mock_adb)
-        file_path = "/path/to/foo"
-
-        with mock.patch.object(
-            client, "_get_full_file_path", return_value=file_path
-        ):
-            client.start("127.0.0.1", "IPERF_ARGS", "TAG")
-
-        mock_open.assert_called_with(file_path, "w")
-        mock_open().__enter__().write.assert_called_with("output")
 
 
 if __name__ == "__main__":

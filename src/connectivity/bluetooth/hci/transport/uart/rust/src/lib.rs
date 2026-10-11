@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod packet;
+mod queue;
 mod serial;
 
 use serial::{SerialConnection, SerialService};
@@ -29,6 +31,16 @@ impl BtTransportUart {
     /// Returns the PID reported by the parent serial device.
     pub fn serial_pid(&self) -> u32 {
         self.serial.serial_pid()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn serial(&self) -> &SerialConnection {
+        &self.serial
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope(&self) -> &fasync::Scope {
+        &self.scope
     }
 }
 

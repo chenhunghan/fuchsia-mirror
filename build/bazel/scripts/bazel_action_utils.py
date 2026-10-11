@@ -11,7 +11,6 @@
 
 """
 
-import collections
 import dataclasses
 import json
 import os
@@ -27,10 +26,12 @@ _FUCHSIA_DIR = os.path.dirname(
 if _FUCHSIA_DIR not in sys.path:
     sys.path.insert(0, _FUCHSIA_DIR)
 
+import bazel_build_events
 import build_utils
-import stdio_redirection
 from build.rbe import rbe_settings
 from build_utils import BazelPaths
+
+JSONObject: T.TypeAlias = dict[str, T.Any]
 
 
 @dataclasses.dataclass(order=True, frozen=True)
@@ -88,6 +89,7 @@ class BazelTargetInfo(object):
     update_rust_project: bool = False
     copy_debug_symbols: bool = False
     extra_bazel_targets_file: str | None = None
+    debug_symbols_manifest: str | None = None
     copy_outputs: list[FileOutput] = dataclasses.field(default_factory=list)
     directory_outputs: list[DirectoryOutput] = dataclasses.field(
         default_factory=list
@@ -122,6 +124,7 @@ class BazelTargetInfosMap(object):
             update_rust_project = entry["update_rust_project"]
             copy_debug_symbols = entry.get("copy_debug_symbols", False)
             extra_bazel_targets_file = entry.get("extra_bazel_targets_file")
+            debug_symbols_manifest = entry.get("debug_symbols_manifest")
             target_info = self._targets.setdefault(
                 (bazel_target, bazel_platform_label),
                 BazelTargetInfo(
@@ -134,6 +137,7 @@ class BazelTargetInfosMap(object):
                     update_rust_project=update_rust_project,
                     copy_debug_symbols=copy_debug_symbols,
                     extra_bazel_targets_file=extra_bazel_targets_file,
+                    debug_symbols_manifest=debug_symbols_manifest,
                 ),
             )
 
@@ -206,6 +210,12 @@ class BazelTargetInfosMap(object):
                 _check_add_ninja_path_to_map(
                     self._targets_by_ninja_output_paths,
                     symlink.ninja_path,
+                    target_info,
+                )
+            if target_info.debug_symbols_manifest:
+                _check_add_ninja_path_to_map(
+                    self._targets_by_ninja_output_paths,
+                    target_info.debug_symbols_manifest,
                     target_info,
                 )
             _check_add_ninja_path_to_map(
@@ -408,305 +418,114 @@ def update_gn_targets_symlink(
     )
 
 
-def find_prefix_in_input(
-    prefix: str | bytes, input: str | bytes
-) -> tuple[int, int]:
-    """Find the first occurrence of a given prefix in input.
+@dataclasses.dataclass(frozen=True)
+class AspectManifestOutputs:
+    """Aggregated manifest file paths and genquery outputs discovered during a Bazel build."""
 
-    Args:
-        prefix: A non-empty prefix string.
-        input: An input string.
-    Returns:
-        There are three possible cases that determine the result
-        of this function:
+    source_files_manifest_paths: list[str] = dataclasses.field(
+        default_factory=list
+    )
+    debug_symbol_manifest_paths: list[str] = dataclasses.field(
+        default_factory=list
+    )
+    rust_analyzer_manifest_paths: list[str] = dataclasses.field(
+        default_factory=list
+    )
+    genquery_output_files: list[str] = dataclasses.field(default_factory=list)
 
-        - Full match:
-
-          When the full prefix is found in the input, return (2, pos)
-          where |pos| is the prefix's index in the input sequence.
-
-        - Partial match:
-
-          When the full prefix is not found in the input, but the
-          input ends with a few characters from the prefix, return
-          (1, pos) where |pos| is the position of the first
-          potential prefix character.
-
-        - No match:
-
-          When the full prefix does not appear in the input, and
-          the last input characters cannot possibly match the first
-          characters of the prefix, return (0, len(input))
-
-    Examples:
-        ("foo", "-------") -> (0, 8)  no match
-        ("foo", "--foo--") -> (2, 2)  full match
-        ("foo", "-----fo") -> (1, 5)  partial match
-    """
-    assert type(input) == type(
-        prefix
-    ), f"prefix and input should be of the same time, got {type(prefix)} and {type(input)}"
-    prefix_len = len(prefix)
-    input_len = len(input)
-    assert prefix_len > 0, f"Empty prefix is not supported"
-    prefix_first_char = prefix[0]
-    from_pos = 0
-    while True:
-        pos = input.find(prefix_first_char, from_pos)  # type: ignore
-        if pos < 0:
-            return (0, input_len)  # No match
-
-        n = 1
-        while True:
-            if n == prefix_len:
-                return (2, pos)  # Full match
-
-            if pos + n >= input_len:
-                return (1, pos)  # Partial match
-
-            if input[pos + n] != prefix[n]:
-                break
-
-            n += 1
-
-        from_pos = pos + n
-
-
-class BazelStderrDebugLineFilter(stdio_redirection.OutputSink):
-    """A OutputSink that can filter DEBUG lines from Bazel's stderr output.
-
-    There is no way to get the path of the output file using cquery, because
-    that command ignores aspect-generated providers.
-    See https://github.com/bazelbuild/bazel/issues/22528
-
-    A work-around is to use print() in the aspect's implementation rule, to
-    print the execroot-related path to stderr, then ensure the caller can process
-    the line to extract the file location.
-
-    All print() statements end up as a line that looks like:
-
-    DEBUG: <path>:<line>:<column>: <message>\r\n
-
-    Where the 'DEBUG: ' prefix may be colored by ANSI VT Code sequences when
-    stdout is a tty, in which case the output will be:
-
-    \x1b[33mDEBUG: \x1b[0m <path>:<line>:<column>: <message>\r\n
-
-    Moreover, when running in an interactive terminal, Bazel will prepend
-    cursor-controlling VT Code sequences, so the input line would look like:
-
-    \r\x1b[1A\x1b[K\x1b[1A\x1b[K\x1b[33mDEBUG: \x1b[0m <path>:<line>:<column>: <message>\r\n
-
-    It is crucial to conserve the prefix commands before the colored DEBUG prefix
-    to ensure that Bazel's progressive status updates are maintained properly, even
-    if the line if filtered out from the final output.
-
-    The point of this class is to detect such DEBUG lines, and pass them to
-    a user-provided filtering function, which may extract information from it,
-    and will return True to indicate that the line should be omitted from the
-    actual output visible to the end user.
-
-    An example usage would be the following:
-
-        # Assume that an aspect uses print("MY_DATA=<some_data>")
-
-        extracted_data = []
-
-        def my_data_line_filter(line: bytes) -> bool:
-            # Filter debug line. This always begin with a DEBUG prefix,
-            # potentially colored, but without any cursor-control VT
-            # sequences before that, and typically ends with \r\n.
-            data_prefix = 'MY_DATA='
-            pos = line.find(data_prefix)
-            if pos < 0:
-                return False   # keep this line
-            extracted_data.append(line[pos + len(data_prefix):].decode("utf-8").strip())
-            return True  # Skip this line
-
-        # Run Bazel command through a pipe or pty, while sending filtered output
-        # to the original stderr.
-
-        filter_sink = BazelStderrDebugLineFilter(
-            stdio_redirection.StderrOutputSink(),
-            my_data_line_filter
-        )
-
-        use_pty = os.isatty(sys.stderr.fileno())
-        with stdio_redirection.PipeOutputSink(filter_sink, use_pty) as stderr_sink:
-            subprocess.run([..bazel.command.args], check=True, stderr=stderr_sink.get_write_fd())
-
-        ... extracted_data will contain the extracted data here
-    """
-
-    # The line prefix used when running in an interactive terminal.
-    DEBUG_PREFIX_COLORED = b"\x1b[33mDEBUG: \x1b[0m"
-
-    # The line prefix when running in a non-interactive terminal.
-    DEBUG_PREFIX = b"DEBUG: "
-
-    def __init__(
-        self,
-        output: stdio_redirection.OutputSink,
-        debug_line_filter: T.Callable[[bytes], bool] = lambda x: False,
-    ) -> None:
-        """Create instance.
-
-        Args:
-            output: The final OutputSink that will receive filtered output.
-            debug_line_filter: A optional callable that receives a single DEBUG line,
-                potentially newline terminated, and return True to indicate that it should
-                be omitted from the output, or False to keep it. By default all lines
-                are kept.
-        """
-        self._output = output
-        self._debug_line_filter = debug_line_filter
-        # Buffered data that was not processed yet due to insufficient data.
-        self._buffer = b""
-        # This will be non-empty if the buffer starts with one recognized prefix.
-        self._prefix_start = b""
-
-    def write(self, data: bytes) -> bool:
-        while True:
-            if self._buffer:
-                data = self._buffer + data
-                self._buffer = b""
-
-            if not data:
-                return True
-
-            if self._prefix_start:
-                assert data.startswith(
-                    self._prefix_start
-                ), f"Unexpected data (expected initial {self._prefix_start!r}): {data!r}"
-                next_newline = data.find(10, len(self._prefix_start))
-                if next_newline < 0:
-                    # Not enough data yet, just store in buffer then wait.
-                    self._buffer = data
-                    return True
-
-                if not self._debug_line_filter(data[0 : next_newline + 1]):
-                    # Line is not filtered, send it directly then loop with the rest.
-                    if not self._output.write(data[0 : next_newline + 1]):
-                        return True
-
-                self._prefix_start = b""
-                data = data[next_newline + 1 :]
-                continue
-            else:
-                colored_match, colored_pos = find_prefix_in_input(
-                    self.DEBUG_PREFIX_COLORED, data
-                )
-                regular_match, regular_pos = find_prefix_in_input(
-                    self.DEBUG_PREFIX, data
-                )
-
-                pos = min(colored_pos, regular_pos)
-                if pos > 0:
-                    # There are characters before the first prefix, send them directly then loop.
-                    if not self._output.write(data[0:pos]):
-                        return False
-                    data = data[pos:]
-                    continue
-
-                if colored_match == 2:
-                    assert colored_pos == 0
-                    self._prefix_start = self.DEBUG_PREFIX_COLORED
-                    continue
-
-                # Because the regular prefix is included in the colored one,
-                # a full regular match must be ignored if there is a partial
-                # colored match. Consider the following input:
-                #
-                #  "\x1b[33m DEBUG: "
-                #
-                # This will get |colored_match == 1| because this is missing
-                # the final "\x1b[0m" sequence, but |regular_match == 2|
-                # because it includes the full regular prefix.
-                #
-                # So only process full regular matches if there is no
-                # possible partial colored match before.
-                if regular_match == 2 and regular_pos == 0:
-                    self._prefix_start = self.DEBUG_PREFIX
-                    continue
-
-                # Partial matches only, store data in buffer then exit.
-                self._buffer = data
-                return True
-
-    def close(self) -> None:
-        if self._buffer:
-            self._output.write(self._buffer)
-            self._buffer = b""
-
-
-class BazelStderrDebugLineRecorder(BazelStderrDebugLineFilter):
-    """An OutputSink that filters and records DEBUG lines in Bazel's stderr stream.
-
-    Usage is:
-      - Create instance, passing a map from names to prefixes that must appear in the
-        debug line.
-
-      - Pass the instance to a stdio_redirection.PipeOutputSink, using the
-        PipeOutputSink's get_write_fd() method as the stderr argument to the
-        subprocess.run() call.
-
-      - After the subprocess returns, call get_recorded_values() for each name
-        to retrieve the recorded values.
-    """
-
-    def __init__(
-        self, output: stdio_redirection.OutputSink, prefix_map: dict[str, bytes]
-    ) -> None:
-        """Create instance.
-
-        Args:
-            output: The OutputSink that will receive filtered output.
-            prefix_map: A map from names to binary prefixes that must appear in the
-                debug line. The value following the prefix will be recorded by the instance.
-        """
-        self._prefix_map = prefix_map
-        self._recorded_values: dict[str, list[str]] = collections.defaultdict(
-            list
-        )
-        super().__init__(output, self._debug_line_filter)
-
-    def get_all_recorded_values(self) -> dict[str, list[str]]:
-        """Return the recorded values for all names.
-
-        Returns:
-            A dictionary mapping each prefix_map key name to the list of corresponding line
-            outputs extracted from Bazel's stderr (without the prefix).
-        """
+    def to_dict(self) -> dict[str, list[str]]:
+        """Return a dictionary mapping manifest categories to lists of output file paths."""
         return {
-            name: self._recorded_values.get(name, [])
-            for name in self._prefix_map.keys()
+            "source_files_manifest_paths": list(
+                self.source_files_manifest_paths
+            ),
+            "debug_symbol_manifest_paths": list(
+                self.debug_symbol_manifest_paths
+            ),
+            "rust_analyzer_manifest_paths": list(
+                self.rust_analyzer_manifest_paths
+            ),
+            "genquery_output_files": list(self.genquery_output_files),
         }
 
-    def get_recorded_values(self, name: str) -> list[str]:
-        """Return the recorded values for a given name.
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
 
-        Args:
-            name: The name to retrieve the recorded values for.
-              This must match one of the names passed as keys of the prefix_map constructor
-              argument.
+    def save_to_file(self, path: Path) -> None:
+        path.write_text(self.to_json(), encoding="utf-8")
 
-        Returns:
-            A list of recorded values for the given name.
-        """
-        assert (
-            name in self._prefix_map
-        ), f"Name {name} not found in prefix map, must be one of: {self._prefix_map.keys()}"
+    @classmethod
+    def from_dict(cls, data: JSONObject) -> "AspectManifestOutputs":
+        return cls(
+            source_files_manifest_paths=list(
+                data.get("source_files_manifest_paths", [])
+            ),
+            debug_symbol_manifest_paths=list(
+                data.get("debug_symbol_manifest_paths", [])
+            ),
+            rust_analyzer_manifest_paths=list(
+                data.get("rust_analyzer_manifest_paths", [])
+            ),
+            genquery_output_files=list(data.get("genquery_output_files", [])),
+        )
 
-        return self._recorded_values.get(name, [])
+    @classmethod
+    def load_from_file(cls, path: Path) -> "AspectManifestOutputs":
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
-    def _debug_line_filter(self, line: bytes) -> bool:
-        """Internal: filter DEBUG lines and record the values associated with each prefix."""
-        for name, prefix in self._prefix_map.items():
-            pos = line.find(prefix)
-            if pos < 0:
-                continue  # Try with next filter.
-            self._recorded_values[name].append(
-                line[pos + len(prefix) :].decode("utf-8").strip()
+    @classmethod
+    def from_build_event_stream(
+        cls,
+        stream: bazel_build_events.BuildEventStream,
+        execroot: Path | None = None,
+    ) -> "AspectManifestOutputs":
+        """Extract aspect manifest paths and genqueries from a generic BEP event stream."""
+        source_files = [
+            f
+            for f in stream.get_output_group_files(
+                "fuchsia_sources_manifest", execroot
             )
-            return True  # Skip this line, its content was recorded.
-        return False  # Keep this line
+            if "buildfiles_genquery" not in f
+        ]
+
+        debug_symbols = [
+            f"{build_utils.canonicalize_label(label)},{file_path}"
+            for label, file_path in stream.get_target_output_group_files(
+                "debug_symbol_manifest", execroot=execroot
+            )
+            if "buildfiles_genquery" not in file_path
+            and file_path.endswith(".debug_symbols.json")
+        ]
+
+        rust_manifests = [
+            f
+            for f in stream.get_output_group_files(
+                "fuchsia_rust_analyzer_manifest", execroot
+            )
+            if "buildfiles_genquery" not in f
+        ]
+
+        genqueries = [
+            f"{build_utils.canonicalize_label(label)},{file_path}"
+            for label, file_path in stream.get_target_output_group_files(
+                "default",
+                label_predicate=lambda l: "buildfiles_genquery" in l,
+                execroot=execroot,
+            )
+        ]
+
+        return cls(
+            source_files_manifest_paths=list(dict.fromkeys(source_files)),
+            debug_symbol_manifest_paths=list(dict.fromkeys(debug_symbols)),
+            rust_analyzer_manifest_paths=list(dict.fromkeys(rust_manifests)),
+            genquery_output_files=list(dict.fromkeys(genqueries)),
+        )
+
+
+def parse_build_event_manifests(
+    bep_json_path: Path,
+    execroot: Path | None = None,
+) -> AspectManifestOutputs:
+    """Parse a BEP JSON file and extract manifest paths using AspectManifestOutputs."""
+    stream = bazel_build_events.BuildEventStream.from_file(bep_json_path)
+    return AspectManifestOutputs.from_build_event_stream(stream, execroot)

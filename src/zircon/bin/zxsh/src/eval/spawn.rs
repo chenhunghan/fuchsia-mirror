@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use std::fs::File;
+use std::io::Write;
 
 use bstr::ByteSlice;
 
@@ -21,11 +22,40 @@ use crate::builtins::is_builtin;
 use crate::errors::{io_err_str, zx_status_str};
 use crate::fd::Fd;
 use crate::parser::ast::{ASTBuilder, Command, CommandTag};
-use crate::process::{clone_fd_to_action, make_pipe, spawn_command};
+use crate::process::{clone_fd_to_action, make_pipe, spawn_command, spawn_status_to_exit_code};
 use crate::relative;
 use crate::subshell::{SubshellScriptArgs, spawn_subshell_process};
 use crate::tty::{ShellSignals, wait_for_process_with_interrupt};
 use bstr::BString;
+
+#[derive(Debug)]
+pub enum SpawnedProcess {
+    Running(zx::Process),
+    Failed(i32),
+}
+
+pub fn spawn_external_command(
+    mut expanded_args: Vec<BString>,
+    state: &mut ShellState,
+    ctx: &ExecutionContext,
+) -> SpawnedProcess {
+    if let Some(resolved_path) = state.resolve_command_path(expanded_args[0].as_ref()) {
+        expanded_args[0] = resolved_path;
+    }
+
+    let mut actions = get_spawn_actions(ctx, None, None, None);
+    let vars = state.vars();
+
+    match spawn_command(&expanded_args, &vars, &mut actions) {
+        Ok(proc) => SpawnedProcess::Running(proc),
+        Err(status) => {
+            if let Some(mut err) = ctx.stderr() {
+                let _ = writeln!(err, "zxsh: {}: {}", expanded_args[0], zx_status_str(status));
+            }
+            SpawnedProcess::Failed(spawn_status_to_exit_code(status))
+        }
+    }
+}
 
 pub fn spawn_command_with_redirection(
     builder: &mut ASTBuilder,
@@ -35,7 +65,7 @@ pub fn spawn_command_with_redirection(
     default_in: Option<&File>,
     default_out: Option<&File>,
     default_err: Option<&File>,
-) -> Result<zx::Process, String> {
+) -> Result<SpawnedProcess, String> {
     let mut stage_context = ctx.try_clone()?;
     if let Some(file) = default_in {
         stage_context.set_fd(Fd::STDIN, file.try_clone().map_err(io_err_str)?);
@@ -97,7 +127,7 @@ pub fn spawn_command_with_redirection(
                     ResolvedAlias::Words(words) => words,
                 };
 
-            let (env_guard, mut expanded_args) = expand_command_and_env(
+            let (env_guard, expanded_args) = expand_command_and_env(
                 builder,
                 &assignments_refs,
                 &cmd_args,
@@ -117,20 +147,10 @@ pub fn spawn_command_with_redirection(
                 ));
             }
 
-            if let Some(resolved_path) =
-                env_guard.state.resolve_command_path(expanded_args[0].as_ref())
-            {
-                expanded_args[0] = resolved_path;
-            }
-
-            let mut actions = get_spawn_actions(&stage_context, None, None, None);
-
-            let vars = env_guard.state.vars();
+            let spawned =
+                spawn_external_command(expanded_args, &mut *env_guard.state, &stage_context);
             drop(env_guard);
-
-            spawn_command(&expanded_args, &vars, &mut actions).map_err(|status| {
-                format!("Failed to spawn {}: {}", expanded_args[0], zx_status_str(status))
-            })
+            Ok(spawned)
         }
         _ => {
             let cmd = builder.get_ref(cmd_ptr);
@@ -144,6 +164,7 @@ pub fn spawn_command_with_redirection(
                 SubshellScriptArgs::DoNotPass,
                 builder,
             )
+            .map(SpawnedProcess::Running)
         }
     }
 }
@@ -156,7 +177,7 @@ pub fn spawn_pipeline_stage(
     stdin: Option<&File>,
     stdout: Option<&File>,
     stderr: Option<&File>,
-) -> Result<zx::Process, String> {
+) -> Result<SpawnedProcess, String> {
     let is_subshell = {
         let cmd = builder.get_ref(cmd_ptr);
         needs_subshell_process(cmd, state, builder)
@@ -173,6 +194,7 @@ pub fn spawn_pipeline_stage(
             SubshellScriptArgs::DoNotPass,
             builder,
         )
+        .map(SpawnedProcess::Running)
     } else {
         spawn_command_with_redirection(builder, cmd_ptr, state, ctx, stdin, stdout, stderr)
     }
@@ -275,10 +297,14 @@ pub fn eval_pipeline(
     drop(pipes);
 
     let mut last_code = 0;
-    for proc in processes {
-        let code = wait_for_process_to_exit(&proc, ctx)?;
+    for spawned in processes {
+        let code = match spawned {
+            SpawnedProcess::Running(proc) => wait_for_process_to_exit(&proc, ctx)?,
+            SpawnedProcess::Failed(code) => code,
+        };
         last_code = code;
     }
 
+    state.set_last_status(last_code);
     Ok(state.handle_outcome(EvalOutcome::Code(last_code)))
 }

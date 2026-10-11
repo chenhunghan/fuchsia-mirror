@@ -163,7 +163,8 @@ fuchsia_unittest_package("flatland_engine_unittests") {
   deps = [ "lib/flatland/engine/tests:unittests" ] + scenic_test_deps
   test_specs = {
     log_settings = {
-      max_severity = "ERROR"
+      # Allows EXPECT_DEATH to work as intended.
+      max_severity = "FATAL"
     }
   }
   test_type = "vulkan"

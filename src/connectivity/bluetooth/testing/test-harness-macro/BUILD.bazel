@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_proc_macro")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_proc_macro(
+    name = "test-harness-macro",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    rustc_flags = ["-Dunused_results"],
+    # @bazel2gn:skip
+    target_compatible_with = HOST_CONSTRAINTS,
+    visibility = ["//src/connectivity/bluetooth/testing/test-harness:__pkg__"],
+    deps = [
+        "//third_party/rust_crates/vendor:quote",
+        "//third_party/rust_crates/vendor:syn",
+    ],
+)

@@ -64,7 +64,6 @@ mdns
 ?memory_pressure_signaler
 ?memory_sampler
 ?metrics-logger-standalone
-?nc
 ?net-cli
 ?netcfg-advanced
 ?netcfg-basic

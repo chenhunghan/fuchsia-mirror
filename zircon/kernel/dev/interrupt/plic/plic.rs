@@ -297,21 +297,11 @@ unsafe extern "C" {
 }
 
 /// Initializes the PLIC driver early in the boot sequence.
-///
-/// # Safety
-///
-/// The caller must ensure that `_config` is a reference to a valid `DcfgRiscvPlicDriver`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plic_init_early(_config: &DcfgRiscvPlicDriver) {}
+pub fn plic_init_early(_config: &DcfgRiscvPlicDriver) {}
 
 /// Performs post-VM initialization for the PLIC driver, mapping the MMIO registers.
-///
-/// # Safety
-///
-/// The caller must ensure that `config` is a reference to a valid `DcfgRiscvPlicDriver`,
-/// and that this function is only called once during boot when the VM system is ready.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plic_init_post_vm(config: &DcfgRiscvPlicDriver) {
+/// Called once during boot, when the VM system is ready.
+pub fn plic_init_post_vm(config: &DcfgRiscvPlicDriver) {
     ltrace_entry!();
     assert!(config.num_irqs > 0);
 
@@ -362,13 +352,8 @@ pub unsafe extern "C" fn plic_init_post_vm(config: &DcfgRiscvPlicDriver) {
 }
 
 /// Performs late initialization for the PLIC driver, registering deny regions.
-///
-/// # Safety
-///
-/// The caller must ensure that `config` is a reference to a valid `DcfgRiscvPlicDriver`,
-/// and that the driver has been initialized successfully in the post-VM phase.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plic_init_late(config: &DcfgRiscvPlicDriver) {
+/// Called once, after the post-VM initialization succeeded.
+pub fn plic_init_late(config: &DcfgRiscvPlicDriver) {
     // Register the MMIO region we have already mapped after the fact to allow the resource
     // manager to initialize after the PostVM hook.
     unsafe {

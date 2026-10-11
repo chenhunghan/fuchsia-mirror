@@ -82,12 +82,12 @@ type PacketGuestVcpu = struct {
     //    uint8_t vector;
     //  } interrupt;
     //  struct {
-    //    uint64_t id;
+    //    uint64_t target;
     //    zx_gpaddr_t entry;
+    //    uint64_t context;
     //  } startup;
     //};
     type uint8;
-    reserved uint64;
 };
 
 type PacketInterrupt = struct {

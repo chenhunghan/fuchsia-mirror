@@ -2,14 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Unused stub target to satisfy Bazel genquery for correct incremental builds.
-# See details in https://fxbug.dev/500609897
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(https://fxbug.dev/506800112): Replace with real targets when available.
-filegroup(
+rustc_library(
     name = "fuchsia-component",
-    srcs = [],
+    srcs = ["src/lib.rs"],
+    edition = "2024",
     visibility = ["//visibility:public"],
+    deps = [
+        "//src/lib/fuchsia-component/client",
+        "//src/lib/fuchsia-component/directory",
+        "//src/lib/fuchsia-component/escrow",
+        "//src/lib/fuchsia-component/runtime",
+        "//src/lib/fuchsia-component/server",
+    ],
 )

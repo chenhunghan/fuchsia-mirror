@@ -49,7 +49,6 @@ mod iob;
 mod iommu;
 #[cfg(target_os = "fuchsia")]
 mod job;
-#[cfg(target_os = "fuchsia")]
 mod koid;
 #[cfg(target_os = "fuchsia")]
 mod msi;
@@ -143,7 +142,6 @@ pub use self::iob::*;
 pub use self::iommu::*;
 #[cfg(target_os = "fuchsia")]
 pub use self::job::*;
-#[cfg(target_os = "fuchsia")]
 pub use self::koid::*;
 #[cfg(target_os = "fuchsia")]
 pub use self::msi::*;

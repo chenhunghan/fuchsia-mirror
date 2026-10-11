@@ -105,6 +105,13 @@
             availability: "optional",
         },
         {
+            protocol: [
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
+            ],
+            availability: "optional",
+        },
+        {
             // TODO(https://fxbug.dev/331302451) Use this config value instead of the presence of
             // file data/pkgfs_disable_executability_restrictions in the system_image package to
             // determine whether executability should be enforced.
@@ -163,6 +170,15 @@
             type: "uint32",
             availability: "optional",
             default: 50,
+        },
+        {
+            // If true, blob page requests are handled in the block driver and verified
+            // in-process via BlobPagerAndVerifier. If false, page requests are handled in Fxfs.
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            key: "use_driver_blob_paging",
+            type: "bool",
+            availability: "optional",
+            default: false,
         },
         {
             config: "fuchsia.zircon.system.pkgfs.cmd",

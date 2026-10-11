@@ -226,4 +226,22 @@ unsafe extern "C" {
     /// The current thread must be an active thread with an initialized `MessageWaiter`.
     #[allow(improper_ctypes)]
     pub fn cpp_thread_dispatcher_get_current_message_waiter() -> *mut MessageWaiter;
+
+    /// Returns the process that owns `thread`.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must point to a valid `ThreadDispatcher`.
+    pub(crate) fn cpp_thread_dispatcher_process(
+        thread: *const ThreadDispatcher,
+    ) -> *const ProcessDispatcher;
+
+    /// Returns a pointer to the thread's `Exceptionate`.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must point to a valid `ThreadDispatcher`.
+    pub(crate) fn cpp_thread_dispatcher_exceptionate(
+        thread: *mut ThreadDispatcher,
+    ) -> *mut super::exceptionate::Exceptionate;
 }

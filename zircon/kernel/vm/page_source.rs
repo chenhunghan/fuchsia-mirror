@@ -6,6 +6,8 @@
 
 use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
+use core::ptr::NonNull;
+use fbl::{HasRefCount, Recyclable, RefCounted, RefPtr};
 use page_source_bindings as bindings;
 use pin_init::pin_data;
 use zr::{Opaque, pin_init_ffi, unsafe_pinned_drop_ffi};
@@ -185,10 +187,40 @@ pub struct PageSource {
     phantom: PhantomData<PhantomPinned>,
 }
 
+impl HasRefCount for PageSource {
+    fn ref_count(&self) -> &RefCounted {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`, and
+        // `cpp_page_source_get_ref_counted` returns a valid pointer to its `fbl::RefCounted` base.
+        let raw = unsafe { bindings::cpp_page_source_get_ref_counted(self.as_raw()) };
+        unsafe { &*(raw.cast::<RefCounted>()) }
+    }
+}
+
+// SAFETY: `PageSource` is a C++ `fbl::RefCounted` object freed via `cpp_page_source_free`.
+unsafe impl Recyclable for PageSource {
+    unsafe fn recycle(ptr: NonNull<Self>) {
+        // SAFETY: Caller guarantees `ptr` points to a valid `PageSource` with zero remaining
+        // references.
+        unsafe {
+            bindings::cpp_page_source_free(ptr.as_ptr().cast());
+        }
+    }
+}
+
 impl PageSource {
     /// Domain-specific conversion: returns raw pointer for `PageSource`.
     pub fn as_raw(&self) -> *mut bindings::PageSource {
         self.raw.get()
+    }
+
+    /// Domain-specific conversion: constructs a `RefPtr<PageSource>` from an exported pointer.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be a valid pointer to a C++ `PageSource` with an owned reference count, or null.
+    pub unsafe fn from_raw(ptr: *mut bindings::PageSource) -> Option<RefPtr<Self>> {
+        // SAFETY: Caller guarantees `ptr` is null or a valid `PageSource` with an owned reference.
+        unsafe { RefPtr::try_from_raw(ptr.cast::<Self>()) }
     }
 
     /// Domain-specific conversion: constructs a `&PageSource` from a raw pointer.
@@ -226,6 +258,12 @@ impl PageSource {
     pub fn paged_vmo_lock_is_held(&self) -> bool {
         // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
         unsafe { bindings::cpp_page_source_paged_vmo_lock_is_held(self.as_raw()) }
+    }
+
+    /// Returns true if `error_status` is a valid `ZX_PAGER_OP_FAIL` failure error code.
+    pub fn is_valid_external_failure_code(error_status: Status) -> bool {
+        // SAFETY: Pure function checking status code validity.
+        unsafe { bindings::cpp_page_source_is_valid_external_failure_code(error_status.into_raw()) }
     }
 
     /// Returns true if `error_status` is a valid provider failure error code, which can be used

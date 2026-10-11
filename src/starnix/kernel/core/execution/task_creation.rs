@@ -6,9 +6,8 @@ use crate::mm::MemoryManager;
 use crate::security;
 use crate::signals::SignalActions;
 use crate::task::{
-    CurrentTask, Kernel, Pid, PidTableGuard, ProcessGroup, RobustListHeadPtr,
-    SeccompFilterContainer, SeccompState, Task, TaskBuilder, ThreadGroup, ThreadGroupParent,
-    ThreadGroupWriteGuard,
+    CurrentTask, Kernel, Pid, PidTableGuard, RobustListHeadPtr, SeccompFilterContainer,
+    SeccompState, Task, TaskBuilder, ThreadGroup, ThreadGroupParent, ThreadGroupWriteGuard,
 };
 use crate::vfs::{FsContext, SharedFdTable};
 use starnix_sync::allow_subclass;
@@ -40,7 +39,6 @@ pub fn create_zircon_process(
     parent: Option<ThreadGroupWriteGuard<'_>>,
     pid: Pid,
     exit_signal: Option<Signal>,
-    process_group: Arc<ProcessGroup>,
     signal_actions: Arc<SignalActions>,
     name: TaskCommand,
 ) -> Result<TaskInfo, Errno> {
@@ -64,7 +62,6 @@ pub fn create_zircon_process(
         parent,
         pid,
         exit_signal,
-        process_group,
         signal_actions,
     );
 
@@ -160,13 +157,12 @@ pub fn create_init_child_process(
         kernel,
         initial_name.clone(),
         fs,
-        |pid, process_group| {
+        |pid| {
             create_zircon_process(
                 kernel,
                 None,
                 pid,
                 Some(SIGCHLD),
-                process_group,
                 SignalActions::default(),
                 initial_name.clone(),
             )
@@ -222,13 +218,12 @@ pub fn create_init_process(
         pid,
         initial_name.clone(),
         fs,
-        |pid, process_group| {
+        |pid| {
             create_zircon_process(
                 kernel,
                 None,
                 pid,
                 Some(SIGCHLD),
-                process_group,
                 SignalActions::default(),
                 initial_name.clone(),
             )
@@ -256,8 +251,8 @@ pub fn create_system_task(kernel: &Arc<Kernel>, fs: Arc<FsContext>) -> Result<Cu
         kernel,
         TaskCommand::new(b"kthreadd"),
         fs,
-        |pid, process_group| {
-            let thread_group = ThreadGroup::for_system(kernel.clone(), pid, process_group);
+        |pid| {
+            let thread_group = ThreadGroup::for_system(kernel.clone(), pid);
             Ok(TaskInfo { thread_group, memory_manager: None }.into())
         },
         Credentials::root(),
@@ -273,7 +268,7 @@ pub fn create_task<F>(
     creds: Arc<Credentials>,
 ) -> Result<TaskBuilder, Errno>
 where
-    F: FnOnce(Pid, Arc<ProcessGroup>) -> Result<TaskInfo, Errno>,
+    F: FnOnce(Pid) -> Result<TaskInfo, Errno>,
 {
     let mut guard = kernel.pids.lock();
     let pid = guard.allocate_pid()?;
@@ -291,17 +286,11 @@ fn create_task_with_pid<F>(
     rlimits: &[(Resource, u64)],
 ) -> Result<TaskBuilder, Errno>
 where
-    F: FnOnce(Pid, Arc<ProcessGroup>) -> Result<TaskInfo, Errno>,
+    F: FnOnce(Pid) -> Result<TaskInfo, Errno>,
 {
     debug_assert!(pid.get_task().is_err());
 
-    let process_group = ProcessGroup::new(pid.clone(), None);
-
-    let TaskInfo { thread_group, memory_manager } =
-        task_info_factory(pid.clone(), process_group.clone())?;
-
-    pids.add_process_group(&process_group);
-    process_group.insert(&thread_group);
+    let TaskInfo { thread_group, memory_manager } = task_info_factory(pid.clone())?;
 
     // > The timer slack values of init (PID 1), the ancestor of all processes, are 50,000
     // > nanoseconds (50 microseconds).  The timer slack value is inherited by a child created
@@ -342,7 +331,13 @@ where
                 .set(*resource, rlimit { rlim_cur: *limit, rlim_max: *limit });
         }
 
+        let (pgid, sid) = {
+            let tg_state = builder.thread_group().read();
+            (tg_state.process_group.clone(), tg_state.session.clone())
+        };
         pids.add_task(Arc::clone(&builder.task));
+        pids.attach_pgid(&pgid, builder.thread_group());
+        pids.attach_sid(&sid, builder.thread_group());
         Ok(())
     });
     Ok(builder)
@@ -414,26 +409,26 @@ pub fn create_kernel_thread(
 mod test {
     use super::*;
     use crate::testing::*;
+    use fuchsia_rcu::RcuReadScope;
 
     #[::fuchsia::test]
     async fn test_create_task_failure_does_not_add_process_group() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let (kept_pg_sender, kept_pg_receiver) = std::sync::mpsc::channel();
+            let (kept_pid_sender, kept_pid_receiver) = std::sync::mpsc::channel();
             let result = super::create_task(
                 kernel,
                 TaskCommand::new(b"failed_task"),
                 current_task.fs(),
-                |_pid, process_group| {
-                    let _ = kept_pg_sender.send(process_group);
+                |pid| {
+                    let _ = kept_pid_sender.send(pid);
                     error!(EINVAL)
                 },
                 Credentials::root(),
             );
             assert!(result.is_err());
-            let kept_pg = kept_pg_receiver.recv().unwrap();
-            let pid_entry = kernel.pids.get(kept_pg.leader.id).unwrap().clone();
-            assert_eq!(pid_entry.get_process_group(), error!(ESRCH));
+            let kept_pid = kept_pid_receiver.recv().unwrap();
+            assert!(!kept_pid.is_process_group(&RcuReadScope::new()));
         })
         .await;
     }

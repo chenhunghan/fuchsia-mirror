@@ -34,6 +34,7 @@ typedef struct {
   __typeof(zx_system_get_page_size)* system_get_page_size;
   __typeof(zx_vmo_read)* vmo_read;
   __typeof(zx_vmo_write)* vmo_write;
+  __typeof(zx_debug_read)* debug_read;
 } minip_ctx_t;
 
 // Subsequent messages and replies are of this format. The |what| parameter is

@@ -14,6 +14,7 @@ rustc_library(
     srcs = ["src/lib.rs"],
     crate_name = "fuchsia_trace",
     edition = "2024",
+    link_deps = ["//zircon/system/ulib/trace-engine"],
     with_unit_tests = True,
     deps = [
         "//sdk/rust/zx",
@@ -21,6 +22,5 @@ rustc_library(
         "//third_party/rust_crates/vendor:libc",
         "//third_party/rust_crates/vendor:pin-project",
         "//third_party/rust_crates/vendor:rand",
-        "//zircon/system/ulib/trace-engine",
     ],
 )

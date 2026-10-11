@@ -151,5 +151,5 @@ using these properties.
 
 <!-- Reference links -->
 
-[drivers-fidl]: /docs/development/drivers/concepts/device_driver_model/fidl.md
+[drivers-fidl]: /docs/concepts/drivers/driver_communication.md
 [edu-device-spec]: https://fuchsia.googlesource.com/third_party/qemu/+/refs/heads/main/docs/specs/edu.txt

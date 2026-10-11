@@ -55,6 +55,10 @@ rustc_library(
         ],
     }),
     edition = "2024",
+    link_deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
     proc_macro_deps = [
         "//src/lib/fuchsia-async-macro",
     ],
@@ -75,7 +79,6 @@ rustc_library(
         "//third_party/rust_crates/vendor:smallvec",
     ] + select({
         "@platforms//os:fuchsia": [
-            "//sdk/lib/fdio",
             "//sdk/rust/zx",
             "//third_party/rust_crates/vendor:crossbeam",
             "//third_party/rust_crates/vendor:libc",
@@ -84,7 +87,6 @@ rustc_library(
             "//third_party/rust_crates/vendor:zerocopy",
         ],
         "//conditions:default": [
-            "//src/lib/fuchsia-emulated-handle",
             "//third_party/rust_crates/vendor:futures-lite",
             "//third_party/rust_crates/vendor:tokio",
         ],

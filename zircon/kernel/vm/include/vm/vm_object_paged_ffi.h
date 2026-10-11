@@ -19,6 +19,11 @@ VmObjectPaged* cpp_vm_object_paged_create(uint32_t pmm_alloc_flags, uint32_t opt
 VmObjectPaged* cpp_vm_object_paged_create_contiguous(uint32_t pmm_alloc_flags, uint64_t size,
                                                      uint8_t alignment_log2,
                                                      zx_status_t* out_status);
+VmObjectPaged* cpp_vm_object_paged_create_external(PageSource* src, uint32_t options, uint64_t size,
+                                                   zx_status_t* out_status);
+void cpp_vm_object_paged_reset_pager_vmo_stats(VmObjectPaged* vmo);
+VmObjectPaged* cpp_vm_object_paged_create_from_wired_pages(const void* data, size_t size,
+                                                           bool exclusive, zx_status_t* out_status);
 VmObject* cpp_vm_object_paged_as_vm_object(VmObjectPaged* vmo);
 VmObjectPaged* cpp_vm_object_as_vm_object_paged(VmObject* vmo);
 VmCowPages* cpp_vm_object_paged_debug_get_cow_pages(VmObjectPaged* vmo);

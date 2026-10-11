@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::device::{BlockDevice, Device, NandDevice, Parent, VolumeServiceDevice};
+use crate::device::{Device, Parent, VolumeServiceDevice};
 use anyhow::{Context as _, Error};
 use async_trait::async_trait;
 use fidl_fuchsia_io as fio;
@@ -39,79 +39,6 @@ fn common_filters(watcher: fuchsia_fs::directory::Watcher) -> stream::BoxStream<
             _ => None,
         })
     }))
-}
-
-pub type GetParentCallback = Arc<dyn Fn(&str) -> Parent + Send + Sync>;
-
-/// An implementation of `WatchSource` based on a path in the local namespace.
-pub struct PathSource {
-    path: &'static str,
-    source_type: PathSourceType,
-    // TODO(https://fxbug.dev/394968352): once we stop watching devfs for block devices, we can
-    // remove this side-channel check. For devfs devices, once we find the block device that
-    // represents the SystemPartitionTable, we need to configure its children, based on the path
-    // prefix, as having the SystemPartitionTable parent instead of the Dev parent.
-    get_parent: Option<GetParentCallback>,
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum PathSourceType {
-    Block,
-    Nand,
-}
-
-impl PathSource {
-    pub fn new(
-        path: &'static str,
-        source_type: PathSourceType,
-        get_parent: Option<GetParentCallback>,
-    ) -> Self {
-        PathSource { path, source_type, get_parent }
-    }
-}
-
-#[async_trait]
-impl WatchSource for PathSource {
-    async fn as_stream(&mut self) -> Result<stream::BoxStream<'static, Box<dyn Device>>, Error> {
-        let path = self.path;
-        let source_type = self.source_type;
-        let get_parent = self.get_parent.clone();
-        let dir_proxy = fuchsia_fs::directory::open_in_namespace(path, fio::PERM_READABLE)
-            .with_context(|| format!("Failed to open directory at {path}"))?;
-        let watcher = fuchsia_fs::directory::Watcher::new(&dir_proxy)
-            .await
-            .with_context(|| format!("Failed to watch {path}"))?;
-        Ok(Box::pin(common_filters(watcher).filter_map(move |filename| {
-            let get_parent = get_parent.clone();
-            async move {
-                let path = format!("{}/{}", path, filename);
-                match source_type {
-                    PathSourceType::Block => {
-                        let mut device = BlockDevice::new(path)
-                            .await
-                            .inspect_err(|e| {
-                                log::warn!(
-                                    "Failed to create device (maybe it went away?): {:?}",
-                                    e
-                                );
-                            })
-                            .ok()?;
-                        if let Some(get_parent) = get_parent {
-                            device.set_parent(get_parent(device.topological_path()))
-                        }
-                        Some(Box::new(device) as Box<dyn Device>)
-                    }
-                    PathSourceType::Nand => NandDevice::new(path)
-                        .await
-                        .map(|d| Box::new(d) as Box<dyn Device>)
-                        .inspect_err(|e| {
-                            log::warn!("Failed to create device (maybe it went away?): {:?}", e);
-                        })
-                        .ok(),
-                }
-            }
-        })))
-    }
 }
 
 /// An implementation of `WatchSource` based on a DirectoryProxy.  The source is expected to be
@@ -159,7 +86,7 @@ impl WatchSource for DirSource {
     }
 }
 
-/// Watcher generates new [`BlockDevice`]s for fshost to process.
+/// Watcher generates new [`Device`]s for fshost to process.
 pub struct Watcher {
     device_tx: mpsc::UnboundedSender<Box<dyn Device>>,
     // Each source has its own Task, and they all feed into _device_tx.
@@ -167,7 +94,7 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Create a new Watcher and BlockDevice stream. The watcher will start watching `sources`
+    /// Create a new Watcher and Device stream. The watcher will start watching `sources`
     /// initially, populating the stream with any entries which are already there, then sending new
     /// items on the stream as they are added to the directory.
     pub async fn new(
@@ -205,10 +132,8 @@ impl Watcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{DirSource, PathSource, PathSourceType, Watcher};
+    use super::{DirSource, Watcher};
     use crate::device::Parent;
-    use fidl::endpoints::Proxy as _;
-    use fidl_fuchsia_device::{ControllerRequest, ControllerRequestStream};
     use fidl_fuchsia_storage_block::BlockRequestStream;
     use futures::StreamExt;
     use std::sync::Arc;
@@ -225,58 +150,8 @@ mod tests {
         })
     }
 
-    pub fn fshost_controller(path: &'static str) -> Arc<service::Service> {
-        service::host(move |mut stream: ControllerRequestStream| async move {
-            while let Some(request) = stream.next().await {
-                match request {
-                    Ok(ControllerRequest::GetTopologicalPath { responder, .. }) => {
-                        responder.send(Ok(path)).unwrap_or_else(|e| {
-                            log::error!(
-                                "failed to send GetTopologicalPath response. error: {:?}",
-                                e
-                            );
-                        });
-                    }
-                    Ok(ControllerRequest::ConnectToDeviceFidl { .. }) => {}
-                    Ok(controller_request) => {
-                        panic!("unexpected request: {:?}", controller_request);
-                    }
-                    Err(error) => {
-                        panic!("controller server failed: {}", error);
-                    }
-                }
-            }
-        })
-    }
-
     #[fuchsia::test]
     async fn watcher_populates_device_stream() {
-        // Start with a couple of devices
-        let block = vfs::pseudo_directory! {
-            "000" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("block-000"),
-            },
-            "001" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("block-001"),
-            },
-        };
-
-        let nand = vfs::pseudo_directory! {
-            "000" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("nand-000"),
-            },
-            "001" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("nand-001"),
-            },
-        };
-
-        let class_block_and_nand = vfs::pseudo_directory! {
-            "class" => vfs::pseudo_directory! {
-                "block" => block.clone(),
-                "nand" => nand.clone(),
-            },
-        };
-
         let partitions_dir = vfs::pseudo_directory! {
             "000" => vfs::pseudo_directory! {
                 "volume" => block_protocol(),
@@ -286,29 +161,13 @@ mod tests {
             },
         };
 
-        let client = vfs::directory::serve_read_only(class_block_and_nand, ExecutionScope::new())
-            .into_client_end()
-            .unwrap();
-
-        {
-            let ns = fdio::Namespace::installed().expect("failed to get installed namespace");
-            ns.bind("/test-dev", client).expect("failed to bind dev in namespace");
-        }
-
-        let client = vfs::directory::serve_read_only(partitions_dir, ExecutionScope::new());
-        let (_watcher, mut device_stream) = Watcher::new(vec![
-            Box::new(PathSource::new("/test-dev/class/block", PathSourceType::Block, None)),
-            Box::new(PathSource::new("/test-dev/class/nand", PathSourceType::Nand, None)),
-            Box::new(DirSource::new(client, "test-dir-source", Parent::Dev)),
-        ])
-        .await
-        .expect("failed to make watcher");
+        let client = vfs::directory::serve_read_only(partitions_dir.clone(), ExecutionScope::new());
+        let (_watcher, mut device_stream) =
+            Watcher::new(vec![Box::new(DirSource::new(client, "test-dir-source", Parent::Dev))])
+                .await
+                .expect("failed to make watcher");
 
         let expected_devices = std::collections::HashSet::from([
-            "/test-dev/class/block/000".to_string(),
-            "/test-dev/class/block/001".to_string(),
-            "/test-dev/class/nand/000".to_string(),
-            "/test-dev/class/nand/001".to_string(),
             "test-dir-source/000".to_string(),
             "test-dir-source/001".to_string(),
         ]);
@@ -320,109 +179,90 @@ mod tests {
 
         // Removing an entry for a device already taken off the stream doesn't do anything.
         assert!(
-            block.remove_entry("001", false).expect("failed to remove dir entry 001").is_some()
+            partitions_dir
+                .remove_entry("001", false)
+                .expect("failed to remove dir entry 001")
+                .is_some()
         );
 
         // Adding an entry generates a new block device.
-        block
+        partitions_dir
             .add_entry(
                 "002",
                 vfs::pseudo_directory! {
-                    "device_controller" => fshost_controller("block-002"),
+                    "volume" => block_protocol(),
                 },
             )
             .expect("failed to add dir entry 002");
 
-        assert_eq!(device_stream.next().await.unwrap().topological_path(), "block-002");
+        assert_eq!(device_stream.next().await.unwrap().path(), "test-dir-source/002");
     }
 
     #[fuchsia::test]
     async fn add_stream() {
-        // Start with a couple of devices
-        let block = vfs::pseudo_directory! {
+        let dir1 = vfs::pseudo_directory! {
             "000" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("block-000"),
+                "volume" => block_protocol(),
             },
             "001" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("block-001"),
+                "volume" => block_protocol(),
             },
         };
 
-        let nand = vfs::pseudo_directory! {
+        let dir2 = vfs::pseudo_directory! {
             "000" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("nand-000"),
+                "volume" => block_protocol(),
             },
             "001" => vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("nand-001"),
+                "volume" => block_protocol(),
             },
         };
 
-        let class_block_and_nand = vfs::pseudo_directory! {
-            "class" => vfs::pseudo_directory! {
-                "block" => block.clone(),
-                "nand" => nand.clone(),
-            },
-        };
+        let client1 = vfs::directory::serve_read_only(dir1.clone(), ExecutionScope::new());
+        let client2 = vfs::directory::serve_read_only(dir2.clone(), ExecutionScope::new());
 
-        let client = vfs::directory::serve_read_only(class_block_and_nand, ExecutionScope::new())
-            .into_client_end()
-            .unwrap();
+        let (mut watcher, mut device_stream) =
+            Watcher::new(vec![Box::new(DirSource::new(client1, "dir1", Parent::Dev))])
+                .await
+                .expect("failed to make watcher");
 
-        {
-            let ns = fdio::Namespace::installed().expect("failed to get installed namespace");
-            ns.bind("/test-dev", client).expect("failed to bind dev in namespace");
-        }
-
-        let (mut watcher, mut device_stream) = Watcher::new(vec![Box::new(PathSource::new(
-            "/test-dev/class/block",
-            PathSourceType::Block,
-            None,
-        ))])
-        .await
-        .expect("failed to make watcher");
-
-        let mut devices = std::collections::HashSet::from(["block-000", "block-001"]);
+        let mut devices = std::collections::HashSet::from(["dir1/000", "dir1/001"]);
 
         // There are two devices that were added before we started watching.
-        assert!(devices.remove(device_stream.next().await.unwrap().topological_path()));
-        assert!(devices.remove(device_stream.next().await.unwrap().topological_path()));
+        assert!(devices.remove(device_stream.next().await.unwrap().path()));
+        assert!(devices.remove(device_stream.next().await.unwrap().path()));
         assert!(devices.is_empty());
 
         // Existing entries in the new source are yielded immediately
         watcher
-            .add_source(Box::new(PathSource::new(
-                "/test-dev/class/nand",
-                PathSourceType::Nand,
-                None,
-            )))
+            .add_source(Box::new(DirSource::new(client2, "dir2", Parent::SystemPartitionTable)))
             .await
             .expect("failed to add_source");
 
-        let mut devices = std::collections::HashSet::from(["nand-000", "nand-001"]);
-        assert!(devices.remove(device_stream.next().await.unwrap().topological_path()));
-        assert!(devices.remove(device_stream.next().await.unwrap().topological_path()));
+        let mut devices = std::collections::HashSet::from(["dir2/000", "dir2/001"]);
+        assert!(devices.remove(device_stream.next().await.unwrap().path()));
+        assert!(devices.remove(device_stream.next().await.unwrap().path()));
         assert!(devices.is_empty());
 
         // And now the directories are both watched as expected
-        nand.add_entry(
+        dir2.add_entry(
             "002",
             vfs::pseudo_directory! {
-                "device_controller" => fshost_controller("nand-002"),
+                "volume" => block_protocol(),
             },
         )
         .expect("failed to add dir entry 002");
 
-        assert_eq!(device_stream.next().await.unwrap().topological_path(), "nand-002");
+        assert_eq!(device_stream.next().await.unwrap().path(), "dir2/002");
 
-        block
-            .add_entry(
-                "002",
-                vfs::pseudo_directory! {
-                    "device_controller" => fshost_controller("block-002"),
-                },
-            )
-            .expect("failed to add dir entry 002");
+        dir1.add_entry(
+            "002",
+            vfs::pseudo_directory! {
+                "volume" => block_protocol(),
+            },
+        )
+        .expect("failed to add dir entry 002");
 
-        assert_eq!(device_stream.next().await.unwrap().topological_path(), "block-002");
+        assert_eq!(device_stream.next().await.unwrap().path(), "dir1/002");
     }
 }

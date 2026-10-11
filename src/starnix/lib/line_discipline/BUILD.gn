@@ -97,7 +97,6 @@ rustc_library("line_discipline") {
     "//src/starnix/lib/starnix_uapi",
     "//third_party/rust_crates:serde",
     "//third_party/rust_crates:serde_json",
-    "//third_party/rust_crates:utf8parse",
   ]
 }
 rustc_test("line_discipline_scenarios_test") {

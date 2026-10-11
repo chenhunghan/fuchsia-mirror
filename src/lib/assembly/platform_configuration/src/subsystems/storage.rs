@@ -259,9 +259,6 @@ impl DefineSubsystemConfiguration<(&StorageConfig, &StorageToolsConfig, &Recover
             }
             None => Config::new(ConfigValueType::String { max_size: 64 }, "".into()),
         };
-        let watch_deprecated_v1_drivers =
-            context.board_config.filesystems.watch_deprecated_v1_drivers;
-
         let configs = [
             ("fuchsia.fshost.Blobfs", Config::new_bool(true)),
             ("fuchsia.fshost.BlobMaxBytes", Config::new_uint64(blob_max_bytes)),
@@ -302,10 +299,6 @@ impl DefineSubsystemConfiguration<(&StorageConfig, &StorageToolsConfig, &Recover
             ("fuchsia.fshost.StarnixVolumeName", starnix_volume_name),
             ("fuchsia.fshost.InlineCrypto", inline_crypto),
             ("fuchsia.fshost.ProvisionFxfs", Config::new_bool(provision_fxfs)),
-            (
-                "fuchsia.fshost.WatchDeprecatedV1Drivers",
-                Config::new_bool(watch_deprecated_v1_drivers),
-            ),
             (
                 "fuchsia.storage.SdmmcCommandQueueingEnabled",
                 Config::new_bool(sdmmc_command_queueing),

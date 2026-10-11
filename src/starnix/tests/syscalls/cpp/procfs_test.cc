@@ -3,19 +3,25 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <grp.h>
+#include <lib/fit/defer.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/fsuid.h>
 #include <sys/inotify.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <format>
 #include <sstream>
+#include <thread>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -1395,6 +1401,362 @@ TEST(ProcFilesystemsTest, Format) {
   EXPECT_TRUE(saw_proc);
   EXPECT_TRUE(saw_sysfs);
   EXPECT_TRUE(saw_ext4);
+}
+
+TEST_F(ProcfsTest, ZombieProcessStatusAccessible) {
+  test_helper::Rendezvous ready = test_helper::MakeRendezvous();
+  test_helper::Rendezvous exit_now = test_helper::MakeRendezvous();
+  pid_t child_pid = fork();
+  ASSERT_GE(child_pid, 0);
+  if (child_pid == 0) {
+    ready.poker.poke();
+    exit_now.holder.hold();
+    _exit(0);
+  }
+  auto cleanup_child = fit::defer([child_pid] {
+    kill(child_pid, SIGKILL);
+    waitpid(child_pid, nullptr, 0);
+  });
+  ready.holder.hold();
+
+  std::string child_proc_dir = fxl::StringPrintf("/proc/%d", child_pid);
+  std::string status_path = fxl::StringPrintf("/proc/%d/status", child_pid);
+
+  // Wait for the child to exit and become an unreaped zombie before looking up
+  // /proc/<pid>/status so that uncached zombie lookup in /proc is exercised.
+  exit_now.poker.poke();
+  siginfo_t info{};
+  ASSERT_THAT(waitid(P_PID, child_pid, &info, WEXITED | WNOWAIT), SyscallSucceeds());
+
+  std::string status_contents;
+  ASSERT_TRUE(files::ReadFileToString(status_path, &status_contents)) << strerror(errno);
+  EXPECT_THAT(status_contents, ContainsRegex("Name:\t"));
+  EXPECT_THAT(status_contents, ContainsRegex(fxl::StringPrintf("Pid:\t%d", child_pid)));
+  EXPECT_THAT(status_contents, ContainsRegex("State:\tZ"));
+
+  int status = 0;
+  ASSERT_THAT(waitpid(child_pid, &status, 0), SyscallSucceeds());
+  cleanup_child.cancel();
+
+  struct stat st{};
+  EXPECT_THAT(stat(child_proc_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcfsTest, LeaderlessThreadGroupAccessible) {
+  int raw_pipe[2];
+  ASSERT_THAT(pipe(raw_pipe), SyscallSucceeds());
+  fbl::unique_fd tid_pipe_read(raw_pipe[0]);
+  fbl::unique_fd tid_pipe_write(raw_pipe[1]);
+  test_helper::Rendezvous exit_worker = test_helper::MakeRendezvous();
+
+  pid_t child_pid = fork();
+  ASSERT_GE(child_pid, 0);
+  if (child_pid == 0) {
+    tid_pipe_read.reset();
+    int write_fd = tid_pipe_write.release();
+    test_helper::Rendezvous worker_started = test_helper::MakeRendezvous();
+    std::thread worker([write_fd, &worker_started, &exit_worker] {
+      pid_t worker_tid = static_cast<pid_t>(syscall(SYS_gettid));
+      SAFE_SYSCALL(write(write_fd, &worker_tid, sizeof(worker_tid)));
+      close(write_fd);
+      worker_started.poker.poke();
+      exit_worker.holder.hold();
+      _exit(0);
+    });
+    worker.detach();
+    worker_started.holder.hold();
+    syscall(SYS_exit, 0);
+  }
+  auto cleanup_child = fit::defer([child_pid] {
+    kill(child_pid, SIGKILL);
+    waitpid(child_pid, nullptr, 0);
+  });
+  tid_pipe_write.reset();
+
+  pid_t worker_tid = 0;
+  ASSERT_EQ(read(tid_pipe_read.get(), &worker_tid, sizeof(worker_tid)),
+            static_cast<ssize_t>(sizeof(worker_tid)));
+  tid_pipe_read.reset();
+
+  // Wait for the thread-group leader to exit. On Linux, the exited group leader remains in
+  // /proc/<pid>/task/<pid> in State: Z until the entire thread group exits; on Starnix, the
+  // exited leader's task entry is removed immediately (ENOENT).
+  std::string leader_status_path =
+      fxl::StringPrintf("/proc/%d/task/%d/status", child_pid, child_pid);
+  while (true) {
+    std::string leader_status;
+    if (!files::ReadFileToString(leader_status_path, &leader_status)) {
+      EXPECT_THAT(open(leader_status_path.c_str(), O_RDONLY), SyscallFailsWithErrno(ENOENT));
+      break;
+    }
+    if (!test_helper::IsStarnix() && leader_status.find("State:\tZ") != std::string::npos) {
+      break;
+    }
+    usleep(1000);
+  }
+
+  std::string status_path = fxl::StringPrintf("/proc/%d/status", child_pid);
+  std::string status_contents;
+  ASSERT_TRUE(files::ReadFileToString(status_path, &status_contents)) << strerror(errno);
+  EXPECT_THAT(status_contents, ContainsRegex(fxl::StringPrintf("Tgid:\t%d", child_pid)));
+  EXPECT_THAT(status_contents, ContainsRegex(fxl::StringPrintf("Pid:\t%d", child_pid)));
+
+  std::string stat_path = fxl::StringPrintf("/proc/%d/stat", child_pid);
+  std::string stat_contents;
+  ASSERT_TRUE(files::ReadFileToString(stat_path, &stat_contents)) << strerror(errno);
+  EXPECT_FALSE(stat_contents.empty());
+
+  std::string limits_path = fxl::StringPrintf("/proc/%d/limits", child_pid);
+  std::string limits_contents;
+  ASSERT_TRUE(files::ReadFileToString(limits_path, &limits_contents)) << strerror(errno);
+  EXPECT_FALSE(limits_contents.empty());
+
+  if (test_helper::IsStarnix()) {
+    std::string mounts_path = fxl::StringPrintf("/proc/%d/mounts", child_pid);
+    std::string mounts_contents;
+    ASSERT_TRUE(files::ReadFileToString(mounts_path, &mounts_contents)) << strerror(errno);
+    EXPECT_FALSE(mounts_contents.empty());
+
+    std::string mountinfo_path = fxl::StringPrintf("/proc/%d/mountinfo", child_pid);
+    std::string mountinfo_contents;
+    ASSERT_TRUE(files::ReadFileToString(mountinfo_path, &mountinfo_contents)) << strerror(errno);
+    EXPECT_FALSE(mountinfo_contents.empty());
+  }
+
+  std::string task_list_dir = fxl::StringPrintf("/proc/%d/task", child_pid);
+  std::vector<std::string> task_entries;
+  ASSERT_TRUE(files::ReadDirContents(task_list_dir, &task_entries));
+  EXPECT_EQ(std::count(task_entries.begin(), task_entries.end(), std::to_string(worker_tid)), 1);
+  if (test_helper::IsStarnix()) {
+    EXPECT_EQ(std::count(task_entries.begin(), task_entries.end(), std::to_string(child_pid)), 0);
+  }
+
+  std::string worker_status_path =
+      fxl::StringPrintf("/proc/%d/task/%d/status", child_pid, worker_tid);
+  std::string worker_status;
+  ASSERT_TRUE(files::ReadFileToString(worker_status_path, &worker_status)) << strerror(errno);
+  EXPECT_THAT(worker_status, ContainsRegex(fxl::StringPrintf("Pid:\t%d", worker_tid)));
+
+  exit_worker.poker.poke();
+  int status = 0;
+  ASSERT_THAT(waitpid(child_pid, &status, 0), SyscallSucceeds());
+  cleanup_child.cancel();
+}
+
+TEST(ProcHidePidTest, HidePidAndGidMountOptions) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
+  }
+  if (getuid() != 0) {
+    GTEST_SKIP() << "Not running as root, skipping.";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_THAT(mount("proc", temp_dir.path().c_str(), "proc", 0, "hidepid=2,gid=3009"),
+              SyscallSucceeds());
+  auto cleanup = fit::defer([&] {
+    mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=0,gid=0");
+    umount2(temp_dir.path().c_str(), MNT_DETACH);
+  });
+
+  std::string mounts_contents;
+  ASSERT_TRUE(files::ReadFileToString("/proc/mounts", &mounts_contents));
+  EXPECT_THAT(mounts_contents, ContainsRegex("gid=3009,hidepid=(2|invisible)"));
+
+  pid_t parent_pid = getpid();
+  std::string parent_proc_dir = fxl::StringPrintf("%s/%d", temp_dir.path().c_str(), parent_pid);
+  std::string parent_cmdline =
+      fxl::StringPrintf("%s/%d/cmdline", temp_dir.path().c_str(), parent_pid);
+  std::string parent_task_dir =
+      fxl::StringPrintf("%s/%d/task/%d", temp_dir.path().c_str(), parent_pid, parent_pid);
+  std::string parent_task_cmdline =
+      fxl::StringPrintf("%s/%d/task/%d/cmdline", temp_dir.path().c_str(), parent_pid, parent_pid);
+
+  // Keep open FDs to parent's /proc/<pid> and /proc/<pid>/task/<tid> so their dentries remain
+  // pinned in DirEntry::children (which holds Weak<DirEntry>) and cached dentry revalidation
+  // is exercised for unprivileged callers.
+  fbl::unique_fd pinned_proc_fd(SAFE_SYSCALL(open(parent_proc_dir.c_str(), O_PATH | O_DIRECTORY)));
+  fbl::unique_fd pinned_task_fd(SAFE_SYSCALL(open(parent_task_dir.c_str(), O_PATH | O_DIRECTORY)));
+  struct stat parent_st{};
+  ASSERT_THAT(stat(parent_cmdline.c_str(), &parent_st), SyscallSucceeds());
+  ASSERT_THAT(stat(parent_task_cmdline.c_str(), &parent_st), SyscallSucceeds());
+
+  // An unprivileged process not in gid 3009 cannot see or stat parent's /proc/<pid>
+  // or /proc/<pid>/task/<tid>, but can see and stat its own /proc/<pid>.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    SAFE_SYSCALL(setgroups(0, nullptr));
+    SAFE_SYSCALL(setgid(65534));
+    SAFE_SYSCALL(setuid(65534));
+
+    struct stat st{};
+    EXPECT_THAT(stat(parent_proc_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+    EXPECT_THAT(open(parent_cmdline.c_str(), O_RDONLY), SyscallFailsWithErrno(ENOENT));
+    EXPECT_THAT(stat(parent_task_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+    EXPECT_THAT(open(parent_task_cmdline.c_str(), O_RDONLY), SyscallFailsWithErrno(ENOENT));
+
+    struct statx stx{};
+    EXPECT_THAT(syscall(SYS_statx, pinned_proc_fd.get(), "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
+                        STATX_BASIC_STATS, &stx),
+                SyscallFailsWithErrno(ENOENT));
+    EXPECT_THAT(syscall(SYS_statx, pinned_task_fd.get(), "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
+                        STATX_BASIC_STATS, &stx),
+                SyscallFailsWithErrno(ENOENT));
+
+    std::string self_proc_dir = fxl::StringPrintf("%s/%d", temp_dir.path().c_str(), getpid());
+    std::string self_task_dir =
+        fxl::StringPrintf("%s/%d/task/%d", temp_dir.path().c_str(), getpid(), getpid());
+    EXPECT_THAT(stat(self_proc_dir.c_str(), &st), SyscallSucceeds());
+    EXPECT_THAT(stat(self_task_dir.c_str(), &st), SyscallSucceeds());
+
+    std::vector<std::string> entries;
+    ASSERT_TRUE(files::ReadDirContents(temp_dir.path(), &entries));
+    EXPECT_EQ(std::count(entries.begin(), entries.end(), std::to_string(parent_pid)), 0);
+    EXPECT_EQ(std::count(entries.begin(), entries.end(), std::to_string(getpid())), 1);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+  pinned_proc_fd.reset();
+  pinned_task_fd.reset();
+
+  // An unprivileged process in gid 3009 can see and stat parent's /proc/<pid> and
+  // /proc/<pid>/task/<tid>.
+  helper.RunInForkedProcess([&] {
+    gid_t groups[] = {3009};
+    SAFE_SYSCALL(setgroups(1, groups));
+    SAFE_SYSCALL(setgid(65534));
+    SAFE_SYSCALL(setuid(65534));
+
+    struct stat st{};
+    EXPECT_THAT(stat(parent_proc_dir.c_str(), &st), SyscallSucceeds());
+    EXPECT_THAT(stat(parent_task_dir.c_str(), &st), SyscallSucceeds());
+    fbl::unique_fd fd(open(parent_cmdline.c_str(), O_RDONLY));
+    EXPECT_TRUE(fd.is_valid()) << strerror(errno);
+    fbl::unique_fd task_fd(open(parent_task_cmdline.c_str(), O_RDONLY));
+    EXPECT_TRUE(task_fd.is_valid()) << strerror(errno);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // Remount with hidepid=0 (omitting gid) so an unprivileged process can open FDs to parent's
+  // /proc/<pid> and /proc/<pid>/task, verifying that gid=3009 is preserved across partial remounts,
+  // then remount with hidepid=noaccess and hidepid=ptraceable while holding those FDs to verify
+  // dynamic enforcement on fstat, getdents64, openat, and "." / "..".
+  std::string parent_task_list_dir =
+      fxl::StringPrintf("%s/%d/task", temp_dir.path().c_str(), parent_pid);
+  ASSERT_THAT(mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=0"),
+              SyscallSucceeds());
+  ASSERT_TRUE(files::ReadFileToString("/proc/mounts", &mounts_contents));
+  EXPECT_THAT(mounts_contents, ContainsRegex("gid=3009"));
+  fbl::unique_fd held_proc_fd(SAFE_SYSCALL(open(parent_proc_dir.c_str(), O_RDONLY | O_DIRECTORY)));
+  fbl::unique_fd held_task_list_fd(
+      SAFE_SYSCALL(open(parent_task_list_dir.c_str(), O_RDONLY | O_DIRECTORY)));
+
+  // Remount with hidepid=noaccess (1), omitting gid to verify gid=3009 remains preserved:
+  // unprivileged process not in gid 3009 can stat parent's /proc/<pid>, but cannot open it,
+  // open files inside it, or traverse "." / ".." / task/<tid> (EPERM). Reading directory
+  // entries via an already-open FD continues to succeed while the target process is alive.
+  ASSERT_THAT(mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=noaccess"),
+              SyscallSucceeds());
+  ASSERT_TRUE(files::ReadFileToString("/proc/mounts", &mounts_contents));
+  EXPECT_THAT(mounts_contents, ContainsRegex("gid=3009,hidepid=(1|noaccess)"));
+  helper.RunInForkedProcess([&] {
+    SAFE_SYSCALL(setgroups(0, nullptr));
+    SAFE_SYSCALL(setgid(65534));
+    SAFE_SYSCALL(setuid(65534));
+
+    struct stat st{};
+    EXPECT_THAT(stat(parent_proc_dir.c_str(), &st), SyscallSucceeds());
+    EXPECT_THAT(fstat(held_proc_fd.get(), &st), SyscallSucceeds());
+    EXPECT_THAT(access(parent_proc_dir.c_str(), F_OK), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(access(parent_proc_dir.c_str(), X_OK), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(open(parent_proc_dir.c_str(), O_RDONLY | O_DIRECTORY),
+                SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(open(parent_cmdline.c_str(), O_RDONLY), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(openat(held_proc_fd.get(), "cmdline", O_RDONLY), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(fstatat(held_proc_fd.get(), ".", &st, 0), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(fstatat(held_proc_fd.get(), "..", &st, 0), SyscallFailsWithErrno(EPERM));
+    char dirent_buf[256];
+    EXPECT_THAT(syscall(SYS_getdents64, held_proc_fd.get(), dirent_buf, sizeof(dirent_buf)),
+                SyscallSucceeds());
+    EXPECT_THAT(syscall(SYS_getdents64, held_task_list_fd.get(), dirent_buf, sizeof(dirent_buf)),
+                SyscallSucceeds());
+    EXPECT_THAT(stat(parent_task_dir.c_str(), &st), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(open(parent_task_cmdline.c_str(), O_RDONLY), SyscallFailsWithErrno(EPERM));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // Remount with hidepid=ptraceable (4), omitting gid: even a process in gid 3009 with a
+  // different UID cannot see or stat parent's /proc/<pid> (ENOENT), and fstat/openat on a
+  // held FD fail.
+  ASSERT_THAT(mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=ptraceable"),
+              SyscallSucceeds());
+  ASSERT_TRUE(files::ReadFileToString("/proc/mounts", &mounts_contents));
+  EXPECT_THAT(mounts_contents, ContainsRegex("gid=3009,hidepid=(4|ptraceable)"));
+  helper.RunInForkedProcess([&] {
+    gid_t groups[] = {3009};
+    SAFE_SYSCALL(setgroups(1, groups));
+    SAFE_SYSCALL(setgid(65534));
+    SAFE_SYSCALL(setuid(65534));
+
+    struct stat st{};
+    EXPECT_THAT(stat(parent_proc_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
+    EXPECT_THAT(fstat(held_proc_fd.get(), &st), SyscallFailsWithErrno(ENOENT));
+    struct statx stx{};
+    EXPECT_THAT(syscall(SYS_statx, held_proc_fd.get(), "", AT_EMPTY_PATH | AT_STATX_DONT_SYNC,
+                        STATX_BASIC_STATS, &stx),
+                SyscallFailsWithErrno(ENOENT));
+    // Note: When /proc/<pid> is already cached in the VFS dcache (e.g. pinned by held_proc_fd),
+    // Linux 6.1's proc_pid_permission returns EPERM under hidepid=ptraceable whereas uncached
+    // proc_pid_lookup returns ENOENT.
+    EXPECT_THAT(open(parent_cmdline.c_str(), O_RDONLY),
+                SyscallFailsWithErrno(testing::AnyOf(ENOENT, EPERM)));
+    EXPECT_THAT(openat(held_proc_fd.get(), "cmdline", O_RDONLY),
+                SyscallFailsWithErrno(testing::AnyOf(ENOENT, EPERM)));
+    EXPECT_THAT(lseek(held_proc_fd.get(), 0, SEEK_SET), SyscallSucceeds());
+    EXPECT_THAT(lseek(held_task_list_fd.get(), 0, SEEK_SET), SyscallSucceeds());
+    char dirent_buf[256];
+    EXPECT_THAT(syscall(SYS_getdents64, held_proc_fd.get(), dirent_buf, sizeof(dirent_buf)),
+                SyscallSucceeds());
+    EXPECT_THAT(syscall(SYS_getdents64, held_task_list_fd.get(), dirent_buf, sizeof(dirent_buf)),
+                SyscallSucceeds());
+    EXPECT_THAT(stat(parent_task_dir.c_str(), &st),
+                SyscallFailsWithErrno(testing::AnyOf(ENOENT, EPERM)));
+    EXPECT_THAT(open(parent_task_cmdline.c_str(), O_RDONLY),
+                SyscallFailsWithErrno(testing::AnyOf(ENOENT, EPERM)));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // Invalid hidepid values are rejected with EINVAL.
+  EXPECT_THAT(mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=3"),
+              SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(mount("proc", temp_dir.path().c_str(), "proc", MS_REMOUNT, "hidepid=invalid"),
+              SyscallFailsWithErrno(EINVAL));
+}
+
+blksize_t ExpectedProcfsBlksize() {
+  // Linux's procfs sets s_blocksize = 1024 in proc_fill_super, whereas Starnix sets st_blksize to
+  // PAGE_SIZE so Bionic stdio buffers size to a full page.
+  return test_helper::IsStarnix() ? static_cast<blksize_t>(sysconf(_SC_PAGESIZE)) : 1024;
+}
+
+TEST(ProcfsBlksizeTest, FileFstatBlksize) {
+  const blksize_t expected_blksize = ExpectedProcfsBlksize();
+  for (const char* path : {"/proc/self/smaps", "/proc/self/maps", "/proc/uptime"}) {
+    fbl::unique_fd fd(open(path, O_RDONLY));
+    ASSERT_TRUE(fd.is_valid()) << "open failed for " << path << ": " << strerror(errno);
+    struct stat st;
+    ASSERT_EQ(fstat(fd.get(), &st), 0) << "fstat failed for " << path << ": " << strerror(errno);
+    EXPECT_EQ(st.st_blksize, expected_blksize) << "path: " << path;
+  }
+}
+
+TEST(ProcfsBlksizeTest, StatBlksize) {
+  const blksize_t expected_blksize = ExpectedProcfsBlksize();
+  for (const char* path :
+       {"/proc", "/proc/self", "/proc/self/fd", "/proc/sys", "/proc/self/attr", "/proc/kmsg"}) {
+    struct stat st;
+    ASSERT_EQ(stat(path, &st), 0) << "stat failed for " << path << ": " << strerror(errno);
+    EXPECT_EQ(st.st_blksize, expected_blksize) << "path: " << path;
+  }
 }
 
 }  // namespace

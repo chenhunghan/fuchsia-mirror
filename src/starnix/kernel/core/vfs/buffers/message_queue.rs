@@ -4,18 +4,40 @@
 
 use std::collections::VecDeque;
 
-use super::message_types::{AncillaryData, Message, MessageData};
+use super::message_types::{AncillaryData, Message, MessageData, UnixControlData};
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::socket::SocketAddress;
-use starnix_uapi::error;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::vfs::FdEvents;
+use starnix_uapi::{error, uapi};
+
+/// Controls whether `SO_PASSCRED` is enabled, which causes stream reads and peeks to break before
+/// messages with differing credentials.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PasscredMode {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl PasscredMode {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl From<bool> for PasscredMode {
+    fn from(enabled: bool) -> Self {
+        if enabled { Self::Enabled } else { Self::Disabled }
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct MessageReadInfo {
     pub bytes_read: usize,
     pub message_length: usize,
     pub address: Option<SocketAddress>,
+    pub credentials: Option<uapi::ucred>,
     pub ancillary_data: Vec<AncillaryData>,
 }
 
@@ -24,6 +46,15 @@ impl MessageReadInfo {
     pub fn append(&mut self, info: &mut MessageReadInfo) {
         self.bytes_read += info.bytes_read;
         self.message_length += info.message_length;
+        if self.address.is_none() {
+            self.address = info.address.take();
+        }
+        if self.credentials.is_none() {
+            self.credentials = info.credentials.take();
+        }
+        if self.ancillary_data.iter().any(AncillaryData::is_credentials) {
+            info.ancillary_data.retain(|d| !d.is_credentials());
+        }
         self.ancillary_data.append(&mut info.ancillary_data);
     }
 }
@@ -96,6 +127,44 @@ impl<D: MessageData> MessageQueue<D> {
         true
     }
 
+    fn update_creds(
+        passcred: PasscredMode,
+        message: &Message<D>,
+        creds: &mut Option<uapi::ucred>,
+    ) -> bool {
+        if passcred.is_enabled() {
+            let message_creds = message.credentials.unwrap_or_else(UnixControlData::unknown_ucred);
+            if let Some(existing_creds) = *creds {
+                if existing_creds != message_creds {
+                    return false;
+                }
+            } else {
+                *creds = Some(message_creds);
+            }
+        }
+        true
+    }
+
+    /// Returns whether the next message in the queue (if any) can be coalesced into `info`.
+    pub fn can_coalesce_with(&self, info: &MessageReadInfo, passcred: PasscredMode) -> bool {
+        if info.bytes_read == 0 {
+            return true;
+        }
+        if info.ancillary_data.iter().any(|d| !d.is_credentials()) {
+            return false;
+        }
+        if passcred.is_enabled() != info.credentials.is_some() {
+            return false;
+        }
+        let Some(message) = self.peek_message() else {
+            return true;
+        };
+        let mut address = info.address.clone();
+        let mut creds = info.credentials;
+        Self::update_address(message, &mut address)
+            && Self::update_creds(passcred, message, &mut creds)
+    }
+
     /// Reads messages until there are no more messages, a message with ancillary data is
     /// encountered, or `data` are full.
     ///
@@ -110,9 +179,25 @@ impl<D: MessageData> MessageQueue<D> {
         &mut self,
         data: &mut dyn OutputBuffer,
     ) -> Result<(MessageReadInfo, bool), Errno> {
+        self.read_stream_with_passcred(data, PasscredMode::Disabled)
+    }
+
+    /// Reads messages from a stream until there are no more messages, a message with ancillary
+    /// data is encountered, a message with differing credentials is encountered (when `passcred`
+    /// is `PasscredMode::Enabled`), or `data` are full.
+    ///
+    /// # Parameters
+    /// - `data`: The `OutputBuffer` to write the data to.
+    /// - `passcred`: Whether `SO_PASSCRED` is enabled on the receiving socket.
+    pub fn read_stream_with_passcred(
+        &mut self,
+        data: &mut dyn OutputBuffer,
+        passcred: PasscredMode,
+    ) -> Result<(MessageReadInfo, bool), Errno> {
         let mut total_bytes_read = 0;
         let mut address = None;
         let mut ancillary_data = vec![];
+        let mut creds = None;
 
         let mut messages_read = 0;
         loop {
@@ -120,9 +205,11 @@ impl<D: MessageData> MessageQueue<D> {
                 Some(m) => m,
                 None => break,
             };
-            if !Self::update_address(&message, &mut address) {
-                // We've already locked onto an address for this batch of messages, but we
-                // have found a message that doesn't match. We put it back for now and
+            if !Self::update_address(&message, &mut address)
+                || !Self::update_creds(passcred, &message, &mut creds)
+            {
+                // We've already locked onto an address or credentials for this batch of messages,
+                // but we have found a message that doesn't match. We put it back for now and
                 // return the messages we have so far.
                 self.write_front(message);
                 break;
@@ -132,17 +219,16 @@ impl<D: MessageData> MessageQueue<D> {
             let bytes_read = message.data.copy_to_user(data)?;
             total_bytes_read += bytes_read;
 
-            if let Some(remaining_data) = message.data.split_off(bytes_read) {
+            if let Some(remaining_message) = message.split_off(bytes_read) {
                 // If not all the message data could fit, return the ancillary data now,
-                // and put the remaining data back without it.
-                ancillary_data = message.ancillary_data;
-                self.write_front(Message::new(remaining_data, message.address.clone(), vec![]));
+                // and put the remaining data back with its address and credentials preserved.
+                ancillary_data.append(&mut message.ancillary_data);
+                self.write_front(remaining_message);
                 break;
             }
 
-            // TODO(https://fxbug.dev/542829111): Only break on credentials if SO_PASSCRED is enabled.
             if !message.ancillary_data.is_empty() {
-                ancillary_data = message.ancillary_data;
+                ancillary_data.append(&mut message.ancillary_data);
                 break;
             }
 
@@ -156,6 +242,7 @@ impl<D: MessageData> MessageQueue<D> {
                 bytes_read: total_bytes_read,
                 message_length: total_bytes_read,
                 address,
+                credentials: creds,
                 ancillary_data,
             },
             messages_read > 0,
@@ -163,7 +250,8 @@ impl<D: MessageData> MessageQueue<D> {
     }
 
     /// Peeks messages until there are no more messages, a message with ancillary data is
-    /// encountered, or `data` are full.
+    /// encountered, a message with differing credentials is encountered (when `passcred` is
+    /// `PasscredMode::Enabled`), or `data` are full.
     ///
     /// Unlike `read_stream`, this function does not remove the messages from the queue.
     ///
@@ -171,16 +259,19 @@ impl<D: MessageData> MessageQueue<D> {
     ///
     /// # Parameters
     /// - `data`: The `OutputBuffer` to write the data to.
+    /// - `passcred`: Whether `SO_PASSCRED` is enabled on the receiving socket.
     ///
     /// Returns the message information containing the number of bytes read, the address, and any
     /// ancillary data. Also returns a boolean indicating if any messages were read.
     pub fn peek_stream(
         &self,
         data: &mut dyn OutputBuffer,
+        passcred: PasscredMode,
     ) -> Result<(MessageReadInfo, bool), Errno> {
         let mut total_bytes_read = 0;
         let mut address = None;
         let mut ancillary_data = vec![];
+        let mut creds = None;
 
         let mut messages_peeked = 0;
         for (index, message) in self.messages.iter().enumerate() {
@@ -188,23 +279,19 @@ impl<D: MessageData> MessageQueue<D> {
                 break;
             }
 
-            if !Self::update_address(message, &mut address) {
+            if !Self::update_address(message, &mut address)
+                || !Self::update_creds(passcred, message, &mut creds)
+            {
                 break;
             }
             messages_peeked += 1;
 
-            if !message.ancillary_data.is_empty() {
-                ancillary_data = message.ancillary_data.clone();
-            }
+            ancillary_data.extend(message.ancillary_data.iter().cloned());
 
             let bytes_read = message.data.copy_to_user(data)?;
             total_bytes_read += bytes_read;
 
-            if bytes_read < message.len() {
-                break;
-            }
-
-            if !ancillary_data.is_empty() {
+            if bytes_read < message.len() || !message.ancillary_data.is_empty() {
                 break;
             }
         }
@@ -214,6 +301,7 @@ impl<D: MessageData> MessageQueue<D> {
                 bytes_read: total_bytes_read,
                 message_length: total_bytes_read,
                 address,
+                credentials: creds,
                 ancillary_data,
             },
             messages_peeked > 0,
@@ -230,6 +318,7 @@ impl<D: MessageData> MessageQueue<D> {
                     bytes_read: message.data.copy_to_user(data)?,
                     message_length: message.len(),
                     address: message.address,
+                    credentials: message.credentials,
                     ancillary_data: message.ancillary_data,
                 },
                 true,
@@ -249,6 +338,7 @@ impl<D: MessageData> MessageQueue<D> {
                     bytes_read: message.data.copy_to_user(data)?,
                     message_length: message.len(),
                     address: message.address.clone(),
+                    credentials: message.credentials,
                     ancillary_data: message.ancillary_data.clone(),
                 },
                 true,
@@ -289,7 +379,7 @@ impl<D: MessageData> MessageQueue<D> {
         address: Option<SocketAddress>,
         ancillary_data: &mut Vec<AncillaryData>,
     ) -> Result<usize, Errno> {
-        self.write_stream_with_filter(data, address, ancillary_data, Some)
+        self.write_stream_with_filter(data, address, None, ancillary_data, Some)
     }
 
     /// Writes the the contents of `InputBuffer` into this socket.
@@ -306,6 +396,7 @@ impl<D: MessageData> MessageQueue<D> {
         &mut self,
         data: &mut dyn InputBuffer,
         address: Option<SocketAddress>,
+        default_credentials: Option<uapi::ucred>,
         ancillary_data: &mut Vec<AncillaryData>,
         filter: impl FnOnce(Message<D>) -> Option<Message<D>>,
     ) -> Result<usize, Errno> {
@@ -313,8 +404,21 @@ impl<D: MessageData> MessageQueue<D> {
         if actual == 0 && data.available() > 0 {
             return error!(EAGAIN);
         }
-        let data = MessageData::copy_from_user(data, actual)?;
-        let message = Message::new(data, address, std::mem::take(ancillary_data));
+        let message_data = MessageData::copy_from_user(data, actual)?;
+        let explicit_creds = ancillary_data.iter().rev().find_map(AncillaryData::credentials);
+        let mut message_ancillary_data = std::mem::take(ancillary_data);
+        message_ancillary_data.retain(|d| !d.is_credentials());
+        if data.available() > 0 {
+            if let Some(creds) = explicit_creds {
+                ancillary_data.push(AncillaryData::Unix(UnixControlData::Credentials(creds)));
+            }
+        }
+        let message = Message::new(
+            message_data,
+            address,
+            explicit_creds.or(default_credentials),
+            message_ancillary_data,
+        );
         if let Some(message) = filter(message) {
             self.write_message(message);
         }
@@ -333,9 +437,10 @@ impl<D: MessageData> MessageQueue<D> {
         &mut self,
         data: &mut dyn InputBuffer,
         address: Option<SocketAddress>,
+        default_credentials: Option<uapi::ucred>,
         ancillary_data: &mut Vec<AncillaryData>,
     ) -> Result<usize, Errno> {
-        self.write_datagram_with_filter(data, address, ancillary_data, Some)
+        self.write_datagram_with_filter(data, address, default_credentials, ancillary_data, Some)
     }
 
     /// Writes the the contents of `InputBuffer` into this socket as
@@ -352,6 +457,7 @@ impl<D: MessageData> MessageQueue<D> {
         &mut self,
         data: &mut dyn InputBuffer,
         address: Option<SocketAddress>,
+        default_credentials: Option<uapi::ucred>,
         ancillary_data: &mut Vec<AncillaryData>,
         filter: impl FnOnce(Message<D>) -> Option<Message<D>>,
     ) -> Result<usize, Errno> {
@@ -362,8 +468,16 @@ impl<D: MessageData> MessageQueue<D> {
         if actual > self.available_capacity() {
             return error!(EAGAIN);
         }
-        let data = MessageData::copy_from_user(data, actual)?;
-        let message = Message::new(data, address, std::mem::take(ancillary_data));
+        let message_data = MessageData::copy_from_user(data, actual)?;
+        let explicit_creds = ancillary_data.iter().rev().find_map(AncillaryData::credentials);
+        let mut message_ancillary_data = std::mem::take(ancillary_data);
+        message_ancillary_data.retain(|d| !d.is_credentials());
+        let message = Message::new(
+            message_data,
+            address,
+            explicit_creds.or(default_credentials),
+            message_ancillary_data,
+        );
         if let Some(message) = filter(message) {
             self.write_message(message);
         }
@@ -399,7 +513,6 @@ impl<D: MessageData> MessageQueue<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vfs::UnixControlData;
 
     /// Tests that a write followed by a read returns the written message.
     #[::fuchsia::test]
@@ -420,7 +533,7 @@ mod tests {
         let bytes: Vec<u8> = vec![1, 2, 3];
         let ancillary_data =
             vec![AncillaryData::Unix(UnixControlData::Security(bytes.clone().into()))];
-        let message = Message::new(vec![].into(), None, ancillary_data);
+        let message = Message::new(vec![].into(), None, None, ancillary_data);
         message_queue.write_message(message);
         assert_eq!(message_queue.len(), 0);
         message_queue.write_message(bytes.clone().into());
@@ -443,5 +556,32 @@ mod tests {
         assert_eq!(message_queue.len(), second_bytes.len());
         assert_eq!(message_queue.read_message(), Some(second_bytes.into()));
         assert_eq!(message_queue.read_message(), None);
+    }
+
+    #[::fuchsia::test]
+    fn test_can_coalesce_with_passcred_toggled() {
+        let mut message_queue: MessageQueue = MessageQueue::new(usize::MAX);
+        let creds = uapi::ucred { pid: 1, uid: 2, gid: 3 };
+        message_queue.write_message(Message::new(vec![1, 2].into(), None, Some(creds), Vec::new()));
+
+        let info_with_creds = MessageReadInfo {
+            bytes_read: 2,
+            message_length: 2,
+            address: None,
+            credentials: Some(creds),
+            ancillary_data: Vec::new(),
+        };
+        assert!(message_queue.can_coalesce_with(&info_with_creds, PasscredMode::Enabled));
+        assert!(!message_queue.can_coalesce_with(&info_with_creds, PasscredMode::Disabled));
+
+        let info_without_creds = MessageReadInfo {
+            bytes_read: 2,
+            message_length: 2,
+            address: None,
+            credentials: None,
+            ancillary_data: Vec::new(),
+        };
+        assert!(message_queue.can_coalesce_with(&info_without_creds, PasscredMode::Disabled));
+        assert!(!message_queue.can_coalesce_with(&info_without_creds, PasscredMode::Enabled));
     }
 }

@@ -9,11 +9,31 @@ group("test") {
   testonly = true
   deps = [
     ":chunk_input_stream_tests",
+    ":codec_adapter_aac_test",
     ":codec_adapter_lc3_test",
+    ":codec_adapter_sbc_test",
     ":codec_adapter_sw_test",
     ":output_sink_tests",
     ":timestamp_extrapolator_tests",
   ]
+}
+
+cc_test_executable("codec_adapter_aac_test_bin") {
+  output_name = "codec_adapter_aac_test"
+  testonly = true
+
+  sources = [ "codec_adapter_aac_test.cc" ]
+
+  deps = [
+    ":test_codec_packets",
+    ":test_fake_codec_adapter_events",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/media/codec/codecs/sw/aac:codec_adapter_aac",
+  ]
+}
+
+fuchsia_unittest_package("codec_adapter_aac_test") {
+  deps = [ ":codec_adapter_aac_test_bin" ]
 }
 
 cc_test_executable("codec_adapter_lc3_test_bin") {
@@ -23,6 +43,8 @@ cc_test_executable("codec_adapter_lc3_test_bin") {
   sources = [ "codec_adapter_lc3_test.cc" ]
 
   deps = [
+    ":test_codec_packets",
+    ":test_fake_codec_adapter_events",
     "//src/lib/fxl/test:gtest_main",
     "//src/media/codec/codecs/sw/lc3:codec_adapter_lc3",
   ]
@@ -30,6 +52,24 @@ cc_test_executable("codec_adapter_lc3_test_bin") {
 
 fuchsia_unittest_package("codec_adapter_lc3_test") {
   deps = [ ":codec_adapter_lc3_test_bin" ]
+}
+
+cc_test_executable("codec_adapter_sbc_test_bin") {
+  output_name = "codec_adapter_sbc_test"
+  testonly = true
+
+  sources = [ "codec_adapter_sbc_test.cc" ]
+
+  deps = [
+    ":test_codec_packets",
+    ":test_fake_codec_adapter_events",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/media/codec/codecs/sw/sbc:codec_adapter_sbc",
+  ]
+}
+
+fuchsia_unittest_package("codec_adapter_sbc_test") {
+  deps = [ ":codec_adapter_sbc_test_bin" ]
 }
 
 cc_test_executable("codec_adapter_sw_test_bin") {
@@ -73,6 +113,15 @@ source_set("test_codec_packets") {
     "//sdk/lib/syslog/cpp",
     "//src/media/lib/codec_impl",
     "//zircon/system/ulib/fzl",
+  ]
+}
+
+source_set("test_fake_codec_adapter_events") {
+  testonly = true
+  public = [ "test_fake_codec_adapter_events.h" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+    "//src/media/lib/codec_impl",
   ]
 }
 

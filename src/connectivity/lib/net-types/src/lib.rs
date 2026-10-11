@@ -531,18 +531,16 @@ witness type.
         // other than `Sized` are supported for const fns, move this into the
         // block with the `A: $trait` bound.
         impl<A> $type<A> {
-            doc_comment! {
-                concat!("Constructs a new `", stringify!($type), "` without
-checking to see if `addr` is actually ", $adj, ".
-
-# Safety
-
-It is up to the caller to make sure that `addr` is ", $adj, " to avoid breaking
-the guarantees of `", stringify!($type), "`. See [`", stringify!($type), "`] for
-more details."),
-                pub const unsafe fn new_unchecked(addr: A) -> $type<A> {
-                    $type(addr)
-                }
+            #[doc = concat!("Constructs a new `", stringify!($type), "` without
+checking to see if `addr` is actually ", $adj, ".")]
+            ///
+            /// # Safety
+            ///
+            #[doc = concat!("It is up to the caller to make sure that `addr`
+is ", $adj, " to avoid breaking the guarantees of `", stringify!($type), "`.
+See [`", stringify!($type), "`] for more details.")]
+            pub const unsafe fn new_unchecked(addr: A) -> $type<A> {
+                $type(addr)
             }
         }
 

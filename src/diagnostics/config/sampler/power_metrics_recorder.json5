@@ -8,8 +8,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        0,
+                        "Mlb",
+                        "Unknown",
                     ],
                 },
                 {
@@ -17,8 +17,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        0,
+                        "Mlb",
+                        "Unknown",
                     ],
                 },
                 {
@@ -26,8 +26,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        0,
+                        "Mlb",
+                        "Unknown",
                     ],
                 },
                 {
@@ -35,8 +35,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        0,
+                        "Mlb",
+                        "Unknown",
                     ],
                 },
                 {
@@ -44,8 +44,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        0,
+                        "Audio",
+                        "Unknown",
                     ],
                 },
                 {
@@ -53,8 +53,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        0,
+                        "Audio",
+                        "Unknown",
                     ],
                 },
                 {
@@ -62,8 +62,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        0,
+                        "Audio",
+                        "Unknown",
                     ],
                 },
                 {
@@ -71,8 +71,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        0,
+                        "Audio",
+                        "Unknown",
                     ],
                 },
                 {
@@ -80,8 +80,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        1,
+                        "Mlb",
+                        "Idle",
                     ],
                 },
                 {
@@ -89,8 +89,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        1,
+                        "Mlb",
+                        "Idle",
                     ],
                 },
                 {
@@ -98,8 +98,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        1,
+                        "Mlb",
+                        "Idle",
                     ],
                 },
                 {
@@ -107,8 +107,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        1,
+                        "Mlb",
+                        "Idle",
                     ],
                 },
                 {
@@ -116,8 +116,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "Idle",
                     ],
                 },
                 {
@@ -125,8 +125,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "Idle",
                     ],
                 },
                 {
@@ -134,8 +134,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "Idle",
                     ],
                 },
                 {
@@ -143,8 +143,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        1,
+                        "Audio",
+                        "Idle",
                     ],
                 },
                 {
@@ -152,8 +152,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        2,
+                        "Mlb",
+                        "Active",
                     ],
                 },
                 {
@@ -161,8 +161,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        2,
+                        "Mlb",
+                        "Active",
                     ],
                 },
                 {
@@ -170,8 +170,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        2,
+                        "Mlb",
+                        "Active",
                     ],
                 },
                 {
@@ -179,8 +179,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        1,
-                        2,
+                        "Mlb",
+                        "Active",
                     ],
                 },
                 {
@@ -188,8 +188,8 @@
                     metric_name: "min_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "Active",
                     ],
                 },
                 {
@@ -197,8 +197,8 @@
                     metric_name: "max_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "Active",
                     ],
                 },
                 {
@@ -206,8 +206,8 @@
                     metric_name: "avg_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "Active",
                     ],
                 },
                 {
@@ -215,8 +215,8 @@
                     metric_name: "median_power_consumption",
                     metric_type: "IntHistogram",
                     event_codes: [
-                        2,
-                        2,
+                        "Audio",
+                        "Active",
                     ],
                 },
                 {

@@ -650,10 +650,10 @@ pub async fn handle_debug_request(
                     .map_err(Status::into_raw),
             )
         }
-        DebugRequest::ReplayXorRecordProfile { responder, volume, profile, duration_secs } => {
+        DebugRequest::ReplayXorRecordProfile { responder, volume, identifier, duration_secs } => {
             responder.send(
                 volumes
-                    .replay_xor_record_profile(volume, profile, duration_secs)
+                    .replay_xor_record_profile(volume, identifier, duration_secs)
                     .await
                     .map_err(Status::into_raw),
             )

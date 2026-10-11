@@ -179,7 +179,7 @@ fn restore_registers_32(
     restored_regs.r = registers;
     restored_regs.sp = registers[13];
     restored_regs.pc = registers[15];
-    restored_regs.cpsr = regs[19].into();
+    restored_regs.cpsr = regs[19] | (zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
     restored_regs.tpidr_el0 = current_task.thread_state.registers.tpidr_el0;
     current_task.thread_state.registers.load(restored_regs);
 
@@ -203,7 +203,7 @@ fn restore_registers_64(
     restored_regs.r = registers;
     restored_regs.sp = uctx.sp;
     restored_regs.pc = uctx.pc;
-    restored_regs.cpsr = uctx.pstate as u32;
+    restored_regs.cpsr = (uctx.pstate as u32) & !(zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32);
     restored_regs.tpidr_el0 = current_task.thread_state.registers.tpidr_el0;
     current_task.thread_state.registers.load(restored_regs);
 

@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_GN} ${PREBUILT_NINJA} ${PREBUILT_PYTHON3}
 ### set up a build directory
 
 ## usage: fx set PRODUCT.BOARD [--with GNLABEL1,GNLABEL2,...]

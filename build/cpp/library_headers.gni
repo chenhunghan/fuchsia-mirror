@@ -116,7 +116,7 @@
 #     Using `deps` might be necessary in the case where the headers are
 #     auto-generated, though.
 #
-#  defines, public_configs, testonly, visibility (optional)
+#  defines, public_configs, metadata, testonly, visibility (optional)
 #     Usual GN meaning.
 #
 template("library_headers") {
@@ -140,6 +140,7 @@ template("library_headers") {
     forward_variables_from(invoker,
                            [
                              "deps",
+                             "metadata",
                              "public",
                              "public_configs",
                              "public_deps",

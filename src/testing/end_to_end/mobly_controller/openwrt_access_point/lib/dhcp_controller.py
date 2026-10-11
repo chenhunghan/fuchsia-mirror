@@ -30,6 +30,12 @@ class DhcpController:
             self.ssh.run(f"uci set dhcp.lan.start='{config.lan.start}'")
         if config.lan.limit is not None:
             self.ssh.run(f"uci set dhcp.lan.limit='{config.lan.limit}'")
+        if config.lan.broadcast:
+            self.ssh.run("uci set dhcp.broadcast_all=mac")
+            self.ssh.run(
+                "uci set dhcp.broadcast_all.networkid='needs-broadcast'"
+            )
+            self.ssh.run("uci set dhcp.broadcast_all.mac='*:*:*:*:*:*'")
         if config.dnsmasq.noping:
             self.ssh.run("uci set dhcp.@dnsmasq[0].noping='1'")
         self.ssh.run("uci commit dhcp")

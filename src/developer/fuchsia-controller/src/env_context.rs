@@ -15,6 +15,7 @@ use ffx_config::EnvironmentContext;
 use ffx_config::environment::ExecutableKind;
 use ffx_target::connection::Connection;
 use rcs;
+use serde_json::{Map, Value};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -32,12 +33,66 @@ fn fxe<E: std::fmt::Debug>(e: E) -> anyhow::Error {
     ffx_error!("{e:?}").into()
 }
 
-#[derive(Debug)]
-pub struct FfxConfigEntry {
-    pub(crate) key: String,
-    pub(crate) value: String,
+fn merge_json_values(dest: &mut Value, src: Value, path: &str) -> Result<()> {
+    match (dest, src) {
+        (Value::Object(dest_map), Value::Object(src_map)) => {
+            for (k, v) in src_map {
+                if let Some(dest_val) = dest_map.get_mut(&k) {
+                    let curr_path = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+                    merge_json_values(dest_val, v, &curr_path)?;
+                } else {
+                    dest_map.insert(k, v);
+                }
+            }
+            Ok(())
+        }
+        (d, s) => {
+            if d.is_object() != s.is_object() {
+                anyhow::bail!(
+                    "Conflicting configuration for key '{path}': cannot merge object and non-object values"
+                );
+            }
+            *d = s;
+            Ok(())
+        }
+    }
 }
 
+pub(crate) fn unflatten_json(val: Value) -> Result<Value> {
+    match val {
+        Value::Object(map) => {
+            let mut res = Map::new();
+            for (key, value) in map {
+                let value = unflatten_json(value)?;
+                let parts: Vec<&str> = key.split('.').collect();
+                let mut curr = &mut res;
+                for (idx, &part) in parts[..parts.len() - 1].iter().enumerate() {
+                    if !curr.contains_key(part) {
+                        curr.insert(part.to_string(), Value::Object(Map::new()));
+                    }
+                    let v = curr.get_mut(part).unwrap();
+                    if !v.is_object() {
+                        let err_path = parts[..=idx].join(".");
+                        anyhow::bail!(
+                            "Conflicting configuration for key '{err_path}': cannot treat scalar as dictionary"
+                        );
+                    }
+                    curr = v.as_object_mut().unwrap();
+                }
+                let last_part = *parts.last().unwrap();
+                if let Some(existing) = curr.get_mut(last_part) {
+                    merge_json_values(existing, value, &key)?;
+                } else {
+                    curr.insert(last_part.to_string(), value);
+                }
+            }
+            Ok(Value::Object(res))
+        }
+        other => Ok(other),
+    }
+}
+
+#[derive(Debug)]
 pub struct EnvContext {
     lib_ctx: Weak<LibContext>,
     target_spec: TargetInfoQuery,
@@ -68,21 +123,18 @@ impl EnvContext {
 
     pub fn new(
         lib_ctx: Weak<LibContext>,
-        config: Vec<FfxConfigEntry>,
+        config_json: Option<String>,
         isolate_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        // TODO(https://fxbug.dev/42079638): This is a lot of potentially unnecessary data transformation
-        // going through several layers of structured into unstructured and then back to structured
-        // again. Likely the solution here is to update the input of the config runtime population
-        // to accept structured data.
-        let formatted_config = config
-            .iter()
-            .map(|entry| format!("{}={}", entry.key, entry.value))
-            .collect::<Vec<String>>()
-            .join(",");
-        let runtime_config =
-            if formatted_config.is_empty() { None } else { Some(formatted_config) };
-        let runtime_args = ffx_config::runtime::populate_runtime(&[], runtime_config)?;
+        let config_json = match config_json.filter(|s| !s.is_empty()) {
+            Some(json_str) => {
+                let parsed: Value = serde_json::from_str(&json_str)?;
+                let unflattened = unflatten_json(parsed)?;
+                Some(serde_json::to_string(&unflattened)?)
+            }
+            None => None,
+        };
+        let runtime_args = ffx_config::runtime::populate_runtime(&[], config_json)?;
         let env_path = None;
         let current_dir = std::env::current_dir()?;
         let context = match isolate_dir {
@@ -302,5 +354,63 @@ impl Drop for EnvContext {
     fn drop(&mut self) {
         log::info!("Dropping EnvContext {}", logging::log_id(&self.context));
         logging::LOG_SINK.remove_log_output(&self.context).expect("remove logger safely");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_unflatten_flat_keys() {
+        let input = json!({"foo.bar": 1, "foo.baz": 2, "qux": "hello"});
+        let result = unflatten_json(input).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "foo": {
+                    "bar": 1,
+                    "baz": 2
+                },
+                "qux": "hello"
+            })
+        );
+    }
+
+    #[test]
+    fn test_unflatten_nested_dict() {
+        let input = json!({"foo": {"bar": 1}});
+        let result = unflatten_json(input).unwrap();
+        assert_eq!(result, json!({"foo": {"bar": 1}}));
+    }
+
+    #[test]
+    fn test_unflatten_mixed_keys() {
+        let input = json!({"foo": {"bar": {"a": 1}}, "foo.bar": {"b": 2}});
+        let result = unflatten_json(input).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "foo": {
+                    "bar": {
+                        "a": 1,
+                        "b": 2
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_unflatten_conflict_scalar_then_dict() {
+        let input = json!({"foo": 1, "foo.bar": 2});
+        assert!(unflatten_json(input).is_err());
+    }
+
+    #[test]
+    fn test_unflatten_conflict_dict_then_scalar() {
+        let input = json!({"foo.bar": 2, "foo": 1});
+        assert!(unflatten_json(input).is_err());
     }
 }

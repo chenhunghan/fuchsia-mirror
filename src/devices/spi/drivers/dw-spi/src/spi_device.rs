@@ -16,11 +16,13 @@ use fidl_next_fuchsia_hardware_spiimpl::{
     SpiImplUnregisterVmoResponse, spi_impl as fspi_impl,
 };
 use fidl_next_fuchsia_mem as fmem;
+use futures::lock::Mutex;
 use log::{debug, error, warn};
 use mmio::Register;
 use mmio::region::MmioRegion;
 use mmio::vmo::VmoMemory;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use zx::Status;
 
@@ -48,13 +50,24 @@ pub struct DwSpiTiming {
     pub rx_sample_delay_ns: u64,
 }
 
-pub struct DwSpiDevice {
+struct DwSpiDeviceInner {
     mmio: DwSpiRegsBlock<MmioRegion<VmoMemory>>,
     cs_gpio: Option<fidl_next::Client<fgpio::Gpio>>,
     interrupt: zx::Interrupt,
     resources: DwSpiResources,
     registered_vmos: HashMap<u32, RegisteredVmo>,
     loopback_registered_vmos: HashMap<u32, RegisteredVmo>,
+    suspended: bool,
+    // Cached SCKDV and RSD register field values.
+    sckdv: Option<u32>,
+    rsd: Option<u32>,
+}
+
+#[derive(Clone)]
+pub struct DwSpiDevice {
+    // Using a Mutex to guard DwSpiDeviceInner guarantees that we can make async calls without
+    // worrying about SPI requests and suspend/resume requests being interleaved.
+    inner: Arc<Mutex<DwSpiDeviceInner>>,
 }
 
 impl DwSpiDevice {
@@ -64,13 +77,41 @@ impl DwSpiDevice {
         interrupt: zx::Interrupt,
         resources: DwSpiResources,
     ) -> Self {
-        DwSpiDevice {
+        Self {
+            inner: Arc::new(Mutex::new(DwSpiDeviceInner::new(mmio, cs_gpio, interrupt, resources))),
+        }
+    }
+
+    pub async fn init(&self, timing: DwSpiTiming) -> Result<(), DriverError> {
+        self.inner.lock().await.init(timing).await
+    }
+
+    pub async fn suspend(&self) -> Result<(), DriverError> {
+        self.inner.lock().await.suspend().await
+    }
+
+    pub async fn resume(&self) -> Result<(), DriverError> {
+        self.inner.lock().await.resume().await
+    }
+}
+
+impl DwSpiDeviceInner {
+    fn new(
+        mmio: MmioRegion<VmoMemory>,
+        cs_gpio: Option<fidl_next::Client<fgpio::Gpio>>,
+        interrupt: zx::Interrupt,
+        resources: DwSpiResources,
+    ) -> Self {
+        Self {
             mmio: DwSpiRegsBlock { mmio },
             cs_gpio,
             interrupt,
             resources,
             registered_vmos: HashMap::new(),
             loopback_registered_vmos: HashMap::new(),
+            suspended: false,
+            sckdv: None,
+            rsd: None,
         }
     }
 
@@ -79,9 +120,8 @@ impl DwSpiDevice {
             match pin_state.select_state(state).await {
                 Ok(Ok(_)) => {}
                 Ok(Err(s)) => {
-                    let status = s.err().unwrap_or(Status::INTERNAL);
-                    error!("Failed to select pin state {state}: {status}");
-                    return Err(status.into());
+                    error!("Failed to select pin state {state}: {s}");
+                    return Err(s.into());
                 }
                 // Pin states are optional, so ignore transport errors.
                 Err(e) => {
@@ -92,16 +132,18 @@ impl DwSpiDevice {
         Ok(())
     }
 
-    pub async fn init(&mut self, timing: DwSpiTiming) -> Result<(), DriverError> {
-        self.resources.powerdomain.enable().await?.map_err(|s| {
-            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
-                .context("Failed to enable power domain")
-        })?;
+    async fn init(&mut self, timing: DwSpiTiming) -> Result<(), DriverError> {
+        self.resources
+            .powerdomain
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable power domain"))?;
 
-        self.resources.clock_bus.enable().await?.map_err(|s| {
-            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
-                .context("Failed to enable bus clock")
-        })?;
+        self.resources
+            .clock_bus
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable bus clock"))?;
 
         let parent_clock_hz = self
             .resources
@@ -109,27 +151,104 @@ impl DwSpiDevice {
             .get_rate()
             .await
             .map_err(|_| Status::INTERNAL)
-            .and_then(|res| res.map_err(|_| Status::INTERNAL))
+            .flatten()
             .inspect_err(|e| {
                 error!("Failed to get bus clock rate: {e:?}");
             })
             .unwrap_or(fclock::ClockGetRateResponse { hz: 0 })
             .hz;
 
-        self.resources.clock_regs.enable().await?.map_err(|s| {
-            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
-                .context("Failed to enable registers clock")
-        })?;
+        if timing.max_bus_clock_hz > 0 {
+            let (sckdv, rsd) = Self::get_sckdv_rsd(timing, parent_clock_hz)?;
+            self.sckdv = Some(sckdv);
+            self.rsd = Some(rsd);
+        } else {
+            warn!("Max bus clock rate reported to be zero, skipping baud rate initialization");
+        }
 
-        self.resources.reset.toggle().await?.map_err(|s| {
-            anyhow::Error::new(s.err().unwrap_or(Status::INTERNAL))
-                .context("Failed to toggle reset")
-        })?;
+        self.resources
+            .clock_regs
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable registers clock"))?;
 
-        self.init_registers(timing, parent_clock_hz)?;
+        self.resources
+            .reset
+            .toggle()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to toggle reset"))?;
+
+        self.init_registers();
 
         self.select_pin_states("default").await?;
 
+        Ok(())
+    }
+
+    async fn suspend(&mut self) -> Result<(), DriverError> {
+        if self.suspended {
+            return Ok(());
+        }
+
+        self.suspended = true;
+
+        self.select_pin_states("sleep").await?;
+
+        // Disable the SPI peripheral and stop the serial clock.
+        self.mmio.ssi_enr_mut().write(registers::SsiEnr::from_raw(0));
+        self.mmio.baudr_mut().write(registers::Baudr::from_raw(0));
+
+        self.resources
+            .clock_regs
+            .disable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to disable registers clock"))?;
+
+        self.resources
+            .clock_bus
+            .disable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to disable bus clock"))?;
+
+        self.resources
+            .powerdomain
+            .disable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to disable power domain"))?;
+
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), DriverError> {
+        self.resources
+            .powerdomain
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable power domain"))?;
+
+        self.resources
+            .clock_bus
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable bus clock"))?;
+
+        self.resources
+            .clock_regs
+            .enable()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to enable registers clock"))?;
+
+        self.resources
+            .reset
+            .toggle()
+            .await?
+            .map_err(|s| anyhow::Error::new(s).context("Failed to toggle reset"))?;
+
+        self.init_registers();
+
+        self.select_pin_states("default").await?;
+
+        self.suspended = false;
         Ok(())
     }
 
@@ -178,7 +297,7 @@ impl DwSpiDevice {
         Ok((divider as u32, rx_sample_delay_clocks as u32))
     }
 
-    fn init_registers(&mut self, timing: DwSpiTiming, parent_clock_hz: u64) -> Result<(), Status> {
+    fn init_registers(&mut self) {
         self.mmio.ssi_enr_mut().write(registers::SsiEnr::from_raw(0));
 
         self.mmio.ctrlr0_mut().write({
@@ -190,8 +309,7 @@ impl DwSpiDevice {
             ctrlr0
         });
 
-        if timing.max_bus_clock_hz > 0 {
-            let (sckdv, rsd) = Self::get_sckdv_rsd(timing, parent_clock_hz)?;
+        if let (Some(sckdv), Some(rsd)) = (self.sckdv, self.rsd) {
             self.mmio.baudr_mut().write({
                 let mut baudr = registers::Baudr::from_raw(0);
                 baudr.set_sckdv(sckdv);
@@ -202,12 +320,14 @@ impl DwSpiDevice {
                 rx_sample_dly.set_rsd(rsd);
                 rx_sample_dly
             });
-        } else {
-            warn!("Max bus clock rate reported to be zero, skipping baud rate initialization");
         }
 
         // Mask all interrupts initially in IMR
         self.mmio.imr_mut().write(registers::Imr::from_raw(0));
+
+        // Clear any pending interrupts and deassert target select lines
+        let _ = self.mmio.icr().read();
+        self.mmio.ser_mut().write(registers::Ser::from_raw(0));
 
         // Configure the controller to interrupt us when the TX FIFO is half empty.
         self.mmio.txftlr_mut().write({
@@ -222,8 +342,6 @@ impl DwSpiDevice {
             ssi_enr.set_ssi_en(true);
             ssi_enr
         });
-
-        Ok(())
     }
 
     fn exchange_pio_loop(
@@ -357,6 +475,11 @@ impl DwSpiDevice {
         rx: bool,
         size: usize,
     ) -> Result<Vec<u8>, Status> {
+        if self.suspended {
+            // It shouldn't be possible to get here since our dispatcher will be paused in suspend.
+            return Err(Status::BAD_STATE);
+        }
+
         if size == 0 {
             return Ok(vec![]);
         }
@@ -509,6 +632,10 @@ impl DwSpiDevice {
         chip_select: u32,
         buffer: &fsharedmemory::natural::SharedVmoBuffer,
     ) -> Result<(), Status> {
+        if self.suspended {
+            return Err(Status::BAD_STATE);
+        }
+
         // TODO(https://fxbug.dev/529838127): Use DMA instead of copying into/out of vectors.
         let mut tx_data = vec![0u8; buffer.size as usize];
         {
@@ -526,6 +653,10 @@ impl DwSpiDevice {
         chip_select: u32,
         buffer: &fsharedmemory::natural::SharedVmoBuffer,
     ) -> Result<(), Status> {
+        if self.suspended {
+            return Err(Status::BAD_STATE);
+        }
+
         let rx_data = self.exchange_pio(chip_select, &[], true, buffer.size as usize).await?;
 
         // TODO(https://fxbug.dev/529838127): Use DMA instead of copying into/out of vectors.
@@ -540,6 +671,10 @@ impl DwSpiDevice {
         tx_buffer: &fsharedmemory::natural::SharedVmoBuffer,
         rx_buffer: &fsharedmemory::natural::SharedVmoBuffer,
     ) -> Result<(), Status> {
+        if self.suspended {
+            return Err(Status::BAD_STATE);
+        }
+
         if tx_buffer.size != rx_buffer.size {
             return Err(Status::INVALID_ARGS);
         }
@@ -573,6 +708,9 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
     ) {
         let payload = request.payload();
         let result = self
+            .inner
+            .lock()
+            .await
             .exchange_pio(payload.chip_select, &payload.data, false, payload.data.len())
             .await
             .map(|_| ());
@@ -586,6 +724,9 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
     ) {
         let payload = request.payload();
         let result = self
+            .inner
+            .lock()
+            .await
             .exchange_pio(payload.chip_select, &[], true, payload.size as usize)
             .await
             .map(|data| SpiImplReceiveVectorResponse { data });
@@ -599,6 +740,9 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
     ) {
         let payload = request.payload();
         let result = self
+            .inner
+            .lock()
+            .await
             .exchange_pio(payload.chip_select, &payload.txdata, true, payload.txdata.len())
             .await
             .map(|rxdata| SpiImplExchangeVectorResponse { rxdata });
@@ -627,7 +771,7 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
         responder: Responder<fspi_impl::RegisterVmo>,
     ) {
         let payload = request.payload();
-        let result = self.register_vmo_impl(
+        let result = self.inner.lock().await.register_vmo_impl(
             payload.chip_select,
             payload.vmo_id,
             payload.vmo,
@@ -643,6 +787,9 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
     ) {
         let payload = request.payload();
         let result = self
+            .inner
+            .lock()
+            .await
             .unregister_vmo_impl(payload.chip_select, payload.vmo_id)
             .map(|vmo| SpiImplUnregisterVmoResponse { vmo });
         let _ = responder.respond_with(result).await;
@@ -653,7 +800,7 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
         request: Request<fspi_impl::ReleaseRegisteredVmos>,
     ) {
         let payload = request.payload();
-        self.release_registered_vmos_impl(payload.chip_select);
+        self.inner.lock().await.release_registered_vmos_impl(payload.chip_select);
     }
 
     async fn transmit_vmo(
@@ -662,7 +809,8 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
         responder: Responder<fspi_impl::TransmitVmo>,
     ) {
         let payload = request.payload();
-        let result = self.transmit_vmo_impl(payload.chip_select, &payload.buffer).await;
+        let result =
+            self.inner.lock().await.transmit_vmo_impl(payload.chip_select, &payload.buffer).await;
         let _ = responder.respond_with(result).await;
     }
 
@@ -672,7 +820,8 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
         responder: Responder<fspi_impl::ReceiveVmo>,
     ) {
         let payload = request.payload();
-        let result = self.receive_vmo_impl(payload.chip_select, &payload.buffer).await;
+        let result =
+            self.inner.lock().await.receive_vmo_impl(payload.chip_select, &payload.buffer).await;
         let _ = responder.respond_with(result).await;
     }
 
@@ -683,6 +832,9 @@ impl fidl_next_fuchsia_hardware_spiimpl::SpiImplServerHandler for DwSpiDevice {
     ) {
         let payload = request.payload();
         let result = self
+            .inner
+            .lock()
+            .await
             .exchange_vmo_impl(payload.chip_select, &payload.tx_buffer, &payload.rx_buffer)
             .await;
         let _ = responder.respond_with(result).await;
@@ -695,7 +847,7 @@ mod tests {
 
     #[test]
     fn test_set_baud_rate_and_delay() {
-        let (sckdv, rsd) = DwSpiDevice::get_sckdv_rsd(
+        let (sckdv, rsd) = DwSpiDeviceInner::get_sckdv_rsd(
             DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 25 },
             200_000_000,
         )
@@ -707,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_set_baud_rate_too_slow() {
-        let result = DwSpiDevice::get_sckdv_rsd(
+        let result = DwSpiDeviceInner::get_sckdv_rsd(
             DwSpiTiming { max_bus_clock_hz: 2_000, rx_sample_delay_ns: 0 },
             200_000_000,
         );
@@ -716,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_set_baud_divider_rounded_up() {
-        let (sckdv, rsd) = DwSpiDevice::get_sckdv_rsd(
+        let (sckdv, rsd) = DwSpiDeviceInner::get_sckdv_rsd(
             DwSpiTiming { max_bus_clock_hz: 3_600_000, rx_sample_delay_ns: 0 },
             200_000_000,
         )
@@ -728,7 +880,7 @@ mod tests {
 
     #[test]
     fn test_set_baud_rate_invalid_delay_remainder() {
-        let result = DwSpiDevice::get_sckdv_rsd(
+        let result = DwSpiDeviceInner::get_sckdv_rsd(
             DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 28 },
             200_000_000,
         );
@@ -737,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_set_baud_rate_invalid_delay_too_large() {
-        let result = DwSpiDevice::get_sckdv_rsd(
+        let result = DwSpiDeviceInner::get_sckdv_rsd(
             DwSpiTiming { max_bus_clock_hz: 20_000_000, rx_sample_delay_ns: 5000 },
             200_000_000,
         );

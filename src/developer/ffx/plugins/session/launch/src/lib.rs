@@ -10,7 +10,7 @@ use fdomain_fuchsia_component_decl as fdecl;
 use fdomain_fuchsia_developer_remotecontrol as rc;
 use fdomain_fuchsia_session::{LaunchConfiguration, LauncherProxy};
 use ffx_session_launch_args::SessionLaunchCommand;
-use ffx_writer::{MachineWriter, ToolIO};
+use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool};
 use moniker::Moniker;
 use std::io::Write;
@@ -31,7 +31,7 @@ fho::embedded_plugin!(LaunchTool);
 
 #[async_trait(?Send)]
 impl FfxMain for LaunchTool {
-    type Writer = MachineWriter<()>;
+    type Writer = VerifiedMachineWriter<()>;
 
     type Error = ::fho::Error;
 
@@ -48,7 +48,7 @@ pub async fn launch_impl(
     launcher_proxy: LauncherProxy,
     rcs: RemoteControlProxyHolder,
     cmd: SessionLaunchCommand,
-    writer: &mut MachineWriter<()>,
+    writer: &mut VerifiedMachineWriter<()>,
 ) -> Result<()> {
     if !writer.is_machine() {
         writeln!(writer, "Launching session: {}", cmd.url)?;
@@ -116,7 +116,7 @@ mod test {
 
         let launch_cmd = SessionLaunchCommand { url: SESSION_URL.to_string(), config: vec![] };
         let test_buffers = ffx_writer::TestBuffers::default();
-        let mut writer = MachineWriter::new_test(None, &test_buffers);
+        let mut writer = VerifiedMachineWriter::new_test(None, &test_buffers);
         let result = launch_impl(proxy, rcs, launch_cmd, &mut writer).await;
         assert!(result.is_ok());
     }
@@ -137,7 +137,7 @@ mod test {
 
         let launch_cmd = SessionLaunchCommand { url: SESSION_URL.to_string(), config: vec![] };
         let test_buffers = ffx_writer::TestBuffers::default();
-        let writer = MachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
+        let writer = VerifiedMachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
 
         let tool = LaunchTool { cmd: launch_cmd, rcs, launcher_proxy: proxy };
 
@@ -146,5 +146,10 @@ mod test {
 
         let output = test_buffers.into_stdout_str();
         assert_eq!(output, "null\n");
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_schema() {
+        VerifiedMachineWriter::<()>::verify_schema(&serde_json::json!(null)).unwrap();
     }
 }

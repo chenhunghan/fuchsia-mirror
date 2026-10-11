@@ -110,9 +110,11 @@ pub trait Interface: Send + Sync + Unpin + 'static {
         )?;
         Ok(async move {
             session_manager.interface.on_attach_vmo(&vmo).await?;
+            scopeguard::defer! {
+                session_manager.interface.on_detach_vmo(&vmo);
+            }
             let res = session_fut.await;
             scope.cancel().await;
-            session_manager.interface.on_detach_vmo(&vmo);
             res
         })
     }

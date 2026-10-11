@@ -8,11 +8,12 @@ use crate::eval::expand::{
     expand_argument_to_word_chars,
 };
 use crate::eval::glob::match_segment_glob;
-use crate::eval::spawn::spawn_pipeline_stage;
+use crate::eval::spawn::spawn_subshell_vmo;
 use crate::eval::state::{BgJob, IgnoreErrGuard, LoopNestGuard, ShellState};
 use crate::eval::{EvalOutcome, eval_command};
 use crate::parser::ast::{ASTBuilder, Command};
 use crate::relative;
+use crate::subshell::SubshellScriptArgs;
 
 enum LoopControl {
     Break,
@@ -128,6 +129,7 @@ pub fn eval_for(
         let item = items.as_slice(builder)[i];
         expanded_items.extend(expand_argument(item.as_slice(builder), state, ctx, builder)?);
     }
+    state.take_cmd_sub_status();
 
     let var_name = builder.get_ref(cmd_ptr).for_var.to_bstring(builder);
 
@@ -161,6 +163,7 @@ pub fn eval_case(
         let cmd = builder.get_ref(cmd_ptr);
         expand_argument_no_split(cmd.case_word.as_slice(builder), state, ctx, builder)?
     };
+    state.take_cmd_sub_status();
 
     let cases = builder.get_ref(cmd_ptr).case_items;
 
@@ -178,12 +181,11 @@ pub fn eval_case(
                 FieldSplitMode::DoNotSplit,
                 builder,
             )?;
-            if !word_chars_list.is_empty() {
-                let pat_word = &word_chars_list[0];
-                if match_segment_glob(pat_word, expanded_word.as_ref()) {
-                    matched = true;
-                    break;
-                }
+            state.take_cmd_sub_status();
+            let pat_word = word_chars_list.first().map(|w| w.as_slice()).unwrap_or(&[]);
+            if match_segment_glob(pat_word, expanded_word.as_ref()) {
+                matched = true;
+                break;
             }
         }
         if matched {
@@ -245,20 +247,22 @@ pub fn eval_background(
     ctx: &mut ExecutionContext,
 ) -> Result<EvalOutcome, String> {
     let left_ptr = builder.get_ref(cmd_ptr).left;
-    let proc = spawn_pipeline_stage(
-        builder,
-        left_ptr,
+    let left_cmd = builder.get_ref(left_ptr);
+    let proc = spawn_subshell_vmo(
+        left_cmd,
         state,
         ctx,
         ctx.stdin(),
         ctx.stdout(),
         ctx.stderr(),
+        SubshellScriptArgs::DoNotPass,
+        builder,
     )?;
     if let Ok(koid) = proc.koid() {
         let raw_koid = koid.raw_koid();
         state.last_bg_pid = Some(raw_koid);
     }
-    let cmd = crate::eval::format::command_to_bstring(builder.get_ref(left_ptr), builder);
+    let cmd = crate::eval::format::command_to_bstring(left_cmd, builder);
     state.bg_jobs.push(BgJob { process: proc, cmd });
     Ok(EvalOutcome::Code(0))
 }
@@ -282,4 +286,22 @@ pub fn eval_sequence(
         }
     }
     Ok(EvalOutcome::Code(last_code))
+}
+
+pub fn eval_not(
+    builder: &mut ASTBuilder,
+    cmd_ptr: relative::Ptr<Command>,
+    state: &mut ShellState,
+    ctx: &mut ExecutionContext,
+) -> Result<EvalOutcome, String> {
+    let outcome = {
+        let mut guard = IgnoreErrGuard::new(state);
+        let left_ptr = builder.get_ref(cmd_ptr).left;
+        eval_command(builder, left_ptr, &mut *guard, ctx)?
+    };
+    match outcome {
+        EvalOutcome::Code(0) => Ok(EvalOutcome::Code(1)),
+        EvalOutcome::Code(_) => Ok(EvalOutcome::Code(0)),
+        other => Ok(other),
+    }
 }

@@ -1,0 +1,89 @@
+{
+    "name": "pty_close_replica",
+    "initial_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    },
+    "events": [
+        {
+            "type": "set_packet_mode",
+            "enabled": true
+        },
+        {
+            "type": "write_to_slave",
+            "data": "abc\n"
+        },
+        {
+            "type": "flush",
+            "side": "replica",
+            "queue_selector": "TCIFLUSH"
+        },
+        {
+            "type": "close",
+            "side": "replica"
+        },
+        {
+            "type": "check_poll",
+            "side": "main",
+            "events": [
+                "POLLIN",
+                "POLLOUT",
+                "POLLPRI",
+                "POLLHUP"
+            ]
+        },
+        {
+            "type": "read_once_from_master",
+            "size": 4096,
+            "data": "\u0001"
+        },
+        {
+            "type": "check_poll",
+            "side": "main",
+            "events": [
+                "POLLIN",
+                "POLLOUT",
+                "POLLHUP"
+            ]
+        },
+        {
+            "type": "read_once_from_master",
+            "size": 4096,
+            "data": "\u0000abc\r\n"
+        },
+        {
+            "type": "check_poll",
+            "side": "main",
+            "events": [
+                "POLLOUT",
+                "POLLHUP"
+            ]
+        },
+        {
+            "type": "read_once_from_master_eio",
+            "size": 4096
+        }
+    ],
+    "final_termios": {
+        "c_iflag": [
+            "ICRNL"
+        ],
+        "c_oflag": [
+            "OPOST",
+            "ONLCR"
+        ],
+        "c_lflag": [
+            "ICANON",
+            "ECHO"
+        ]
+    }
+}

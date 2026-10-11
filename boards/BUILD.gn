@@ -34,6 +34,7 @@ if (target_cpu == "x64") {
   }
 } else if (target_cpu == "riscv64") {
   group("riscv64") {
+    testonly = true
     deps = [ "//boards/riscv64" ]
   }
 }

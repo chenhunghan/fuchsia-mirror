@@ -13,7 +13,7 @@ use net_types::{MulticastAddress, ScopeableAddress, SpecifiedAddr, Witness as _}
 use netstack3_base::socket::{SocketIpAddr, SocketIpAddrExt as _};
 use netstack3_base::{
     AnyDevice, CounterContext, DeviceIdContext, DeviceIdentifier, EitherDeviceId, InstantContext,
-    InterfaceProperties, IpDeviceAddr, IpExt, Marks, Mms, NetworkSerializationContext,
+    InterfaceProperties, IpDeviceAddr, IpExt, Marks, Mms, NetworkSerializationContext, PacketType,
     SendFrameErrorReason, StrongDeviceIdentifier, TxMetadata, TxMetadataBindingsTypes,
     WeakDeviceIdentifier,
 };
@@ -1101,9 +1101,10 @@ where
             PacketConstraints::UNCONSTRAINED,
             packet::new_buf_vec,
         )?;
-        let loopback_metadata;
+        let mut loopback_metadata;
         SplitMulticastPacketMetadata { primary: packet_metadata, secondary: loopback_metadata } =
             packet_metadata.split_for_multicast();
+        loopback_metadata.set_packet_type(PacketType::Loopback);
         Some((
             RawIpBody::new(*proto, local_ip.addr(), remote_ip.addr(), body_copy),
             loopback_metadata,

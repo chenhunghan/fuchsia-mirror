@@ -81,6 +81,21 @@ test_platforms = [
   },
   {
     device_type = "crosvm"
+    cpu = "arm64"
+    host_device_type = "AmpereAltraMax-M128-30"
+  },
+  {
+    device_type = "crosvm"
+    cpu = "arm64"
+    host_device_type = "AmpereOne-A192-32X"
+  },
+  {
+    device_type = "crosvm"
+    cpu = "arm64"
+    host_device_type = "GCP_C4A_HIGHMEM_96_BM"
+  },
+  {
+    device_type = "crosvm"
     cpu = "x64"
   },
   {

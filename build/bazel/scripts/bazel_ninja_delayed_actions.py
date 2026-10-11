@@ -533,6 +533,23 @@ def main() -> int:
             for owner, sources in sources_by_owner.items():
                 # Locate the action request and stamp path for this target.
                 action, stamp_path = target_request_map[owner]
+                target_info = platform_targets[owner.target]
+
+                if target_info.debug_symbols_manifest:
+                    debug_manifest_path = (
+                        bazel_paths.ninja_build_dir
+                        / target_info.debug_symbols_manifest
+                    )
+                    owner_debug_symbols = action_result.debug_symbols.get(
+                        owner.target, []
+                    )
+                    if write_file_if_changed(
+                        debug_manifest_path,
+                        json.dumps(owner_debug_symbols, indent=2),
+                    ):
+                        updated_outputs.add(
+                            Path(target_info.debug_symbols_manifest)
+                        )
 
                 # Construct a depfile for it.
                 depfile = DepFile(action.ninja_outputs[0])
@@ -560,9 +577,7 @@ def main() -> int:
                 # (`//:bazel_host_test_suites` walks `//:host_tests`, which
                 # depends on this action). Record the file in the depfile
                 # instead so the action still reruns when its contents change.
-                extra_targets_file = platform_targets[
-                    owner.target
-                ].extra_bazel_targets_file
+                extra_targets_file = target_info.extra_bazel_targets_file
                 if extra_targets_file:
                     depfile.add_input(extra_targets_file)
 

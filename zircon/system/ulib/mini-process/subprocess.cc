@@ -306,6 +306,17 @@
                                   sizeof(*buf), nullptr, nullptr);
           goto reply;
         }
+        if (what & MINIP_CMD_DEBUG_READ) {
+          what &= ~MINIP_CMD_DEBUG_READ;
+
+          char ch = 0;
+          size_t actual = 0;
+          do {
+            cmd.status = ctx.debug_read(received_handle, &ch, 1, &actual);
+          } while (cmd.status == ZX_OK);
+          ctx.handle_close(received_handle);
+          goto reply;
+        }
 
         // The following don't send a message so the client will get ZX_CHANNEL_PEER_CLOSED.
 

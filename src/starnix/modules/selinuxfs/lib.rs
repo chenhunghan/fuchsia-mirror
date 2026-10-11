@@ -856,13 +856,13 @@ impl FsNodeOps for BooleansDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         let utf8_name = String::from_utf8(name.to_vec()).map_err(|_| errno!(ENOENT))?;
         if self.security_server.conditional_booleans().contains(&utf8_name) {
-            Ok(node.fs().create_node_and_allocate_node_id(
+            Ok(entry.node.fs().create_node_and_allocate_node_id(
                 BooleanFile::new_node(self.security_server.clone(), utf8_name),
                 FsNodeInfo::new(mode!(IFREG, 0o644), current_task.current_fscred()),
             ))
@@ -994,7 +994,7 @@ impl FsNodeOps for ClassDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -1004,7 +1004,7 @@ impl FsNodeOps for ClassDirectory {
             .map_err(|_| errno!(EINVAL))?
             .into();
 
-        let fs = node.fs();
+        let fs = entry.node.fs();
         let dir = SimpleDirectory::new();
         dir.edit(&fs, |dir| {
             let index_bytes = format!("{}", id).into_bytes();
@@ -1057,7 +1057,7 @@ impl FsNodeOps for PermsDirectory {
 
     fn lookup(
         &self,
-        node: &FsNode,
+        entry: &DirEntry,
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
@@ -1070,7 +1070,7 @@ impl FsNodeOps for PermsDirectory {
             .ok_or_else(|| errno!(ENOENT))?
             .0;
 
-        Ok(node.fs().create_node_and_allocate_node_id(
+        Ok(entry.node.fs().create_node_and_allocate_node_id(
             BytesFile::new_node(format!("{}", found_permission_id).into_bytes()),
             FsNodeInfo::new(mode!(IFREG, 0o444), current_task.current_fscred()),
         ))

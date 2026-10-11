@@ -25,7 +25,7 @@ package(default_applicable_licenses = ["//:license"])
 #    --buildifier $(pwd)/prebuilt/third_party/buildifier/linux-x64/buildifier \
 #
 # # Run test suite to verify its content.
-# build/bazel_sdk/tests/scripts/bazel_test.py \
+# build/bazel_sdk/tests/scripts/run_tests.py \
 #    --fuchsia_sdk_dir /tmp/fuchsia_sdk
 # ```
 py_binary(

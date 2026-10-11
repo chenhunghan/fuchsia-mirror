@@ -5,8 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::object::{
-    Dispatcher, HandleValue, InitialMutability, ProcessDispatcher, VmObjectDispatcher,
-    validate_ranged_resource,
+    HandleValue, InitialMutability, ProcessDispatcher, VmObjectDispatcher, validate_ranged_resource,
 };
 use crate::user_copy::{UserInOutPtr, UserInPtr, UserOutPtr};
 use crate::vm::arch_vm_aspace::{
@@ -76,7 +75,13 @@ pub fn sys_vmo_read(
     );
 
     // lookup the dispatcher from handle
-    let vmo = Dispatcher::get_with_rights::<VmObjectDispatcher>(handle, ZX_RIGHT_READ)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_READ,
+        )
+    })?;
 
     vmo.read(data, offset, len)?;
     Ok(())
@@ -98,7 +103,13 @@ pub fn sys_vmo_write(
     );
 
     // lookup the dispatcher from handle
-    let vmo = Dispatcher::get_with_rights::<VmObjectDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     vmo.write(data, offset, len)?;
     Ok(())
@@ -125,12 +136,20 @@ pub fn sys_vmo_transfer_data(
         return Err(Status::INVALID_ARGS);
     }
 
-    let dst_vmo_dispatcher =
-        Dispatcher::get_with_rights::<VmObjectDispatcher>(dst_vmo_handle, ZX_RIGHT_WRITE)?;
-    let src_vmo_dispatcher = Dispatcher::get_with_rights::<VmObjectDispatcher>(
-        src_vmo_handle,
-        ZX_RIGHT_READ | ZX_RIGHT_WRITE,
-    )?;
+    let (dst_vmo_dispatcher, src_vmo_dispatcher) =
+        ProcessDispatcher::with_current(|up| -> Result<_, Status> {
+            let dst = up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+                up,
+                dst_vmo_handle,
+                ZX_RIGHT_WRITE,
+            )?;
+            let src = up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+                up,
+                src_vmo_handle,
+                ZX_RIGHT_READ | ZX_RIGHT_WRITE,
+            )?;
+            Ok((dst, src))
+        })?;
 
     // Short circuit out if src_vmo and dst_vmo are identical and the src_offset is the same as
     // the destination offset.
@@ -155,7 +174,9 @@ pub fn sys_vmo_get_size(handle: HandleValue, size: UserOutPtr<u64>) -> Result<()
     ltracef!("handle {:x}, sizep {:p}\n", handle.raw_value(), size.as_ptr());
 
     // lookup the dispatcher from handle
-    let vmo = Dispatcher::get::<VmObjectDispatcher>(handle)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher::<VmObjectDispatcher>(up, handle)
+    })?;
 
     // no rights check, anyone should be able to get the size
 
@@ -169,7 +190,9 @@ pub fn sys_vmo_get_size(handle: HandleValue, size: UserOutPtr<u64>) -> Result<()
 #[syscall]
 pub fn sys_vmo_get_stream_size(handle: HandleValue, size: UserOutPtr<u64>) -> Result<(), Status> {
     // lookup the dispatcher from handle (no rights required to get stream size).
-    let vmo = Dispatcher::get::<VmObjectDispatcher>(handle)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher::<VmObjectDispatcher>(up, handle)
+    })?;
 
     let stream_size = vmo.get_stream_size();
     size.copy_to_user(&stream_size)?;
@@ -181,8 +204,13 @@ pub fn sys_vmo_set_size(handle: HandleValue, size: u64) -> Result<(), Status> {
     ltracef!("handle {:x}, size {:#x}\n", handle.raw_value(), size);
 
     // lookup the dispatcher from handle
-    let (vmo, rights) =
-        Dispatcher::get_with_rights_and_actual::<VmObjectDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let (vmo, rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights_and_actual::<VmObjectDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     // VMOs that are not resizable should fail with ZX_ERR_UNAVAILABLE for backwards compatibility,
     // which will be handled by the SetSize call below. Only validate the RESIZE right if the VMO is
@@ -201,7 +229,13 @@ pub fn sys_vmo_set_stream_size(handle: HandleValue, size: u64) -> Result<(), Sta
     ltracef!("handle {:x}, size {:#x}\n", handle.raw_value(), size);
 
     // lookup the dispatcher from handle
-    let vmo = Dispatcher::get_with_rights::<VmObjectDispatcher>(handle, ZX_RIGHT_WRITE)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_WRITE,
+        )
+    })?;
 
     // do the operation
     vmo.set_stream_size(size)?;
@@ -229,7 +263,9 @@ pub fn sys_vmo_op_range(
 
     // lookup the dispatcher from handle
     // save the rights and pass down into the dispatcher for further testing
-    let (vmo, rights) = Dispatcher::get_and_rights::<VmObjectDispatcher>(handle)?;
+    let (vmo, rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_and_rights::<VmObjectDispatcher>(up, handle)
+    })?;
 
     vmo.range_op(op, offset, size, buffer, buffer_size, rights)?;
     Ok(())
@@ -243,7 +279,9 @@ pub fn sys_vmo_set_cache_policy(handle: HandleValue, cache_policy: u32) -> Resul
     }
 
     // lookup the dispatcher from handle.
-    let vmo = Dispatcher::get_with_rights::<VmObjectDispatcher>(handle, ZX_RIGHT_MAP)?;
+    let vmo = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<VmObjectDispatcher>(up, handle, ZX_RIGHT_MAP)
+    })?;
 
     vmo.set_mapping_cache_policy(cache_policy)?;
     Ok(())
@@ -298,8 +336,13 @@ pub fn sys_vmo_create_child(
     // vmo. Should the vmo destroyed between creating the child and setting the id in the dispatcher
     // the currently unset user_id may be used to re-attribute a parent. Holding the refptr prevents
     // any destruction from occurring.
-    let (vmo, actual_rights) =
-        Dispatcher::get_with_rights_and_actual::<VmObjectDispatcher>(handle, desired_rights)?;
+    let (vmo, actual_rights) = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights_and_actual::<VmObjectDispatcher>(
+            up,
+            handle,
+            desired_rights,
+        )
+    })?;
 
     // clone the vmo into a new one
     let child_vmo =
@@ -369,7 +412,8 @@ pub fn sys_vmo_replace_as_executable(
     };
 
     let orig_handle =
-        ProcessDispatcher::with_current(|up| up.remove_handle(handle)).ok_or(Status::BAD_HANDLE)?;
+        ProcessDispatcher::with_current(|up| up.handle_table().remove_handle(up, handle))
+            .ok_or(Status::BAD_HANDLE)?;
     if orig_handle.dispatcher().get_type() != ZX_OBJ_TYPE_VMO {
         return Err(Status::BAD_HANDLE);
     }

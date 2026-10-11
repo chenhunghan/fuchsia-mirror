@@ -5,18 +5,23 @@
 // https://opensource.org/licenses/MIT
 
 use core::mem::MaybeUninit;
+use core::ptr::NonNull;
 use zx_status::Status;
 use zx_types::{
     ZX_DEFAULT_JOB_RIGHTS, ZX_OBJECT_SIGNAL_6, zx_policy_basic_v1_t, zx_policy_basic_v2_t,
     zx_policy_timer_slack_t, zx_rights_t, zx_signals_t,
 };
 
-use super::handle::KernelHandle;
+use super::channel_dispatcher::ChannelDispatcher;
+use super::exceptionate::Exceptionate;
+use super::handle::{HandleRef, KernelHandle};
 use super::job_dispatcher_ffi::{
-    cpp_job_dispatcher_create, cpp_job_dispatcher_create_root_job,
-    cpp_job_dispatcher_enumerate_children, cpp_job_dispatcher_get_info,
+    cpp_job_dispatcher_create, cpp_job_dispatcher_create_debug_exceptionate,
+    cpp_job_dispatcher_create_root_job, cpp_job_dispatcher_enumerate_children,
+    cpp_job_dispatcher_exceptionate, cpp_job_dispatcher_get_info,
     cpp_job_dispatcher_get_kill_on_oom, cpp_job_dispatcher_get_root_job,
-    cpp_job_dispatcher_get_runtime_stats, cpp_job_dispatcher_is_root, cpp_job_dispatcher_kill,
+    cpp_job_dispatcher_get_root_job_handle, cpp_job_dispatcher_get_runtime_stats,
+    cpp_job_dispatcher_is_root, cpp_job_dispatcher_kill,
     cpp_job_dispatcher_kill_job_with_kill_on_oom, cpp_job_dispatcher_max_height,
     cpp_job_dispatcher_parent, cpp_job_dispatcher_set_basic_policy_v1,
     cpp_job_dispatcher_set_basic_policy_v2, cpp_job_dispatcher_set_kill_on_oom,
@@ -220,5 +225,41 @@ impl JobDispatcher {
         };
         Status::ok(status)?;
         Ok((count, avail))
+    }
+
+    /// Returns the job's normal `Exceptionate`.
+    pub fn exceptionate(&self) -> &Exceptionate {
+        // SAFETY: `self` is a valid `JobDispatcher`, which owns `exceptionate_` for its entire
+        // lifetime.
+        unsafe { &*cpp_job_dispatcher_exceptionate(self as *const _ as *mut _) }
+    }
+
+    /// Creates a debug `Exceptionate` on this job backed by `channel_handle`.
+    pub fn create_debug_exceptionate(
+        &self,
+        mut channel_handle: KernelHandle<ChannelDispatcher>,
+        thread_rights: zx_rights_t,
+        process_rights: zx_rights_t,
+    ) -> Result<(), Status> {
+        // SAFETY: `self` and `channel_handle` are valid.
+        Status::ok(unsafe {
+            cpp_job_dispatcher_create_debug_exceptionate(
+                self as *const _ as *mut _,
+                &mut channel_handle,
+                thread_rights,
+                process_rights,
+            )
+        })
+    }
+}
+
+/// Returns a reference to the immortal singleton root job handle.
+pub fn get_root_job_handle() -> HandleRef<'static> {
+    // SAFETY: `cpp_job_dispatcher_get_root_job_handle` returns a pointer to the immortal singleton
+    // root job handle.
+    unsafe {
+        HandleRef::from_raw(NonNull::new_unchecked(
+            cpp_job_dispatcher_get_root_job_handle().cast_mut(),
+        ))
     }
 }

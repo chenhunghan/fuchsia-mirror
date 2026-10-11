@@ -791,3 +791,39 @@ class SelectTestsTest(unittest.IsolatedAsyncioTestCase):
             if e.payload is not None and e.payload.program_output is not None
         ]
         self.assertEqual(len(output_events), 0)
+
+    @mock.patch("selection.execution.run_command")
+    async def test_distance_matcher_does_not_pass_verbose_flag(
+        self, mock_run_cmd: mock.AsyncMock
+    ) -> None:
+        """Test that _DLDistanceMatcher does not pass -v to dldist to avoid stderr spam."""
+        mock_run_cmd.return_value = mock.MagicMock(return_code=0, stdout="0\n")
+        matcher = selection._TestDistanceMeasurer(
+            [self._make_host_test("src", "foo")],
+            lambda t: t.name(),
+            ["dldist"],
+        )
+        await matcher.distances("foo", None, None)
+        mock_run_cmd.assert_called_once()
+        cmd_args = mock_run_cmd.call_args[0]
+        self.assertNotIn("-v", cmd_args)
+
+    @mock.patch("selection.execution.run_command")
+    async def test_distance_matcher_reuses_input_file_across_queries(
+        self, mock_run_cmd: mock.AsyncMock
+    ) -> None:
+        """Test that _TestDistanceMeasurer reuses the generated input file across calls."""
+        mock_run_cmd.return_value = mock.MagicMock(return_code=0, stdout="0\n")
+        matcher = selection._TestDistanceMeasurer(
+            [self._make_host_test("src", "foo")],
+            lambda t: t.name(),
+            ["dldist"],
+        )
+        await matcher.distances("foo", None, None)
+        await matcher.distances("bar", None, None)
+        self.assertEqual(mock_run_cmd.call_count, 2)
+        call1_args = mock_run_cmd.call_args_list[0][0]
+        call2_args = mock_run_cmd.call_args_list[1][0]
+        input_file_1 = call1_args[call1_args.index("--input") + 1]
+        input_file_2 = call2_args[call2_args.index("--input") + 1]
+        self.assertEqual(input_file_1, input_file_2)

@@ -69,11 +69,10 @@ std::unique_ptr<SystemCallTest> ZxPortQueue(int64_t status, std::string_view sta
   return value;
 }
 
-#define PORT_QUEUE_DISPLAY_TEST_CONTENT(status, handle, init_packet, expected)             \
-  zx_port_packet_t packet;                                                                 \
-  init_packet(&packet);                                                                    \
-  PerformDisplayTest("$plt(zx_port_queue)", ZxPortQueue(status, #status, handle, &packet), \
-                     expected)
+#define PORT_QUEUE_DISPLAY_TEST_CONTENT(status, handle, init_packet, expected) \
+  zx_port_packet_t packet;                                                     \
+  init_packet(&packet);                                                        \
+  PerformDisplayTest("$plt(zx_port_queue)", ZxPortQueue(status, #status, handle, &packet), expected)
 
 #define PORT_QUEUE_DISPLAY_TEST(name, status, handle, init_packet, expected) \
   TEST_F(InterceptionWorkflowTestX64, name) {                                \
@@ -423,7 +422,6 @@ void InitGuestVcpuInterrupt(zx_port_packet_t* packet) {
   packet->guest_vcpu.interrupt.mask = kMask;
   packet->guest_vcpu.interrupt.vector = kVector;
   packet->guest_vcpu.type = ZX_PKT_GUEST_VCPU_INTERRUPT;
-  packet->guest_vcpu.reserved = 0;
 }
 
 PORT_WAIT_DISPLAY_TEST(
@@ -447,20 +445,20 @@ PORT_WAIT_DISPLAY_TEST(
     "mask: \x1B[32muint64\x1B[0m = \x1B[34m1234\x1B[0m, "
     "vector: \x1B[32muint8\x1B[0m = \x1B[34m50\x1B[0m"
     " }\n"
-    "        reserved: \x1B[32muint64\x1B[0m = \x1B[34m0\x1B[0m\n"
     "      }\n"
     "    }\n")
 
 void InitGuestVcpuStartup(zx_port_packet_t* packet) {
-  constexpr uint64_t kId = 56789;
+  constexpr uint64_t kTarget = 56789;
   constexpr zx_gpaddr_t kEntry = 0x78654321;
+  constexpr uint64_t kContext = 98765;
   packet->key = kKey;
   packet->type = ZX_PKT_TYPE_GUEST_VCPU;
   packet->status = ZX_OK;
-  packet->guest_vcpu.startup.id = kId;
+  packet->guest_vcpu.startup.target = kTarget;
   packet->guest_vcpu.startup.entry = kEntry;
+  packet->guest_vcpu.startup.context = kContext;
   packet->guest_vcpu.type = ZX_PKT_GUEST_VCPU_STARTUP;
-  packet->guest_vcpu.reserved = 0;
 }
 
 PORT_WAIT_DISPLAY_TEST(
@@ -480,11 +478,11 @@ PORT_WAIT_DISPLAY_TEST(
     "      guest_vcpu: \x1B[32mzx_packet_guest_vcpu_t\x1B[0m = {\n"
     "        type: \x1B[32mzx.packet_guest_vcpu::type\x1B[0m = "
     "\x1B[34mZX_PKT_GUEST_VCPU_STARTUP\x1B[0m\n"
-    "        startup: \x1B[32mzx_packet_guest_vcpu_startup_t\x1B[0m = { "
-    "id: \x1B[32muint64\x1B[0m = \x1B[34m56789\x1B[0m, "
-    "entry: \x1B[32mzx.gpaddr\x1B[0m = \x1B[34m0000000078654321\x1B[0m "
-    "}\n"
-    "        reserved: \x1B[32muint64\x1B[0m = \x1B[34m0\x1B[0m\n"
+    "        startup: \x1B[32mzx_packet_guest_vcpu_startup_t\x1B[0m = {\n"
+    "          target: \x1B[32muint64\x1B[0m = \x1B[34m56789\x1B[0m\n"
+    "          entry: \x1B[32mzx.gpaddr\x1B[0m = \x1B[34m0000000078654321\x1B[0m\n"
+    "          context: \x1B[32muint64\x1B[0m = \x1B[34m98765\x1B[0m\n"
+    "        }\n"
     "      }\n"
     "    }\n")
 

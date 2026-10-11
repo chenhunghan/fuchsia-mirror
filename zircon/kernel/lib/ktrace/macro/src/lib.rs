@@ -46,7 +46,7 @@ macro_rules! resolve_category {
 macro_rules! category_enabled {
     ($category:tt) => {{
         let category = $crate::resolve_category!($category);
-        crate::ktrace_rs::KTrace::get_instance().is_category_enabled(category)
+        crate::ktrace_rs::KTrace::category_enabled(category)
     }};
 }
 
@@ -61,9 +61,8 @@ macro_rules! instant {
     ($category:tt, $label:tt, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::Instant,
                     category,
                     $crate::resolve_string!($label),
@@ -73,6 +72,7 @@ macro_rules! instant {
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
@@ -97,9 +97,8 @@ macro_rules! duration_begin_timestamp {
     ($category:tt, $label:tt, $timestamp:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::DurationBegin,
                     category,
                     $crate::resolve_string!($label),
@@ -109,6 +108,7 @@ macro_rules! duration_begin_timestamp {
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
@@ -162,9 +162,8 @@ macro_rules! duration_end_timestamp {
     ($category:tt, $label:tt, $timestamp:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::DurationEnd,
                     category,
                     $crate::resolve_string!($label),
@@ -174,6 +173,7 @@ macro_rules! duration_end_timestamp {
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
@@ -221,6 +221,55 @@ macro_rules! cpu_duration_end {
     };
 }
 
+/// Similar to `counter!`, but accepts an expression to use for the event timestamp.
+#[macro_export]
+macro_rules! counter_timestamp {
+    ($category:tt, $label:tt, $timestamp:expr, $counter_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        {
+            let category = $crate::resolve_category!($category);
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
+                    crate::ktrace_rs::EventType::Counter,
+                    category,
+                    $crate::resolve_string!($label),
+                    $timestamp,
+                    $context,
+                    Some($counter_id as u64),
+                    &[
+                        $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
+                    ],
+                    &[],
+                );
+            }
+        }
+    };
+    ($category:tt, $label:tt, $timestamp:expr, $counter_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::counter_timestamp!(
+            $category,
+            $label,
+            $timestamp,
+            $counter_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Similar to `cpu_counter!`, but accepts an expression to use for the event timestamp.
+#[macro_export]
+macro_rules! cpu_counter_timestamp {
+    ($category:tt, $label:tt, $timestamp:expr, $counter_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::counter_timestamp!(
+            $category,
+            $label,
+            $timestamp,
+            $counter_id,
+            crate::ktrace_rs::Context::Cpu
+            $(, $key => $val)*
+        )
+    };
+}
+
 /// Writes a counter event associated with the current thread when the given category is enabled.
 ///
 /// Each argument is rendered as a separate value series named "<label>:<arg name>:<counter_id>".
@@ -232,48 +281,73 @@ macro_rules! cpu_duration_end {
 /// - ...: List of key => value argument pairs.
 #[macro_export]
 macro_rules! counter {
+    ($category:tt, $label:tt, $counter_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::counter_timestamp!(
+            $category,
+            $label,
+            crate::ktrace_rs::KTrace::timestamp(),
+            $counter_id,
+            $context
+            $(, $key => $val)*
+        )
+    };
     ($category:tt, $label:tt, $counter_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
-        {
-            let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
-                    crate::ktrace_rs::EventType::Counter,
-                    category,
-                    $crate::resolve_string!($label),
-                    crate::ktrace_rs::KTrace::timestamp(),
-                    crate::ktrace_rs::Context::Thread,
-                    Some($counter_id as u64),
-                    &[
-                        $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
-                    ],
-                );
-            }
-        }
+        $crate::counter!(
+            $category,
+            $label,
+            $counter_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Similar to `counter!`, but associates the event with the current CPU instead of the current
+/// thread.
+#[macro_export]
+macro_rules! cpu_counter {
+    ($category:tt, $label:tt, $counter_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::counter!(
+            $category,
+            $label,
+            $counter_id,
+            crate::ktrace_rs::Context::Cpu
+            $(, $key => $val)*
+        )
     };
 }
 
 /// Similar to `flow_begin!`, but accepts an expression to use for the event timestamp.
 #[macro_export]
 macro_rules! flow_begin_timestamp {
-    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::FlowBegin,
                     category,
                     $crate::resolve_string!($label),
                     $timestamp,
-                    crate::ktrace_rs::Context::Thread,
+                    $context,
                     Some($flow_id as u64),
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
+    };
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_begin_timestamp!(
+            $category,
+            $label,
+            $timestamp,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
     };
 }
 
@@ -286,12 +360,37 @@ macro_rules! flow_begin_timestamp {
 /// - ...: List of key => value argument pairs.
 #[macro_export]
 macro_rules! flow_begin {
-    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         $crate::flow_begin_timestamp!(
             $category,
             $label,
             crate::ktrace_rs::KTrace::timestamp(),
-            $flow_id
+            $flow_id,
+            $context
+            $(, $key => $val)*
+        )
+    };
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_begin!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Similar to `flow_begin!`, but associates the event with the current CPU instead of the current
+/// thread.
+#[macro_export]
+macro_rules! cpu_flow_begin {
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_begin!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Cpu
             $(, $key => $val)*
         )
     };
@@ -300,24 +399,34 @@ macro_rules! flow_begin {
 /// Similar to `flow_step!`, but accepts an expression to use for the event timestamp.
 #[macro_export]
 macro_rules! flow_step_timestamp {
-    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::FlowStep,
                     category,
                     $crate::resolve_string!($label),
                     $timestamp,
-                    crate::ktrace_rs::Context::Thread,
+                    $context,
                     Some($flow_id as u64),
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
+    };
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_step_timestamp!(
+            $category,
+            $label,
+            $timestamp,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
     };
 }
 
@@ -330,12 +439,37 @@ macro_rules! flow_step_timestamp {
 /// - ...: List of key => value argument pairs.
 #[macro_export]
 macro_rules! flow_step {
-    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         $crate::flow_step_timestamp!(
             $category,
             $label,
             crate::ktrace_rs::KTrace::timestamp(),
-            $flow_id
+            $flow_id,
+            $context
+            $(, $key => $val)*
+        )
+    };
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_step!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Similar to `flow_step!`, but associates the event with the current CPU instead of the current
+/// thread.
+#[macro_export]
+macro_rules! cpu_flow_step {
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_step!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Cpu
             $(, $key => $val)*
         )
     };
@@ -344,24 +478,34 @@ macro_rules! flow_step {
 /// Similar to `flow_end!`, but accepts an expression to use for the event timestamp.
 #[macro_export]
 macro_rules! flow_end_timestamp {
-    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::FlowEnd,
                     category,
                     $crate::resolve_string!($label),
                     $timestamp,
-                    crate::ktrace_rs::Context::Thread,
+                    $context,
                     Some($flow_id as u64),
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
+    };
+    ($category:tt, $label:tt, $timestamp:expr, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_end_timestamp!(
+            $category,
+            $label,
+            $timestamp,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
     };
 }
 
@@ -374,21 +518,46 @@ macro_rules! flow_end_timestamp {
 /// - ...: List of key => value argument pairs.
 #[macro_export]
 macro_rules! flow_end {
-    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+    ($category:tt, $label:tt, $flow_id:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         $crate::flow_end_timestamp!(
             $category,
             $label,
             crate::ktrace_rs::KTrace::timestamp(),
-            $flow_id
+            $flow_id,
+            $context
+            $(, $key => $val)*
+        )
+    };
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_end!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Thread
             $(, $key => $val)*
         )
     };
 }
 
-/// Creates a delegate to capture the given arguments at the beginning of a scope when the given
-/// category is enabled. The returned value should be used to construct a `ktrace::Scope` to track
-/// the lifetime of the scope and emit the complete trace event. The complete event is associated
-/// with the current thread.
+/// Similar to `flow_end!`, but associates the event with the current CPU instead of the current
+/// thread.
+#[macro_export]
+macro_rules! cpu_flow_end {
+    ($category:tt, $label:tt, $flow_id:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::flow_end!(
+            $category,
+            $label,
+            $flow_id,
+            crate::ktrace_rs::Context::Cpu
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Creates a scope guard (`Option<KTraceScope>`) that captures the given arguments at the
+/// beginning of a scope when the given category is enabled, and emits the duration complete event
+/// when dropped or ended via `end_scope!`. The complete event is associated with the current
+/// thread.
 ///
 /// # Arguments:
 /// - category: Filter category for the event. Expects a string literal or expression.
@@ -397,12 +566,7 @@ macro_rules! flow_end {
 #[macro_export]
 macro_rules! begin_scope {
     ($category:tt, $label:tt $(, $key:tt => $val:expr)* $(,)?) => {
-        crate::ktrace_rs::KTraceScope::begin(
-            $crate::resolve_category!($category),
-            $crate::resolve_string!($label),
-            crate::ktrace_rs::Context::Thread,
-            [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
-        )
+        $crate::begin_scope_cond!(true, $category, $label $(, $key => $val)*)
     };
 }
 
@@ -411,12 +575,7 @@ macro_rules! begin_scope {
 #[macro_export]
 macro_rules! cpu_begin_scope {
     ($category:tt, $label:tt $(, $key:tt => $val:expr)* $(,)?) => {
-        crate::ktrace_rs::KTraceScope::begin(
-            $crate::resolve_category!($category),
-            $crate::resolve_string!($label),
-            crate::ktrace_rs::Context::Cpu,
-            [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
-        )
+        $crate::cpu_begin_scope_cond!(true, $category, $label $(, $key => $val)*)
     };
 }
 
@@ -424,20 +583,60 @@ macro_rules! cpu_begin_scope {
 /// category, to determine whether to emit the event.
 #[macro_export]
 macro_rules! begin_scope_cond {
+    ($cond:expr, $category:tt, $label:tt, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {{
+        let category = $crate::resolve_category!($category);
+        if $cond && crate::ktrace_rs::KTrace::category_enabled(category) {
+            Some(crate::ktrace_rs::KTraceScope::begin(
+                category,
+                $crate::resolve_string!($label),
+                $context,
+                [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
+            ))
+        } else {
+            None
+        }
+    }};
     ($cond:expr, $category:tt, $label:tt $(, $key:tt => $val:expr)* $(,)?) => {
-        {
-            let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if $cond && ktrace.is_category_enabled(category) {
-                Some(crate::ktrace_rs::KTraceScope::begin(
-                    category,
-                    $crate::resolve_string!($label),
-                    crate::ktrace_rs::Context::Thread,
-                    [$(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*],
-                ))
-            } else {
-                None
+        $crate::begin_scope_cond!(
+            $cond,
+            $category,
+            $label,
+            crate::ktrace_rs::Context::Thread
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Similar to `begin_scope_cond!`, but associates the event with the current CPU instead of the
+/// current thread.
+#[macro_export]
+macro_rules! cpu_begin_scope_cond {
+    ($cond:expr, $category:tt, $label:tt $(, $key:tt => $val:expr)* $(,)?) => {
+        $crate::begin_scope_cond!(
+            $cond,
+            $category,
+            $label,
+            crate::ktrace_rs::Context::Cpu
+            $(, $key => $val)*
+        )
+    };
+}
+
+/// Ends a trace scope created by a begin scope macro with additional key-value argument pairs.
+///
+/// # Arguments:
+/// - scope: The `Option<KTraceScope>` returned by a begin scope macro.
+/// - ...: List of key => value argument pairs.
+#[macro_export]
+macro_rules! end_scope {
+    ($scope:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        if let Some(mut scope) = $scope {
+            if !scope.is_ended() {
+                scope.end_with_args(&[
+                    $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
+                ]);
             }
+            core::mem::forget(scope);
         }
     };
 }
@@ -455,9 +654,8 @@ macro_rules! complete {
     ($category:tt, $label:tt, $start_timestamp:expr, $context:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_event(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_event(
                     crate::ktrace_rs::EventType::DurationComplete,
                     category,
                     $crate::resolve_string!($label),
@@ -467,6 +665,7 @@ macro_rules! complete {
                     &[
                         $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                     ],
+                    &[],
                 );
             }
         }
@@ -498,9 +697,8 @@ macro_rules! kernel_object {
     ($category:tt, $koid:expr, $obj_type:expr, $name:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
             let category = $crate::resolve_category!($category);
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            if ktrace.is_category_enabled(category) {
-                ktrace.emit_kernel_object_outlined(
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_kernel_object_outlined(
                     $koid as u64,
                     $obj_type as u32,
                     $crate::resolve_string!($name),
@@ -525,8 +723,7 @@ macro_rules! kernel_object {
 macro_rules! kernel_object_always {
     ($koid:expr, $obj_type:expr, $name:expr $(, $key:tt => $val:expr)* $(,)?) => {
         {
-            let ktrace = crate::ktrace_rs::KTrace::get_instance();
-            ktrace.emit_kernel_object_outlined(
+            crate::ktrace_rs::KTrace::emit_kernel_object_outlined(
                 $koid as u64,
                 $obj_type as u32,
                 $crate::resolve_string!($name),
@@ -534,6 +731,60 @@ macro_rules! kernel_object_always {
                     $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
                 ],
             );
+        }
+    };
+}
+
+/// Writes a context switch record for the given threads when the given trace category is enabled.
+///
+/// # Arguments:
+/// - category: Filter category for the event. Expects a string literal or expression.
+/// - cpu: The CPU number on which the context switch occurred.
+/// - outgoing_state: The state of the outgoing thread (`zx_thread_state_t`).
+/// - outgoing_tid: The KOID of the outgoing thread.
+/// - incoming_tid: The KOID of the incoming thread.
+/// - ...: List of key => value argument pairs.
+#[macro_export]
+macro_rules! context_switch {
+    ($category:tt, $cpu:expr, $outgoing_state:expr, $outgoing_tid:expr, $incoming_tid:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        {
+            let category = $crate::resolve_category!($category);
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_context_switch(
+                    $cpu as u16,
+                    $outgoing_state as u32,
+                    $outgoing_tid as u64,
+                    $incoming_tid as u64,
+                    &[
+                        $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
+                    ],
+                );
+            }
+        }
+    };
+}
+
+/// Writes a thread wakeup record for the given thread when the given trace category is enabled.
+///
+/// # Arguments:
+/// - category: Filter category for the event. Expects a string literal or expression.
+/// - cpu: The target CPU number on which the thread is waking.
+/// - incoming_tid: The KOID of the waking thread.
+/// - ...: List of key => value argument pairs.
+#[macro_export]
+macro_rules! thread_wakeup {
+    ($category:tt, $cpu:expr, $incoming_tid:expr $(, $key:tt => $val:expr)* $(,)?) => {
+        {
+            let category = $crate::resolve_category!($category);
+            if crate::ktrace_rs::KTrace::category_enabled(category) {
+                crate::ktrace_rs::KTrace::emit_thread_wakeup(
+                    $cpu as u16,
+                    $incoming_tid as u64,
+                    &[
+                        $(crate::ktrace_rs::Argument::new($crate::resolve_string!($key), $val)),*
+                    ],
+                );
+            }
         }
     };
 }

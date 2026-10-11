@@ -95,7 +95,7 @@ pub(super) fn ptrace_access_check(
                 PtraceAllowedPtracers::Any => return Ok(()),
             }
 
-            security::check_task_capable(current_task, CAP_SYS_PTRACE)
+            security::check_task_ptrace_capable(current_task, mode)
         }
 
         // admin-only attach:
@@ -104,7 +104,7 @@ pub(super) fn ptrace_access_check(
         // user namespace of the target process may perform
         // PTRACE_MODE_ATTACH operations or trace children that employ
         // PTRACE_TRACEME.
-        SCOPE_ADMIN_ONLY => security::check_task_capable(current_task, CAP_SYS_PTRACE),
+        SCOPE_ADMIN_ONLY => security::check_task_ptrace_capable(current_task, mode),
 
         // no attach:
         //

@@ -10,6 +10,8 @@
 #include <lib/stdcompat/optional.h>
 #include <lib/zx/event.h>
 
+#include <memory>
+
 #include <fbl/mutex.h>
 
 #include "src/connectivity/network/drivers/network-device/mac/public/network_mac.h"
@@ -19,10 +21,11 @@ namespace network::internal {
 
 class DeviceInterface;
 
-class DevicePort : public fidl::WireServer<netdev::Port> {
+class DevicePort : public fidl::WireServer<netdev::Port>,
+                   public std::enable_shared_from_this<DevicePort> {
  public:
   using TeardownCallback = fit::callback<void(DevicePort&)>;
-  using OnCreated = fit::callback<void(zx::result<std::unique_ptr<DevicePort>>)>;
+  using OnCreated = fit::callback<void(zx::result<std::shared_ptr<DevicePort>>)>;
 
   // Asynchronously create a DevicePort object. This will make calls on the port_client to determine
   // the initial state of the port. Once the port object is ready it will be provided through the

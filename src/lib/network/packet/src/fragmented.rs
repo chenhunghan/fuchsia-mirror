@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use alloc::vec::Vec;
 use core::ops::{Range, RangeBounds};
 
 use zerocopy::{SplitByteSlice, SplitByteSliceMut};
@@ -299,7 +300,7 @@ impl<'a, B: 'a + Fragment> FragmentedByteSlice<'a, B> {
         if self.0.is_empty() {
             Ok(B::empty())
         } else if self.0.len() == 1 {
-            Ok(std::mem::replace(&mut self.0[0], B::empty()))
+            Ok(core::mem::replace(&mut self.0[0], B::empty()))
         } else {
             Err(self)
         }

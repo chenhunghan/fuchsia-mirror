@@ -361,7 +361,7 @@ class ChromiumInputTest : public MouseInputBase {
          .targets = {ChildRef{kMemoryPressureSignaler}, target}},
         {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_scheduler::RoleManager>}},
          .source = ParentRef(),
-         .targets = {ChildRef{kMemoryPressureSignaler}}},
+         .targets = {ChildRef{kMemoryPressureSignaler}, target}},
         {.capabilities = {Protocol{
              fidl::DiscoverableProtocolName<fuchsia_kernel::RootJobForInspect>}},
          .source = ParentRef(),

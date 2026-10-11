@@ -8,5 +8,6 @@
 #include <string>
 
 [[nodiscard]] std::string CreateRandomCodecSpecifier();
+[[nodiscard]] const std::string& GetSwFfmpegH264CodecSpecifier();
 
 #endif  // SRC_MEDIA_CODEC_FACTORY_CODEC_SPECIFIER_H_

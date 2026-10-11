@@ -26,6 +26,7 @@ FFI_ALWAYS_INLINE void cpp_vmcompression_compressor_guard_destroy(
     VmCompression::CompressorGuard* guard);
 FFI_ALWAYS_INLINE VmCompressor* cpp_vmcompression_compressor_guard_get(
     VmCompression::CompressorGuard* guard);
+FFI_ALWAYS_INLINE void cpp_vmcompression_free_reference(VmCompression* compression, uint32_t ref);
 
 __END_CDECLS
 

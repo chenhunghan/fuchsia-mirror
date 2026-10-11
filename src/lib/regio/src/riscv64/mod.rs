@@ -83,6 +83,16 @@ where
     }
 }
 
+impl<Encoding, Layout> Default for Csr<Encoding, Layout>
+where
+    Encoding: ControlAndStatusRegisterEncoding,
+    Layout: LayoutOver<u64>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An I/O backend for riscv64 CSRs.
 pub struct CsrIo<Encoding: ControlAndStatusRegisterEncoding>(PhantomData<Encoding>);
 
@@ -92,6 +102,12 @@ impl<Encoding: ControlAndStatusRegisterEncoding> CsrIo<Encoding> {
         // now.
         const { Encoding::VALID };
         Self(PhantomData)
+    }
+}
+
+impl<Encoding: ControlAndStatusRegisterEncoding> Default for CsrIo<Encoding> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

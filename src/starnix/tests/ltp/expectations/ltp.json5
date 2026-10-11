@@ -65,9 +65,7 @@
                 "acl_other01",
                 "acl_user_obj01",
 
-                // add_key unsupported
-                "add_key01",
-                "add_key03",
+                // adjtimex not supported
                 "adjtimex01",
                 "adjtimex02",
                 "adjtimex03",
@@ -101,18 +99,10 @@
 
                 // Depends on real contents in /proc/sys/kernel/perf_event_mlock_kb
                 "cve-2015-3290",
-                "cve-2015-7550",
-                "cve-2016-9604",
                 "cve-2016-9793",
-                "cve-2017-12193",
-                "cve-2017-15274",
-                "cve-2017-15299",
-                "cve-2017-15951",
+                "cve-2017-7308",
                 "cve-2017-17807",
                 "cve-2017-18075",
-                "cve-2017-6951",
-                "cve-2017-7308",
-                "cve-2017-7472",
                 "cve-2018-11508",
                 "cve-2018-19854",
                 "cve-2018-5803",
@@ -185,14 +175,18 @@
                 "ioprio_set01",
                 "ioprio_set02",
                 "ioprio_set03",
-                "keyctl01",
-                "keyctl03",
-                "keyctl05",
-                "keyctl06",
                 "leapsec01",
                 "madvise02",
                 "madvise08",
                 "membarrier01",
+
+                // TODO(https://fxbug.dev/568892309): Requires cgroup v1 memory controller.
+                "madvise09",
+                "memcg_control",
+                "memcg_regression",
+                "memcg_test_3",
+                "memcontrol02",
+                "swapon01",
                 "mincore01",
                 "mincore02",
                 "mincore03",
@@ -233,12 +227,6 @@
                 // Depends on IO stats in /proc/<pid>/io .
                 "readahead02",
                 "remap_file_pages02",
-                "request_key01",
-                "request_key02",
-                "request_key03",
-                "request_key04",
-                "request_key05",
-                "request_key06",
 
                 // TODO: https://fxbug.dev/287120797 - maybe we'll implement sched_getattr?
                 "sched_getattr01", // https://fxbug.dev/287120797
@@ -325,6 +313,28 @@
 
                 // TODO(https://fxbug.dev/287114514): Pass all userfaultfd* tests
                 "userfaultfd01",
+
+                // TODO(https://fxbug.dev/287705521): Key management support
+                "add_key01",
+                "add_key03",
+                "cve-2015-7550",
+                "cve-2016-9604",
+                "cve-2017-12193",
+                "cve-2017-15274",
+                "cve-2017-15299",
+                "cve-2017-17807",
+                "cve-2017-15951",
+                "cve-2017-6951",
+                "cve-2017-7472",
+                "keyctl01",
+                "keyctl03",
+                "keyctl06",
+                "request_key01",
+                "request_key02",
+                "request_key03",
+                "request_key04",
+                "request_key05",
+                "request_key06",
             ],
         },
         {

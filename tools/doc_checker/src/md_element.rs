@@ -227,12 +227,24 @@ impl<'a> DocContext<'a> {
         link: pulldown_cmark::BrokenLink<'_>,
         text: &'a str,
     ) -> Option<(CowStr<'a>, CowStr<'a>)> {
-        // TODO(https://fxbug.dev/42069593): Glossary reference links are hard to validate.
-        if !link.reference.starts_with("glossary.")  &&  
+        if let Some(term) = link.reference.strip_prefix("glossary.") {
+            // Glossary links in DevSite use reference syntax (e.g. [text][glossary.term] or [glossary.term]),
+            // which often do not have an in-page reference definition because DevSite renders them via a
+            // custom documentation widget.
+            //
+            // When pulldown_cmark encounters such an undefined reference, we map it to the canonical in-tree
+            // glossary document link: /docs/glossary/README.md#<slug>. This allows LinkChecker to validate
+            // that the referenced term exists in docs/glossary/_glossary.yaml and prevents false-positive
+            // "broken reference link" errors while ensuring broken/misspelled glossary targets are caught.
+            let slug = term.trim().replace(' ', "-").to_lowercase();
+            let target = format!("/docs/glossary/README.md#{}", slug);
+            let normalized: &str = &text[link.span.clone()];
+            Some((CowStr::Boxed(target.into()), normalized.into()))
+        } else if
         // TODO(https://fxbug.dev/42069638): Consider removing [TOC]
         link.reference.as_ref() != "TOC" &&
         // TODO(https://fxbug.dev/42068739): need to check for anchors and classes.
-        !link.reference.starts_with("#")
+        !link.reference.starts_with('#')
         {
             let normalized: &str = &text[link.span.clone()];
             let reference = link.reference.to_string();
@@ -421,6 +433,37 @@ This is an example [link](https://somewhere.com)
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_glossary_reference_link_resolution() -> Result<()> {
+        let input = "See [product bundle][glossary.product-bundle] and [shortcut][glossary.session component].";
+        let file = PathBuf::from("/docs/test.md");
+        let callback = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input)
+        };
+        let ctx = DocContext::new(file, input, Some(callback));
+        let elements = ctx.collect::<Vec<Element<'_>>>();
+        let actual_links: Vec<&Element<'_>> =
+            elements.iter().filter_map(|e| e.get_links()).flatten().collect();
+        assert_eq!(actual_links.len(), 2);
+        match actual_links[0] {
+            Element::Link(link_type, url, title, ..) => {
+                assert_eq!(*link_type, LinkType::ReferenceUnknown);
+                assert_eq!(url.as_ref(), "/docs/glossary/README.md#product-bundle");
+                assert_eq!(title.as_ref(), "[product bundle][glossary.product-bundle]");
+            }
+            other => panic!("Expected Link, got {:?}", other),
+        }
+        match actual_links[1] {
+            Element::Link(link_type, url, title, ..) => {
+                assert_eq!(*link_type, LinkType::ReferenceUnknown);
+                assert_eq!(url.as_ref(), "/docs/glossary/README.md#session-component");
+                assert_eq!(title.as_ref(), "[shortcut][glossary.session component]");
+            }
+            other => panic!("Expected Link, got {:?}", other),
+        }
         Ok(())
     }
 }

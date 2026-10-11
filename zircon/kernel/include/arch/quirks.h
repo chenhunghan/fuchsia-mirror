@@ -26,7 +26,7 @@
 // chance to identify themselves.  Use mp_wait_for_all_cpus_ready
 // (kernel/mp.h) to establish this if needed.
 #if __aarch64__
-bool arch_quirks_needs_arm_erratum_858921_mitigation();
+extern "C" bool arch_quirks_needs_arm_erratum_858921_mitigation();
 #else
 template <typename T = void>
 static inline bool arch_quirks_needs_arm_erratum_858921_mitigation() {

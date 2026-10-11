@@ -61,29 +61,22 @@ type Error = strict enum {
 ///    temporarily taking over and mutating system interfaces.
 @discoverable
 closed protocol Controller {
-    /// Starts a hermetic network realm corresponding to `netstack`.
+    /// Starts a hermetic network realm.
     ///
     /// Any previously running hermetic network realm will be terminated before
     /// the new realm is started. The configured realm will contain a subset of
     /// the components in the standard network realm. In particular, it will
     /// contain:
     ///
-    ///  * A Netstack instance that corresponds to the provided `netstack`
+    ///  * A Netstack instance
     ///  * A DHCP server
+    ///  * A DHCPv4 client
     ///  * A DHCPv6 client
     ///  * A DNS resolver
     ///
-    /// + request `netstack` the type of Netstack that will be run.
     /// * error `INTERNAL` for internal errors, including failure to start the
-    ///     specified `netstack`.
-    strict StartHermeticNetworkRealm(struct {
-        netstack strict enum {
-            /// Netstack2.
-            V2 = 1;
-            /// Netstack3.
-            V3 = 2;
-        };
-    }) -> () error Error;
+    ///     Netstack.
+    strict StartHermeticNetworkRealm() -> () error Error;
 
     /// Stops any running hermetic network realm.
     ///

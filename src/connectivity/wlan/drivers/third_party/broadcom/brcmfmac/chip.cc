@@ -593,9 +593,8 @@ static void brcmf_chip_resetcore(struct brcmf_core* pub, uint32_t prereset, uint
 static void brcmf_chip_socram_ramsize(struct brcmf_core_priv* sr, uint32_t* ramsize,
                                       uint32_t* srsize) {
   uint32_t coreinfo;
-  uint nb, banksize, lss;
+  uint banksize, lss;
   bool retent;
-  int i;
 
   *ramsize = 0;
   *srsize = 0;
@@ -610,7 +609,7 @@ static void brcmf_chip_socram_ramsize(struct brcmf_core_priv* sr, uint32_t* rams
 
   /* Get info for determining size */
   coreinfo = brcmf_chip_core_read32(sr, SOCRAMREGOFFS(coreinfo));
-  nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
+  uint8_t nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
 
   if ((sr->pub.rev <= 7) || (sr->pub.rev == 12)) {
     banksize = (coreinfo & SRCI_SRBSZ_MASK);
@@ -624,7 +623,7 @@ static void brcmf_chip_socram_ramsize(struct brcmf_core_priv* sr, uint32_t* rams
     }
   } else {
     nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
-    for (i = 0; i < (int)nb; i++) {
+    for (uint8_t i = 0; i < nb; i++) {
       retent = brcmf_chip_socram_banksize(sr, i, &banksize);
       *ramsize += banksize;
       if (retent) {
@@ -655,8 +654,6 @@ static void brcmf_chip_socram_ramsize(struct brcmf_core_priv* sr, uint32_t* rams
 static uint32_t brcmf_chip_sysmem_ramsize(struct brcmf_core_priv* sysmem) {
   uint32_t memsize = 0;
   uint32_t coreinfo;
-  uint32_t idx;
-  uint32_t nb;
   uint32_t banksize;
 
   if (!brcmf_chip_iscoreup(&sysmem->pub)) {
@@ -664,9 +661,9 @@ static uint32_t brcmf_chip_sysmem_ramsize(struct brcmf_core_priv* sysmem) {
   }
 
   coreinfo = brcmf_chip_core_read32(sysmem, SYSMEMREGOFFS(coreinfo));
-  nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
+  const uint8_t nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
 
-  for (idx = 0; idx < nb; idx++) {
+  for (uint8_t idx = 0; idx < nb; idx++) {
     brcmf_chip_socram_banksize(sysmem, idx, &banksize);
     memsize += banksize;
   }

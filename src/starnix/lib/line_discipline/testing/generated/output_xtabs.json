@@ -28,7 +28,8 @@
     "final_termios": {
         "c_iflag": [],
         "c_oflag": [
-            "OPOST"
+            "OPOST",
+            "XTABS"
         ],
         "c_lflag": [
             "ICANON",

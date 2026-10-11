@@ -18,6 +18,9 @@
 #if !defined(__riscv)
 #include <arch/user_copy.h>
 
+static_assert(static_cast<uint8_t>(CopyContext::kBlockingAllowed) == 0);
+static_assert(static_cast<uint8_t>(CopyContext::kBlockingNotAllowed) == 1);
+
 namespace {
 
 FFI_ALWAYS_INLINE zx_status_t capture_faults_result(UserCopyCaptureFaultsResult res,
@@ -52,9 +55,11 @@ uint32_t cpp_arch_max_num_cpus();
 zx_status_t cpp_arch_copy_from_user(void* dst, const void* src, size_t len);
 zx_status_t cpp_arch_copy_to_user(void* dst, const void* src, size_t len);
 zx_status_t cpp_arch_copy_from_user_capture_faults(void* dst, const void* src, size_t len,
-                                                   vaddr_t* fault_va, uint* fault_flags);
+                                                   CopyContext context, vaddr_t* fault_va,
+                                                   uint* fault_flags);
 zx_status_t cpp_arch_copy_to_user_capture_faults(void* dst, const void* src, size_t len,
-                                                 vaddr_t* fault_va, uint* fault_flags);
+                                                 CopyContext context, vaddr_t* fault_va,
+                                                 uint* fault_flags);
 #endif
 void* cpp_arch_get_current_thread();
 void cpp_arch_set_current_thread(void* thread);
@@ -63,6 +68,7 @@ void cpp_dump_common_exception_context(const arch_exception_context_t* context);
 bool cpp_with_frame_pointers();
 void cpp_arch_set_blocking_disallowed(bool value);
 void* cpp_arch_get_curr_percpu();
+uint32_t cpp_arch_vm_features();
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_arch_yield() { arch::Yield(); }
@@ -86,15 +92,18 @@ FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_to_user(void* dst, const void* src, 
   return arch_copy_to_user(dst, src, len);
 }
 FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_from_user_capture_faults(void* dst, const void* src,
-                                                                     size_t len, vaddr_t* fault_va,
+                                                                     size_t len,
+                                                                     CopyContext context,
+                                                                     vaddr_t* fault_va,
                                                                      uint* fault_flags) {
-  return capture_faults_result(arch_copy_from_user_capture_faults(dst, src, len), fault_va,
+  return capture_faults_result(arch_copy_from_user_capture_faults(dst, src, len, context), fault_va,
                                fault_flags);
 }
 FFI_ALWAYS_INLINE zx_status_t cpp_arch_copy_to_user_capture_faults(void* dst, const void* src,
-                                                                   size_t len, vaddr_t* fault_va,
+                                                                   size_t len, CopyContext context,
+                                                                   vaddr_t* fault_va,
                                                                    uint* fault_flags) {
-  return capture_faults_result(arch_copy_to_user_capture_faults(dst, src, len), fault_va,
+  return capture_faults_result(arch_copy_to_user_capture_faults(dst, src, len, context), fault_va,
                                fault_flags);
 }
 #endif
@@ -113,5 +122,6 @@ FFI_ALWAYS_INLINE void cpp_arch_set_blocking_disallowed(bool value) {
   arch_set_blocking_disallowed(value);
 }
 FFI_ALWAYS_INLINE void* cpp_arch_get_curr_percpu() { return arch_get_curr_percpu(); }
+FFI_ALWAYS_INLINE uint32_t cpp_arch_vm_features() { return arch_vm_features(); }
 
 }  // extern "C"

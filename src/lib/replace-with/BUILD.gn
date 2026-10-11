@@ -2,7 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/rust/rustc_library.gni")
+import("//build/bazel/bazel_test_suite.gni")
+
+bazel_test_suite("replace-with_test") {
+  target_tests = [ "//src/lib/replace-with:replace-with-test" ]
+  host_tests = [ "//src/lib/replace-with:replace-with-host_test" ]
+}
 
 group("tests") {
   testonly = true
@@ -52,5 +57,4 @@ rustc_library("replace-with") {
     "//src/starnix/kernel/core:*",
     "//vendor/google/*",
   ]
-  with_unit_tests = true
 }

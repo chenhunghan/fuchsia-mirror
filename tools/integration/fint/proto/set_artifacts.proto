@@ -51,4 +51,10 @@ message SetArtifacts {
   // be streaming build events live to the named build event service.
   // TODO(b/473907403): merge this 'build_event_service' after total roll-out.
   string build_event_service_ninja = 7;
+
+  // The experiments from the static spec.
+  repeated string experiment_specs = 8;
+
+  // The actual experiments enabled based on the experiment percentage.
+  repeated string enabled_experiments = 9;
 }

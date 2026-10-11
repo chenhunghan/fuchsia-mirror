@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "detect-stall",
+    srcs = [
+        "src/lib.rs",
+        "src/stream.rs",
+    ],
+    edition = "2024",
+    # @bazel2gn:skip
+    test_deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component/tests:fuchsia.component.client.test_rust",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+    # TODO(https://fxbug.dev/326626515): Avoid widely taking on users until we
+    # get some experience stopping some components.
+    visibility = [
+        "//src/connectivity/policy/http-client:__pkg__",
+        "//src/devices/bin/driver-index:__pkg__",
+        "//src/hwinfo:__pkg__",
+        "//src/lib/fuchsia-component/server:__pkg__",
+        "//src/sys/component_manager/tests/stop_with_escrow:__pkg__",
+        "//src/sys/pkg/bin/null-update-checker:__pkg__",
+        "//src/sys/pkg/bin/system-update-committer:__pkg__",
+    ],
+    # @bazel2gn:skip
+    with_unit_tests = True,
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:pin-project-lite",
+    ],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+    name = "detect-stall_test_packaged_bin",
+    testonly = True,
+    binary = ":detect-stall_test",
+    binary_name = "detect_stall_lib_test",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "detect-stall-unittests-manifest",
+    testonly = True,
+    component_name = "detect-stall-unittests",
+    includes = [
+        "//sdk/lib/syslog:use.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/detect-stall-unittests.cml",
+)
+
+# @bazel2gn:skip
+fx_test_component(
+    name = "detect-stall-unittests-component",
+    compiled_manifest = ":detect-stall-unittests-manifest",
+    component_name = "detect-stall-unittests",
+    deps = [":detect-stall_test_packaged_bin"],
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "detect-stall-unittests-package",
+    package_name = "detect-stall-unittests",
+    test_components = [":detect-stall-unittests-component"],
+)
+
+# @bazel2gn:skip
+fx_test(
+    name = "detect-stall-unittests",
+    package = ":detect-stall-unittests-package",
+)

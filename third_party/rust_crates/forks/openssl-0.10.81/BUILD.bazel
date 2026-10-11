@@ -83,8 +83,8 @@ rust_library(
     }),
     version = "0.10.81",
     deps = [
+        ":build_script_build",
         "//third_party/rust_crates/forks/libc-0.2.189:libc",
-        "//third_party/rust_crates/forks/openssl-0.10.81:build_script_build",
         "//third_party/rust_crates/vendor/bitflags-2.13.0:bitflags",
         "//third_party/rust_crates/vendor/cfg-if-1.0.4:cfg_if",
         "//third_party/rust_crates/vendor/foreign-types-0.3.2:foreign_types",
@@ -130,6 +130,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     link_deps = [
         "//third_party/rust_crates/vendor/openssl-sys-0.9.117:openssl_sys",
     ],

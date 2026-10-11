@@ -41,6 +41,7 @@ use starnix_core::execution::{
     create_init_process, create_system_task, execute_task_with_prerun_result,
 };
 use starnix_core::fs::fuchsia::new_remotefs_in_root;
+use starnix_core::fs::sysfs::init_power_residency_device;
 use starnix_core::fs::tmpfs::TmpFs;
 use starnix_core::security;
 use starnix_core::task::container_namespace::ContainerNamespace;
@@ -798,6 +799,7 @@ async fn create_container(
     // Register common devices and add them in sysfs and devtmpfs.
     log_info!("Registering devices and filesystems.");
     init_common_devices(&kernel)?;
+    init_power_residency_device(&kernel);
     register_common_file_systems(&kernel);
 
     register_common_syscalls(&kernel);
@@ -866,6 +868,7 @@ async fn create_container(
     }
 
     log_info!("Creating init process.");
+    node.record_int("init_started_at", zx::MonotonicInstant::get().into_nanos());
     let init_task =
         create_init_process(&kernel, init_pid, initial_name, Arc::clone(&fs_context), &rlimits)
             .with_source_context(|| format!("creating init task: {:?}", start_info.program.init))?;

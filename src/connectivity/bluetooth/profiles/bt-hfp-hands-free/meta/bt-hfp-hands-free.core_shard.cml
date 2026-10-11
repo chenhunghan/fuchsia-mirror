@@ -57,5 +57,30 @@
             to: "self/toolbox",
             target_availability: "unknown",
         },
+        {
+            config: [
+                "fuchsia.bluetooth.ControllerEncodingCvsd",
+                "fuchsia.bluetooth.ControllerEncodingMsbc",
+                "fuchsia.bluetooth.OffloadType",
+                "fuchsia.bluetooth.WideBandSpeech",
+            ],
+            from: "parent",
+            to: "#bt-hfp-hands-free",
+            availability: "optional",
+        },
+        {
+            config: [
+                "fuchsia.bluetooth.CallWaitingOrThreeWayCalling",
+                "fuchsia.bluetooth.CliPresentationCapability",
+                "fuchsia.bluetooth.EchoCancelingAndNoiseReduction",
+                "fuchsia.bluetooth.EnhancedVoiceRecognition",
+                "fuchsia.bluetooth.EnhancedVoiceRecognitionWithText",
+                "fuchsia.bluetooth.RemoteVolumeControl",
+                "fuchsia.bluetooth.VoiceRecognitionActivation",
+            ],
+            from: "void",
+            to: "#bt-hfp-hands-free",
+            availability: "optional",
+        },
     ],
 }

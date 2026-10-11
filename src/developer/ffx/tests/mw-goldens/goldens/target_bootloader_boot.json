@@ -1,0 +1,57 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "BootloaderToolMessage",
+    "type": "object",
+    "properties": {
+        "message_type": {
+            "$ref": "#/definitions/BootloaderToolMessageType"
+        },
+        "info_message": {
+            "$ref": "#/definitions/InfoMessage"
+        }
+    },
+    "required": [
+        "message_type",
+        "info_message"
+    ],
+    "definitions": {
+        "BootloaderToolMessageType": {
+            "type": "string",
+            "enum": [
+                "unknown",
+                "info",
+                "rebooting",
+                "error"
+            ]
+        },
+        "InfoMessage": {
+            "type": "object",
+            "properties": {
+                "variables": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/VariableMessage"
+                    }
+                }
+            },
+            "required": [
+                "variables"
+            ]
+        },
+        "VariableMessage": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "key",
+                "value"
+            ]
+        }
+    }
+}

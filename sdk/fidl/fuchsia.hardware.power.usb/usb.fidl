@@ -58,3 +58,23 @@ service Service {
     usb client_end:UsbSource;
     power_source client_end:fuchsia.hardware.power.source.Source;
 };
+
+/// Protocol for test and debug control of the USB Type-C port (e.g. cable-breaker).
+@discoverable
+open protocol Debug {
+    /// Connects or disconnects the physical Type-C CC lines and USB data switch.
+    ///
+    /// When `connected` is `false`, disables autonomous DRP toggling and opens CC1/CC2
+    /// terminations to simulate a physical cable unplug. When `connected` is `true`,
+    /// restores autonomous DRP Rp/Rd toggling and restarts connection detection; if
+    /// `wake_lease` is provided, the driver holds it across CC attach debounce and
+    /// BC1.2 detection so the system does not re-suspend before USB re-enumerates.
+    flexible SetConnected(resource struct {
+        connected bool;
+        wake_lease fuchsia.power.system.LeaseToken:optional;
+    }) -> () error fuchsia.hardware.power.source.Error;
+};
+
+service DebugService {
+    debug client_end:Debug;
+};

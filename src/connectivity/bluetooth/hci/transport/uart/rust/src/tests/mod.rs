@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-mod fake_serial;
+pub(crate) mod fake_serial;
 
 use fdf_component::testing::harness::TestHarness;
 use fdf_component::{ServiceInstance, ServiceOffer};
@@ -16,7 +16,12 @@ use std::sync::Arc;
 use crate::{BtTransportUart, CHILD_NODE_NAME, HCI_SERVICE_NAME};
 use fake_serial::{FAKE_SERIAL_PID, FakeSerialService, FakeSerialState};
 
-fn setup_test_harness(state: Arc<Mutex<FakeSerialState>>) -> TestHarness<BtTransportUart> {
+const TEST_BAUD_RATE: u32 = 115_200;
+const FALLBACK_BAUD_RATE: u32 = 9600;
+
+pub(crate) fn setup_test_harness(
+    state: Arc<Mutex<FakeSerialState>>,
+) -> TestHarness<BtTransportUart> {
     let mut driver_incoming = ServiceFs::new();
     let harness = TestHarness::<BtTransportUart>::new();
     let offer = ServiceOffer::<serialimpl::Service>::new_next()
@@ -146,7 +151,6 @@ async fn test_outgoing_serialimpl_service() {
     assert_eq!(info.serial_pid, FAKE_SERIAL_PID);
 
     // 2. Verify config delegates to parent serial device.
-    const TEST_BAUD_RATE: u32 = 115_200;
     let config_resp = client
         .config(TEST_BAUD_RATE, serialimpl::SERIAL_SET_BAUD_RATE_ONLY)
         .await
@@ -159,18 +163,18 @@ async fn test_outgoing_serialimpl_service() {
 
     // Verify config error propagation from parent.
     state.lock().config_result = Err(zx::Status::INVALID_ARGS);
-    let config_err_resp = client.config(9600, 0).await.expect("config FIDL call");
-    assert_eq!(config_err_resp.as_ref().err(), Some(&Err(zx::Status::INVALID_ARGS)));
+    let config_err_resp = client.config(FALLBACK_BAUD_RATE, 0).await.expect("config FIDL call");
+    assert_eq!(config_err_resp.err(), Some(zx::Status::INVALID_ARGS));
 
     // 3. Verify enable, read, and write return NOT_SUPPORTED.
     let enable_resp = client.enable(false).await.expect("enable FIDL call");
-    assert_eq!(enable_resp.as_ref().err(), Some(&Err(zx::Status::NOT_SUPPORTED)));
+    assert_eq!(enable_resp.as_ref().err(), Some(&zx::Status::NOT_SUPPORTED));
 
     let read_resp = client.read().await.expect("read FIDL call");
-    assert_eq!(read_resp.as_ref().err(), Some(&Err(zx::Status::NOT_SUPPORTED)));
+    assert_eq!(read_resp.as_ref().err(), Some(&zx::Status::NOT_SUPPORTED));
 
     let write_resp = client.write([0x01, 0x02]).await.expect("write FIDL call");
-    assert_eq!(write_resp.as_ref().err(), Some(&Err(zx::Status::NOT_SUPPORTED)));
+    assert_eq!(write_resp.as_ref().err(), Some(&zx::Status::NOT_SUPPORTED));
 
     // 4. Verify cancel_all returns Ok(()).
     client.cancel_all().await.expect("cancel_all FIDL call");
@@ -179,4 +183,52 @@ async fn test_outgoing_serialimpl_service() {
     drop(client);
     let _ = client_task.await;
     started_driver.stop_driver().await;
+}
+
+#[fuchsia::test]
+async fn test_serial_connection_read() {
+    let state = Arc::new(Mutex::new(FakeSerialState::default()));
+    {
+        let mut state_guard = state.lock();
+        state_guard.read_responses.push_back(Ok(vec![0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]));
+        state_guard.read_responses.push_back(Err(zx::Status::IO));
+    }
+
+    let mut harness = setup_test_harness(state);
+    let started_driver = harness.start_driver().await.expect("driver should start successfully");
+    let serial = started_driver.get_driver().expect("driver instance").serial().clone();
+
+    assert_eq!(serial.read().await, Ok(vec![0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00]));
+    assert_eq!(serial.read().await, Err(zx::Status::IO));
+
+    started_driver.stop_driver().await;
+
+    // Reading after connection is closed returns INTERNAL.
+    assert_eq!(serial.read().await, Err(zx::Status::INTERNAL));
+}
+
+#[fuchsia::test]
+async fn test_serial_connection_write() {
+    let state = Arc::new(Mutex::new(FakeSerialState::default()));
+    {
+        let mut state_guard = state.lock();
+        state_guard.write_results.push_back(Ok(()));
+        state_guard.write_results.push_back(Err(zx::Status::IO_REFUSED));
+    }
+
+    let mut harness = setup_test_harness(state.clone());
+    let started_driver = harness.start_driver().await.expect("driver should start successfully");
+    let serial = started_driver.get_driver().expect("driver instance").serial().clone();
+
+    let payload = [0x01, 0x03, 0x0c, 0x00];
+    assert_eq!(serial.write(&payload).await, Ok(()));
+    assert_eq!(state.lock().written_packets, vec![payload.to_vec()]);
+
+    assert_eq!(serial.write(&payload).await, Err(zx::Status::IO_REFUSED));
+    assert_eq!(state.lock().written_packets.len(), 1);
+
+    started_driver.stop_driver().await;
+
+    // Writing after connection is closed returns INTERNAL.
+    assert_eq!(serial.write(&payload).await, Err(zx::Status::INTERNAL));
 }

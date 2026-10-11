@@ -1,0 +1,421 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Shared test environments for `fx_test(environments = ...)`.
+
+These mirror the individual environments in //build/testing/environments.gni,
+under the same names.
+
+There are no targets for the environment lists in environments.gni:
+  - `basic_envs` is what an `fx_test()` with no `environments` gets.
+  - Other lists can be added when a Bazel test needs them, as Starlark lists
+    of absolute labels of these targets in a .bzl file in this package.
+"""
+
+load(
+    "//build/bazel/rules/testing:fx_test_environment.bzl",
+    "fx_test_environment",
+)
+load(":device_types.bzl", "device_types", "host_device_types")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Only environments that tests all over the tree use are public. The others are
+# visible to the areas whose GN tests reference them directly, or private if no
+# GN test does, so that new uses of specialized or scarce testbeds get reviewed
+# here. Environments that GN tests only get through a list like
+# `wlan_ap_iperf_envs` or `all_fuchsia_envs` count as unused, because those
+# lists don't exist in Bazel yet. A list's labels are resolved where the list is
+# used, so porting a list means making each of its environments visible to the
+# list's users.
+
+# LINT.IfChange(environments)
+
+fx_test_environment(
+    name = "aemu_env",
+    dimensions = {"device_type": device_types.aemu},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "astro_env",
+    dimensions = {"device_type": device_types.astro},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "crosvm_env",
+    dimensions = {"device_type": device_types.crosvm},
+    visibility = ["//zircon/kernel:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "bt_lacewing_sherlock_env",
+    dimensions = {
+        "device_type": device_types.sherlock,
+        "pool": "fuchsia.tests.bluetooth",
+        "sherlocks": "2",
+        "testbed": "lacewing_bt_Sherlock",
+    },
+    visibility = ["//src/tests:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "bt_lacewing_vim3_env",
+    dimensions = {
+        "device_type": device_types.vim3,
+        "pool": "fuchsia.tests.bluetooth",
+        "testbed": "lacewing_bt_vim3",
+        "vim3s": "2",
+    },
+    visibility = ["//src/tests:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "bt_lacewing_sorrel_env",
+    dimensions = {
+        "device_type": device_types.sorrel,
+        "pool": "fuchsia.tests.bluetooth",
+        "sorrels": "2",
+        "testbed": "lacewing_bt_Sorrel",
+    },
+    visibility = [
+        "//bundles/buildbot:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_test_environment(
+    name = "wlan_astro_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.astro,
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_astro_ap_iperf_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.astro,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_astro_ap_iperf_attenuator_env",
+    dimensions = {
+        "access_points": "1",
+        "attenuators": "1",
+        "device_type": device_types.astro,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_nelson_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.nelson,
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_nelson_ap_iperf_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.nelson,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_nelson_ap_iperf_attenuator_env",
+    dimensions = {
+        "access_points": "1",
+        "attenuators": "1",
+        "device_type": device_types.nelson,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_nuc11_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.nuc11,
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_nuc11_ap_iperf_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.nuc11,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_nuc11_ap_iperf_attenuator_env",
+    dimensions = {
+        "access_points": "1",
+        "attenuators": "1",
+        "device_type": device_types.nuc11,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_sherlock_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.sherlock,
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_sherlock_ap_iperf_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.sherlock,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "wlan_sherlock_ap_iperf_attenuator_env",
+    dimensions = {
+        "access_points": "1",
+        "attenuators": "1",
+        "device_type": device_types.sherlock,
+        "iperf_servers": "1",
+        "pool": "fuchsia.tests.connectivity",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_sorrel_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.sorrel,
+        "pool": "fuchsia.tests.connectivity",
+    },
+    visibility = [
+        "//bundles/buildbot:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_test_environment(
+    name = "wlan_sorrel_ap_env_testbed_prototype",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.sorrel,
+        "pool": "fuchsia.dev.tests.connectivity.openwrt",
+    },
+)
+
+fx_test_environment(
+    name = "wlan_iris_ap_env",
+    dimensions = {
+        "access_points": "1",
+        "device_type": device_types.iris,
+        "pool": "fuchsia.dev.tests.connectivity.openwrt",
+    },
+    visibility = ["//vendor/google:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "ampere_altra_env",
+    dimensions = {
+        "device_type": device_types.qemu,
+        "host_device_type": host_device_types.ampere_altra,
+    },
+)
+
+fx_test_environment(
+    name = "ampere_one_env",
+    dimensions = {
+        "device_type": device_types.qemu,
+        "host_device_type": host_device_types.ampere_one,
+    },
+)
+
+fx_test_environment(
+    name = "c4a_env",
+    dimensions = {
+        "device_type": device_types.qemu,
+        "host_device_type": host_device_types.gcp_c4a_highmem_96_bm,
+    },
+    visibility = ["//bundles/buildbot:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "iris_env",
+    dimensions = {"device_type": device_types.iris},
+    visibility = ["//visibility:public"],
+)
+
+# Iris devices that are hosted by a LattePanda Sigma "Fuchsia cell". Use this
+# instead of `:iris_env` for tests that require a cell testbed.
+fx_test_environment(
+    name = "iris_cell_env",
+    dimensions = {
+        "device_type": device_types.iris,
+        "host_device_type": host_device_types.lattepanda_sigma_cell,
+    },
+    visibility = [
+        "//src/tests:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_test_environment(
+    name = "luis_env",
+    dimensions = {"device_type": device_types.luis},
+)
+
+fx_test_environment(
+    name = "kola_env",
+    dimensions = {"device_type": device_types.kola},
+)
+
+fx_test_environment(
+    name = "lilac_env",
+    dimensions = {"device_type": device_types.lilac},
+    visibility = [
+        "//src/devices:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_test_environment(
+    name = "kudzu_env",
+    dimensions = {"device_type": device_types.maple},
+)
+
+fx_test_environment(
+    name = "maple_env",
+    dimensions = {"device_type": device_types.maple},
+)
+
+fx_test_environment(
+    name = "sorrel_env",
+    dimensions = {"device_type": device_types.sorrel},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "nelson_env",
+    dimensions = {"device_type": device_types.nelson},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "nuc7_env",
+    dimensions = {"device_type": device_types.nuc7},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "nuc11_env",
+    dimensions = {"device_type": device_types.nuc11},
+    visibility = ["//visibility:public"],
+)
+
+_QEMU_DIMENSIONS = select({
+    "//build/bazel/platforms:is_fuchsia_arm64": {
+        "device_type": device_types.qemu,
+        "host_device_type": host_device_types.gcp_c4a_highmem_96_bm,
+    },
+    "//conditions:default": {"device_type": device_types.qemu},
+})
+
+fx_test_environment(
+    name = "qemu_env",
+    dimensions = _QEMU_DIMENSIONS,
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "qemu_1cpu_env",
+    dimensions = _QEMU_DIMENSIONS,
+    emulator = select({
+        "//build/bazel/platforms:is_fuchsia_x64": {
+            "device": "x64-emu-min",
+            "name": "1cpu",
+        },
+        "//build/bazel/platforms:is_fuchsia_arm64": {
+            "device": "arm64-emu-min",
+            "name": "1cpu",
+        },
+        "//build/bazel/platforms:is_fuchsia_riscv64": {
+            "device": "riscv64-emu-min",
+            "name": "1cpu",
+        },
+    }),
+    visibility = ["//zircon/kernel:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "sherlock_env",
+    dimensions = {"device_type": device_types.sherlock},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "vim3_env",
+    dimensions = {"device_type": device_types.vim3},
+    visibility = ["//visibility:public"],
+)
+
+fx_test_environment(
+    name = "gce_env",
+    dimensions = {"device_type": device_types.gce},
+    visibility = [
+        "//src/developer:__subpackages__",
+        "//src/starnix:__subpackages__",
+    ],
+)
+
+fx_test_environment(
+    name = "atlas_env",
+    dimensions = {"device_type": device_types.atlas},
+    visibility = [
+        "//src/chromium:__subpackages__",
+        "//src/media:__subpackages__",
+        "//src/starnix:__subpackages__",
+    ],
+)
+
+# The default emulator for the target CPU.
+alias(
+    name = "emu_env",
+    actual = select({
+        "//build/bazel/platforms:is_fuchsia_x64": ":aemu_env",
+        "//build/bazel/platforms:is_fuchsia_arm64": ":c4a_env",
+        "//conditions:default": ":qemu_env",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# LINT.ThenChange(//build/testing/environments.gni:environments)

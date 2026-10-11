@@ -81,13 +81,15 @@ impl<T: Fastboot + Send> Fastboot for CachingFastboot<T> {
 
     async fn get_all_vars(&mut self, listener: Sender<Variable>) -> Result<(), FastbootError> {
         let (cached_tx, mut cached_rx) = tokio::sync::mpsc::channel(100);
-        let send_res = self.inner.get_all_vars(cached_tx).await;
-        while let Ok(var) = cached_rx.try_recv() {
-            if is_cacheable_variable(&var.name) {
-                self.var_cache.insert(var.name.clone(), Ok(var.value.clone()));
+        let Self { inner, var_cache } = self;
+        let (send_res, ()) = futures::join!(inner.get_all_vars(cached_tx), async {
+            while let Some(var) = cached_rx.recv().await {
+                if is_cacheable_variable(&var.name) {
+                    var_cache.insert(var.name.clone(), Ok(var.value.clone()));
+                }
+                let _ = listener.send(var).await;
             }
-            let _ = listener.send(var).await;
-        }
+        });
         send_res
     }
 
@@ -252,5 +254,43 @@ mod test {
         // Second query returns cached error without calling inner interface
         assert!(caching.get_var("max-download-size").await.is_err());
         assert_eq!(state.lock().unwrap().get_var_call_count("max-download-size"), (false, 1));
+    }
+
+    #[fuchsia::test]
+    async fn test_get_all_vars_over_100_variables() {
+        let (state, interface) = setup();
+        let num_partitions = 150;
+        {
+            let mut s = state.lock().unwrap();
+            for i in 0..num_partitions {
+                s.set_var(format!("partition-size:part_{i}"), format!("0x{i:x}"));
+            }
+            s.set_var("current-slot".to_string(), "a".to_string());
+        }
+
+        let mut caching = CachingFastboot::new(interface);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        let (res, received) = futures::join!(caching.get_all_vars(tx), async {
+            let mut vars = Vec::new();
+            while let Some(var) = rx.recv().await {
+                vars.push(var);
+            }
+            vars
+        });
+
+        res.unwrap();
+        assert_eq!(received.len(), num_partitions + 1);
+
+        // Cacheable variables from get_all_vars should be served from cache without calling inner
+        for i in 0..num_partitions {
+            let name = format!("partition-size:part_{i}");
+            assert_eq!(caching.get_var(&name).await.unwrap(), format!("0x{i:x}"));
+            assert_eq!(state.lock().unwrap().get_var_call_count(&name), (true, 0));
+        }
+
+        // Uncacheable variables should still query the inner interface
+        assert_eq!(caching.get_var("current-slot").await.unwrap(), "a");
+        assert_eq!(state.lock().unwrap().get_var_call_count("current-slot"), (true, 1));
     }
 }

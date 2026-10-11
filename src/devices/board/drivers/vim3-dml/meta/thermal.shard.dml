@@ -16,6 +16,12 @@
     ],
     offer: [
         {
+            from: "#self",
+            to: "#temperature-sensor-ff634800",
+            driver_config: "fuchsia.hardware.trippoint.TripDeviceMetadata",
+            critical_temp_celsius: 101,
+        },
+        {
             name: "clock-init",
             service: "fuchsia.clock.Init",
             from: "#clock-controller-ff63c000",
@@ -80,6 +86,12 @@
                     },
                 ],
             },
+        },
+        {
+            from: "#self",
+            to: "#temperature-sensor-ff634c00",
+            driver_config: "fuchsia.hardware.trippoint.TripDeviceMetadata",
+            critical_temp_celsius: 110,
         },
     ],
 }

@@ -18,6 +18,7 @@ mod aspace_rs {
     use crate::arch_rs::vm::is_user_accessible_range;
     use crate::arch_rs::{
         KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE, USER_ASPACE_BASE, USER_ASPACE_SIZE,
+        USER_RESTRICTED_ASPACE_SIZE,
     };
     use crate::kernel::deadline::Deadline;
     use crate::kernel::event::AutounsignalEvent;
@@ -53,6 +54,7 @@ mod aspace_rs {
         assert_eq, assert_err, assert_nonnull, assert_ok, assert_true, expect_eq, expect_err,
         expect_false, expect_ne, expect_ok, expect_true, subtest, unwrap_ok, unwrap_some,
     };
+    use zr::ToMutPtr;
     use zx_status::Status;
 
     const PAGE_SIZE: u64 = PAGE_SIZE_USIZE as u64;
@@ -610,6 +612,143 @@ mod aspace_rs {
         harvest_access_bits(NonTerminalAction::Retain, TerminalAction::UpdateAgeAndHarvest);
     }
 
+    /// Touch mappings in a unified aspace and ensure accessed bits are correctly harvested.
+    #[test]
+    fn vmaspace_unified_accessed_test() {
+        // Touch mappings in both the shared and restricted region of a unified aspace and ensure we
+        // can correctly harvest accessed bits.
+
+        // Disable for RISC-V for now, since the `ArchMmmu` code for this architecture currently
+        // does not track accessed bits in intermediate page tables, and thus has no reasonable
+        // way to honor `NonTerminalAction::FreeUnaccessed` on harvest calls.
+        if cfg!(target_arch = "riscv64") {
+            kprintln!("Skipping on RISC-V");
+            return true;
+        }
+
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        // Create a unified aspace.
+        let private_aspace_base = USER_ASPACE_BASE;
+        let private_aspace_size = USER_RESTRICTED_ASPACE_SIZE;
+        let shared_aspace_base = private_aspace_base + private_aspace_size + PAGE_SIZE_USIZE;
+        let shared_aspace_size = USER_ASPACE_BASE + USER_ASPACE_SIZE - shared_aspace_base;
+        let restricted_aspace = unwrap_some!(VmAspace::create_with_opts(
+            private_aspace_base,
+            private_aspace_size,
+            Type::User,
+            c"test restricted aspace",
+            ShareOpt::Restricted,
+        ));
+        let shared_aspace = unwrap_some!(VmAspace::create_with_opts(
+            shared_aspace_base,
+            shared_aspace_size,
+            Type::User,
+            c"test shared aspace",
+            ShareOpt::Shared,
+        ));
+        // SAFETY: `shared_aspace` and `restricted_aspace` are valid and were created as shared and
+        // restricted respectively.
+        let unified_aspace = unwrap_some!(unsafe {
+            VmAspace::create_unified(
+                (*shared_aspace).to_mut_ptr(),
+                (*restricted_aspace).to_mut_ptr(),
+                c"test unified aspace",
+            )
+        });
+
+        let _cleanup_aspace = zr::defer(|| {
+            let _ = unified_aspace.destroy();
+            let _ = restricted_aspace.destroy();
+            let _ = shared_aspace.destroy();
+        });
+
+        // Create regions of user memory that we can touch in both the shared and
+        // restricted regions.
+        let size: u64 = 4 * PAGE_SIZE;
+        let shared_vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, size));
+        let restricted_vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, size));
+
+        let shared_mem = unwrap_some!(UserMemory::create_in_aspace(
+            VmObjectPaged::into_vm_object(shared_vmo),
+            &shared_aspace,
+            0,
+            0,
+        ));
+        let restricted_mem = unwrap_some!(UserMemory::create_in_aspace(
+            VmObjectPaged::into_vm_object(restricted_vmo),
+            &restricted_aspace,
+            0,
+            0,
+        ));
+
+        // Commit and map these regions to avoid page faults when we call `put` later on. We
+        // have to do this because the `put` function invokes a `copy_to_user` that may trigger a
+        // page fault, which the fault handler will try to resolve using the thread's current
+        // aspace. That aspace, in turn, will be the unified aspace, which cannot resolve faults.
+        let middle_offset: usize = (size / 2) as usize;
+        expect_ok!(shared_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+        expect_ok!(restricted_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+
+        // Switch to the unified aspace.
+        // NOTE: This test takes care to not trigger any page faults or accessed faults from this
+        // point on, because the unified aspace cannot resolve faults. For a user thread, we would
+        // rely on the process dispatcher to look up if the faulting address lies in the shared
+        // aspace or the restricted aspace, and use one of those to resolve the fault instead.
+        // We cannot exercise that behavior from within a kernel unit test.
+        // SAFETY: Active aspace reference is not invalidated during test.
+        let old_aspace = unsafe { thread::current_active_aspace() };
+        // SAFETY: `unified_aspace` remains valid while active.
+        unsafe { vmm::set_active_aspace(Some(&unified_aspace)) };
+        let _reset_old_aspace = zr::defer(|| {
+            // SAFETY: `old_aspace` remains valid while active.
+            unsafe { vmm::set_active_aspace(old_aspace) };
+        });
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Touch the shared and restricted regions via the unified aspace. This will
+            // guarantee that the accessed bits are set on x86, where the hardware sets the
+            // accessed bits. On ARM, where we use software managed accessed bits, the
+            // `commit_and_map` above will already have set them.
+            unwrap_ok!(shared_mem.put::<u8>(42, middle_offset));
+            unwrap_ok!(restricted_mem.put::<u8>(42, middle_offset));
+        }
+
+        // Harvest the accessed information. This should not actually unmap the pages.
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        expect_err!(
+            shared_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+        expect_err!(
+            restricted_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE),
+            Status::ALREADY_EXISTS
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Touch the memory again so that the accessed bits are guaranteed to be set.
+            // We must do this because `commit_and_map` does not set the accessed flag on x86.
+            //
+            // We specifically want to avoid doing this on ARM because the harvest will have
+            // cleared accessed bits, and this `put` now will trigger an accessed fault on the
+            // unified aspace, which cannot resolve any faults. Moreover, the `commit_and_map`
+            // above will have already set the non-terminal accessed bits on the walk down
+            // to the page.
+            unwrap_ok!(shared_mem.put::<u8>(43, middle_offset));
+            unwrap_ok!(restricted_mem.put::<u8>(43, middle_offset));
+        }
+
+        // Harvest the accessed information, then attempt to do it again so that it gets
+        // unmapped. The first `harvest_access_bits` call will clear the accessed bits, and
+        // the second will unmap the memory.
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        harvest_access_bits(NonTerminalAction::FreeUnaccessed, TerminalAction::UpdateAgeAndHarvest);
+        expect_ok!(shared_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+        expect_ok!(restricted_mem.commit_and_map(middle_offset..middle_offset + PAGE_SIZE_USIZE));
+    }
+
     /// Tests sparse VM mappings with an empty backing VMO.
     #[test]
     fn vm_mapping_sparse_mapping_test() {
@@ -658,10 +797,10 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         let (vmo, _) = unwrap_ok!(make_committed_pager_vmo::<1>(false, false));
@@ -685,7 +824,7 @@ mod aspace_rs {
             vmo_child.clone(),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
         // Validate the root and clone received the priority.
@@ -712,7 +851,7 @@ mod aspace_rs {
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
 
         // Remove priority and validate.
-        expect_ok!(vmar.set_memory_priority(MemoryPriority::DEFAULT));
+        expect_ok!(vmar.set_memory_priority(MemoryPriority::Default));
 
         expect_false!(childp.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
         expect_false!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -730,10 +869,10 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE * 2));
@@ -746,7 +885,7 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -775,7 +914,7 @@ mod aspace_rs {
             vmo_reference,
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
         let _ = mapping_result;
 
@@ -801,7 +940,7 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
         let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE * 4));
@@ -814,11 +953,11 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
         // Set the priority in our vmar and validate it propagates to the VMO and the aspace.
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -831,7 +970,7 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 16,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test sub-vmar",
+            b"test sub-vmar",
         ));
 
         let vmo2 = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE * 4));
@@ -844,13 +983,13 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo2.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
         expect_true!(vmo2.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
 
         // Change the priority of the sub vmar. It should not effect the original vmar / vmo
         // priority.
-        let status = sub_vmar.set_memory_priority(MemoryPriority::DEFAULT);
+        let status = sub_vmar.set_memory_priority(MemoryPriority::Default);
         expect_ok!(status);
         expect_false!(vmo2.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -873,7 +1012,7 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
         let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE));
@@ -886,11 +1025,11 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
         let mapping = mapping_result.mapping;
 
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -907,7 +1046,7 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo2.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping2",
+            b"test-mapping2",
         ));
 
         // Original VMO should have lost its priority, and the VMO for our new mapping should have
@@ -932,7 +1071,7 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
         let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE * 8));
@@ -945,11 +1084,11 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
         // Set the priority in our vmar and validate it propagates to the VMO and the aspace.
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -1022,10 +1161,10 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
-        let status = vmar.set_memory_priority(MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(MemoryPriority::High);
         expect_ok!(status);
 
         let vmo = unwrap_ok!(VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, PAGE_SIZE * 2));
@@ -1038,7 +1177,7 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_RW_USER_FLAGS,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
@@ -1053,12 +1192,12 @@ mod aspace_rs {
         expect_true!(slicep.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
 
         // Change priority of the VMAR should remove from the VMO.
-        expect_ok!(vmar.set_memory_priority(MemoryPriority::DEFAULT));
+        expect_ok!(vmar.set_memory_priority(MemoryPriority::Default));
         expect_false!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
         expect_false!(aspace.is_high_memory_priority());
 
         // Re-enable priority and verify.
-        expect_ok!(vmar.set_memory_priority(MemoryPriority::HIGH));
+        expect_ok!(vmar.set_memory_priority(MemoryPriority::High));
         expect_true!(vmo.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
         expect_true!(slicep.debug_get_cow_pages().unwrap().debug_is_high_memory_priority());
         expect_true!(aspace.is_high_memory_priority());
@@ -1085,7 +1224,7 @@ mod aspace_rs {
             PAGE_SIZE_USIZE * 64,
             0,
             vmar::flag::CAN_MAP_SPECIFIC | vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            c"test vmar",
+            b"test vmar",
         ));
 
         struct CleanupSubVmar<'a>(&'a vmar::VmAddressRegion);
@@ -1109,10 +1248,10 @@ mod aspace_rs {
             VmObjectPaged::into_vm_object(vmo),
             0,
             arch_read_user_flags,
-            c"test-mapping",
+            b"test-mapping",
         ));
 
-        let status = vmar.set_memory_priority(vmar::MemoryPriority::HIGH);
+        let status = vmar.set_memory_priority(vmar::MemoryPriority::High);
         expect_ok!(status);
 
         let force_result = mapping_result.mapping.force_writable();

@@ -8,7 +8,7 @@ use crate::hooks::HooksHandle;
 use crate::log::*;
 use crate::metrics;
 use crate::object_handle::LayerObject;
-use crate::object_store::allocator::{Allocator, Hold, Reservation};
+use crate::object_store::allocator::Allocator;
 use crate::object_store::directory::Directory;
 use crate::object_store::graveyard::Graveyard;
 use crate::object_store::journal::super_block::{SuperBlockHeader, SuperBlockInstance};
@@ -58,7 +58,7 @@ const_assert!(9223372036854771712 == MAX_FILE_SIZE);
 use futures::stream::StreamExt;
 
 // The maximum number of transactions that can be in-flight at any time.
-const MAX_IN_FLIGHT_TRANSACTIONS: u64 = 4;
+pub(crate) const MAX_IN_FLIGHT_TRANSACTIONS: u64 = 4;
 
 // Start trimming 1 hour after boot.  The idea here is to wait until the initial flurry of
 // activity during boot is finished.  This is a rough heuristic and may need to change later if
@@ -72,15 +72,27 @@ const TRIM_INTERVAL_TIMER: Duration = Duration::from_secs(60 * 60 * 24);
 // TODO(https://fxbug.dev/489725256) Configure the task to run when fxfs is idle.
 const CLEAN_TRANSFER_BUFFER_INTERVAL: Duration = Duration::from_secs(60);
 
-#[cfg(target_os = "fuchsia")]
-pub type WakeLease = zx::NullableHandle;
+/// An opaque token representing an active wake lease. When held, it prevents the system from
+/// suspending. Dropping this token releases the lease.
+#[derive(Debug)]
+pub struct WakeLease {
+    #[cfg(target_os = "fuchsia")]
+    _lease: zx::Handle,
+}
 
-#[cfg(not(target_os = "fuchsia"))]
-pub type WakeLease = fuchsia_emulated_handle::Handle;
+#[cfg(target_os = "fuchsia")]
+impl WakeLease {
+    pub fn new<H: TryInto<zx::Handle>>(lease: H) -> Self
+    where
+        H::Error: std::fmt::Debug,
+    {
+        Self { _lease: lease.try_into().expect("lease handle must be valid") }
+    }
+}
 
 pub trait PowerManager: Send + Sync {
     /// Returns a stream of battery status changes (true if using battery).
-    fn watch_battery(self: Arc<Self>) -> BoxStream<'static, (bool, WakeLease)>;
+    fn watch_battery(self: Arc<Self>) -> BoxStream<'static, (bool, Option<WakeLease>)>;
 }
 
 /// Services registration of layer files with a platform-specific layer pager.
@@ -855,20 +867,6 @@ impl FxFilesystem {
     }
 
     pub(crate) fn drop_transaction(&self, transaction: &mut Transaction<'_>) {
-        if !matches!(transaction.metadata_reservation, MetadataReservation::None) {
-            self.sub_transaction();
-        }
-        // If we placed a hold for metadata space, return it now.
-        if let MetadataReservation::Hold(hold_amount) =
-            std::mem::replace(&mut transaction.metadata_reservation, MetadataReservation::None)
-        {
-            let hold = transaction
-                .allocator_reservation
-                .unwrap()
-                .reserve(0)
-                .expect("Zero should always succeed.");
-            hold.add(hold_amount);
-        }
         self.objects.drop_transaction(transaction);
         self.lock_manager.drop_transaction(transaction);
     }
@@ -913,7 +911,7 @@ impl FxFilesystem {
 
                 let mut pause_future = pin!(
                     async {
-                        let mut wake_lease = WakeLease::invalid();
+                        let mut wake_lease: Option<WakeLease> = None;
                         loop {
                             let Some((using_battery, new_lease)) = watcher.next_latest().await
                             else {
@@ -930,8 +928,8 @@ impl FxFilesystem {
                             // Hold onto a wake lease if we are using an external power source (and
                             // we are therefore unpaused).
                             if using_battery {
-                                wake_lease = WakeLease::invalid();
-                            } else if !new_lease.is_invalid() {
+                                wake_lease = None;
+                            } else if new_lease.is_some() {
                                 wake_lease = new_lease;
                             }
                         }
@@ -1010,56 +1008,47 @@ impl FxFilesystem {
         );
     }
 
-    pub(crate) async fn reservation_for_transaction<'a>(
+    /// Tops up the transaction's metadata_reservation to ensure the reservation is large enough to
+    /// accommodate a maximally sized transaction.  This must be called before the transaction is
+    /// used.
+    ///
+    /// If `skip_journal_checks` is unset, this function also ensures that there is sufficient
+    /// space in the journal to write the transaction, and will block if the journal needs to grow.
+    pub(crate) async fn add_transaction_reservation(
         self: &Arc<Self>,
-        options: transaction::Options<'a>,
-    ) -> Result<(MetadataReservation, Option<&'a Reservation>, Option<Hold<'a>>), Error> {
+        transaction: &mut Transaction<'_>,
+    ) -> Result<(), Error> {
         if self.options.image_builder_mode.is_some() {
             // Image builder mode avoids the journal so reservation tracking for metadata overheads
             // doesn't make sense and so we essentially have 'all or nothing' semantics instead.
-            return Ok((MetadataReservation::Borrowed, None, None));
+            return Ok(());
         }
-        if !options.skip_journal_checks {
+        if !transaction.skip_journal_checks {
             self.maybe_start_flush_task();
             self.journal.check_journal_space().await?;
         }
 
-        // We support three options for metadata space reservation:
-        //
-        //   1. We can borrow from the filesystem's metadata reservation.  This should only be
-        //      be used on the understanding that eventually, potentially after a full compaction,
-        //      there should be no net increase in space used.  For example, unlinking an object
-        //      should eventually decrease the amount of space used and setting most attributes
-        //      should not result in any change.
-        //
-        //   2. A reservation is provided in which case we'll place a hold on some of it for
-        //      metadata.
-        //
-        //   3. No reservation is supplied, so we try and reserve space with the allocator now,
-        //      and will return NoSpace if that fails.
-        let mut hold = None;
-        let metadata_reservation = if options.borrow_metadata_space {
-            MetadataReservation::Borrowed
-        } else {
-            match options.allocator_reservation {
-                Some(reservation) => {
-                    hold = Some(
-                        reservation
-                            .reserve(TRANSACTION_METADATA_MAX_AMOUNT)
-                            .ok_or(FxfsError::NoSpace)?,
-                    );
-                    MetadataReservation::Hold(TRANSACTION_METADATA_MAX_AMOUNT)
-                }
-                None => {
-                    let reservation = self
-                        .allocator()
-                        .reserve(None, TRANSACTION_METADATA_MAX_AMOUNT)
-                        .ok_or(FxfsError::NoSpace)?;
-                    MetadataReservation::Reservation(reservation)
-                }
+        match &mut transaction.metadata_reservation {
+            MetadataReservation::BorrowedMetadata
+            | MetadataReservation::BorrowedMetadataAndData => {}
+            MetadataReservation::Hold(hold) => {
+                let amount = TRANSACTION_METADATA_MAX_AMOUNT.saturating_sub(hold.amount());
+                hold.add(hold.owner().reserve(amount).ok_or(FxfsError::NoSpace)?.forget());
             }
-        };
-        Ok((metadata_reservation, options.allocator_reservation, hold))
+            MetadataReservation::Reservation(txn_reservation) => {
+                txn_reservation.add(
+                    self.allocator()
+                        .reserve(
+                            txn_reservation.owner_object_id(),
+                            TRANSACTION_METADATA_MAX_AMOUNT
+                                .saturating_sub(txn_reservation.amount()),
+                        )
+                        .ok_or(FxfsError::NoSpace)?
+                        .forget(),
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn add_transaction(&self, skip_journal_checks: bool) {
@@ -1086,7 +1075,7 @@ impl FxFilesystem {
                 if inc() {
                     break;
                 }
-                listener.await;
+                debug_assert_not_too_long!(listener);
             }
         }
     }
@@ -1138,12 +1127,14 @@ impl FxFilesystem {
             || store_id == self.objects.root_store_object_id()
         {
             transaction::Options {
-                borrow_metadata_space: true,
-                allocator_reservation: Some(self.objects.metadata_reservation()),
+                reservation: transaction::ReservationOptions::BorrowedMetadataAndData,
                 ..Default::default()
             }
         } else {
-            transaction::Options { borrow_metadata_space: true, ..Default::default() }
+            transaction::Options {
+                reservation: transaction::ReservationOptions::BorrowedMetadata,
+                ..Default::default()
+            }
         };
         store.tombstone_object(object_id, options, truncate_guard).await
     }
@@ -1171,12 +1162,14 @@ impl FxFilesystem {
             || store_id == self.objects.root_store_object_id()
         {
             transaction::Options {
-                borrow_metadata_space: true,
-                allocator_reservation: Some(self.objects.metadata_reservation()),
+                reservation: transaction::ReservationOptions::BorrowedMetadataAndData,
                 ..Default::default()
             }
         } else {
-            transaction::Options { borrow_metadata_space: true, ..Default::default() }
+            transaction::Options {
+                reservation: transaction::ReservationOptions::BorrowedMetadata,
+                ..Default::default()
+            }
         };
         store.tombstone_attribute(object_id, attribute_id, options).await
     }
@@ -2566,7 +2559,7 @@ mod tests {
         impl super::PowerManager for MockPowerManager {
             fn watch_battery(
                 self: Arc<Self>,
-            ) -> futures::stream::BoxStream<'static, (bool, super::WakeLease)> {
+            ) -> futures::stream::BoxStream<'static, (bool, Option<super::WakeLease>)> {
                 futures::stream::unfold(true, move |first| {
                     let this = self.clone();
                     async move {
@@ -2575,12 +2568,11 @@ mod tests {
                         }
                         let val = *this.on_battery.lock();
                         let handle = if val {
-                            zx::NullableHandle::invalid()
+                            None
                         } else {
                             let (h1, h2) = zx::EventPair::create();
                             *this.wake_lease.lock() = Some(h2);
-                            // SAFETY: It's clear the handle is valid.
-                            h1.into_handle()
+                            Some(super::WakeLease::new(h1))
                         };
                         Some(((val, handle), false))
                     }

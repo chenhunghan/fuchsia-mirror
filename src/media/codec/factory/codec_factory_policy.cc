@@ -17,7 +17,7 @@ CodecFactoryPolicy::CodecFactoryPolicy(CodecFactoryApp* app) : app_(app) {
   FX_LOGS(INFO) << "board_name: " << board_name.c_str();
 #if LIMIT_ASTRO_HW_DECODE_CONCURRENCY
   if (board_name == "astro") {
-    FX_LOGS(INFO) << "baord name is astro";
+    FX_LOGS(INFO) << "board name is astro";
     hw_policies_.emplace_back(
         std::unique_ptr<CodecFactoryHwPolicy>(new CodecFactoryHwPolicyAstro(this)));
   }

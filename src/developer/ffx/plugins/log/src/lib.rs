@@ -1355,4 +1355,55 @@ ffx log --force-set-severity.
             Ok(())
         );
     }
+
+    #[fuchsia::test]
+    async fn logger_dump_resolves_ambiguous_subcomponents_by_root_moniker() {
+        let environment = TestEnvironment::new(TestEnvironmentConfig {
+            instances: vec![
+                Moniker::try_from("bootstrap/archivist").unwrap(),
+                Moniker::try_from("bootstrap/archivist/archivist-pipelines").unwrap(),
+            ],
+            messages: vec![
+                LogsDataBuilder::new(BuilderArgs {
+                    component_url: Some("".into()),
+                    moniker: "bootstrap/archivist".try_into().unwrap(),
+                    severity: Severity::Info,
+                    timestamp: Timestamp::from_nanos(0),
+                })
+                .set_message("log from archivist")
+                .build(),
+                LogsDataBuilder::new(BuilderArgs {
+                    component_url: Some("".into()),
+                    moniker: "bootstrap/archivist/archivist-pipelines".try_into().unwrap(),
+                    severity: Severity::Info,
+                    timestamp: Timestamp::from_nanos(0),
+                })
+                .set_message("log from pipeline")
+                .build(),
+            ],
+            ..Default::default()
+        })
+        .await;
+
+        let cmd = LogCommand {
+            sub_command: Some(LogSubCommand::Dump(RawDumpCommand::default())),
+            filters: LogFilterArgs {
+                symbolize: Some(SymbolizeMode::Off),
+                component: vec!["archivist".to_string()],
+                no_color: true,
+                ..Default::default()
+            },
+            ..LogCommand::default()
+        };
+
+        let rcs_connector = environment.rcs_connector().await;
+        let tool = LogTool { cmd, rcs_connector, context: environment.environment_context() };
+        let buffers = TestBuffers::default();
+        let writer = CommandOutputMachineWriter::new_test(None, &buffers);
+
+        assert_matches!(tool.main_no_timestamp(writer).await, Ok(()));
+        let stdout = buffers.into_stdout_str();
+        assert!(stdout.contains("log from archivist"));
+        assert!(!stdout.contains("log from pipeline"));
+    }
 }

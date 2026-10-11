@@ -362,7 +362,7 @@ mod test {
                     .expect("mkdir");
 
                 let lookup_result1 =
-                    root_dir1.lookup(&root_node1.node, current_task, "test_child".into());
+                    root_dir1.lookup(root_node1, current_task, "test_child".into());
                 assert!(lookup_result1.is_ok());
             }
 
@@ -374,8 +374,7 @@ mod test {
             let root_dir2 = dir_nodes2.root.clone();
             let root_node2 = fs2.root();
 
-            let lookup_result2 =
-                root_dir2.lookup(&root_node2.node, current_task, "test_child".into());
+            let lookup_result2 = root_dir2.lookup(root_node2, current_task, "test_child".into());
             assert!(lookup_result2.is_ok(), "child cgroup should be preserved on remount");
         })
         .await;

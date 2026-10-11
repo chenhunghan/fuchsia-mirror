@@ -6,6 +6,7 @@ use fidl::AsHandleRef;
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_fdomain as proto;
 use fidl_fuchsia_io as fio;
+#[cfg(target_os = "fuchsia")]
 use fuchsia_async as fasync;
 use futures::prelude::*;
 use replace_with::replace_with;
@@ -324,7 +325,7 @@ impl AsHandleRef for AnyHandleRef {
 type OnSignals = fasync::OnSignals<'static, AnyHandleRef>;
 
 #[cfg(not(target_os = "fuchsia"))]
-type OnSignals = fasync::OnSignalsRef<'static>;
+type OnSignals = fidl::OnSignalsRef<'static>;
 
 /// Represents a `WaitForSignals` transaction from a client. When the contained
 /// `OnSignals` polls to completion we can reply to the transaction.

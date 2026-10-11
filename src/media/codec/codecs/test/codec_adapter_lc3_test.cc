@@ -4,10 +4,8 @@
 
 #include <fuchsia/media/cpp/fidl.h>
 
-#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -17,46 +15,17 @@
 
 #include "src/media/codec/codecs/sw/lc3/codec_adapter_lc3_decoder.h"
 #include "src/media/codec/codecs/sw/lc3/codec_adapter_lc3_encoder.h"
+#include "src/media/codec/codecs/test/test_codec_packets.h"
+#include "src/media/codec/codecs/test/test_fake_codec_adapter_events.h"
 
 namespace {
-
-class FakeCodecAdapterEvents : public CodecAdapterEvents {
- public:
-  void onCoreCodecFailCodec(const char* format, ...) override {
-    fail_codec_count_++;
-    char buffer[256];
-    va_list args;
-    va_start(args, format);
-    std::vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-    last_fail_message_ = buffer;
-  }
-
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override {}
-  void onCoreCodecResetStreamAfterCurrentFrame() override {}
-  void onCoreCodecMidStreamOutputConstraintsChange(bool output_re_config_required) override {}
-  void onCoreCodecOutputFormatChange() override {}
-  void onCoreCodecInputPacketDone(const CodecPacket* packet) override {}
-  void onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected_before,
-                               bool error_detected_during) override {}
-  void onCoreCodecOutputTimestampHasNoOutput(uint64_t timestamp_ish) override {}
-  void onCoreCodecOutputEndOfStream(bool error_detected_before) override {}
-  void onCoreCodecLogEvent(
-      media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent event_code) override {}
-
-  size_t fail_codec_count() const { return fail_codec_count_; }
-  const std::string& last_fail_message() const { return last_fail_message_; }
-
- private:
-  size_t fail_codec_count_ = 0;
-  std::string last_fail_message_;
-};
 
 class TestCodecAdapterLc3Decoder : public CodecAdapterLc3Decoder {
  public:
   TestCodecAdapterLc3Decoder(std::mutex& lock, CodecAdapterEvents* events)
       : CodecAdapterLc3Decoder(lock, events) {}
 
+  using CodecAdapterLc3Decoder::CleanUpAfterStream;
   using CodecAdapterLc3Decoder::InputChunkSize;
   using CodecAdapterLc3Decoder::InputLoopStatus;
   using CodecAdapterLc3Decoder::MinOutputBufferSize;
@@ -70,6 +39,7 @@ class TestCodecAdapterLc3Encoder : public CodecAdapterLc3Encoder {
   TestCodecAdapterLc3Encoder(std::mutex& lock, CodecAdapterEvents* events)
       : CodecAdapterLc3Encoder(lock, events) {}
 
+  using CodecAdapterLc3Encoder::CleanUpAfterStream;
   using CodecAdapterLc3Encoder::CreateTimestampExtrapolator;
   using CodecAdapterLc3Encoder::InputChunkSize;
   using CodecAdapterLc3Encoder::InputLoopStatus;
@@ -83,6 +53,21 @@ fuchsia::media::FormatDetails MakeLc3FormatDetails(std::vector<uint8_t> oob_byte
   format_details.set_mime_type(kLc3MimeType);
   format_details.set_oob_bytes(std::move(oob_bytes));
   return format_details;
+}
+
+fuchsia::media::FormatDetails MakeValidLc3DecoderFormatDetails() {
+  // Valid 16-byte LTV configuration:
+  // Sampling_Frequency: 48 kHz (0x08)
+  // Frame_Duration: 10 ms (0x01)
+  // Audio_Channel_Allocation: LF (0x00000001)
+  // Octets_Per_Codec_Frame: 40 (0x0028)
+  std::vector<uint8_t> oob_bytes = {
+      0x02, 0x01, 0x08,                    // Sampling_Frequency: 48 kHz
+      0x02, 0x02, 0x01,                    // Frame_Duration: 10 ms
+      0x05, 0x03, 0x00, 0x00, 0x00, 0x01,  // Audio_Channel_Allocation: LF
+      0x03, 0x04, 0x00, 0x28               // Octets_Per_Codec_Frame: 40
+  };
+  return MakeLc3FormatDetails(std::move(oob_bytes));
 }
 
 fuchsia::media::FormatDetails MakeValidLc3EncoderFormatDetails() {
@@ -119,19 +104,7 @@ TEST(CodecAdapterLc3DecoderTest, ValidOobBytesSucceeds) {
   FakeCodecAdapterEvents events;
   TestCodecAdapterLc3Decoder decoder(lock, &events);
 
-  // Valid 16-byte LTV configuration:
-  // Sampling_Frequency: 48 kHz (0x08)
-  // Frame_Duration: 10 ms (0x01)
-  // Audio_Channel_Allocation: LF (0x00000001)
-  // Octets_Per_Codec_Frame: 40 (0x0028)
-  std::vector<uint8_t> oob_bytes = {
-      0x02, 0x01, 0x08,                    // Sampling_Frequency
-      0x02, 0x02, 0x01,                    // Frame_Duration
-      0x05, 0x03, 0x00, 0x00, 0x00, 0x01,  // Audio_Channel_Allocation
-      0x03, 0x04, 0x00, 0x28               // Octets_Per_Codec_Frame
-  };
-
-  auto status = decoder.ProcessFormatDetails(MakeLc3FormatDetails(std::move(oob_bytes)));
+  auto status = decoder.ProcessFormatDetails(MakeValidLc3DecoderFormatDetails());
   EXPECT_EQ(status, TestCodecAdapterLc3Decoder::kOk);
   EXPECT_EQ(events.fail_codec_count(), 0u);
   EXPECT_EQ(decoder.InputChunkSize(), 40u);
@@ -388,19 +361,12 @@ TEST(CodecAdapterLc3DecoderTest, MidstreamFormatChangeRejected) {
   FakeCodecAdapterEvents events;
   TestCodecAdapterLc3Decoder decoder(lock, &events);
 
-  std::vector<uint8_t> oob_bytes = {
-      0x02, 0x01, 0x08,                    // Sampling_Frequency
-      0x02, 0x02, 0x01,                    // Frame_Duration
-      0x05, 0x03, 0x00, 0x00, 0x00, 0x01,  // Audio_Channel_Allocation
-      0x03, 0x04, 0x00, 0x28               // Octets_Per_Codec_Frame
-  };
-
-  ASSERT_EQ(decoder.ProcessFormatDetails(MakeLc3FormatDetails(oob_bytes)),
+  ASSERT_EQ(decoder.ProcessFormatDetails(MakeValidLc3DecoderFormatDetails()),
             TestCodecAdapterLc3Decoder::kOk);
   EXPECT_EQ(events.fail_codec_count(), 0u);
 
   // A second ProcessFormatDetails call on an active stream should fail the codec.
-  EXPECT_EQ(decoder.ProcessFormatDetails(MakeLc3FormatDetails(std::move(oob_bytes))),
+  EXPECT_EQ(decoder.ProcessFormatDetails(MakeValidLc3DecoderFormatDetails()),
             TestCodecAdapterLc3Decoder::kShouldTerminate);
   EXPECT_EQ(events.fail_codec_count(), 1u);
   EXPECT_NE(events.last_fail_message().find("Midstream input format change"), std::string::npos)
@@ -412,13 +378,7 @@ TEST(CodecAdapterLc3DecoderTest, ProcessInputChunkDataBufferSizeValidation) {
   FakeCodecAdapterEvents events;
   TestCodecAdapterLc3Decoder decoder(lock, &events);
 
-  std::vector<uint8_t> oob_bytes = {
-      0x02, 0x01, 0x08,                    // Sampling_Frequency: 48 kHz
-      0x02, 0x02, 0x01,                    // Frame_Duration: 10 ms
-      0x05, 0x03, 0x00, 0x00, 0x00, 0x01,  // Audio_Channel_Allocation: 1 ch
-      0x03, 0x04, 0x00, 0x28               // Octets_Per_Codec_Frame: 40 bytes
-  };
-  ASSERT_EQ(decoder.ProcessFormatDetails(MakeLc3FormatDetails(std::move(oob_bytes))),
+  ASSERT_EQ(decoder.ProcessFormatDetails(MakeValidLc3DecoderFormatDetails()),
             TestCodecAdapterLc3Decoder::kOk);
 
   const size_t input_size = decoder.InputChunkSize();
@@ -676,6 +636,100 @@ TEST(CodecAdapterLc3EncoderTest, TimestampExtrapolatorUsesFourBytesPerSampleFor2
   auto extrapolated = extrapolator.Extrapolate(chunk_size);
   ASSERT_TRUE(extrapolated.has_value());
   EXPECT_EQ(*extrapolated, 10'000'000ull);
+}
+
+TEST(CodecAdapterLc3DecoderTest, OutputBufferConstraintsAvailableAfterCleanUpAfterStream) {
+  std::mutex lock;
+  FakeCodecAdapterEvents events;
+  TestCodecAdapterLc3Decoder decoder(lock, &events);
+
+  ASSERT_EQ(decoder.ProcessFormatDetails(MakeValidLc3DecoderFormatDetails()),
+            TestCodecAdapterLc3Decoder::kOk);
+
+  // Stop/clean up the stream (which resets codec_params_ and chunk_input_stream_) and verify
+  // CoreCodecGetBufferCollectionConstraints2(kOutputPort) still succeeds using cached size.
+  decoder.CleanUpAfterStream();
+
+  fuchsia::media::StreamBufferConstraints stream_constraints;
+  fuchsia::media::StreamBufferPartialSettings partial_settings;
+  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
+      kOutputPort, stream_constraints, partial_settings);
+  ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
+  EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 960u);
+}
+
+TEST(CodecAdapterLc3EncoderTest, OutputBufferConstraintsAvailableAfterCleanUpAfterStream) {
+  std::mutex lock;
+  FakeCodecAdapterEvents events;
+  TestCodecAdapterLc3Encoder encoder(lock, &events);
+
+  ASSERT_EQ(encoder.ProcessFormatDetails(MakeValidLc3EncoderFormatDetails()),
+            TestCodecAdapterLc3Encoder::kOk);
+
+  encoder.CleanUpAfterStream();
+
+  fuchsia::media::StreamBufferConstraints stream_constraints;
+  fuchsia::media::StreamBufferPartialSettings partial_settings;
+  auto constraints = encoder.CoreCodecGetBufferCollectionConstraints2(
+      kOutputPort, stream_constraints, partial_settings);
+  ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
+  EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 40u);
+}
+
+TEST(CodecAdapterLc3DecoderTest, EmptyStreamEndOfStreamAndStaleChunkInputStreamCleanedUp) {
+  std::mutex lock;
+  FakeCodecAdapterEvents events;
+  TestCodecAdapterLc3Decoder decoder(lock, &events);
+
+  auto format_details = MakeValidLc3DecoderFormatDetails();
+  format_details.set_format_details_version_ordinal(0);
+
+  decoder.CoreCodecInit(format_details);
+  ASSERT_EQ(events.fail_codec_count(), 0u);
+
+  // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
+  decoder.CoreCodecStartStream();
+  decoder.CoreCodecQueueInputEndOfStream();
+  events.WaitForOutputEosCount(1);
+  EXPECT_EQ(events.fail_codec_count(), 0u);
+  EXPECT_EQ(events.output_eos_count(), 1u);
+  decoder.CoreCodecStopStream();
+
+  // Stream 2: Queue FormatDetails and a partial input packet (10 bytes < 40-byte frame size)
+  // so chunk_input_stream_ buffers partial bytes in scratch_block_, then stop stream without EOS.
+  decoder.CoreCodecStartStream();
+  decoder.CoreCodecQueueInputFormatDetails(format_details);
+  events.WaitForOutputConstraintsChangeCount(1);
+  decoder.CoreCodecMidStreamOutputBufferReConfigFinish();
+
+  auto input_buffers = Buffers({4096});
+  auto input_packets = Packets(1);
+  CodecPacket* input_packet = input_packets.ptr(0);
+  input_packet->SetBuffer(input_buffers.ptr(0));
+  input_packet->SetStartOffset(0);
+  input_packet->SetValidLengthBytes(10);  // Partial frame (< 40 bytes)
+  decoder.CoreCodecQueueInputPacket(input_packet);
+  events.WaitForInputPacketDoneCount(1);
+  EXPECT_EQ(events.fail_codec_count(), 0u);
+  decoder.CoreCodecStopStream();
+
+  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed.
+  fuchsia::media::StreamBufferConstraints stream_constraints;
+  fuchsia::media::StreamBufferPartialSettings partial_settings;
+  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
+      kOutputPort, stream_constraints, partial_settings);
+  ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
+  EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 960u);
+
+  // Stream 3: Queue EndOfStream without FormatDetails or Packet; must not flush stale partial
+  // bytes from Stream 2 or dereference null codec_params_.
+  decoder.CoreCodecStartStream();
+  decoder.CoreCodecQueueInputEndOfStream();
+  events.WaitForOutputEosCount(2);
+  EXPECT_EQ(events.fail_codec_count(), 0u);
+  EXPECT_EQ(events.output_eos_count(), 2u);
+  EXPECT_EQ(events.output_packet_count(), 0u);
+  decoder.CoreCodecStopStream();
 }
 
 }  // namespace

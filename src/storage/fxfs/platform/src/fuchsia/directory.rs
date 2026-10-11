@@ -20,7 +20,9 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::{SyncOptions, TruncateGuard};
 use fxfs::log::*;
 use fxfs::object_store::directory::{self, ReplacedChild};
-use fxfs::object_store::transaction::{LockKey, Options, Transaction, lock_keys};
+use fxfs::object_store::transaction::{
+    LockKey, Options, ReservationOptions, Transaction, lock_keys,
+};
 use fxfs::object_store::{self, Directory, ObjectDescriptor, ObjectStore, Timestamp};
 use fxfs_crypto::WrappingKeyId;
 use fxfs_macros::ToWeakNode;
@@ -860,7 +862,7 @@ impl MutableDirectory for FxDirectory {
                     self.store().store_object_id(),
                     self.directory.object_id()
                 )],
-                Options { borrow_metadata_space: true, ..Default::default() },
+                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
             )
             .await
             .map_err(map_to_status)?;
@@ -6089,6 +6091,42 @@ mod tests {
         close_file_checked(open_file).await;
 
         drop(root_dir);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_symlink_removed_from_node_cache_on_drop() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let volume = fixture.volume().volume();
+
+        let (proxy, server_end) = create_proxy::<fio::SymlinkMarker>();
+        root.create_symlink("test_symlink", b"target", Some(server_end))
+            .await
+            .expect("FIDL call failed")
+            .expect("create_symlink failed");
+
+        let (_mutable, immutable) = proxy
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("transport error on get_attributes")
+            .expect("get_attributes failed");
+        let symlink_id = immutable.id.unwrap();
+
+        // While the symlink connection is open, the node cache contains the entry.
+        assert!(volume.cache().contains_key(symlink_id));
+
+        proxy
+            .close()
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("close failed");
+
+        // When the connection is closed, the strong reference is dropped, which invokes
+        // FxSymlink's Drop implementation and removes it from the node cache.
+        assert!(!volume.cache().contains_key(symlink_id));
+
         fixture.close().await;
     }
 }

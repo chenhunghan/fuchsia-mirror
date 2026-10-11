@@ -96,8 +96,7 @@ async fn register_datachannel_devices(kernel: Arc<Kernel>) {
 
         let registry = &kernel.device_registry;
 
-        let device_class =
-            registry.objects.get_or_create_class("nanohub".into(), registry.objects.virtual_bus());
+        let device_class = registry.objects.get_or_create_class("nanohub".into());
 
         if let Err(e) = registry.register_dyn_device_with_dir(
             &kernel,

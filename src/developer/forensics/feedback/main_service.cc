@@ -152,7 +152,9 @@ MainService::MainService(
     FX_PLOGS(FATAL, status) << "Failed to start writer thread for SystemTimeTracker";
   }
 
-  system_time_tracker_.Start();
+  if (options.enable_periodic_system_time_writes) {
+    system_time_tracker_.Start();
+  }
 }
 
 MainService::~MainService() { system_time_tracker_loop_.Shutdown(); }

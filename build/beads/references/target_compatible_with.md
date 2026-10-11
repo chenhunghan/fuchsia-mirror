@@ -29,6 +29,13 @@ load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 target_compatible_with = HOST_CONSTRAINTS,
 ```
 
+`HOST_CONSTRAINTS` pins the host CPU as well as the OS, so it breaks building host tools for the other host CPU (for example, linux-arm64 tools on an x64 builder).
+
+Other common mistakes:
+
+- Don't substitute `["@platforms//os:linux"]` for `HOST_OS_CONSTRAINTS`.
+- Put the same `target_compatible_with` on an `alias` as on its target, so the GN group bazel2gn generates lands in the same `if` block.
+
 ### Examples
 
 #### Host Binary Tool
@@ -59,7 +66,7 @@ go_library(
 )
 ```
 
-*Note: If the library is not guarded by `is_host` in GN (i.e. it is platform-agnostic), omit `target_compatible_with`.*
+*Note: Omit `target_compatible_with` only if the library really builds for both host and Fuchsia. A missing `is_host` guard in GN doesn't prove that: if only host tools depend on the library, it still needs `HOST_OS_CONSTRAINTS`.*
 
 ---
 
@@ -110,3 +117,13 @@ go_binary_host_tool(
     ] + HOST_OS_CONSTRAINTS,
 )
 ```
+
+Prefer a CPU constraint like this over a `select()` plus a `# @bazel2gn:raw_overwrite:` comment. bazel2gn already turns the constraint into a GN `if` block.
+
+---
+
+## 4. `select()` and Constraint Pitfalls
+
+- `target_compatible_with` takes `constraint_value` labels, not `config_setting` labels.
+- Every label in every branch of a `select()` must exist, even branches your build never picks. `bazel query` and `genquery` follow all branches.
+- A `select()` can't be a single element inside a list. Concatenate it with the rest of the list instead: `deps = [...] + select({...}) + [...]`.

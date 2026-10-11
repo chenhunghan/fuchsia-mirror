@@ -6,8 +6,8 @@
 
 use crate::object::{
     BusTransactionInitiatorDispatcher, ClockDispatcher, Dispatcher, HandleValue, JobDispatcher,
-    MsiDispatcher, SocketDispatcher, ThreadDispatcher, TimerDispatcher, VmAddressRegionDispatcher,
-    VmObjectDispatcher,
+    MsiDispatcher, ProcessDispatcher, SocketDispatcher, ThreadDispatcher, TimerDispatcher,
+    VcpuDispatcher, VmAddressRegionDispatcher, VmObjectDispatcher,
 };
 use crate::user_copy::UserOutPtr;
 use debug::ltracef;
@@ -180,36 +180,49 @@ pub fn sys_object_get_info(
 ) -> Result<(), Status> {
     ltracef!("handle {:?} topic {}\n", handle, topic);
 
+    let up = ProcessDispatcher::get_current();
+
     /// Helper macro for single-record topic queries that obtain a typed dispatcher with
     /// `ZX_RIGHT_INSPECT` (or rights) and copy the single record into user buffers using
     /// `single_record_result`.
     macro_rules! single_record_info {
         // Infallible method call on a dispatcher with ZX_RIGHT_INSPECT.
         ($dispatcher_type:ty, $method:ident) => {{
-            let dispatcher =
-                Dispatcher::get_with_rights::<$dispatcher_type>(handle, ZX_RIGHT_INSPECT)?;
+            let dispatcher = up.handle_table().get_dispatcher_with_rights::<$dispatcher_type>(
+                &up,
+                handle,
+                ZX_RIGHT_INSPECT,
+            )?;
             let record = dispatcher.$method();
             single_record_result(buffer, buffer_size, actual, avail, &record)?;
             Ok(())
         }};
         // Fallible method call on a dispatcher with ZX_RIGHT_INSPECT.
         ($dispatcher_type:ty, $method:ident?) => {{
-            let dispatcher =
-                Dispatcher::get_with_rights::<$dispatcher_type>(handle, ZX_RIGHT_INSPECT)?;
+            let dispatcher = up.handle_table().get_dispatcher_with_rights::<$dispatcher_type>(
+                &up,
+                handle,
+                ZX_RIGHT_INSPECT,
+            )?;
             let record = dispatcher.$method()?;
             single_record_result(buffer, buffer_size, actual, avail, &record)?;
             Ok(())
         }};
         // Custom closure/expression receiving the dispatcher with ZX_RIGHT_INSPECT.
         ($dispatcher_type:ty, |$disp:ident| $body:expr) => {{
-            let $disp = Dispatcher::get_with_rights::<$dispatcher_type>(handle, ZX_RIGHT_INSPECT)?;
+            let $disp = up.handle_table().get_dispatcher_with_rights::<$dispatcher_type>(
+                &up,
+                handle,
+                ZX_RIGHT_INSPECT,
+            )?;
             let record = $body;
             single_record_result(buffer, buffer_size, actual, avail, &record)?;
             Ok(())
         }};
         // Closure/expression with handle rights lookup.
         (with_rights: |$disp:ident, $rights:ident| $body:expr) => {{
-            let ($disp, $rights) = Dispatcher::get_dispatcher_and_rights(handle)?;
+            let ($disp, $rights) =
+                up.handle_table().get_dispatcher_and_rights::<Dispatcher>(&up, handle)?;
             let record = $body;
             single_record_result(buffer, buffer_size, actual, avail, &record)?;
             Ok(())
@@ -223,7 +236,11 @@ pub fn sys_object_get_info(
             })
         }
         ZX_INFO_JOB_CHILDREN | ZX_INFO_JOB_PROCESSES => {
-            let job = Dispatcher::get_with_rights::<JobDispatcher>(handle, ZX_RIGHT_ENUMERATE)?;
+            let job = up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+                &up,
+                handle,
+                ZX_RIGHT_ENUMERATE,
+            )?;
             // Don't recurse; we only want the job's direct children.
             let max =
                 if buffer_size == 0 { 0 } else { buffer_size / core::mem::size_of::<zx_koid_t>() };
@@ -241,7 +258,11 @@ pub fn sys_object_get_info(
             })
         }
         ZX_INFO_THREAD_EXCEPTION_REPORT => {
-            let thread = Dispatcher::get_with_rights::<ThreadDispatcher>(handle, ZX_RIGHT_INSPECT)?;
+            let thread = up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(
+                &up,
+                handle,
+                ZX_RIGHT_INSPECT,
+            )?;
             let report = thread.get_exception_report()?;
             // SAFETY: `report` is a valid, fully initialized 40-byte `zx_exception_report_t` struct.
             let src_bytes: &[u8] = unsafe {
@@ -255,7 +276,11 @@ pub fn sys_object_get_info(
         }
         ZX_INFO_THREAD_STATS => single_record_info!(ThreadDispatcher, get_stats_for_userspace?),
         ZX_INFO_TASK_RUNTIME | ZX_INFO_TASK_RUNTIME_V1 => {
-            let dispatcher = Dispatcher::get_with_rights::<Dispatcher>(handle, ZX_RIGHT_INSPECT)?;
+            let dispatcher = up.handle_table().get_dispatcher_with_rights::<Dispatcher>(
+                &up,
+                handle,
+                ZX_RIGHT_INSPECT,
+            )?;
             let runtime: zx_info_task_runtime_t =
                 if let Some(job) = dispatcher.downcast::<JobDispatcher>() {
                     job.get_runtime_stats()
@@ -287,8 +312,8 @@ pub fn sys_object_get_info(
             Ok(())
         }
         ZX_INFO_VMO | ZX_INFO_VMO_V1 | ZX_INFO_VMO_V2 | ZX_INFO_VMO_V3 => {
-            let (dispatcher, rights) = Dispatcher::get_dispatcher_and_rights(handle)?;
-            let vmo = dispatcher.downcast::<VmObjectDispatcher>().ok_or(Status::WRONG_TYPE)?;
+            let (vmo, rights) =
+                up.handle_table().get_dispatcher_and_rights::<VmObjectDispatcher>(&up, handle)?;
             let info = vmo.get_vmo_info(rights);
             match topic {
                 ZX_INFO_VMO_V1 => {
@@ -320,6 +345,7 @@ pub fn sys_object_get_info(
         ZX_INFO_TIMER => single_record_info!(TimerDispatcher, get_info),
         ZX_INFO_MSI => single_record_info!(MsiDispatcher, get_info),
         ZX_INFO_BTI => single_record_info!(BusTransactionInitiatorDispatcher, get_info),
+        ZX_INFO_VCPU => single_record_info!(VcpuDispatcher, get_info),
         ZX_INFO_CLOCK_MAPPED_SIZE => single_record_info!(ClockDispatcher, get_mapped_size?),
         // C++ only topics (and VM map/vmo enumeration, system resources, process info, etc.)
         _ => {

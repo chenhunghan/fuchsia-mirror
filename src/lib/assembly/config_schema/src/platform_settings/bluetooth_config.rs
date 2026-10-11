@@ -283,12 +283,6 @@ pub struct AudioGatewayEnabledConfig {
     /// Enable echo canceling and/or noise reduction functionality.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub echo_canceling_and_noise_reduction: bool,
-    /// Enable hands-free control of a device's functions through voice commands.
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub voice_recognition: bool,
-    /// Enable sending the ringtone for a phone call.
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub inband_ringtone: bool,
     /// Enable the voice tag association feature.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub attach_phone_number_voice_tag: bool,
@@ -298,12 +292,6 @@ pub struct AudioGatewayEnabledConfig {
     /// Enabled enhanced call controls (private mode & release specified call index procedures).
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub enhanced_call_control: bool,
-    /// Enable enhanced hands-free call controls including integration with voice assistants.
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub enhanced_voice_recognition_status: bool,
-    /// Enable the voice-to-text feature.
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub voice_recognition_text: bool,
 }
 
 /// Configuration options for the Bluetooth HFP Audio Gateway component ('bt-hfp-audio-gateway').
@@ -732,15 +720,11 @@ mod tests {
                 },
                 "hfp": {
                     "audio_gateway": {
-                        "voice_recognition": true,
                         "three_way_calling": true,
-                        "inband_ringtone": true,
                         "echo_canceling_and_noise_reduction": true,
                         "attach_phone_number_voice_tag": true,
                         "reject_incoming_call": true,
                         "enhanced_call_control": true,
-                        "enhanced_voice_recognition_status": true,
-                        "voice_recognition_text": true,
                     },
                     "hands_free": {
                         "echo_canceling_and_noise_reduction": true,
@@ -806,13 +790,9 @@ mod tests {
                 audio_gateway: AudioGatewayConfig::Enabled(AudioGatewayEnabledConfig {
                     three_way_calling: true,
                     echo_canceling_and_noise_reduction: true,
-                    voice_recognition: true,
-                    inband_ringtone: true,
                     attach_phone_number_voice_tag: true,
                     reject_incoming_call: true,
                     enhanced_call_control: true,
-                    enhanced_voice_recognition_status: true,
-                    voice_recognition_text: true,
                 }),
                 hands_free: HandsFreeConfig::Enabled(HandsFreeEnabledConfig {
                     echo_canceling_and_noise_reduction: true,
@@ -939,13 +919,9 @@ mod tests {
                 audio_gateway: AudioGatewayConfig::Enabled(AudioGatewayEnabledConfig {
                     three_way_calling: false,
                     echo_canceling_and_noise_reduction: false,
-                    voice_recognition: false,
-                    inband_ringtone: false,
                     attach_phone_number_voice_tag: false,
                     reject_incoming_call: false,
                     enhanced_call_control: false,
-                    enhanced_voice_recognition_status: false,
-                    voice_recognition_text: false,
                 }),
                 hands_free: HandsFreeConfig::Enabled(HandsFreeEnabledConfig {
                     echo_canceling_and_noise_reduction: false,

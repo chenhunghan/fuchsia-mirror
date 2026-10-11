@@ -3,3 +3,30 @@
 # found in the LICENSE file.
 
 package(default_applicable_licenses = ["//:license"])
+
+# The Fuchsia Rust toolchain links the Rust standard library dynamically
+# (-Cprefer-dynamic), and libstd has an implicit link attribute on libfdio.so.
+# The rustc_*() macros add this to `link_deps` of every Fuchsia Rust
+# executable, test and dylib, like GN does with
+# //src/lib/fdio/rust:fdio_for_rust_stdlib in BUILDCONFIG.gn.
+#
+# This is a separate label from //sdk/lib/fdio on purpose. Some Rust targets
+# call fdio functions directly and therefore list //sdk/lib/fdio in their own
+# `link_deps`. If the macros appended //sdk/lib/fdio itself, those targets would
+# end up with the same label twice in `link_deps`, which Bazel rejects with an
+# error like:
+#
+#   Label '//sdk/lib/fdio:fdio' is duplicated in the 'link_deps' attribute of
+#   rule 'foo'
+#
+# The macros cannot simply deduplicate the list, because the label is added
+# through a select() whose resolved value is unknown at loading time.
+#
+# With a distinct alias label, both entries are accepted, and they resolve to
+# the same cc_library. Its CcInfo is merged through depsets, so libfdio.so is
+# still linked only once.
+alias(
+    name = "fdio_for_rust_stdlib",
+    actual = "//sdk/lib/fdio",
+    visibility = ["//visibility:public"],
+)

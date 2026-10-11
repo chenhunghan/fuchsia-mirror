@@ -22,7 +22,6 @@ source_set("arm_generic") {
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/counters",
-    "//zircon/kernel/lib/fixed_point",
     "//zircon/kernel/lib/init",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/phys:handoff",

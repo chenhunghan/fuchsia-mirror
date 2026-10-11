@@ -400,6 +400,7 @@ pub enum TelemetryEvent {
     SmeScanResult {
         result: wlan_telemetry::ScanResult,
     },
+    ChipPowerUpFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -1753,6 +1754,9 @@ impl Telemetry {
                 }
             }
             TelemetryEvent::SmeScanStart | TelemetryEvent::SmeScanResult { .. } => {}
+            TelemetryEvent::ChipPowerUpFailure => {
+                self.stats_logger.log_chip_power_up_failure().await;
+            }
         }
     }
 
@@ -2454,6 +2458,16 @@ impl StatsLogger {
             &[],
         ));
         self.rssi_velocity_hist.clear();
+    }
+
+    async fn log_chip_power_up_failure(&mut self) {
+        self.throttled_error_logger.throttle_error(log_cobalt!(
+            self.cobalt_proxy,
+            log_occurrence,
+            metrics::CHIP_POWER_UP_FAILURE_METRIC_ID,
+            1,
+            &[],
+        ));
     }
 
     async fn log_hourly_fleetwise_quality_cobalt_metrics(&mut self) {
@@ -10467,5 +10481,24 @@ mod tests {
         // Log another error to verify that the counter begins incrementing again.
         error_logger.throttle_error(Err(format_err!("")));
         assert_eq!(error_logger.suppressed_errors[&String::from("")], 1);
+    }
+
+    #[fuchsia::test]
+    fn test_log_chip_power_up_failure() {
+        let (mut test_helper, mut test_fut) = setup_test();
+
+        test_helper.telemetry_sender.send(TelemetryEvent::ChipPowerUpFailure);
+        test_helper.drain_cobalt_events(&mut test_fut);
+
+        let logged_metrics =
+            test_helper.get_logged_metrics(metrics::CHIP_POWER_UP_FAILURE_METRIC_ID);
+        assert_matches!(&logged_metrics[..], [metric] => {
+            let expected_metric = fidl_fuchsia_metrics::MetricEvent {
+                metric_id: metrics::CHIP_POWER_UP_FAILURE_METRIC_ID,
+                event_codes: vec![],
+                payload: fidl_fuchsia_metrics::MetricEventPayload::Count(1),
+            };
+            assert_eq!(metric, &expected_metric);
+        });
     }
 }

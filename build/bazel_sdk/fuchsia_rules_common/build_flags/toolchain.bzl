@@ -88,6 +88,15 @@ build_flags_toolchain_instance = rule(
 #####    @fuchsia_rules_common//build_flags:toolchain_type.
 #####
 
+def _dedup_list(items):
+    seen = {}
+    result = []
+    for item in items:
+        if item not in seen:
+            seen[item] = True
+            result.append(item)
+    return result
+
 def _rust_toolchain_with_build_flags_impl(ctx):
     base_info = ctx.attr.toolchain[platform_common.ToolchainInfo]
     flags_toolchain = ctx.toolchains["@fuchsia_rules_common//build_flags:toolchain_type"]
@@ -101,21 +110,17 @@ def _rust_toolchain_with_build_flags_impl(ctx):
             for lib_dir in info.lib_dirs:
                 extra_flags.append("-Lnative=" + lib_dir)
 
-    raw_flags = extra_flags + ctx.attr.extra_rustc_flags + getattr(base_info, "extra_rustc_flags", [])
-    seen = {}
-    all_extra_flags = []
-    for flag in raw_flags:
-        if flag not in seen:
-            seen[flag] = True
-            all_extra_flags.append(flag)
-
     fields = {}
     for k in dir(base_info):
         if k in ("to_json", "to_proto"):
             continue
         fields[k] = getattr(base_info, k)
-    fields["extra_rustc_flags"] = all_extra_flags
-    fields["extra_exec_rustc_flags"] = ctx.attr.extra_rustc_flags + getattr(base_info, "extra_exec_rustc_flags", [])
+    fields["extra_rustc_flags"] = _dedup_list(
+        extra_flags + ctx.attr.extra_rustc_flags + getattr(base_info, "extra_rustc_flags", []),
+    )
+    fields["extra_exec_rustc_flags"] = _dedup_list(
+        extra_flags + ctx.attr.extra_rustc_flags + getattr(base_info, "extra_exec_rustc_flags", []),
+    )
 
     providers = [platform_common.ToolchainInfo(**fields)]
     if platform_common.TemplateVariableInfo in ctx.attr.toolchain:

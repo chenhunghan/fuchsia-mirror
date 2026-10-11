@@ -431,13 +431,13 @@ VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_io_t, reserved2, 24, 8);
 
 VALIDATE_TYPE_SIZE_ALIGNMENT(zx_packet_guest_vcpu_t, 32, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, type, 0, 4);
-VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, interrupt, 8, 16);
+VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, interrupt, 8, 24);
 VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, interrupt.mask, 8, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, interrupt.vector, 16, 1);
-VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup, 8, 16);
-VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup.id, 8, 8);
+VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup, 8, 24);
+VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup.target, 8, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup.entry, 16, 8);
-VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, reserved, 24, 8);
+VALIDATE_FIELD_OFFSET_SIZE(zx_packet_guest_vcpu_t, startup.context, 24, 8);
 
 VALIDATE_TYPE_SIZE_ALIGNMENT(zx_packet_interrupt_t, 32, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_packet_interrupt_t, timestamp, 0, 8);

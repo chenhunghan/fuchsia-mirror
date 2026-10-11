@@ -167,7 +167,11 @@ zx_status_t Vcpu::HandleVcpu(const zx_packet_guest_vcpu_t& packet, uint64_t trap
     case ZX_PKT_GUEST_VCPU_INTERRUPT:
       return guest_->Interrupt(packet.interrupt.mask, packet.interrupt.vector);
     case ZX_PKT_GUEST_VCPU_STARTUP:
-      return guest_->StartVcpu(packet.startup.id, packet.startup.entry, boot_ptr_);
+#if __aarch64__
+      return guest_->StartVcpu(packet.startup.target, packet.startup.entry, packet.startup.context);
+#else
+      return guest_->StartVcpu(packet.startup.target, packet.startup.entry, boot_ptr_);
+#endif
     default:
       return ZX_ERR_NOT_SUPPORTED;
   }

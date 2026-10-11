@@ -1,0 +1,135 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    name: "adc-buttons",
+    include: [],
+    program: {},
+    capabilities: [
+        {
+            driver_config: "fuchsia.buttons.AdcButtonsMetadata",
+            defs: {
+                ConsumerControlButton: {
+                    type: "string",
+                    enum: [
+                        "CAMERA_DISABLE",
+                        "FACTORY_RESET",
+                        "FUNCTION",
+                        "MIC_MUTE",
+                        "PAUSE",
+                        "POWER",
+                        "REBOOT",
+                        "VOLUME_DOWN",
+                        "VOLUME_UP",
+                    ],
+                },
+                AdcButtonConfig: {
+                    type: "object",
+                    properties: {
+                        channel_idx: { type: "uint32" },
+                        release_threshold: { type: "uint32" },
+                        press_threshold: { type: "uint32" },
+                    },
+                },
+                ButtonConfig: {
+                    type: "object",
+                    properties: {
+                        adc: { ref: "#/AdcButtonConfig" },
+                    },
+                },
+                Button: {
+                    type: "object",
+                    properties: {
+                        types: {
+                            type: "vector",
+                            element: { ref: "#/ConsumerControlButton" },
+                            max_count: "MAX",
+                        },
+                        button_config: { ref: "#/ButtonConfig" },
+                    },
+                },
+            },
+            properties: {
+                polling_rate_usec: { type: "uint32" },
+                buttons: {
+                    type: "vector",
+                    element: { ref: "#/Button" },
+                    max_count: "MAX",
+                },
+            },
+        },
+    ],
+    use: [
+        { service: "fuchsia.driver.compat.Service" },
+        {
+            name: "pdev",
+            service: "fuchsia.hardware.platform.device.Service",
+            primary: true,
+            bind: {
+                one_of: [
+                    { compat: "fuchsia,adc-buttons" },
+                    {
+                        did: "fuchsia.platform.BIND_PLATFORM_DEV_DID.ADC_BUTTONS",
+                        rules: {
+                            "fuchsia.BIND_PROTOCOL": "fuchsia.platform.BIND_PROTOCOL.DEVICE",
+                            "fuchsia.BIND_PLATFORM_DEV_VID": "fuchsia.platform.BIND_PLATFORM_DEV_VID.GENERIC",
+                            "fuchsia.BIND_PLATFORM_DEV_PID": "fuchsia.platform.BIND_PLATFORM_DEV_PID.GENERIC",
+                        },
+                    },
+                ],
+            },
+        },
+        {
+            name: "adc-0",
+            service: "fuchsia.hardware.adc.Service",
+            availability: "optional",
+            bind: {
+                one_of: [
+                    { match_name: true },
+                    {
+                        rules: { "fuchsia.adc.CHANNEL": 0 },
+                    },
+                ],
+            },
+        },
+        {
+            name: "adc-1",
+            service: "fuchsia.hardware.adc.Service",
+            availability: "optional",
+            bind: {
+                one_of: [
+                    { match_name: true },
+                    {
+                        rules: { "fuchsia.adc.CHANNEL": 1 },
+                    },
+                ],
+            },
+        },
+        {
+            name: "adc-2",
+            service: "fuchsia.hardware.adc.Service",
+            availability: "optional",
+            bind: {
+                one_of: [
+                    { match_name: true },
+                    {
+                        rules: { "fuchsia.adc.CHANNEL": 2 },
+                    },
+                ],
+            },
+        },
+        {
+            name: "adc-3",
+            service: "fuchsia.hardware.adc.Service",
+            availability: "optional",
+            bind: {
+                one_of: [
+                    { match_name: true },
+                    {
+                        rules: { "fuchsia.adc.CHANNEL": 3 },
+                    },
+                ],
+            },
+        },
+    ],
+}

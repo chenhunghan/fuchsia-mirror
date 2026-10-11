@@ -3,3 +3,10 @@
 # found in the LICENSE file.
 
 package(default_applicable_licenses = ["//:license"])
+
+# The default for `fx_test(environments = ...)`. See `_DEFAULT_ENVIRONMENTS`
+# in fx_test.bzl.
+filegroup(
+    name = "default_environments",
+    visibility = ["//visibility:public"],
+)

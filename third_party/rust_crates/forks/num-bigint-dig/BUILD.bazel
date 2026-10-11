@@ -82,7 +82,7 @@ rust_library(
     }),
     version = "0.8.6",
     deps = [
-        "//third_party/rust_crates/forks/num-bigint-dig:build_script_build",
+        ":build_script_build",
         "//third_party/rust_crates/forks/zeroize",
         "//third_party/rust_crates/vendor/lazy_static-1.5.0:lazy_static",
         "//third_party/rust_crates/vendor/libm-0.2.16:libm",
@@ -134,6 +134,7 @@ cargo_build_script(
         ],
     ),
     edition = "2021",
+    emit_warnings = False,
     pkg_name = "num-bigint-dig",
     rustc_flags = [
         "--cap-lints=allow",

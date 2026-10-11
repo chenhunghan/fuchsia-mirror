@@ -53,11 +53,11 @@ zx_status_t Vcpu::ArchHandleMem(const zx_packet_guest_mem_t& mem, IoMapping* dev
     return status;
   }
 
-  // If the guest was reading from the MMIO, update their register set
-  // to contain the read value.
-  if (mem.read) {
+  // If the guest was reading from the MMIO into a general-purpose register
+  // (excluding xzr/wzr where xt == 31), update their register set.
+  zx_vcpu_state_t vcpu_state;
+  if (mem.read && mem.xt < std::size(vcpu_state.x)) {
     // Read.
-    zx_vcpu_state_t vcpu_state;
     status = vcpu_.read_state(ZX_VCPU_STATE, &vcpu_state, sizeof(vcpu_state));
     if (status != ZX_OK) {
       return status;

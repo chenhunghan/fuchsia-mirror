@@ -34,7 +34,8 @@ class CodecAdapterLc3Decoder : public CodecAdapterSWImpl<Lc3DecoderParams> {
                             uint8_t* output_buffer, size_t output_buffer_size) override;
   size_t InputChunkSize() override;
   size_t MinOutputBufferSize() override;
-  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port) override;
+  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+      __TA_REQUIRES(lock_) override;
 
   TimestampExtrapolator CreateTimestampExtrapolator(
       const fuchsia::media::FormatDetails& format_details) override {

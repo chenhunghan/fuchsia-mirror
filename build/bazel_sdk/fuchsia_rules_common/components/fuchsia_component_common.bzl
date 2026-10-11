@@ -126,7 +126,11 @@ number of dependencies which will be included in the final package.
         "is_test": attr.bool(
             doc = """True if this is a test component.
 
-            Controls how the SDK runs the component.
+            Packages require test components to be listed in their
+            `test_components` attribute and all other components in
+            `components`. The SDK also uses this to control how the component
+            is run, and the platform build's `fx_test()` uses it to find the
+            test components in its package.
             This is independent of the `testonly` attribute.
             """,
             mandatory = True,

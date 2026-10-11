@@ -5,7 +5,7 @@
             metrics: [
                 {
                     event_codes: [
-                        0,
+                        "Blobfs",
                     ],
                     metric_name: "fvm_slice_allocations_migrated",
                     metric_type: "Occurrence",
@@ -16,7 +16,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "Minfs",
                     ],
                     metric_name: "fvm_slice_allocations_migrated",
                     metric_type: "Occurrence",
@@ -29,7 +29,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "fvm",
                     ],
                     metric_name: "version_migrated",
                     metric_type: "String",

@@ -1,0 +1,140 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "FlashMessage",
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "preflight": {
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "message"
+                    ]
+                }
+            },
+            "required": [
+                "preflight"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "properties": {
+                "progress": {
+                    "$ref": "#/definitions/FlashProgress"
+                }
+            },
+            "required": [
+                "progress"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "properties": {
+                "finished": {
+                    "type": "object",
+                    "properties": {
+                        "success": {
+                            "type": "boolean"
+                        },
+                        "error_message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "success",
+                        "error_message"
+                    ]
+                }
+            },
+            "required": [
+                "finished"
+            ],
+            "additionalProperties": false
+        }
+    ],
+    "definitions": {
+        "FlashProgress": {
+            "oneOf": [
+                {
+                    "type": "string",
+                    "enum": [
+                        "unlock",
+                        "reboot_to_bootloader_started",
+                        "reboot_to_bootloader_finished",
+                        "got_variable",
+                        "upload_started",
+                        "upload_finished",
+                        "upload_error"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flash_partition_started": {
+                            "type": "object",
+                            "properties": {
+                                "partition_name": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "partition_name"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "flash_partition_started"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flash_partition_finished": {
+                            "type": "object",
+                            "properties": {
+                                "partition_name": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "partition_name"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "flash_partition_finished"
+                    ],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "oem_command": {
+                            "type": "object",
+                            "properties": {
+                                "oem_command": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "oem_command"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "oem_command"
+                    ],
+                    "additionalProperties": false
+                }
+            ]
+        }
+    }
+}

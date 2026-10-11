@@ -354,13 +354,7 @@ async fn update(
     crash_reporter: crash_report::CrashReporter,
 ) -> (String, impl FusedStream<Item = fupdate_installer_ext::State>) {
     let attempt_fut = history.lock().start_update_attempt(
-        fupdate_installer_ext::Options {
-            initiator: config.initiator.into(),
-            allow_attach_to_existing_attempt: config.allow_attach_to_existing_attempt,
-            should_write_recovery: config.should_write_recovery,
-            manifest_range: config.manifest_range,
-            manifest_headers: config.manifest_headers.clone(),
-        },
+        config.options.clone(),
         &config.update_url,
         config.start_time,
         &env.data_sink,
@@ -385,7 +379,7 @@ async fn update(
         let cobalt_forwarder_task = fuchsia_async::Task::spawn(cobalt_forwarder_task);
 
         info!(config:?; "starting system update");
-        cobalt.log_ota_start(config.initiator, config.start_time);
+        cobalt.log_ota_start(config.options.initiator, config.start_time);
 
         let mut target_version = history::Version::default();
 
@@ -459,13 +453,13 @@ async fn update(
 
         info!("system update attempt completed in {}s, logging metrics", update_duration.as_secs());
         cobalt.log_ota_result_attempt(
-            config.initiator,
+            config.options.initiator,
             history.lock().attempts_for(&source_version, &target_version) + 1,
             phase,
             status_code,
         );
         cobalt.log_ota_result_duration(
-            config.initiator,
+            config.options.initiator,
             phase,
             status_code,
             update_duration,
@@ -894,10 +888,10 @@ impl Attempt<'_> {
 
         let update_url = AbsolutePackageUrl::parse(&self.config.update_url.to_string())
             .map_err(PrepareError::ParseUpdatePackageUrl)?;
-        if self.config.manifest_range.is_some() {
+        if self.config.options.manifest_range.is_some() {
             return Err(PrepareError::ManifestRangeNotSupported);
         }
-        if !self.config.manifest_headers.is_empty() {
+        if !self.config.options.manifest_headers.is_empty() {
             return Err(PrepareError::ManifestHeadersNotSupported);
         }
         let update_pkg = resolve_update_package(
@@ -931,7 +925,7 @@ impl Attempt<'_> {
         match mode {
             update_package::UpdateMode::Normal => {}
             update_package::UpdateMode::ForceRecovery => {
-                if !self.config.should_write_recovery {
+                if !self.config.options.should_write_recovery {
                     return Err(PrepareError::VerifyUpdateMode);
                 }
             }
@@ -977,7 +971,6 @@ impl Attempt<'_> {
             }
 
             if let Some(vbmeta) = fuchsia.vbmeta() {
-                target_version.vbmeta_hash = vbmeta.sha256().to_string();
                 // Determine if the vbmeta has changed in this update.
                 if should_write_image(
                     vbmeta.sha256(),
@@ -995,7 +988,7 @@ impl Attempt<'_> {
         }
 
         // Only check these images if we have to.
-        if self.config.should_write_recovery
+        if self.config.options.should_write_recovery
             && let Some(recovery) = images_metadata.recovery()
         {
             let target_config = paver::TargetConfiguration::Single(fpaver::Configuration::Recovery);
@@ -1337,7 +1330,7 @@ impl PackagelessAttempt<'_> {
             .map_err(PrepareError::PreparePartitionMetdata)?;
 
         let update_url = self.config.update_url.to_string();
-        let manifest_range = if let Some(r) = self.config.manifest_range {
+        let manifest_range = if let Some(r) = self.config.options.manifest_range {
             let end = r.offset.checked_add(r.size).and_then(|val| val.checked_sub(1)).ok_or_else(
                 || PrepareError::InvalidManifestRange { offset: r.offset, size: r.size },
             )?;
@@ -1347,7 +1340,7 @@ impl PackagelessAttempt<'_> {
         };
         let manifest_bytes =
             fuchsia_backoff::retry_or_last_error(ManifestFetchBackoff::default(), || {
-                fetch_url(&update_url, manifest_range, self.config.manifest_headers.clone())
+                fetch_url(&update_url, manifest_range, self.config.options.manifest_headers.clone())
             })
             .await
             .map_err(PrepareError::FetchUrl)?;
@@ -1375,7 +1368,7 @@ impl PackagelessAttempt<'_> {
         let zbi_slot = match manifest.mode {
             update_package::UpdateMode::Normal => update_package::manifest::Slot::AB,
             update_package::UpdateMode::ForceRecovery => {
-                if !self.config.should_write_recovery {
+                if !self.config.options.should_write_recovery {
                     return Err(PrepareError::VerifyUpdateMode);
                 }
                 update_package::manifest::Slot::R
@@ -1443,9 +1436,29 @@ impl PackagelessAttempt<'_> {
         info!("Targeting configuration: {:?}", desired_config);
         let target_config = desired_config.to_target_configuration();
 
+        let fallback_gc = async {
+            let () = replace_retained_blobs(
+                manifest.images.iter().map(|image| image.blob.fuchsia_merkle_root),
+                &self.env.retained_blobs,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                error!(
+                    "while fetching images, unable to minimize retained blobs set \
+                     before second gc attempt: {:#}",
+                    anyhow!(e)
+                )
+            });
+
+            if let Err(e) = gc(&self.env.space_manager).await {
+                error!("unable to gc blobs before retry fetching blobs: {:#}", anyhow!(e));
+            }
+        }
+        .shared();
+
         let mut stream = futures::stream::iter(manifest.images.iter())
             .map(async |image| {
-                if !self.config.should_write_recovery
+                if !self.config.options.should_write_recovery
                     && image.slot == update_package::manifest::Slot::R
                 {
                     return Ok((image.blob.uncompressed_size * IMAGE_BLOB_WEIGHT_MULTIPLIER, 0));
@@ -1477,25 +1490,7 @@ impl PackagelessAttempt<'_> {
                     {
                         Ok(size) => size,
                         Err(fpkg::ResolveError::NoSpace) => {
-                            let () = replace_retained_blobs(
-                                manifest.images.iter().map(|image| image.blob.fuchsia_merkle_root),
-                                &self.env.retained_blobs,
-                            )
-                            .await
-                            .unwrap_or_else(|e| {
-                                error!(
-                                    "while fetching images, unable to minimize retained blobs set \
-                                     before second gc attempt: {:#}",
-                                    anyhow!(e)
-                                )
-                            });
-
-                            if let Err(e) = gc(&self.env.space_manager).await {
-                                error!(
-                                    "unable to gc blobs before retry fetching blobs: {:#}",
-                                    anyhow!(e)
-                                );
-                            }
+                            let () = fallback_gc.clone().await;
                             self.env
                                 .ota_downloader
                                 .fetch_blob(&blob_id, blob_base_url, false)

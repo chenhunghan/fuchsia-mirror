@@ -13,14 +13,15 @@ import random
 import re
 import string
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Dict, List
 
-from antlion.controllers.ap_lib import hostapd_constants
 from antlion.controllers.utils_lib.commands.tcpdump import LinuxTcpdumpCommand
 from honeydew.typing.custom_types import MacAddress
 from iperf.iperf_server import IPerfServerOverSsh
+from legacy_access_point.ap_lib import hostapd_constants
 from libs.ssh import connection, settings
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
@@ -511,21 +512,27 @@ class OpenWrtAP:
             section_names = [section_name]
 
         for section_name in section_names:
-            for option, value in bss.custom_uci_options.items():
-                if isinstance(value, list):
-                    for item in value:
-                        self.ssh.run(
-                            f"uci add_list wireless.{section_name}.{option}='{item}'"
-                        )
-                elif isinstance(value, bool):
-                    v = str(int(value))
+            self._apply_custom_uci_options(section_name, bss.custom_uci_options)
+
+    @staticmethod
+    def _format_uci_value(value: object) -> str:
+        """Formats a Python value into an OpenWrt UCI string."""
+        return str(int(value)) if isinstance(value, bool) else str(value)
+
+    def _apply_custom_uci_options(
+        self, section: str, options: Mapping[str, object]
+    ) -> None:
+        """Applies custom UCI options to a wireless section."""
+        for option, value in options.items():
+            if isinstance(value, list):
+                for item in value:
+                    v = self._format_uci_value(item)
                     self.ssh.run(
-                        f"uci set wireless.{section_name}.{option}='{v}'"
+                        f"uci add_list wireless.{section}.{option}='{v}'"
                     )
-                else:
-                    self.ssh.run(
-                        f"uci set wireless.{section_name}.{option}='{value}'"
-                    )
+            else:
+                v = self._format_uci_value(value)
+                self.ssh.run(f"uci set wireless.{section}.{option}='{v}'")
 
     def configure_wifi(self, config: AccessPointConfig) -> None:
         """Configures the Wi-Fi on the Access Point.
@@ -565,17 +572,9 @@ class OpenWrtAP:
                 country = "US"
             self.ssh.run(f"uci set wireless.{radio}.country='{country}'")
 
-            for option, value in radio_config.custom_uci_options.items():
-                if isinstance(value, list):
-                    for item in value:
-                        self.ssh.run(
-                            f"uci add_list wireless.{radio}.{option}='{item}'"
-                        )
-                elif isinstance(value, bool):
-                    v = str(int(value))
-                    self.ssh.run(f"uci set wireless.{radio}.{option}='{v}'")
-                else:
-                    self.ssh.run(f"uci set wireless.{radio}.{option}='{value}'")
+            self._apply_custom_uci_options(
+                radio, radio_config.custom_uci_options
+            )
 
             # Apply hostapd options
             if hasattr(radio_config, "custom_hostapd_options"):
@@ -583,8 +582,9 @@ class OpenWrtAP:
                     option,
                     value,
                 ) in radio_config.custom_hostapd_options.items():
+                    v = self._format_uci_value(value)
                     self.ssh.run(
-                        f"uci add_list wireless.{radio}.hostapd_options='{option}={value}'"
+                        f"uci add_list wireless.{radio}.hostapd_options='{option}={v}'"
                     )
 
             if radio_config.bss_settings:
@@ -678,7 +678,7 @@ class OpenWrtAP:
                 return False, {}
             for iface in interfaces:
                 status_res = self.ssh.run(
-                    f"ubus call hostapd.{iface} get_status"
+                    f"ubus -t 2 call hostapd.{iface} get_status"
                 )
                 status_data = json.loads(status_res.stdout.decode("utf-8"))
                 status_map[iface] = status_data
@@ -811,7 +811,7 @@ class OpenWrtAP:
 
         Note:
             This implementation is derived from Antlion's `hostapd.py`
-            (`antlion.controllers.ap_lib.hostapd._bss_tm_req`) to construct
+            (`legacy_access_point.ap_lib.hostapd._bss_tm_req`) to construct
             the command for `hostapd_cli`.
         """
 

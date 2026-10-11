@@ -67,6 +67,93 @@ class SpecificationsParserTest(unittest.TestCase):
         )
 
 
+class LoadJsonDictTest(unittest.TestCase):
+    """Tests load_json_dict helper."""
+
+    def test_valid_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = pathlib.Path(temp_dir) / "test.json"
+            file_path.write_text('{"key": "value", "count": 42}')
+            data = fint_build.load_json_dict(file_path)
+            self.assertEqual(data, {"key": "value", "count": 42})
+
+    def test_error_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            cases = [
+                ("list.json", "[1, 2, 3]", "Warning: Expected JSON object"),
+                (
+                    "str.json",
+                    '"just a string"',
+                    "Warning: Expected JSON object",
+                ),
+                (
+                    "corrupt.json",
+                    "{broken json",
+                    "Warning: Failed to read JSON",
+                ),
+                ("missing.json", None, "Warning: Failed to read JSON"),
+            ]
+            for filename, content, expected_warn in cases:
+                with self.subTest(filename=filename):
+                    file_path = temp_path / filename
+                    if content is not None:
+                        file_path.write_text(content)
+                    f = io.StringIO()
+                    with contextlib.redirect_stderr(f):
+                        data = fint_build.load_json_dict(file_path)
+                    self.assertIsNone(data)
+                    self.assertIn(expected_warn, f.getvalue())
+
+
+class ParseNinjaActionMetricsTest(unittest.TestCase):
+    """Tests parse_ninja_action_metrics helper."""
+
+    def test_parse_ninja_action_metrics(self) -> None:
+        cases: list[
+            tuple[str, fint_build.JSONValue, int, int, dict[str, int]]
+        ] = [
+            (
+                "valid_dict",
+                {
+                    "initial_actions": 100,
+                    "final_actions": 50,
+                    "action_counts": {"ACTION": 10, "CXX": 40},
+                },
+                100,
+                50,
+                {"ACTION": 10, "CXX": 40},
+            ),
+            ("empty_dict", {}, 0, 0, {}),
+            (
+                "malformed_numeric",
+                {
+                    "initial_actions": "not_an_int",
+                    "final_actions": None,
+                    "action_counts": {"ACTION": "bad", "CXX": 20},
+                },
+                0,
+                0,
+                {"CXX": 20},
+            ),
+            (
+                "non_dict_action_counts",
+                {"action_counts": [1, 2, 3]},
+                0,
+                0,
+                {},
+            ),
+            ("non_dict_data", [1, 2, 3], 0, 0, {}),
+        ]
+        for name, data, exp_init, exp_final, exp_counts in cases:
+            with self.subTest(name=name):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    metrics = fint_build.parse_ninja_action_metrics(data)
+                self.assertEqual(metrics.initial_actions, exp_init)
+                self.assertEqual(metrics.final_actions, exp_final)
+                self.assertEqual(dict(metrics.actions_by_type), exp_counts)
+
+
 class BuildArtifactsTest(unittest.TestCase):
     """Tests the produce_build_artifacts method on BuildContext."""
 
@@ -190,9 +277,11 @@ class BuildArtifactsTest(unittest.TestCase):
         mock_run.return_value.returncode = 0
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
-            build_dir = temp_path / "build"
+            checkout_dir = temp_path / "checkout"
+            build_dir = checkout_dir / "out" / "default"
             artifact_dir = temp_path / "artifact"
-            build_dir.mkdir()
+            checkout_dir.mkdir()
+            build_dir.mkdir(parents=True)
             artifact_dir.mkdir()
 
             # Create fake raw ninja_build_trace.json.gz
@@ -200,19 +289,20 @@ class BuildArtifactsTest(unittest.TestCase):
             raw_trace.write_text("raw-trace-content")
 
             # Create fake tool paths file to provide ninjatrace_prebuilt and buildstats_prebuilt
+            # using relative paths starting with ../.. from build_dir
             tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
             tool_paths_file.write_text(
                 json.dumps(
                     [
                         {
                             "name": "ninjatrace_prebuilt",
-                            "path": "prebuilt/ninjatrace",
+                            "path": "../../prebuilt/tools/ninjatrace/linux-x64/ninjatrace",
                             "os": "linux",
                             "cpu": "x64",
                         },
                         {
                             "name": "buildstats_prebuilt",
-                            "path": "prebuilt/buildstats",
+                            "path": "../../prebuilt/tools/buildstats/linux-x64/buildstats",
                             "os": "linux",
                             "cpu": "x64",
                         },
@@ -222,6 +312,7 @@ class BuildArtifactsTest(unittest.TestCase):
 
             static_spec = static_pb2.Static()
             context_spec = context_pb2.Context(
+                checkout_dir=str(checkout_dir),
                 build_dir=str(build_dir),
                 artifact_dir=str(artifact_dir),
             )
@@ -233,10 +324,13 @@ class BuildArtifactsTest(unittest.TestCase):
                 verbose=False,
             )
 
+            executed_cmds: list[list[str]] = []
+
             # We must stub subprocess.run to touch the files they generate, since they are mocked
             def side_effect(
                 cmd: list[str],
             ) -> subprocess.CompletedProcess[bytes]:
+                executed_cmds.append(cmd)
                 if "ninjatrace" in cmd[0]:
                     (build_dir / fint_build.NINJATRACE_JSON_GZ).write_text(
                         "processed-trace"
@@ -250,6 +344,18 @@ class BuildArtifactsTest(unittest.TestCase):
             mock_run.side_effect = side_effect
 
             ctx.produce_build_artifacts(42)
+
+            # Verify that ninjatrace and buildstats tools were resolved relative to build_dir
+            expected_ninjatrace_tool = str(
+                build_dir
+                / "../../prebuilt/tools/ninjatrace/linux-x64/ninjatrace"
+            )
+            expected_buildstats_tool = str(
+                build_dir
+                / "../../prebuilt/tools/buildstats/linux-x64/buildstats"
+            )
+            self.assertEqual(executed_cmds[0][0], expected_ninjatrace_tool)
+            self.assertEqual(executed_cmds[1][0], expected_buildstats_tool)
 
             # Verify that ninjatrace.json.gz was copied to artifact_dir
             trace_dest = artifact_dir / fint_build.NINJATRACE_JSON_GZ
@@ -274,6 +380,92 @@ class BuildArtifactsTest(unittest.TestCase):
                 manifest_content.get("buildstatsJsonFiles"),
                 [str(stats_dest)],
             )
+
+    @mock.patch.object(subprocess, "run")
+    def test_produce_build_artifacts_with_subbuild_ninja_traces(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Verifies that subbuild traces are merged with ninjatrace tool resolved relative to build_dir."""
+        mock_run.return_value.returncode = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            checkout_dir = temp_path / "checkout"
+            build_dir = checkout_dir / "out" / "default"
+            artifact_dir = temp_path / "artifact"
+            checkout_dir.mkdir()
+            build_dir.mkdir(parents=True)
+            artifact_dir.mkdir()
+
+            # Create raw trace, ninja_subbuilds.json, and the ninjatrace2json.py script
+            raw_trace = build_dir / fint_build.NINJA_BUILD_TRACE_GZ
+            raw_trace.write_text("raw-trace-content")
+
+            subbuilds_json = build_dir / "ninja_subbuilds.json"
+            subbuilds_json.write_text("[]")
+
+            ninjatrace2json_script = (
+                checkout_dir / fint_build.NINJATRACE2JSON_PY_RELATIVE_PATH
+            )
+            ninjatrace2json_script.parent.mkdir(parents=True, exist_ok=True)
+            ninjatrace2json_script.write_text("#!/usr/bin/env python3\n")
+
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "ninjatrace_prebuilt",
+                            "path": "../../prebuilt/tools/ninjatrace/linux-x64/ninjatrace",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                    ]
+                )
+            )
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(
+                checkout_dir=str(checkout_dir),
+                build_dir=str(build_dir),
+                artifact_dir=str(artifact_dir),
+            )
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(
+                static_spec=static_spec,
+                context_spec=context_spec,
+                host=host,
+                verbose=False,
+            )
+
+            executed_cmds: list[list[str]] = []
+
+            def side_effect(
+                cmd: list[str],
+            ) -> subprocess.CompletedProcess[bytes]:
+                executed_cmds.append(cmd)
+                if "ninjatrace" in cmd[0]:
+                    (build_dir / fint_build.NINJATRACE_JSON_GZ).write_text(
+                        "processed-trace"
+                    )
+                return subprocess.CompletedProcess(cmd, 0)
+
+            mock_run.side_effect = side_effect
+
+            ctx.produce_build_artifacts(42)
+
+            # Step 1: raw ninjatrace prebuilt
+            expected_ninjatrace_tool = str(
+                build_dir
+                / "../../prebuilt/tools/ninjatrace/linux-x64/ninjatrace"
+            )
+            self.assertEqual(executed_cmds[0][0], expected_ninjatrace_tool)
+
+            # Step 3: ninjatrace2json.py merging subbuild traces
+            self.assertEqual(len(executed_cmds), 2)
+            merge_cmd = executed_cmds[1]
+            self.assertIn("--ninjatrace-path", merge_cmd)
+            idx = merge_cmd.index("--ninjatrace-path")
+            self.assertEqual(merge_cmd[idx + 1], expected_ninjatrace_tool)
 
     def test_produce_build_artifacts_with_ninja_traces_missing_tool_paths(
         self,
@@ -403,6 +595,75 @@ class BuildArtifactsTest(unittest.TestCase):
             f"Warning: include_prebuilt_binary_manifests is enabled, but {fint_build.PREBUILT_BINARY_SETS_JSON} is missing on disk.",
             f.getvalue(),
         )
+
+    def test_produce_build_artifacts_action_metrics(self) -> None:
+        """Verifies that produce_build_artifacts populates ninjaActionMetrics from custom path or default build_dir."""
+        cases = [
+            ("custom_path", True),
+            ("default_path", False),
+        ]
+        for name, use_custom_path in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_path = pathlib.Path(temp_dir)
+                    build_dir = temp_path / "build"
+                    artifact_dir = temp_path / "artifact"
+                    build_dir.mkdir()
+                    artifact_dir.mkdir()
+
+                    if use_custom_path:
+                        metrics_dir = temp_path / "ninja_logs"
+                        metrics_dir.mkdir()
+                        metrics_file = (
+                            metrics_dir / fint_build.NINJA_ACTION_METRICS_JSON
+                        )
+                        explicit_arg = metrics_file
+                    else:
+                        metrics_file = (
+                            build_dir / fint_build.NINJA_ACTION_METRICS_JSON
+                        )
+                        explicit_arg = None
+
+                    metrics_file.write_text(
+                        json.dumps(
+                            {
+                                "initial_actions": 120,
+                                "final_actions": 60,
+                                "action_counts": {
+                                    "ACTION": 10,
+                                    "CXX": 45,
+                                    "LINK": 5,
+                                },
+                            }
+                        )
+                    )
+
+                    ctx = fint_build.BuildContext(
+                        static_spec=static_pb2.Static(),
+                        context_spec=context_pb2.Context(
+                            build_dir=str(build_dir),
+                            artifact_dir=str(artifact_dir),
+                        ),
+                        host=fint_build.HostProperties(os="linux", cpu="x64"),
+                        verbose=False,
+                    )
+                    ctx.produce_build_artifacts(
+                        42, ninja_action_metrics_path=explicit_arg
+                    )
+
+                    manifest_path = (
+                        artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+                    )
+                    self.assertTrue(manifest_path.exists())
+
+                    manifest_content = json.loads(manifest_path.read_text())
+                    metrics = manifest_content.get("ninjaActionMetrics", {})
+                    self.assertEqual(metrics.get("initialActions"), 120)
+                    self.assertEqual(metrics.get("finalActions"), 60)
+                    self.assertEqual(
+                        metrics.get("actionsByType"),
+                        {"ACTION": 10, "CXX": 45, "LINK": 5},
+                    )
 
 
 class ExportDebugSymbolsTest(unittest.TestCase):
@@ -726,6 +987,8 @@ class MainArgParserTest(unittest.TestCase):
                 "/path/to/static",
                 "--context",
                 "/path/to/context",
+                "--ninja-action-metrics-output",
+                "/path/to/metrics.json",
                 "--",
                 "ninja",
                 "target",
@@ -733,6 +996,10 @@ class MainArgParserTest(unittest.TestCase):
         )
         self.assertEqual(args.static, pathlib.Path("/path/to/static"))
         self.assertEqual(args.context, pathlib.Path("/path/to/context"))
+        self.assertEqual(
+            args.ninja_action_metrics_output,
+            pathlib.Path("/path/to/metrics.json"),
+        )
         self.assertEqual(args.wrapped_cmd, ["ninja", "target"])
 
 
@@ -963,6 +1230,113 @@ class NinjaBuildWrapTest(unittest.TestCase):
                 mock_export.assert_called_once()
 
 
+class BuildContextToolPathsTest(unittest.TestCase):
+    """Tests BuildContext tool path resolution and cached properties."""
+
+    def test_resolve_tool_path_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            build_dir = pathlib.Path(tmp_dir) / "out" / "default"
+            build_dir.mkdir(parents=True)
+
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "ninjatrace_prebuilt",
+                            "path": "../../prebuilt/tools/ninjatrace",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                        {
+                            "name": "buildstats_prebuilt",
+                            "path": "../../prebuilt/tools/buildstats",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                    ]
+                )
+            )
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(build_dir=str(build_dir))
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(static_spec, context_spec, host)
+
+            expected_ninjatrace = build_dir / "../../prebuilt/tools/ninjatrace"
+            expected_buildstats = build_dir / "../../prebuilt/tools/buildstats"
+
+            self.assertEqual(
+                ctx.resolve_tool_path("ninjatrace_prebuilt"),
+                expected_ninjatrace,
+            )
+            self.assertEqual(
+                ctx.resolve_tool_path("buildstats_prebuilt"),
+                expected_buildstats,
+            )
+            self.assertEqual(ctx.ninjatrace_tool_path, expected_ninjatrace)
+            self.assertEqual(ctx.buildstats_tool_path, expected_buildstats)
+            self.assertIsNone(ctx.resolve_tool_path("nonexistent_tool"))
+
+    def test_resolve_tool_path_missing_or_invalid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            build_dir = pathlib.Path(tmp_dir) / "out" / "default"
+            build_dir.mkdir(parents=True)
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(build_dir=str(build_dir))
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(static_spec, context_spec, host)
+
+            # When tool_paths.json does not exist
+            self.assertIsNone(ctx.resolve_tool_path("ninjatrace_prebuilt"))
+            self.assertIsNone(ctx.ninjatrace_tool_path)
+            self.assertIsNone(ctx.buildstats_tool_path)
+
+            # When tool_paths.json is invalid JSON
+            ctx_invalid = fint_build.BuildContext(
+                static_spec, context_spec, host
+            )
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text("invalid json")
+            self.assertIsNone(
+                ctx_invalid.resolve_tool_path("ninjatrace_prebuilt")
+            )
+            self.assertIsNone(ctx_invalid.ninjatrace_tool_path)
+
+    def test_cached_properties(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            build_dir = pathlib.Path(tmp_dir) / "out" / "default"
+            build_dir.mkdir(parents=True)
+
+            tool_paths_file = build_dir / fint_build.TOOL_PATHS_JSON
+            tool_paths_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "ninjatrace_prebuilt",
+                            "path": "../../prebuilt/tools/ninjatrace",
+                            "os": "linux",
+                            "cpu": "x64",
+                        },
+                    ]
+                )
+            )
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(build_dir=str(build_dir))
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(static_spec, context_spec, host)
+
+            first_trace = ctx.ninjatrace_tool_path
+            self.assertIsNotNone(first_trace)
+
+            # Delete the file from disk; cached property should still return the cached Path
+            tool_paths_file.unlink()
+            second_trace = ctx.ninjatrace_tool_path
+            self.assertEqual(first_trace, second_trace)
+
+
 class MainExecutionTest(unittest.TestCase):
     """Integration tests for the wrapper main() execution flow."""
 
@@ -1104,6 +1478,96 @@ class MainExecutionTest(unittest.TestCase):
                 os.unlink(static_path)
                 os.unlink(context_path)
 
+    def _run_main_with_action_metrics(
+        self,
+        mock_managed: MagicMock,
+        mock_run: MagicMock,
+        extra_argv: list[str],
+        metrics_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Helper to run main() with mocked action metrics and return parsed build_artifacts.json."""
+        with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".textproto", delete=False
+            ) as static_file:
+                static_file.write("incremental: true")
+                static_path = static_file.name
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".textproto", delete=False
+            ) as context_file:
+                context_file.write(
+                    f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"'
+                )
+                context_path = context_file.name
+
+            metrics_json_path = os.path.join(
+                build_dir, fint_build.NINJA_ACTION_METRICS_JSON
+            )
+            with open(metrics_json_path, "w") as f:
+                json.dump(metrics_data, f)
+
+            resolved_argv = [
+                arg.replace("{metrics_path}", metrics_json_path)
+                for arg in extra_argv
+            ]
+
+            try:
+                mock_managed.return_value.run.return_value = 0
+                mock_run.return_value.returncode = 0
+                mock_run.return_value.stdout = "ninja: no work to do."
+
+                real_argv = [
+                    "--static",
+                    static_path,
+                    "--context",
+                    context_path,
+                ] + resolved_argv
+
+                exit_code = fint_build.main(real_argv)
+                self.assertEqual(exit_code, 0)
+
+                manifest_path = os.path.join(
+                    artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
+                )
+                self.assertTrue(os.path.exists(manifest_path))
+
+                with open(manifest_path, "r") as f:
+                    return json.loads(f.read())
+            finally:
+                os.unlink(static_path)
+                os.unlink(context_path)
+
+    @mock.patch.object(subprocess, "run")
+    @mock.patch.object(signal_utils, "SignalManagedProcess")
+    def test_main_writes_build_artifacts_json_with_ninja_action_metrics_output(
+        self, mock_managed: MagicMock, mock_run: MagicMock
+    ) -> None:
+        """Verifies that main writes build_artifacts.json with ninjaActionMetrics when --ninja-action-metrics-output is passed."""
+        manifest = self._run_main_with_action_metrics(
+            mock_managed,
+            mock_run,
+            [
+                "--ninja-action-metrics-output",
+                "{metrics_path}",
+                "--",
+                "ninja",
+                "target",
+            ],
+            {
+                "initial_actions": 50,
+                "final_actions": 25,
+                "action_counts": {"ACTION": 5, "CXX": 20},
+            },
+        )
+        metrics = manifest.get("ninjaActionMetrics", {})
+        self.assertEqual(metrics.get("initialActions"), 50)
+        self.assertEqual(metrics.get("finalActions"), 25)
+        self.assertEqual(
+            metrics.get("actionsByType"),
+            {"ACTION": 5, "CXX": 20},
+        )
+
     @mock.patch.object(subprocess, "run")
     @mock.patch.object(signal_utils, "SignalManagedProcess")
     @mock.patch.object(fint_build, "load_json_list")
@@ -1117,36 +1581,39 @@ class MainExecutionTest(unittest.TestCase):
     ) -> None:
         """Verifies that omitting --context automatically generates context_spec."""
         mock_load_json_list.return_value = []
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory() as tmp_dir, tempfile.TemporaryDirectory() as fake_root_dir:
             mock_cwd.return_value = pathlib.Path(tmp_dir)
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".textproto", delete=False
-            ) as static_file:
-                static_file.write("")
-                static_path = static_file.name
+            fake_root = pathlib.Path(fake_root_dir)
+            (fake_root / ".jiri_manifest").touch()
+            with mock.patch.object(fint_build, "fuchsia_root", fake_root):
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".textproto", delete=False
+                ) as static_file:
+                    static_file.write("")
+                    static_path = static_file.name
 
-            try:
-                # Mock successful build command execution
-                mock_managed.return_value.run.return_value = 0
-                mock_run.return_value.returncode = 0
-                mock_run.return_value.stdout = "ninja: no work to do."
+                try:
+                    # Mock successful build command execution
+                    mock_managed.return_value.run.return_value = 0
+                    mock_run.return_value.returncode = 0
+                    mock_run.return_value.stdout = "ninja: no work to do."
 
-                real_argv = [
-                    "--static",
-                    static_path,
-                    "--",
-                    "ninja",
-                    "-j",
-                    "64",
-                    "target",
-                ]
+                    real_argv = [
+                        "--static",
+                        static_path,
+                        "--",
+                        "ninja",
+                        "-j",
+                        "64",
+                        "target",
+                    ]
 
-                # Run main() passing arguments directly without --context
-                exit_code = fint_build.main(real_argv)
-                self.assertEqual(exit_code, 0)
+                    # Run main() passing arguments directly without --context
+                    exit_code = fint_build.main(real_argv)
+                    self.assertEqual(exit_code, 0)
 
-            finally:
-                os.unlink(static_path)
+                finally:
+                    os.unlink(static_path)
 
     @mock.patch.object(signal_utils, "SignalManagedProcess")
     @mock.patch.object(fint_build.BuildContext, "wrap_bazel")
@@ -1382,14 +1849,79 @@ class MakeBuildContextTest(unittest.TestCase):
         mock_cwd.return_value = pathlib.Path("/mock/cwd")
         static_path = pathlib.Path("fake_static.textproto")
 
-        ctx = fint_build.make_build_context(static_path, None)
+        with tempfile.TemporaryDirectory() as fake_root_dir:
+            fake_root = pathlib.Path(fake_root_dir)
+            with mock.patch.object(fint_build, "fuchsia_root", fake_root):
+                ctx = fint_build.make_build_context(static_path, None)
 
-        mock_load_static.assert_called_once_with(static_path)
-        self.assertEqual(
-            ctx.context_spec.checkout_dir,
-            str(fint_build.fuchsia_root.resolve()),
-        )
-        self.assertEqual(ctx.context_spec.build_dir, "/mock/cwd")
+                mock_load_static.assert_called_once_with(static_path)
+                self.assertEqual(
+                    ctx.context_spec.checkout_dir,
+                    str(fake_root.resolve()),
+                )
+                self.assertEqual(ctx.context_spec.build_dir, "/mock/cwd")
+
+    def test_make_build_context_with_explicit_build_dir(self) -> None:
+        """Verifies make_build_context uses explicit build_dir if provided."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            static_path = pathlib.Path(tmp_dir) / "static.textproto"
+            static_path.write_text("")
+            out_dir = pathlib.Path(tmp_dir) / "out_custom"
+            out_dir.mkdir()
+
+            ctx = fint_build.make_build_context(
+                static_path,
+                None,
+                build_dir=out_dir,
+            )
+            self.assertEqual(ctx.context_spec.build_dir, str(out_dir.resolve()))
+
+
+class BuildDirResolutionTest(unittest.TestCase):
+    """Tests for resolving the build directory fallback."""
+
+    def test_resolve_fallback_explicit_build_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            explicit_dir = pathlib.Path(tmp_dir)
+            resolved = fint_build.resolve_fallback_build_dir(
+                build_dir=explicit_dir
+            )
+            self.assertEqual(resolved, explicit_dir.resolve())
+
+    def test_resolve_fallback_to_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_root_dir, tempfile.TemporaryDirectory() as tmp_cwd:
+            fake_root = pathlib.Path(fake_root_dir)
+            with mock.patch.object(fint_build, "fuchsia_root", fake_root):
+                with mock.patch.object(pathlib.Path, "cwd") as mock_cwd:
+                    mock_cwd.return_value = pathlib.Path(tmp_cwd)
+                    resolved = fint_build.resolve_fallback_build_dir()
+                    self.assertEqual(resolved, pathlib.Path(tmp_cwd).resolve())
+
+    def test_resolve_fallback_from_fx_build_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_root_dir:
+            fake_root = pathlib.Path(fake_root_dir)
+            fx_build_dir = fake_root / ".fx-build-dir"
+            custom_out = fake_root / "out/my_target"
+            custom_out.mkdir(parents=True)
+            fx_build_dir.write_text("out/my_target\n")
+
+            with mock.patch.object(pathlib.Path, "cwd") as mock_cwd:
+                mock_cwd.return_value = fake_root
+                with mock.patch.object(fint_build, "fuchsia_root", fake_root):
+                    resolved = fint_build.resolve_fallback_build_dir()
+                    self.assertEqual(resolved, custom_out.resolve())
+
+    def test_resolve_fallback_from_out_default(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_root_dir:
+            fake_root = pathlib.Path(fake_root_dir)
+            default_out = fake_root / "out/default"
+            default_out.mkdir(parents=True)
+
+            with mock.patch.object(pathlib.Path, "cwd") as mock_cwd:
+                mock_cwd.return_value = fake_root
+                with mock.patch.object(fint_build, "fuchsia_root", fake_root):
+                    resolved = fint_build.resolve_fallback_build_dir()
+                    self.assertEqual(resolved, default_out.resolve())
 
 
 if __name__ == "__main__":

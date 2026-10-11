@@ -14,7 +14,7 @@ use zx_types::{
     zx_policy_basic_v1_t, zx_policy_basic_v2_t, zx_policy_timer_slack_t,
 };
 
-use crate::object::{Dispatcher, HandleValue, JobDispatcher, ProcessDispatcher};
+use crate::object::{HandleValue, JobDispatcher, ProcessDispatcher};
 use crate::user_copy::UserInPtr;
 
 const LOCAL_TRACE: u32 = 0;
@@ -40,7 +40,13 @@ fn job_set_policy_basic_v1(
         .copy_slice_from_user(slice)
         .map_err(|_| Status::INVALID_ARGS)?;
 
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(handle, ZX_RIGHT_SET_POLICY)?;
+    let job = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_SET_POLICY,
+        )
+    })?;
     job.set_basic_policy_v1(options, policy)?;
     Ok(())
 }
@@ -65,7 +71,13 @@ fn job_set_policy_basic_v2(
         .copy_slice_from_user(slice)
         .map_err(|_| Status::INVALID_ARGS)?;
 
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(handle, ZX_RIGHT_SET_POLICY)?;
+    let job = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_SET_POLICY,
+        )
+    })?;
     job.set_basic_policy_v2(options, policy)?;
     Ok(())
 }
@@ -89,7 +101,13 @@ fn job_set_policy_timer_slack(
         .copy_from_user(&mut uninit_policy)
         .map_err(|_| Status::INVALID_ARGS)?;
 
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(handle, ZX_RIGHT_SET_POLICY)?;
+    let job = ProcessDispatcher::with_current(|up| {
+        up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+            up,
+            handle,
+            ZX_RIGHT_SET_POLICY,
+        )
+    })?;
     job.set_timer_slack_policy(slack_policy)?;
     Ok(())
 }
@@ -106,9 +124,14 @@ pub fn sys_job_create(
         return Err(Status::INVALID_ARGS);
     }
 
-    let parent = Dispatcher::get_with_rights::<JobDispatcher>(parent_job, ZX_RIGHT_MANAGE_JOB)?;
+    let up = ProcessDispatcher::get_current();
+    let parent = up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+        &up,
+        parent_job,
+        ZX_RIGHT_MANAGE_JOB,
+    )?;
     let (handle, rights) = JobDispatcher::create(options, parent)?;
-    *out = ProcessDispatcher::with_current(|up| up.make_and_add_handle(handle, rights))?;
+    *out = up.make_and_add_handle(handle, rights)?;
     Ok(())
 }
 
@@ -157,8 +180,17 @@ pub fn sys_job_set_critical(
         false
     };
 
-    let job = Dispatcher::get_with_rights::<JobDispatcher>(job_handle, ZX_RIGHT_DESTROY)?;
-    let process = Dispatcher::get_with_rights::<ProcessDispatcher>(process_handle, ZX_RIGHT_WAIT)?;
+    let up = ProcessDispatcher::get_current();
+    let job = up.handle_table().get_dispatcher_with_rights::<JobDispatcher>(
+        &up,
+        job_handle,
+        ZX_RIGHT_DESTROY,
+    )?;
+    let process = up.handle_table().get_dispatcher_with_rights::<ProcessDispatcher>(
+        &up,
+        process_handle,
+        ZX_RIGHT_WAIT,
+    )?;
     process.set_critical_to_job(job, retcode_nonzero)?;
     Ok(())
 }

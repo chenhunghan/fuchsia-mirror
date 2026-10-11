@@ -939,10 +939,10 @@ This should never be set as a build argument.
 }
   tsan = {
   shared = {
-  clang_rt = "../../../../out/not-default/libclang_rt.tsan.so"
+  clang_rt = ""
 }
   static = {
-  clang_rt = ""
+  clang_rt = "../../../../out/not-default/libclang_rt.tsan.a"
   clang_rt_cxx = "../../../../out/not-default/libclang_rt.tsan_cxx.a"
 }
 }
@@ -1808,11 +1808,12 @@ From //build/config/compilation_modes.gni:39
 
 ### compress_debuginfo
 
+LINT.IfChange(compress_debuginfo)
 Enable compression of debug sections.
 
 **Current value (from the default):** `"zstd"`
 
-From //build/config/compiler.gni:123
+From //build/config/compiler.gni:129
 
 ### config_example_cpp_greeting
 
@@ -3475,11 +3476,12 @@ From //build/config/profile/config.gni:18
 
 ### dwarf_version
 
+LINT.IfChange(dwarf_version)
 Explicitly specify DWARF version used.
 
 **Current value (from the default):** `5`
 
-From //build/config/compiler.gni:102
+From //build/config/compiler.gni:103
 
 ### e2e_test_labels
 
@@ -3567,16 +3569,17 @@ Set to true to have Ninja implement a GNU Make jobserver pool
 to better coordinate parallel tasks, especially when sub-builds
 are recursively invoked.
 
-This allows launching all IDK sub-builds
-at the same time without risking overloading the current machine.
+When combined with RBE (`cxx_rbe_enable = true`), this allows launching all
+IDK sub-builds at the same time without risking overloading the current
+machine.
 
 IMPORTANT: This feature requires a version of Ninja that implements
-the `--jobserver` option. See https://fxbug.dev/XXXXX for details.
+the `--jobserver` option. See https://fxbug.dev/42163397 for details.
 
 
 **Current value (from the default):** `false`
 
-From //build/config/jobserver.gni:16
+From //build/config/jobserver.gni:17
 
 ### enable_lock_dep
 
@@ -3963,6 +3966,7 @@ From //zircon/kernel/params.gni:112
 
 ### experimental_cxx_version
 
+LINT.IfChange(experimental_cxx_version)
 **NOTE:** This is for **experimentation only** and should not normally be
 changed.  Set the version of the C++ standard to use when compiling. Must be
 one of the values in `_available_cxx_versions`.
@@ -3971,7 +3975,7 @@ instead use the `fuchsia_cxx_version` variable.
 
 **Current value (from the default):** `false`
 
-From //build/config/fuchsia_cxx_version.gni:35
+From //build/config/fuchsia_cxx_version.gni:12
 
 ### experimental_dso_enabled
 
@@ -4022,7 +4026,7 @@ configuration / Rust custom target definition.
 
 **Current value (from the default):** `["//build/config:cpu_baseline"]`
 
-From //zircon/kernel/switch/BUILD.gn:31
+From //zircon/kernel/switch/BUILD.gn:33
 
 ### experimental_mem_enabled
 
@@ -4791,7 +4795,7 @@ LINT.IfChange
 
 **Current value (from the default):** `["arm64", "riscv64", "x64"]`
 
-From //build/sdk/config.gni:72
+From //build/sdk/config.gni:73
 
 ### in_default_toolchain
 
@@ -5021,7 +5025,7 @@ memory profile.
 
 **Current value (from the default):** `false`
 
-From //zircon/kernel/switch/BUILD.gn:26
+From //zircon/kernel/switch/BUILD.gn:28
 
 ### kernel_no_userabi
 
@@ -8776,8 +8780,9 @@ From //build/sdk/config.gni:25
 
 ### sdk_max_simultaneous_sub_builds
 
-When enable_jobserver is not set, this provides an upper bound on the
-maximum number of subbuilds that may be running at the same time.
+When enable_jobserver is not set or cxx_rbe_enable is false, this provides
+an upper bound on the maximum number of subbuilds that may be running at the
+same time.
 A larger number means these good things:
 - Better parallelization of the inherently single-threaded parts of GN and
   ninja.
@@ -8795,7 +8800,7 @@ But also these bad things:
 
 **Current value (from the default):** `5`
 
-From //build/sdk/config.gni:43
+From //build/sdk/config.gni:44
 
 ### sdk_sub_build_max_load_average
 
@@ -8806,7 +8811,7 @@ guess.
 
 **Current value (from the default):** `""`
 
-From //build/sdk/config.gni:56
+From //build/sdk/config.gni:57
 
 ### sdk_sub_build_parallelism
 
@@ -8818,7 +8823,7 @@ subbuild script will make a guess.
 
 **Current value (from the default):** `""`
 
-From //build/sdk/config.gni:50
+From //build/sdk/config.gni:51
 
 ### sdk_sub_build_verbose
 
@@ -8826,7 +8831,7 @@ Set to `true` to enable verbose logging during IDK subbuilds.
 
 **Current value (from the default):** `false`
 
-From //build/sdk/config.gni:59
+From //build/sdk/config.gni:60
 
 ### select_variant
 

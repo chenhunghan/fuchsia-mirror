@@ -208,11 +208,6 @@
 	url = https://fuchsia.googlesource.com/third_party/mako
 	name = third_party/mako
 	ignore = all
-[submodule "third_party/markupsafe"]
-	path = third_party/markupsafe
-	url = https://fuchsia.googlesource.com/third_party/markupsafe
-	name = third_party/markupsafe
-	ignore = all
 [submodule "third_party/micro-ecc"]
 	path = third_party/micro-ecc
 	url = https://fuchsia.googlesource.com/third_party/github.com/kmackay/micro-ecc
@@ -727,4 +722,9 @@
 	path = third_party/pylibs/coverage/src
 	url = https://fuchsia.googlesource.com/third_party/github.com/coveragepy/coveragepy
 	name = third_party/pylibs/coverage
+	ignore = all
+[submodule "third_party/markupsafe/markupsafe"]
+	path = third_party/markupsafe/markupsafe
+	url = https://fuchsia.googlesource.com/third_party/markupsafe
+	name = third_party/markupsafe
 	ignore = all

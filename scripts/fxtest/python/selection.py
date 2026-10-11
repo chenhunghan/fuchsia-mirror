@@ -357,6 +357,28 @@ class _TestDistanceMeasurer:
             (test, y) for test in tests if (y := extractor(test)) is not None
         ]
         self._matcher_script_prefix = matcher_script_prefix
+        self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
+        self._input_file_path: str | None = None
+
+    def _get_input_file(self) -> str:
+        if self._input_file_path is None:
+            self._temp_dir = tempfile.TemporaryDirectory()
+            self._input_file_path = os.path.join(
+                self._temp_dir.name, "temp-input.txt"
+            )
+            with open(self._input_file_path, "w") as f:
+                f.write("\n".join([v[1] for v in self._test_and_key]))
+                f.flush()
+        return self._input_file_path
+
+    def cleanup(self) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
+            self._input_file_path = None
+
+    def __del__(self) -> None:
+        self.cleanup()
 
     async def distances(
         self,
@@ -380,51 +402,45 @@ class _TestDistanceMeasurer:
             list[_TestDistance]: Description of distances from contained set
             of tests to the input value.
         """
-        with tempfile.TemporaryDirectory() as td:
-            file_name = os.path.join(td, "temp-input.txt")
-            with open(file_name, "w") as f:
-                f.write("\n".join([v[1] for v in self._test_and_key]))
-                f.flush()
+        file_name = self._get_input_file()
 
-            program_prefix = self._matcher_script_prefix
+        program_prefix = self._matcher_script_prefix
 
-            if program_prefix and program_prefix[0] == "fx":
-                if not shutil.which("fx"):
-                    # There is no fx available, which means we may be in a test scenario.
-                    # Try to construct a path to the dldist data dependency.
-                    cur_dir = os.path.dirname(os.path.dirname(__file__))
-                    dldist_path = os.path.join(cur_dir, "bin", "dldist")
-                    if os.path.exists(dldist_path):
-                        # Only override if we are actually in a test scenario.
-                        program_prefix = [dldist_path]
+        if program_prefix and program_prefix[0] == "fx":
+            if not shutil.which("fx"):
+                # There is no fx available, which means we may be in a test scenario.
+                # Try to construct a path to the dldist data dependency.
+                cur_dir = os.path.dirname(os.path.dirname(__file__))
+                dldist_path = os.path.join(cur_dir, "bin", "dldist")
+                if os.path.exists(dldist_path):
+                    # Only override if we are actually in a test scenario.
+                    program_prefix = [dldist_path]
 
-            arg_suffix = [
-                "-v",
-                "--needle",
-                value,
-                "--input",
-                file_name,
-            ] + (["--match-contains"] if not exact else [])
+        arg_suffix = [
+            "--needle",
+            value,
+            "--input",
+            file_name,
+        ] + (["--match-contains"] if not exact else [])
+        output = await execution.run_command(
+            *program_prefix,
+            *arg_suffix,
+            recorder=recorder,
+            parent=parent_id,
+            do_not_log_output=True,
+        )
 
-            output = await execution.run_command(
-                *program_prefix,
-                *arg_suffix,
-                recorder=recorder,
-                parent=parent_id,
-                do_not_log_output=True,
+        if output is None:
+            raise RuntimeError(
+                f"Failed to execute matcher script at {program_prefix}."
             )
+        elif output.return_code != 0:
+            raise RuntimeError(f"Matching program failed:\n{output.stderr}")
 
-            if output is None:
-                raise RuntimeError(
-                    f"Failed to execute matcher script at {program_prefix}."
-                )
-            elif output.return_code != 0:
-                raise RuntimeError(f"Matching program failed:\n{output.stderr}")
-
-            vals = [int(line) for line in output.stdout.strip().splitlines()]
-            return [
-                _TestDistance(t[0], v) for t, v in zip(self._test_and_key, vals)
-            ]
+        vals = [int(line) for line in output.stdout.strip().splitlines()]
+        return [
+            _TestDistance(t[0], v) for t, v in zip(self._test_and_key, vals)
+        ]
 
 
 def _parse_selection_command_line(

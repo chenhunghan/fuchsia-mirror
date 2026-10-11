@@ -12,6 +12,12 @@ set -euo pipefail
 #    - version = "0.1.0" on first-party (in-tree) rustc_* targets
 #    - crate_root = "src/lib.rs" on rustc_library
 #    - crate_root = "src/main.rs" on rustc_binary
+#    - output_name = "<x>" or out = "<x>" when identical to target name (and
+#      unsupported output_name on go_binary / go_binary_host_tool)
+#    - missing //build/bazel/versioning:is_api_level_PLATFORM visibility in
+#      build/bazel/versioning/BUILD.bazel when calling legacy host-tool macros
+#      (go_binary_host_tool, py_binary_host_tool)
+#    - private or duplicate external rule load() statements (@...//.../private/...)
 #    and genrule commands added by the change that derive paths or arguments with
 #    shell command substitution ($$(dirname ...), $$(python3 -c ...), backticks) or
 #    hard-code bazel-out/ paths instead of using Bazel's predefined genrule variables.
@@ -20,12 +26,14 @@ set -euo pipefail
 #    files (`BUILD.bazel`, `BUILD`, `*.bzl`, `*.bazel`, `MODULE.bazel`),
 #    catching missing `.bzl` module docstrings, unused `load` symbols, and
 #    unformatted Starlark files before `shac` runs in CQ.
-# 3. Flags drive-by edits to unrelated packages outside PLANTER_TARGET_DIR /
-#    PLANTER_TARGET_DIRS (except centralized registration lists, direct parent
-#    BUILD.gn/BUILD.bazel test groups, and dependency packages the change
-#    migrates: a new BUILD.bazel referenced, transitively, from a target
-#    package's BUILD.bazel, and the in-tree build of third_party/rust_crates:
-#    its BUILD files, Cargo.toml/Cargo.lock and compat/ shims).
+# 3. Flags drive-by edits to unrelated packages and shared Bazel rule/macro
+#    definitions (`build/bazel/rules/**`, `build/bazel/aspects/**`, etc.) outside
+#    PLANTER_TARGET_DIR / PLANTER_TARGET_DIRS (except centralized registration
+#    lists, direct parent BUILD.gn/BUILD.bazel test groups, and dependency
+#    packages the change migrates: a new BUILD.bazel referenced, transitively,
+#    from a target package's BUILD.bazel, and the in-tree build of
+#    third_party/rust_crates: its BUILD files, Cargo.toml/Cargo.lock and compat/
+#    shims).
 #    TODO: Evaluate each out-of-scope edit for validity/usefulness and apply or
 #    batch valid changes in a separate commit.
 
@@ -56,6 +64,26 @@ ALLOWED_GLOBAL_PREFIXES = (
     "build/images/",
 )
 
+SHARED_BAZEL_RULE_PREFIXES = (
+    "build/bazel/rules/",
+    "build/bazel/aspects/",
+    "build/bazel/toolchains/",
+    "build/bazel/starlark/",
+    "build/bazel/scripts/",
+)
+
+
+def is_shared_bazel_rule_file(norm: str) -> bool:
+    if not target_dirs:
+        return False
+    if any(norm == td or norm.startswith(td + "/") for td in target_dirs):
+        return False
+    if norm.startswith(SHARED_BAZEL_RULE_PREFIXES):
+        return True
+    if norm.startswith("build/bazel/") and norm.endswith(".bzl"):
+        return not norm.startswith("build/bazel/update-rustc-third-party/")
+    return False
+
 
 def git_lines(args):
     try:
@@ -77,7 +105,8 @@ def migrated_dependency_packages():
     """Packages this change migrates because a target (transitively) depends on them.
 
     A dependency package is in scope when its BUILD.bazel is added or modified in this change
-    and a BUILD.bazel of a target package, or of another such dependency package, references it.
+    and is reachable from a target package's BUILD.bazel through non-visibility label
+    references (including across already-migrated intermediate BUILD.bazel files).
     """
     added = set(git_lines(["diff", "--name-only", "--diff-filter=AM", change_base])) | set(untracked)
     candidates = {
@@ -87,22 +116,29 @@ def migrated_dependency_packages():
         and not p.strip("/").startswith(ALLOWED_GLOBAL_PREFIXES)
     }
     candidates -= set(target_dirs)
-    label_re = re.compile(r'"@?//([^":]*)')
+    if not candidates:
+        return set()
+    label_re = re.compile(r'"@?//([^":]+)(?::([^"\s]+))?"')
     found, seen, frontier = set(), set(), list(target_dirs)
-    while frontier:
+    while frontier and found != candidates:
         pkg = frontier.pop()
-        if pkg in seen:
+        if pkg in seen or not pkg:
             continue
         seen.add(pkg)
+        if pkg not in candidates and pkg.startswith(("third_party/rust_crates/vendor", "build/bazel/")):
+            continue
         try:
             with open(os.path.join(workdir, pkg, "BUILD.bazel"), encoding="utf-8") as f:
                 text = f.read()
         except OSError:
             continue
-        for ref in label_re.findall(text):
-            ref = ref.strip("/")
-            if ref in candidates and ref not in found:
+        for m in label_re.finditer(text):
+            ref, target = m.group(1).strip("/"), m.group(2) or ""
+            if not ref or target in ("__pkg__", "__subpackages__"):
+                continue
+            if ref in candidates:
                 found.add(ref)
+            if ref not in seen:
                 frontier.append(ref)
     return found
 
@@ -144,6 +180,8 @@ def is_allowed_scope(path: str) -> bool:
             return True
         if pkg_dir == os.path.dirname(td) and os.path.basename(norm) in ("BUILD.gn", "BUILD.bazel"):
             return True
+    if is_shared_bazel_rule_file(norm):
+        return False
     if norm in allowed_gni_files:
         return True
     if pkg_dir in allowed_lint_pkgs and os.path.basename(norm) in ("BUILD.gn", "BUILD.bazel"):
@@ -151,7 +189,14 @@ def is_allowed_scope(path: str) -> bool:
     for prefix in ALLOWED_GLOBAL_PREFIXES:
         if norm.startswith(prefix):
             return True
-    if norm in ("tools/BUILD.gn", "src/BUILD.gn", "sdk/BUILD.gn"):
+    if norm in (
+        "tools/BUILD.gn",
+        "src/BUILD.gn",
+        "sdk/BUILD.gn",
+        "sdk/atom_lists.bzl",
+        "sdk/fidl/BUILD.gn",
+        "sdk/fidl/category_lists.bzl",
+    ):
         return True
     # Build files under bundles/ wire migrated targets and tests into CQ (test groups,
     # tests_barrier / bazel_target_test_suite_barrier of builder groups), which migrations
@@ -185,21 +230,106 @@ findings = []
 
 for path in sorted(changed):
     if not is_allowed_scope(path):
-        findings.append({
-            "source": "bazel_minimality",
-            "category": "out_of_scope_package_modified",
-            "severity": "error",
-            "file": path,
-            "line": 1,
-            "message": (
-                f"File '{path}' is outside the assigned target directory scope "
-                f"({', '.join(target_dirs)}). Drive-by edits or cleanups in unrelated packages are forbidden."
-            ),
-            "remediation": (
-                f"Revert changes to '{path}' (`git checkout {change_base} -- {path}` or `git checkout -- {path}`) "
-                "and restrict modifications strictly to the assigned target package(s)."
-            ),
-        })
+        if is_shared_bazel_rule_file(path.strip("/")):
+            findings.append({
+                "source": "bazel_minimality",
+                "category": "out_of_scope_package_modified",
+                "severity": "error",
+                "file": path,
+                "line": 1,
+                "message": (
+                    f"File '{path}' is a shared Bazel rule or macro definition outside the assigned target "
+                    f"directory scope ({', '.join(target_dirs)}). Package migrations must never modify "
+                    "shared rules or macros under '//build/bazel/' (such as loading private rule definitions, "
+                    "wrapping macros, or adding custom attributes)."
+                ),
+                "remediation": (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}`). If a migrated target calls a "
+                    "legacy host-tool macro (`go_binary_host_tool`, `py_binary_host_tool`) and fails visibility "
+                    "on `//build/bazel/versioning:is_api_level_PLATFORM`, add `\"//<dir>:__pkg__\"` to "
+                    "`is_api_level_PLATFORM`'s `visibility` list in 'build/bazel/versioning/BUILD.bazel' instead "
+                    f"of editing '{path}'. If a target passes a redundant or unsupported attribute (such as "
+                    "`output_name` matching `name` on `go_binary_host_tool`), omit or fix the attribute in the "
+                    "target's BUILD.bazel."
+                ),
+            })
+        else:
+            findings.append({
+                "source": "bazel_minimality",
+                "category": "out_of_scope_package_modified",
+                "severity": "error",
+                "file": path,
+                "line": 1,
+                "message": (
+                    f"File '{path}' is outside the assigned target directory scope "
+                    f"({', '.join(target_dirs)}). Drive-by edits or cleanups in unrelated packages are forbidden."
+                ),
+                "remediation": (
+                    f"Revert changes to '{path}' (`git checkout {change_base} -- {path}` or `git checkout -- {path}`) "
+                    "and restrict modifications strictly to the assigned target package(s)."
+                ),
+            })
+
+def load_platform_api_level_visibility():
+    ver_path = os.path.join(workdir, "build/bazel/versioning/BUILD.bazel")
+    if not os.path.isfile(ver_path):
+        return None
+    try:
+        with open(ver_path, "r", encoding="utf-8") as f:
+            ver_tree = ast.parse(f.read(), filename="build/bazel/versioning/BUILD.bazel")
+    except Exception:
+        return None
+    var_lists = {}
+    for stmt in ver_tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            strs = [
+                n.value
+                for n in ast.walk(stmt.value)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            ]
+            var_lists[stmt.targets[0].id] = strs
+    for node in ast.walk(ver_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Name) and node.func.id == "config_setting"):
+            continue
+        cname = ""
+        vis_node = None
+        for kw in node.keywords:
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                cname = kw.value.value
+            elif kw.arg == "visibility":
+                vis_node = kw.value
+        if cname == "is_api_level_PLATFORM" and vis_node is not None:
+            entries = []
+            for sub in ast.walk(vis_node):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    entries.append(sub.value)
+                elif isinstance(sub, ast.Name) and sub.id in var_lists:
+                    entries.extend(var_lists[sub.id])
+            return entries
+    return None
+
+
+platform_api_vis = load_platform_api_level_visibility()
+
+
+def is_covered_by_platform_api_vis(pkg_dir: str) -> bool:
+    if platform_api_vis is None:
+        return True
+    for entry in platform_api_vis:
+        if entry == "//visibility:public" or entry == "//:__subpackages__":
+            return True
+        if entry.startswith("//") and entry.endswith(":__pkg__"):
+            p = entry[2 : -len(":__pkg__")].strip("/")
+            if pkg_dir == p:
+                return True
+        elif entry.startswith("//") and entry.endswith(":__subpackages__"):
+            p = entry[2 : -len(":__subpackages__")].strip("/")
+            if not p or pkg_dir == p or pkg_dir.startswith(p + "/"):
+                return True
+    return False
+
 
 bazel_files = []
 for td in dict.fromkeys(list(target_dirs) + sorted(dependency_dirs)):
@@ -292,6 +422,67 @@ for rel_path, full_path in bazel_files:
                     ),
                     "remediation": (
                         "Remove `crate_root` from BUILD.bazel and re-run `fx bazel2gn`."
+                    ),
+                })
+
+        # 3b. Redundant output_name / out matching name (or unsupported output_name on go_binary / go_binary_host_tool)
+        for out_attr in ("output_name", "out"):
+            if out_attr not in kw_map:
+                continue
+            out_val, lineno = kw_map[out_attr]
+            if target_name and out_val == target_name:
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "redundant_default_attribute",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": lineno,
+                    "message": (
+                        f"Target '{target_name}' ({rule_name}) specifies redundant `{out_attr} = \"{out_val}\"`, "
+                        "which is already the default derived from `name` (and `output_name` is not a valid attribute on "
+                        "`go_binary` / `go_binary_host_tool`)."
+                    ),
+                    "remediation": (
+                        f"Remove `{out_attr}` from BUILD.bazel (and from BUILD.gn if dual-building) and re-run `fx bazel2gn`."
+                    ),
+                })
+            elif out_attr == "output_name" and rule_name in ("go_binary", "go_binary_host_tool"):
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "redundant_default_attribute",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": lineno,
+                    "message": (
+                        f"Target '{target_name}' ({rule_name}) specifies `output_name = \"{out_val}\"`, "
+                        f"which is not a valid attribute on `{rule_name}` (`go_binary` uses `out` when a custom binary name is needed)."
+                    ),
+                    "remediation": (
+                        f"Omit `output_name` when it matches `name`, or use `out = \"{out_val}\"` if a custom binary name is required, "
+                        "without modifying shared macros in `//build/bazel/rules/host:defs.bzl`."
+                    ),
+                })
+
+        # 3c. Legacy host-tool macros (go_binary_host_tool, py_binary_host_tool) require
+        #     caller package visibility on //build/bazel/versioning:is_api_level_PLATFORM.
+        if rule_name in ("go_binary_host_tool", "py_binary_host_tool"):
+            pkg_d = os.path.dirname(rel_path).strip("/")
+            if pkg_d and not is_covered_by_platform_api_vis(pkg_d):
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "missing_platform_api_level_visibility",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": getattr(node, "lineno", 1),
+                    "message": (
+                        f"Target '{target_name}' ({rule_name}) invokes legacy macro `{rule_name}`, which "
+                        "expands `//build/bazel/versioning:is_api_level_PLATFORM` in the calling package, "
+                        f"but 'build/bazel/versioning/BUILD.bazel' does not grant visibility to '//{pkg_d}'."
+                    ),
+                    "remediation": (
+                        f"Add `\"//{pkg_d}:__pkg__\"` (in alphabetical order) to the `visibility` list of "
+                        "`is_api_level_PLATFORM` in 'build/bazel/versioning/BUILD.bazel'. Never modify "
+                        "'build/bazel/rules/host/defs.bzl' to work around this visibility requirement."
                     ),
                 })
 
@@ -463,6 +654,63 @@ for td in target_dirs:
             rel = os.path.join(rel_root, fname) if rel_root else fname
             if is_starlark_file(rel):
                 starlark_rels.add(rel)
+
+# 4a. Reject newly added private external rule loads (@...//.../private/...) or duplicate
+#     loads of the same rule symbol from both a public and a private .bzl location.
+for rel in sorted(starlark_rels):
+    try:
+        with open(os.path.join(workdir, rel), "r", encoding="utf-8") as f:
+            st_src = f.read()
+        st_tree = ast.parse(st_src, filename=rel)
+    except Exception:
+        continue
+    base_st_flat = re.sub(r"\s+", "", "".join(git_lines(["show", f"{change_base}:{rel}"])))
+    loaded_symbols = {}
+    for stmt in st_tree.body:
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "load"
+            and stmt.value.args
+            and isinstance(stmt.value.args[0], ast.Constant)
+            and isinstance(stmt.value.args[0].value, str)
+        ):
+            continue
+        call = stmt.value
+        mod_label = call.args[0].value
+        seg = ast.get_source_segment(st_src, stmt) or ""
+        is_new_load = not (seg and re.sub(r"\s+", "", seg) in base_st_flat)
+        syms = []
+        for a in call.args[1:]:
+            if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                syms.append((a.value, a.value))
+        for kw in call.keywords:
+            if kw.arg and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                syms.append((kw.arg, kw.value.value))
+        is_ext_private = bool(re.search(r"^@[^/]+//(?:[^:]*/)?private(?:/|:)", mod_label))
+        for _local_name, orig_name in syms:
+            prev_mod = loaded_symbols.get(orig_name)
+            if is_new_load and (
+                is_ext_private
+                or (prev_mod and prev_mod != mod_label and "private" in (mod_label + prev_mod))
+            ):
+                dup_note = f" (duplicating `{orig_name}` already loaded from `{prev_mod}`)" if prev_mod else ""
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "private_or_duplicate_rule_load",
+                    "severity": "error",
+                    "file": rel,
+                    "line": stmt.lineno,
+                    "message": (
+                        f"'{rel}' loads `{orig_name}` from private rule location `{mod_label}`{dup_note}. "
+                        "Starlark files must only load rules from their public `.bzl` entry points."
+                    ),
+                    "remediation": (
+                        f"Remove `load(\"{mod_label}\", ...)` from '{rel}' and use the public rule entry point instead."
+                    ),
+                })
+            loaded_symbols.setdefault(orig_name, mod_label)
 
 buildifier_bin = None
 for cand_rel in (

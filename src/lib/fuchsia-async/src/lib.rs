@@ -34,8 +34,11 @@ mod runtime;
 pub use self::runtime::*;
 
 mod handle;
+#[cfg(target_os = "fuchsia")]
 pub use self::handle::channel::{Channel, RecvMsg};
+#[cfg(target_os = "fuchsia")]
 pub use self::handle::on_signals::OnSignalsRef;
+#[cfg(target_os = "fuchsia")]
 pub use self::handle::socket::Socket;
 
 /// Asynchronous networking abstractions.

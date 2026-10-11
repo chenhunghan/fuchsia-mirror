@@ -91,6 +91,11 @@ register! {
         pub txeis, _: 0;
     }
 
+    #[register(offset = 0x48, mode = RO)]
+    pub struct Icr(u32) {
+        pub icr, _: 0;
+    }
+
     #[register(offset = 0x60, mode = RW)]
     pub struct Dr0(u32) {
         pub dr, set_dr: 7, 0;
@@ -116,6 +121,7 @@ register_block! {
         pub sr: Sr,
         pub imr: Imr,
         pub isr: Isr,
+        pub icr: Icr,
         pub dr0: Dr0,
         pub rx_sample_dly: RxSampleDly,
     }

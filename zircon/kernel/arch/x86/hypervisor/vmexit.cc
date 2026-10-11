@@ -732,7 +732,7 @@ zx::result<> handle_ipi(const ExitInfo& exit_info, AutoVmcs& vmcs, const GuestSt
       memset(&packet, 0, sizeof(packet));
       packet.type = ZX_PKT_TYPE_GUEST_VCPU;
       packet.guest_vcpu.type = ZX_PKT_GUEST_VCPU_STARTUP;
-      packet.guest_vcpu.startup.id = icr.destination;
+      packet.guest_vcpu.startup.target = icr.destination;
       packet.guest_vcpu.startup.entry = icr.vector << 12;
       next_rip(exit_info, vmcs);
       return zx::error(ZX_ERR_NEXT);

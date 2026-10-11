@@ -14,7 +14,7 @@ use crate::mm::{
 };
 use crate::security;
 use crate::signals::{SignalDetail, SignalInfo};
-use crate::task::{CurrentTask, ExceptionResult, PageFaultExceptionReport, Pid, Task};
+use crate::task::{CurrentTask, ExceptionResult, PageFaultExceptionReport, Task, TaskContainer};
 use crate::vfs::aio::AioContext;
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::pseudo::dynamic_file::{
@@ -26,6 +26,7 @@ use crate::vfs::{
 };
 use anyhow::{Error, anyhow};
 use bitflags::bitflags;
+use crossbeam::atomic::AtomicCell;
 use flyweights::FlyByteStr;
 use linux_uapi::BUS_ADRERR;
 use memory_pinning::PinnedMapping;
@@ -35,8 +36,8 @@ use starnix_ext::map_ext::EntryExt;
 use starnix_lifecycle::DropNotifier;
 use starnix_logging::{CATEGORY_STARNIX_MM, impossible_error, log_error, log_warn, track_stub};
 use starnix_sync::{
-    LockDepMutex, MemoryManagerCachedStatsLock, MmDumpable, RwLock, RwLockWriteGuard,
-    ordered_write_lock,
+    LockDepMutex, LockDepRwLock, LockDepWriteGuard, MemoryManagerCachedStatsLock,
+    MemoryManagerStateLock, assert_lock_level, ordered_write_lock,
 };
 use starnix_types::arch::ArchWidth;
 use starnix_types::futex_address::FutexAddress;
@@ -208,6 +209,8 @@ pub enum DumpPolicy {
     /// Corresponds to SUID_DUMP_USER.
     User,
 }
+
+static_assertions::const_assert!(AtomicCell::<DumpPolicy>::is_lock_free());
 
 // Supported types of membarriers.
 pub enum MembarrierType {
@@ -389,7 +392,7 @@ impl ReleasedMappings {
         self.doomed.len() + self.doomed_pins.len()
     }
 
-    fn finalize(&mut self, mm_state: RwLockWriteGuard<'_, MemoryManagerState>) {
+    fn finalize(&mut self, mm_state: LockDepWriteGuard<'_, MemoryManagerState>) {
         // Drop the state before the unmapped mappings, since dropping a mapping may acquire a lock
         // in `DirEntry`'s `drop`.
         std::mem::drop(mm_state);
@@ -654,7 +657,7 @@ impl MemoryManagerState {
 
     fn add_memory_mapping(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: DesiredAddress,
         memory: Arc<MemoryObject>,
         memory_offset: u64,
@@ -700,7 +703,7 @@ impl MemoryManagerState {
 
     fn map_private_anonymous(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: DesiredAddress,
         length: usize,
         prot_flags: ProtectionFlags,
@@ -739,7 +742,7 @@ impl MemoryManagerState {
 
     fn map_anonymous(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: DesiredAddress,
         length: usize,
         prot_flags: ProtectionFlags,
@@ -884,7 +887,7 @@ impl MemoryManagerState {
     fn remap(
         &mut self,
         _current_task: &CurrentTask,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         old_addr: UserAddress,
         old_length: usize,
         new_length: usize,
@@ -970,7 +973,7 @@ impl MemoryManagerState {
     /// successful. Returns `Ok(None)` if there was no space to grow.
     fn try_remap_in_place(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         old_addr: UserAddress,
         old_length: usize,
         new_length: usize,
@@ -1053,7 +1056,7 @@ impl MemoryManagerState {
     /// Grows or shrinks the mapping while moving it to a new destination.
     fn remap_move(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         src_addr: UserAddress,
         src_length: usize,
         dst_addr: Option<UserAddress>,
@@ -1233,7 +1236,7 @@ impl MemoryManagerState {
     /// Unmaps the specified range. Unmapped mappings are placed in `released_mappings`.
     fn unmap(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: UserAddress,
         length: usize,
         released_mappings: &mut ReleasedMappings,
@@ -1283,7 +1286,7 @@ impl MemoryManagerState {
     // Unmapped mappings are placed in `released_mappings`.
     fn update_after_unmap(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: UserAddress,
         length: usize,
         released_mappings: &mut ReleasedMappings,
@@ -1942,15 +1945,17 @@ impl MemoryManagerState {
     /// and extends it if possible. Returns true if the given address is covered by a mapping.
     fn extend_growsdown_mapping_to_address(
         &mut self,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: UserAddress,
         is_write: bool,
     ) -> Result<bool, Error> {
         let Some((mapping_low_addr, mapping_to_grow)) = self.find_growsdown_mapping(addr) else {
             return Ok(false);
         };
-        if is_write && !mapping_to_grow.can_write() {
-            // Don't grow a read-only GROWSDOWN mapping for a write fault, it won't work.
+        if (is_write && !mapping_to_grow.can_write()) || (!is_write && !mapping_to_grow.can_read())
+        {
+            // Don't grow a GROWSDOWN mapping if it doesn't have the required permissions for the
+            // access.
             return Ok(false);
         }
         if !mapping_to_grow.flags().contains(MappingFlags::ANONYMOUS) {
@@ -1958,6 +1963,9 @@ impl MemoryManagerState {
             return Ok(false);
         }
         let low_addr = (addr - (addr.ptr() as u64 % *PAGE_SIZE))?;
+        if low_addr < mm.base_addr {
+            return Ok(false);
+        }
         let high_addr = mapping_low_addr;
 
         let length = high_addr
@@ -1995,30 +2003,9 @@ impl MemoryManagerState {
         bytes: &'a mut [MaybeUninit<u8>],
         context: &MappingContext,
     ) -> Result<&'a mut [u8], Errno> {
-        let mut bytes_read = 0;
-        for (mapping, len) in self.get_contiguous_mappings_at(addr, bytes.len(), context)? {
-            let next_offset = bytes_read + len;
-            self.read_mapping_memory(
-                (addr + bytes_read)?,
-                mapping,
-                &mut bytes[bytes_read..next_offset],
-                context,
-            )?;
-            bytes_read = next_offset;
-        }
-
-        if bytes_read != bytes.len() {
-            error!(EFAULT)
-        } else {
-            // SAFETY: The created slice is properly aligned/sized since it
-            // is a subset of the `bytes` slice. Note that `MaybeUninit<T>` has
-            // the same layout as `T`. Also note that `bytes_read` bytes have
-            // been properly initialized.
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u8, bytes_read)
-            };
-            Ok(bytes)
-        }
+        let total_len = bytes.len();
+        let bytes_read = self.read_memory_partial(addr, bytes, context)?;
+        if bytes_read.len() != total_len { error!(EFAULT) } else { Ok(bytes_read) }
     }
 
     /// Reads exactly `bytes.len()` bytes of memory from `addr`.
@@ -2074,19 +2061,17 @@ impl MemoryManagerState {
             bytes_read = next_offset;
         }
 
-        // If at least one byte was requested but we got none, it means that `addr` was invalid.
-        if !bytes.is_empty() && bytes_read == 0 {
-            error!(EFAULT)
-        } else {
-            // SAFETY: The created slice is properly aligned/sized since it
-            // is a subset of the `bytes` slice. Note that `MaybeUninit<T>` has
-            // the same layout as `T`. Also note that `bytes_read` bytes have
-            // been properly initialized.
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u8, bytes_read)
-            };
-            Ok(bytes)
-        }
+        let initialized = &mut bytes[..bytes_read];
+        // SAFETY: `initialized` is an exclusive `&'a mut [MaybeUninit<u8>]` subslice of `bytes` of
+        // length `bytes_read`, which guarantees a non-null, aligned pointer with exclusive
+        // provenance over a single live allocation of size `bytes_read <= bytes.len() <= isize::MAX`.
+        // `MaybeUninit<u8>` has the same layout as `u8`, and each succeeded `read_mapping_memory`
+        // call initialized its contiguous segment via `MemoryObject::read_uninit`
+        // (`zx::Vmo::read_uninit`), so all `bytes_read` bytes in `initialized` are initialized.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(initialized.as_mut_ptr() as *mut u8, bytes_read)
+        };
+        Ok(bytes)
     }
 
     /// Like `read_memory_partial` but only returns the bytes up to and including
@@ -2116,18 +2101,7 @@ impl MemoryManagerState {
         bytes: &[u8],
         context: &MappingContext,
     ) -> Result<usize, Errno> {
-        let mut bytes_written = 0;
-        for (mapping, len) in self.get_contiguous_mappings_at(addr, bytes.len(), context)? {
-            let next_offset = bytes_written + len;
-            self.write_mapping_memory(
-                (addr + bytes_written)?,
-                mapping,
-                &bytes[bytes_written..next_offset],
-                context,
-            )?;
-            bytes_written = next_offset;
-        }
-
+        let bytes_written = self.write_memory_partial(addr, bytes, context)?;
         if bytes_written != bytes.len() { error!(EFAULT) } else { Ok(bytes.len()) }
     }
 
@@ -2181,10 +2155,10 @@ impl MemoryManagerState {
             bytes_written = next_offset;
         }
 
-        if !bytes.is_empty() && bytes_written == 0 { error!(EFAULT) } else { Ok(bytes.len()) }
+        Ok(bytes_written)
     }
 
-    fn zero(
+    fn zero_partial(
         &self,
         addr: UserAddress,
         length: usize,
@@ -2199,6 +2173,16 @@ impl MemoryManagerState {
             bytes_written = next_offset;
         }
 
+        Ok(bytes_written)
+    }
+
+    fn zero(
+        &self,
+        addr: UserAddress,
+        length: usize,
+        context: &MappingContext,
+    ) -> Result<usize, Errno> {
+        let bytes_written = self.zero_partial(addr, length, context)?;
         if length != bytes_written { error!(EFAULT) } else { Ok(length) }
     }
 
@@ -2433,7 +2417,7 @@ impl MemoryManagerState {
     fn set_brk(
         &mut self,
         current_task: &CurrentTask,
-        mm: &Arc<MemoryManager>,
+        mm: &MemoryManager,
         addr: UserAddress,
         released_mappings: &mut ReleasedMappings,
     ) -> Result<UserAddress, Errno> {
@@ -2775,11 +2759,16 @@ impl MemoryManager {
         &self,
         addr: UserAddress,
         len: usize,
+        is_write: bool,
         mut transfer_fn: F,
     ) -> Result<usize, Errno>
     where
         F: FnMut(UserAddress, usize) -> Result<ControlFlow<usize, usize>, Errno>,
     {
+        // A usercopy fault acquires MemoryManagerStateLock via ensure_range_mapped_in_user_vmar
+        // or extend_growsdown_mapping_to_address. Assert lock ordering upfront so lockdep catches
+        // callers holding higher-level locks even when the user buffer is resident.
+        assert_lock_level::<MemoryManagerStateLock>();
         let mut copied = 0;
         while copied < len {
             match transfer_fn((addr + copied)?, copied)? {
@@ -2798,9 +2787,17 @@ impl MemoryManager {
                         // for now, but this could be tuned in the future.
                         if self.ensure_range_mapped_in_user_vmar(fault_addr, None)? {
                             continue;
-                        } else {
-                            break;
                         }
+                        // A failed transfer can also be resolved by extending a GROWSDOWN mapping
+                        // above, if there is one.
+                        match self.extend_growsdown_mapping_to_address(fault_addr, is_write) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(e) => {
+                                log_warn!("Error extending growsdown mapping: {e}");
+                            }
+                        }
+                        break;
                     }
                     copied += num_copied;
                 }
@@ -2813,30 +2810,82 @@ impl MemoryManager {
         Ok(copied)
     }
 
+    /// Finalizes a partially-initialized `MaybeUninit<u8>` buffer after reading `copied` bytes.
+    ///
+    /// Returns `error!(EFAULT)` if `copied == 0` and `!bytes.is_empty()`.
+    ///
+    /// # Safety
+    /// The caller must guarantee that the first `copied` bytes of `bytes` (`bytes[..copied]`)
+    /// have been initialized, and `copied <= bytes.len()`.
+    unsafe fn finalize_partial_read<'a>(
+        bytes: &'a mut [MaybeUninit<u8>],
+        copied: usize,
+    ) -> Result<&'a mut [u8], Errno> {
+        if copied == 0 && !bytes.is_empty() {
+            return error!(EFAULT);
+        }
+        let initialized = &mut bytes[..copied];
+        // SAFETY: `initialized` is an exclusive `&'a mut [MaybeUninit<u8>]` subslice of `bytes` of
+        // length `copied`, which guarantees a non-null, aligned pointer with exclusive provenance
+        // over a single live allocation of size `copied <= bytes.len() <= isize::MAX`.
+        // `MaybeUninit<u8>` has the same layout as `u8`, and the caller guarantees that all
+        // `copied` bytes in `initialized` are initialized.
+        Ok(unsafe { std::slice::from_raw_parts_mut(initialized.as_mut_ptr() as *mut u8, copied) })
+    }
+
     pub fn unified_read_memory<'a>(
         &self,
         current_task: &CurrentTask,
         addr: UserAddress,
         bytes: &'a mut [MaybeUninit<u8>],
     ) -> Result<&'a mut [u8], Errno> {
-        debug_assert!(self.has_same_address_space(&current_task.mm().unwrap()));
+        let total_len = bytes.len();
+        let bytes_read = self.unified_read_memory_partial(current_task, addr, bytes)?;
+        if bytes_read.len() < total_len { error!(EFAULT) } else { Ok(bytes_read) }
+    }
 
-        let buf_ptr = bytes.as_mut_ptr();
-        let buf_len = bytes.len();
-
-        let copied = self.unified_transfer_loop(addr, buf_len, |cur_addr, offset| {
-            // SAFETY: Exclusive access to `bytes` for the lifetime of this function.
-            let current_bytes =
-                unsafe { std::slice::from_raw_parts_mut(buf_ptr.add(offset), buf_len - offset) };
-            let (read_bytes, _unread_bytes) = usercopy().copyin(cur_addr.ptr(), current_bytes);
-            Ok(ControlFlow::Continue(read_bytes.len()))
-        })?;
-        if copied < bytes.len() {
-            error!(EFAULT)
-        } else {
-            // SAFETY: All bytes up to `buf_len` have been initialized.
-            Ok(unsafe { std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) })
+    fn syscall_transfer_loop<F>(
+        &self,
+        addr: UserAddress,
+        len: usize,
+        is_write: bool,
+        mut transfer_fn: F,
+    ) -> Result<usize, Errno>
+    where
+        F: FnMut(
+            &MemoryManagerState,
+            UserAddress,
+            usize,
+        ) -> Result<ControlFlow<usize, usize>, Errno>,
+    {
+        let mut copied = 0;
+        while copied < len {
+            let cur_addr = (addr + copied)?;
+            let flow = {
+                let state = self.state.read();
+                transfer_fn(&state, cur_addr, copied)?
+            };
+            match flow {
+                ControlFlow::Continue(num_copied) => {
+                    if num_copied == 0 {
+                        match self.extend_growsdown_mapping_to_address(cur_addr, is_write) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(e) => {
+                                log_warn!("Error extending growsdown mapping: {e}");
+                            }
+                        }
+                        break;
+                    }
+                    copied += num_copied;
+                }
+                ControlFlow::Break(num_copied) => {
+                    copied += num_copied;
+                    break;
+                }
+            }
         }
+        Ok(copied)
     }
 
     pub fn syscall_read_memory<'a>(
@@ -2844,7 +2893,9 @@ impl MemoryManager {
         addr: UserAddress,
         bytes: &'a mut [MaybeUninit<u8>],
     ) -> Result<&'a mut [u8], Errno> {
-        self.state.read().read_memory(addr, bytes, &self.mapping_context)
+        let total_len = bytes.len();
+        let bytes_read = self.syscall_read_memory_partial(addr, bytes)?;
+        if bytes_read.len() < total_len { error!(EFAULT) } else { Ok(bytes_read) }
     }
 
     pub fn unified_read_memory_partial_until_null_byte<'a>(
@@ -2855,29 +2906,26 @@ impl MemoryManager {
     ) -> Result<&'a mut [u8], Errno> {
         debug_assert!(self.has_same_address_space(&current_task.mm().unwrap()));
 
-        let buf_ptr = bytes.as_mut_ptr();
-        let buf_len = bytes.len();
+        let copied = self.unified_transfer_loop(
+            addr,
+            bytes.len(),
+            /*is_write=*/ false,
+            |cur_addr, offset| {
+                let (read_bytes, _unread_bytes) =
+                    usercopy().copyin_until_null_byte(cur_addr.ptr(), &mut bytes[offset..]);
 
-        let copied = self.unified_transfer_loop(addr, buf_len, |cur_addr, offset| {
-            // SAFETY: Exclusive access to `bytes` for the lifetime of this function.
-            let current_bytes =
-                unsafe { std::slice::from_raw_parts_mut(buf_ptr.add(offset), buf_len - offset) };
-            let (read_bytes, _unread_bytes) =
-                usercopy().copyin_until_null_byte(cur_addr.ptr(), current_bytes);
-
-            let num_copied = read_bytes.len();
-            if read_bytes.last().map(|b| *b == 0).unwrap_or(false) {
-                Ok(ControlFlow::Break(num_copied))
-            } else {
-                Ok(ControlFlow::Continue(num_copied))
-            }
-        })?;
-        if copied == 0 && !bytes.is_empty() {
-            error!(EFAULT)
-        } else {
-            // SAFETY: Bytes up to `copied` have been initialized.
-            Ok(unsafe { std::slice::from_raw_parts_mut(buf_ptr as *mut u8, copied) })
-        }
+                let num_copied = read_bytes.len();
+                if read_bytes.last().map(|b| *b == 0).unwrap_or(false) {
+                    Ok(ControlFlow::Break(num_copied))
+                } else {
+                    Ok(ControlFlow::Continue(num_copied))
+                }
+            },
+        )?;
+        // SAFETY: Each iteration of `unified_transfer_loop` initializes `read_bytes.len()`
+        // contiguous bytes starting at `offset` via `usercopy().copyin_until_null_byte`, so the
+        // first `copied` bytes of `bytes` are initialized and `copied <= bytes.len()`.
+        unsafe { Self::finalize_partial_read(bytes, copied) }
     }
 
     pub fn syscall_read_memory_partial_until_null_byte<'a>(
@@ -2885,7 +2933,29 @@ impl MemoryManager {
         addr: UserAddress,
         bytes: &'a mut [MaybeUninit<u8>],
     ) -> Result<&'a mut [u8], Errno> {
-        self.state.read().read_memory_partial_until_null_byte(addr, bytes, &self.mapping_context)
+        let copied = self.syscall_transfer_loop(
+            addr,
+            bytes.len(),
+            /*is_write=*/ false,
+            |state, cur_addr, offset| {
+                let read_bytes = state.read_memory_partial_until_null_byte(
+                    cur_addr,
+                    &mut bytes[offset..],
+                    &self.mapping_context,
+                )?;
+                let num_copied = read_bytes.len();
+                if read_bytes.last().map(|b| *b == 0).unwrap_or(false) {
+                    Ok(ControlFlow::Break(num_copied))
+                } else {
+                    Ok(ControlFlow::Continue(num_copied))
+                }
+            },
+        )?;
+        // SAFETY: Each iteration of `syscall_transfer_loop` initializes `read_bytes.len()`
+        // contiguous bytes starting at `offset` via `read_memory_partial_until_null_byte`
+        // (`MemoryObject::read_uninit`), so the first `copied` bytes of `bytes` are initialized
+        // and `copied <= bytes.len()`.
+        unsafe { Self::finalize_partial_read(bytes, copied) }
     }
 
     pub fn unified_read_memory_partial<'a>(
@@ -2896,22 +2966,20 @@ impl MemoryManager {
     ) -> Result<&'a mut [u8], Errno> {
         debug_assert!(self.has_same_address_space(&current_task.mm().unwrap()));
 
-        let buf_ptr = bytes.as_mut_ptr();
-        let buf_len = bytes.len();
-
-        let copied = self.unified_transfer_loop(addr, buf_len, |cur_addr, offset| {
-            // SAFETY: Exclusive access to `bytes` for the lifetime of this function.
-            let current_bytes =
-                unsafe { std::slice::from_raw_parts_mut(buf_ptr.add(offset), buf_len - offset) };
-            let (read_bytes, _unread_bytes) = usercopy().copyin(cur_addr.ptr(), current_bytes);
-            Ok(ControlFlow::Continue(read_bytes.len()))
-        })?;
-        if copied == 0 && !bytes.is_empty() {
-            error!(EFAULT)
-        } else {
-            // SAFETY: Bytes up to `copied` have been initialized.
-            Ok(unsafe { std::slice::from_raw_parts_mut(buf_ptr as *mut u8, copied) })
-        }
+        let copied = self.unified_transfer_loop(
+            addr,
+            bytes.len(),
+            /*is_write=*/ false,
+            |cur_addr, offset| {
+                let (read_bytes, _unread_bytes) =
+                    usercopy().copyin(cur_addr.ptr(), &mut bytes[offset..]);
+                Ok(ControlFlow::Continue(read_bytes.len()))
+            },
+        )?;
+        // SAFETY: Each iteration of `unified_transfer_loop` initializes `read_bytes.len()`
+        // contiguous bytes starting at `offset` via `usercopy().copyin`, so the first `copied`
+        // bytes of `bytes` are initialized and `copied <= bytes.len()`.
+        unsafe { Self::finalize_partial_read(bytes, copied) }
     }
 
     pub fn syscall_read_memory_partial<'a>(
@@ -2919,7 +2987,24 @@ impl MemoryManager {
         addr: UserAddress,
         bytes: &'a mut [MaybeUninit<u8>],
     ) -> Result<&'a mut [u8], Errno> {
-        self.state.read().read_memory_partial(addr, bytes, &self.mapping_context)
+        let copied = self.syscall_transfer_loop(
+            addr,
+            bytes.len(),
+            /*is_write=*/ false,
+            |state, cur_addr, offset| {
+                let read_bytes = state.read_memory_partial(
+                    cur_addr,
+                    &mut bytes[offset..],
+                    &self.mapping_context,
+                )?;
+                Ok(ControlFlow::Continue(read_bytes.len()))
+            },
+        )?;
+        // SAFETY: Each iteration of `syscall_transfer_loop` initializes `read_bytes.len()`
+        // contiguous bytes starting at `offset` via `read_memory_partial`
+        // (`MemoryObject::read_uninit`), so the first `copied` bytes of `bytes` are initialized
+        // and `copied <= bytes.len()`.
+        unsafe { Self::finalize_partial_read(bytes, copied) }
     }
 
     pub fn unified_write_memory(
@@ -2928,12 +3013,7 @@ impl MemoryManager {
         addr: UserAddress,
         bytes: &[u8],
     ) -> Result<usize, Errno> {
-        debug_assert!(self.has_same_address_space(&current_task.mm().unwrap()));
-
-        let len = bytes.len();
-        let copied = self.unified_transfer_loop(addr, len, |cur_addr, offset| {
-            Ok(ControlFlow::Continue(usercopy().copyout(&bytes[offset..], cur_addr.ptr())))
-        })?;
+        let copied = self.unified_write_memory_partial(current_task, addr, bytes)?;
         if copied < bytes.len() { error!(EFAULT) } else { Ok(copied) }
     }
 
@@ -2952,7 +3032,8 @@ impl MemoryManager {
     }
 
     pub fn syscall_write_memory(&self, addr: UserAddress, bytes: &[u8]) -> Result<usize, Errno> {
-        self.state.read().write_memory(addr, bytes, &self.mapping_context)
+        let copied = self.syscall_write_memory_partial(addr, bytes)?;
+        if copied < bytes.len() { error!(EFAULT) } else { Ok(copied) }
     }
 
     pub fn unified_write_memory_partial(
@@ -2964,9 +3045,10 @@ impl MemoryManager {
         debug_assert!(self.has_same_address_space(&current_task.mm().unwrap()));
 
         let len = bytes.len();
-        let copied = self.unified_transfer_loop(addr, len, |cur_addr, offset| {
-            Ok(ControlFlow::Continue(usercopy().copyout(&bytes[offset..], cur_addr.ptr())))
-        })?;
+        let copied =
+            self.unified_transfer_loop(addr, len, /*is_write=*/ true, |cur_addr, offset| {
+                Ok(ControlFlow::Continue(usercopy().copyout(&bytes[offset..], cur_addr.ptr())))
+            })?;
         if copied == 0 && !bytes.is_empty() { error!(EFAULT) } else { Ok(copied) }
     }
 
@@ -2975,7 +3057,20 @@ impl MemoryManager {
         addr: UserAddress,
         bytes: &[u8],
     ) -> Result<usize, Errno> {
-        self.state.read().write_memory_partial(addr, bytes, &self.mapping_context)
+        let len = bytes.len();
+        let copied = self.syscall_transfer_loop(
+            addr,
+            len,
+            /*is_write=*/ true,
+            |state, cur_addr, offset| {
+                Ok(ControlFlow::Continue(state.write_memory_partial(
+                    cur_addr,
+                    &bytes[offset..],
+                    &self.mapping_context,
+                )?))
+            },
+        )?;
+        if copied == 0 && !bytes.is_empty() { error!(EFAULT) } else { Ok(copied) }
     }
 
     pub fn unified_zero(
@@ -3005,14 +3100,31 @@ impl MemoryManager {
             }
         }
 
-        let copied = self.unified_transfer_loop(addr, length, |cur_addr, offset| {
-            Ok(ControlFlow::Continue(usercopy().zero(cur_addr.ptr(), length - offset)))
-        })?;
+        let copied = self.unified_transfer_loop(
+            addr,
+            length,
+            /*is_write=*/ true,
+            |cur_addr, offset| {
+                Ok(ControlFlow::Continue(usercopy().zero(cur_addr.ptr(), length - offset)))
+            },
+        )?;
         if copied == 0 && length > 0 { error!(EFAULT) } else { Ok(copied) }
     }
 
     pub fn syscall_zero(&self, addr: UserAddress, length: usize) -> Result<usize, Errno> {
-        self.state.read().zero(addr, length, &self.mapping_context)
+        let copied = self.syscall_transfer_loop(
+            addr,
+            length,
+            /*is_write=*/ true,
+            |state, cur_addr, offset| {
+                Ok(ControlFlow::Continue(state.zero_partial(
+                    cur_addr,
+                    length - offset,
+                    &self.mapping_context,
+                )?))
+            },
+        )?;
+        if copied == 0 && length > 0 { error!(EFAULT) } else { Ok(copied) }
     }
 
     /// Performs a data and instruction cache flush over the given address range.
@@ -3102,10 +3214,10 @@ pub struct MemoryManager {
     pub mapping_context: MappingContext,
 
     /// Mutable state for the memory manager.
-    pub state: RwLock<MemoryManagerState>,
+    pub state: LockDepRwLock<MemoryManagerState, MemoryManagerStateLock>,
 
     /// Whether this address space is dumpable.
-    pub dumpable: LockDepMutex<DumpPolicy, MmDumpable>,
+    pub dumpable: AtomicCell<DumpPolicy>,
 
     /// Maximum valid user address for this vmar.
     pub maximum_valid_user_address: UserAddress,
@@ -3277,7 +3389,7 @@ impl MemoryManager {
             .into(),
             // TODO(security): Reset to DISABLE, or the value in the fs.suid_dumpable sysctl, under
             // certain conditions as specified in the prctl(2) man page.
-            dumpable: LockDepMutex::new(DumpPolicy::User),
+            dumpable: AtomicCell::new(DumpPolicy::User),
             maximum_valid_user_address: UserAddress::from_ptr(
                 user_vmar_info.base + user_vmar_info.len,
             ),
@@ -3561,8 +3673,7 @@ impl MemoryManager {
             target_state.forkable_state = state.forkable_state.clone();
         }
 
-        let self_dumpable = *source_mm.dumpable.lock();
-        *target.dumpable.lock() = self_dumpable;
+        target.dumpable.store(source_mm.dumpable.load());
 
         Ok(target)
     }
@@ -3951,6 +4062,7 @@ impl MemoryManager {
     }
 
     pub fn log_memory_map(&self, task: &Task, fault_address: UserAddress) {
+        let fs_context = task.fs();
         let state = self.state.read();
         log_warn!("Memory map for pid={}:", task.pid);
         let mut last_end = UserAddress::from_ptr(0);
@@ -3974,11 +4086,11 @@ impl MemoryManager {
 
             let name_str = match &map.name() {
                 MappingNameRef::File(file) => {
-                    let Ok(fs) = task.fs() else {
+                    let Ok(ref fs) = fs_context else {
                         log_warn!("Task {} is not running", task.get_tid());
                         continue;
                     };
-                    String::from_utf8_lossy(&file.name().path(&fs)).into_owned()
+                    String::from_utf8_lossy(&file.name().path(fs)).into_owned()
                 }
                 MappingNameRef::None | MappingNameRef::AioContext(_) => {
                     if map.flags().contains(MappingFlags::SHARED)
@@ -4284,7 +4396,7 @@ impl MemoryManager {
     }
 
     pub fn extend_growsdown_mapping_to_address(
-        self: &Arc<Self>,
+        &self,
         addr: UserAddress,
         is_write: bool,
     ) -> Result<bool, Error> {
@@ -4611,13 +4723,13 @@ pub struct MemoryStats {
 #[derive(Clone)]
 pub struct ProcMapsFile {
     mm: Weak<MemoryManager>,
-    task: Weak<Task>,
+    target: TaskContainer,
 }
 impl ProcMapsFile {
-    pub fn new(task: Arc<Task>) -> DynamicFile<Self> {
+    pub fn new(task: Arc<Task>, target: TaskContainer) -> DynamicFile<Self> {
         // "maps" is empty for kthreads, rather than inaccessible.
         let mm = task.mm().map_or_else(|_| Weak::default(), |mm| Arc::downgrade(&mm));
-        DynamicFile::new(Self { mm, task: Arc::downgrade(&task) })
+        DynamicFile::new(Self { mm, target })
     }
 }
 
@@ -4630,14 +4742,14 @@ impl SequenceFileSource for ProcMapsFile {
         cursor: UserAddress,
         sink: &mut DynamicFileBuf,
     ) -> Result<Option<UserAddress>, Errno> {
-        let task = Task::from_weak(&self.task)?;
+        let task = self.target.get_task()?;
         // /proc/<pid>/maps is empty for kthreads and tasks whose memory manager has changed.
         let Some(mm) = self.mm.upgrade() else {
             return Ok(None);
         };
+        let fs_context = task.fs().ok();
         let state = mm.state.read();
         if let Some((range, map)) = state.mappings.find_at_or_after(cursor) {
-            let fs_context = task.fs().ok();
             write_map(&task, fs_context.as_deref(), sink, &state, range, map)?;
             return Ok(Some(range.end));
         }
@@ -4648,13 +4760,13 @@ impl SequenceFileSource for ProcMapsFile {
 #[derive(Clone)]
 pub struct ProcSmapsFile {
     mm: Weak<MemoryManager>,
-    task: Weak<Task>,
+    target: TaskContainer,
 }
 impl ProcSmapsFile {
-    pub fn new(task: Arc<Task>) -> DynamicFile<Self> {
+    pub fn new(task: Arc<Task>, target: TaskContainer) -> DynamicFile<Self> {
         // "smaps" is empty for kthreads, rather than inaccessible.
         let mm = task.mm().map_or_else(|_| Weak::default(), |mm| Arc::downgrade(&mm));
-        DynamicFile::new(Self { mm, task: Arc::downgrade(&task) })
+        DynamicFile::new(Self { mm, target })
     }
 
     /// Compute the commited bytes in each memory mapping, using the `zx_mappings`.
@@ -4681,7 +4793,10 @@ impl ProcSmapsFile {
                 };
                 let zx_start = zx_mapping.base;
                 let zx_end = zx_start + zx_mapping.size;
-                assert!(zx_end > mm_start, "Zircon mapping that isn't mapped from starnix: {zx_details:?}");
+                assert!(
+                    zx_end > mm_start,
+                    "Zircon mapping that isn't mapped from starnix: {zx_details:?}"
+                );
                 if zx_start >= mm_end {
                     // This mapping starts in a later MemoryManager mapping
                     break;
@@ -4724,7 +4839,7 @@ impl ProcSmapsFile {
 impl DynamicFileSource for ProcSmapsFile {
     fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
         let page_size_kb = *PAGE_SIZE / 1024;
-        let task = Task::from_weak(&self.task)?;
+        let task = self.target.get_task()?;
         // /proc/<pid>/smaps is empty for kthreads and tasks whose memory manager has changed.
         let Some(mm) = self.mm.upgrade() else {
             return Ok(());
@@ -4746,13 +4861,13 @@ impl DynamicFileSource for ProcSmapsFile {
             mm.state.write().ensure_ranges_mapped_in_user_vmar(lazy_ranges, &mm.mapping_context)?;
         }
 
+        let fs_context = task.fs().ok();
+        let fs_context_ref = fs_context.as_deref();
+
         let state = mm.state.read();
         let committed_bytes_vec = mm.with_zx_mappings(current_task, |zx_mappings| {
             Self::compute_committed_bytes(&mm, &state, zx_mappings)
         });
-
-        let fs_context = task.fs().ok();
-        let fs_context_ref = fs_context.as_deref();
 
         let mut share_count_cache: HashMap<zx::Koid, u64> = HashMap::default();
 
@@ -4832,19 +4947,19 @@ impl DynamicFileSource for ProcSmapsFile {
 #[derive(Clone)]
 pub struct ProcSmapsRollupFile {
     mm: Weak<MemoryManager>,
-    task: Weak<Task>,
+    target: TaskContainer,
 }
 impl ProcSmapsRollupFile {
     // Linux 6.6 allows open() without an mm and fails with ESRCH on read(). Linux 6.11+
     // fails with ESRCH on open(). Match Linux 6.6 since Starnix targets 6.6.
-    pub fn new(task: Arc<Task>) -> DynamicFile<Self> {
+    pub fn new(task: Arc<Task>, target: TaskContainer) -> DynamicFile<Self> {
         let mm = task.mm().map_or_else(|_| Weak::default(), |mm| Arc::downgrade(&mm));
-        DynamicFile::new(Self { mm, task: Arc::downgrade(&task) })
+        DynamicFile::new(Self { mm, target })
     }
 }
 impl DynamicFileSource for ProcSmapsRollupFile {
     fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
-        let _task = Task::from_weak(&self.task)?;
+        let _task = self.target.get_task()?;
         let Some(mm) = self.mm.upgrade() else {
             return error!(ESRCH);
         };
@@ -4927,36 +5042,81 @@ fn compute_pseudo_pfn(koid: zx::Koid, vmo_page_idx: u64) -> u64 {
 /// Implements `/proc/<pid>/pagemap`.
 #[derive(Clone)]
 pub struct ProcPagemapFile {
-    pid: Pid,
+    mm: Weak<MemoryManager>,
+    can_read_pfn: bool,
 }
 
 impl ProcPagemapFile {
-    pub fn new(pid: Pid) -> Self {
-        Self { pid }
+    pub fn new(current_task: &CurrentTask, task: &Task) -> Self {
+        let mm = task.mm().map_or_else(|_| Weak::default(), |mm| Arc::downgrade(&mm));
+        let can_read_pfn =
+            security::is_task_capable_noaudit(current_task, starnix_uapi::auth::CAP_SYS_ADMIN);
+        Self { mm, can_read_pfn }
     }
-}
 
-impl FileOps for ProcPagemapFile {
-    fileops_impl_seekable!();
-    fileops_impl_noop_sync!();
+    // Bit 63 indicates the page is present in RAM, bit 61 indicates file-page or
+    // shared-anon, and bit 57 indicates an exclusively mapped page (anonymous private).
+    //
+    // On Linux, bit 63 indicates physical hardware residency in CPU page tables. Zircon
+    // uses demand paging and does not expose per-page commit/PTE status to userspace
+    // without faulting in the page. We treat all registered mappings as present so tools
+    // (e.g. procrank, librank, showmap) can query page sharing, while aggregate resident
+    // sizes (RSS) are obtained from /proc/<pid>/smaps.
+    #[inline]
+    fn compute_entry_flags(mm_mapping: &Mapping) -> u64 {
+        let is_shared = mm_mapping.flags().contains(MappingFlags::SHARED);
+        let is_file = matches!(mm_mapping.name(), MappingNameRef::File(_));
+        (1u64 << 63) | if is_shared || is_file { 1u64 << 61 } else { 1u64 << 57 }
+    }
 
-    fn read(
+    #[inline]
+    fn compute_start_pfn(
+        mm: &MemoryManager,
+        state: &MemoryManagerState,
+        mm_mapping: &Mapping,
+        addr: UserAddress,
+        page_size: usize,
+    ) -> u64 {
+        let (koid, vmo_offset) = match state.get_mapping_backing(mm_mapping) {
+            MappingBacking::Memory(backing) => {
+                (backing.memory().get_koid(), backing.address_to_offset(addr))
+            }
+            MappingBacking::PrivateAnonymous => {
+                (mm.mapping_context.private_anonymous.backing.get_koid(), addr.ptr() as u64)
+            }
+        };
+        compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
+    }
+
+    #[inline]
+    fn fill_contiguous_entries(slice: &mut [u64], flags: u64, start_pfn: u64, can_read_pfn: bool) {
+        if !can_read_pfn {
+            slice.fill(flags);
+            return;
+        }
+        if start_pfn + (slice.len() as u64) <= PAGEMAP_PFN_MASK {
+            let base_entry = flags | start_pfn;
+            for (i, entry) in slice.iter_mut().enumerate() {
+                *entry = base_entry + (i as u64);
+            }
+        } else {
+            for (i, entry) in slice.iter_mut().enumerate() {
+                let pfn = start_pfn.wrapping_add(i as u64) & PAGEMAP_PFN_MASK;
+                *entry = flags | pfn;
+            }
+        }
+    }
+
+    // Avoid inlining into `read` so the 4 KiB `chunk_buf` stack frame is not allocated on the
+    // single-page fast path.
+    #[inline(never)]
+    fn read_multi_page(
         &self,
-        _file: &FileObject,
-        current_task: &CurrentTask,
+        mm: &MemoryManager,
         offset: usize,
+        to_read: usize,
         dst: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
-        let task = self.pid.get_task()?;
-        let Ok(mm) = task.mm() else {
-            return Ok(0);
-        };
-
-        let to_read = std::cmp::min(dst.available(), 1024 * 1024);
-        if to_read == 0 {
-            return Ok(0);
-        }
-
         let entry_size = std::mem::size_of::<u64>();
         let page_size = *PAGE_SIZE as usize;
 
@@ -4964,72 +5124,70 @@ impl FileOps for ProcPagemapFile {
         let start_page_idx = offset / entry_size;
         let total_bytes_needed = unaligned_offset + to_read;
         let num_pages = (total_bytes_needed + entry_size - 1) / entry_size;
+        let can_read_pfn = self.can_read_pfn;
 
-        let can_read_pfn =
-            security::is_task_capable_noaudit(current_task, starnix_uapi::auth::CAP_SYS_ADMIN);
-
-        let compute_mapping_pfn =
-            |state: &MemoryManagerState, mm_mapping: &Mapping, addr: UserAddress| -> u64 {
-                if !can_read_pfn {
-                    return 0;
-                }
-                let (koid, vmo_offset) = match state.get_mapping_backing(mm_mapping) {
-                    MappingBacking::Memory(backing) => {
-                        (backing.memory().get_koid(), backing.address_to_offset(addr))
-                    }
-                    MappingBacking::PrivateAnonymous => {
-                        (mm.mapping_context.private_anonymous.backing.get_koid(), addr.ptr() as u64)
-                    }
-                };
-                compute_pseudo_pfn(koid, vmo_offset / page_size as u64)
-            };
-
-        // Bit 63 indicates the page is present in RAM, bit 61 indicates file-page or
-        // shared-anon, and bit 57 indicates an exclusively mapped page (anonymous private).
-        //
-        // On Linux, bit 63 indicates physical hardware residency in CPU page tables. Zircon
-        // uses demand paging and does not expose per-page commit/PTE status to userspace
-        // without faulting in the page. We treat all registered mappings as present so tools
-        // (e.g. procrank, librank, showmap) can query page sharing, while aggregate resident
-        // sizes (RSS) are obtained from /proc/<pid>/smaps.
-        let compute_entry_flags = |mm_mapping: &Mapping| -> u64 {
-            let is_shared = mm_mapping.flags().contains(MappingFlags::SHARED);
-            let is_file = matches!(mm_mapping.name(), MappingNameRef::File(_));
-            (1u64 << 63) | if is_shared || is_file { 1u64 << 61 } else { 1u64 << 57 }
+        let Some(start_addr) = start_page_idx.checked_mul(page_size) else {
+            return Ok(0);
         };
-
-        // Ultra-fast path for single-page reads (the dominant case in procrank/smapinfo).
-        if to_read == entry_size && unaligned_offset == 0 {
-            let start_vaddr = match start_page_idx.checked_mul(page_size) {
-                Some(addr) => UserAddress::from(addr as u64),
-                None => return Ok(0),
-            };
-            let entry = {
-                // Drop the read lock before writing to `dst`, as `dst.write_all` may fault on a
-                // lazy mapping in the same `MemoryManager` and acquire a write lock on `mm.state`.
-                let state = mm.state.read();
-                if let Some((_, mm_mapping)) = state.mappings.get(start_vaddr) {
-                    let flags = compute_entry_flags(mm_mapping);
-                    let pfn = compute_mapping_pfn(&state, mm_mapping, start_vaddr);
-                    flags | pfn
-                } else {
-                    0
-                }
-            };
-            dst.write_all(&entry.to_ne_bytes())?;
-            return Ok(entry_size);
-        }
+        let read_start_vaddr = UserAddress::from(start_addr as u64);
+        let read_end_vaddr = start_page_idx
+            .checked_add(num_pages)
+            .and_then(|end_page| end_page.checked_mul(page_size))
+            .map_or_else(|| UserAddress::from(u64::MAX), |addr| UserAddress::from(addr as u64));
 
         const CHUNK_PAGES: usize = 512;
-        let mut chunk_buf = [0u64; CHUNK_PAGES];
-
+        let mut chunk_buf = SmallVec::<[u64; CHUNK_PAGES]>::new();
         let mut pages_processed = 0;
         let mut bytes_written_total = 0;
 
+        // Fast path: the entire requested range is contained within a single mapping.
+        // Perform only one B-tree lookup and one VMO KOID hash across all chunks, and release
+        // `mm.state.read()` before `dst.write_all` which may need `mm.state.write()` to
+        // materialize lazy mappings in the destination buffer.
+        let single_mapping_info = {
+            let state = mm.state.read();
+            if let Some((mm_range, mm_mapping)) = state.mappings.get(read_start_vaddr)
+                && mm_range.end >= read_end_vaddr
+            {
+                let flags = Self::compute_entry_flags(mm_mapping);
+                let base_pfn = if can_read_pfn {
+                    Self::compute_start_pfn(mm, &state, mm_mapping, read_start_vaddr, page_size)
+                } else {
+                    0
+                };
+                Some((flags, base_pfn))
+            } else {
+                None
+            }
+        };
+        if let Some((flags, base_pfn)) = single_mapping_info {
+            while pages_processed < num_pages && bytes_written_total < to_read {
+                let current_chunk_pages = std::cmp::min(CHUNK_PAGES, num_pages - pages_processed);
+                let chunk_start_pfn =
+                    base_pfn.wrapping_add(pages_processed as u64) & PAGEMAP_PFN_MASK;
+
+                chunk_buf.resize(current_chunk_pages, 0);
+                let chunk_slice = &mut chunk_buf[..current_chunk_pages];
+                Self::fill_contiguous_entries(chunk_slice, flags, chunk_start_pfn, can_read_pfn);
+
+                let byte_slice = chunk_slice.as_bytes();
+                let chunk_byte_offset = if pages_processed == 0 { unaligned_offset } else { 0 };
+                let chunk_available_bytes = byte_slice.len().saturating_sub(chunk_byte_offset);
+                let chunk_write_len =
+                    std::cmp::min(to_read - bytes_written_total, chunk_available_bytes);
+
+                dst.write_all(&byte_slice[chunk_byte_offset..chunk_byte_offset + chunk_write_len])?;
+                bytes_written_total += chunk_write_len;
+                pages_processed += current_chunk_pages;
+            }
+
+            return Ok(bytes_written_total);
+        }
+
+        // General path: spans multiple mappings or unmapped memory.
         while pages_processed < num_pages && bytes_written_total < to_read {
             let chunk_start_page = start_page_idx + pages_processed;
             let current_chunk_pages = std::cmp::min(CHUNK_PAGES, num_pages - pages_processed);
-            let chunk_slice = &mut chunk_buf[..current_chunk_pages];
 
             let chunk_start_vaddr = match chunk_start_page.checked_mul(page_size) {
                 Some(addr) => UserAddress::from(addr as u64),
@@ -5041,56 +5199,38 @@ impl FileOps for ProcPagemapFile {
                     None => UserAddress::from(u64::MAX),
                 };
 
+            chunk_buf.clear();
+            chunk_buf.resize(current_chunk_pages, 0);
+            let chunk_slice = &mut chunk_buf[..current_chunk_pages];
+
             {
                 // Hold `mm.state.read()` only while snapshotting the pagemap entries for this
                 // chunk, and release it before `dst.write_all` which may need `mm.state.write()`
                 // to materialize lazy mappings in the destination buffer.
                 let state = mm.state.read();
 
-                // Fast path: entire chunk is contained within a single mapping.
-                if let Some((mm_range, mm_mapping)) = state.mappings.get(chunk_start_vaddr)
-                    && mm_range.end >= chunk_end_vaddr
+                for (mm_range, mm_mapping) in
+                    state.mappings.range(chunk_start_vaddr..chunk_end_vaddr)
                 {
-                    let flags = compute_entry_flags(mm_mapping);
-                    let start_pfn = compute_mapping_pfn(&state, mm_mapping, chunk_start_vaddr);
+                    let flags = Self::compute_entry_flags(mm_mapping);
 
-                    for (i, entry) in chunk_slice.iter_mut().enumerate() {
-                        let pfn = if can_read_pfn {
-                            (start_pfn.wrapping_add(i as u64)) & PAGEMAP_PFN_MASK
-                        } else {
-                            0
-                        };
-                        *entry = flags | pfn;
-                    }
-                } else {
-                    // General path: spans multiple mappings or unmapped memory.
-                    chunk_slice.fill(0);
+                    let map_start_page = (mm_range.start.ptr() as usize) / page_size;
+                    let map_end_page = (mm_range.end.ptr() as usize) / page_size;
 
-                    for (mm_range, mm_mapping) in
-                        state.mappings.range(chunk_start_vaddr..chunk_end_vaddr)
-                    {
-                        let flags = compute_entry_flags(mm_mapping);
+                    let first_page = std::cmp::max(chunk_start_page, map_start_page);
+                    let last_page =
+                        std::cmp::min(chunk_start_page + current_chunk_pages, map_end_page);
 
-                        let map_start_page = (mm_range.start.ptr() as usize) / page_size;
-                        let map_end_page = (mm_range.end.ptr() as usize) / page_size;
+                    let first_page_vaddr = UserAddress::from((first_page * page_size) as u64);
+                    let start_pfn = if can_read_pfn {
+                        Self::compute_start_pfn(mm, &state, mm_mapping, first_page_vaddr, page_size)
+                    } else {
+                        0
+                    };
 
-                        let first_page = std::cmp::max(chunk_start_page, map_start_page);
-                        let last_page =
-                            std::cmp::min(chunk_start_page + current_chunk_pages, map_end_page);
-
-                        let first_page_vaddr = UserAddress::from((first_page * page_size) as u64);
-                        let start_pfn = compute_mapping_pfn(&state, mm_mapping, first_page_vaddr);
-
-                        for page_idx in first_page..last_page {
-                            let pfn = if can_read_pfn {
-                                (start_pfn.wrapping_add((page_idx - first_page) as u64))
-                                    & PAGEMAP_PFN_MASK
-                            } else {
-                                0
-                            };
-                            chunk_slice[page_idx - chunk_start_page] = flags | pfn;
-                        }
-                    }
+                    let sub_slice = &mut chunk_slice
+                        [first_page - chunk_start_page..last_page - chunk_start_page];
+                    Self::fill_contiguous_entries(sub_slice, flags, start_pfn, can_read_pfn);
                 }
             }
 
@@ -5106,6 +5246,59 @@ impl FileOps for ProcPagemapFile {
         }
 
         Ok(bytes_written_total)
+    }
+}
+
+impl FileOps for ProcPagemapFile {
+    fileops_impl_seekable!();
+    fileops_impl_noop_sync!();
+
+    fn read(
+        &self,
+        _file: &FileObject,
+        _current_task: &CurrentTask,
+        offset: usize,
+        dst: &mut dyn OutputBuffer,
+    ) -> Result<usize, Errno> {
+        let Some(mm) = self.mm.upgrade() else {
+            return Ok(0);
+        };
+
+        let to_read = std::cmp::min(dst.available(), 1024 * 1024);
+        if to_read == 0 {
+            return Ok(0);
+        }
+
+        let entry_size = std::mem::size_of::<u64>();
+        let page_size = *PAGE_SIZE as usize;
+        let unaligned_offset = offset % entry_size;
+
+        // Ultra-fast path for single-page reads (the dominant case in procrank/smapinfo).
+        if unaligned_offset + to_read <= entry_size {
+            let start_page_idx = offset / entry_size;
+            let Some(addr) = start_page_idx.checked_mul(page_size) else {
+                return Ok(0);
+            };
+            let start_vaddr = UserAddress::from(addr as u64);
+            let state = mm.state.read();
+            let entry = if let Some((_, mm_mapping)) = state.mappings.get(start_vaddr) {
+                let flags = Self::compute_entry_flags(mm_mapping);
+                let pfn = if self.can_read_pfn {
+                    Self::compute_start_pfn(&mm, &state, mm_mapping, start_vaddr, page_size)
+                } else {
+                    0
+                };
+                flags | pfn
+            } else {
+                0
+            };
+            drop(state);
+            let bytes = entry.to_ne_bytes();
+            dst.write_all(&bytes[unaligned_offset..unaligned_offset + to_read])?;
+            return Ok(to_read);
+        }
+
+        self.read_multi_page(&mm, offset, to_read, dst)
     }
 
     fn write(
@@ -5183,6 +5376,21 @@ mod tests {
         let adusted_mapping_flags = mapping_flags.with_access_flags(new_access_flags);
         assert_eq!(adusted_mapping_flags.access_flags(), new_access_flags);
         assert_eq!(adusted_mapping_flags.options(), options);
+    }
+
+    #[::fuchsia::test]
+    fn test_mapping_flags_populate_is_not_stored() {
+        // POPULATE is a creation only option and must be stripped when used in creating the actual
+        // MappingFlags.
+        let options = MappingOptions::ANONYMOUS | MappingOptions::POPULATE;
+        let access_flags = ProtectionFlags::READ | ProtectionFlags::WRITE;
+        let mapping_flags = MappingFlags::from_access_flags_and_options(access_flags, options);
+        assert!(!mapping_flags.contains(MappingFlags::LOCKED));
+        assert_eq!(mapping_flags.options(), MappingOptions::ANONYMOUS);
+
+        // A locked mapping must not report `POPULATE` as one of its options.
+        let locked_flags = mapping_flags | MappingFlags::LOCKED;
+        assert_eq!(locked_flags.options(), MappingOptions::ANONYMOUS);
     }
 
     #[::fuchsia::test]
@@ -6116,6 +6324,7 @@ mod tests {
         spawn_kernel_and_run(async |current_task| {
             let mm = current_task.mm().unwrap();
             let ma = current_task.deref();
+            let task_ma: &Task = &current_task.task;
 
             let addr = mm.state.read().find_next_unused_range(2 * *PAGE_SIZE as usize).unwrap();
             let addr = map_memory(&current_task, addr, *PAGE_SIZE);
@@ -6139,6 +6348,58 @@ mod tests {
                 ma.read_memory_partial_to_vec(addr, bytes.len()).unwrap().len(),
                 *PAGE_SIZE as usize,
             );
+            assert_eq!(
+                task_ma.read_memory_partial_to_vec(addr, bytes.len()).unwrap().len(),
+                *PAGE_SIZE as usize,
+            );
+            assert_eq!(ma.read_memory_partial_to_vec(second_map, bytes.len()), error!(EFAULT));
+            assert_eq!(task_ma.read_memory_partial_to_vec(second_map, bytes.len()), error!(EFAULT));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_partial_write() {
+        spawn_kernel_and_run(async |current_task| {
+            let mm = current_task.mm().unwrap();
+            let ma = current_task.deref();
+            let task_ma: &Task = &current_task.task;
+
+            let addr = mm.state.read().find_next_unused_range(2 * *PAGE_SIZE as usize).unwrap();
+            let addr = map_memory(&current_task, addr, *PAGE_SIZE);
+            let second_map = map_memory(&current_task, (addr + *PAGE_SIZE).unwrap(), *PAGE_SIZE);
+
+            let mut state = mm.state.write();
+            let mut released_mappings = ReleasedMappings::default();
+            state
+                .protect(
+                    ma,
+                    second_map,
+                    *PAGE_SIZE as usize,
+                    ProtectionFlags::empty(),
+                    &mut released_mappings,
+                )
+                .unwrap();
+            released_mappings.finalize(state);
+
+            let bytes = vec![0xab; (*PAGE_SIZE * 2) as usize];
+            assert_eq!(ma.write_memory_partial(addr, &bytes), Ok(*PAGE_SIZE as usize));
+            assert_eq!(
+                ma.read_memory_to_vec(addr, *PAGE_SIZE as usize).unwrap(),
+                &bytes[..*PAGE_SIZE as usize]
+            );
+
+            let bytes2 = vec![0xcd; (*PAGE_SIZE * 2) as usize];
+            assert_eq!(task_ma.write_memory_partial(addr, &bytes2), Ok(*PAGE_SIZE as usize));
+            assert_eq!(
+                task_ma.read_memory_to_vec(addr, *PAGE_SIZE as usize).unwrap(),
+                &bytes2[..*PAGE_SIZE as usize]
+            );
+
+            assert_eq!(ma.write_memory_partial(second_map, &bytes), error!(EFAULT));
+            assert_eq!(task_ma.write_memory_partial(second_map, &bytes), error!(EFAULT));
+            assert_eq!(ma.write_memory_partial(second_map, &[]), Ok(0));
+            assert_eq!(task_ma.write_memory_partial(second_map, &[]), Ok(0));
         })
         .await;
     }
@@ -6263,6 +6524,105 @@ mod tests {
             );
 
             assert_eq!(mm.get_mapping_count(), 1);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_grow_fault_below_prot_none_mapping() {
+        spawn_kernel_and_run(async |current_task| {
+            let mm = current_task.mm().unwrap();
+
+            let mapped_addr = map_memory_growsdown(&current_task, *PAGE_SIZE);
+
+            mm.protect(&current_task, mapped_addr, *PAGE_SIZE as usize, ProtectionFlags::empty())
+                .unwrap();
+
+            assert_matches!(
+                mm.extend_growsdown_mapping_to_address((mapped_addr - *PAGE_SIZE).unwrap(), false),
+                Ok(false)
+            );
+            assert_matches!(
+                mm.extend_growsdown_mapping_to_address((mapped_addr - *PAGE_SIZE).unwrap(), true),
+                Ok(false)
+            );
+
+            assert_eq!(mm.get_mapping_count(), 1);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_usercopy_growsdown_write_and_read() {
+        spawn_kernel_and_run(async |current_task| {
+            let mapped_addr = map_memory_growsdown(&current_task, *PAGE_SIZE);
+            let read_addr = (mapped_addr - 100usize).unwrap();
+
+            // Reading below a growsdown mapping should grow it and yield zeroes.
+            let mut read_buf = [std::mem::MaybeUninit::uninit(); 24];
+            let read_data = current_task.read_memory(read_addr, &mut read_buf).unwrap();
+            assert_eq!(read_data, &[0u8; 24]);
+
+            // Writing further down below the expanded mapping should grow it again.
+            let write_addr = (read_addr - *PAGE_SIZE).unwrap();
+            let test_data = b"hello growsdown usercopy";
+            assert_matches!(
+                current_task.write_memory(write_addr, test_data),
+                Ok(len) if len == test_data.len()
+            );
+
+            let mut read_buf = [std::mem::MaybeUninit::uninit(); 24];
+            let read_data = current_task.read_memory(write_addr, &mut read_buf).unwrap();
+            assert_eq!(read_data, test_data);
+
+            // Accessing an address below `mm.base_addr` should not grow the mapping and should
+            // return EFAULT.
+            let mm = current_task.mm().unwrap();
+            assert_matches!(
+                mm.extend_growsdown_mapping_to_address(UserAddress::NULL, false),
+                Ok(false)
+            );
+            assert_eq!(current_task.read_memory(UserAddress::NULL, &mut read_buf), error!(EFAULT));
+            assert_eq!(current_task.write_memory(UserAddress::NULL, test_data), error!(EFAULT));
+            assert_eq!(current_task.zero(UserAddress::NULL, 16), error!(EFAULT));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_syscall_growsdown_write_and_read() {
+        spawn_kernel_and_run(async |current_task| {
+            let task_ma: &Task = &current_task.task;
+            let mapped_addr = map_memory_growsdown(&current_task, *PAGE_SIZE);
+            let read_addr = (mapped_addr - 100usize).unwrap();
+
+            // Reading below a growsdown mapping via syscall_read_memory should grow it and yield zeroes.
+            let mut read_buf = [std::mem::MaybeUninit::uninit(); 24];
+            let read_data = task_ma.read_memory(read_addr, &mut read_buf).unwrap();
+            assert_eq!(read_data, &[0u8; 24]);
+
+            // Writing further down below the expanded mapping via syscall_write_memory should grow it again.
+            let write_addr = (read_addr - *PAGE_SIZE).unwrap();
+            let test_data = b"hello growsdown syscall\0";
+            assert_matches!(
+                task_ma.write_memory(write_addr, test_data),
+                Ok(len) if len == test_data.len()
+            );
+
+            let mut read_buf = [std::mem::MaybeUninit::uninit(); 32];
+            let read_cstr =
+                task_ma.read_memory_partial_until_null_byte(write_addr, &mut read_buf).unwrap();
+            assert_eq!(read_cstr, test_data);
+
+            // Zeroing further down below the expanded mapping via syscall_zero should grow it again.
+            let zero_addr = (write_addr - *PAGE_SIZE).unwrap();
+            assert_eq!(task_ma.zero(zero_addr, 16), Ok(16));
+
+            // Accessing an address below `mm.base_addr` should not grow the mapping and should
+            // return EFAULT.
+            assert_eq!(task_ma.read_memory(UserAddress::NULL, &mut read_buf), error!(EFAULT));
+            assert_eq!(task_ma.write_memory(UserAddress::NULL, test_data), error!(EFAULT));
+            assert_eq!(task_ma.zero(UserAddress::NULL, 16), error!(EFAULT));
         })
         .await;
     }
@@ -6570,5 +6930,41 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_fill_contiguous_entries_vectorized() {
+        let mut slice = [0u64; 512];
+        let flags = 0x8000_0000_0000_0000;
+        let start_pfn = 0x1000;
+        ProcPagemapFile::fill_contiguous_entries(&mut slice, flags, start_pfn, true);
+        for (i, &entry) in slice.iter().enumerate() {
+            assert_eq!(entry, flags | (start_pfn + i as u64));
+        }
+    }
+
+    #[::fuchsia::test]
+    fn test_fill_contiguous_entries_overflow() {
+        let mut slice = [0u64; 10];
+        let flags = 0x8000_0000_0000_0000;
+        let start_pfn = PAGEMAP_PFN_MASK - 5;
+        ProcPagemapFile::fill_contiguous_entries(&mut slice, flags, start_pfn, true);
+        for (i, &entry) in slice.iter().enumerate() {
+            let expected_pfn = (start_pfn.wrapping_add(i as u64)) & PAGEMAP_PFN_MASK;
+            assert_eq!(entry, flags | expected_pfn);
+        }
+        assert_eq!(slice[5], flags | PAGEMAP_PFN_MASK);
+        assert_eq!(slice[6], flags | 0);
+    }
+
+    #[::fuchsia::test]
+    fn test_fill_contiguous_entries_unprivileged() {
+        let mut slice = [0u64; 10];
+        let flags = 0x8000_0000_0000_0000;
+        let start_pfn = 0x1000;
+        ProcPagemapFile::fill_contiguous_entries(&mut slice, flags, start_pfn, false);
+        for &entry in slice.iter() {
+            assert_eq!(entry, flags);
+        }
     }
 }

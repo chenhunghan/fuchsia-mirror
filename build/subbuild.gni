@@ -7,6 +7,7 @@ import("//build/config/fuchsia/platform_version.gni")
 import("//build/config/jobserver.gni")
 import("//build/sdk/config.gni")
 import("//build/testing/config.gni")
+import("//build/toolchain/rbe.gni")
 import("//build/tracer/tracer.gni")
 import("//sdk/config.gni")
 
@@ -136,10 +137,14 @@ template("subbuild") {
       ]
     }
 
-    # If jobserver mode is not enabled, limit the number of concurrent
-    # sub-builds that can run at the same time to avoid overloading the
-    # system with two many overall parallel tasks.
-    if (!enable_jobserver) {
+    # If jobserver mode is not enabled, or if C++ compiles run locally without
+    # RBE, limit the number of concurrent sub-builds that can run at the same
+    # time to avoid overloading the system. Even with a jobserver pool, each
+    # sub-build runs its own Ninja instance with independent `local` and
+    # `highmem` pools, and infra passes `-j 10*cpu_count` to top-level Ninja,
+    # which can OOM machines when all sub-builds compile C++/FIDL locally at
+    # once.
+    if (!enable_jobserver || !cxx_rbe_enable) {
       pool = "//sdk:subbuild_pool"
     }
 

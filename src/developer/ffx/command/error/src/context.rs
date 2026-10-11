@@ -209,10 +209,17 @@ mod tests {
             anyhow::Result::<()>::Err(anyhow!("the wubbler broke")).user_message("broken wubbler");
         let user_err2 = user_err.bug_context("getting wubbler");
         let user_err3 = user_err2.bug_context("delegating wubbler");
-        let err_string = format!("{}", user_err3.unwrap_err());
-        assert_eq!(
-            err_string,
-            "BUG: An internal command error occurred.\nError: delegating wubbler\n    1.  getting wubbler\n    2.  broken wubbler\n    3.  the wubbler broke"
-        );
+        let err = user_err3.unwrap_err();
+        let err_string = format!("{err}");
+        let expected = "BUG: An internal command error occurred.\nError: delegating wubbler\n    1.  getting wubbler\n    2.  broken wubbler\n    3.  the wubbler broke";
+        match &err {
+            Error::Unexpected(e)
+                if e.backtrace().status() == std::backtrace::BacktraceStatus::Captured =>
+            {
+                assert!(err_string.starts_with(expected));
+                assert!(err_string.contains("\n\nStack backtrace:\n"));
+            }
+            _ => assert_eq!(err_string, expected),
+        }
     }
 }

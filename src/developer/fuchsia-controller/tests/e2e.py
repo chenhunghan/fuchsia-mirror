@@ -135,6 +135,36 @@ class EndToEnd(unittest.IsolatedAsyncioTestCase):
     def test_context_creation_duplicate_target_raises_exception(self) -> None:
         with self.assertRaises(RuntimeError):
             _ctx = Context(target="foo", config={"target.default": "bar"})
+        with self.assertRaises(RuntimeError):
+            _ctx = Context(target="foo", config={"target": {"default": "bar"}})
+        with self.assertRaises(RuntimeError):
+            _ctx = Context(target="foo", config={"target": "bar"})
+
+    def test_context_creation_invalid_config_type(self) -> None:
+        with self.assertRaises(TypeError):
+            Context(config="not a dict")  # type: ignore
+
+    def test_context_creation_conflicting_config_raises_error(
+        self,
+    ) -> None:
+        with self.assertRaises(RuntimeError):
+            Context(config={"foo": 1, "foo.bar": 2})
+        with self.assertRaises(RuntimeError):
+            Context(config={"foo.bar": 2, "foo": 1})
+        with self.assertRaises(RuntimeError):
+            Context(config={"foo": {"bar": 1}, "foo.bar": {"baz": 2}})
+
+    def test_config_get_nested(self) -> None:
+        config = self._get_default_config()
+        config["some.nested.key"] = "nested_val"
+        ctx = Context(config=config, isolate_dir=self._get_isolate_dir())
+        self.assertEqual(ctx.config_get_string("some.nested.key"), "nested_val")
+
+    def test_config_get_dict_nested(self) -> None:
+        config: typing.Dict[str, typing.Any] = self._get_default_config()
+        config["some"] = {"dict": {"nested": "dict_val"}}
+        ctx = Context(config=config, isolate_dir=self._get_isolate_dir())
+        self.assertEqual(ctx.config_get_string("some.dict.nested"), "dict_val")
 
     def test_context_creation_no_args(self) -> None:
         Context()

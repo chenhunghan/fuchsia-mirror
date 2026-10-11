@@ -79,13 +79,14 @@ def main() -> None:
         sys.exit(do_process_previous(real_flags))
 
     # No special modes, proceed with async execution.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     fut = asyncio.ensure_future(
         async_main_wrapper(
             real_flags, config_file=config_file, replay_mode=replay_mode
         )
     )
     try:
-        loop = asyncio.get_event_loop()
         loop.run_until_complete(fut)
         sys.exit(fut.result())
     except asyncio.CancelledError:
@@ -1640,6 +1641,7 @@ class AsyncMain:
                     if "version" in data:
                         version = data["version"]
                 except json.JSONDecodeError:
+                    f.seek(0)
                     meta_manifests = [
                         stripped_line
                         for l in f.readlines()
@@ -2068,11 +2070,18 @@ class AsyncMain:
                         to_run = run_state.non_hermetic_test_queue.get_nowait()
                         run_state.non_hermetic_running += 1
                         was_non_hermetic = True
-                    elif run_state.hermetic_test_queue.empty():
-                        return
-                    else:
+                    elif not run_state.hermetic_test_queue.empty():
                         to_run = run_state.hermetic_test_queue.get_nowait()
                         was_non_hermetic = False
+                    elif (
+                        run_state.hermetic_test_queue.empty()
+                        and run_state.non_hermetic_test_queue.empty()
+                    ):
+                        run_condition.notify_all()
+                        return
+                    else:
+                        await run_condition.wait()
+                        continue
                     run_state.total_running += 1
 
                 test_suite_id = recorder.emit_test_suite_started(
@@ -2082,6 +2091,7 @@ class AsyncMain:
                     event.TestSuiteStatus.FAILED_TO_START
                 )
                 message: str | None = None
+                start_time = time.monotonic()
                 try:
                     if not to_run.abort_group.is_set():
                         # Only run if this group was not already aborted.
@@ -2170,6 +2180,7 @@ class AsyncMain:
                         # following run state code to trigger any waiting executors.
                         abort_all_tests_event.set()
                 finally:
+                    duration_seconds = time.monotonic() - start_time
                     recorder.emit_test_suite_ended(
                         test_suite_id, status, message
                     )
@@ -2213,7 +2224,7 @@ class AsyncMain:
                             log_path=None,
                             stdout_log_path=stdout_log_path,
                             stderr_log_path=stderr_log_path,
-                            duration_seconds=None,
+                            duration_seconds=duration_seconds,
                             message=message,
                         )
                     )
@@ -2222,7 +2233,7 @@ class AsyncMain:
                     run_state.total_running -= 1
                     if was_non_hermetic:
                         run_state.non_hermetic_running -= 1
-                    run_condition.notify()
+                    run_condition.notify_all()
 
         # Wait for the debugger to signal that it is ready.
         if maybe_debugger is not None:

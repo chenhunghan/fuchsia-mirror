@@ -22,6 +22,15 @@
             "queue_selector": "TCIFLUSH"
         },
         {
+            "type": "wait_until_readable",
+            "side": "main"
+        },
+        {
+            "type": "read_once_from_master",
+            "size": 0,
+            "data": ""
+        },
+        {
             "type": "read_from_master",
             "data": "\u0001"
         },

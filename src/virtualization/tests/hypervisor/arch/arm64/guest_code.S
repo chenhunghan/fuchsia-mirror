@@ -29,6 +29,7 @@
 
 .set PSCI64_SYSTEM_OFF,         0x84000008
 .set PSCI64_SYSTEM_RESET,       0x84000009
+.set PSCI64_CPU_ON,             0xc4000003
 
 // TCR_EL1 for configuring the MMU.
 //
@@ -370,6 +371,303 @@ END_FUNCTION
 FUNCTION vcpu_psci_system_reset
     movlit x0, PSCI64_SYSTEM_RESET
     smc #0
+END_FUNCTION
+
+FUNCTION vcpu_psci_cpu_on
+    movlit x0, PSCI64_CPU_ON
+    movlit x1, 0x1
+    movlit x2, 0x1000
+    movlit x3, 0xfeedfacedeadbeef
+    smc #0
+    cbnz x0, 1f
+    test_complete
+1:
+    test_failure
+END_FUNCTION
+
+// Test EL1/EL0 system register context switching across VM exits under VHE.
+FUNCTION vcpu_system_registers
+    // Enable the guest MMU and caches first so HCR_EL2.TVM is cleared and
+    // subsequent system register writes execute untrapped against *_el12 hardware.
+    setup_and_enable_mmu
+
+    movlit x1, 0x1111222233334444
+    msr    sp_el0, x1
+    movlit x2, 0x2222333344445555
+    msr    tpidr_el0, x2
+    movlit x3, 0x3333444455556666
+    msr    tpidrro_el0, x3
+    movlit x4, 0x4444555566667777
+    msr    tpidr_el1, x4
+    movlit x5, 0x88889999aaaabbbc
+    msr    elr_el1, x5
+    movlit x6, SPSR_DAIF_AARCH64
+    msr    spsr_el1, x6
+    movlit x7, 0x0000123456784000
+    msr    vbar_el1, x7
+    movlit x8, 0x9999aaaa
+    msr    contextidr_el1, x8
+    movlit x9, CPACR_EL1_FPEN_NO_TRAP
+    msr    cpacr_el1, x9
+    mov    x10, 0x3
+    msr    cntkctl_el1, x10
+    movlit x11, 0x0022000000020000
+    msr    ttbr1_el1, x11
+    movlit x12, 0x56000042
+    msr    esr_el1, x12
+    movlit x13, 0xfeedfacecafebabe
+    msr    far_el1, x13
+    movlit x15, 0xab00000012345000
+    msr    par_el1, x15
+    mov    x16, 0x2
+    msr    csselr_el1, x16
+    isb
+
+    // Trigger a VM exit to userspace so host EL2&0 / userspace runs before re-entry.
+    mov    x0, TRAP_ADDR
+    str    xzr, [x0]
+
+    mrs    x14, sp_el0
+    cmp    x14, x1
+    bne    .Lsysreg_fail
+    mrs    x14, tpidr_el0
+    cmp    x14, x2
+    bne    .Lsysreg_fail
+    mrs    x14, tpidrro_el0
+    cmp    x14, x3
+    bne    .Lsysreg_fail
+    mrs    x14, tpidr_el1
+    cmp    x14, x4
+    bne    .Lsysreg_fail
+    mrs    x14, elr_el1
+    cmp    x14, x5
+    bne    .Lsysreg_fail
+    mrs    x14, spsr_el1
+    cmp    x14, x6
+    bne    .Lsysreg_fail
+    mrs    x14, vbar_el1
+    cmp    x14, x7
+    bne    .Lsysreg_fail
+    mrs    x14, contextidr_el1
+    cmp    x14, x8
+    bne    .Lsysreg_fail
+    mrs    x14, cpacr_el1
+    cmp    x14, x9
+    bne    .Lsysreg_fail
+    mrs    x14, cntkctl_el1
+    and    x14, x14, #0x3
+    cmp    x14, x10
+    bne    .Lsysreg_fail
+    mrs    x14, ttbr1_el1
+    cmp    x14, x11
+    bne    .Lsysreg_fail
+    mrs    x14, esr_el1
+    cmp    x14, x12
+    bne    .Lsysreg_fail
+    mrs    x14, far_el1
+    cmp    x14, x13
+    bne    .Lsysreg_fail
+    mrs    x14, par_el1
+    cmp    x14, x15
+    bne    .Lsysreg_fail
+    mrs    x14, csselr_el1
+    cmp    x14, x16
+    bne    .Lsysreg_fail
+    mrs    x14, mair_el1
+    movlit x17, GUEST_MAIR_EL1
+    cmp    x14, x17
+    bne    .Lsysreg_fail
+    mrs    x14, tcr_el1
+    movlit x17, GUEST_TCR_EL1
+    cmp    x14, x17
+    bne    .Lsysreg_fail
+    mrs    x14, ttbr0_el1
+    movlit x17, PAGE_TABLE_PADDR
+    cmp    x14, x17
+    bne    .Lsysreg_fail
+
+    test_complete
+.Lsysreg_fail:
+    test_failure
+END_FUNCTION
+
+// Test trapped TVM / TDOSA system register accesses and Rt == 31 (xzr) bounds checking.
+FUNCTION vcpu_trapped_system_registers
+    // sp_el0 immediately follows x[30] in GuestState; verify Rt == 31 (xzr)
+    // does not index out-of-bounds and overwrite sp_el0.
+    movlit x19, 0xdeadbeefcafebabe
+    msr    sp_el0, x19
+
+    // Trapped TVM writes using xzr (Rt == 31).
+    msr    sctlr_el1, xzr
+    msr    tcr_el1, xzr
+    msr    ttbr0_el1, xzr
+    msr    ttbr1_el1, xzr
+    msr    esr_el1, xzr
+    msr    far_el1, xzr
+    msr    afsr0_el1, xzr
+    msr    afsr1_el1, xzr
+    msr    mair_el1, xzr
+    msr    amair_el1, xzr
+    msr    contextidr_el1, xzr
+
+    // Trapped TDOSA reads and writes using xzr (Rt == 31) and general registers.
+    msr    oslar_el1, xzr
+    msr    osdlr_el1, xzr
+    msr    dbgprcr_el1, xzr
+    mrs    xzr, oslsr_el1
+    mrs    xzr, osdlr_el1
+    mrs    xzr, dbgprcr_el1
+
+    movlit x1, 0x123456789abcdef0
+    msr    osdlr_el1, x1
+    mrs    x1, osdlr_el1
+    cbnz   x1, .Ltrap_sysreg_fail
+
+    movlit x1, 0x123456789abcdef0
+    mrs    x1, oslsr_el1
+    cbnz   x1, .Ltrap_sysreg_fail
+
+    movlit x1, 0x123456789abcdef0
+    msr    dbgprcr_el1, x1
+    mrs    x1, dbgprcr_el1
+    cbnz   x1, .Ltrap_sysreg_fail
+
+    // Verify trapped AFSR0_EL1, AFSR1_EL1, and AMAIR_EL1 writes are handled
+    // without error (these registers are RAZ/WI in hardware when no
+    // implementation-defined fault status or auxiliary attributes exist).
+    movlit x1, 0x0123456789abcdef
+    msr    afsr0_el1, x1
+    msr    afsr1_el1, x1
+    msr    amair_el1, x1
+
+    // Verify 64-bit preservation across trapped TVM writes.
+    movlit x1, 0xfeedfacedeadbeef
+    msr    mair_el1, x1
+    isb
+    mrs    x2, mair_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, 0x0011000000010000
+    msr    ttbr0_el1, x1
+    isb
+    mrs    x2, ttbr0_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, 0x0022000000020000
+    msr    ttbr1_el1, x1
+    isb
+    mrs    x2, ttbr1_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, ((1 << 32) | GUEST_TCR_EL1)
+    msr    tcr_el1, x1
+    isb
+    mrs    x2, tcr_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, 0xfeedfacecafebabe
+    msr    far_el1, x1
+    isb
+    mrs    x2, far_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, 0x56000042
+    msr    esr_el1, x1
+    isb
+    mrs    x2, esr_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    movlit x1, 0xaabbccdd
+    msr    contextidr_el1, x1
+    isb
+    mrs    x2, contextidr_el1
+    cmp    x2, x1
+    bne    .Ltrap_sysreg_fail
+
+    // Verify sp_el0 was not corrupted by any Rt == 31 (xzr) trapped instructions.
+    mrs    x2, sp_el0
+    cmp    x2, x19
+    bne    .Ltrap_sysreg_fail
+
+    test_complete
+.Ltrap_sysreg_fail:
+    test_failure
+END_FUNCTION
+
+// Test EL1 and EL0 generic timer access and context switch under VHE.
+FUNCTION vcpu_timer_registers
+    mrs    x1, cntfrq_el0
+    cbz    x1, .Ltimer_fail
+    mrs    x2, cntpct_el0
+    cbz    x2, .Ltimer_fail
+    mrs    x3, cntvct_el0
+    cbz    x3, .Ltimer_fail
+
+    // Program virtual timer with a masked far-future deadline and verify it
+    // survives a VM exit to the host.
+    movlit x2, 0x7fffffffffffffff
+    msr    cntv_cval_el0, x2
+    mov    x3, 0x3  // IMASK | ENABLE
+    msr    cntv_ctl_el0, x3
+
+    mov    x0, TRAP_ADDR
+    str    xzr, [x0]
+
+    mrs    x4, cntv_cval_el0
+    cmp    x4, x2
+    bne    .Ltimer_fail
+    mrs    x4, cntv_ctl_el0
+    and    x4, x4, #0x3
+    cmp    x4, x3
+    bne    .Ltimer_fail
+
+    msr    cntv_ctl_el0, xzr
+
+    // Enable EL0 physical and virtual counter reads (EL0PCTEN | EL0VCTEN)
+    // and verify guest EL0 can read timer registers without trapping to EL2.
+    mov    x0, 0x3
+    msr    cntkctl_el1, x0
+    isb
+
+    drop_to_el0
+    mrs    x1, cntfrq_el0
+    cbz    x1, .Ltimer_fail
+    mrs    x2, cntpct_el0
+    cbz    x2, .Ltimer_fail
+    mrs    x3, cntvct_el0
+    cbz    x3, .Ltimer_fail
+
+    test_complete
+.Ltimer_fail:
+    test_failure
+END_FUNCTION
+
+// Test that guest EL0 syscalls (svc) route to guest VBAR_EL1 (TGE=0) rather than host VBAR_EL2.
+FUNCTION vcpu_el0_syscall
+    mov    x19, #0
+    drop_to_el0
+    svc    #0x1234
+    cmp    x19, #0x42
+    bne    .Lsvc_fail
+    test_complete
+.Lsvc_fail:
+    test_failure
+
+    exception_vector LOWER_EL_ARCH64_BASE, SYNC_EXC_OFFSET
+    mrs    x1, esr_el1
+    // EC == 0b010101 (SVC in AArch64), ISS == 0x1234.
+    movlit x2, ((0x15 << 26) | (1 << 25) | 0x1234)
+    cmp    x1, x2
+    bne    .Lsvc_fail
+    mov    x19, #0x42
+    eret
 END_FUNCTION
 
 // Test set/way d-cache operations.

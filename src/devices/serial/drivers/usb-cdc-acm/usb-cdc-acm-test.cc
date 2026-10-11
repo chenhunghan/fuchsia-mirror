@@ -10,23 +10,24 @@
 #include <fidl/fuchsia.hardware.usb.virtual.bus/cpp/wire.h>
 #include <fidl/fuchsia.io/cpp/wire.h>
 #include <lib/component/incoming/cpp/protocol.h>
-#include <lib/ddk/platform-defs.h>
 #include <lib/fdio/cpp/caller.h>
 #include <lib/fdio/directory.h>
 #include <lib/fdio/watcher.h>
-#include <lib/hid/boot.h>
 #include <lib/usb-virtual-bus-launcher/usb-virtual-bus-launcher.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zircon/errors.h>
 #include <zircon/syscalls.h>
 
 #include <fbl/string.h>
+#include <gtest/gtest.h>
 #include <usb/cdc.h>
 #include <usb/usb.h>
-#include <zxtest/zxtest.h>
+
+#include "src/lib/testing/predicates/status.h"
 
 namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
@@ -49,7 +50,7 @@ zx_status_t WaitForAnyFile(int dirfd, int event, const char* name, void* cookie)
   return ZX_OK;
 }
 
-class UsbCdcAcmTest : public zxtest::Test {
+class UsbCdcAcmTest : public ::testing::Test {
  public:
   void SetUp() override {
     auto bus = BusLauncher::Create();
@@ -109,7 +110,7 @@ TEST_F(UsbCdcAcmTest, DISABLED_ReadAndWriteTest) {
       fdio_cpp::UnownedFdioCaller(bus_->GetRootFd()).directory(), devpath_.c_str());
   ASSERT_OK(result.status_value());
   auto [client_end, server] = fidl::Endpoints<fuchsia_hardware_serial::Device>::Create();
-  ASSERT_OK(fidl::WireCall(result.value())->GetChannel(std::move(server)));
+  ASSERT_OK(fidl::WireCall(result.value())->GetChannel(std::move(server)).status());
 
   auto assert_read_with_timeout = [&client_end = client_end](cpp20::span<uint8_t> write_data) {
     for (zx::time deadline = zx::deadline_after(zx::sec(5));
@@ -117,16 +118,16 @@ TEST_F(UsbCdcAcmTest, DISABLED_ReadAndWriteTest) {
       const fidl::WireResult result = fidl::WireCall(client_end)->Read();
       ASSERT_OK(result.status());
       const fit::result response = result.value();
-      ASSERT_TRUE(response.is_ok(), "%s", zx_status_get_string(response.error_value()));
+      ASSERT_TRUE(response.is_ok()) << zx_status_get_string(response.error_value());
       cpp20::span data = response.value()->data.get();
       if (data.empty()) {
         continue;
       }
       ASSERT_EQ(data.size_bytes(), write_data.size_bytes());
-      ASSERT_BYTES_EQ(data.data(), write_data.data(), write_data.size_bytes());
+      ASSERT_EQ(memcmp(data.data(), write_data.data(), write_data.size_bytes()), 0);
       return;
     }
-    FAIL("timed out");
+    FAIL() << "timed out";
   };
 
   {
@@ -135,7 +136,7 @@ TEST_F(UsbCdcAcmTest, DISABLED_ReadAndWriteTest) {
         fidl::WireCall(client_end)->Write(fidl::VectorView<uint8_t>::FromExternal(write_data));
     ASSERT_OK(result.status());
     const fit::result response = result.value();
-    ASSERT_TRUE(response.is_ok(), "%s", zx_status_get_string(response.error_value()));
+    ASSERT_TRUE(response.is_ok()) << zx_status_get_string(response.error_value());
     ASSERT_NO_FATAL_FAILURE(assert_read_with_timeout(cpp20::span(write_data)));
   }
 
@@ -145,7 +146,7 @@ TEST_F(UsbCdcAcmTest, DISABLED_ReadAndWriteTest) {
         fidl::WireCall(client_end)->Write(fidl::VectorView<uint8_t>::FromExternal(write_data));
     ASSERT_OK(result.status());
     const fit::result response = result.value();
-    ASSERT_TRUE(response.is_ok(), "%s", zx_status_get_string(response.error_value()));
+    ASSERT_TRUE(response.is_ok()) << zx_status_get_string(response.error_value());
     ASSERT_NO_FATAL_FAILURE(assert_read_with_timeout(cpp20::span(write_data)));
   }
 }

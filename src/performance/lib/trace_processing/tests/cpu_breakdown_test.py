@@ -5,10 +5,12 @@
 """Unit tests for cpu.py."""
 
 import unittest
-from typing import cast
+from typing import TypeVar, cast
 
 from trace_processing import trace_model, trace_time
 from trace_processing.metrics import cpu
+
+_Breakdown = TypeVar("_Breakdown", cpu.ProcessBreakdown, cpu.ThreadBreakdown)
 
 
 class CpuBreakdownTest(unittest.TestCase):
@@ -16,22 +18,29 @@ class CpuBreakdownTest(unittest.TestCase):
 
     def assertBreakdownAlmostEqual(
         self,
-        first: cpu.Breakdown,
-        second: cpu.Breakdown,
+        first: _Breakdown,
+        second: _Breakdown,
         places: int,
     ) -> None:
         self.assertEqual(len(first), len(second))
-        for first_element, second_element in zip(first, second, strict=True):
-            self.assertEqual(first_element.keys(), second_element.keys())
-            for key in first_element:
+        for first_breakdown_metric, second_breakdown_metric in zip(
+            first, second, strict=True
+        ):
+            self.assertEqual(
+                first_breakdown_metric.keys(), second_breakdown_metric.keys()
+            )
+            for key in first_breakdown_metric:
                 if key in {"percent", "normalized_percent"}:
                     self.assertAlmostEqual(
-                        cast(float, first_element[key]),
-                        cast(float, second_element[key]),
+                        cast(float, first_breakdown_metric[key]),  # type: ignore
+                        cast(float, second_breakdown_metric[key]),  # type: ignore
                         places=places,
                     )
                 else:
-                    self.assertEqual(first_element[key], second_element[key])
+                    self.assertEqual(
+                        first_breakdown_metric[key],  # type: ignore
+                        second_breakdown_metric[key],  # type: ignore
+                    )
 
     def construct_trace_model(self) -> trace_model.Model:
         threads = [trace_model.Thread(i, f"thread-{i}") for i in range(1, 5)]
@@ -327,88 +336,102 @@ class CpuBreakdownTest(unittest.TestCase):
 
         processor = cpu.CpuMetricsProcessor()
         name, breakdown = processor.process_freeform_metrics(model)
+        # TODO(https://github.com/python/mypy/issues/18176): eliminate this
+        # cast and local field; the type-checker ought understand that a
+        # ThreadBreakdown is suitable to use where a metrics.JSON is needed.
+        thread_breakdown = cast(cpu.ThreadBreakdown, breakdown)
         self.assertEqual(name, processor.FREEFORM_METRICS_FILENAME)
 
-        self.assertEqual(len(breakdown), 5)
+        self.assertEqual(len(thread_breakdown), 5)
 
         # Each process: thread has the correct numbers for each CPU.
         # Sorted by descending cpu and descending percent.
         # Note that neither thread-3 nor thread-4 are logged because
         # they are idle or there is no duration.
         self.assertBreakdownAlmostEqual(
-            breakdown,
-            [
-                {
-                    "process_name": "big_process",
-                    "thread_name": "thread-1",
-                    "tid": 1,
-                    "cpu": 5,
-                    "percent": 54.545,
-                    "duration": 3000.0,
-                    "normalized_percent": 54.545,
-                    "normalized_duration": 3000.0,
-                    "duration_per_rate": {"1000": 3000.0},
-                },
-                {
-                    "process_name": "big_process",
-                    "thread_name": "thread-2",
-                    "tid": 2,
-                    "cpu": 3,
-                    "percent": 33.333,
-                    "duration": 1000.0,
-                    "normalized_percent": 33.333,
-                    "normalized_duration": 1000.0,
-                    "duration_per_rate": {"1000": 1000.0},
-                },
-                {
-                    "process_name": "big_process",
-                    "thread_name": "thread-2",
-                    "tid": 2,
-                    "cpu": 2,
-                    "percent": 62.5,
-                    "duration": 5000.0,
-                    "normalized_percent": 65.321,
-                    "normalized_duration": 3462.0,
-                    "duration_per_rate": {
-                        "1000": 1000.0,
-                        "798": 2000.0,
-                        "506": 1000.0,
-                        "360": 1000.0,
-                    },
-                },
-                {
-                    "process_name": "big_process",
-                    "thread_name": "thread-1",
-                    "tid": 1,
-                    "cpu": 2,
-                    "percent": 18.75,
-                    "duration": 1500.0,
-                    "normalized_percent": 19.426,
-                    "normalized_duration": 1029.6,
-                    "duration_per_rate": {
-                        "1000": 400.0,
-                        "798": 400.0,
-                        "506": 400.0,
-                        "360": 300.0,
-                    },
-                },
-                {
-                    "process_name": "small_process",
-                    "thread_name": "small-thread",
-                    "tid": 100,
-                    "cpu": 2,
-                    "percent": 6.25,
-                    "duration": 500.0,
-                    "normalized_percent": 5.706,
-                    "normalized_duration": 302.4,
-                    "duration_per_rate": {
-                        "1000": 100.0,
-                        "798": 100.0,
-                        "506": 100.0,
-                        "360": 200.0,
-                    },
-                },
-            ],
+            thread_breakdown,
+            (
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "big_process",
+                        "thread_name": "thread-1",
+                        "tid": 1,
+                        "cpu": 5,
+                        "percent": 54.545,
+                        "duration": 3000.0,
+                        "normalized_percent": 54.545,
+                        "normalized_duration": 3000.0,
+                        "duration_per_rate": {"1000": 3000.0},
+                    }
+                ),
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "big_process",
+                        "thread_name": "thread-2",
+                        "tid": 2,
+                        "cpu": 3,
+                        "percent": 33.333,
+                        "duration": 1000.0,
+                        "normalized_percent": 33.333,
+                        "normalized_duration": 1000.0,
+                        "duration_per_rate": {"1000": 1000.0},
+                    }
+                ),
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "big_process",
+                        "thread_name": "thread-2",
+                        "tid": 2,
+                        "cpu": 2,
+                        "percent": 62.5,
+                        "duration": 5000.0,
+                        "normalized_percent": 65.321,
+                        "normalized_duration": 3462.0,
+                        "duration_per_rate": {
+                            "1000": 1000.0,
+                            "798": 2000.0,
+                            "506": 1000.0,
+                            "360": 1000.0,
+                        },
+                    }
+                ),
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "big_process",
+                        "thread_name": "thread-1",
+                        "tid": 1,
+                        "cpu": 2,
+                        "percent": 18.75,
+                        "duration": 1500.0,
+                        "normalized_percent": 19.426,
+                        "normalized_duration": 1029.6,
+                        "duration_per_rate": {
+                            "1000": 400.0,
+                            "798": 400.0,
+                            "506": 400.0,
+                            "360": 300.0,
+                        },
+                    }
+                ),
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "small_process",
+                        "thread_name": "small-thread",
+                        "tid": 100,
+                        "cpu": 2,
+                        "percent": 6.25,
+                        "duration": 500.0,
+                        "normalized_percent": 5.706,
+                        "normalized_duration": 302.4,
+                        "duration_per_rate": {
+                            "1000": 100.0,
+                            "798": 100.0,
+                            "506": 100.0,
+                            "360": 200.0,
+                        },
+                    }
+                ),
+            ),
             places=3,
         )
 
@@ -417,14 +440,20 @@ class CpuBreakdownTest(unittest.TestCase):
 
         processor = cpu.CpuMetricsProcessor()
         name, breakdown = processor.process_freeform_metrics(model)
+        # TODO(https://github.com/python/mypy/issues/18176): eliminate this
+        # cast and local field; the type-checker ought understand that a
+        # ProcessBreakdown is suitable to use where a metrics.JSON is needed.
+        thread_breakdown = cast(cpu.ThreadBreakdown, breakdown)
         self.assertEqual(name, processor.FREEFORM_METRICS_FILENAME)
-        consolidated_breakdown = cpu.group_by_process_name(breakdown)
+        consolidated_breakdown = cpu.group_by_process_name(
+            thread_breakdown,
+        )
         self.assertEqual(len(consolidated_breakdown), 4)
 
         # Each process has been consolidated.
         # Sorted by descending cpu and descending percent.
         self.assertBreakdownAlmostEqual(
-            consolidated_breakdown,
+            consolidated_breakdown,  # type: ignore
             [
                 {
                     "process_name": "big_process",
@@ -486,37 +515,47 @@ class CpuBreakdownTest(unittest.TestCase):
         with self.assertLogs(cpu._LOGGER, level="WARNING") as context_manager:
             processor = cpu.CpuMetricsProcessor()
             name, breakdown = processor.process_freeform_metrics(model)
+            # TODO(https://github.com/python/mypy/issues/18176): eliminate
+            # this cast and local field; the type-checker ought understand
+            # that a ThreadBreakdown is suitable to use where a metrics.JSON
+            # is needed.
+            thread_breakdown = cast(cpu.ThreadBreakdown, breakdown)
             self.assertEqual(name, processor.FREEFORM_METRICS_FILENAME)
 
-        self.assertEqual(len(breakdown), 2)
+        self.assertEqual(len(thread_breakdown), 2)
 
         # Each process: thread has the correct numbers for each CPU.
-        self.assertEqual(
-            breakdown,
-            [
-                {
-                    "process_name": "process",
-                    "thread_name": "thread-1",
-                    "tid": 1,
-                    "cpu": 2,
-                    "percent": 30.0,
-                    "duration": 1500.0,
-                    "normalized_percent": 30.0,
-                    "normalized_duration": 1500.0,
-                    "duration_per_rate": {"1000": 1500.0},
-                },
-                {
-                    "process_name": "process",
-                    "thread_name": "thread-3",
-                    "tid": 3,
-                    "cpu": 2,
-                    "percent": 20.0,
-                    "duration": 1000.0,
-                    "normalized_percent": 20.0,
-                    "normalized_duration": 1000.0,
-                    "duration_per_rate": {"1000": 1000.0},
-                },
-            ],
+        self.assertBreakdownAlmostEqual(
+            thread_breakdown,
+            (
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "process",
+                        "thread_name": "thread-1",
+                        "tid": 1,
+                        "cpu": 2,
+                        "percent": 30.0,
+                        "duration": 1500.0,
+                        "normalized_percent": 30.0,
+                        "normalized_duration": 1500.0,
+                        "duration_per_rate": {"1000": 1500.0},
+                    }
+                ),
+                cpu.ThreadBreakdownMetric(
+                    {
+                        "process_name": "process",
+                        "thread_name": "thread-3",
+                        "tid": 3,
+                        "cpu": 2,
+                        "percent": 20.0,
+                        "duration": 1000.0,
+                        "normalized_percent": 20.0,
+                        "normalized_duration": 1000.0,
+                        "duration_per_rate": {"1000": 1000.0},
+                    }
+                ),
+            ),
+            places=3,
         )
 
         # Skipped records are logged.

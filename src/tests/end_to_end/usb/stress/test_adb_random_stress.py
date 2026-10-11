@@ -10,6 +10,7 @@ import random
 import tempfile
 
 import fuchsia_base_test
+from honeydew.device_classes import android_device
 from mobly import test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
         random_seed (int): Seed for the random number generator for test reproducibility.
     """
 
+    dut: android_device.AndroidDevice
+
     async def pre_run(self) -> None:
         test_arg_tuple_list: list[tuple[int]] = []
         num_iterations = int(self.user_params.get("num_iterations", 20))
@@ -39,6 +42,7 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def setup_class(self) -> None:
         await super().setup_class()
+        assert isinstance(self.dut, android_device.AndroidDevice)
         # Ensure ADB is supported and enabled on this device before starting the test
         # (raises NotSupportedError or NotEnabledError otherwise).
         _ = self.dut.adb

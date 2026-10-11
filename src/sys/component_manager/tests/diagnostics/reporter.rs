@@ -92,26 +92,31 @@ async fn main() {
                 "0": {
                     moniker: ".",
                     type: "started",
+                    start_reason: AnyProperty,
                     time: AnyProperty,
                 },
                 "1": {
                     moniker: "root",
                     type: "started",
+                    start_reason: AnyProperty,
                     time: AnyProperty,
                 },
                 "2": {
                     moniker: "root/elf_runner",
                     type: "started",
+                    start_reason: AnyProperty,
                     time: AnyProperty,
                 },
                 "3": {
                     moniker: "root/reporter",
                     type: "started",
+                    start_reason: AnyProperty,
                     time: AnyProperty,
                 },
                 "4": {
                     moniker: "root/archivist",
                     type: "started",
+                    start_reason: AnyProperty,
                     time: AnyProperty,
                 },
             },

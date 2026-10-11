@@ -225,9 +225,7 @@ inline bool compare_exchange_pte(pte_t* pte, pte_t& expected, pte_t desired,
 }
 
 // Convert user level mmu flags to flags that go in L1 descriptors.
-// Hypervisor flag modifies behavior to work for single translation regimes
-// such as the mapping of kernel pages with ArmAspaceType::kHypervisor in EL2.
-pte_t mmu_flags_to_s1_pte_attr(arch_mmu_flags_t flags, bool hypervisor = false) {
+pte_t mmu_flags_to_s1_pte_attr(arch_mmu_flags_t flags) {
   pte_t attr = MMU_PTE_ATTR_AF;
 
   switch (flags & ARCH_MMU_FLAG_CACHE_MASK) {
@@ -262,25 +260,17 @@ pte_t mmu_flags_to_s1_pte_attr(arch_mmu_flags_t flags, bool hypervisor = false) 
       break;
   }
 
-  if (hypervisor) {
-    // For single translation regimes such as the hypervisor pages, only
-    // the XN bit applies.
-    if ((flags & ARCH_MMU_FLAG_PERM_EXECUTE) == 0) {
-      attr |= MMU_PTE_ATTR_XN;
+  if (flags & ARCH_MMU_FLAG_PERM_EXECUTE) {
+    if (flags & ARCH_MMU_FLAG_PERM_USER) {
+      // User executable page, marked privileged execute never.
+      attr |= MMU_PTE_ATTR_PXN;
+    } else {
+      // Privileged executable page, marked user execute never.
+      attr |= MMU_PTE_ATTR_UXN;
     }
   } else {
-    if (flags & ARCH_MMU_FLAG_PERM_EXECUTE) {
-      if (flags & ARCH_MMU_FLAG_PERM_USER) {
-        // User executable page, marked privileged execute never.
-        attr |= MMU_PTE_ATTR_PXN;
-      } else {
-        // Privileged executable page, marked user execute never.
-        attr |= MMU_PTE_ATTR_UXN;
-      }
-    } else {
-      // All non executable pages are marked both privileged and user execute never.
-      attr |= MMU_PTE_ATTR_UXN | MMU_PTE_ATTR_PXN;
-    }
+    // All non executable pages are marked both privileged and user execute never.
+    attr |= MMU_PTE_ATTR_UXN | MMU_PTE_ATTR_PXN;
   }
 
   if (flags & ARCH_MMU_FLAG_NS) {
@@ -290,7 +280,7 @@ pte_t mmu_flags_to_s1_pte_attr(arch_mmu_flags_t flags, bool hypervisor = false) 
   return attr;
 }
 
-arch_mmu_flags_t s1_pte_attr_to_mmu_flags(pte_t pte, bool hypervisor = false) {
+arch_mmu_flags_t s1_pte_attr_to_mmu_flags(pte_t pte) {
   arch_mmu_flags_t mmu_flags = 0;
   switch (pte & MMU_PTE_ATTR_ATTR_INDEX_MASK) {
     case MMU_PTE_ATTR_STRONGLY_ORDERED:
@@ -324,27 +314,20 @@ arch_mmu_flags_t s1_pte_attr_to_mmu_flags(pte_t pte, bool hypervisor = false) {
       break;
   }
 
-  if (hypervisor) {
-    // Single translation regimes such as the hypervisor only support the XN bit.
-    if ((pte & MMU_PTE_ATTR_XN) == 0) {
+  // Based on whether or not this is a user page, check UXN or PXN bit to determine
+  // if it's an executable page.
+  if (mmu_flags & ARCH_MMU_FLAG_PERM_USER) {
+    if ((pte & MMU_PTE_ATTR_UXN) == 0) {
       mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
     }
-  } else {
-    // Based on whether or not this is a user page, check UXN or PXN bit to determine
-    // if it's an executable page.
-    if (mmu_flags & ARCH_MMU_FLAG_PERM_USER) {
-      if ((pte & MMU_PTE_ATTR_UXN) == 0) {
-        mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
-      }
-    } else if ((pte & MMU_PTE_ATTR_PXN) == 0) {
-      // Privileged page, check the PXN bit.
-      mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
-    }
-
-    // TODO: https://fxbug.dev/42169684
-    // Add additional asserts here that the translation table entries are correctly formed
-    // with regards to UXN and PXN bits and possibly other unhandled and/or ambiguous bits.
+  } else if ((pte & MMU_PTE_ATTR_PXN) == 0) {
+    // Privileged page, check the PXN bit.
+    mmu_flags |= ARCH_MMU_FLAG_PERM_EXECUTE;
   }
+
+  // TODO: https://fxbug.dev/42169684
+  // Add additional asserts here that the translation table entries are correctly formed
+  // with regards to UXN and PXN bits and possibly other unhandled and/or ambiguous bits.
 
   if (pte & MMU_PTE_ATTR_NON_SECURE) {
     mmu_flags |= ARCH_MMU_FLAG_NS;
@@ -475,10 +458,20 @@ ktl::string_view ArmAspaceTypeName(ArmAspaceType type) {
       return "user";
     case ArmAspaceType::kGuest:
       return "guest";
-    case ArmAspaceType::kHypervisor:
-      return "hypervisor";
   }
   __UNREACHABLE;
+}
+
+// Returns true if the given physical page address is mapped in the kernel
+// physmap. Non-RAM physical pages (such as reserved firmware runtime regions)
+// are excluded from the physmap even when they fall below gPhysmapSize.
+bool IsPhysmapPageMapped(paddr_t pa) {
+  if (!is_physmap_phys_addr(pa)) {
+    return false;
+  }
+  paddr_t unused;
+  return arm64_mmu_translate(reinterpret_cast<vaddr_t>(paddr_to_physmap(pa)), &unused,
+                             /*user=*/false, /*write=*/false) == ZX_OK;
 }
 
 }  // namespace
@@ -552,11 +545,9 @@ class ArmArchVmAspace::ConsistencyManager {
   void FlushEntry(vaddr_t va, bool terminal) {
     // Check we have queued too many entries already.
     if (num_pending_tlbs_ >= kMaxPendingTlbs) {
-      // Most of the time we will now prefer to invalidate the entire ASID, the exception is if
-      // this aspace is using the global ASID, since we cannot perform a global TLB invalidation
-      // for all ASIDs. Note that there is an instruction to invalidate the entire TLB, but it is
-      // only available in EL2, and we are in EL1.
-      if (aspace_.asid_ != MMU_ARM64_GLOBAL_ASID) {
+      // Most of the time we will now prefer to invalidate the entire ASID/VMID, the exception is
+      // if this is the kernel aspace, which uses global mappings rather than a dedicated ASID.
+      if (aspace_.type_ != ArmAspaceType::kKernel) {
         // Keep counting entries so that we can track how many TLB invalidates we saved by grouping.
         num_pending_tlbs_++;
         return;
@@ -593,7 +584,7 @@ class ArmArchVmAspace::ConsistencyManager {
     // Check if we should just be performing a full ASID invalidation.
     // If the associate aspace is shared, this will be upgraded to a full TLB invalidation across
     // all ASIDs.
-    if (num_pending_tlbs_ > kMaxPendingTlbs || aspace_.type_ == ArmAspaceType::kHypervisor) {
+    if (num_pending_tlbs_ > kMaxPendingTlbs) {
       cm_flush_all.Add(1);
       cm_flush_all_replacing.Add(num_pending_tlbs_);
       // If we're a shared aspace, we should be invalidating across all ASIDs.
@@ -677,8 +668,6 @@ arch_mmu_flags_t ArmArchVmAspace::MmuFlagsFromPte(pte_t pte) {
     case ArmAspaceType::kUser:
     case ArmAspaceType::kKernel:
       return s1_pte_attr_to_mmu_flags(pte);
-    case ArmAspaceType::kHypervisor:
-      return s1_pte_attr_to_mmu_flags(pte, true);
     case ArmAspaceType::kGuest:
       return s2_pte_attr_to_mmu_flags(pte);
   }
@@ -888,9 +877,6 @@ void ArmArchVmAspace::FlushTLBEntry(vaddr_t vaddr, bool terminal) const {
       DEBUG_ASSERT(status == ZX_OK);
       return;
     }
-    case ArmAspaceType::kHypervisor:
-      PANIC("Unsupported.");
-      return;
   }
   __UNREACHABLE;
 }
@@ -917,12 +903,6 @@ void ArmArchVmAspace::FlushAsid() const {
     case ArmAspaceType::kGuest: {
       uint64_t vttbr = arm64_vttbr(asid_, tt_phys_);
       zx_status_t status = arm64_el2_tlbi_vmid(vttbr);
-      DEBUG_ASSERT(status == ZX_OK);
-      return;
-    }
-    case ArmAspaceType::kHypervisor: {
-      // Flush all TLB entries in EL2.
-      zx_status_t status = arm64_el2_tlbi_el2();
       DEBUG_ASSERT(status == ZX_OK);
       return;
     }
@@ -1526,9 +1506,6 @@ pte_t ArmArchVmAspace::MmuParamsFromFlags(arch_mmu_flags_t mmu_flags) {
     case ArmAspaceType::kGuest:
       attrs = mmu_flags_to_s2_pte_attr(mmu_flags);
       break;
-    case ArmAspaceType::kHypervisor:
-      attrs = mmu_flags_to_s1_pte_attr(mmu_flags, true);
-      break;
   }
   return attrs;
 }
@@ -1567,17 +1544,22 @@ zx_status_t ArmArchVmAspace::MapContiguous(vaddr_t vaddr, paddr_t paddr, size_t 
   {
     Guard<CriticalMutex> a{&lock_};
     ASSERT(updates_enabled_);
-    if ((mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) || type_ == ArmAspaceType::kHypervisor) {
-      // The icache gets synced both for executable mappings, which is the expected case, as well as
-      // for any hypervisor mapping. For hypervisor mappings we additionally need to clean the cache
-      // fully to PoC (not just PoU as required for icache consistency) as guests, who can disable
-      // their caches at will, could otherwise see stale data that hasn't been written back to
-      // memory yet.
+    if ((mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) || type_ == ArmAspaceType::kGuest) {
+      // The icache gets synced both for executable mappings, which is the expected case, as well
+      // as for any physmap-backed guest mapping. For guest mappings we additionally need to clean
+      // the cache fully to PoC (not just PoU as required for icache consistency) as guests, who
+      // can disable their Stage-1 caches at will, could otherwise see stale data that hasn't been
+      // written back to memory yet.
       ArmVmICacheConsistencyManager cache_cm;
-      if (type_ == ArmAspaceType::kHypervisor) {
+      if (type_ == ArmAspaceType::kGuest) {
         cache_cm.ForceCleanToPoC();
       }
-      cache_cm.SyncAddr(reinterpret_cast<vaddr_t>(paddr_to_physmap(paddr)), count * kPageSize);
+      for (size_t idx = 0; idx < count; ++idx) {
+        const paddr_t page_paddr = paddr + idx * kPageSize;
+        if (IsPhysmapPageMapped(page_paddr)) {
+          cache_cm.SyncAddr(reinterpret_cast<vaddr_t>(paddr_to_physmap(page_paddr)), kPageSize);
+        }
+      }
     }
     pte_t attrs = MmuParamsFromFlags(mmu_flags);
 
@@ -1655,12 +1637,17 @@ zx_status_t ArmArchVmAspace::Map(vaddr_t vaddr, paddr_t* phys, size_t count,
   {
     Guard<CriticalMutex> a{&lock_};
     ASSERT(updates_enabled_);
-    if ((mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) || type_ == ArmAspaceType::kHypervisor) {
+    if ((mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) || type_ == ArmAspaceType::kGuest) {
       ArmVmICacheConsistencyManager cache_cm;
+      if (type_ == ArmAspaceType::kGuest) {
+        // See comment in MapContiguous for why we do this for guest mappings.
+        cache_cm.ForceCleanToPoC();
+      }
       for (size_t idx = 0; idx < count; ++idx) {
-        // See comment in MapContiguous for why we do this for the hypervisor.
-        if (type_ == ArmAspaceType::kHypervisor) {
-          cache_cm.ForceCleanToPoC();
+        // Ignore non-physmap pages, such as passed-through device MMIO ranges or reserved
+        // firmware runtime regions.
+        if (unlikely(!IsPhysmapPageMapped(phys[idx]))) {
+          continue;
         }
         cache_cm.SyncAddr(reinterpret_cast<vaddr_t>(paddr_to_physmap(phys[idx])), kPageSize);
       }
@@ -1780,7 +1767,7 @@ zx_status_t ArmArchVmAspace::Protect(vaddr_t vaddr, size_t count, arch_mmu_flags
       paddr_t paddr;
       arch_mmu_flags_t flags;
       if (QueryLocked(vaddr + idx * kPageSize, &paddr, &flags) == ZX_OK &&
-          !(flags & ARCH_MMU_FLAG_PERM_EXECUTE)) {
+          !(flags & ARCH_MMU_FLAG_PERM_EXECUTE) && IsPhysmapPageMapped(paddr)) {
         cache_cm.SyncAddr(reinterpret_cast<vaddr_t>(paddr_to_physmap(paddr)), kPageSize);
         pages_synced++;
       }
@@ -1959,13 +1946,7 @@ zx_status_t ArmArchVmAspace::Init() {
       top_index_shift_ = MMU_GUEST_TOP_SHIFT;
       page_size_shift_ = MMU_GUEST_PAGE_SIZE_SHIFT;
     } else {
-      DEBUG_ASSERT(type_ == ArmAspaceType::kHypervisor);
-      DEBUG_ASSERT(base_ + size_ <= 1UL << MMU_IDENT_SIZE_SHIFT);
-
-      vaddr_base_ = 0;
-      top_size_shift_ = MMU_IDENT_SIZE_SHIFT;
-      top_index_shift_ = MMU_IDENT_TOP_SHIFT;
-      page_size_shift_ = MMU_IDENT_PAGE_SIZE_SHIFT;
+      DEBUG_ASSERT(false);
     }
 
     // allocate a top level page table to serve as the translation table

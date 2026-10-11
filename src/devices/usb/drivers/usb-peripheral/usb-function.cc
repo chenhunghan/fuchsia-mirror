@@ -184,6 +184,8 @@ UsbFunction::~UsbFunction() {
       }
     }
   }
+  function_intf_ = {};
+  CompletePendingUnconfigures(ZX_OK);
 }
 
 void UsbFunction::ConnectToEndpoint(ConnectToEndpointRequest& request,
@@ -278,7 +280,7 @@ void UsbFunction::DisableEndpoint(DisableEndpointRequest& request,
                                   DisableEndpointCompleter::Sync& completer) {
   TRACE_DURATION("usb-peripheral", __func__, "ep_address", request.endpoint_address());
   if (!function_intf_.is_valid()) {
-    fdf::error("DisableEndpoint failed: not configured");
+    fdf::debug("DisableEndpoint called with invalid function interface");
     completer.Reply(fit::as_error(ZX_ERR_BAD_STATE));
     return;
   }
@@ -292,8 +294,8 @@ void UsbFunction::DisableEndpoint(DisableEndpointRequest& request,
 
 void UsbFunction::Configure(ConfigureRequest& request, ConfigureCompleter::Sync& completer) {
   TRACE_DURATION("usb-peripheral", __func__);
-  if (peripheral_->IsPeripheralStopping()) {
-    fdf::warn("Configure rejected: Peripheral is stopping or driver is tearing down.");
+  if (peripheral_->IsPeripheralStopping() || state_ == FunctionState::kCleared) {
+    fdf::warn("Configure rejected: Peripheral is stopping or function is cleared.");
     completer.Reply(fit::as_error(ZX_ERR_BAD_STATE));
     return;
   }
@@ -326,14 +328,17 @@ void UsbFunction::Configure(ConfigureRequest& request, ConfigureCompleter::Sync&
   num_interfaces_ = validate_result.value();
 
   SetDescriptors(descriptors, length);
+  const uint64_t bind_gen = ++bind_generation_;
   function_intf_.Bind(std::move(request.iface()), dispatcher_,
-                      std::make_unique<FunctionEventHandler>(this));
+                      std::make_unique<FunctionEventHandler>(this, bind_gen));
+  state_ = FunctionState::kBound;
   zx_status_t status = peripheral_->FunctionRegistered();
 
   if (status != ZX_OK) {
     completer.Reply(fit::as_error(status));
     fdf::error("FunctionRegistered failed: {}", zx_status_get_string(status));
     function_intf_ = {};
+    state_ = FunctionState::kWaitingForBind;
     ClearDescriptors();
     return;
   }
@@ -362,7 +367,8 @@ void UsbFunction::FunctionEventHandler::on_fidl_error(fidl::UnbindInfo info) {
     case ZX_ERR_PEER_CLOSED:
     case ZX_OK:
     case ZX_ERR_CANCELED:
-      if (std::shared_ptr parent = parent_.lock()) {
+      if (std::shared_ptr parent = parent_.lock();
+          parent && parent->bind_generation_ == bind_generation_) {
         parent->CloseFunctionInterface();
       }
       break;
@@ -379,28 +385,74 @@ void UsbFunction::FunctionEventHandler::handle_unknown_event(
 }
 
 UsbFunction::FunctionEventHandler::~FunctionEventHandler() {
-  if (std::shared_ptr parent = parent_.lock()) {
+  if (std::shared_ptr parent = parent_.lock();
+      parent && parent->bind_generation_ == bind_generation_) {
     parent->CloseFunctionInterface();
   }
 }
 
+void UsbFunction::CompletePendingUnconfigures(zx_status_t status) {
+  ++rpc_generation_;
+  if (state_ != FunctionState::kCleared) {
+    state_ =
+        function_intf_.is_valid() ? FunctionState::kUnconfigured : FunctionState::kWaitingForBind;
+  }
+  fit::callback<void(zx_status_t)> canceled_active_configure =
+      std::move(active_configure_completer_);
+  auto completers = std::move(pending_unconfigure_completers_);
+  auto pending_config = std::move(pending_configure_);
+  pending_configure_.reset();
+
+  if (canceled_active_configure) {
+    canceled_active_configure(ZX_ERR_CANCELED);
+  }
+
+  for (auto& cb : completers) {
+    if (cb) {
+      cb(status);
+    }
+  }
+
+  if (pending_config.has_value()) {
+    if (status != ZX_OK || !function_intf_.is_valid()) {
+      pending_config->completer(status != ZX_OK ? status : ZX_ERR_BAD_STATE);
+    } else {
+      Configure(static_cast<usb_speed_t>(pending_config->speed),
+                std::move(pending_config->completer));
+    }
+  }
+}
+
 void UsbFunction::CloseFunctionInterface() {
+  if (!function_intf_.is_valid() && !deconfigure_completer_.has_value() &&
+      !active_configure_completer_ && pending_unconfigure_completers_.empty() &&
+      !pending_configure_.has_value() &&
+      (state_ == FunctionState::kWaitingForBind || state_ == FunctionState::kCleared)) {
+    return;
+  }
+  ++bind_generation_;
   function_intf_ = {};
   ClearDescriptors();
   inspect_.UpdateConfiguration(0, false);
-  peripheral_->FunctionUnregistered();
-
-  if (deconfigure_completer_.has_value()) {
-    deconfigure_completer_->Reply(fit::ok());
-    deconfigure_completer_.reset();
-  }
+  CompletePendingUnconfigures(ZX_OK);
+  auto completer = std::move(deconfigure_completer_);
+  deconfigure_completer_.reset();
+  peripheral_->FunctionUnregistered([completer = std::move(completer)]() mutable {
+    if (completer.has_value()) {
+      completer->Reply(fit::ok());
+    }
+  });
 }
 
 void UsbFunction::RequestRemoval() {
   async::PostTask(dispatcher_, [this, self = shared_from_this()]() {
+    if (state_ == FunctionState::kCleared) {
+      return;
+    }
     if (!child_.is_valid()) {
       // If there is no child, we're already effectively cleared. Since child_ is invalid,
       // active_functions_count_ was either never incremented or already decremented.
+      state_ = FunctionState::kCleared;
       peripheral_->FunctionCleared(function_index(), config_generation());
       return;
     }
@@ -425,143 +477,198 @@ void UsbFunction::OnNodeControllerUnbound(fidl::UnbindInfo info) {
   }
   child_ = {};
   CloseFunctionInterface();
-  peripheral_->DecrementActiveFunctions(config_generation());
-  peripheral_->FunctionCleared(function_index(), config_generation());
+  if (state_ != FunctionState::kCleared) {
+    state_ = FunctionState::kCleared;
+    peripheral_->DecrementActiveFunctions(config_generation());
+    peripheral_->FunctionCleared(function_index(), config_generation());
+  }
 }
 
-void UsbFunction::SetConfigured(bool configured, usb_speed_t speed,
-                                fit::callback<void(zx_status_t)> completer) {
-  TRACE_DURATION("usb-peripheral", __func__);
-
-  bool unconfigure_first = false;
-  if (last_configured_.has_value() && *last_configured_ == configured) {
-    if (!configured) {
-      // Nothing to do since it's already in the desired unconfigured state.
-      completer(ZX_OK);
-      return;
-    }
-
-    // From the USB 2.0 specification, section 9.1.1.5:
-    //
-    //    Before a USB device’s function may be used, the device must be
-    //    configured. From the device’s perspective, configuration involves
-    //    correctly processing a SetConfiguration() request with a non-zero
-    //    configuration value. Configuring a device or changing an alternate
-    //    setting causes all of the status and configuration values associated
-    //    with endpoints in the affected interfaces to be set to their default
-    //    values. This includes setting the data toggle of any endpoint using
-    //    data toggles to the value DATA0.
-    //
-    // The easy way to get compliance for all function drivers is to flap them
-    // before acknowledging the configuration change.
-    fdf::info("SetConfigured called twice with configured = true; forcing configuration flap on {}",
-              index_);
-    unconfigure_first = true;
+void UsbFunction::StartUnconfigure(fdescriptor::wire::UsbSpeed fspeed) {
+  state_ = FunctionState::kUnconfiguring;
+  const uint64_t generation = ++rpc_generation_;
+  fit::callback<void(zx_status_t)> canceled_active_configure =
+      std::move(active_configure_completer_);
+  function_intf_->SetConfigured(false, fspeed)
+      .ThenExactlyOnce([weak_this = weak_from_this(), generation](
+                           fidl::WireUnownedResult<ffunction::UsbFunctionInterface::SetConfigured>&
+                               result) mutable {
+        auto self = weak_this.lock();
+        if (!self || self->state_ != FunctionState::kUnconfiguring ||
+            self->rpc_generation_ != generation) {
+          return;
+        }
+        zx_status_t status = ZX_OK;
+        if (!result.ok()) {
+          if (result.status() != ZX_ERR_CANCELED && result.status() != ZX_ERR_PEER_CLOSED) {
+            fdf::error("UsbFunctionInterface.SetConfigured FIDL call failed: {}",
+                       result.FormatDescription());
+            status = result.status();
+          }
+        } else if (result->is_error()) {
+          if (result->error_value() != ZX_ERR_BAD_STATE &&
+              result->error_value() != ZX_ERR_NOT_CONNECTED &&
+              result->error_value() != ZX_ERR_CANCELED) {
+            fdf::error("UsbFunctionInterface.SetConfigured error: {}",
+                       zx_status_get_string(result->error_value()));
+            status = result->error_value();
+          }
+        }
+        if (status == ZX_OK) {
+          self->inspect_.UpdateConfiguration(self->configuration_ + 1, false);
+        }
+        self->CompletePendingUnconfigures(status);
+      });
+  if (canceled_active_configure) {
+    canceled_active_configure(ZX_ERR_CANCELED);
   }
+}
 
-  last_configured_ = configured;
+void UsbFunction::SendSetConfiguredTrue(fdescriptor::wire::UsbSpeed fspeed,
+                                        fit::callback<void(zx_status_t)> completer) {
   if (!function_intf_.is_valid()) {
-    if (!configured) {
-      // If the function interface is invalid (not yet registered or already unbound
-      // during teardown/deconfigure), the function is de-facto unconfigured. Succeed
-      // immediately with ZX_OK to prevent spurious ZX_ERR_BAD_STATE error logging and
-      // allow unconfigure promises to complete cleanly during disconnect and teardown.
-      completer(ZX_OK);
-      return;
-    }
-    fdf::error("SetConfigured failed as the interface is invalid.");
+    fdf::error("Configure failed as the interface is invalid.");
+    completer(ZX_ERR_BAD_STATE);
+    return;
+  }
+  state_ = FunctionState::kConfiguring;
+  const uint64_t generation = ++rpc_generation_;
+  active_configure_completer_ = std::move(completer);
+  function_intf_->SetConfigured(true, fspeed)
+      .ThenExactlyOnce([weak_this = weak_from_this(), generation](
+                           fidl::WireUnownedResult<ffunction::UsbFunctionInterface::SetConfigured>&
+                               result) mutable {
+        auto self = weak_this.lock();
+        if (!self || self->state_ != FunctionState::kConfiguring ||
+            self->rpc_generation_ != generation) {
+          return;
+        }
+        auto completer = std::move(self->active_configure_completer_);
+        if (!result.ok()) {
+          fdf::error("UsbFunctionInterface.SetConfigured FIDL call failed: {}",
+                     result.FormatDescription());
+          self->state_ = self->function_intf_.is_valid() ? FunctionState::kUnconfigured
+                                                         : FunctionState::kWaitingForBind;
+          if (completer) {
+            completer(result.status());
+          }
+          return;
+        }
+        if (result->is_error()) {
+          fdf::error("UsbFunctionInterface.SetConfigured error: {}",
+                     zx_status_get_string(result->error_value()));
+          self->state_ = self->function_intf_.is_valid() ? FunctionState::kUnconfigured
+                                                         : FunctionState::kWaitingForBind;
+          if (completer) {
+            completer(result->error_value());
+          }
+          return;
+        }
+        self->state_ = FunctionState::kConfigured;
+        self->inspect_.UpdateConfiguration(self->configuration_ + 1, true);
+        if (completer) {
+          completer(ZX_OK);
+        }
+      });
+}
+
+void UsbFunction::Configure(usb_speed_t speed, fit::callback<void(zx_status_t)> completer) {
+  TRACE_DURATION("usb-peripheral", __func__);
+  if (!function_intf_.is_valid()) {
+    fdf::error("Configure failed as the interface is invalid.");
     completer(ZX_ERR_BAD_STATE);
     return;
   }
 
   fdescriptor::wire::UsbSpeed fspeed = static_cast<fdescriptor::wire::UsbSpeed>(speed);
-  auto send_set_configured = [configured, fspeed, weak_this = weak_from_this()](
-                                 fit::callback<void(zx_status_t)> completer) {
-    auto self = weak_this.lock();
-    if (!self) {
-      completer(!configured ? ZX_OK : ZX_ERR_CANCELED);
+  switch (state_) {
+    case FunctionState::kBound:
+    case FunctionState::kUnconfigured:
+      SendSetConfiguredTrue(fspeed, std::move(completer));
+      return;
+    case FunctionState::kConfiguring:
+    case FunctionState::kConfigured:
+      // From the USB 2.0 specification, section 9.1.1.5:
+      //
+      //    Before a USB device’s function may be used, the device must be
+      //    configured. From the device’s perspective, configuration involves
+      //    correctly processing a SetConfiguration() request with a non-zero
+      //    configuration value. Configuring a device or changing an alternate
+      //    setting causes all of the status and configuration values associated
+      //    with endpoints in the affected interfaces to be set to their default
+      //    values. This includes setting the data toggle of any endpoint using
+      //    data toggles to the value DATA0.
+      //
+      // To reset endpoint state across all function drivers, unconfigure and
+      // reconfigure the function before acknowledging the configuration change.
+      fdf::info("Configure called twice with configured = true; reconfiguring function {}", index_);
+      [[fallthrough]];
+    case FunctionState::kUnconfiguring: {
+      fit::callback<void(zx_status_t)> canceled_configure;
+      if (pending_configure_.has_value()) {
+        canceled_configure = std::move(pending_configure_->completer);
+      }
+      pending_configure_ = PendingConfigure{
+          .speed = fspeed,
+          .completer = std::move(completer),
+      };
+      if (state_ != FunctionState::kUnconfiguring) {
+        StartUnconfigure(fspeed);
+      }
+      if (canceled_configure) {
+        canceled_configure(ZX_ERR_CANCELED);
+      }
       return;
     }
-    if (!self->function_intf_.is_valid()) {
-      if (!configured) {
-        completer(ZX_OK);
-        return;
-      }
-      fdf::error("SetConfigured failed as the interface is invalid.");
+    case FunctionState::kWaitingForBind:
+    case FunctionState::kCleared:
       completer(ZX_ERR_BAD_STATE);
       return;
-    }
-    self->function_intf_->SetConfigured(configured, fspeed)
-        .ThenExactlyOnce(
-            [weak_this, configured, completer = std::move(completer)](
-                fidl::WireUnownedResult<ffunction::UsbFunctionInterface::SetConfigured>&
-                    result) mutable {
-              if (!result.ok()) {
-                // If we are deconfiguring, and the function interface was unbound or closed
-                // (e.g. user initiated unbind or peer closed during disconnect/teardown),
-                // the function is already de-facto unconfigured. Treat this as ZX_OK to prevent
-                // spurious error logging and allow disconnect/teardown promises to complete
-                // cleanly.
-                if (!configured &&
-                    (result.status() == ZX_ERR_CANCELED || result.status() == ZX_ERR_PEER_CLOSED)) {
-                  completer(ZX_OK);
-                  return;
-                }
-                fdf::error("UsbFunctionInterface.SetConfigured FIDL call failed: {}",
-                           result.FormatDescription());
-                completer(result.status());
-                return;
-              }
-              if (result->is_error()) {
-                if (!configured && (result->error_value() == ZX_ERR_BAD_STATE ||
-                                    result->error_value() == ZX_ERR_NOT_CONNECTED)) {
-                  completer(ZX_OK);
-                  return;
-                }
-                fdf::error("UsbFunctionInterface.SetConfigured error: {}",
-                           zx_status_get_string(result->error_value()));
-                completer(result->error_value());
-                return;
-              }
-              if (auto self = weak_this.lock()) {
-                self->inspect_.UpdateConfiguration(self->configuration_ + 1, configured);
-              }
-              completer(ZX_OK);
-            });
-  };
+  }
+}
 
-  if (unconfigure_first) {
-    function_intf_->SetConfigured(false, fspeed)
-        .ThenExactlyOnce(
-            [send_set_configured = std::move(send_set_configured),
-             completer = std::move(completer)](
-                fidl::WireUnownedResult<ffunction::UsbFunctionInterface::SetConfigured>&
-                    result) mutable {
-              if (!result.ok()) {
-                if (result.status() == ZX_ERR_CANCELED || result.status() == ZX_ERR_PEER_CLOSED) {
-                  send_set_configured(std::move(completer));
-                  return;
-                }
-                fdf::error("UsbFunctionInterface.SetConfigured FIDL call failed on deconfigure: {}",
-                           result.FormatDescription());
-                completer(result.status());
-                return;
-              }
-              if (result->is_error()) {
-                if (result->error_value() == ZX_ERR_BAD_STATE ||
-                    result->error_value() == ZX_ERR_NOT_CONNECTED) {
-                  send_set_configured(std::move(completer));
-                  return;
-                }
-                fdf::error("UsbFunctionInterface.SetConfigured error on deconfigure: {}",
-                           zx_status_get_string(result->error_value()));
-                completer(result->error_value());
-                return;
-              }
-              send_set_configured(std::move(completer));
-            });
-  } else {
-    send_set_configured(std::move(completer));
+void UsbFunction::Unconfigure(fit::callback<void(zx_status_t)> completer) {
+  TRACE_DURATION("usb-peripheral", __func__);
+
+  fit::callback<void(zx_status_t)> canceled_configure;
+  if (pending_configure_.has_value()) {
+    canceled_configure = std::move(pending_configure_->completer);
+    pending_configure_.reset();
+  }
+
+  if (!function_intf_.is_valid()) {
+    CompletePendingUnconfigures(ZX_OK);
+    if (canceled_configure) {
+      canceled_configure(ZX_ERR_CANCELED);
+    }
+    completer(ZX_OK);
+    return;
+  }
+
+  switch (state_) {
+    case FunctionState::kWaitingForBind:
+    case FunctionState::kUnconfigured:
+    case FunctionState::kCleared:
+      if (canceled_configure) {
+        canceled_configure(ZX_ERR_CANCELED);
+      }
+      completer(ZX_OK);
+      return;
+    case FunctionState::kBound:
+    case FunctionState::kConfiguring:
+    case FunctionState::kConfigured:
+      pending_unconfigure_completers_.push_back(std::move(completer));
+      StartUnconfigure(fdescriptor::wire::UsbSpeed::kUndefined);
+      if (canceled_configure) {
+        canceled_configure(ZX_ERR_CANCELED);
+      }
+      return;
+    case FunctionState::kUnconfiguring:
+      pending_unconfigure_completers_.push_back(std::move(completer));
+      if (canceled_configure) {
+        canceled_configure(ZX_ERR_CANCELED);
+      }
+      return;
   }
 }
 
@@ -594,42 +701,56 @@ void UsbFunction::SetInterface(uint8_t interface, uint8_t alt_setting,
       });
 }
 
-// TODO(https://fxbug.dev/493657863): This call should be async like
-// SetConfigured and SetInterface once we can guarantee a single-dispatch of
-// RequestRecipient::kDevice requests to
-// bound functions.
-zx::result<std::vector<uint8_t>> UsbFunction::Control(const fdescriptor::wire::UsbSetup& setup,
-                                                      cpp20::span<uint8_t> write_buffer) {
+void UsbFunction::Control(const fdescriptor::wire::UsbSetup& setup,
+                          std::span<const uint8_t> write_buffer,
+                          fit::callback<void(zx::result<std::vector<uint8_t>>)> completer) {
   TRACE_DURATION("usb-peripheral", __func__);
   if (!function_intf_.is_valid()) {
     fdf::error("Control failed as the interface is invalid.");
-    return zx::error(ZX_ERR_BAD_STATE);
+    completer(zx::error(ZX_ERR_BAD_STATE));
+    return;
   }
 
-  fidl::VectorView<uint8_t> write_data =
-      fidl::VectorView<uint8_t>::FromExternal(write_buffer.data(), write_buffer.size());
+  fidl::Arena arena;
+  fidl::VectorView<uint8_t> write_data(arena, write_buffer.size());
+  if (!write_buffer.empty()) {
+    std::memcpy(write_data.data(), write_buffer.data(), write_buffer.size());
+  }
   size_t expected_read_size = le16toh(setup.w_length);
 
-  auto result = function_intf_.sync()->Control(setup, write_data);
-  if (!result.ok()) {
-    fdf::error("UsbFunctionInterface.Control FIDL call failed: {}", result.FormatDescription());
-    return zx::error(result.status());
-  }
-  if (result->is_error()) {
-    fdf::error("UsbFunctionInterface.Control error: {}",
-               zx_status_get_string(result->error_value()));
-    return zx::error(result->error_value());
-  }
+  function_intf_->Control(setup, write_data)
+      .ThenExactlyOnce(
+          [expected_read_size, completer = std::move(completer)](
+              fidl::WireUnownedResult<ffunction::UsbFunctionInterface::Control>& result) mutable {
+            if (!result.ok()) {
+              fdf::error("UsbFunctionInterface.Control FIDL call failed: {}",
+                         result.FormatDescription());
+              completer(zx::error(result.status()));
+              return;
+            }
+            if (result->is_error()) {
+              if (result->error_value() == ZX_ERR_NOT_SUPPORTED) {
+                fdf::debug("UsbFunctionInterface.Control not supported: {}",
+                           zx_status_get_string(result->error_value()));
+              } else {
+                fdf::error("UsbFunctionInterface.Control error: {}",
+                           zx_status_get_string(result->error_value()));
+              }
+              completer(zx::error(result->error_value()));
+              return;
+            }
 
-  ffunction::wire::UsbFunctionInterfaceControlResponse* response = result->value();
-  size_t actual_read = response->read.size();
-  if (actual_read > expected_read_size) {
-    fdf::error("Control read too much data: {} > {}", actual_read, expected_read_size);
-    return zx::error(ZX_ERR_BUFFER_TOO_SMALL);
-  }
+            ffunction::wire::UsbFunctionInterfaceControlResponse* response = result->value();
+            size_t actual_read = response->read.size();
+            if (actual_read > expected_read_size) {
+              fdf::error("Control read too much data: {} > {}", actual_read, expected_read_size);
+              completer(zx::error(ZX_ERR_BUFFER_TOO_SMALL));
+              return;
+            }
 
-  std::vector<uint8_t> read_data_vec(response->read.begin(), response->read.end());
-  return zx::ok(std::move(read_data_vec));
+            std::vector<uint8_t> read_data_vec(response->read.begin(), response->read.end());
+            completer(zx::ok(std::move(read_data_vec)));
+          });
 }
 
 zx_status_t UsbFunction::CommonEndpointSetStall(uint8_t ep_address) {

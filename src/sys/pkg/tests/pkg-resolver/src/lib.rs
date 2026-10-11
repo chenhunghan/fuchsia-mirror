@@ -726,6 +726,7 @@ where
                     .capability(Capability::configuration(
                         "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                     ))
+                    .capability(Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging"))
                     .from(Ref::void())
                     .to(&pkg_cache),
             )

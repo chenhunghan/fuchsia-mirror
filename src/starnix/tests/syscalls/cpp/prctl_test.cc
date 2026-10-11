@@ -20,6 +20,10 @@
 #include <linux/prctl.h>
 #include <linux/securebits.h>
 
+#if defined(__x86_64__)
+#include <asm/prctl.h>
+#endif
+
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -886,5 +890,117 @@ TEST(PrctlTest, PDeathSigExec) {
   // Set-user-ID execve(2) clears the parent death signal.
   EXPECT_EQ(run_exec_and_read_pdeathsig(suid_binary), 0);
 }
+
+#if defined(__x86_64__)
+
+TEST(ArchPrctlTest, GetSetFs) {
+  constexpr uintptr_t kNonCanonicalFsBase = 0x4141414142424242;
+  constexpr uintptr_t kCustomFsBase = 0x12345678;
+
+  uintptr_t orig_fs = 0;
+  ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_FS, &orig_fs), SyscallSucceeds());
+  EXPECT_NE(orig_fs, 0u);
+
+  // On x86_64 ELF ABI, %fs:0 holds the thread pointer itself.
+  uintptr_t tls_self = 0;
+  __asm__ volatile("movq %%fs:0, %0" : "=r"(tls_self));
+  EXPECT_EQ(orig_fs, tls_self);
+
+  // Temporarily set FS to a custom value, read it back with ARCH_GET_FS, and restore orig_fs
+  // inside a single asm block so the compiler cannot emit %fs-relative loads in between.
+  uintptr_t read_custom_fs = 0;
+  int64_t set_res = -1;
+  int64_t get_res = -1;
+  int64_t restore_res = -1;
+  __asm__ volatile(
+      "movq %[sys_nr], %%rax\n\t"
+      "movq %[set_fs], %%rdi\n\t"
+      "movq %[custom_fs], %%rsi\n\t"
+      "syscall\n\t"
+      "movq %%rax, %[set_res]\n\t"
+      "movq %[sys_nr], %%rax\n\t"
+      "movq %[get_fs], %%rdi\n\t"
+      "movq %[read_ptr], %%rsi\n\t"
+      "syscall\n\t"
+      "movq %%rax, %[get_res]\n\t"
+      "movq %[sys_nr], %%rax\n\t"
+      "movq %[set_fs], %%rdi\n\t"
+      "movq %[orig_fs], %%rsi\n\t"
+      "syscall\n\t"
+      : [set_res] "=&r"(set_res), [get_res] "=&r"(get_res), [restore_res] "=&a"(restore_res)
+      : [sys_nr] "i"(SYS_arch_prctl), [set_fs] "i"(ARCH_SET_FS), [get_fs] "i"(ARCH_GET_FS),
+        [custom_fs] "r"(kCustomFsBase), [read_ptr] "r"(&read_custom_fs), [orig_fs] "r"(orig_fs)
+      : "rdi", "rsi", "rcx", "r11", "memory");
+  EXPECT_EQ(set_res, 0);
+  EXPECT_EQ(get_res, 0);
+  EXPECT_EQ(restore_res, 0);
+  EXPECT_EQ(read_custom_fs, kCustomFsBase);
+
+  // Setting FS to a non-canonical address should fail with EPERM and leave FS unchanged.
+  EXPECT_THAT(syscall(SYS_arch_prctl, ARCH_SET_FS, kNonCanonicalFsBase),
+              SyscallFailsWithErrno(EPERM));
+
+  uintptr_t current_fs = 0;
+  ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_FS, &current_fs), SyscallSucceeds());
+  EXPECT_EQ(current_fs, orig_fs);
+
+  // Passing an invalid user pointer to ARCH_GET_FS should fail with EFAULT.
+  EXPECT_THAT(syscall(SYS_arch_prctl, ARCH_GET_FS, nullptr), SyscallFailsWithErrno(EFAULT));
+
+  // Verify that a newly spawned thread has a distinct non-zero FS base.
+  uintptr_t thread_fs = 0;
+  std::thread worker([&thread_fs] {
+    EXPECT_THAT(syscall(SYS_arch_prctl, ARCH_GET_FS, &thread_fs), SyscallSucceeds());
+  });
+  worker.join();
+  EXPECT_NE(thread_fs, 0u);
+  EXPECT_NE(thread_fs, orig_fs);
+}
+
+TEST(ArchPrctlTest, GetSetGs) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    constexpr uintptr_t kNonCanonicalGsBase = 0x4141414142424242;
+    constexpr uint64_t kMagicValue = 0xdeadbeefcafebabeULL;
+
+    uintptr_t orig_gs = 0;
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_GS, &orig_gs), SyscallSucceeds());
+
+    auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+        nullptr, getpagesize(), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    auto *data = static_cast<uint64_t *>(mapping.mapping());
+    *data = kMagicValue;
+
+    uintptr_t new_gs = reinterpret_cast<uintptr_t>(mapping.mapping());
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_SET_GS, new_gs), SyscallSucceeds());
+
+    uintptr_t read_gs = 0;
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_GS, &read_gs), SyscallSucceeds());
+    EXPECT_EQ(read_gs, new_gs);
+
+    uint64_t gs_val = 0;
+    __asm__ volatile("movq %%gs:0, %0" : "=r"(gs_val));
+    EXPECT_EQ(gs_val, kMagicValue);
+
+    // Setting GS to a non-canonical address should fail with EPERM and leave GS unchanged.
+    EXPECT_THAT(syscall(SYS_arch_prctl, ARCH_SET_GS, kNonCanonicalGsBase),
+                SyscallFailsWithErrno(EPERM));
+
+    read_gs = 0;
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_GS, &read_gs), SyscallSucceeds());
+    EXPECT_EQ(read_gs, new_gs);
+
+    // Passing an invalid user pointer to ARCH_GET_GS should fail with EFAULT.
+    EXPECT_THAT(syscall(SYS_arch_prctl, ARCH_GET_GS, nullptr), SyscallFailsWithErrno(EFAULT));
+
+    // Restore original GS base.
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_SET_GS, orig_gs), SyscallSucceeds());
+    ASSERT_THAT(syscall(SYS_arch_prctl, ARCH_GET_GS, &read_gs), SyscallSucceeds());
+    EXPECT_EQ(read_gs, orig_gs);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+#endif  // defined(__x86_64__)
 
 }  // namespace

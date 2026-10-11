@@ -8,7 +8,7 @@ use super::dispatcher::{
     DispatcherOps, impl_dispatcher_facade_with_state, impl_dispatcher_state_init,
 };
 use super::handle::KernelHandle;
-use crate::arch_rs::{UserCopyCaptureFaultsError, arch_copy_from_user_capture_faults};
+use crate::arch_rs::{CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user_capture_faults};
 use crate::kernel::thread::soft_fault;
 use crate::kernel::types::VAddr;
 use crate::user_copy::{UserInIovec, UserInPtr, UserInVector};
@@ -140,7 +140,7 @@ impl IoBufferSharedRegionDispatcher {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            c"IOBuffer shared region",
+            b"IOBuffer shared region",
         )?;
 
         mapping.mapping.map_range(0, size as usize, true, false)?;
@@ -269,6 +269,7 @@ impl IoBufferSharedRegionDispatcher {
                                     get_ptr(offset).cast(),
                                     data.as_ptr().cast(),
                                     amount,
+                                    CopyContext::BlockingAllowed,
                                 )
                             };
 

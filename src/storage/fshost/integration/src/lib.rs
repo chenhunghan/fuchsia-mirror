@@ -325,20 +325,6 @@ impl TestFixtureBuilder {
             )
             .await
             .unwrap();
-        builder
-            .add_route(
-                Route::new()
-                    .capability(
-                        Capability::directory("dev-class")
-                            .rights(fio::R_STAR_DIR)
-                            .subdir("block")
-                            .as_("dev-class-block"),
-                    )
-                    .from(Ref::child(fuchsia_driver_test::COMPONENT_NAME))
-                    .to(Ref::parent()),
-            )
-            .await
-            .unwrap();
 
         let realm = builder.build().await.unwrap();
         let realm_proxy = connect_to_protocol_at_dir_root::<fidl_fuchsia_component::RealmMarker>(

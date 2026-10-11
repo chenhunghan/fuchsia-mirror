@@ -11,6 +11,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files(
     [
         "cargo-bazel.json",
+        "crates.bzl",
         "defs.bzl",
     ] + glob(
         include = ["*.bazel"],
@@ -43,26 +44,26 @@ alias(
 )
 
 alias(
-    name = "aes-gcm-0.11.0",
-    actual = "//third_party/rust_crates/vendor/aes-gcm-0.11.0:aes_gcm",
+    name = "aes-gcm-0.11.1",
+    actual = "//third_party/rust_crates/vendor/aes-gcm-0.11.1:aes_gcm",
     tags = ["manual"],
 )
 
 alias(
     name = "aes-gcm",
-    actual = "//third_party/rust_crates/vendor/aes-gcm-0.11.0:aes_gcm",
+    actual = "//third_party/rust_crates/vendor/aes-gcm-0.11.1:aes_gcm",
     tags = ["manual"],
 )
 
 alias(
-    name = "aes-gcm-siv-0.12.0-rc.3",
-    actual = "//third_party/rust_crates/vendor/aes-gcm-siv-0.12.0-rc.3:aes_gcm_siv",
+    name = "aes-gcm-siv-0.12.1",
+    actual = "//third_party/rust_crates/vendor/aes-gcm-siv-0.12.1:aes_gcm_siv",
     tags = ["manual"],
 )
 
 alias(
     name = "aes-gcm-siv",
-    actual = "//third_party/rust_crates/vendor/aes-gcm-siv-0.12.0-rc.3:aes_gcm_siv",
+    actual = "//third_party/rust_crates/vendor/aes-gcm-siv-0.12.1:aes_gcm_siv",
     tags = ["manual"],
 )
 
@@ -2257,14 +2258,14 @@ alias(
 )
 
 alias(
-    name = "rand-0.10.2",
-    actual = "//third_party/rust_crates/vendor/rand-0.10.2:rand",
+    name = "rand-0.10.3",
+    actual = "//third_party/rust_crates/vendor/rand-0.10.3:rand",
     tags = ["manual"],
 )
 
 alias(
     name = "rand",
-    actual = "//third_party/rust_crates/vendor/rand-0.10.2:rand",
+    actual = "//third_party/rust_crates/vendor/rand-0.10.3:rand",
     tags = ["manual"],
 )
 
@@ -3301,14 +3302,14 @@ alias(
 )
 
 alias(
-    name = "tracing-mutex-0.3.2",
-    actual = "//third_party/rust_crates/forks/tracing-mutex-0.3.2:tracing_mutex",
+    name = "tracing-mutex-0.3.3",
+    actual = "//third_party/rust_crates/forks/tracing-mutex-0.3.3:tracing_mutex",
     tags = ["manual"],
 )
 
 alias(
     name = "tracing-mutex",
-    actual = "//third_party/rust_crates/forks/tracing-mutex-0.3.2:tracing_mutex",
+    actual = "//third_party/rust_crates/forks/tracing-mutex-0.3.3:tracing_mutex",
     tags = ["manual"],
 )
 
@@ -3457,14 +3458,14 @@ alias(
 )
 
 alias(
-    name = "uom-0.36.0",
-    actual = "//third_party/rust_crates/vendor/uom-0.36.0:uom",
+    name = "uom-0.38.0",
+    actual = "//third_party/rust_crates/vendor/uom-0.38.0:uom",
     tags = ["manual"],
 )
 
 alias(
     name = "uom",
-    actual = "//third_party/rust_crates/vendor/uom-0.36.0:uom",
+    actual = "//third_party/rust_crates/vendor/uom-0.38.0:uom",
     tags = ["manual"],
 )
 
@@ -3663,6 +3664,18 @@ alias(
 alias(
     name = "zeroize",
     actual = "//third_party/rust_crates/forks/zeroize:zeroize",
+    tags = ["manual"],
+)
+
+alias(
+    name = "zerotrie-0.2.5",
+    actual = "//third_party/rust_crates/vendor/zerotrie-0.2.5:zerotrie",
+    tags = ["manual"],
+)
+
+alias(
+    name = "zerotrie",
+    actual = "//third_party/rust_crates/vendor/zerotrie-0.2.5:zerotrie",
     tags = ["manual"],
 )
 

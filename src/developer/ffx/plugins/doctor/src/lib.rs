@@ -14,7 +14,7 @@ use ffx_doctor_args::DoctorCommand;
 use ffx_ssh::SshKeyFiles;
 use ffx_target_show::ShowTool;
 use ffx_target_show_args::TargetShow;
-use ffx_writer::{MachineWriter, ToolIO, VerifiedMachineWriter};
+use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool, FhoEnvironment};
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -97,7 +97,7 @@ fho::embedded_plugin!(DoctorTool);
 
 #[async_trait(?Send)]
 impl FfxMain for DoctorTool {
-    type Writer = MachineWriter<DoctorResult>;
+    type Writer = VerifiedMachineWriter<DoctorResult>;
 
     type Error = ::fho::Error;
 
@@ -1075,5 +1075,15 @@ mod test {
         let (fake_recorder, mut params) = record_params_with_temp(root);
         params.output_dir = None;
         missing_field_test(fake_recorder, params).await;
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_schema() {
+        let data = serde_json::to_value(&DoctorResult {
+            steps: LedgerNode::new("root".to_string(), LedgerMode::Normal),
+        })
+        .unwrap();
+        VerifiedMachineWriter::<DoctorResult>::verify_schema(&data)
+            .expect("schema should be valid");
     }
 }

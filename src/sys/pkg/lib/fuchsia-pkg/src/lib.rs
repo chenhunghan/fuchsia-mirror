@@ -13,6 +13,7 @@ mod meta_subpackages;
 mod package_archive;
 mod package_build_manifest;
 mod package_builder;
+#[cfg(target_os = "fuchsia")]
 pub mod package_directory;
 mod package_manifest;
 mod package_manifest_list;
@@ -31,6 +32,7 @@ pub use crate::meta_subpackages::MetaSubpackages;
 pub use crate::package_archive::PackageArchiveBuilder;
 pub use crate::package_build_manifest::PackageBuildManifest;
 pub use crate::package_builder::{ABI_REVISION_FILE_PATH, PackageBuilder};
+#[cfg(target_os = "fuchsia")]
 pub use crate::package_directory::{
     LoadAbiRevisionError, LoadMetaContentsError, PackageDirectory, ReadHashError,
 };

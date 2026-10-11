@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::atomic_stack::{AtomicListIterator, AtomicStack};
+use crate::rcu_callback::RcuCallback;
 use crate::rcu_droppable::RcuDroppable;
 use fuchsia_sync::{Completion, Mutex};
 use std::marker::PhantomData;
@@ -14,8 +15,6 @@ use std::time::Duration;
 use crate::read_counters::RcuReadCounters;
 #[cfg(feature = "rseq_backend")]
 use std::cell::Cell;
-
-type RcuCallback = Box<dyn FnOnce() + Send + Sync + 'static>;
 
 struct RcuControlBlock {
     /// The generation counter.
@@ -334,7 +333,7 @@ pub(crate) fn rcu_call(callback: impl FnOnce() + Send + Sync + 'static) {
     }
 
     // Synchronization point [G] (see design.md)
-    RCU_CONTROL_BLOCK.callback_chain.push_front(Box::new(callback));
+    RCU_CONTROL_BLOCK.callback_chain.push_front(RcuCallback::new(callback));
 
     // Wake the rcu advancer thread if it is sleeping on the futex.
     let thread_state = &RCU_CONTROL_BLOCK.advancer_thread_state;
@@ -449,7 +448,7 @@ fn rcu_grace_period() {
     };
 
     for callback in callbacks {
-        callback();
+        callback.invoke();
     }
 }
 

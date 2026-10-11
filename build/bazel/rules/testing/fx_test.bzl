@@ -17,11 +17,16 @@ load(
     "@fuchsia_rules_common//packages:providers.bzl",
     "FuchsiaPackageInfo",
 )
-load("//build/bazel/rules:current_platform_info.bzl", "CurrentPlatformInfo")
+load(
+    "//build/bazel/rules:current_platform_info.bzl",
+    "CURRENT_PLATFORM_INFO_ATTRS",
+    "get_current_platform_info",
+)
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "resolve_test_type_realm",
 )
+load(":fx_test_environment.bzl", "FxTestEnvironmentInfo")
 
 # The repository that test packages are published to. This matches the default
 # used by the GN `fuchsia_test_package()` template.
@@ -65,6 +70,44 @@ FuchsiaTestInfo, _new_fuchsia_test_info = provider(
     init = _fuchsia_test_info_init,
 )
 
+# `attr.label_list` can't tell an omitted `environments` apart from
+# `environments = []`, so the default is this placeholder instead. That way an
+# explicit `[]` (e.g. from a `select()`) fails rather than silently running the
+# test in the default environments. The placeholder doesn't provide
+# FxTestEnvironmentInfo, which is why `environments` checks providers here
+# rather than with `providers = [...]`.
+_DEFAULT_ENVIRONMENTS = Label("//build/bazel/rules/testing:default_environments")
+
+def _collect_environments(ctx):
+    if [t.label for t in ctx.attr.environments] == [_DEFAULT_ENVIRONMENTS]:
+        return []
+    if ctx.attr.build_only:
+        fail("build_only tests should not specify environments")
+
+    # GN's test_spec() rejects empty environments too.
+    if not ctx.attr.environments:
+        fail("`environments` is empty. Use `build_only = True` if the test " +
+             "shouldn't run in this configuration, or omit `environments` to " +
+             "use the default environments.")
+
+    environments = []
+    seen = {}
+    for target in ctx.attr.environments:
+        if FxTestEnvironmentInfo not in target:
+            fail("`environments` entry {} is not an `fx_test_environment()`.".format(
+                target.label,
+            ))
+        env = target[FxTestEnvironmentInfo].environment
+
+        # build_tests_json.py dedupes too, but deduping here keeps
+        # FuchsiaTestInfo readable when e.g. both `:emu_env` and `:aemu_env`
+        # are listed.
+        key = json.encode(env)
+        if key not in seen:
+            seen[key] = True
+            environments.append(env)
+    return environments
+
 def _fx_test_impl(ctx):
     # Test rules default to `testonly = True`, so this only rejects an explicit
     # `testonly = False`, which would let non-test targets depend on this one.
@@ -72,7 +115,7 @@ def _fx_test_impl(ctx):
         fail("`fx_test()` targets are always testonly.")
 
     package_info = ctx.attr.package[FuchsiaPackageInfo]
-    current_platform = ctx.attr._current_platform[CurrentPlatformInfo]
+    current_platform = get_current_platform_info(ctx)
 
     test_components = [
         component
@@ -143,7 +186,7 @@ def _fx_test_impl(ctx):
             test_label = ctx.label,
             os = current_platform.os,
             cpu = current_platform.cpu,
-            environments = [json.decode(env) for env in ctx.attr.environments],
+            environments = _collect_environments(ctx),
             build_only = ctx.attr.build_only,
             max_log_severity = ctx.attr.max_log_severity,
             package_name = package_info.package_name,
@@ -155,95 +198,8 @@ def _fx_test_impl(ctx):
         ctx.attr.package[FuchsiaDebugSymbolInfo],
     ]
 
-_fx_test = rule(
-    implementation = _fx_test_impl,
-    test = True,
-    attrs = {
-        "package": attr.label(
-            doc = "The `fx_package()` target containing the test components.",
-            providers = [FuchsiaPackageInfo],
-            mandatory = True,
-        ),
-        "environments": attr.string_list(
-            doc = "JSON-encoded environment dicts describing the target environments in which the test should run.",
-            default = [],
-        ),
-        "build_only": attr.bool(
-            doc = "True if the test should only be built, not run.",
-            default = False,
-        ),
-        "max_log_severity": attr.string(
-            doc = "The maximum log severity allowed before the test fails. Defaults to `WARN`.",
-            default = "WARN",
-            values = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
-        ),
-        "test_type": attr.string(
-            doc = "The non-hermetic test realm type to run the test components in. See `fx_test()`.",
-        ),
-        "_current_platform": attr.label(
-            default = "@//build/bazel:current_platform",
-            providers = [CurrentPlatformInfo],
-        ),
-        "_rebase_package_manifest": attr.label(
-            default = "@fuchsia_rules_common//packages:rebase_package_manifest",
-            executable = True,
-            cfg = "exec",
-        ),
-    },
-)
-
-_ALLOWED_ENV_KEYS = (
-    "dimensions",
-    "emulator",
-    "netboot",
-    "service_account",
-    "tags",
-)
-
-def _validate_environment(env):
-    if type(env) != type({}):
-        fail("Each entry in 'environments' must be a dict, got {}.".format(type(env)))
-    for key in env:
-        if key not in _ALLOWED_ENV_KEYS:
-            fail(
-                "Unknown environment field '{}'; allowed fields are {}.".format(
-                    key,
-                    ", ".join(_ALLOWED_ENV_KEYS),
-                ),
-            )
-    dimensions = env.get("dimensions")
-    if type(dimensions) != type({}) or not dimensions:
-        fail("Each environment must specify a non-empty 'dimensions' dict.")
-    if "tags" in dimensions:
-        fail("'tags' are only valid in an environment dict, not in 'dimensions'.")
-    if "dimensions" in dimensions:
-        fail(
-            "Found nested 'dimensions' field in environment dimensions. " +
-            "Did you set `dimensions = some_env` instead of `dimensions = some_env[\"dimensions\"]`?",
-        )
-    emulator = env.get("emulator")
-    if emulator != None:
-        if type(emulator) != type({}):
-            fail("Environment 'emulator' field must be a dict, got {}.".format(type(emulator)))
-        if not emulator.get("name"):
-            fail("The 'emulator' dict requires a unique 'name'.")
-        if emulator.get("uefi") and (
-            not emulator.get("vbmeta_key") or not emulator.get("vbmeta_key_metadata")
-        ):
-            fail(
-                "Emulator environments with 'uefi' set to True must provide " +
-                "'vbmeta_key' and 'vbmeta_key_metadata'.",
-            )
-
-def fx_test(
-        name,
-        package,
-        environments = None,
-        build_only = False,
-        max_log_severity = "WARN",
-        test_type = None,
-        **kwargs):
-    """Exposes the test components of a Fuchsia package to the Fuchsia test runners (`fx test` and infra).
+fx_test = rule(
+    doc = """Exposes the test components of a Fuchsia package to the Fuchsia test runners (`fx test` and infra).
 
     Every component in the `package`'s `test_components` becomes a separate
     test, which is run on a Fuchsia device or emulator as
@@ -254,7 +210,7 @@ def fx_test(
     `bazel_test_suite()` target that is reachable from the build graph. See
     //docs/development/build/bazel_concepts/tests.md.
 
-    This wraps a test rule so that these targets can be grouped with
+    This is a test rule so that these targets can be grouped with
     `test_suite()` and found with the `tests()` query function, exactly like
     `host_test()` targets. Its executable is a stub that always fails, because
     Fuchsia device tests cannot be run with `bazel test`; they must be run
@@ -262,8 +218,6 @@ def fx_test(
 
     Example usage:
     ```bazel
-    load("@fuchsia_build_info//:environments.bzl", "aemu_env", "nuc11_env")
-
     fx_package(
         name = "pkg_tests_package",
         package_name = "pkg_tests",
@@ -274,60 +228,52 @@ def fx_test(
     fx_test(
         name = "pkg_tests",
         package = ":pkg_tests_package",
-        environments = [aemu_env, nuc11_env],
+        environments = [
+            "//build/testing/environments:aemu_env",
+            "//build/testing/environments:nuc11_env",
+        ],
     )
     ```
-
-    Args:
-        name: The target name.
-        package: The `fx_package()` target containing the test components.
-        environments: Optional list of environment dicts (see
-            `@fuchsia_build_info//:environments.bzl`) specifying which target
-            environments the test should run in. If omitted, defaults to the
-            build's default test environments, exactly like GN tests that
-            don't set `environments`. Must not be an empty list, and must be a
-            plain list rather than a `select()`.
-        build_only: True if the test should only be built, not run. Environments
-            must not be specified if `build_only` is true.
-        max_log_severity: The maximum log severity allowed before the test
-            fails. Defaults to `"WARN"`.
-        test_type: The non-hermetic test realm type to run the test components
-            in (e.g. `"starnix"` or `"system"`). Can also be specified per
-            component on `fx_test_component()`. Must be a key of
-            `_TYPE_MONIKER_MAP` in //build/bazel/rules/components/fx_component.bzl,
-            which maps it to the test realm moniker. If omitted, tests run in
-            the default hermetic test realm unless overridden on
-            `fx_test_component()`. See
-            https://fuchsia.dev/fuchsia-src/development/testing/components/test_runner_framework#non-hermetic_tests
-            for valid types.
-        **kwargs: Additional common rule attributes forwarded to the underlying
-            test rule (e.g. `visibility`, `tags`, `target_compatible_with`).
-    """
-
-    # Bazel has no attribute type for a list of dicts, and its dict-typed
-    # attributes (`attr.string_dict`, `attr.string_list_dict`) only hold flat
-    # string values, which can't represent nested fields like `dimensions` or
-    # `emulator`. So serialize each environment to a JSON string here and
-    # decode it again in `_fx_test_impl`. This happens in the macro, at
-    # loading time, which is also why `environments` can't be a `select()`.
-    encoded_environments = []
-    if environments != None:
-        if type(environments) != type([]):
-            fail("Test 'environments' must be a list of environment dicts, got {}.".format(type(environments)))
-        if not environments:
-            fail("Test 'environments' must not be empty. Build-only tests should use 'build_only = True' instead of specifying an empty set of environments.")
-        if build_only:
-            fail("build_only tests should not specify environments")
-        for env in environments:
-            _validate_environment(env)
-            encoded_environments.append(json.encode(env))
-
-    _fx_test(
-        name = name,
-        package = package,
-        environments = encoded_environments,
-        build_only = build_only,
-        max_log_severity = max_log_severity,
-        test_type = test_type,
-        **kwargs
-    )
+    """,
+    implementation = _fx_test_impl,
+    test = True,
+    attrs = {
+        "package": attr.label(
+            doc = "The `fx_package()` target containing the test components.",
+            providers = [FuchsiaPackageInfo],
+            mandatory = True,
+        ),
+        "environments": attr.label_list(
+            doc = "The infra test environments that the test should run in, " +
+                  "such as `//build/testing/environments:emu_env` or an " +
+                  "`fx_test_environment()` target. If omitted, the test runs " +
+                  "in the build's default test environments, exactly like GN " +
+                  "tests that don't set `environments`.",
+            default = [_DEFAULT_ENVIRONMENTS],
+        ),
+        "build_only": attr.bool(
+            doc = "True if the test should only be built, not run. Environments must not be specified if this is true.",
+            default = False,
+        ),
+        "max_log_severity": attr.string(
+            doc = "The maximum log severity allowed before the test fails. Defaults to `WARN`.",
+            default = "WARN",
+            values = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
+        ),
+        "test_type": attr.string(
+            doc = "The non-hermetic test realm type to run the test components " +
+                  "in (e.g. `starnix` or `system`). Can also be specified per " +
+                  "component on `fx_test_component()`. Must be a key of " +
+                  "`_TYPE_MONIKER_MAP` in //build/bazel/rules/components/fx_component.bzl. " +
+                  "If omitted, tests run in the default hermetic test realm " +
+                  "unless overridden on `fx_test_component()`. See " +
+                  "https://fuchsia.dev/fuchsia-src/development/testing/components/test_runner_framework#non-hermetic_tests " +
+                  "for valid types.",
+        ),
+        "_rebase_package_manifest": attr.label(
+            default = "@fuchsia_rules_common//packages:rebase_package_manifest",
+            executable = True,
+            cfg = "exec",
+        ),
+    } | CURRENT_PLATFORM_INFO_ATTRS,
+)

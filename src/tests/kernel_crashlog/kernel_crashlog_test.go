@@ -83,7 +83,7 @@ func testCommon(t *testing.T,
 
 // See that the kernel stows a crashlog upon panicking.
 func TestKernelCrashlog(t *testing.T) {
-	i := testCommon(t, "k crash", "ZIRCON KERNEL PANIC", "KERNEL PANIC")
+	i := testCommon(t, "k crash deref", "ZIRCON KERNEL PANIC", "KERNEL PANIC")
 
 	// There should be a banner present, with a "VERSION" line.
 	i.WaitForLogMessage("VERSION")
@@ -137,6 +137,27 @@ func TestKernelCrashlogAssert(t *testing.T) {
 	i.WaitForLogMessage("KERNEL PANIC")
 	i.WaitForLogMessage("ASSERT FAILED")
 	i.WaitForLogMessage("value 42")
+	i.WaitForLogMessage("--- BEGIN DLOG DUMP ---")
+	i.WaitForLogMessage("stopping other cpus")
+	i.WaitForLogMessage("--- END DLOG DUMP ---")
+}
+
+// See that when the kernel crashes because of a Rust panic the crashlog contains the whole panic
+// message, even when it is long and formatted.
+func TestKernelCrashlogRustPanic(t *testing.T) {
+	i := testCommon(t, "k crash rust_panic", "ZIRCON KERNEL PANIC", "KERNEL PANIC")
+	// Same as an assert failure, except that the panic buffer holds the Rust panic. Its message
+	// is several hundred bytes long and its last line comes after the filler, so seeing that line
+	// shows the message was not truncated on its way into the crashlog.
+	i.WaitForLogMessage("VERSION")
+	i.WaitForLogMessage("{{{reset}}}")
+	i.WaitForLogMessage("BACKTRACE")
+	i.WaitForLogMessage("{{{bt:0")
+	i.WaitForLogMessage("counters: ")
+	i.WaitForLogMessage("panic buffer: ")
+	i.WaitForLogMessage("KERNEL PANIC (Rust):")
+	i.WaitForLogMessage("top/debug.rs:")
+	i.WaitForLogMessage("end of rust_panic test message")
 	i.WaitForLogMessage("--- BEGIN DLOG DUMP ---")
 	i.WaitForLogMessage("stopping other cpus")
 	i.WaitForLogMessage("--- END DLOG DUMP ---")

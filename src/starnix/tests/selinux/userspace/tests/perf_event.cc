@@ -668,4 +668,108 @@ TEST(PerfEventTest, PermissiveOpenEventsNoCapabilities) {
   }));
 }
 
+// Runs `action` in a subprocess with no capabilities, after transitioning to `label`. The
+// capabilities are dropped before the transition, so `label` needs no `process { setcap }`.
+template <typename T>
+::testing::AssertionResult RunSubprocessWithoutCapabilitiesAs(std::string_view label, T action) {
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&] {
+    test_helper::DropAllCapabilities();
+    ASSERT_TRUE(WriteTaskAttr("current", label).is_ok());
+    action();
+  });
+  return fork_helper.WaitForChildren();
+}
+
+TEST(PerfEventTest, ParanoidMinusOneAllowsOpenWithoutCapabilities) {
+  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(
+      RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_all_permissions_t:s0", [&] {
+        for (int pid : {kCurrentTaskPid, kAllTasksPid}) {
+          for (bool exclude_kernel : {false, true}) {
+            auto pe = GetPerfEventAttr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK, exclude_kernel);
+            fbl::unique_fd fd(perf_event_open(pe.get(), pid, 0 /* this CPU */));
+            EXPECT_THAT(fd.get(), SyscallSucceeds())
+                << "pid=" << pid << " exclude_kernel=" << exclude_kernel;
+          }
+        }
+      }));
+}
+
+TEST(PerfEventTest, ParanoidMinusOneStillRequiresOpenPermission) {
+  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_open_t:s0", [&] {
+    auto pe =
+        GetPerfEventAttr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK, /*exclude_kernel=*/true);
+    fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
+    EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+TEST(PerfEventTest, ParanoidMinusOneRequiresCpuPermission) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "Only Starnix requires `perf_event { cpu }` when the capability is waived";
+  }
+  // Starnix samples job-wide regardless of the target (https://fxbug.dev/398914921), so when a
+  // low `perf_event_paranoid` waives the capability requirement it requires `perf_event { cpu }`
+  // instead, even for events that would otherwise not need it.
+  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_cpu_t:s0", [&] {
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id,
+                               /*exclude_kernel=*/true);
+    fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
+    EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+TEST(PerfEventTest, ParanoidTwoRequiresCapability) {
+  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(
+      RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_all_permissions_t:s0", [&] {
+        auto pe =
+            GetPerfEventAttr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK, /*exclude_kernel=*/true);
+        fbl::unique_fd fd(perf_event_open(pe.get(), kAllTasksPid, 0 /* this CPU */));
+        EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+
+        pe =
+            GetPerfEventAttr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK, /*exclude_kernel=*/false);
+        fd = fbl::unique_fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
+        EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+      }));
+}
+
+TEST(PerfEventTest, ParanoidTwoTracepointOnSelfRequiresNoCpuPermission) {
+  // A tracepoint on the calling task that excludes the kernel needs no capability. The capability
+  // was not waived by `perf_event_paranoid`, so `perf_event { cpu }` is not required either.
+  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_cpu_t:s0", [&] {
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
+    EXPECT_THAT(fd.get(), SyscallSucceeds());
+  }));
+}
+
+TEST(PerfEventTest, OpenEventsNoPermissionsChecksOpenBeforeCapabilities) {
+  // `perf_event { open }` is checked before the capabilities, so only its denial is audited.
+  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_permissions_t:s0", [&] {
+    auto pe =
+        GetPerfEventAttr(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK, /*exclude_kernel=*/false);
+    fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
+    EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
 }  // namespace

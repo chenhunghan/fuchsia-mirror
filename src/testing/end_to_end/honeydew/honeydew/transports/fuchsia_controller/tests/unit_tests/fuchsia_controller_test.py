@@ -9,13 +9,14 @@ from typing import Any
 from unittest import mock
 
 import fuchsia_controller_py as fuchsia_controller
-from honeydew import affordances_capable
+from honeydew import affordances_capable, errors
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fc_transport,
 )
 from honeydew.typing import custom_types
+from mobly import signals
 
 _TARGET_NAME: str = "fuchsia-emulator"
 
@@ -276,3 +277,80 @@ class FuchsiaControllerTests(unittest.TestCase):
             self.fuchsia_controller_obj_with_device_ip.check_connection()
 
         mock_target_wait.assert_called()
+
+    @mock.patch.object(
+        fuchsia_controller.Context,
+        "target_wait",
+        side_effect=fuchsia_controller.FcTransportStatus(
+            fuchsia_controller.FcTransportStatus.FC_ERR_INVALID_ARGS
+        ),
+        autospec=True,
+    )
+    def test_check_connection_raises_on_fc_transport_status(
+        self, mock_target_wait: mock.Mock
+    ) -> None:
+        """Test check_connection() wraps FcTransportStatus"""
+        with self.assertRaises(fc_errors.FuchsiaControllerConnectionError):
+            self.fuchsia_controller_obj_with_device_ip.check_connection()
+
+        mock_target_wait.assert_called()
+
+    @mock.patch.object(
+        fuchsia_controller.Context,
+        "target_wait",
+        side_effect=errors.HoneydewError("error"),
+        autospec=True,
+    )
+    def test_check_connection_raises_on_honeydew_error(
+        self, mock_target_wait: mock.Mock
+    ) -> None:
+        """Test check_connection() wraps HoneydewError"""
+        with self.assertRaises(fc_errors.FuchsiaControllerConnectionError):
+            self.fuchsia_controller_obj_with_device_ip.check_connection()
+
+        mock_target_wait.assert_called()
+
+    @mock.patch.object(
+        fuchsia_controller.Context,
+        "target_wait",
+        side_effect=signals.TestAbortAll("abort"),
+        autospec=True,
+    )
+    def test_check_connection_propagates_unexpected_exceptions(
+        self, mock_target_wait: mock.Mock
+    ) -> None:
+        """Test check_connection() propagates non-FC exceptions"""
+        with self.assertRaises(signals.TestAbortAll):
+            self.fuchsia_controller_obj_with_device_ip.check_connection()
+
+        mock_target_wait.assert_called()
+
+    @mock.patch.object(
+        fuchsia_controller,
+        "Context",
+        side_effect=RuntimeError("internal error"),
+        autospec=True,
+    )
+    def test_create_context_raises_on_runtime_error(
+        self, mock_fc_context: mock.Mock
+    ) -> None:
+        """Test create_context() wraps RuntimeError"""
+        with self.assertRaises(fc_errors.FuchsiaControllerError):
+            self.fuchsia_controller_obj_with_device_ip.create_context()
+
+        mock_fc_context.assert_called()
+
+    @mock.patch.object(
+        fuchsia_controller,
+        "Context",
+        side_effect=signals.TestAbortAll("abort"),
+        autospec=True,
+    )
+    def test_create_context_propagates_unexpected_exceptions(
+        self, mock_fc_context: mock.Mock
+    ) -> None:
+        """Test create_context() propagates non-FC exceptions"""
+        with self.assertRaises(signals.TestAbortAll):
+            self.fuchsia_controller_obj_with_device_ip.create_context()
+
+        mock_fc_context.assert_called()

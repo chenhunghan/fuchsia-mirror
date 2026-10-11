@@ -2,21 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::update::config::Initiator;
 use crate::update::{AttemptError, FetchError, PrepareError, ResolveError, StageError};
 use anyhow::{Context, Error, format_err};
-use cobalt_client::traits::AsEventCode;
 use cobalt_sw_delivery_registry as metrics;
 use fidl_contrib::ProtocolConnector;
 use fidl_contrib::protocol_connector::{ConnectedProtocol, ProtocolSender};
 use fidl_fuchsia_metrics::{
     MetricEvent, MetricEventLoggerFactoryMarker, MetricEventLoggerProxy, ProjectSpec,
 };
+use fidl_fuchsia_update_installer_ext::Initiator;
 use fuchsia_cobalt_builders::MetricEventExt;
 use fuchsia_component::client::connect_to_protocol;
 use futures::FutureExt;
 use futures::future::{self, Future};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 // See $FUCHSIA_OUT_DIR/gen/src/sys/pkg/bin/amber/cobalt_sw_delivery_registry.rs for more info.
 pub use metrics::{
@@ -98,20 +97,6 @@ pub(super) fn result_to_status_code(res: Result<(), &AttemptError>) -> StatusCod
     }
 }
 
-impl AsEventCode for Initiator {
-    fn as_event_code(&self) -> u32 {
-        match self {
-            Initiator::Automatic => {
-                metrics::SoftwareDeliveryMetricDimensionInitiator::AutomaticUpdateCheck
-            }
-            Initiator::Manual => {
-                metrics::SoftwareDeliveryMetricDimensionInitiator::UserInitiatedCheck
-            }
-        }
-        .as_event_code()
-    }
-}
-
 fn hour_of_day(when: SystemTime) -> u32 {
     use chrono::Timelike;
 
@@ -122,19 +107,6 @@ fn hour_of_day(when: SystemTime) -> u32 {
 
 fn duration_to_micros(duration: Duration) -> i64 {
     duration.as_micros().try_into().unwrap_or(i64::MAX)
-}
-
-/// Attempts to determine the monotonic instant that correlates with the given wall time by
-/// subtracting the duration from the given time to now (wall time) from now (monotonic time). If
-/// `time` is in the future or it corresponds with an invalid monotonic time, returns None.
-///
-/// This conversion is flawed as there is no guarantee that the monotonic and wall clocks tick at
-/// the same rate or that the system was up at the given wall time.
-///
-/// FIXME: switch start time to initially be based on monotonic time to remove the need for this
-/// conversion.
-pub fn system_time_to_monotonic_time(time: SystemTime) -> Option<Instant> {
-    Instant::now().checked_sub(time.elapsed().ok()?)
 }
 
 #[derive(Debug, Clone)]

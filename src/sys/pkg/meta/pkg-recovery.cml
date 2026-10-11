@@ -114,6 +114,7 @@
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 "fuchsia.pkgcache.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgcache.BlobNetworkHeaderTimeoutSeconds",
+                "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",
             to: "#pkg-cache",

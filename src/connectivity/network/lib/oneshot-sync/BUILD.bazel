@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "oneshot-sync",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    rustc_flags = [
+        "--check-cfg=cfg(loom)",
+        "--check-cfg=cfg(test)",
+    ],
+    visibility = ["//src/connectivity/network/netlink:__pkg__"],
+)
+
+# The tests only build on host because we use loom, which itself only can
+# build on host.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "oneshot-sync-tests",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    # TODO(https://fxbug.dev/540947935): loom's generator dependency intentionally
+    # calls Box::leak on per-thread root contexts, triggering LeakSanitizer on exit.
+    features = [
+        "-asan",
+        "-lsan",
+    ],
+    rustc_flags = [
+        "--cfg=loom",
+        "--check-cfg=cfg(loom)",
+        "--check-cfg=cfg(test)",
+    ],
+    target_compatible_with = HOST_CONSTRAINTS,
+    deps = ["//third_party/rust_crates/vendor:loom"],
+)

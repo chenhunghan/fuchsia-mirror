@@ -529,10 +529,20 @@ void Dwc2::SetAddress(uint8_t address) {
   DCFG::Get().ReadFrom(mmio).set_devaddr(address).WriteTo(mmio);
 }
 
-// Reads number of bytes transfered on specified endpoint
-uint32_t Dwc2::ReadTransfered(Endpoint* ep) {
+// Reads number of bytes transferred on specified endpoint
+uint32_t Dwc2::ReadTransferred(Endpoint* ep) {
   auto* mmio = get_mmio();
-  return ep->req_xfersize - DEPTSIZ::Get(ep->ep_addr()).ReadFrom(mmio).xfersize();
+  uint32_t remaining = DEPTSIZ::Get(ep->ep_addr()).ReadFrom(mmio).xfersize();
+  // Guard against the hardware reporting more bytes remaining than were
+  // programmed (DOEPTSIZ0.xfersize wrap on EP0, reserved-bit reads, or
+  // glitched MMIO). Without this clamp the unsigned subtraction underflows
+  // and the resulting req_offset drives DEPDMA outside the pinned buffer.
+  if (remaining > ep->req_xfersize) {
+    fdf::warn("DWC2: Hardware reported more remaining bytes ({}) than programmed ({}) for ep {}",
+              remaining, ep->req_xfersize, ep->ep_addr());
+  }
+  remaining = std::min(remaining, ep->req_xfersize);
+  return ep->req_xfersize - remaining;
 }
 
 // Prepares to receive next control request on endpoint zero.
@@ -814,8 +824,8 @@ void Dwc2::HandleEp0TransferComplete(bool is_in) {
     }
     case Ep0State::DATA: {
       auto& ep = endpoints_[is_in ? DWC_EP0_IN : DWC_EP0_OUT];
-      auto transfered = ReadTransfered(&*ep);
-      ep->req_offset += transfered;
+      auto transferred = ReadTransferred(&*ep);
+      ep->req_offset += transferred;
 
       if (is_in) {  // data direction is IN-type (to the host).
         if (ep->req_offset == ep->req_length) {
@@ -870,7 +880,7 @@ void Dwc2::HandleEp0TransferComplete(bool is_in) {
       if (is_in) {
         // Timeout was due to lost data.
         auto& ep = endpoints_[DWC_EP0_IN];
-        ep->req_offset += ReadTransfered(&*ep);
+        ep->req_offset += ReadTransferred(&*ep);
         ZX_ASSERT(ep->req_offset == ep->req_length);
         HandleEp0Status(false);
       } else {
@@ -933,7 +943,7 @@ void Dwc2::HandleTransferComplete(uint8_t ep_num) {
 
   ep->lock.lock();
 
-  ep->req_offset += ReadTransfered(&*ep);
+  ep->req_offset += ReadTransferred(&*ep);
 
   if (ep->pending_zlp) {
     ep->pending_zlp = false;

@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 pub mod apic;
+pub mod cache;
 pub mod fake_msr_access;
 pub mod feature;
 pub mod interrupts;
@@ -33,7 +34,7 @@ zr::static_assert!(core::mem::align_of::<ArchSavedNormalState>() == 8);
 
 use debug::ltracef;
 use zx_status::Status;
-use zx_types::{zx_restricted_state_t, zx_status_t, zx_thread_state_general_regs_t};
+use zx_types::{zx_restricted_state_t, zx_thread_state_general_regs_t};
 
 use arch_x86_aspace_bindings as aspace_bindings;
 
@@ -478,111 +479,6 @@ pub fn enter_full(
     unsafe {
         cpp_x86_enter_uspace(&iframe);
     }
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_validate_state_pre_restricted_entry(
-    state: *const zx_restricted_state_t,
-) -> zx_status_t {
-    // SAFETY: Caller guarantees `state` is a valid pointer.
-    let state = unsafe { &*state };
-    Status::result_into_raw(validate_state_pre_restricted_entry(state))
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_state_pre_restricted_entry(
-    state: *mut ArchSavedNormalState,
-) {
-    // SAFETY: Caller guarantees `state` is valid.
-    let state = unsafe { &mut *state };
-    save_state_pre_restricted_entry(state);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_enter_restricted(state: *const zx_restricted_state_t) -> ! {
-    // SAFETY: Caller guarantees `state` is valid.
-    let state = unsafe { &*state };
-    enter_restricted(state);
-}
-
-/// # Safety
-/// Caller guarantees `state` and `regs` are valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_syscall_state(
-    state: *mut zx_restricted_state_t,
-    regs: *const SyscallRegs,
-) {
-    // SAFETY: Caller guarantees pointers are valid.
-    let state = unsafe { &mut *state };
-    let regs = unsafe { &*regs };
-    save_restricted_syscall_state(state, regs);
-}
-
-/// # Safety
-/// Caller guarantees `state` and `frame` are valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_iframe_state(
-    state: *mut zx_restricted_state_t,
-    frame: *const Iframe,
-) {
-    // SAFETY: Caller guarantees pointers are valid.
-    let state = unsafe { &mut *state };
-    let frame = unsafe { &*frame };
-    save_restricted_iframe_state(state, frame);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_save_restricted_exception_state(
-    state: *mut zx_restricted_state_t,
-) {
-    // SAFETY: Caller guarantees pointer is valid.
-    let state = unsafe { &mut *state };
-    save_restricted_exception_state(state);
-}
-
-/// # Safety
-/// Caller guarantees `arch_state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_redirect_restricted_exception_to_normal(
-    arch_state: *const ArchSavedNormalState,
-    vector_table: usize,
-    context: usize,
-    reason: u64,
-) {
-    // SAFETY: Caller guarantees pointer is valid.
-    let arch_state = unsafe { &*arch_state };
-    redirect_restricted_exception_to_normal(arch_state, vector_table, context, reason);
-}
-
-/// # Safety
-/// Caller guarantees `arch_state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_enter_full(
-    arch_state: *const ArchSavedNormalState,
-    vector_table: usize,
-    context: usize,
-    code: u64,
-) -> ! {
-    // SAFETY: Caller guarantees pointer is valid.
-    let arch_state = unsafe { &*arch_state };
-    enter_full(arch_state, vector_table, context, code);
-}
-
-/// # Safety
-/// Caller guarantees `state` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_dump(state: *const zx_restricted_state_t) {
-    // SAFETY: Caller guarantees `state` is a valid pointer.
-    let state = unsafe { &*state };
-    dump(state);
 }
 
 #[cfg(ktest)]

@@ -9,20 +9,19 @@ import time
 from dataclasses import dataclass
 from enum import StrEnum, auto, unique
 
-from antlion.controllers.ap_lib.hostapd_ap_preset import create_ap_preset
-from antlion.controllers.ap_lib.hostapd_security import (
-    Security as HostapdSecurity,
-)
-from antlion.controllers.ap_lib.radvd_config import RadvdConfig
 from antlion.controllers.attenuator import (
     Attenuator,
     get_attenuators_for_device,
 )
 from antlion.controllers.fuchsia_device import FuchsiaDevice
-from antlion.utils import rand_ascii_str
-from antlion.validation import MapValidator
 from fuchsia_wlan_base_test.deprecated.wifi import base_test
 from iperf.iperf_server import IPerfResult
+from legacy_access_point.ap_lib.hostapd_ap_preset import create_ap_preset
+from legacy_access_point.ap_lib.hostapd_security import (
+    Security as HostapdSecurity,
+)
+from legacy_access_point.ap_lib.radvd_config import RadvdConfig
+from libs.validation import MapValidator
 from mobly import asserts, signals, test_runner
 from mobly.config_parser import TestRunConfig
 from mobly.records import TestResultRecord
@@ -390,7 +389,6 @@ class WlanRvrTest(base_test.WifiBaseTest):
             case IPVersion.V4:
                 iperf_server_ip_address = self._wait_for_iperf_ipv4_addr()
             case IPVersion.V6:
-                self.iperf_server.renew_test_interface_ip_address()
                 self.log.info(
                     "Waiting for iperf server to complete Duplicate "
                     "Address Detection..."
@@ -640,7 +638,7 @@ class WlanRvrTest(base_test.WifiBaseTest):
             return 0
 
     def _test_rvr(self, t: TestParams) -> None:
-        ssid = rand_ascii_str(20)
+        ssid = AccessPointConfig.random_string(20)
         if self.access_point:
             self.access_point.stop_all_aps()
         results = self.run_rvr(

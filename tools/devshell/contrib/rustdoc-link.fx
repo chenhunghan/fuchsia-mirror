@@ -3,4 +3,5 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Documentation
+#### PREBUILTS=${PREBUILT_PYTHON3} ${PREBUILT_RUST_DIR}
 ### Link generated documentation for Rust code. Replaces `fx rustdoc`

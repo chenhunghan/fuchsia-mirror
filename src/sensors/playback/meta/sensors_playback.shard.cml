@@ -6,7 +6,6 @@
         {
             name: "playback",
             url: "sensors#meta/playback.cm",
-            startup: "eager",
         },
     ],
     use: [

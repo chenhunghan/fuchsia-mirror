@@ -162,7 +162,13 @@ impl SocketOps for RemoteUnixDomainSocket {
 
         let message_length = response.data_original_length.unwrap_or(written as u64) as usize;
 
-        Ok(MessageReadInfo { bytes_read: written, message_length, address: None, ancillary_data })
+        Ok(MessageReadInfo {
+            bytes_read: written,
+            message_length,
+            address: None,
+            credentials: None,
+            ancillary_data,
+        })
     }
 
     fn write(

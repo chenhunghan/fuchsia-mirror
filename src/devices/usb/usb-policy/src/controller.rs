@@ -120,14 +120,27 @@ impl ControllerState {
                     Timer::new(MonotonicInstant::after(MonotonicDuration::from_seconds(1))).await;
                 }
                 Err(e) => {
+                    if e.is_closed() {
+                        info!(
+                            "monitor_device_state() loop exited because the server closed the channel."
+                        );
+                        self.close();
+                        return Ok(());
+                    }
                     error!("Monitor loop failed! FIDL Error: {:?}", e);
 
                     Timer::new(MonotonicInstant::after(MonotonicDuration::from_seconds(1))).await;
                 }
             }
         }
-        error!("monitor_device_state() loop exited because the server closed the channel.");
+        info!("monitor_device_state() loop exited because stream ended.");
+        self.close();
         Ok(())
+    }
+
+    pub fn close(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.watchers.clear();
     }
 
     pub fn get_state(&self) -> UsbState {
@@ -259,6 +272,43 @@ mod tests {
                 }
             }
         });
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_monitor_device_state_terminates_on_channel_closed() -> anyhow::Result<()> {
+        use fuchsia_async::TimeoutExt as _;
+
+        let inspector = Inspector::default();
+        let inspect_node = inspector.root().create_child("usb_state_history");
+
+        let (controller_proxy, request_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fpolicy::ControllerMarker>();
+
+        let controller = Arc::new(ControllerState::new(
+            controller_proxy,
+            DeviceState::NotAttached,
+            0,
+            inspect_node,
+        ));
+
+        // Close the server end of the channel to simulate driver teardown (e.g. Dwc3::Stop).
+        drop(request_stream);
+
+        // Without the fix, monitor_device_state loops forever logging FIDL errors and sleeping 1s.
+        // It must cleanly terminate with Ok(()) when the server closes the channel.
+        let monitor_fut = controller.monitor_device_state();
+        let result = monitor_fut
+            .on_timeout(
+                zx::MonotonicInstant::after(zx::MonotonicDuration::from_millis(500)),
+                || {
+                    Err(anyhow::anyhow!(
+                        "monitor_device_state hung and did not terminate upon channel closure"
+                    ))
+                },
+            )
+            .await;
+        assert!(result.is_ok(), "Expected monitor_device_state to terminate cleanly: {:?}", result);
         Ok(())
     }
 }

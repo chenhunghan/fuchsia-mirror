@@ -1820,6 +1820,8 @@ pub mod options {
 
     #[cfg(test)]
     mod tests {
+        use alloc::vec;
+        use alloc::vec::Vec;
         use core::convert::TryInto as _;
         use core::fmt::Debug;
 
@@ -2347,7 +2349,7 @@ pub mod options {
 
                 fn test_serialize_parse_inner<
                     O: OptionBuilder + Debug + PartialEq + for<'a> From<&'a (u8, Vec<u8>)>,
-                    I: for<'a> OptionsImpl<Error = OptionParseErr, Option<'a> = O> + std::fmt::Debug,
+                    I: for<'a> OptionsImpl<Error = OptionParseErr, Option<'a> = O> + core::fmt::Debug,
                 >(
                     opts: &[(u8, Vec<u8>)],
                     expect: &[(u8, Vec<u8>)],

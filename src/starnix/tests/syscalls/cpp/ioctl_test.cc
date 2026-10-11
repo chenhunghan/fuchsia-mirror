@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include <optional>
+#include <string_view>
 
 #include <fbl/unique_fd.h>
 #include <gmock/gmock.h>
@@ -24,12 +25,15 @@
 #include <linux/input.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+#include <linux/uinput.h>
 
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
+
+using test_helper::ScopedUinputDevice;
 
 constexpr char kLoopbackIfName[] = "lo";
 constexpr char kUnknownIfName[] = "unknown";
@@ -520,52 +524,47 @@ TEST_F(IoctlTest, SIOCGIFINDEX_SIOCGIFNAME_Success) {
   EXPECT_EQ(ifr2.ifr_ifindex, ifr.ifr_ifindex);
 }
 
-// Check the names of all available input devices as reported by EVIOCGNAME.
-// We expect few (two to be exact).
+// Check the name of an injected input device as reported by EVIOCGNAME.
 TEST_F(IoctlTest, EVIOCGNAME_Success) {
   if (!test_helper::HasSysAdmin()) {
-    GTEST_SKIP() << "EVIOCGNAME requires permissions to avoid EACCESS, skipping here...";
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
   }
 
-  std::vector<std::string> input_device_names;
-  const std::string dev_input_path = "/dev/input";
-  DIR* dir = opendir(dev_input_path.c_str());
-  ASSERT_NE(dir, nullptr);
-
-  for (struct dirent* entry = readdir(dir); entry != nullptr; entry = readdir(dir)) {
-    const std::string dev_file = entry->d_name;
-    if (dev_file == "." || dev_file == "..") {
-      continue;
-    }
-    const std::string dev_path = dev_input_path + "/" + dev_file;
-    const int fd = open(dev_path.c_str(), O_RDONLY);
-    ASSERT_GT(fd, 0) << "for: " << dev_path;
-    char dev_name[100];
-    const int result = ioctl(fd, EVIOCGNAME(sizeof(dev_name)), &dev_name);
-    ASSERT_GT(result, 0) << "for: " << dev_path;
-    close(fd);
-    input_device_names.push_back(dev_name);
+  auto device = ScopedUinputDevice::Create("test_input_device");
+  if (!device) {
+    return;
   }
 
-  // TODO(b/564945259): Re-add "starnix_mouse" once mouse device is registered
-  // dynamically.
-  EXPECT_THAT(input_device_names,
-              testing::UnorderedElementsAre("starnix_touch", "starnix_buttons"));
+  char dev_name[100] = {};
+  const int result = ioctl(device->event_fd.get(), EVIOCGNAME(sizeof(dev_name)), &dev_name);
+  ASSERT_GT(result, 0);
+  EXPECT_STREQ(dev_name, "test_input_device");
 }
 
 // If the buffer for copying the device name is too small, copy only how much
 // will fit.
 TEST_F(IoctlTest, EVIOCGNAME_TooSmall) {
   if (!test_helper::HasSysAdmin()) {
-    GTEST_SKIP() << "EVIOCGNAME requires permissions to avoid EACCESS, skipping here...";
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
   }
-  const std::string dev_path = "/dev/input/event0";
-  int fd = open(dev_path.c_str(), O_RDONLY);
-  ASSERT_GT(fd, 0);
-  char dev_name[10];
-  int result = ioctl(fd, EVIOCGNAME(sizeof(dev_name)), &dev_name);
-  EXPECT_EQ(result, 10);
-  close(fd);
+
+  auto device = ScopedUinputDevice::Create("test_input_device");
+  if (!device) {
+    return;
+  }
+
+  char dev_name[5];
+  memset(dev_name, 0xAA, sizeof(dev_name));
+  int result = ioctl(device->event_fd.get(), EVIOCGNAME(sizeof(dev_name)), &dev_name);
+  ASSERT_EQ(result, 5);
+  if (test_helper::IsStarnix()) {
+    // Starnix always NUL-terminates truncated EVIOCGNAME buffers.
+    ASSERT_EQ(dev_name[sizeof(dev_name) - 1], '\0');
+    EXPECT_STREQ(dev_name, "test");
+  } else {
+    // Linux evdev str_to_user() copies `maxlen` bytes without NUL-termination when truncated.
+    EXPECT_EQ(std::string_view(dev_name, sizeof(dev_name)), "test_");
+  }
 }
 
 TEST_F(IoctlTest, FIONREAD_StreamSocket_Success) {

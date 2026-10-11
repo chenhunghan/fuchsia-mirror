@@ -32,8 +32,9 @@ use netstack3_base::{
     AnyDevice, BidirectionalConverter, ContextPair, CoreTxMetadataContext, CounterContext,
     DeviceIdContext, Inspector, InspectorDeviceExt, InstantContext, IpSocketPropertiesMatcher,
     LocalAddressError, Mark, MarkDomain, Marks, MatcherBindingsTypes, NetworkParsingContext,
-    PortAllocImpl, ReferenceNotifiers, RemoveResourceResultWithContext, ResourceCounterContext,
-    RngContext, SocketError, StrongDeviceIdentifier, WeakDeviceIdentifier, ZonedAddressError,
+    PacketType, PortAllocImpl, ReferenceNotifiers, RemoveResourceResultWithContext,
+    ResourceCounterContext, RngContext, SocketError, StrongDeviceIdentifier, WeakDeviceIdentifier,
+    ZonedAddressError,
 };
 use netstack3_datagram::{
     self as datagram, BoundDatagramSocketMap, BoundSocketState as DatagramBoundSocketState,
@@ -1482,7 +1483,7 @@ fn receive_ip_packet<
     info: &mut LocalDeliveryPacketInfo<I, H>,
     early_demux_socket: Option<DualStackUdpSocketId<I, CC::WeakDeviceId, BC>>,
 ) -> Result<(), (B, I::IcmpError)> {
-    let LocalDeliveryPacketInfo { meta, header_info, marks } = info;
+    let LocalDeliveryPacketInfo { meta, header_info, marks, packet_type } = info;
     let ReceiveIpPacketMeta { broadcast, transparent_override, parsing_context } = meta;
 
     trace_duration!("udp::receive_ip_packet");
@@ -1593,6 +1594,7 @@ fn receive_ip_packet<
             device,
             &meta,
             marks,
+            *packet_type,
             require_transparent,
             header_info,
             packet.clone(),
@@ -1625,6 +1627,7 @@ fn try_deliver<
     device_id: &CC::DeviceId,
     meta: UdpPacketMeta<I>,
     packet_marks: &Marks,
+    packet_type: PacketType,
     require_transparent: bool,
     header_info: &H,
     packet: UdpPacket<&[u8]>,
@@ -1676,6 +1679,7 @@ fn try_deliver<
             device_id,
             id.socket_info(),
             &marks,
+            packet_type,
         );
 
         match filter_result {
@@ -1717,6 +1721,7 @@ fn try_dual_stack_deliver<
     device_id: &CC::DeviceId,
     meta: &UdpPacketMeta<I>,
     packet_marks: &Marks,
+    packet_type: PacketType,
     require_transparent: bool,
     header_info: &H,
     packet: UdpPacket<&[u8]>,
@@ -1763,6 +1768,7 @@ fn try_dual_stack_deliver<
             device_id,
             meta,
             packet_marks,
+            packet_type,
             require_transparent,
             header_info,
             packet,
@@ -1774,6 +1780,7 @@ fn try_dual_stack_deliver<
             device_id,
             meta,
             packet_marks,
+            packet_type,
             require_transparent,
             header_info,
             packet,

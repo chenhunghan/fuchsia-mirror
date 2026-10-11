@@ -65,10 +65,166 @@ resource("i2c-dtb-file") {
   deps = [ ":i2c-dtb" ]
 }
 
+dtb("i2c-channels-dtb") {
+  sources = [ "test/dts/i2c-channels.dts.S" ]
+}
+
+resource("i2c-channels-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-dtb" ]
+}
+
+dtb("i2c-channels-duplicate-names-dtb") {
+  sources = [ "test/dts/i2c-channels-duplicate-names.dts.S" ]
+}
+
+resource("i2c-channels-duplicate-names-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-duplicate-names-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-duplicate-names-dtb" ]
+}
+
+dtb("i2c-channels-duplicate-phandles-dtb") {
+  sources = [ "test/dts/i2c-channels-duplicate-phandles.dts.S" ]
+}
+
+resource("i2c-channels-duplicate-phandles-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-duplicate-phandles-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-duplicate-phandles-dtb" ]
+}
+
+dtb("i2c-channels-grandchild-dtb") {
+  sources = [ "test/dts/i2c-channels-grandchild.dts.S" ]
+}
+
+resource("i2c-channels-grandchild-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-grandchild-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-grandchild-dtb" ]
+}
+
+dtb("i2c-channels-multi-address-dtb") {
+  sources = [ "test/dts/i2c-channels-multi-address.dts.S" ]
+}
+
+resource("i2c-channels-multi-address-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-multi-address-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-multi-address-dtb" ]
+}
+
+dtb("i2c-channels-multiple-referrers-dtb") {
+  sources = [ "test/dts/i2c-channels-multiple-referrers.dts.S" ]
+}
+
+resource("i2c-channels-multiple-referrers-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-multiple-referrers-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-multiple-referrers-dtb" ]
+}
+
+dtb("i2c-channels-names-mismatch-dtb") {
+  sources = [ "test/dts/i2c-channels-names-mismatch.dts.S" ]
+}
+
+resource("i2c-channels-names-mismatch-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-names-mismatch-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-names-mismatch-dtb" ]
+}
+
+dtb("i2c-channels-no-names-dtb") {
+  sources = [ "test/dts/i2c-channels-no-names.dts.S" ]
+}
+
+resource("i2c-channels-no-names-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-no-names-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-no-names-dtb" ]
+}
+
+dtb("i2c-channels-not-i2c-child-dtb") {
+  sources = [ "test/dts/i2c-channels-not-i2c-child.dts.S" ]
+}
+
+resource("i2c-channels-not-i2c-child-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-not-i2c-child-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-not-i2c-child-dtb" ]
+}
+
+dtb("i2c-channels-own-name-collision-dtb") {
+  sources = [ "test/dts/i2c-channels-own-name-collision.dts.S" ]
+}
+
+resource("i2c-channels-own-name-collision-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-own-name-collision-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-own-name-collision-dtb" ]
+}
+
+dtb("i2c-channels-referenced-compatible-dtb") {
+  sources = [ "test/dts/i2c-channels-referenced-compatible.dts.S" ]
+}
+
+resource("i2c-channels-referenced-compatible-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-referenced-compatible-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-referenced-compatible-dtb" ]
+}
+
+dtb("i2c-channels-self-reference-dtb") {
+  sources = [ "test/dts/i2c-channels-self-reference.dts.S" ]
+}
+
+resource("i2c-channels-self-reference-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-self-reference-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-self-reference-dtb" ]
+}
+
+dtb("i2c-channels-shared-address-dtb") {
+  sources = [ "test/dts/i2c-channels-shared-address.dts.S" ]
+
+  # -Wno-unique_unit_address is needed because the test DTS
+  # (i2c-channels-shared-address.dts.S) intentionally defines duplicate unit
+  # addresses (child@c and child-dup@c) to test the rejection of references to
+  # a shared address.
+  dtcflags = [ "-Wno-unique_unit_address" ]
+}
+
+resource("i2c-channels-shared-address-dtb-file") {
+  sources = get_target_outputs(":i2c-channels-shared-address-dtb")
+  outputs = [ "test-data/{{source_file_part}}" ]
+  deps = [ ":i2c-channels-shared-address-dtb" ]
+}
+
 fuchsia_unittest_package("i2c-bus-visitor-test") {
   component_name = "i2c-bus-visitor-test"
   deps = [
     ":i2c-bus-visitor-test-bin",
+    ":i2c-channels-dtb-file",
+    ":i2c-channels-duplicate-names-dtb-file",
+    ":i2c-channels-duplicate-phandles-dtb-file",
+    ":i2c-channels-grandchild-dtb-file",
+    ":i2c-channels-multi-address-dtb-file",
+    ":i2c-channels-multiple-referrers-dtb-file",
+    ":i2c-channels-names-mismatch-dtb-file",
+    ":i2c-channels-no-names-dtb-file",
+    ":i2c-channels-not-i2c-child-dtb-file",
+    ":i2c-channels-own-name-collision-dtb-file",
+    ":i2c-channels-referenced-compatible-dtb-file",
+    ":i2c-channels-self-reference-dtb-file",
+    ":i2c-channels-shared-address-dtb-file",
     ":i2c-dtb-file",
   ]
+
+  # The error-case tests log errors.
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

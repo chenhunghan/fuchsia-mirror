@@ -11,6 +11,7 @@ import argparse
 import json
 import pathlib
 import sys
+from typing import cast
 
 from trace_processing import hardware_configs, trace_importing, trace_model
 from trace_processing.metrics import agg_cpu_breakdown, cpu
@@ -119,10 +120,18 @@ def RunCpuBreakdown(args: argparse.Namespace, trace_path_json: str) -> None:
     )
     processor = cpu.CpuMetricsProcessor(percent_cutoff=args.percent_cutoff)
 
-    _, breakdown = processor.process_freeform_metrics(model)
+    # TODO(https://github.com/python/mypy/issues/18176): eliminate this cast
+    # and "untyped_breakdown" local field; the type-checker ought understand
+    # that a ThreadBreakdown is suitable to use where a metrics.JSON is
+    # needed.
+    _, untyped_breakdown = processor.process_freeform_metrics(model)
+    thread_breakdown = cast(cpu.ThreadBreakdown, untyped_breakdown)
 
     if args.group_processes:
-        breakdown = cpu.group_by_process_name(breakdown)
+        process_breakdown = cpu.group_by_process_name(thread_breakdown)
+        breakdown = process_breakdown
+    else:
+        breakdown = thread_breakdown
 
     with open(args.output_path, "w") as json_file:
         json.dump(breakdown, json_file, indent=4)

@@ -46,68 +46,6 @@ void SetUnknownIdError(PythonTypeID id, const char *expected) {
   PyErr_Format(PyExc_TypeError, "Unable to cast from type %s to \"%s\"", TypeStrings[id], expected);
 }
 
-std::pair<std::unique_ptr<ffx_config_t[]>, Py_ssize_t> build_config(PyObject *config,
-                                                                    const char *target) {
-  static const char TYPE_ERROR[] = "`config` must be a dictionary of string key/value pairs";
-  if (!PyDict_Check(config)) {
-    PyErr_SetString(PyExc_TypeError, TYPE_ERROR);
-    return std::make_pair(nullptr, 0);
-  }
-  PyObject *maybe_target = PyDict_GetItem(config, PyUnicode_FromString("target.default"));
-  if (target && maybe_target) {
-    PyErr_Format(
-        PyExc_RuntimeError,
-        "Context `target` parameter set to '%s', but "
-        "config also contains 'target.default' value set to '%s'. You must only specify one",
-        target, PyUnicode_AsUTF8AndSize(maybe_target, nullptr));
-    return std::make_pair(nullptr, 0);
-  }
-  Py_ssize_t config_len = PyDict_Size(config);
-  if (config_len < 0) {
-    return std::make_pair(nullptr, 0);
-  }
-  std::unique_ptr<ffx_config_t[]> ffx_config;
-  if (target) {
-    config_len++;
-  }
-  ffx_config = std::make_unique<ffx_config_t[]>(config_len);
-
-  PyObject *py_key = nullptr;
-  PyObject *py_value = nullptr;
-  Py_ssize_t pos = 0;
-  // `pos` is not used for iterating in ffx_config because it is an internal
-  // iterator for a sparse map, so does not always increment by one.
-  for (Py_ssize_t i = 0; PyDict_Next(config, &pos, &py_key, &py_value); ++i) {
-    if (!PyUnicode_Check(py_key)) {
-      PyErr_SetString(PyExc_TypeError, TYPE_ERROR);
-      return std::make_pair(nullptr, 0);
-    }
-    const char *key = PyUnicode_AsUTF8AndSize(py_key, nullptr);
-    if (key == nullptr) {
-      return std::make_pair(nullptr, 0);
-    }
-    if (!PyUnicode_Check(py_value)) {
-      PyErr_SetString(PyExc_TypeError, TYPE_ERROR);
-      return std::make_pair(nullptr, 0);
-    }
-    const char *value = PyUnicode_AsUTF8AndSize(py_value, nullptr);
-    if (value == nullptr) {
-      return std::make_pair(nullptr, 0);
-    }
-    ffx_config[i] = {
-        .key = key,
-        .value = value,
-    };
-  }
-  if (target) {
-    ffx_config[config_len - 1] = {
-        .key = "target.default",
-        .value = target,
-    };
-  }
-  return std::make_pair(std::move(ffx_config), config_len);
-}
-
 /// Base class for Python objects to inherit from.
 class PythonObject {
  public:
@@ -537,29 +475,14 @@ PyObject *handle_create(PyObject *self, PyObject *args) {
 }
 
 PyObject *context_create(PyObject *self, PyObject *args) {
-  PyObject *config = nullptr;
+  const char *config_json = nullptr;
   const char *isolate = nullptr;
-  const char *target = nullptr;
-  if (!PyArg_ParseTuple(args, "Osz", &config, &isolate, &target)) {
+  if (!PyArg_ParseTuple(args, "zs", &config_json, &isolate)) {
     return nullptr;
   }
-  fc::abi::utils::Object config_holder = fc::abi::utils::Object::null();
-  if (!config || config == Py_None) {
-    config_holder = fc::abi::utils::Object(PyDict_New());
-    if (config_holder == nullptr) {
-      return nullptr;
-    }
-    config = config_holder.get();
-  }
-  auto pair = build_config(config, target);
-  if (pair.first == nullptr) {
-    return nullptr;
-  }
-  auto ffx_config = std::move(pair.first);
-  auto config_len = pair.second;
   ffx_env_context_t *env_context;
-  fc_status_t status = create_ffx_env_context(&env_context, mod::get_module_state()->ctx,
-                                              ffx_config.get(), config_len, isolate);
+  fc_status_t status =
+      create_ffx_env_context(&env_context, mod::get_module_state()->ctx, config_json, isolate);
   if (status != FC_OK) {
     mod::set_python_exception(status);
     return nullptr;

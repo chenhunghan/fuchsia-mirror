@@ -5,8 +5,8 @@
             metrics: [
                 {
                     event_codes: [
-                        0,
-                        0,
+                        "All",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -14,8 +14,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        1,
+                        "All",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -23,8 +23,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        0,
+                        "Feedback",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -32,8 +32,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Feedback",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -41,8 +41,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        0,
+                        "LegacyMetrics",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -50,8 +50,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "LegacyMetrics",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -59,8 +59,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        0,
+                        "LoWPAN",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -68,8 +68,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "LoWPAN",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
@@ -77,8 +77,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        0,
+                        "All",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -86,8 +86,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        1,
+                        "All",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -95,8 +95,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        0,
+                        "Feedback",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -104,8 +104,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Feedback",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -113,8 +113,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        0,
+                        "LegacyMetrics",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -122,8 +122,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "LegacyMetrics",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -131,8 +131,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        0,
+                        "LoWPAN",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -140,8 +140,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "LoWPAN",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
@@ -149,8 +149,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        0,
+                        "All",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -158,8 +158,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        1,
+                        "All",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -167,8 +167,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        0,
+                        "Feedback",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -176,8 +176,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Feedback",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -185,8 +185,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        0,
+                        "LegacyMetrics",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -194,8 +194,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "LegacyMetrics",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -203,8 +203,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        0,
+                        "LoWPAN",
+                        "Inspect",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -212,8 +212,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "LoWPAN",
+                        "Logs",
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
@@ -221,8 +221,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        0,
+                        "All",
+                        "Inspect",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -230,8 +230,8 @@
                 },
                 {
                     event_codes: [
-                        0,
-                        1,
+                        "All",
+                        "Logs",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -239,8 +239,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        0,
+                        "Feedback",
+                        "Inspect",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -248,8 +248,8 @@
                 },
                 {
                     event_codes: [
-                        1,
-                        1,
+                        "Feedback",
+                        "Logs",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -257,8 +257,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        0,
+                        "LegacyMetrics",
+                        "Inspect",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -266,8 +266,8 @@
                 },
                 {
                     event_codes: [
-                        2,
-                        1,
+                        "LegacyMetrics",
+                        "Logs",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -275,8 +275,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        0,
+                        "LoWPAN",
+                        "Inspect",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -284,8 +284,8 @@
                 },
                 {
                     event_codes: [
-                        3,
-                        1,
+                        "LoWPAN",
+                        "Logs",
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
@@ -293,7 +293,7 @@
                 },
                 {
                     event_codes: [
-                        0,
+                        "All",
                     ],
                     metric_name: "archive_accessor_connections_opened_migrated",
                     metric_type: "Occurrence",
@@ -301,7 +301,7 @@
                 },
                 {
                     event_codes: [
-                        1,
+                        "Feedback",
                     ],
                     metric_name: "archive_accessor_connections_opened_migrated",
                     metric_type: "Occurrence",
@@ -309,7 +309,7 @@
                 },
                 {
                     event_codes: [
-                        2,
+                        "LegacyMetrics",
                     ],
                     metric_name: "archive_accessor_connections_opened_migrated",
                     metric_type: "Occurrence",
@@ -317,7 +317,7 @@
                 },
                 {
                     event_codes: [
-                        3,
+                        "LoWPAN",
                     ],
                     metric_name: "archive_accessor_connections_opened_migrated",
                     metric_type: "Occurrence",

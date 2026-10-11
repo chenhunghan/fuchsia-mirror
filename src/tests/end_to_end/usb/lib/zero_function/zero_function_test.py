@@ -520,7 +520,7 @@ class UsbConfigTest(unittest.TestCase):
         self,
     ) -> None:
         dut = mock.MagicMock()
-        dut.serial.send.side_effect = OSError("Serial write error")
+        dut.serial.send_and_recv.side_effect = OSError("Serial write error")
 
         with self.assertRaises(RuntimeError) as ctx:
             usb_config.set_usb_config(dut, "cdc,adb")
@@ -532,20 +532,30 @@ class UsbConfigTest(unittest.TestCase):
 
     def test_set_usb_config_success(self) -> None:
         dut = mock.MagicMock()
-        dut.serial.read.return_value = "[usb-cli:DONE]"
+        dut.serial.send_and_recv.return_value = "[usb-cli:DONE]"
 
         usb_config.set_usb_config(dut, "cdc,adb")
-        dut.serial.send.assert_called_once_with("usb-cli set-config cdc,adb")
+        dut.serial.send_and_recv.assert_called_once_with(
+            cmd="usb-cli set-config cdc,adb",
+            stop_tokens=("[usb-cli:DONE]", "[usb-cli:ERROR]"),
+            timeout_sec=8.0,
+        )
         dut.reboot.assert_not_called()
         dut.ffx.run_ssh_cmd.assert_not_called()
 
     def test_get_usb_config_uses_serial_only(self) -> None:
         dut = mock.MagicMock()
-        dut.serial.read.return_value = '{"functions": ["cdc"]} [usb-cli:DONE]'
+        dut.serial.send_and_recv.return_value = (
+            '{"functions": ["cdc"]} [usb-cli:DONE]'
+        )
 
         res = usb_config.get_usb_config(dut)
         self.assertIn('"functions": ["cdc"]', res)
-        dut.serial.send.assert_called_once_with("usb-cli get-config")
+        dut.serial.send_and_recv.assert_called_once_with(
+            cmd="usb-cli get-config",
+            stop_tokens=("[usb-cli:DONE]", "[usb-cli:ERROR]"),
+            timeout_sec=5.0,
+        )
         dut.ffx.run_ssh_cmd.assert_not_called()
 
     def test_get_usb_config_missing_serial_raises(self) -> None:

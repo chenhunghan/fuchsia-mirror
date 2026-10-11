@@ -76,14 +76,12 @@ async fn handle_inline_encryption_requests(
                     Ok(key_token) => responder.send(Ok(key_token))?,
                     Err(status) => responder.send(Err(status.into_raw()))?,
                 },
-                Err(Err(status)) => responder.send(Err(status.into_raw()))?,
-                Err(Ok(())) => responder.send(Err(zx::Status::INTERNAL.into_raw()))?,
+                Err(status) => responder.send(Err(status.into_raw()))?,
             },
             finlineencryption::DeviceRequest::DeriveRawSecret { wrapped_key, responder } => {
                 match client.derive_raw_secret(wrapped_key).await? {
                     Ok(response) => responder.send(Ok(&response.secret))?,
-                    Err(Err(status)) => responder.send(Err(status.into_raw()))?,
-                    Err(Ok(())) => responder.send(Err(zx::Status::INTERNAL.into_raw()))?,
+                    Err(status) => responder.send(Err(status.into_raw()))?,
                 }
             }
         }

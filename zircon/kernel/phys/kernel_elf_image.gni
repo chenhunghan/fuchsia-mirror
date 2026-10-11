@@ -160,11 +160,6 @@ template("kernel_elf_image") {
 
     utils = [ "objcopy" ]
     script = true
-    if (is_gcc) {
-      args = [ "--strip-all" ]
-    } else {
-      args = [ "--strip-sections" ]
-    }
 
     # Nothing prevents link_output_rspfile() from collecting multiple
     # binary files here if $deps reaches more than one without barrier.
@@ -173,7 +168,8 @@ template("kernel_elf_image") {
     # check for it otherwise (which would require a wrapper script).
     deps = [ ":$rspfile_target" ]
     sources = [ rspfile ]
-    args += [
+    args = [
+      "--strip-sections",
       "@" + rebase_path(rspfile, root_build_dir),
       rebase_path(image_file, root_build_dir),
     ]

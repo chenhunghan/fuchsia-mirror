@@ -47,6 +47,8 @@ toc:
       path: /docs/development/drivers/best_practices/vmo-registration-pattern.md
     - title: "Driver stack performance"
       path: /docs/development/drivers/best_practices/driver_stack_performance.md
+    - title: "Device firmware"
+      path: /docs/development/drivers/best_practices/firmware.md
   - title: "Guidelines"
     section:
     - title: "Driver runtime API guidelines"

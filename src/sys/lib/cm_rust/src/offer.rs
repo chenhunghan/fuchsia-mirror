@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use crate::{
     Availability, CapabilityTypeName, ChildRef, DependencyType, EventScope, FidlIntoNative,
-    NameMapping, NativeIntoFidl, SourceName, SourcePath,
+    GenericRef, NameMapping, NativeIntoFidl, SourceName, SourcePath, ToGenericRef,
 };
 
 #[cfg(feature = "serde")]
@@ -319,7 +319,7 @@ impl From<&OfferDecl> for CapabilityTypeName {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, ToGenericRef)]
 pub enum OfferSource {
     Framework,
     Parent,
@@ -361,26 +361,8 @@ impl FidlIntoNative<OfferSource> for fdecl::Ref {
     }
 }
 
-impl NativeIntoFidl<fdecl::Ref> for OfferSource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            OfferSource::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            OfferSource::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            OfferSource::Child(c) => fdecl::Ref::Child(c.native_into_fidl()),
-            OfferSource::Collection(name) => {
-                fdecl::Ref::Collection(fdecl::CollectionRef { name: name.native_into_fidl() })
-            }
-            OfferSource::Framework => fdecl::Ref::Framework(fdecl::FrameworkRef {}),
-            OfferSource::Capability(name) => {
-                fdecl::Ref::Capability(fdecl::CapabilityRef { name: name.to_string() })
-            }
-            OfferSource::Void => fdecl::Ref::VoidType(fdecl::VoidRef {}),
-        }
-    }
-}
-
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ToGenericRef)]
 pub enum OfferTarget {
     Child(ChildRef),
     Collection(Name),
@@ -405,24 +387,6 @@ impl FidlIntoNative<OfferTarget> for fdecl::Ref {
             fdecl::Ref::Collection(c) => OfferTarget::Collection(c.name.parse().unwrap()),
             fdecl::Ref::Capability(c) => OfferTarget::Capability(c.name.parse().unwrap()),
             _ => panic!("invalid OfferTarget variant"),
-        }
-    }
-}
-
-impl NativeIntoFidl<fdecl::Ref> for OfferTarget {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            OfferTarget::Child(c) => fdecl::Ref::Child(c.native_into_fidl()),
-            OfferTarget::Collection(collection_name) => {
-                fdecl::Ref::Collection(fdecl::CollectionRef {
-                    name: collection_name.native_into_fidl(),
-                })
-            }
-            OfferTarget::Capability(capability_name) => {
-                fdecl::Ref::Capability(fdecl::CapabilityRef {
-                    name: capability_name.native_into_fidl(),
-                })
-            }
         }
     }
 }

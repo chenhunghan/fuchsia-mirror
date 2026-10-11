@@ -8,11 +8,6 @@
         {
             name: "memory_monitor2",
             url: "fuchsia-pkg://fuchsia.com/memory_monitor2#meta/memory_monitor2.cm",
-
-            // TODO: https://fxbug.dev/78680 - need to start eagerly to collect memory
-            // stats. Find a better solution than "eager".
-            startup: "eager",
-            environment: "#core-env",
         },
     ],
     offer: [

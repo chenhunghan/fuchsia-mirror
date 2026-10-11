@@ -263,6 +263,28 @@ async fn inspect_success() {
     assert_data_tree!(
         env.inspect_hierarchy().await,
         "root": contains {
+            "blob_fetcher": {
+                "active": {
+                    "1": {
+                        "start_boot_ns": AnyProperty,
+                        "hash": fuchsia_merkle::root_from_slice("blob-contents".as_bytes()).to_string(),
+                        "base_url": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "conflict_behavior": "AskBlobfs",
+                        "attempts": 1u64,
+                    },
+                },
+                "recent": {
+                    "0": {
+                        "start_boot_ns": AnyProperty,
+                        "hash": package.hash().to_string(),
+                        "base_url": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "conflict_behavior": "AskBlobfs",
+                        "attempts": 1u64,
+                        "end_boot_ns": AnyProperty,
+                        "result": "success: downloaded 365 bytes",
+                    }
+                },
+            },
             "package_fetcher": {
                 "0": {
                     "start_boot_ns": AnyProperty,
@@ -293,6 +315,29 @@ async fn inspect_success() {
     assert_data_tree!(
         env.inspect_hierarchy().await,
         "root": contains {
+            "blob_fetcher": {
+                "active": {},
+                "recent": {
+                    "0": {
+                        "start_boot_ns": AnyProperty,
+                        "hash": package.hash().to_string(),
+                        "base_url": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "conflict_behavior": "AskBlobfs",
+                        "attempts": 1u64,
+                        "end_boot_ns": AnyProperty,
+                        "result": "success: downloaded 365 bytes",
+                    },
+                    "1": {
+                        "start_boot_ns": AnyProperty,
+                        "hash": fuchsia_merkle::root_from_slice("blob-contents".as_bytes()).to_string(),
+                        "base_url": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "conflict_behavior": "AskBlobfs",
+                        "attempts": 1u64,
+                        "end_boot_ns": AnyProperty,
+                        "result": "success: downloaded 41 bytes",
+                    },
+                },
+            },
             "package_fetcher": {},
             "fuchsia.pkg.PackageResolver-ota": {
                 "active": {},
@@ -344,6 +389,20 @@ async fn inspect_failure() {
     assert_data_tree!(
         env.inspect_hierarchy().await,
         "root": contains {
+            "blob_fetcher": {
+                "active": {},
+                "recent": {
+                    "0": {
+                        "start_boot_ns": AnyProperty,
+                        "hash": package.hash().to_string(),
+                        "base_url": format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
+                        "conflict_behavior": "AskBlobfs",
+                        "attempts": 2u64,
+                        "end_boot_ns": AnyProperty,
+                        "result": "error: fuchsia.pkg.http.Client.DownloadBlob failed: Network",
+                    }
+                },
+            },
             "package_fetcher": {},
             "fuchsia.pkg.PackageResolver-ota": {
                 "active": {},
@@ -355,8 +414,8 @@ async fn inspect_failure() {
                             format!("{}/1", repo_config.mirrors()[0].blob_mirror_url()),
                         "hash": package.hash().to_string(),
                         "result":
-                            "error: forwarding to the package fetcher: fetching blob: error \
-                                while calling fuchsia.pkg.http.Client.DownloadBlob Network",
+                            "error: forwarding to package fetcher: fetching blob: \
+                                fuchsia.pkg.http.Client.DownloadBlob failed: Network",
                         "end_boot_ns": AnyProperty,
                     },
                 },

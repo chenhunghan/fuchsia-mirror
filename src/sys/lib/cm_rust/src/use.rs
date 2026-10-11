@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 
 use crate::{
     Availability, ConfigValue, ConfigValueType, DependencyType, DictionaryValue, EventScope,
-    FidlIntoNative, NativeIntoFidl, SourceName, SourcePath,
+    FidlIntoNative, GenericRef, NativeIntoFidl, SourceName, SourcePath, ToGenericRef,
 };
 
 #[cfg(fuchsia_api_level_at_least = "29")]
@@ -239,7 +239,7 @@ pub trait UseDeclCommon: SourceName + SourcePath + Send + Sync {
 }
 
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize), serde(rename_all = "snake_case"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ToGenericRef)]
 pub enum UseSource {
     Parent,
     Framework,
@@ -282,28 +282,6 @@ impl FidlIntoNative<UseSource> for fdecl::Ref {
             #[cfg(fuchsia_api_level_at_least = "HEAD")]
             fdecl::Ref::Environment(_) => UseSource::Environment,
             _ => panic!("invalid UseSource variant"),
-        }
-    }
-}
-
-impl NativeIntoFidl<fdecl::Ref> for UseSource {
-    fn native_into_fidl(self) -> fdecl::Ref {
-        match self {
-            UseSource::Parent => fdecl::Ref::Parent(fdecl::ParentRef {}),
-            UseSource::Framework => fdecl::Ref::Framework(fdecl::FrameworkRef {}),
-            UseSource::Debug => fdecl::Ref::Debug(fdecl::DebugRef {}),
-            UseSource::Self_ => fdecl::Ref::Self_(fdecl::SelfRef {}),
-            UseSource::Capability(name) => {
-                fdecl::Ref::Capability(fdecl::CapabilityRef { name: name.to_string() })
-            }
-            UseSource::Child(name) => {
-                fdecl::Ref::Child(fdecl::ChildRef { name: name.to_string(), collection: None })
-            }
-            UseSource::Collection(name) => {
-                fdecl::Ref::Collection(fdecl::CollectionRef { name: name.to_string() })
-            }
-            #[cfg(fuchsia_api_level_at_least = "HEAD")]
-            UseSource::Environment => fdecl::Ref::Environment(fdecl::EnvironmentRef {}),
         }
     }
 }

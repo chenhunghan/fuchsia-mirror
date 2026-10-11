@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 import asyncio
 import logging
+from collections.abc import Buffer
 
 import fuchsia_controller_py as fc
 
@@ -127,7 +128,7 @@ class AsyncSocket:
             self.socket.close()
             return output
 
-    def write(self, buf: bytes) -> None:
+    def write(self, buf: Buffer) -> None:
         """Does a blocking write on the socket.
 
         This is identical to calling the write function on the socket itself.

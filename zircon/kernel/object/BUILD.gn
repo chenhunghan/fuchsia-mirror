@@ -38,6 +38,7 @@ source_set("object") {
     "guest_dispatcher_ffi.cc",
     "handle.cc",
     "handle_table.cc",
+    "handle_table_ffi.cc",
     "interrupt_dispatcher.cc",
     "interrupt_event_dispatcher.cc",
     "io_buffer_dispatcher.cc",
@@ -56,6 +57,7 @@ source_set("object") {
     "msi_dispatcher_ffi.cc",
     "msi_interrupt_dispatcher.cc",
     "pager_dispatcher.cc",
+    "pager_dispatcher_ffi.cc",
     "pager_proxy.cc",
     "pinned_memory_token_dispatcher.cc",
     "pinned_memory_token_dispatcher_ffi.cc",
@@ -82,9 +84,9 @@ source_set("object") {
     "thread_dispatcher_ffi.cc",
     "timer_dispatcher.cc",
     "vcpu_dispatcher.cc",
+    "vcpu_dispatcher_ffi.cc",
     "virtual_interrupt_dispatcher.cc",
     "vm_address_region_dispatcher.cc",
-    "vm_address_region_dispatcher_ffi.cc",
     "vm_object_dispatcher.cc",
     "wait_signal_observer.cc",
   ]
@@ -112,6 +114,7 @@ source_set("object") {
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/page-map",
     "//zircon/kernel/lib/page_cache",
+    "//zircon/kernel/lib/stall:headers",
     "//zircon/kernel/lib/thread_sampler",
     "//zircon/system/ulib/pretty",
     "//zircon/system/ulib/region-alloc",
@@ -206,6 +209,34 @@ kernel_bindgen_crate("process-dispatcher-bindings") {
   ]
 }
 
+kernel_bindgen_crate("executor-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/object/executor.h" ]
+  non_rust_deps = [ ":headers" ]
+  cpp = true
+
+  edition = "2024"
+  notice_year = 2026
+
+  function_blocklist = [ ".*" ]
+  type_allowlist = [
+    "Executor",
+    "HandleOwner",
+    "MemoryWatchdog",
+  ]
+  type_blocklist = [ "MemoryWatchdog_.*" ]
+  opaque_types = [
+    "HandleOwner",
+    "MemoryWatchdog",
+    "fbl::RefPtr",
+    "ktl::unique_ptr",
+    "std::unique_ptr",
+  ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  raw_lines = [ "#![no_std]" ]
+  expect_lints = []
+}
+
 kernel_rust_mod("object-rs") {
   output_name = "object"
   source_root = "object.rs"
@@ -226,12 +257,19 @@ kernel_rust_mod("object-rs") {
     "event_dispatcher_ffi.rs",
     "event_pair_dispatcher.rs",
     "event_pair_dispatcher_ffi.rs",
+    "exception_dispatcher.rs",
+    "exception_dispatcher_ffi.rs",
+    "exceptionate.rs",
+    "exceptionate_ffi.rs",
+    "executor.rs",
     "fifo_dispatcher.rs",
     "fifo_dispatcher_ffi.rs",
     "guest.rs",
     "guest_dispatcher.rs",
     "guest_dispatcher_ffi.rs",
     "handle.rs",
+    "handle_table.rs",
+    "handle_table_ffi.rs",
     "io_buffer_dispatcher.rs",
     "io_buffer_dispatcher_ffi.rs",
     "io_buffer_shared_region_dispatcher.rs",
@@ -245,6 +283,7 @@ kernel_rust_mod("object-rs") {
     "log_dispatcher.rs",
     "log_dispatcher_ffi.rs",
     "mbuf.rs",
+    "memory_watchdog.rs",
     "message_packet.rs",
     "msi_allocation.rs",
     "msi_dispatcher.rs",
@@ -252,6 +291,8 @@ kernel_rust_mod("object-rs") {
     "msi_interrupt_dispatcher.rs",
     "msi_interrupt_dispatcher_ffi.rs",
     "object.rs",
+    "pager_dispatcher.rs",
+    "pager_dispatcher_ffi.rs",
     "pinned_memory_token_dispatcher.rs",
     "pinned_memory_token_dispatcher_ffi.rs",
     "pmt.rs",
@@ -279,6 +320,9 @@ kernel_rust_mod("object-rs") {
     "timer_dispatcher.rs",
     "timer_dispatcher_ffi.rs",
     "user_handles.rs",
+    "vcpu.rs",
+    "vcpu_dispatcher.rs",
+    "vcpu_dispatcher_ffi.rs",
     "vm_address_region_dispatcher.rs",
     "vm_address_region_dispatcher_ffi.rs",
     "vm_object_dispatcher.rs",
@@ -287,6 +331,7 @@ kernel_rust_mod("object-rs") {
   ]
 
   deps = [
+    ":executor-bindings",
     ":process-dispatcher-bindings",
     "//sdk/rust/iob",
     "//sdk/rust/zx-status",
@@ -302,6 +347,7 @@ kernel_rust_mod("object-rs") {
     "//third_party/rust_crates:pin-init",
     "//third_party/rust_crates:zerocopy",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",

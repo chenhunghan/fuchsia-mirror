@@ -171,4 +171,13 @@ cpp_vm_page_list_btree_const_cursor_next(VmPageListBtreeConstCursor* cursor) {
   return entry;
 }
 
+FFI_ALWAYS_INLINE VmPageListBtreeUtilization
+cpp_vm_page_list_btree_calculate_utilization_slow(const VmPageListBtree* tree) {
+  auto utilization = tree->calculate_utilization_slow();
+  return {
+      .nodes_in_bytes = utilization.nodes_in_bytes(),
+      .stored_values = utilization.stored_values,
+  };
+}
+
 }  // extern "C"

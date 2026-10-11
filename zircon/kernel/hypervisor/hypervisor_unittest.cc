@@ -8,8 +8,10 @@
 #include <lib/unittest/unittest.h>
 #include <zircon/errors.h>
 #include <zircon/syscalls/hypervisor.h>
+#include <zircon/syscalls/port.h>
 #include <zircon/types.h>
 
+#include <arch/hypervisor.h>
 #include <hypervisor/aspace.h>
 #include <hypervisor/interrupt_tracker.h>
 #include <hypervisor/trap_map.h>
@@ -21,14 +23,23 @@
 #include <vm/vm_object.h>
 #include <vm/vm_object_paged.h>
 
+#ifdef __x86_64__
+#include <arch/x86/page_tables/constants.h>
+#elif __aarch64__
+#include <arch/arm64.h>
+#endif
+
 static constexpr arch_mmu_flags_t kMmuFlags =
     ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_PERM_EXECUTE;
 
 static bool hypervisor_supported() {
 #ifdef __x86_64__
   return true;
-#endif
+#elif __aarch64__
+  return arm64_get_boot_el() >= 2;
+#else
   return false;
+#endif
 }
 
 static zx::result<hypervisor::GuestPhysicalAspace> create_gpas() {
@@ -563,6 +574,120 @@ static bool trap_map_insert_trap_out_of_range() {
   END_TEST;
 }
 
+static bool vcpu_enter() {
+  BEGIN_TEST;
+
+  if (!hypervisor_supported()) {
+    return true;
+  }
+
+  auto guest = Guest::Create();
+  if (guest.status_value() == ZX_ERR_NOT_SUPPORTED) {
+    return true;
+  }
+  ASSERT_EQ(ZX_OK, guest.status_value(), "Failed to create Guest\n");
+
+  // Map 3 pages at GPA 0x0:
+  //   [0x0000, 0x1000): PML4 (on x86)
+  //   [0x1000, 0x2000): PDP (on x86)
+  //   [0x2000, 0x3000): Guest entry code
+  constexpr size_t kVmoPages = 3;
+  constexpr zx_gpaddr_t kEntryAddr = kPageSize * 2;
+  constexpr zx_gpaddr_t kTrapAddr = kPageSize * 3;
+  constexpr uint64_t kTrapKey = 0x1234;
+
+  fbl::RefPtr<VmObjectPaged> vmo;
+  zx_status_t status = create_vmo(kPageSize * kVmoPages, &vmo);
+  ASSERT_EQ(ZX_OK, status, "Failed to create VMO\n");
+  status = commit_vmo(vmo);
+  ASSERT_EQ(ZX_OK, status, "Failed to commit VMO\n");
+
+#ifdef __x86_64__
+  // Set up a 1 GiB identity mapping in the first two pages for the guest's initial CR3 (0x0).
+  constexpr uint64_t kPml4Entry = kPageSize | X86_MMU_PG_P | X86_MMU_PG_U | X86_MMU_PG_RW;
+  status = vmo->Write(&kPml4Entry, 0, sizeof(kPml4Entry));
+  ASSERT_EQ(ZX_OK, status, "Failed to write PML4 entry\n");
+  constexpr uint64_t kPdpEntry = X86_MMU_PG_PS | X86_MMU_PG_P | X86_MMU_PG_U | X86_MMU_PG_RW;
+  status = vmo->Write(&kPdpEntry, kPageSize, sizeof(kPdpEntry));
+  ASSERT_EQ(ZX_OK, status, "Failed to write PDP entry\n");
+
+  // Guest code at kEntryAddr (0x2000):
+  //   mov $0x1, %eax             (b8 01 00 00 00)
+  //   mov $0x2, %ebx             (bb 02 00 00 00)
+  //   add %ebx, %eax             (01 d8)
+  //   movq $0, (0x3000)          (48 c7 04 25 00 30 00 00 00 00 00 00)
+  static constexpr uint8_t kGuestCode[] = {
+      0xb8, 0x01, 0x00, 0x00, 0x00, 0xbb, 0x02, 0x00, 0x00, 0x00, 0x01, 0xd8,
+      0x48, 0xc7, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
+#elif __aarch64__
+  // Guest code at kEntryAddr (0x2000):
+  //   mrs x1, CurrentEL          (0xd5384241)
+  //   movz x3, #0x30, lsl #16    (0xd2a00603)  // CPACR_EL1.FPEN = 0b11
+  //   msr cpacr_el1, x3          (0xd5181043)
+  //   isb                        (0xd5033fdf)
+  //   fmov d0, #1.00000000       (0x1e6e1000)
+  //   fmov x2, d0                (0x9e660002)
+  //   movz x0, #0x3000           (0xd2860000)
+  //   str xzr, [x0]              (0xf900001f)
+  static constexpr uint32_t kGuestCode[] = {
+      0xd5384241, 0xd2a00603, 0xd5181043, 0xd5033fdf,
+      0x1e6e1000, 0x9e660002, 0xd2860000, 0xf900001f,
+  };
+#else
+  static constexpr uint8_t kGuestCode[] = {};
+#endif
+  status = vmo->Write(kGuestCode, kEntryAddr, sizeof(kGuestCode));
+  ASSERT_EQ(ZX_OK, status, "Failed to write guest code to VMO\n");
+
+  status = create_mapping((*guest)->RootVmar(), vmo, 0);
+  ASSERT_EQ(ZX_OK, status, "Failed to map guest code into GPA\n");
+
+  status =
+      (*guest)->SetTrap(ZX_GUEST_TRAP_MEM, kTrapAddr, kPageSize, nullptr, kTrapKey).status_value();
+  ASSERT_EQ(ZX_OK, status, "Failed to set trap\n");
+
+  auto vcpu = Vcpu::Create(**guest, kEntryAddr);
+  if (vcpu.status_value() == ZX_ERR_NOT_SUPPORTED) {
+    return true;
+  }
+  ASSERT_EQ(ZX_OK, vcpu.status_value(), "Failed to create Vcpu\n");
+
+#ifdef __aarch64__
+  const uint64_t host_daif_before = __arm_rsr64("daif");
+  const uint64_t host_pan_before = arm64_mmu_features.pan ? __arm_rsr64("s3_0_c4_c2_3") : 0;
+#endif
+
+  zx_port_packet_t packet = {};
+  auto enter_result = (*vcpu)->Enter(packet);
+  ASSERT_EQ(ZX_OK, enter_result.status_value(), "Failed to enter Vcpu\n");
+  EXPECT_EQ(ZX_PKT_TYPE_GUEST_MEM, packet.type);
+  EXPECT_EQ(kTrapKey, packet.key);
+  EXPECT_EQ(kTrapAddr, packet.guest_mem.addr);
+
+  zx_vcpu_state_t vcpu_state = {};
+  ASSERT_EQ(ZX_OK, (*vcpu)->ReadState(vcpu_state).status_value(), "Failed to read Vcpu state\n");
+
+#ifdef __x86_64__
+  EXPECT_EQ(3ul, vcpu_state.rax, "Expected guest rax to be 3\n");
+  EXPECT_EQ(2ul, vcpu_state.rbx, "Expected guest rbx to be 2\n");
+#elif __aarch64__
+  EXPECT_EQ(host_daif_before, __arm_rsr64("daif"), "Expected host DAIF to be preserved\n");
+  if (arm64_mmu_features.pan) {
+    EXPECT_EQ(host_pan_before, __arm_rsr64("s3_0_c4_c2_3"), "Expected host PAN to be preserved\n");
+  }
+
+  // Verify the guest executed at EL1 (CurrentEL == 1 << 2).
+  EXPECT_EQ(1ul << 2, vcpu_state.x[1], "Expected guest to execute at EL1\n");
+  // Verify lazy FP trap and state save/restore (IEEE-754 1.0 == 0x3ff0000000000000).
+  EXPECT_EQ(0x3ff0000000000000ul, vcpu_state.x[2], "Expected guest FP state to be preserved\n");
+  // Verify the host kernel is still executing at EL2 with FEAT_VHE.
+  EXPECT_EQ(2ul, arm64_get_boot_el(), "Expected host kernel to remain at EL2\n");
+#endif
+
+  END_TEST;
+}
+
 // Use the function name as the test name
 #define HYPERVISOR_UNITTEST(fname) UNITTEST(#fname, fname)
 
@@ -582,4 +707,5 @@ HYPERVISOR_UNITTEST(guest_physical_aspace_query)
 HYPERVISOR_UNITTEST(interrupt_bitmap)
 HYPERVISOR_UNITTEST(trap_map_insert_trap_intersecting)
 HYPERVISOR_UNITTEST(trap_map_insert_trap_out_of_range)
+HYPERVISOR_UNITTEST(vcpu_enter)
 UNITTEST_END_TESTCASE(hypervisor, "hypervisor", "Hypervisor unit tests.")

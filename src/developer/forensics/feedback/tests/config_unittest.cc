@@ -89,6 +89,7 @@ TEST_F(FeedbackConfigTest, MissingCrashReportUploadPolicy) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -108,6 +109,7 @@ TEST_F(FeedbackConfigTest, MissingDailyPerProductCrashReportQuota) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -127,6 +129,7 @@ TEST_F(FeedbackConfigTest, MissingEnableDataRedaction) {
     "daily_per_product_crash_report_quota": -1,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -146,6 +149,7 @@ TEST_F(FeedbackConfigTest, MissingEnableHourlySnapshots) {
     "daily_per_product_crash_report_quota": -1,
     "enable_data_redaction": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -165,6 +169,27 @@ TEST_F(FeedbackConfigTest, MissingEnableLimitInspectData) {
     "daily_per_product_crash_report_quota": -1,
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
+    "disk_endurance": "high",
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
+TEST_F(FeedbackConfigTest, MissingDiskEndurance) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -185,6 +210,7 @@ TEST_F(FeedbackConfigTest, MissingRemoteDeviceIdProvider) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "supports_user_initiated_poweroffs": false
 })");
 
@@ -204,6 +230,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyDisabled) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -226,6 +253,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyEnabled) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -248,6 +276,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyReadFromPrivacySettings) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -270,6 +299,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotAllowedValue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -290,6 +320,7 @@ TEST_F(FeedbackConfigTest, CrashReportUploadPolicyNotString) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -310,6 +341,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -331,6 +363,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -352,6 +385,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -373,6 +407,7 @@ TEST_F(FeedbackConfigTest, DailyPerProductCrashReportQuotaNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -393,6 +428,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionTrue) {
     "enable_data_redaction": true,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -414,6 +450,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionFalse) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -435,6 +472,7 @@ TEST_F(FeedbackConfigTest, EnableDataRedactionNotBoolean) {
     "enable_data_redaction": "",
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -455,6 +493,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsTrue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": true,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -476,6 +515,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsFalse) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -497,6 +537,7 @@ TEST_F(FeedbackConfigTest, EnableHourlySnapshotsNotBoolean) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": "",
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -517,6 +558,7 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataTrue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": true,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -538,6 +580,7 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataFalse) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -559,6 +602,93 @@ TEST_F(FeedbackConfigTest, EnableLimitInspectDataNotBoolean) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": "",
+    "disk_endurance": "high",
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
+TEST_F(FeedbackConfigTest, DiskEnduranceHigh) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->disk_endurance, DiskEndurance::kHigh);
+}
+
+TEST_F(FeedbackConfigTest, DiskEnduranceLow) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "disk_endurance": "low",
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->disk_endurance, DiskEndurance::kLow);
+}
+
+TEST_F(FeedbackConfigTest, DiskEnduranceNotAllowedValue) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "disk_endurance": "not_allowed",
+    "remote_device_id_provider": false,
+    "supports_user_initiated_poweroffs": false
+})");
+
+  EXPECT_FALSE(config.has_value());
+}
+
+TEST_F(FeedbackConfigTest, DiskEnduranceNotString) {
+  const std::optional<FeedbackConfig> config = ParseConfig(R"({
+    "persisted_logs_total_size_kib": 512,
+    "report_persistence_max_cache_size_kib": 1,
+    "report_persistence_max_tmp_size_kib": 1,
+    "snapshot_persistence_max_cache_size_mib": 1,
+    "snapshot_persistence_max_tmp_size_mib": 1,
+    "spontaneous_reboot_reason": "spontaneous",
+    "crash_report_upload_policy": "disabled",
+    "daily_per_product_crash_report_quota": -1,
+    "enable_data_redaction": false,
+    "enable_hourly_snapshots": false,
+    "enable_limit_inspect_data": false,
+    "disk_endurance": 0,
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -579,6 +709,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderTrue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": true,
     "supports_user_initiated_poweroffs": true
 })");
@@ -600,6 +731,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderFalse) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -621,6 +753,7 @@ TEST_F(FeedbackConfigTest, RemoteDeviceIdProviderNotBoolean) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": "",
     "supports_user_initiated_poweroffs": false
 })");
@@ -641,6 +774,7 @@ TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsTrue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": true
 })");
@@ -662,6 +796,7 @@ TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsFalse) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -683,6 +818,7 @@ TEST_F(FeedbackConfigTest, SupportsUserInitiatedPoweroffsNotBoolean) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": ""
 })");
@@ -886,6 +1022,7 @@ TEST_F(FeedbackConfigTest, MissingPersistedLogsTotalSizeKib) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -905,6 +1042,7 @@ TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxCacheSizeKib) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -924,6 +1062,7 @@ TEST_F(FeedbackConfigTest, MissingReportPersistenceMaxTmpSizeKib) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -943,6 +1082,7 @@ TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxCacheSizeMib) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -962,6 +1102,7 @@ TEST_F(FeedbackConfigTest, MissingSnapshotPersistenceMaxTmpSizeMib) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -981,6 +1122,7 @@ TEST_F(FeedbackConfigTest, MissingSpontaneousRebootReason) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1001,6 +1143,7 @@ TEST_F(FeedbackConfigTest, SpuriousField) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false,
     "spurious": ""
@@ -1022,6 +1165,7 @@ TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1043,6 +1187,7 @@ TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1063,6 +1208,7 @@ TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1083,6 +1229,7 @@ TEST_F(FeedbackConfigTest, PersistedLogsTotalSizeKibNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1103,6 +1250,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeMibPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1123,6 +1271,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1143,6 +1292,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1163,6 +1313,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxCacheSizeKibNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1183,6 +1334,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeMibPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1203,6 +1355,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1223,6 +1376,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1243,6 +1397,7 @@ TEST_F(FeedbackConfigTest, ReportPersistenceMaxTmpSizeKibNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1263,6 +1418,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1284,6 +1440,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1305,6 +1462,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1326,6 +1484,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxCacheSizeMibNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1346,6 +1505,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibPositive) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1367,6 +1527,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibZero) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1388,6 +1549,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNegative) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1409,6 +1571,7 @@ TEST_F(FeedbackConfigTest, SnapshotPersistenceMaxTmpSizeMibNotNumber) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1429,6 +1592,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotAllowedValue) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1449,6 +1613,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonNotString) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1469,6 +1634,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonSpontaneous) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1490,6 +1656,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonBriefPowerLoss) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1511,6 +1678,7 @@ TEST_F(FeedbackConfigTest, SpontaneousRebootReasonHardReset) {
     "enable_data_redaction": false,
     "enable_hourly_snapshots": false,
     "enable_limit_inspect_data": false,
+    "disk_endurance": "high",
     "remote_device_id_provider": false,
     "supports_user_initiated_poweroffs": false
 })");
@@ -1706,6 +1874,22 @@ TEST_F(InspectConfigTest, ExposeConfig_SnapshotPersistenceMaxCacheSizePositive) 
               BuildConfigMatcher({StringIs(kSnapshotPersistenceMaxCacheSizeKey, "1")}));
 }
 
+TEST_F(InspectConfigTest, ExposeConfig_DiskEnduranceHigh) {
+  ExposeConfig(InspectRoot(), FeedbackConfig{
+                                  .disk_endurance = DiskEndurance::kHigh,
+                              });
+
+  EXPECT_THAT(InspectTree(), BuildConfigMatcher({StringIs(kDiskEnduranceKey, "HIGH")}));
+}
+
+TEST_F(InspectConfigTest, ExposeConfig_DiskEnduranceLow) {
+  ExposeConfig(InspectRoot(), FeedbackConfig{
+                                  .disk_endurance = DiskEndurance::kLow,
+                              });
+
+  EXPECT_THAT(InspectTree(), BuildConfigMatcher({StringIs(kDiskEnduranceKey, "LOW")}));
+}
+
 TEST_F(InspectConfigTest, ExposeConfig_SupportsUserInitiatedPoweroffsFalse) {
   ExposeConfig(InspectRoot(), FeedbackConfig{
                                   .supports_user_initiated_poweroffs = false,
@@ -1743,6 +1927,7 @@ TEST_F(InspectConfigTest, ExposeConfig_FeedbackConfigEnableAll) {
                                  UintIs(kPersistedLogsTotalSizeKey, 512),
                                  StringIs(kSnapshotPersistenceMaxTmpSizeKey, "1"),
                                  StringIs(kSnapshotPersistenceMaxCacheSizeKey, "1"),
+                                 StringIs(kDiskEnduranceKey, "HIGH"),
                                  BoolIs(kSupportsUserInitiatedPoweroffsKey, false),
                              }));
 }
@@ -1752,6 +1937,7 @@ TEST_F(InspectConfigTest, ExposeConfig_EnableAll) {
                                   .persisted_logs_total_size = StorageSize::Kilobytes(512),
                                   .snapshot_persistence_max_cache_size = StorageSize::Megabytes(1),
                                   .snapshot_persistence_max_tmp_size = StorageSize::Megabytes(1),
+                                  .disk_endurance = DiskEndurance::kLow,
                                   .supports_user_initiated_poweroffs = true,
                                   .build_type_config =
                                       BuildTypeConfig{
@@ -1767,6 +1953,7 @@ TEST_F(InspectConfigTest, ExposeConfig_EnableAll) {
                                  UintIs(kPersistedLogsTotalSizeKey, 512),
                                  StringIs(kCrashReportUploadPolicyKey, ToString(kConfigEnabled)),
                                  StringIs(kDailyPerProductCrashReportQuotaKey, "1"),
+                                 StringIs(kDiskEnduranceKey, "LOW"),
                                  BoolIs(kEnableDataRedactionKey, true),
                                  BoolIs(kEnableHourlySnapshotsKey, true),
                                  BoolIs(kEnableLimitInspectDataKey, true),

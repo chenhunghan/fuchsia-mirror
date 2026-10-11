@@ -51,6 +51,9 @@ rust_library(
     ),
     crate_root = "src/lib.rs",
     edition = "2021",
+    link_deps = [
+        "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
+    ],
     rustc_flags = [
         "--cap-lints=allow",
     ],
@@ -70,7 +73,4 @@ rust_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     version = "0.4.0",
-    deps = [
-        "//third_party/rust_crates/compat/alloca-0.4.0:alloca-c",
-    ],
 )

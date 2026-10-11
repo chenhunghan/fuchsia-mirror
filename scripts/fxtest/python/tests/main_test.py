@@ -4350,3 +4350,191 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(ret, 0)
         mock_get_dev_env.assert_awaited_once()
+
+    async def test_non_hermetic_test_worker_not_starved_when_hermetic_queue_empty(
+        self,
+    ) -> None:
+        """Test that worker tasks are not starved/exited when hermetic queue is empty
+        while multiple non-hermetic tests are executing or queued."""
+        flags = args.parse_args(["--parallel", "4"])
+        recorder = event.EventRecorder()
+        app = main.AsyncMain(
+            flags,
+            [],
+            recorder,
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        mock_test_1 = mock.MagicMock(spec=test_list_file.Test)
+        mock_test_1.info.is_hermetic.return_value = False
+        mock_test_1.needs_device.return_value = False
+        mock_test_1.name.return_value = "non_hermetic_1"
+
+        mock_test_2 = mock.MagicMock(spec=test_list_file.Test)
+        mock_test_2.info.is_hermetic.return_value = False
+        mock_test_2.needs_device.return_value = False
+        mock_test_2.name.return_value = "non_hermetic_2"
+
+        test_selections = selection_types.TestSelections(
+            selected=[mock_test_1, mock_test_2],
+            selected_but_not_run=[],
+            best_score={},
+            group_matches=[],
+            fuzzy_distance_threshold=0,
+        )
+
+        exec_env = mock.MagicMock()
+
+        workers_alive_during_test_1 = []
+
+        async def fake_run_test_1(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> mock.MagicMock:
+            await asyncio.sleep(0.05)
+            executor_tasks = [
+                t
+                for t in asyncio.all_tasks()
+                if "test_executor" in t.get_coro().__name__ and not t.done()
+            ]
+            workers_alive_during_test_1.append(len(executor_tasks))
+            return mock.MagicMock(return_code=0)
+
+        async def fake_run_test_2(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> mock.MagicMock:
+            return mock.MagicMock(return_code=0)
+
+        with (
+            mock.patch(
+                "execution.TestExecution.run", new_callable=mock.AsyncMock
+            ) as mock_run,
+            mock.patch.object(
+                execution.TestExecution,
+                "command_line",
+                return_value=["fake_cmd"],
+            ),
+        ):
+
+            async def dispatch_run(
+                *args: typing.Any, **kwargs: typing.Any
+            ) -> typing.Any:
+                if mock_run.await_count <= 1:
+                    return await fake_run_test_1(*args, **kwargs)
+                return await fake_run_test_2(*args, **kwargs)
+
+            mock_run.side_effect = dispatch_run
+
+            app._exec_env = exec_env
+            success = await app._run_all_tests(test_selections)
+
+        self.assertTrue(success)
+        self.assertEqual(len(workers_alive_during_test_1), 1)
+        self.assertEqual(workers_alive_during_test_1[0], 4)
+
+    @mock.patch.object(main.execution, "run_command")
+    async def test_publish_packages_reads_plain_text_manifest_after_json_decode_error(
+        self, mock_run_cmd: mock.MagicMock
+    ) -> None:
+        """Test that plain text package manifests are fully read and published
+        even after json.load raises JSONDecodeError."""
+        flags = args.parse_args([])
+        recorder = event.EventRecorder()
+        app = main.AsyncMain(
+            flags,
+            [],
+            recorder,
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            exec_env = mock.MagicMock()
+            exec_env.out_dir = out_dir
+            exec_env.fx_cmd_line.side_effect = lambda *cmd: list(cmd)
+            app._exec_env = exec_env
+
+            meta_path = os.path.join(
+                out_dir, "package_manifests_from_metadata.list"
+            )
+            with open(meta_path, "w") as f:
+                f.write(
+                    "pkg1/package_manifest.json\npkg2/package_manifest.json\n"
+                )
+
+            mock_run_cmd.return_value = mock.MagicMock(return_code=0)
+
+            written_manifests: list[str] = []
+            original_dump = json.dump
+
+            def spy_dump(
+                obj: typing.Any,
+                fp: typing.Any,
+                *args: typing.Any,
+                **kwargs: typing.Any,
+            ) -> typing.Any:
+                if isinstance(obj, dict) and "content" in obj:
+                    written_manifests.extend(
+                        obj["content"].get("manifests", [])
+                    )
+                return original_dump(obj, fp, *args, **kwargs)
+
+            with mock.patch("json.dump", side_effect=spy_dump):
+                await app._publish_packages(event.Id(1))
+
+            self.assertIn("pkg1/package_manifest.json", written_manifests)
+            self.assertIn("pkg2/package_manifest.json", written_manifests)
+
+    async def test_summary_records_actual_test_duration(
+        self,
+    ) -> None:
+        """Test that test_worker records actual execution duration into summary TestResult."""
+        flags = args.parse_args(["--parallel", "1"])
+        recorder = event.EventRecorder()
+        app = main.AsyncMain(
+            flags,
+            [],
+            recorder,
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        mock_test = mock.MagicMock(spec=test_list_file.Test)
+        mock_test.info.is_hermetic.return_value = True
+        mock_test.needs_device.return_value = False
+        mock_test.name.return_value = "duration_test"
+
+        test_selections = selection_types.TestSelections(
+            selected=[mock_test],
+            selected_but_not_run=[],
+            best_score={},
+            group_matches=[],
+            fuzzy_distance_threshold=0,
+        )
+
+        exec_env = mock.MagicMock()
+
+        async def fake_run(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> mock.MagicMock:
+            await asyncio.sleep(0.02)
+            return mock.MagicMock(return_code=0)
+
+        with (
+            mock.patch(
+                "execution.TestExecution.run", new_callable=mock.AsyncMock
+            ) as mock_run,
+            mock.patch.object(
+                execution.TestExecution,
+                "command_line",
+                return_value=["fake_cmd"],
+            ),
+        ):
+            mock_run.side_effect = fake_run
+            app._exec_env = exec_env
+            await app._run_all_tests(test_selections)
+
+        self.assertEqual(len(app._summary.tests), 1)
+        test_result = app._summary.tests[0]
+        self.assertIsNotNone(test_result.duration_seconds)
+        self.assertGreaterEqual(test_result.duration_seconds, 0.01)

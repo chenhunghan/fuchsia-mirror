@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::errors::zx_status_str;
-use crate::eval::ShellEnv;
+use crate::eval::{EXIT_CANNOT_EXEC, EXIT_FAILURE, EXIT_NOT_FOUND, ShellEnv};
 use crate::fd::Fd;
 use bstr::{BStr, BString, ByteSlice};
 use std::fs::File;
@@ -11,6 +11,16 @@ use std::io::Read;
 use std::os::fd::AsFd;
 
 pub use crate::string::{bstr_to_cstring, bstrings_to_cstrings, cstrings_to_c_strs};
+
+/// Maps a `zx::Status` returned from spawning a process to the corresponding POSIX shell
+/// exit status code (`127` for `NOT_FOUND`, `126` for `ACCESS_DENIED`, `1` otherwise).
+pub const fn spawn_status_to_exit_code(status: zx::Status) -> i32 {
+    match status {
+        zx::Status::NOT_FOUND => EXIT_NOT_FOUND,
+        zx::Status::ACCESS_DENIED => EXIT_CANNOT_EXEC,
+        _ => EXIT_FAILURE,
+    }
+}
 
 /// Spawns a new OS process given binary name, command arguments, environment variable state, and FD actions.
 pub fn spawn_command_with_path(

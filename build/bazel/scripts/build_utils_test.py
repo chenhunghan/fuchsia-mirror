@@ -73,6 +73,48 @@ class FindFuchsiaDirTest(unittest.TestCase):
                 )
 
 
+class LabelUtilsTest(unittest.TestCase):
+    def test_canonicalize_label(self) -> None:
+        self.assertEqual(
+            build_utils.canonicalize_label("//fake/pkg:target"),
+            "@@//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.canonicalize_label("@//fake/pkg:target"),
+            "@@//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.canonicalize_label("@@//fake/pkg:target"),
+            "@@//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.canonicalize_label("@@fake_repo//fake/pkg:target"),
+            "@@fake_repo//fake/pkg:target",
+        )
+        with self.assertRaises(ValueError):
+            build_utils.canonicalize_label("@fake_repo//fake/pkg:target")
+
+    def test_normalize_label(self) -> None:
+        self.assertEqual(
+            build_utils.normalize_label("@@//fake/pkg:target"),
+            "//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.normalize_label("@//fake/pkg:target"),
+            "//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.normalize_label("//fake/pkg:target"),
+            "//fake/pkg:target",
+        )
+        self.assertEqual(
+            build_utils.normalize_label("@@canonical//fake/pkg:target"),
+            "canonical//fake/pkg:target",
+        )
+        with self.assertRaises(ValueError):
+            build_utils.normalize_label("@apparent//fake/pkg:target")
+
+
 class FindFxBuildDirTest(unittest.TestCase):
     def test_find_fx_build_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

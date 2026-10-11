@@ -47,13 +47,13 @@ static uint32_t gicv3_default_gich_vmcr() {
 static void gicv3_read_gich_state(IchState* state) {
   DEBUG_ASSERT(state->num_aprs <= kNumAprs);
   DEBUG_ASSERT(state->num_lrs <= kNumLrs);
-  arm64_el2_gicv3_read_gich_state(physmap_to_paddr(state));
+  arm64_el2_gicv3_read_gich_state(state);
 }
 
 static void gicv3_write_gich_state(IchState* state, uint32_t hcr) {
   DEBUG_ASSERT(state->num_aprs <= kNumAprs);
   DEBUG_ASSERT(state->num_lrs <= kNumLrs);
-  arm64_el2_gicv3_write_gich_state(physmap_to_paddr(state), hcr);
+  arm64_el2_gicv3_write_gich_state(state, hcr);
 }
 
 static uint64_t gicv3_get_lr_from_vector(uint8_t prio, InterruptState state, uint32_t vector) {

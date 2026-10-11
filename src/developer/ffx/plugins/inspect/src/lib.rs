@@ -8,7 +8,7 @@ use errors::{ffx_bail, ffx_error};
 use fdomain_fuchsia_developer_remotecontrol::RemoteControlProxy;
 use fdomain_fuchsia_diagnostics_host::ArchiveAccessorProxy;
 use ffx_inspect_args::{InspectCommand, InspectSubCommand};
-use ffx_writer::{MachineWriter, ToolIO as _};
+use ffx_writer::{ToolIO as _, VerifiedMachineWriter};
 use fho::{Deferred, FfxMain, FfxTool, deferred};
 use iquery_fdomain::commands::{
     Command, ListAccessorsResult, ListResult, SelectorsResult, ShowResult,
@@ -38,7 +38,7 @@ pub struct InspectTool {
 
 #[async_trait(?Send)]
 impl FfxMain for InspectTool {
-    type Writer = MachineWriter<InspectOutput>;
+    type Writer = VerifiedMachineWriter<InspectOutput>;
 
     type Error = ::fho::Error;
 
@@ -84,7 +84,7 @@ pub(crate) async fn run_command<C, O>(
     rcs_proxy: RemoteControlProxy,
     diagnostics_proxy: ArchiveAccessorProxy,
     cmd: C,
-    writer: &mut MachineWriter<InspectOutput>,
+    writer: &mut VerifiedMachineWriter<InspectOutput>,
 ) -> anyhow::Result<()>
 where
     C: Command<Result = O>,
@@ -106,8 +106,9 @@ where
 
 macro_rules! impl_inspect_output {
     ($($variant:tt),*) => {
-        #[derive(Serialize)]
+        #[derive(Serialize, schemars::JsonSchema)]
         #[serde(untagged)]
+        #[schemars(title = "InspectOutput", untagged)]
         pub enum InspectOutput {
             $($variant( $variant ),)*
         }

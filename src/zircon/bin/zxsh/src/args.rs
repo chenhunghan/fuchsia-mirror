@@ -175,6 +175,9 @@ pub struct Args {
     /// Maps to the `-u` / `+u` option.
     pub opt_nounset: Option<bool>,
 
+    /// The invoked binary name (`argv[0]`), used as fallback for `$0` when `script_name` is None.
+    pub arg0: Option<BString>,
+
     /// The name of the script to run, if not running a command via `-c`.
     /// This becomes `$0` in the script.
     pub script_name: Option<BString>,
@@ -195,6 +198,7 @@ pub struct Args {
 /// - `-` forces reading from stdin and ends option parsing.
 pub fn parse_args(args: &[BString]) -> Result<Args, String> {
     let mut result = Args::default();
+    result.arg0 = args.first().filter(|a| !a.is_empty()).cloned();
     let slice = if !args.is_empty() { &args[1..] } else { args };
     let mut parser = OptionParser::new(slice).allow_plus_options(true);
 

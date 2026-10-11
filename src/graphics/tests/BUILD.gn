@@ -33,6 +33,7 @@ group("hw_tests") {
     "../examples/vkproto/test",
     "../examples/vkproto/transaction-elimination-test",
     "benchmark",
+    "vkfractal",
     "vkvalidation",
     "//src/lib/vulkan/tests:image-pipe-swapchain-tests",
     "//third_party/Vulkan-Tools/cube",

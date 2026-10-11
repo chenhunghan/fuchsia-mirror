@@ -12,7 +12,7 @@ use errors::ffx_error;
 
 use ffx_component::rcs::connect_to_realm_query;
 use ffx_component_storage_args::{StorageCommand, SubCommandEnum};
-use ffx_writer::{MachineWriter, ToolIO};
+use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{FfxMain, FfxTool};
 use target_holders::RemoteControlProxyHolder;
 
@@ -27,7 +27,7 @@ fho::embedded_plugin!(StorageTool);
 
 #[async_trait(?Send)]
 impl FfxMain for StorageTool {
-    type Writer = MachineWriter<Vec<String>>;
+    type Writer = VerifiedMachineWriter<Vec<String>>;
 
     type Error = ::fho::Error;
 
@@ -117,9 +117,17 @@ mod test {
         };
 
         let test_buffers = TestBuffers::default();
-        let writer = MachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
+        let writer = VerifiedMachineWriter::new_test(Some(ffx_writer::Format::Json), &test_buffers);
 
         let result = tool.main(writer).await;
         assert!(result.is_err());
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_schema() {
+        VerifiedMachineWriter::<Vec<String>>::verify_schema(&serde_json::json!([
+            "entry1".to_string()
+        ]))
+        .expect("schema should be valid");
     }
 }

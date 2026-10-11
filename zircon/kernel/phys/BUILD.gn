@@ -58,6 +58,9 @@ if (current_toolchain == default_toolchain) {
       remove_common_configs = [ "//build/config:default_frame_pointers" ]
 
       exclude_variant_tags = [
+        # There is no GCC toolchain for phys, only Clang.
+        "gcc",
+
         # There is no possibility of fancy runtimes like ASan for phys.
         "instrumentation-runtime",
       ]
@@ -1031,16 +1034,6 @@ compiler_config("phys-elf-module.config") {
   # cross-DSO checking entrypoint.  When that instrumentation is not enabled,
   # this will have no effect, so it doesn't need to be conditionalized.
   linker_flags = [ "--export-dynamic-symbol=__cfi_check" ]
-
-  # The GNU linkers don't do page-aligned segments by default like LLD,
-  # so a linker script is required.
-  if (is_gcc) {
-    inputs = [ "phys-elf-module.ld" ]
-    linker_flags += [
-      "-zrelro",
-      "-T" + rebase_path(inputs[0], root_build_dir),
-    ]
-  }
 }
 
 if (is_kernel) {

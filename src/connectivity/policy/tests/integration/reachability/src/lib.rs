@@ -21,7 +21,7 @@ use log::info;
 use net_declare::{net_ip_v4, net_ip_v6, net_mac};
 use netstack_testing_common::constants::{ipv4 as ipv4_consts, ipv6 as ipv6_consts};
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack, TestSandboxExt as _, constants,
+    KnownServiceProvider, Netstack3, TestSandboxExt as _, constants,
 };
 use netstack_testing_common::{get_inspect_data, interfaces, wait_for_component_stopped};
 use netstack_testing_macros::netstack_test;
@@ -398,13 +398,13 @@ struct ReachabilityEnv<'a> {
     fake_clock: ftesting::FakeClockControlProxy,
 }
 
-async fn setup_reachability_env<'a, N: Netstack>(
+async fn setup_reachability_env<'a>(
     name: &'a str,
     sandbox: &'a netemul::TestSandbox,
     start_reachability_as_eager: bool,
 ) -> ReachabilityEnv<'a> {
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[
                 KnownServiceProvider::Reachability { eager: start_reachability_as_eager },
@@ -514,7 +514,6 @@ async fn accelerate_fake_clock(fake_clock: &ftesting::FakeClockControlProxy) -> 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(
     "gateway",
     &[(InterfaceConfig::new_primary(LOWER_METRIC), LinkState::Gateway.into())];
@@ -556,14 +555,10 @@ async fn accelerate_fake_clock(fake_clock: &ftesting::FakeClockControlProxy) -> 
         (InterfaceConfig::new_secondary(HIGHER_METRIC), LinkState::Internet.into()),
     ];
     "internet_internet")]
-async fn test_state<N: Netstack>(
-    name: &str,
-    sub_test_name: &str,
-    configs: &[(InterfaceConfig, State)],
-) {
+async fn test_state(name: &str, sub_test_name: &str, configs: &[(InterfaceConfig, State)]) {
     let name = format!("{}_{}", name, sub_test_name);
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(&name, &sandbox, false).await;
+    let env = setup_reachability_env(&name, &sandbox, false).await;
 
     // Initialize a connection to the Monitor marker to start the reachability component.
     let _monitor = env
@@ -804,13 +799,12 @@ impl<'a> ReachabilityTestHelper<'a> {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(LinkState::Internet.into(), LinkState::Internet.into())]
 #[test_case(LinkState::Internet.into(), LinkState::Gateway.into())]
 #[test_case(LinkState::Internet.into(), LinkState::Up.into())]
-async fn test_internet_available<N: Netstack>(name: &str, state1: State, state2: State) {
+async fn test_internet_available(name: &str, state1: State, state2: State) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(name, &sandbox, false).await;
+    let env = setup_reachability_env(name, &sandbox, false).await;
     let configs = vec![
         (InterfaceConfig::new_primary(LOWER_METRIC), state1),
         (InterfaceConfig::new_secondary(HIGHER_METRIC), state2),
@@ -825,13 +819,12 @@ async fn test_internet_available<N: Netstack>(name: &str, state1: State, state2:
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(LinkState::Internet.into(), LinkState::Internet.into())]
 #[test_case(LinkState::Internet.into(), LinkState::Gateway.into())]
 #[test_case(LinkState::Internet.into(), LinkState::Up.into())]
-async fn test_internet_comes_up<N: Netstack>(name: &str, state1: State, state2: State) {
+async fn test_internet_comes_up(name: &str, state1: State, state2: State) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(name, &sandbox, false).await;
+    let env = setup_reachability_env(name, &sandbox, false).await;
     let configs = vec![
         (InterfaceConfig::new_primary(LOWER_METRIC), LinkState::Up.into()),
         (InterfaceConfig::new_secondary(HIGHER_METRIC), LinkState::Up.into()),
@@ -845,12 +838,11 @@ async fn test_internet_comes_up<N: Netstack>(name: &str, state1: State, state2: 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(LinkState::Gateway.into(), LinkState::Gateway.into())]
 #[test_case(LinkState::Up.into(), LinkState::Up.into())]
-async fn test_internet_goes_down<N: Netstack>(name: &str, state1: State, state2: State) {
+async fn test_internet_goes_down(name: &str, state1: State, state2: State) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(name, &sandbox, false).await;
+    let env = setup_reachability_env(name, &sandbox, false).await;
     let configs = vec![
         (InterfaceConfig::new_primary(LOWER_METRIC), LinkState::Internet.into()),
         (InterfaceConfig::new_secondary(HIGHER_METRIC), LinkState::Internet.into()),
@@ -867,12 +859,11 @@ async fn test_internet_goes_down<N: Netstack>(name: &str, state1: State, state2:
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
 #[test_case(LinkState::Gateway.into(), LinkState::Gateway.into())]
 #[test_case(LinkState::Gateway.into(), LinkState::Up.into())]
-async fn test_gateway_goes_down<N: Netstack>(name: &str, state1: State, state2: State) {
+async fn test_gateway_goes_down(name: &str, state1: State, state2: State) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(name, &sandbox, false).await;
+    let env = setup_reachability_env(name, &sandbox, false).await;
     let configs = vec![
         (InterfaceConfig::new_primary(LOWER_METRIC), state1),
         (InterfaceConfig::new_secondary(HIGHER_METRIC), state2),
@@ -890,10 +881,9 @@ async fn test_gateway_goes_down<N: Netstack>(name: &str, state1: State, state2: 
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_internet_to_gateway_state<N: Netstack>(name: &str) {
+async fn test_internet_to_gateway_state(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
-    let env = setup_reachability_env::<N>(name, &sandbox, false).await;
+    let env = setup_reachability_env(name, &sandbox, false).await;
     let configs = vec![
         (InterfaceConfig::new_primary(LOWER_METRIC), LinkState::Internet.into()),
         (InterfaceConfig::new_secondary(HIGHER_METRIC), LinkState::Gateway.into()),
@@ -911,11 +901,10 @@ async fn test_internet_to_gateway_state<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_hanging_get_multiple_clients<N: Netstack>(name: &str) {
+async fn test_hanging_get_multiple_clients(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[
                 KnownServiceProvider::Reachability { eager: true },
@@ -952,11 +941,10 @@ async fn test_hanging_get_multiple_clients<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_cannot_call_set_options_after_watch<N: Netstack>(name: &str) {
+async fn test_cannot_call_set_options_after_watch(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[
                 KnownServiceProvider::Reachability { eager: true },
@@ -982,11 +970,10 @@ async fn test_cannot_call_set_options_after_watch<N: Netstack>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(N, Netstack)]
-async fn test_cannot_call_set_options_twice<N: Netstack>(name: &str) {
+async fn test_cannot_call_set_options_twice(name: &str) {
     let sandbox = netemul::TestSandbox::new().expect("failed to create sandbox");
     let realm = sandbox
-        .create_netstack_realm_with::<N, _, _>(
+        .create_netstack_realm_with::<Netstack3, _, _>(
             name,
             &[
                 KnownServiceProvider::Reachability { eager: true },

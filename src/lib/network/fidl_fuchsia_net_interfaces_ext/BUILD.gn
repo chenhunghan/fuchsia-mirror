@@ -96,6 +96,5 @@ group("tests") {
     ":fidl-fuchsia-net-interfaces-ext-fdomain-tests",
     ":fidl-fuchsia-net-interfaces-ext-tests",
     ":fidl_fuchsia_net_interfaces_ext_fdomain_test($host_toolchain)",
-    ":fidl_fuchsia_net_interfaces_ext_test($host_toolchain)",
   ]
 }

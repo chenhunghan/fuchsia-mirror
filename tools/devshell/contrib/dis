@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 
 #### CATEGORY=Build
+#### PREBUILTS=${PREBUILT_BINUTILS_DIR} ${PREBUILT_CLANG_DIR} ${PREBUILT_PYTHON3}
 ### Disassembles a given binary in the build.
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -16,4 +17,4 @@ export FUCHSIA_BUILD_DIR
 export PREBUILT_BINUTILS_DIR # Required if --binutils is passed
 export PREBUILT_CLANG_DIR
 
-"${PREBUILT_PYTHON3}" "$FUCHSIA_DIR"/zircon/kernel/scripts/dis.py "$@"
+"${PREBUILT_PYTHON3}" "$FUCHSIA_DIR"/zircon/kernel/scripts/disassemble.py "$@"

@@ -6,8 +6,6 @@
         {
             name: "sensors",
             url: "fuchsia-pkg://fuchsia.com/sensors#meta/sensors.cm",
-            startup: "eager",
-            environment: "#core-env",
         },
     ],
 }

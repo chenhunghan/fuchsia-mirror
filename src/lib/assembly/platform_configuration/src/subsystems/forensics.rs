@@ -8,7 +8,7 @@ use assembly_config_schema::developer_overrides::{
     DeveloperOnlyOptions, FeedbackBuildTypeConfig, ForensicsOptions,
 };
 use assembly_config_schema::platform_settings::forensics_config::{
-    DiskSize, FeedbackIdComponentUrl, ForensicsConfig, SpontaneousRebootReason,
+    DiskEndurance, DiskSize, FeedbackIdComponentUrl, ForensicsConfig, SpontaneousRebootReason,
 };
 use assembly_config_schema::platform_settings::session_config::PlatformSessionConfig;
 use assembly_constants::{FileEntry, PackageDestination, PackageSetDestination};
@@ -121,6 +121,7 @@ impl DefineSubsystemConfiguration<(&ForensicsConfig, &PlatformSessionConfig)>
                 snapshot_persistence_max_cache_size_mib: disk_sized_params
                     .snapshot_storage_size_mib,
                 snapshot_persistence_max_tmp_size_mib: disk_sized_params.snapshot_storage_size_mib,
+                disk_endurance: config.feedback.disk_endurance,
                 spontaneous_reboot_reason: config.feedback.spontaneous_reboot_reason,
                 crash_report_upload_policy: build_type_config.crash_report_upload_policy,
                 daily_per_product_crash_report_quota: build_type_config
@@ -271,6 +272,8 @@ struct FeedbackInternalConfig {
     // indicate that snapshots should not be stored in that location.
     pub snapshot_persistence_max_cache_size_mib: i64,
     pub snapshot_persistence_max_tmp_size_mib: i64,
+
+    pub disk_endurance: DiskEndurance,
 
     pub spontaneous_reboot_reason: SpontaneousRebootReason,
 
@@ -756,5 +759,35 @@ mod test {
         let forensics_config =
             serde_json::from_str::<FeedbackInternalConfig>(string_contents).unwrap();
         assert!(forensics_config.remote_device_id_provider);
+    }
+
+    #[test]
+    fn feedback_config_default_disk_endurance() {
+        let config =
+            get_feedback_config(BuildType::Eng, ForensicsConfig::default(), Default::default());
+
+        assert_eq!(config.disk_endurance, DiskEndurance::High);
+    }
+
+    #[test]
+    fn feedback_config_disk_endurance_high() {
+        let forensics_config = ForensicsConfig {
+            feedback: FeedbackConfig { disk_endurance: DiskEndurance::High, ..Default::default() },
+            ..Default::default()
+        };
+        let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
+
+        assert_eq!(config.disk_endurance, DiskEndurance::High);
+    }
+
+    #[test]
+    fn feedback_config_disk_endurance_low() {
+        let forensics_config = ForensicsConfig {
+            feedback: FeedbackConfig { disk_endurance: DiskEndurance::Low, ..Default::default() },
+            ..Default::default()
+        };
+        let config = get_feedback_config(BuildType::Eng, forensics_config, Default::default());
+
+        assert_eq!(config.disk_endurance, DiskEndurance::Low);
     }
 }
