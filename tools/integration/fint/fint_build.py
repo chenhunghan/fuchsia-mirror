@@ -39,7 +39,7 @@ if protobuf_wheel.exists() and str(protobuf_wheel) not in sys.path:
 
 # Bypass strict protobuf gencode/runtime version check to align prebuilts at build-time (see b/537501139)
 try:
-    import google.protobuf.runtime_version as rv  # type: ignore
+    import google.protobuf.runtime_version as rv
 
     rv.ValidateProtobufRuntimeVersion = lambda *args, **kwargs: None
 except ImportError:
@@ -50,12 +50,13 @@ import functools
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generator, Iterable, TextIO
 
 from build.scripts import signal_utils
@@ -81,6 +82,7 @@ PREBUILT_BINARY_SETS_JSON = "prebuilt_binaries.json"
 FORCE_NONHERMETIC_REBUILD_SENTINEL = "force_nonhermetic_rebuild"
 LAST_NINJA_BUILD_SUCCESS_STAMP = "last_ninja_build_success.stamp"
 RUST_TARGET_MAPPING_JSON = "rust_target_mapping.json"
+TESTS_JSON = "tests.json"
 NINJATRACE2JSON_PY_RELATIVE_PATH = pathlib.Path(
     "build/scripts/ninjatrace2json.py"
 )
@@ -90,6 +92,17 @@ NINJA_BUILD_TRACE_GZ = "ninja_build_trace.json.gz"
 NINJATRACE_JSON_GZ = "ninjatrace.json.gz"
 BUILDSTATS_JSON_GZ = "buildstats.json.gz"
 
+# These tests use a system image as data, so they appear affected by a broad
+# range of changes, but they're almost never actually sensitive to said changes.
+# https://fxbug.dev/42146209 tracks generating this list automatically.
+# Keep in sync with neverAffectedTestLabels in affected.go.
+NEVER_AFFECTED_TEST_LABELS = frozenset(
+    [
+        "//src/recovery/simulator:recovery_simulator_boot_test",
+        "//src/recovery/simulator:recovery_simulator_serial_test",
+    ]
+)
+
 
 @dataclass
 class BuildExecution:
@@ -97,6 +110,11 @@ class BuildExecution:
 
     command: list[str]
     exit_code: int = 0
+    affected_tests: list[str] = field(default_factory=list)
+    build_not_affected: bool = False
+    # Set when a post-build step fails, so the failure summary doesn't blame
+    # the delegated build command.
+    failure_summary: str | None = None
 
 
 class Timer:
@@ -298,6 +316,111 @@ def parse_ninja_action_metrics(
     return metrics
 
 
+# TODO(olivernewman): This is a stopgap. Delete the Bazel output condensing
+# logic once infra failure summaries are generated from structured build
+# results (e.g. a checkpoint produced by the build TUI in headless mode)
+# rather than by scraping Bazel's console output.
+
+# Matches lines that only appear in the output of a Bazel invocation.
+_BAZEL_OUTPUT_RE = re.compile(
+    r"^(INFO: Invocation ID: |Starting local Bazel server |\[[\d,]+ / [\d,]+\] )",
+    re.MULTILINE,
+)
+
+# Matches lines of Bazel output that report progress or statistics rather than
+# errors. They often make up the vast majority of a failed Bazel action's
+# output, pushing the actual error message past the point where the recipe
+# truncates the failure summary. These depend on the wording of Bazel's UI, so
+# a Bazel upgrade may require updating them.
+_BAZEL_NOISE_RE = re.compile(
+    r"""^(
+        \[[\d,]+\ /\ [\d,]+\]\    # e.g. "[1,234 / 5,678] Compiling foo.cc"
+        | Computing\ main\ repo\ mapping:
+        | Loading:
+        | Analyzing:
+        | Starting\ local\ Bazel\ server[ ]
+        | \.\.\.\ still\ trying\ to\ connect\ to\ local\ Bazel\ server[ ]
+        | \#\ Configuration:[ ]
+        | INFO:\ (
+            Invocation\ ID
+            | Analyzed\ \d
+            | Found\ \d
+            | Elapsed\ time
+            | \d[\d,]*\ process
+            | Build\ completed\ successfully
+        )
+        | INFO:\s*$
+    )""",
+    re.VERBOSE,
+)
+
+# Matches the first line of the command that Bazel prints after an
+# "ERROR: ... failed" line. Every line of the command except the last ends with
+# a backslash.
+# LINT.IfChange(verbose_failures)
+_BAZEL_COMMAND_START_RE = re.compile(r"^  \(cd \S+ && \\$")
+# LINT.ThenChange(/build/bazel/scripts/bazel_action_impl.py:verbose_failures)
+
+
+def condense_bazel_output(output: str) -> str:
+    """Strips progress noise from a Bazel invocation's output.
+
+    If the output contains an error, everything before the first error is also
+    stripped. Output that doesn't appear to come from Bazel is returned
+    unchanged.
+    """
+    if not _BAZEL_OUTPUT_RE.search(output):
+        return output
+
+    lines = []
+    in_command = False
+    prev_blank = False
+    for line in output.split("\n"):
+        line = line.rstrip("\r")
+        if in_command:
+            if not line.endswith("\\"):
+                in_command = False
+            continue
+        if _BAZEL_COMMAND_START_RE.match(line):
+            # The full command is often many kilobytes long and is rarely
+            # needed to diagnose the failure, since the compiler error comes
+            # right after it.
+            in_command = True
+            lines.append("  (command elided)")
+            prev_blank = False
+            continue
+        if _BAZEL_NOISE_RE.match(line):
+            continue
+        blank = not line.strip()
+        if blank and prev_blank:
+            continue
+        prev_blank = blank
+        lines.append(line)
+
+    if in_command:
+        # The output ended partway through a command, which suggests that
+        # Bazel's command format has changed and we may have elided the actual
+        # error message.
+        return output
+
+    # Anything before the first error is just preamble (warnings, links, output
+    # from earlier successful Bazel invocations in the same action, etc.) that
+    # pushes the error further down the summary.
+    for i, line in enumerate(lines):
+        if line.startswith("ERROR: "):
+            lines = lines[i:]
+            break
+    return "\n".join(lines)
+
+
+# Suffix of the stamp file that is the first output of every GN bazel_action().
+# LINT.IfChange(bazel_action_stamp_suffix)
+_BAZEL_ACTION_STAMP_SUFFIX = (
+    ".bazel_target_can_only_be_referenced_by_one_bazel_action"
+)
+# LINT.ThenChange(/build/bazel/bazel_action.gni:bazel_action_stamp_suffix)
+
+
 @dataclass(frozen=True)
 class NinjaFailure:
     """Represents a single action failure recorded in ninja_errors.json."""
@@ -331,13 +454,20 @@ class NinjaFailure:
         return cls(
             artifacts=[str(a) for a in artifacts],
             exit_code=exit_code_int,
-            output=str(output).strip(),
+            output=condense_bazel_output(str(output)).strip(),
         )
 
     @property
     def is_eligible_for_deduplication(self) -> bool:
         """Returns True if the failure output is eligible for deduplication (>= 5 lines)."""
         return bool(self.output and self.output.count("\n") >= 5)
+
+    @property
+    def is_bazel_action(self) -> bool:
+        """Returns True if the failed action is a GN bazel_action()."""
+        return any(
+            a.endswith(_BAZEL_ACTION_STAMP_SUFFIX) for a in self.artifacts
+        )
 
     def format(self, include_output: bool = True) -> str:
         """Formats the failure into a high-signal error block."""
@@ -356,6 +486,9 @@ class TestSpec:
     os: str
     cpu: str
     path: str
+    name: str = ""
+    package_label: str = ""
+    source_label: str = ""
 
     @classmethod
     def from_dict(cls, data: JSONObject) -> "TestSpec":
@@ -370,18 +503,75 @@ class TestSpec:
         os_val = test_dict.get("os", "")
         cpu_val = test_dict.get("cpu", "")
         path_val = test_dict.get("path", "")
+        name = test_dict.get("name", "")
+        package_label = test_dict.get("package_label", "")
+        source_label = test_dict.get("source_label", "")
 
         if not (
             isinstance(label, str)
             and isinstance(os_val, str)
             and isinstance(cpu_val, str)
             and isinstance(path_val, str)
+            and isinstance(name, str)
+            and isinstance(package_label, str)
+            and isinstance(source_label, str)
         ):
             raise ValueError(
                 f"TestSpec has invalid field types: label={type(label).__name__}, "
-                f"os={type(os_val).__name__}, cpu={type(cpu_val).__name__}, path={type(path_val).__name__}"
+                f"os={type(os_val).__name__}, cpu={type(cpu_val).__name__}, path={type(path_val).__name__}, "
+                f"name={type(name).__name__}, package_label={type(package_label).__name__}, "
+                f"source_label={type(source_label).__name__}"
             )
-        return cls(label=label, os=os_val, cpu=cpu_val, path=path_val)
+        return cls(
+            label=label,
+            os=os_val,
+            cpu=cpu_val,
+            path=path_val,
+            name=name,
+            package_label=package_label,
+            source_label=source_label,
+        )
+
+
+def resolve_affected_test_names(
+    test_specs: Iterable[TestSpec], target_labels: Iterable[str]
+) -> list[str]:
+    """Maps labels from `build/api/client affected_tests` to tests.json names.
+
+    The affected_tests tool may return a test's GN label, package label, or
+    source label (Bazel tests have no package label), with or without a
+    toolchain suffix, so index tests by all of them. Labels that don't match
+    any test are passed through as-is, matching Go fint's behavior.
+    """
+
+    def strip_toolchain(label: str) -> str:
+        return label.split("(")[0]
+
+    tests_by_label: dict[str, list[str]] = {}
+    tests_by_no_toolchain_label: dict[str, list[str]] = {}
+    for spec in test_specs:
+        if strip_toolchain(spec.label) in NEVER_AFFECTED_TEST_LABELS:
+            continue
+        for label in (spec.label, spec.package_label, spec.source_label):
+            if label:
+                tests_by_label.setdefault(label, []).append(spec.name)
+                tests_by_no_toolchain_label.setdefault(
+                    strip_toolchain(label), []
+                ).append(spec.name)
+        tests_by_label.setdefault(spec.name, []).append(spec.name)
+
+    affected: list[str] = []
+    for label in target_labels:
+        no_toolchain = strip_toolchain(label)
+        if no_toolchain in NEVER_AFFECTED_TEST_LABELS:
+            continue
+        if label in tests_by_label:
+            affected.extend(tests_by_label[label])
+        elif no_toolchain in tests_by_no_toolchain_label:
+            affected.extend(tests_by_no_toolchain_label[no_toolchain])
+        else:
+            affected.append(label)
+    return list(dict.fromkeys(affected))
 
 
 @dataclass(frozen=True)
@@ -490,6 +680,14 @@ def format_ninja_failures(data: JSONObject) -> str | None:
     if not failures:
         return None
 
+    # Ninja batches pending bazel_action()s into a single Bazel invocation, so
+    # if one Bazel target fails then every GN action in the batch fails, but
+    # only one of them gets the Bazel output. The rest are collateral and
+    # their headers just bury the real error, as do any other output-less
+    # failures, which are unlikely to be actionable on their own.
+    if any(f.is_bazel_action and f.output for f in failures):
+        failures = [f for f in failures if f.output]
+
     msg_lines = []
     seen_outputs = set()
     for failure in failures:
@@ -513,7 +711,7 @@ def run_gn_check(
     build_dir: pathlib.Path,
     host: HostProperties,
     verbose: bool = False,
-) -> int:
+) -> tuple[int, str | None]:
     """Runs 'gn check' to verify header dependency rules inside the build directory.
 
     Args:
@@ -523,7 +721,8 @@ def run_gn_check(
         verbose: Enable verbose logging.
 
     Returns:
-        The exit code of the 'gn check' subprocess.
+        A tuple of (exit_code, failure_summary), where failure_summary is None
+        when exit_code is 0.
     """
     gn_bin = checkout_dir / host.gn_relative_path
     cmd = [
@@ -537,8 +736,23 @@ def run_gn_check(
     msg("Running gn check...")
     if verbose:
         msg(f"Command: {shlex.join(cmd)}")
-    res = subprocess.run(cmd)
-    return res.returncode
+    res = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    output = res.stdout or ""
+    if res.returncode == 0:
+        if output:
+            print(output, end="")
+        return 0, None
+    if output:
+        print(output, end="", file=sys.stderr)
+    summary = (
+        output.strip() or f"gn check failed with exit code {res.returncode}"
+    )
+    return res.returncode, summary
 
 
 def check_ninja_noop(
@@ -547,7 +761,7 @@ def check_ninja_noop(
     host: HostProperties,
     targets: list[str],
     verbose: bool = False,
-) -> int:
+) -> tuple[int, str | None]:
     """Verifies that the Ninja build converges to a no-op state.
 
     This function does a dry-run invocation of Ninja with 'explain' and
@@ -563,8 +777,8 @@ def check_ninja_noop(
         verbose: Enable verbose logging.
 
     Returns:
-        0 if the build successfully converges to a no-op, non-zero if Ninja
-        diverges or fails.
+        A tuple of (exit_code, failure_summary), where exit_code is 0 and
+        failure_summary is None if the build converges to a no-op.
     """
     ninja_bin = checkout_dir / host.ninja_relative_path
 
@@ -592,19 +806,36 @@ def check_ninja_noop(
             capture_output=True,
             text=True,
         )
+        stdout = res.stdout or ""
+        stderr = res.stderr or ""
 
         if res.returncode != 0:
-            return res.returncode
+            if stderr:
+                print(stderr[:1000], file=sys.stderr)
+            if stdout:
+                print(stdout[:1000], file=sys.stderr)
+            output = stderr.strip() or stdout.strip()
+            summary = (
+                f"ninja dry-run check failed:\n{output}"
+                if output
+                else f"ninja dry-run check failed with exit code {res.returncode}"
+            )
+            return res.returncode, summary
 
-        if "ninja: no work to do." in res.stdout:
-            return 0
+        # Different versions of Ninja may emit output to stdout or stderr.
+        all_stdio = f"{stdout}\n\n{stderr}"
+        if "ninja: no work to do." in all_stdio:
+            return 0, None
 
         # Handle non-noop build
         msg(
             "Error: Ninja build did not converge to no-op.",
             file=sys.stderr,
         )
-        print(res.stdout[:1000], file=sys.stderr)
+        if stderr:
+            print(stderr[:1000], file=sys.stderr)
+        if stdout:
+            print(stdout[:1000], file=sys.stderr)
 
         # Print the dirty sources list if any were captured
         if dirty_sources_path.exists():
@@ -614,7 +845,32 @@ def check_ninja_noop(
                     f"Identified dirty source files:\n{dirty_content}",
                     file=sys.stderr,
                 )
-        return 1
+
+        summary_lines = [
+            "Ninja build did not converge to no-op.",
+            "See: https://fuchsia.dev/fuchsia-src/development/build/ninja_no_op",
+        ]
+        explain_lines = [
+            line.strip().removeprefix("ninja explain: ")
+            for line in all_stdio.splitlines()
+            if line.strip().startswith("ninja explain: ")
+        ]
+        fallback_output = stderr.strip() or stdout.strip()
+        first_explain_line = (
+            explain_lines[0]
+            if explain_lines
+            else (fallback_output.splitlines()[0] if fallback_output else "")
+        )
+        if first_explain_line:
+            summary_lines.extend(
+                [
+                    "",
+                    "First line of ninja explain output:",
+                    "",
+                    first_explain_line,
+                ]
+            )
+        return 1, "\n".join(summary_lines)
 
 
 def collect_failure_diagnostics(build_dir: pathlib.Path) -> None:
@@ -659,6 +915,11 @@ class BuildContext:
     def last_ninja_build_targets_path(self) -> pathlib.Path:
         """Returns the absolute path to the last ninja build targets file."""
         return self.build_dir / "last_ninja_build_targets.txt"
+
+    @property
+    def tests_json_path(self) -> pathlib.Path:
+        """Returns the absolute path to the tests.json build API module."""
+        return self.build_dir / TESTS_JSON
 
     @property
     def rust_target_mapping_json_path(self) -> pathlib.Path:
@@ -794,6 +1055,26 @@ class BuildContext:
                 )
             targets.append(ClippyTargetSpec.from_dict(item))
         return targets
+
+    @functools.cached_property
+    def test_specs(self) -> list[TestSpec]:
+        """Loads and returns the test specs from tests.json."""
+        if not self.tests_json_path.exists():
+            return []
+        try:
+            # Narrow the try clause strictly to loading/decoding the JSON file.
+            tests_data = load_json_list(self.tests_json_path)
+        except ValueError as e:
+            raise ValueError(f"Failed to decode {TESTS_JSON}: {e}")
+
+        specs = []
+        for item in tests_data:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Expected dict entry inside {TESTS_JSON}, but got: {type(item).__name__}"
+                )
+            specs.append(TestSpec.from_dict(item))
+        return specs
 
     @functools.cached_property
     def generated_sources(self) -> JSONArray:
@@ -975,7 +1256,7 @@ class BuildContext:
         success_stamp_path.write_text("")
 
         # Post-build verification checks
-        gn_status = run_gn_check(
+        gn_status, gn_failure_summary = run_gn_check(
             checkout_dir=self.checkout_dir,
             build_dir=self.build_dir,
             host=self.host,
@@ -983,10 +1264,11 @@ class BuildContext:
         )
         if gn_status != 0:
             result.exit_code = gn_status
+            result.failure_summary = gn_failure_summary
             return
 
         if not self.context_spec.skip_ninja_noop_check:
-            noop_status = check_ninja_noop(
+            noop_status, noop_failure_summary = check_ninja_noop(
                 checkout_dir=self.checkout_dir,
                 build_dir=self.build_dir,
                 host=self.host,
@@ -995,6 +1277,7 @@ class BuildContext:
             )
             if noop_status != 0:
                 result.exit_code = noop_status
+                result.failure_summary = noop_failure_summary
                 return
 
         # Export debug symbols at the very end to avoid spending time on symbols
@@ -1004,6 +1287,15 @@ class BuildContext:
         except RuntimeError as e:
             msg(f"Error: {e}", file=sys.stderr)
             result.exit_code = 1
+            result.failure_summary = f"Failed to export debug symbols: {e}"
+            return
+
+        try:
+            self._find_affected_tests(result)
+        except (RuntimeError, ValueError) as e:
+            msg(f"Error: {e}", file=sys.stderr)
+            result.exit_code = 1
+            result.failure_summary = f"Failed to find affected tests: {e}"
             return
 
     @contextmanager
@@ -1055,6 +1347,61 @@ class BuildContext:
             raise RuntimeError(
                 f"export_last_build_debug_symbols failed with exit code {res.returncode}"
             )
+
+    def _find_affected_tests(self, result: BuildExecution) -> None:
+        """Populates result with the tests affected by the changed files.
+
+        The infra recipes use the affected tests to skip unaffected tests in
+        presubmit, and skip testing entirely if build_not_affected is set.
+        """
+        changed_files = [f.path for f in self.context_spec.changed_files]
+        # Without an artifact dir there's nowhere to report the results, and
+        # without changed files or tests there's nothing to analyze.
+        if not self.artifact_dir or not changed_files or not self.test_specs:
+            return
+
+        with tempfile.NamedTemporaryFile(
+            "w", dir=self.artifact_dir, prefix="changed_files_", suffix=".txt"
+        ) as files_list:
+            files_list.write("\n".join(changed_files) + "\n")
+            files_list.flush()
+            cmd = [
+                str(self.api_client_path),
+                "--build-dir",
+                str(self.build_dir),
+                "affected_tests",
+                f"--files-list={files_list.name}",
+                "--format=json",
+            ]
+            msg("Finding affected tests...")
+            if self.verbose:
+                msg(f"Command: {shlex.join(cmd)}")
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"affected_tests failed with exit code {res.returncode}"
+            )
+        try:
+            output = json.loads(res.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Failed to decode affected_tests output: {e}")
+        if not isinstance(output, dict):
+            raise RuntimeError(
+                f"Expected JSON object from affected_tests, but got: {type(output).__name__}"
+            )
+
+        labels = [t["label"] for t in output.get("test_targets", [])]
+        result.affected_tests = resolve_affected_test_names(
+            self.test_specs, labels
+        )
+        result.build_not_affected = bool(
+            output.get("build_not_affected", False)
+        )
+        msg(
+            f"Found {len(result.affected_tests)} affected tests "
+            f"(build_not_affected={result.build_not_affected})"
+        )
 
     def _run_buildstats(self) -> pathlib.Path | None:
         """Runs the buildstats prebuilt tool on the raw trace to generate buildstats.json.gz (Step 2)."""
@@ -1169,6 +1516,8 @@ class BuildContext:
         duration_seconds: int,
         failure_summary: str | None = None,
         ninja_action_metrics_path: pathlib.Path | None = None,
+        affected_tests: Iterable[str] = (),
+        build_not_affected: bool = False,
     ) -> None:
         """Serializes and writes the build_artifacts.json manifest to the artifact directory."""
         if not self.artifact_dir:
@@ -1178,6 +1527,8 @@ class BuildContext:
         artifacts.ninja_duration_seconds = duration_seconds
         if failure_summary:
             artifacts.failure_summary = failure_summary
+        artifacts.affected_tests.extend(affected_tests)
+        artifacts.build_not_affected = build_not_affected
 
         # Collect Ninja action metrics if present
         action_metrics_file = (
@@ -1493,31 +1844,36 @@ def main(argv: list[str]) -> int:
             args.verbose,
         )
 
-        # If artifact_dir is specified, serialize and write build_artifacts.json
-        # unconditionally on both success and failure.
-        if ctx.context_spec.artifact_dir:
-            ts_msg(
-                f"Serializing build artifacts manifest to {ctx.context_spec.artifact_dir}...",
-                args.verbose,
-            )
-            failure_summary = None
-            if run.exit_code != 0:
-                if args.ninja_error_logging_output:
-                    failure_summary = parse_ninja_failures(
-                        args.ninja_error_logging_output
-                    )
+    # If artifact_dir is specified, serialize and write build_artifacts.json
+    # unconditionally on both success and failure. This must happen after the
+    # `with wrapper(...)` block exits so that post-build checks (gn check,
+    # ninja no-op check, debug symbol export, affected tests) have completed
+    # and populated `run`.
+    if ctx.context_spec.artifact_dir:
+        ts_msg(
+            f"Serializing build artifacts manifest to {ctx.context_spec.artifact_dir}...",
+            args.verbose,
+        )
+        failure_summary = run.failure_summary
+        if run.exit_code != 0 and not failure_summary:
+            if args.ninja_error_logging_output:
+                failure_summary = parse_ninja_failures(
+                    args.ninja_error_logging_output
+                )
 
-                if not failure_summary:
-                    failure_summary = (
-                        f"Fuchsia build failed: delegated command "
-                        f"'{shlex.join(run.command)}' exited with status {run.exit_code}"
-                    )
+            if not failure_summary:
+                failure_summary = (
+                    f"Fuchsia build failed: delegated command "
+                    f"'{shlex.join(run.command)}' exited with status {run.exit_code}"
+                )
 
-            ctx.produce_build_artifacts(
-                duration_seconds,
-                failure_summary=failure_summary,
-                ninja_action_metrics_path=args.ninja_action_metrics_output,
-            )
+        ctx.produce_build_artifacts(
+            duration_seconds,
+            failure_summary=failure_summary,
+            ninja_action_metrics_path=args.ninja_action_metrics_output,
+            affected_tests=run.affected_tests,
+            build_not_affected=run.build_not_affected,
+        )
 
     return run.exit_code
 

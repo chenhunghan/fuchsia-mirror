@@ -40,7 +40,6 @@ zx::result<uint32_t> Device::QueryIrqMode(fpci::InterruptMode mode) {
       }
       break;
     case fpci::InterruptMode::kDisabled:
-    case fpci::InterruptMode::kLegacyNoack:
     default:
       return zx::error(ZX_ERR_INVALID_ARGS);
   }
@@ -64,9 +63,6 @@ pci_interrupt_modes_t Device::GetInterruptModes() {
 }
 
 zx_status_t Device::SetIrqMode(fpci::InterruptMode mode, uint32_t irq_cnt) {
-  if (mode == fpci::InterruptMode::kLegacyNoack) {
-    return ZX_ERR_INVALID_ARGS;
-  }
   if (mode != fpci::InterruptMode::kDisabled && irq_cnt == 0) {
     return ZX_ERR_INVALID_ARGS;
   }
@@ -346,6 +342,11 @@ zx_status_t Device::VerifyAllMsisFreed() {
   zx_info_msi_t info = {};
   const zx_status_t st =
       irqs_.msi_allocation.get_info(ZX_INFO_MSI, &info, sizeof(info), nullptr, nullptr);
+  if (st == ZX_ERR_WRONG_TYPE) {
+    // Some Pciroot implementations manage MSI controllers in-driver rather than via kernel
+    // zx::msi allocations and return a placeholder handle (such as a zx::event).
+    return ZX_OK;
+  }
   if (st != ZX_OK) {
     return st;
   }

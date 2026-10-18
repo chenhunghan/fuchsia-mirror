@@ -2,19 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
+
 group("tests") {
   testonly = true
 
   deps = [
+    ":bazel_tests",
     "agents:tests",
     "analytics:tests",
     "android:tests",
     "async-utils:tests",
     "atomic-storage:tests",
-    "backoff:tests",
     "bitrs:tests",
     "buf-read-ext:tests",
-    "callback:tests",
     "captive-thread:tests",
     "chunked-compression:tests",
     "cmdline:tests",
@@ -73,7 +74,6 @@ group("tests") {
     "icu:tests",
     "icu_data:tests",
     "inet:tests",
-    "inject:tests",
     "injectable-time:tests",
     "intl:tests",
     "json_parser:tests",
@@ -155,4 +155,8 @@ group("boot_tests") {
   testonly = true
 
   deps = [ "elfldltl:boot_tests" ]
+}
+
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/lib:target_tests" ]
 }

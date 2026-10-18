@@ -32,7 +32,7 @@
 #include <object/channel_dispatcher.h>
 #include <object/handle.h>
 #include <object/root_job_observer.h>
-#include <phys/boot-constants.h>
+#include <phys/handoff/boot-constants.h>
 #include <platform/timer.h>
 #include <vm/pmm.h>
 #include <vm/pmm_checker.h>
@@ -137,6 +137,18 @@ size_t crashlog_to_string(ktl::span<char> target, zircon_crash_reason_t reason) 
             static_cast<uint64_t>(ticks.boot_now - timer_get_boot_ticks_offset()),
             static_cast<uint64_t>(timer_get_boot_ticks_offset()),
             static_cast<uint64_t>(timer_get_mono_ticks_offset()));
+
+    // If usermode had suspended the debug UART (or was in the process of
+    // suspending it) when this crashlog was generated, none of the kernel's
+    // recent output (including any output related to this crashlog) made it out
+    // of the serial port.  Make a note of that so that whoever reads this
+    // crashlog knows why.
+    if (platform_serial_is_suspended()) {
+      fprintf(&outfile,
+              "DEBUG UART SUSPENDED (or suspending, since boot time %" PRIi64
+              "ms); kernel output since then was not written to the serial console\n\n",
+              platform_serial_suspended_at() / ZX_MSEC(1));
+    }
 
     outfile.Write(static_cast<bool>(regions & RenderRegion::DebugInfo)
                       // Include full symbolizer markup context for DebugInfo.

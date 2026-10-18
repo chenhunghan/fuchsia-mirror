@@ -85,6 +85,7 @@ bringup_platform_aib_names = [
     "bus_pci_driver",
     "realtek_8211f_driver",
     "xhci_driver",
+    "usb_bus_driver",
     "sdhci_driver",
     "cqhci_driver",
 
@@ -257,8 +258,7 @@ platform_aib_names = bringup_platform_aib_names + [
     "location_emergency",
 
     # WLAN
-    "wlan_legacy_privacy_support",
-    "wlan_contemporary_privacy_only_support",
+    "wlan_core",
     "wlan_fullmac_support",
     "wlan_policy",
     "wlan_softmac_support",

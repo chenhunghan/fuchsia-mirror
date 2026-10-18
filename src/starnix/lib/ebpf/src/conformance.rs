@@ -17,8 +17,8 @@ pub mod test {
         BPF_SUB, BPF_TO_BE, BPF_TO_LE, BPF_W, BPF_XCHG, BPF_XOR, BpfValue, CallingContext,
         DataWidth, EbpfHelperImpl, EbpfInstruction, EbpfProgramContext, FromBpfValue,
         FunctionSignature, HelperDefinition, MapFlags, MapReference, MapSchema, MapTypeFilter,
-        MemoryId, MemoryParameterSize, NullVerifierLogger, Packet, ProgramArgument, Type,
-        link_program_dynamic, static_helper_set, verify_program,
+        MemoryId, MemoryParameterSize, NullVerifierLogger, Packet, PointerOrigin, ProgramArgument,
+        Type, link_program_dynamic, static_helper_set, verify_program,
     };
     use pest::Parser;
     use pest::iterators::Pair;
@@ -434,8 +434,19 @@ pub mod test {
         }
     }
 
+    /// Index of the test map whose value can be obtained with the
+    /// `map_lookup_value` helper. Must match the position of the map in the
+    /// `CallingContext` used by `test_ebpf_conformance`.
+    const TEST_MAP_INDEX_WITH_VALUE: usize = 2;
+
+    /// Size of the value of the test map at index `TEST_MAP_INDEX_WITH_VALUE`.
+    const TEST_MAP_VALUE_SIZE: usize = 16;
+
     struct TestEbpfRunContext {
         buffer_size: usize,
+        /// Storage for the value returned by the `map_lookup_value` helper.
+        /// Stored as `u64` to guarantee 8-byte alignment.
+        map_value: [u64; TEST_MAP_VALUE_SIZE / std::mem::size_of::<u64>()],
     }
 
     const DATA_OFFSET: usize = 8;
@@ -479,6 +490,7 @@ pub mod test {
                     id: TEST_ARG_MEMORY_ID.clone(),
                     offset: 0.into(),
                     buffer_size: self.size as u64,
+                    origin: PointerOrigin::KernelWritable,
                 }
             }
         }
@@ -720,6 +732,7 @@ pub mod test {
                                 filter: MapTypeFilter::AllowList(&[
                                     linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                 ]),
+                                must_be_writable: false,
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
@@ -736,12 +749,52 @@ pub mod test {
                                 filter: MapTypeFilter::DenyList(&[
                                     linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                 ]),
+                                must_be_writable: false,
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
                         },
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
+                        index: 108,
+                        name: "map_update",
+                        signature: FunctionSignature {
+                            args: vec![Type::ConstPtrToMapParameter {
+                                filter: MapTypeFilter::DenyList(&[
+                                    linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
+                                ]),
+                                must_be_writable: true,
+                            }],
+                            return_value: Type::UNKNOWN_SCALAR,
+                            invalidate_array_bounds: false,
+                        },
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
+                        index: 109,
+                        name: "map_lookup_value",
+                        signature: FunctionSignature {
+                            args: vec![
+                                Type::ConstPtrToMapParameter {
+                                    filter: MapTypeFilter::DenyList(&[
+                                        linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
+                                    ]),
+                                    must_be_writable: false,
+                                },
+                                Type::MapKeyParameter { map_ptr_index: 0 },
+                            ],
+                            return_value: Type::NullOrParameter(Box::new(
+                                Type::MapValueParameter { map_ptr_index: 0 },
+                            )),
+                            invalidate_array_bounds: false,
+                        },
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(map_lookup_value),
                 ),
                 (
                     HelperDefinition {
@@ -1001,6 +1054,17 @@ pub mod test {
         0.into()
     }
 
+    fn map_lookup_value(
+        context: &mut TestEbpfRunContext,
+        _map: BpfValue,
+        _key: BpfValue,
+        _: BpfValue,
+        _: BpfValue,
+        _: BpfValue,
+    ) -> BpfValue {
+        (context.map_value.as_mut_ptr() as u64).into()
+    }
+
     pub fn parse_asm(data: &str) -> Vec<EbpfInstruction> {
         let mut pairs =
             TestGrammar::parse(Rule::ASM_INSTRUCTIONS, data).expect("Parsing must be successful");
@@ -1154,18 +1218,35 @@ pub mod test {
     #[test_case(ubpf_test_data!("subnet.data"))]
     #[test_case(local_test_data!("access_with_check.data"))]
     #[test_case(local_test_data!("ashr_fully_unknown_u64_stays_unbounded.data"))]
+    #[test_case(local_test_data!("atomic_aligned.data"))]
+    #[test_case(local_test_data!("bounded_loop_counter_access.data"))]
     #[test_case(local_test_data!("context_parameter.data"))]
     #[test_case(local_test_data!("datadep_call_oob.data"))]
     #[test_case(local_test_data!("datadep_store_oob.data"))]
     #[test_case(local_test_data!("branch_ptr_gt_zero_prunes_live.data"))]
     #[test_case(local_test_data!("branch_ptr_jsgt_zero_keeps_live.data"))]
     #[test_case(local_test_data!("branch_zero_jgt_ptr_prunes_live.data"))]
+    #[test_case(local_test_data!("cmpxchg_prune_point.data"))]
     #[test_case(local_test_data!("div_by_range_with_zero.data"))]
+    #[test_case(local_test_data!("err_atomic_misaligned32.data"))]
+    #[test_case(local_test_data!("err_atomic_misaligned64.data"))]
+    #[test_case(local_test_data!("err_atomic_misaligned_stack.data"))]
+    #[test_case(local_test_data!("err_atomic_not_map_value.data"))]
+    #[test_case(local_test_data!("err_atomic_variable_offset.data"))]
+    #[test_case(local_test_data!("err_bounded_loop_oob_last_iteration.data"))]
     #[test_case(local_test_data!("err_context_parameter.data"))]
+    #[test_case(local_test_data!("err_infinite_loop_counter.data"))]
+    #[test_case(local_test_data!("err_infinite_loop_same_state.data"))]
     #[test_case(local_test_data!("err_lddw_punning.data"))]
     #[test_case(local_test_data!("err_memory_id_collision.data"))]
     #[test_case(local_test_data!("err_offset_overflow.data"))]
+    #[test_case(local_test_data!("err_packet_load_exit_path_prune.data"))]
+    #[test_case(local_test_data!("err_packet_load_ind_offset.data"))]
+    #[test_case(local_test_data!("err_packet_load_infinite_loop.data"))]
+    #[test_case(local_test_data!("err_packet_load_r0_dep.data"))]
+    #[test_case(local_test_data!("err_packet_load_scalar_src.data"))]
     #[test_case(local_test_data!("err_packet_oob.data"))]
+    #[test_case(local_test_data!("err_prune_point_dependency_chain.data"))]
     #[test_case(local_test_data!("err_read_only_helper.data"))]
     #[test_case(local_test_data!("err_write_r10.data"))]
     #[test_case(local_test_data!("exponential_verification.data"))]
@@ -1174,6 +1255,8 @@ pub mod test {
     #[test_case(local_test_data!("malloc_double_free.data"))]
     #[test_case(local_test_data!("malloc_multiple_use_free.data"))]
     #[test_case(local_test_data!("malloc_use_free.data"))]
+    #[test_case(local_test_data!("map_read_only_allowed.data"))]
+    #[test_case(local_test_data!("map_read_only_prohibited.data"))]
     #[test_case(local_test_data!("map_type_allowed.data"))]
     #[test_case(local_test_data!("map_type_prohibited.data"))]
     #[test_case(local_test_data!("mem_oob_underflow.data"))]
@@ -1181,6 +1264,7 @@ pub mod test {
     #[test_case(local_test_data!("null_checks_multiple.data"))]
     #[test_case(local_test_data!("null_checks_propagated.data"))]
     #[test_case(local_test_data!("packet_access.data"))]
+    #[test_case(local_test_data!("packet_load_prune.data"))]
     #[test_case(local_test_data!("ptr_sub_ptr_offset.data"))]
     #[test_case(local_test_data!("range_narrowing_with_conditional_jump.data"))]
     #[test_case(local_test_data!("read_only_helper.data"))]
@@ -1212,20 +1296,34 @@ pub mod test {
         let helpers: HashMap<u32, &'static HelperDefinition> =
             HELPER_DEFS.iter().map(|(def, _)| (def.index, def)).collect();
 
+        let maps = vec![
+            MapSchema {
+                map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
+                key_size: 4,
+                value_size: 4,
+                max_entries: 0,
+                flags: MapFlags::NoPrealloc,
+            },
+            MapSchema {
+                map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_ARRAY,
+                key_size: 4,
+                value_size: 4,
+                max_entries: 1,
+                flags: MapFlags::ProgReadOnly,
+            },
+            MapSchema {
+                map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_ARRAY,
+                key_size: 4,
+                value_size: TEST_MAP_VALUE_SIZE as u32,
+                max_entries: 1,
+                flags: MapFlags::empty(),
+            },
+        ];
+        assert_eq!(maps[TEST_MAP_INDEX_WITH_VALUE].value_size as usize, TEST_MAP_VALUE_SIZE);
+
         let verified_program = verify_program(
             test_case.code,
-            CallingContext {
-                maps: vec![MapSchema {
-                    map_type: linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
-                    key_size: 4,
-                    value_size: 4,
-                    max_entries: 0,
-                    flags: MapFlags::NoPrealloc,
-                }],
-                helpers,
-                args,
-                packet_type,
-            },
+            CallingContext { maps, helpers, args, packet_type },
             &mut NullVerifierLogger,
         );
 
@@ -1239,7 +1337,8 @@ pub mod test {
             let program = link_program_dynamic::<TestEbpfProgramContext>(&verified_program, maps)
                 .expect("failed to link a test program");
 
-            let mut context = TestEbpfRunContext { buffer_size: test_memory.size };
+            let mut context =
+                TestEbpfRunContext { buffer_size: test_memory.size, map_value: Default::default() };
             let result = program.run_with_2_arguments(&mut context, test_memory, test_memory.size);
             assert_eq!(result, value);
         } else {

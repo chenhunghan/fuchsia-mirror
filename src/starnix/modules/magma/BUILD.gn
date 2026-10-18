@@ -22,6 +22,8 @@ rustc_library("magma") {
 
   configs += [ "//src/starnix/build:kernel_library_config" ]
 
+  visibility = [ "//src/starnix/modules/*" ]
+
   deps = [
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
@@ -38,6 +40,8 @@ rustc_library("magma") {
     "//src/starnix/lib/starnix_syscalls",
     "//src/starnix/lib/starnix_types",
     "//src/starnix/lib/starnix_uapi",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:argh",
     "//third_party/rust_crates:bstr",
     "//third_party/rust_crates:zerocopy",
   ]

@@ -9,12 +9,12 @@ set -euo pipefail
 # of a target package directory while filtering out:
 # 1. References inside visibility = [...] or visibility.gni allowlists
 # 2. Substring prefix collisions with sibling packages (e.g. //a/b-foo or //a/b/subpkg)
-# 3. References to GN-only targets above #LOCAL_BAZEL_BUILD_SENTINEL or bazel2gn verification targets (:verify_bazel2gn, :tests, :benchmarks)
+# 3. References to GN-only targets above #LOCAL_BAZEL_BUILD_SENTINEL (:tests, :benchmarks)
 # Also detects relative GN label references from ancestor BUILD.gn files and computes deterministic,
 # tiered Bazel visibility lists per target:
 # - Tier 1 (Narrow / Subsystem-Scoped, <= 15 entries): exact :__pkg__ and depth >= 3 LCA :__subpackages__
-# - Tier 2 (Multi-Subsystem Broad Usage, > 15 narrow entries across < 6 areas): 2-3 level area rollups
-# - Tier 3 (Globally-Used Platform Library / Test Utility, > 15 narrow entries across >= 6 areas): ["//visibility:public"]
+# - Tier 2 (Multi-Subsystem Broad Usage, > 15 narrow entries): 2-3 level subsystem area rollups (<= 15 entries)
+# - Tier 3 (Foundational Tree-Wide Library, > 15 subsystem area rollup entries): ["//:__subpackages__"]
 
 export PATH="${PATH:-}:${HOME:-}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
@@ -43,7 +43,28 @@ gn_file = os.path.join(workdir, target_pkg, "BUILD.gn")
 
 bazel_targets = []
 package_targets = set()
+non_gn_synced_targets = set()
+testonly_targets = set()
 alias_map = {}
+
+BAZEL_NON_GN_SYNCED_RULES = {
+    "fx_component",
+    "fx_component_manifest",
+    "fx_packaged_binary",
+    "fx_test_component",
+    "fx_unittest_component",
+    "fx_test",
+    "fx_unittest_package",
+    "test_suite",
+    "rustc_test",
+    "host_rustc_test",
+    "host_go_test",
+    "host_py_test",
+    "host_test",
+    "wrap_host_rust_test",
+    "go_test",
+}
+
 if os.path.isfile(bazel_file):
     try:
         with open(bazel_file, "r", encoding="utf-8") as f:
@@ -57,15 +78,25 @@ if os.path.isfile(bazel_file):
                 )
                 tname = None
                 actual = None
+                is_to = False
                 for kw in node.keywords:
                     if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         tname = kw.value.value
                     elif kw.arg == "actual" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         actual = kw.value.value
+                    elif kw.arg == "testonly":
+                        if isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                            is_to = True
+                        elif isinstance(kw.value, ast.Name) and kw.value.id in ("True", "true"):
+                            is_to = True
                 if tname:
                     bazel_targets.append(tname)
-                    if func in ("fx_package", "fuchsia_package"):
+                    if is_to:
+                        testonly_targets.add(tname)
+                    if func in ("fx_package", "fuchsia_package", "fx_unittest_package"):
                         package_targets.add(tname)
+                    if func in BAZEL_NON_GN_SYNCED_RULES:
+                        non_gn_synced_targets.add(tname)
                     if func == "alias" and actual and actual.startswith(":"):
                         alias_map[tname] = actual[1:]
     except Exception:
@@ -74,12 +105,12 @@ if os.path.isfile(bazel_file):
 CONVERTIBLE_GN_TEMPLATES = {
     "static_library",
     "source_set",
-    "shared_library",
     "executable",
     "library_headers",
     "rustc_library",
     "rustc_binary",
     "rustc_macro",
+    "rustc_dylib",
     "rustc_test",
     "go_library",
     "go_binary",
@@ -103,7 +134,8 @@ GN_PACKAGE_TEMPLATES = {
     "fuchsia_package_with_single_component",
 }
 
-gn_only_targets = {"verify_bazel2gn", "tests", "benchmarks"}
+gn_only_targets = {"tests", "benchmarks"}
+gn_nonconvertible_targets = {"tests", "benchmarks"}
 if os.path.isfile(gn_file):
     try:
         with open(gn_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -114,9 +146,11 @@ if os.path.isfile(gn_file):
         if bazel_targets:
             above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else gn_src
             for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', above_sentinel, flags=re.MULTILINE):
-                t = m.group(2)
+                tmpl, t = m.group(1), m.group(2)
                 if t not in bazel_targets:
                     gn_only_targets.add(t)
+                if tmpl not in CONVERTIBLE_GN_TEMPLATES:
+                    gn_nonconvertible_targets.add(t)
         else:
             for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', gn_src, flags=re.MULTILINE):
                 tmpl, t = m.group(1), m.group(2)
@@ -124,6 +158,7 @@ if os.path.isfile(gn_file):
                     bazel_targets.append(t)
                 elif tmpl not in CONVERTIBLE_GN_TEMPLATES and t not in bazel_targets:
                     gn_only_targets.add(t)
+                    gn_nonconvertible_targets.add(t)
     except Exception:
         pass
 
@@ -190,7 +225,7 @@ for fpath in sorted(set(files)):
     except Exception:
         continue
     no_comments = re.sub(r"#[^\n]*", "", content)
-    stripped = re.sub(r"visibility\s*\+?=\s*\[[^\]]*\]", "", no_comments, flags=re.DOTALL)
+    stripped = re.sub(r"(?:visibility|packages)\s*\+?=\s*\[[^\]]*\]", "", no_comments, flags=re.DOTALL)
 
     rel_sub = None
     if target_pkg.startswith(pkg + "/"):
@@ -217,6 +252,9 @@ for fpath in sorted(set(files)):
     for m in dep_matches:
         sub = m.group(1) or default_target
         if sub in gn_only_targets and sub not in bazel_targets:
+            excluded_gn_only_references.add(f"//{pkg} (:{sub})")
+            continue
+        if rel.endswith((".gn", ".gni")) and (sub in non_gn_synced_targets or sub in gn_nonconvertible_targets):
             excluded_gn_only_references.add(f"//{pkg} (:{sub})")
             continue
         is_pkg_target = sub in package_targets or (
@@ -384,13 +422,25 @@ def is_globally_used_target(rdep_pkgs):
     areas = {get_pkg_area(p) for p in pkgs if get_pkg_area(p)}
     return len(areas) >= 6 and (len(narrow) > 15 or len(pkgs) >= 20)
 
-def recommend_visibility(rdep_pkgs):
+is_test_pkg = (
+    target_pkg.startswith("src/testing/")
+    or target_pkg.startswith("src/lib/testing/")
+    or target_pkg.startswith("testing/")
+    or "/testing/" in target_pkg
+)
+
+def recommend_visibility(rdep_pkgs, is_test_support=False):
     pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != target_pkg))
     narrow = recommend_narrow_visibility(pkgs)
-    if is_globally_used_target(pkgs):
-        return ["//visibility:public"]
-    if len(narrow) > 15:
-        return recommend_area_rollup_visibility(pkgs)
+    globally_used = is_globally_used_target(pkgs)
+    if globally_used or len(narrow) > 8:
+        rollup = recommend_area_rollup_visibility(pkgs)
+        if globally_used and len(rollup) > 15:
+            return ["//:__subpackages__"]
+        if len(rollup) <= len(narrow):
+            return rollup
+    if is_test_support and len(get_distinct_areas(pkgs)) >= 2:
+        return ["//:__subpackages__"]
     return narrow
 
 print(json.dumps({
@@ -398,7 +448,7 @@ print(json.dumps({
     "true_rdep_packages": sorted({f"//{sanitize_rdep_pkg(p)}" for p in true_rdep_packages}),
     "distinct_rdep_areas": get_distinct_areas(true_rdep_packages),
     "is_globally_used": is_globally_used_target(true_rdep_packages),
-    "recommended_visibility": recommend_visibility(true_rdep_packages),
+    "recommended_visibility": recommend_visibility(true_rdep_packages, is_test_support=is_test_pkg or any(t in testonly_targets for t in bazel_targets)),
     "per_target_rdeps": {
         t: sorted({f"//{sanitize_rdep_pkg(p)}" for p in rset}) for t, rset in per_target_rdeps.items()
     },
@@ -406,7 +456,7 @@ print(json.dumps({
         t: is_globally_used_target(rset) for t, rset in per_target_rdeps.items()
     },
     "per_target_recommended_visibility": {
-        t: recommend_visibility(rset) for t, rset in per_target_rdeps.items()
+        t: recommend_visibility(rset, is_test_support=is_test_pkg or t in testonly_targets) for t, rset in per_target_rdeps.items()
     },
     "per_target_area_rollup_visibility": {
         t: recommend_area_rollup_visibility(rset) for t, rset in per_target_rdeps.items()

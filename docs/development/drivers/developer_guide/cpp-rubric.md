@@ -117,6 +117,34 @@ implement the `std::format`.
 Follow the [Fuchsia logging guidelines][logging-guidelines] by using `warning`
 or `error` log levels when documenting failures such as FIDL errors.
 
+## Error handling
+
+Return [`zx::result<T>`][zx-result] from fallible functions instead of `void`
+or a `zx_status_t` plus an out-parameter, so the caller can handle the error.
+Use `fit::result<E, T>` for your own error types. Mark functions whose
+signature must return `zx_status_t` (C ABI, legacy interfaces) `[[nodiscard]]`.
+
+Never report success after a failure. Pass errors to completers that accept
+them (such as `fdf::StartCompleter`) with `take_error()` or
+`zx::make_result(status)`. If the completer cannot report an error
+(`fdf_power::ResumeCompleter`), leave the driver's state showing the failure.
+Log or comment any place that continues after a failure on purpose.
+
+## Threading and synchronization
+
+Know which dispatcher runs the code before adding a lock. State accessed only
+from one [synchronized dispatcher][dispatcher-threads], such as the default one
+from `Start()`, needs no mutex. State accessed from an unsynchronized
+dispatcher, from several dispatchers, or from a thread the driver runtime does
+not manage (a dedicated interrupt thread, `std::thread`) does. Document this
+where the state is declared, or check `fdf::Dispatcher::GetCurrent()`.
+
+Do not hold a lock while calling anything that can re-enter the driver or wait
+on the same lock: update the state, release the lock, then make the call.
+Comment any lock held across a call on purpose. Do not release and re-acquire
+the lock around each call, or add a getter that takes the lock and returns a
+copy; both cause TOCTOU races.
+
 ## Zircon resources
 
 ### Interrupts
@@ -139,6 +167,18 @@ To ensure safe access to register bitfields, it is recommended to use the
 [hwreg/bitfields library][bitfields]. This library is found at
 `zircon/system/ulib/hwreg/include/hwreg/bitfields.h`.
 
+`hwreg` setters do not clamp values to the field width: they `ZX_DEBUG_ASSERT`
+in debug builds and overwrite neighboring fields in release builds. Check
+lengths, offsets, indices, and counts from outside the driver (FIDL clients,
+bus hosts, metadata, firmware), and values computed from them, before using
+them in a register, a DMA transfer size, or a buffer index. Where the value
+enters the driver, return `ZX_ERR_INVALID_ARGS`, or clamp if the protocol
+allows a maximum value; compute bounds so they cannot overflow; confirm that a
+client-supplied ID was registered by that client
+([VMO registration][vmo-registration]). A comment naming what already
+guarantees the range can replace a check; see
+[Precondition checks][precondition-checks] for when to assert instead.
+
 The driver should take control of its BTI and stop any DMA which might be
 ongoing during initialization. Once that is complete, it should tell the BTI
 that it has regained control of the hardware by calling
@@ -146,6 +186,21 @@ that it has regained control of the hardware by calling
 hardware are required to pin the BTI beforehand. After the hardware has
 finished accessing the memory, the driver is responsible for unpinning it.
 Under no circumstances should the BTI be unpinned within the destructor.
+
+Atomics (`std::memory_order_release`) order memory accesses between CPUs, not
+accesses by a device. Before notifying the device of a DMA descriptor (a
+doorbell register write, an ownership bit, an index update), know whether the
+buffer is cached, and, at the notification, comment how the descriptor write
+is ordered before it. Barriers order accesses;
+[cache operations][dma-cache-coherency] make data visible to the device; one
+does not replace the other. Do not add a barrier just in case: comment every
+explicit barrier with the two accesses it orders.
+
+Unpin each `zx::pmt` when a transfer completes, fails, or is canceled, and at
+shutdown, but only after the device has stopped; if you cannot confirm that
+(for example, a disable timed out), leave it pinned. Destroying a `zx::pmt`
+without calling `unpin()` quarantines the pages until
+`zx_bti_release_quarantine()`.
 
 ### Clocks
 
@@ -258,3 +313,8 @@ connection to the `DriverTestRealm` service, perform necessary configuration in
 [fake-mmio-reg]: /sdk/lib/driver/fake-mmio-reg
 [mock-mmio]: /sdk/lib/driver/mock-mmio
 [dtr]: /sdk/lib/driver_test_realm/
+[vmo-registration]: /docs/development/drivers/best_practices/vmo-registration-pattern.md
+[precondition-checks]: /docs/development/drivers/driver_guides/display/register-definitions.md#precondition_checks
+[dma-cache-coherency]: /docs/development/drivers/concepts/driver_development/dma.md#cache_coherency
+[zx-result]: /zircon/system/ulib/zx/include/lib/zx/result.h
+[dispatcher-threads]: /docs/concepts/drivers/driver-dispatcher-and-threads.md#synchronized-and-unsynchronized

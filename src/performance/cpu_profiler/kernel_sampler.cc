@@ -8,6 +8,7 @@
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fit/defer.h>
 #include <lib/trace/event.h>
+#include <lib/zx/time.h>
 #include <zircon/syscalls-next.h>
 #include <zircon/syscalls.h>
 
@@ -15,6 +16,14 @@
 
 #include <trace-reader/reader.h>
 #include <trace-reader/records.h>
+
+namespace {
+// How often to move samples out of the kernel's per-CPU buffers. Each pass runs on the same
+// dispatcher that handles thread start/exit exceptions for the profiled tasks, so frequent, small
+// passes keep those exceptions (and the threads waiting on them) from queuing up behind a large
+// pass. It also keeps the per-CPU buffers from overflowing at high sample rates.
+constexpr zx::duration kServiceBuffersInterval = zx::msec(100);
+}  // namespace
 
 zx::result<std::unique_ptr<profiler::KernelSamplerSession>>
 profiler::KernelSamplerSession::CreateAndInit(const zx_sampler_config_t& config) {
@@ -67,7 +76,7 @@ void profiler::KernelSampler::ServiceBuffers() {
         ServiceBuffers();
       }
     });
-    service_buffers_task_.PostDelayed(dispatcher_, zx::sec(1));
+    service_buffers_task_.PostDelayed(dispatcher_, kServiceBuffersInterval);
   }
 }
 
@@ -127,51 +136,11 @@ zx::result<> profiler::KernelSampler::Start(size_t buffer_size_mb) {
   sample_buffer_.resize((max_size + sizeof(uint64_t) - 1) / sizeof(uint64_t));
 
   FX_LOGS(DEBUG) << "Attaching to known tasks and watching for new ones.";
-  zx::result known_threads_res = targets_.ForEachProcess(
-      [this](std::span<const zx_koid_t> job_path, const ProcessTarget& p) -> zx::result<> {
-        TRACE_DURATION("cpu_profiler", "KernelSampler::Start/ForEachProcess");
-
-        // Before we start sampling the thread, make sure we've recorded information about its
-        // process
-        CacheModules(p);
-
-        std::vector<zx_koid_t> saved_path{job_path.begin(), job_path.end()};
-        auto process_watcher = std::make_unique<ProcessWatcher>(
-            p.handle.borrow(),
-            [saved_path, this](zx_koid_t pid, zx_koid_t tid, zx::thread t) {
-              AddThread(saved_path, pid, tid, std::move(t));
-            },
-            [saved_path, this](zx_koid_t pid, zx_koid_t tid) {
-              RemoveThread(saved_path, pid, tid);
-            });
-
-        auto [it, emplaced] = process_watchers_.emplace(p.pid, std::move(process_watcher));
-        if (emplaced) {
-          zx::result watch_result = it->second->Watch(dispatcher_);
-          if (watch_result.is_error()) {
-            if (watch_result.error_value() == ZX_ERR_BAD_STATE) {
-              FX_LOGS(DEBUG) << "Process terminated before being watched.";
-            } else {
-              FX_PLOGS(ERROR, watch_result.status_value()) << "Failed to watch process: " << p.pid;
-              job_watchers_.clear();
-              process_watchers_.clear();
-              return watch_result.take_error();
-            }
-          }
-        }
-        return zx::ok();
-      });
-  if (known_threads_res.is_error()) {
-    FX_PLOGS(ERROR, known_threads_res.error_value()) << "Failed to set up all known processes.";
-    return known_threads_res;
+  if (zx::result<> res = WatchTargets(); res.is_error()) {
+    FX_PLOGS(ERROR, res.error_value()) << "Failed to set up all known processes.";
+    return res;
   }
 
-  // If a watched job launches a new process, we want to add it to the set
-  zx::result watch_result =
-      targets_.ForEachJob([this](const JobTarget& target) { return WatchTarget(target); });
-  if (watch_result.is_error()) {
-    return watch_result;
-  }
   zx::result<> res = session_->Start();
   if (res.is_ok()) {
     ServiceBuffers();
@@ -300,12 +269,7 @@ void profiler::KernelSampler::AddThread(std::vector<zx_koid_t> job_path, zx_koid
   TRACE_DURATION("cpu_profiler", __PRETTY_FUNCTION__, "pid", pid, "tid", tid);
   // Before we start sampling the thread, make sure we've recorded information about its process
   if (!contexts_.contains(pid)) {
-    zx::result<ProcessTarget*> target = targets_.GetProcess(job_path, pid);
-    if (target.is_ok()) {
-      CacheModules(**target);
-    } else {
-      FX_PLOGS(ERROR, target.status_value()) << "Failed to search up process: " << pid;
-    }
+    ScheduleCacheModules(job_path, pid);
   }
 
   // Add the thread so we can later grab its address space and module information for
@@ -314,7 +278,7 @@ void profiler::KernelSampler::AddThread(std::vector<zx_koid_t> job_path, zx_koid
   if (zx::result res = targets_.AddThread(
           job_path, pid,
           ThreadTarget{.handle = std::move(t), .tid = tid, .name = std::move(thread_name)});
-      res.is_error()) {
+      res.is_error() && res.error_value() != ZX_ERR_ALREADY_EXISTS) {
     FX_PLOGS(ERROR, res.status_value()) << "Failed to add thread to session: " << tid;
   }
 }

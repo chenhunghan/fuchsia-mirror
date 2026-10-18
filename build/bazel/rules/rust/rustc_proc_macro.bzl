@@ -6,11 +6,11 @@
 
 load(
     "@fuchsia_rules_common//build_flags:rust.bzl",
-    "BUILD_FLAGS_RUST_ATTRS_KWARGS",
+    "BUILD_FLAGS_RUST_MACRO_ATTRS",
     "wrap_rust_macro_args_with_build_flags",
 )
 load("@rules_rust//rust:defs.bzl", "rust_proc_macro")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rustc_flags")
+load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_tags", "with_fuchsia_rustc_flags")
 load("//build/bazel/rules/rust:generate_unit_tests.bzl", "generate_unit_tests")
 
 def _rustc_proc_macro_impl(
@@ -19,6 +19,7 @@ def _rustc_proc_macro_impl(
         with_unit_tests,
         test_deps,
         lint_config,
+        disable_clippy,
         rustc_flags,
         build_flags,
         visibility,
@@ -29,6 +30,7 @@ def _rustc_proc_macro_impl(
     else:
         test_lint_config = lint_config
 
+    kwargs["tags"] = with_fuchsia_rust_tags(kwargs.get("tags"), disable_clippy)
     kwargs["rustc_flags"] = with_fuchsia_rustc_flags(rustc_flags)
 
     proc_macro_kwargs = wrap_rust_macro_args_with_build_flags(
@@ -97,5 +99,10 @@ See details in https://fxbug.dev/407441714.
             doc = "Extra dependencies for the test target.",
             default = [],
         ),
-    } | BUILD_FLAGS_RUST_ATTRS_KWARGS,
+        "disable_clippy": attr.bool(
+            doc = "If true, disables clippy lints on this target.",
+            default = False,
+            configurable = False,
+        ),
+    } | BUILD_FLAGS_RUST_MACRO_ATTRS,
 )

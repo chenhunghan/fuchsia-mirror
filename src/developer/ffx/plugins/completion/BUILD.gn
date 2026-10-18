@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//src/developer/ffx/build/ffx_plugin.gni")
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -29,13 +27,8 @@ import("//src/developer/ffx/build/ffx_plugin.gni")
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 ffx_plugin("ffx_completion") {
+  sources = [ "src/lib.rs" ]
   args_deps = [
     "//src/developer/ffx/core:lib",
     "//third_party/rust_crates:argh",
@@ -44,7 +37,6 @@ ffx_plugin("ffx_completion") {
   edition = "2024"
   proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
   sdk_category = "not-yet-specified"
-  sources = [ "src/lib.rs" ]
   version = "0.1.0"
   deps = [
     "//src/developer/ffx/command:lib",

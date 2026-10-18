@@ -19,7 +19,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cinttypes>
 #include <format>
+#include <optional>
 #include <sstream>
 #include <thread>
 
@@ -383,6 +385,62 @@ TEST_F(ProcTaskDirTest, PidDirNotAccessibleAfterExitWithOpenChildFd) {
   EXPECT_THAT(stat(child_status.c_str(), &st), SyscallFailsWithErrno(ENOENT));
 }
 
+TEST_F(ProcTaskDirTest, PidDirFdLookupsFailAfterExit) {
+  test_helper::Rendezvous child_exit = test_helper::MakeRendezvous();
+
+  test_helper::ForkHelper helper;
+  pid_t child_pid = helper.RunInForkedProcess(
+      [holder = std::move(child_exit.holder)]() mutable { holder.hold(); });
+
+  std::string child_dir = fxl::StringPrintf("/proc/%d", child_pid);
+  fbl::unique_fd dirfd(SAFE_SYSCALL(open(child_dir.c_str(), O_RDONLY | O_DIRECTORY)));
+  fbl::unique_fd status_fd(SAFE_SYSCALL(openat(dirfd.get(), "status", O_RDONLY)));
+
+  // Allow the child to exit and reap it while keeping the fds open.
+  child_exit.poker.poke();
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // The open fds themselves remain valid.
+  struct stat st;
+  EXPECT_THAT(fstat(dirfd.get(), &st), SyscallSucceeds());
+  EXPECT_THAT(fstat(status_fd.get(), &st), SyscallSucceeds());
+
+  // Lookups relative to the dead task's directory fail with ESRCH, whether or not the entry has
+  // been looked up before, and even for names that never existed.
+  EXPECT_THAT(openat(dirfd.get(), "status", O_RDONLY), SyscallFailsWithErrno(ESRCH));
+  EXPECT_THAT(openat(dirfd.get(), "cmdline", O_RDONLY), SyscallFailsWithErrno(ESRCH));
+  EXPECT_THAT(fstatat(dirfd.get(), "status", &st, 0), SyscallFailsWithErrno(ESRCH));
+  EXPECT_THAT(fstatat(dirfd.get(), "stat", &st, 0), SyscallFailsWithErrno(ESRCH));
+  EXPECT_THAT(fstatat(dirfd.get(), "nonexistent", &st, 0), SyscallFailsWithErrno(ESRCH));
+}
+
+TEST_F(ProcTaskDirTest, PidDirFdListingAndReadsFailAfterExit) {
+  test_helper::Rendezvous child_exit = test_helper::MakeRendezvous();
+
+  test_helper::ForkHelper helper;
+  pid_t child_pid = helper.RunInForkedProcess(
+      [holder = std::move(child_exit.holder)]() mutable { holder.hold(); });
+
+  std::string child_dir = fxl::StringPrintf("/proc/%d", child_pid);
+  fbl::unique_fd dirfd(SAFE_SYSCALL(open(child_dir.c_str(), O_RDONLY | O_DIRECTORY)));
+  fbl::unique_fd status_fd(SAFE_SYSCALL(openat(dirfd.get(), "status", O_RDONLY)));
+  fbl::unique_fd task_fd(SAFE_SYSCALL(openat(dirfd.get(), "task", O_RDONLY | O_DIRECTORY)));
+
+  // Allow the child to exit and reap it while keeping the fds open.
+  child_exit.poker.poke();
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // Listing the dead task's directories fails with ENOENT.
+  char buf[4096];
+  EXPECT_THAT(syscall(SYS_getdents64, dirfd.get(), buf, sizeof(buf)),
+              SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(syscall(SYS_getdents64, task_fd.get(), buf, sizeof(buf)),
+              SyscallFailsWithErrno(ENOENT));
+
+  // Reading an already-open file of the dead task fails with ESRCH.
+  EXPECT_THAT(read(status_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(ESRCH));
+}
+
 TEST_F(ProcTaskDirTest, SelfAuxvIsNotEmpty) {
   std::string contents;
   ASSERT_TRUE(files::ReadFileToString("/proc/self/auxv", &contents));
@@ -707,6 +765,33 @@ TEST_F(ProcTaskDirTest, FdOpath) {
   std::string opath_fd_path = fxl::StringPrintf(kProcSelfFdPath, opath_fd.get());
   fbl::unique_fd regular_fd(SAFE_SYSCALL(open(opath_fd_path.c_str(), O_RDONLY)));
   ASSERT_TRUE(regular_fd.is_valid());
+}
+
+TEST_F(ProcTaskDirTest, FdOpathMode) {
+  test_helper::ScopedTempFD temp_file;
+  ASSERT_TRUE(temp_file);
+
+  constexpr struct {
+    int open_flags;
+    mode_t expected_mode;
+  } kTestCases[] = {
+      {O_RDONLY, S_IFLNK | 0500},
+      {O_WRONLY, S_IFLNK | 0300},
+      {O_RDWR, S_IFLNK | 0700},
+      {O_RDONLY | O_PATH, S_IFLNK | 0000},
+      {O_WRONLY | O_PATH, S_IFLNK | 0000},
+      {O_RDWR | O_PATH, S_IFLNK | 0000},
+  };
+
+  for (const auto& [open_flags, expected_mode] : kTestCases) {
+    SCOPED_TRACE(fxl::StringPrintf("open_flags=0x%x", open_flags));
+    fbl::unique_fd fd(SAFE_SYSCALL(open(temp_file.name().c_str(), open_flags)));
+    ASSERT_TRUE(fd.is_valid());
+    std::string fd_path = fxl::StringPrintf(kProcSelfFdPath, fd.get());
+    struct stat fd_stat = {};
+    SAFE_SYSCALL(fstatat(AT_FDCWD, fd_path.c_str(), &fd_stat, AT_SYMLINK_NOFOLLOW));
+    EXPECT_EQ(fd_stat.st_mode, expected_mode);
+  }
 }
 
 TEST_F(ProcTaskDirTest, FdOpathSymlink) {
@@ -1756,6 +1841,250 @@ TEST(ProcfsBlksizeTest, StatBlksize) {
     struct stat st;
     ASSERT_EQ(stat(path, &st), 0) << "stat failed for " << path << ": " << strerror(errno);
     EXPECT_EQ(st.st_blksize, expected_blksize) << "path: " << path;
+  }
+}
+
+struct KernelTextBounds {
+  std::optional<uint64_t> stext;
+  std::optional<uint64_t> etext;
+};
+
+std::optional<KernelTextBounds> ReadKernelTextBoundsFromFd(int fd) {
+  std::string contents;
+  if (!files::ReadFileDescriptorToString(fd, &contents)) {
+    return std::nullopt;
+  }
+  std::istringstream stream(contents);
+  std::string line;
+  KernelTextBounds bounds;
+  while (std::getline(stream, line)) {
+    uint64_t addr = 0;
+    char type = 0;
+    char name[256] = {};
+    if (sscanf(line.c_str(), "%" SCNx64 " %c %255s", &addr, &type, name) == 3) {
+      if (strcmp(name, "_stext") == 0) {
+        bounds.stext = addr;
+      } else if (strcmp(name, "_etext") == 0) {
+        bounds.etext = addr;
+      }
+      if (bounds.stext.has_value() && bounds.etext.has_value()) {
+        break;
+      }
+    }
+  }
+  return bounds;
+}
+
+std::optional<KernelTextBounds> ReadKernelTextBounds() {
+  fbl::unique_fd fd(open("/proc/kallsyms", O_RDONLY | O_CLOEXEC));
+  if (!fd.is_valid()) {
+    return std::nullopt;
+  }
+  return ReadKernelTextBoundsFromFd(fd.get());
+}
+
+TEST(ProcKallsymsTest, TextSectionSymbolsPresent) {
+  if (access("/proc/kallsyms", R_OK) != 0) {
+    GTEST_SKIP() << "/proc/kallsyms is not readable: " << strerror(errno);
+  }
+
+  std::string kptr_restrict;
+  bool has_kptr_restrict =
+      files::ReadFileToString("/proc/sys/kernel/kptr_restrict", &kptr_restrict);
+  std::string perf_paranoid_str;
+  int perf_paranoid = 2;
+  if (files::ReadFileToString(test_helper::kPerfEventParanoidPath, &perf_paranoid_str)) {
+    perf_paranoid = atoi(perf_paranoid_str.c_str());
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    if (test_helper::HasCapabilityEffective(CAP_SYSLOG)) {
+      test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+    }
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYSLOG));
+    std::optional<KernelTextBounds> bounds = ReadKernelTextBounds();
+    ASSERT_TRUE(bounds.has_value());
+    ASSERT_TRUE(bounds->stext.has_value());
+    ASSERT_TRUE(bounds->etext.has_value());
+    if (has_kptr_restrict && (kptr_restrict == "1\n" || kptr_restrict == "2\n")) {
+      EXPECT_EQ(*bounds->stext, 0u);
+      EXPECT_EQ(*bounds->etext, 0u);
+    } else if (has_kptr_restrict && kptr_restrict == "0\n") {
+      if (test_helper::IsStarnix() || perf_paranoid <= 1) {
+        EXPECT_NE(*bounds->stext, 0u);
+        EXPECT_GT(*bounds->etext, *bounds->stext);
+      } else {
+        EXPECT_EQ(*bounds->stext, 0u);
+        EXPECT_EQ(*bounds->etext, 0u);
+      }
+    }
+  });
+}
+
+TEST(ProcKallsymsTest, KptrRestrictControlsKernelSymbolAddresses) {
+  if (!test_helper::HasSysAdmin() || !test_helper::HasCapabilityEffective(CAP_SYSLOG)) {
+    GTEST_SKIP() << "Requires CAP_SYS_ADMIN and CAP_SYSLOG";
+  }
+  if (access("/proc/kallsyms", R_OK) != 0 || access("/proc/sys/kernel/kptr_restrict", R_OK) != 0) {
+    GTEST_SKIP() << "/proc/kallsyms or /proc/sys/kernel/kptr_restrict is not accessible";
+  }
+
+  constexpr const char* kKptrRestrictPath = "/proc/sys/kernel/kptr_restrict";
+  std::string saved_kptr_restrict;
+  ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &saved_kptr_restrict));
+  auto restore_kptr_restrict =
+      fit::defer([&] { files::WriteFile(kKptrRestrictPath, saved_kptr_restrict); });
+  test_helper::ScopedPerfEventParanoid scoped_perf_paranoid(1);
+
+  // Reject out-of-range, signed-positive, whitespace-only, non-UTF8, or malformed values with
+  // EINVAL.
+  for (const char* invalid : {"-1", "+1", "3", "256", "999999999", " \n", "\xff", "invalid"}) {
+    fbl::unique_fd fd(open(kKptrRestrictPath, O_WRONLY));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_THAT(write(fd.get(), invalid, strlen(invalid)), SyscallFailsWithErrno(EINVAL));
+  }
+
+  // Zero-length write succeeds with 0 bytes written and leaves kptr_restrict unchanged.
+  {
+    ASSERT_TRUE(files::WriteFile(kKptrRestrictPath, "2\n"));
+    fbl::unique_fd fd(open(kKptrRestrictPath, O_WRONLY));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    EXPECT_EQ(write(fd.get(), "", 0), 0);
+    std::string read_back;
+    ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &read_back));
+    EXPECT_EQ(read_back, "2\n");
+  }
+
+  // Reject writes when the writer lacks CAP_SYS_ADMIN (including zero-length writes).
+  {
+    fbl::unique_fd fd(open(kKptrRestrictPath, O_WRONLY));
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+      ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYS_ADMIN));
+      EXPECT_THAT(write(fd.get(), "", 0), SyscallFailsWithErrno(EPERM));
+      EXPECT_THAT(write(fd.get(), "1", 1), SyscallFailsWithErrno(EPERM));
+    });
+  }
+
+  // Mode 0 (including newline-terminated sysctl writes): expose non-zero ordered kernel symbol
+  // addresses to all readers.
+  ASSERT_TRUE(files::WriteFile(kKptrRestrictPath, "0\n"));
+  {
+    std::string read_back;
+    ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &read_back));
+    EXPECT_EQ(read_back, "0\n");
+
+    std::optional<KernelTextBounds> bounds = ReadKernelTextBounds();
+    ASSERT_TRUE(bounds.has_value());
+    ASSERT_TRUE(bounds->stext.has_value());
+    ASSERT_TRUE(bounds->etext.has_value());
+    EXPECT_NE(*bounds->stext, 0u);
+    EXPECT_GT(*bounds->etext, *bounds->stext);
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([] {
+      test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+      ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYSLOG));
+      std::optional<KernelTextBounds> unpriv_bounds = ReadKernelTextBounds();
+      ASSERT_TRUE(unpriv_bounds.has_value());
+      ASSERT_TRUE(unpriv_bounds->stext.has_value());
+      ASSERT_TRUE(unpriv_bounds->etext.has_value());
+      EXPECT_NE(*unpriv_bounds->stext, 0u);
+      EXPECT_GT(*unpriv_bounds->etext, *unpriv_bounds->stext);
+    });
+  }
+
+  // Mode 1 (including leading/trailing whitespace): expose non-zero addresses only to readers
+  // holding CAP_SYSLOG at open() time; mask to zero otherwise.
+  ASSERT_TRUE(files::WriteFile(kKptrRestrictPath, " 1 \n"));
+  {
+    std::string read_back;
+    ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &read_back));
+    EXPECT_EQ(read_back, "1\n");
+
+    fbl::unique_fd priv_kallsyms_fd(open("/proc/kallsyms", O_RDONLY | O_CLOEXEC));
+    ASSERT_THAT(priv_kallsyms_fd.get(), SyscallSucceeds());
+
+    std::optional<KernelTextBounds> bounds = ReadKernelTextBoundsFromFd(priv_kallsyms_fd.get());
+    ASSERT_TRUE(bounds.has_value());
+    ASSERT_TRUE(bounds->stext.has_value());
+    ASSERT_TRUE(bounds->etext.has_value());
+    EXPECT_NE(*bounds->stext, 0u);
+    EXPECT_GT(*bounds->etext, *bounds->stext);
+
+    // Verify open-time credential evaluation: a child without CAP_SYSLOG reading from a descriptor
+    // opened with CAP_SYSLOG still observes non-zero addresses, while opening /proc/kallsyms anew
+    // without CAP_SYSLOG masks addresses to zero.
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+      ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYSLOG));
+
+      ASSERT_THAT(lseek(priv_kallsyms_fd.get(), 0, SEEK_SET), SyscallSucceeds());
+      std::optional<KernelTextBounds> inherited_bounds =
+          ReadKernelTextBoundsFromFd(priv_kallsyms_fd.get());
+      ASSERT_TRUE(inherited_bounds.has_value());
+      ASSERT_TRUE(inherited_bounds->stext.has_value());
+      EXPECT_NE(*inherited_bounds->stext, 0u);
+
+      std::optional<KernelTextBounds> unpriv_bounds = ReadKernelTextBounds();
+      ASSERT_TRUE(unpriv_bounds.has_value());
+      ASSERT_TRUE(unpriv_bounds->stext.has_value());
+      ASSERT_TRUE(unpriv_bounds->etext.has_value());
+      EXPECT_EQ(*unpriv_bounds->stext, 0u);
+      EXPECT_EQ(*unpriv_bounds->etext, 0u);
+    });
+  }
+
+  // Mode 2: mask kernel symbol addresses to zero for all newly opened readers, including
+  // CAP_SYSLOG holders.
+  ASSERT_TRUE(files::WriteFile(kKptrRestrictPath, "2\n"));
+  {
+    std::string read_back;
+    ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &read_back));
+    EXPECT_EQ(read_back, "2\n");
+
+    fbl::unique_fd masked_kallsyms_fd(open("/proc/kallsyms", O_RDONLY | O_CLOEXEC));
+    ASSERT_THAT(masked_kallsyms_fd.get(), SyscallSucceeds());
+
+    std::optional<KernelTextBounds> bounds = ReadKernelTextBoundsFromFd(masked_kallsyms_fd.get());
+    ASSERT_TRUE(bounds.has_value());
+    ASSERT_TRUE(bounds->stext.has_value());
+    ASSERT_TRUE(bounds->etext.has_value());
+    EXPECT_EQ(*bounds->stext, 0u);
+    EXPECT_EQ(*bounds->etext, 0u);
+
+    {
+      test_helper::ForkHelper helper;
+      helper.RunInForkedProcess([] {
+        test_helper::UnsetCapabilityEffective(CAP_SYSLOG);
+        ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYSLOG));
+        std::optional<KernelTextBounds> unpriv_bounds = ReadKernelTextBounds();
+        ASSERT_TRUE(unpriv_bounds.has_value());
+        ASSERT_TRUE(unpriv_bounds->stext.has_value());
+        ASSERT_TRUE(unpriv_bounds->etext.has_value());
+        EXPECT_EQ(*unpriv_bounds->stext, 0u);
+        EXPECT_EQ(*unpriv_bounds->etext, 0u);
+      });
+    }
+
+    // Lowering kptr_restrict back to 0 does not retroactively expose addresses on a descriptor
+    // opened while kptr_restrict was 2, whereas a newly opened descriptor sees non-zero addresses.
+    ASSERT_TRUE(files::WriteFile(kKptrRestrictPath, "0\n"));
+    ASSERT_THAT(lseek(masked_kallsyms_fd.get(), 0, SEEK_SET), SyscallSucceeds());
+    std::optional<KernelTextBounds> still_masked =
+        ReadKernelTextBoundsFromFd(masked_kallsyms_fd.get());
+    ASSERT_TRUE(still_masked.has_value());
+    ASSERT_TRUE(still_masked->stext.has_value());
+    EXPECT_EQ(*still_masked->stext, 0u);
+
+    std::optional<KernelTextBounds> newly_opened = ReadKernelTextBounds();
+    ASSERT_TRUE(newly_opened.has_value());
+    ASSERT_TRUE(newly_opened->stext.has_value());
+    EXPECT_NE(*newly_opened->stext, 0u);
   }
 }
 

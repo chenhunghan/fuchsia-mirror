@@ -337,4 +337,13 @@ FFI_ALWAYS_INLINE void cpp_vm_object_set_user_stream_size(VmObject* vmo, StreamS
   vmo->SetUserStreamSize(fbl::ImportFromRawPtr(ssm));
 }
 
+FFI_ALWAYS_INLINE void cpp_vm_object_dump(VmObject* vmo, uint32_t depth, bool verbose) {
+  vmo->Dump(depth, verbose);
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_object_commit_high_priority_pages(VmObject* vmo, uint64_t offset,
+                                                                uint64_t len) {
+  vmo->CommitHighPriorityPages(offset, len);
+}
+
 }  // extern "C"

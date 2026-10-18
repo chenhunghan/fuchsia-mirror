@@ -10,7 +10,7 @@ use fuchsia_bootfs::{
     BootfsParser, BootfsParserError, zbi_bootfs_is_aligned, zbi_bootfs_page_align,
 };
 use fuchsia_component::client;
-use fuchsia_runtime::{HandleInfo, HandleType, take_startup_handle};
+use fuchsia_runtime::HandleType;
 use log::info;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -102,19 +102,14 @@ pub struct BootfsSvc {
 }
 
 impl BootfsSvc {
-    pub fn new() -> Result<Self, BootfsError> {
-        let bootfs_handle = take_startup_handle(HandleType::BootfsVmo.into())
-            .ok_or(BootfsError::InvalidHandle { handle_type: HandleType::BootfsVmo })?;
-        let bootfs = zx::Vmo::from(bootfs_handle);
+    pub fn new(bootfs_vmo: Option<zx::Vmo>) -> Result<Self, BootfsError> {
+        let bootfs =
+            bootfs_vmo.ok_or(BootfsError::InvalidHandle { handle_type: HandleType::BootfsVmo })?;
         Self::new_internal(bootfs)
     }
 
     fn new_internal(bootfs: zx::Vmo) -> Result<Self, BootfsError> {
-        let bootfs_dup = bootfs
-            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-            .map_err(BootfsError::DuplicateHandle)?
-            .into();
-        let parser = BootfsParser::create_from_vmo(bootfs_dup)?;
+        let parser = BootfsParser::create_from_vmo(&bootfs)?;
         Ok(Self {
             next_inode: FIRST_INODE_VALUE,
             parser,
@@ -157,11 +152,8 @@ impl BootfsSvc {
     ) -> Result<Vec<u8>, BootfsError> {
         for entry in self.parser.zero_copy_iter() {
             let entry = entry?;
-            assert!(entry.payload.is_none()); // Using the zero copy iterator.
             if entry.name == config_path {
-                let mut buffer = vec![0; usize::try_from(entry.size)?];
-                self.bootfs.read(&mut buffer, entry.offset).map_err(BootfsError::Vmo)?;
-                return Ok(buffer);
+                return self.bootfs.read_to_vec(entry.offset, entry.size).map_err(BootfsError::Vmo);
             }
         }
         Err(BootfsError::MissingEntry { name: config_path.to_string() })
@@ -221,15 +213,14 @@ impl BootfsSvc {
 
     // This function will iterate through all entries parsed from the Bootfs
     // VMO. A VMO is created for each entry, and the content located at the
-    // entry's offset in the Bootfs VMO is  transferred to the newly created
+    // entry's offset in the Bootfs VMO is transferred to the newly created
     // VMO. The entry VMO corresponds to a new VMO file that gets inserted into
     // the Bootfs VFS. The Bootfs VMO gets decommitted during this process.
     //
-    // Note that until https://fxbug.dev/352179816 is landed, Userboot continues
-    // to hold onto copy-on-write VMO clones of the Component Manager binary and
-    // deps backing this process, so that even when this function creates
-    // true-copy VMOs and decommits their regions, the COW VMO will still have
-    // its own copy of pages with the original content.
+    // Userboot already transfers the ranges for the Component Manager binary
+    // and its shared library dependencies into dedicated VMOs and passes them
+    // via `fuchsia.boot.Userboot/PostBootfsFiles` (`bootfs_entries`), which are
+    // inserted into `seen_ranges` below before scanning the remaining entries.
     fn ingest_bootfs_vmo(
         mut self,
         vmex: Resource,
@@ -261,7 +252,6 @@ impl BootfsSvc {
 
         for entry in self.parser.zero_copy_iter() {
             let entry = entry?;
-            assert!(entry.payload.is_none()); // Using the zero copy iterator.
 
             let vmo_range = aligned_range(entry.offset.try_into()?, entry.size.try_into()?)?;
             let vmo = match seen_ranges.get(&vmo_range) {
@@ -354,34 +344,6 @@ impl BootfsSvc {
         Ok(self)
     }
 
-    /// Publish all VMOs of a given type provided to this process through its processargs
-    /// bootstrap message. An initial index can be provided to skip handles that were already
-    /// taken.
-    pub fn publish_kernel_vmos(
-        mut self,
-        handle_type: HandleType,
-        first_index: u16,
-    ) -> Result<Self, BootfsError> {
-        info!(
-            "[BootfsSvc] Adding kernel VMOs of type {:?} starting at index {}.",
-            handle_type, first_index
-        );
-        // The first handle may not be at index 0 if we have already taken it previously.
-        let mut index = first_index;
-        loop {
-            let vmo = take_startup_handle(HandleInfo::new(handle_type, index)).map(zx::Vmo::from);
-            match vmo {
-                Some(vmo) => {
-                    index += 1;
-                    self = self.publish_kernel_vmo(vmo)?;
-                }
-                None => break,
-            }
-        }
-
-        Ok(self)
-    }
-
     pub fn create_and_bind_vfs(mut self) -> Result<(), BootfsError> {
         info!("[BootfsSvc] Finalizing rust bootfs service.");
 
@@ -454,7 +416,7 @@ mod tests {
     }
 
     fn parsed_payload(entry: &BootfsEntry) -> String {
-        String::from_utf8(entry.payload.clone().unwrap()).unwrap()
+        String::from_utf8(entry.payload.clone()).unwrap()
     }
 
     // Test that bootfs entries are all parsed into true copy VMOs and inserted
@@ -463,7 +425,11 @@ mod tests {
     async fn bootfs_is_parsed_and_decommitted() {
         let bootfs_vmo = read_file_to_vmo(BASIC_BOOTFS_UNCOMPRESSED_FILE);
         let bootfs_svc = BootfsSvc::new_internal(bootfs_vmo).unwrap();
-        let entries = bootfs_svc.parser.iter().map(|e| e.unwrap()).collect::<Vec<BootfsEntry>>();
+        let entries = bootfs_svc
+            .parser
+            .iter(&bootfs_svc.bootfs)
+            .map(|e| e.unwrap())
+            .collect::<Vec<BootfsEntry>>();
 
         // Save a copy of the Bootfs handle so we can check that this region is
         // decommitted later.
@@ -486,7 +452,7 @@ mod tests {
         for entry in &entries {
             let file = open_file_to_read(&boot_proxy, &entry.name).await;
             let contents = fuchsia_fs::file::read(&file).await.unwrap();
-            assert_eq!(entry.payload.as_ref().unwrap(), &contents);
+            assert_eq!(&entry.payload, &contents);
             // Assert that the VMO handle backing the file is a fully-owned VMO
             // (i.e. it does not have a parent VMO).
             let vmo = file.get_backing_memory(fio::VmoFlags::READ).await.unwrap().unwrap();
@@ -522,7 +488,11 @@ mod tests {
     async fn shared_bootfs_offsets() {
         let bootfs_vmo = read_file_to_vmo(BASIC_BOOTFS_UNCOMPRESSED_FILE);
         let bootfs_svc = BootfsSvc::new_internal(bootfs_vmo).unwrap();
-        let entries = bootfs_svc.parser.iter().map(|e| e.unwrap()).collect::<Vec<BootfsEntry>>();
+        let entries = bootfs_svc
+            .parser
+            .iter(&bootfs_svc.bootfs)
+            .map(|e| e.unwrap())
+            .collect::<Vec<BootfsEntry>>();
 
         // `entry1` is just an empty file, so the offset for this entry is the
         // same as `entry2`, even if the entry.size of `entry1` is 0 and the
@@ -566,7 +536,11 @@ mod tests {
     async fn shared_bootfs_ranges() {
         let bootfs_vmo = read_file_to_vmo(BASIC_BOOTFS_UNCOMPRESSED_FILE);
         let bootfs_svc = BootfsSvc::new_internal(bootfs_vmo).unwrap();
-        let entries = bootfs_svc.parser.iter().map(|e| e.unwrap()).collect::<Vec<BootfsEntry>>();
+        let entries = bootfs_svc
+            .parser
+            .iter(&bootfs_svc.bootfs)
+            .map(|e| e.unwrap())
+            .collect::<Vec<BootfsEntry>>();
 
         // `entry1` and `entry2` share the same parsed VMO offset and size under
         // different named entries.
@@ -617,7 +591,11 @@ mod tests {
         let bootfs_vmo = read_file_to_vmo(BASIC_BOOTFS_UNCOMPRESSED_FILE);
         let bootfs_vmo_handle = bootfs_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
         let bootfs_svc = BootfsSvc::new_internal(bootfs_vmo).unwrap();
-        let entries = bootfs_svc.parser.iter().map(|e| e.unwrap()).collect::<Vec<BootfsEntry>>();
+        let entries = bootfs_svc
+            .parser
+            .iter(&bootfs_svc.bootfs)
+            .map(|e| e.unwrap())
+            .collect::<Vec<BootfsEntry>>();
 
         // `entry1` and `entry2` share the same parsed VMO offset and size under
         // different named entries.

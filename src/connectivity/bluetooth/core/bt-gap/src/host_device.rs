@@ -210,6 +210,7 @@ impl HostDevice {
         .map_ok(|v| v.into_iter().flatten().collect())
     }
 
+    /// Sets whether the host is connectable to other devices.
     pub fn set_connectable(&self, value: bool) -> impl Future<Output = types::Result<()>> + use<> {
         self.0.proxy.set_connectable(value).map(from_fidl_result)
     }
@@ -379,8 +380,17 @@ impl HostDevice {
         let proxy = self.0.proxy.clone();
         let info = proxy.watch_state().await?;
         let info: HostInfo = info.try_into()?;
+        let mut current = self.0.info.write();
+        if info.id != current.id || info.addresses.first() != current.addresses.first() {
+            return Err(format_err!(
+                "Host {} ({:?}) reported changed identity in WatchState: {info:?}",
+                current.id,
+                current.addresses
+            )
+            .into());
+        }
         debug!("HostDevice::refresh_host_info: {:?}", info);
-        self.0.info.write().update(info.clone());
+        current.update(info.clone());
         Ok(info)
     }
 

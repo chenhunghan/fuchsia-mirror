@@ -27,22 +27,15 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 go_library("mdns") {
   sources = [ "mdns.go" ]
+  visibility = [
+    ":*",
+    "//tools/*",
+  ]
   deps = [
     "//third_party/golibs:golang.org/x/net/ipv4",
     "//third_party/golibs:golang.org/x/net/ipv6",
     "//tools/lib/logger",
   ]
-}
-go_test("mdns_tests") {
-  sources = [ "mdns_test.go" ]
-  embed = [ ":mdns" ]
-  deps = [ "//third_party/golibs:github.com/google/go-cmp/cmp" ]
 }

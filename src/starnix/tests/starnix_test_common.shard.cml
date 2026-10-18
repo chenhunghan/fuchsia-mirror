@@ -26,7 +26,7 @@
         },
         {
             name: "netstack",
-            url: "netstack#meta/netstack.cm",
+            url: "netstack#meta/netstack3.cm",
         },
         {
             name: "network-tun",
@@ -247,6 +247,12 @@
             protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "#cobalt",
             to: [ "#timekeeper" ],
+        },
+        {
+            config: "fuchsia.time.config.TimeSourceEndpointUrl",
+            from: "void",
+            to: [ "#timekeeper" ],
+            availability: "optional",
         },
     ],
     environments: [

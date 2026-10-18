@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use diagnostics_data::{BuilderArgs, LogsDataBuilder, LogsProperty, Severity};
 use error::LogError;
 use fdomain_client::fidl::Proxy;
-use fdomain_fuchsia_diagnostics::{LogSettingsMarker, LogSettingsProxy, StreamParameters};
-use fdomain_fuchsia_diagnostics_host::ArchiveAccessorMarker;
+use fdomain_fuchsia_diagnostics::{
+    ArchiveAccessorMarker, LogSettingsMarker, LogSettingsProxy, StreamParameters,
+};
+use fdomain_fuchsia_diagnostics_host as fhost;
 use fdomain_fuchsia_sys2::RealmQueryProxy;
 use ffx_config::EnvironmentContext;
 use ffx_log_args::LogCommand;
@@ -154,8 +156,46 @@ async fn connect_to_rcs(
     rcs_connector.try_connect_indefinitely(|_target, _err| Ok(())).await
 }
 
-// TODO(https://fxbug.dev/42080003): Remove this once Overnet
-// has support for reconnect handling.
+trait ArchiveAccessorConnector: fdomain_client::fidl::DiscoverableProtocolMarker {
+    async fn stream_diagnostics(
+        proxy: &Self::Proxy,
+        params: &StreamParameters,
+        socket: fdomain_client::Socket,
+    ) -> Result<(), fidl::Error>;
+}
+
+impl ArchiveAccessorConnector for ArchiveAccessorMarker {
+    async fn stream_diagnostics(
+        proxy: &Self::Proxy,
+        params: &StreamParameters,
+        socket: fdomain_client::Socket,
+    ) -> Result<(), fidl::Error> {
+        proxy.stream_diagnostics_to_socket(params, socket).await
+    }
+}
+
+impl ArchiveAccessorConnector for fhost::ArchiveAccessorMarker {
+    async fn stream_diagnostics(
+        proxy: &Self::Proxy,
+        params: &StreamParameters,
+        socket: fdomain_client::Socket,
+    ) -> Result<(), fidl::Error> {
+        proxy.stream_diagnostics(params, socket).await
+    }
+}
+
+async fn connect_and_stream<P: ArchiveAccessorConnector>(
+    rcs_client: &RemoteControlProxyHolder,
+    params: &StreamParameters,
+) -> Result<fdomain_client::Socket, LogError> {
+    let diagnostics_client = rcs::toolbox::connect_with_timeout::<P>(rcs_client, TIMEOUT)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let (local, remote) = rcs_client.domain().create_stream_socket();
+    P::stream_diagnostics(&diagnostics_client, params, remote).await?;
+    Ok(local)
+}
+
 async fn connect_to_target(
     stream_mode: &mut fdomain_fuchsia_diagnostics::StreamMode,
     prev_boot_id: Option<u64>,
@@ -185,32 +225,25 @@ async fn connect_to_target(
         }
         _ => false,
     };
-    // Connect to ArchiveAccessor
-    let diagnostics_client =
-        rcs::toolbox::connect_with_timeout::<ArchiveAccessorMarker>(&rcs_client, TIMEOUT)
-            .await
-            .map_err(anyhow::Error::from)?;
     // Connect to LogSettings
     let log_settings_client =
         rcs::toolbox::connect_with_timeout::<LogSettingsMarker>(&rcs_client, TIMEOUT)
             .await
             .map_err(anyhow::Error::from)?;
     // Setup stream
-    let (local, remote) = rcs_client.domain().create_stream_socket();
-    diagnostics_client
-        .stream_diagnostics(
-            &StreamParameters {
-                data_type: Some(fdomain_fuchsia_diagnostics::DataType::Logs),
-                stream_mode: Some(*stream_mode),
-                format: Some(fdomain_fuchsia_diagnostics::Format::Json),
-                client_selector_configuration: Some(
-                    fdomain_fuchsia_diagnostics::ClientSelectorConfiguration::SelectAll(true),
-                ),
-                ..Default::default()
-            },
-            remote,
-        )
-        .await?;
+    let params = StreamParameters {
+        data_type: Some(fdomain_fuchsia_diagnostics::DataType::Logs),
+        stream_mode: Some(*stream_mode),
+        format: Some(fdomain_fuchsia_diagnostics::Format::Json),
+        client_selector_configuration: Some(
+            fdomain_fuchsia_diagnostics::ClientSelectorConfiguration::SelectAll(true),
+        ),
+        ..Default::default()
+    };
+    let local = match connect_and_stream::<ArchiveAccessorMarker>(&rcs_client, &params).await {
+        Ok(socket) => socket,
+        Err(_) => connect_and_stream::<fhost::ArchiveAccessorMarker>(&rcs_client, &params).await?,
+    };
     Ok(DeviceConnection {
         boot_timestamp,
         log_socket: local,
@@ -241,11 +274,8 @@ where
     };
     let disable_reconnect = cmd.disable_reconnect();
     let mut stream_mode = get_stream_mode(cmd.clone())?;
-    // TODO(https://fxbug.dev/42080003): Add support for reconnect handling to Overnet.
     // This plugin needs special logic to handle reconnects as logging should tolerate
     // a device rebooting and remaining in a consistent state (automatically) after the reboot.
-    // Eventually we should have direct support for this in Overnet, but for now we have to
-    // handle reconnects manually.
     let mut prev_boot_id = None;
     let is_ai = is_invoked_by_agent(&env);
     loop {
@@ -983,6 +1013,7 @@ ffx log --force-set-severity.
             // didn't have that field.
             boot_id: None,
             send_connected_event: true,
+            use_legacy_archive_accessor: true,
             ..Default::default()
         })
         .await;
@@ -1405,5 +1436,103 @@ ffx log --force-set-severity.
         let stdout = buffers.into_stdout_str();
         assert!(stdout.contains("log from archivist"));
         assert!(!stdout.contains("log from pipeline"));
+    }
+
+    #[fuchsia::test]
+    async fn logger_dump_sorts_out_of_order_logs() {
+        Box::pin(logger_dump_test(
+            TestEnvironmentConfig {
+                messages: vec![
+                    testing_utils::test_log(1_300_000_000),
+                    testing_utils::test_log(1_100_000_000),
+                    testing_utils::test_log(1_200_000_000),
+                ],
+                ..Default::default()
+            },
+            LogCommand::default(),
+            concat!(
+                "[00001.100000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00001.200000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00001.300000][ffx] INFO: Hello world!\u{1b}[m\n",
+            ),
+        ))
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn logger_dump_does_not_reorder_bogus_timestamps() {
+        Box::pin(logger_dump_test(
+            TestEnvironmentConfig {
+                messages: vec![
+                    testing_utils::test_log(10_000_000_000),
+                    testing_utils::test_log(999_000_000_000),
+                    testing_utils::test_log(999_100_000_000),
+                    testing_utils::test_log(10_200_000_000),
+                    testing_utils::test_log(10_100_000_000),
+                    testing_utils::test_log(1_000_000_000),
+                    testing_utils::test_log(10_300_000_000),
+                ],
+                ..Default::default()
+            },
+            LogCommand::default(),
+            concat!(
+                "[00010.000000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00999.000000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00999.100000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "\u{1b}[38;5;6m[00010.100000]\u{1b}[m[ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00010.200000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "\u{1b}[38;5;6m[00001.000000]\u{1b}[m[ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00010.300000][ffx] INFO: Hello world!\u{1b}[m\n",
+            ),
+        ))
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn logger_watch_highlights_out_of_order_timestamps() {
+        let mut environment = TestEnvironment::new(TestEnvironmentConfig {
+            messages: vec![
+                testing_utils::test_log(1_300_000_000),
+                testing_utils::test_log(1_100_000_000),
+                testing_utils::test_log(1_200_000_000),
+                testing_utils::test_log(1_400_000_000),
+                testing_utils::test_log(999_000_000_000),
+                testing_utils::test_log(999_100_000_000),
+                testing_utils::test_log(5_500_000_000),
+                testing_utils::test_log(5_400_000_000),
+                testing_utils::test_log(5_600_000_000),
+            ],
+            ..Default::default()
+        })
+        .await;
+        let cmd = LogCommand {
+            sub_command: Some(LogSubCommand::Watch(RawWatchCommand::default())),
+            filters: LogFilterArgs { symbolize: Some(SymbolizeMode::Off), ..Default::default() },
+            ..LogCommand::default()
+        };
+        let rcs_connector = environment.rcs_connector().await;
+        let tool = LogTool { cmd, rcs_connector, context: environment.environment_context() };
+        let buffers = TestBuffers::default();
+        let writer = CommandOutputMachineWriter::new_test(None, &buffers);
+        let mut event_stream = environment.take_event_stream().unwrap();
+
+        let _result = fasync::Task::local(tool.main_no_timestamp(writer));
+        check_for_message(
+            &buffers,
+            concat!(
+                "[00001.300000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "\u{1b}[38;5;6m[00001.100000]\u{1b}[m[ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00001.200000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00001.400000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00999.000000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00999.100000][ffx] INFO: Hello world!\u{1b}[m\n",
+                "\u{1b}[38;5;6m[00005.500000]\u{1b}[m[ffx] INFO: Hello world!\u{1b}[m\n",
+                "\u{1b}[38;5;6m[00005.400000]\u{1b}[m[ffx] INFO: Hello world!\u{1b}[m\n",
+                "[00005.600000][ffx] INFO: Hello world!\u{1b}[m\n",
+            ),
+        )
+        .await;
+        environment.disconnect_target();
+        assert_matches!(event_stream.next().await, Some(TestEvent::LogSettingsClosed));
     }
 }

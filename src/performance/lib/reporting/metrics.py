@@ -27,15 +27,15 @@ from typing import (
     Any,
     Callable,
     NotRequired,
+    ReadOnly,
     Self,
-    TypeAlias,
     TypedDict,
 )
 
 _LOGGER: logging.Logger = logging.getLogger("Reporting")
 
-JSON: TypeAlias = (
-    Mapping[str, "JSON"] | Sequence["JSON"] | str | int | float | bool | None
+type JSON = (
+    Mapping[str, JSON] | Sequence[JSON] | str | int | float | bool | None
 )
 
 
@@ -71,18 +71,18 @@ class Unit(enum.Enum):
 class MetricDescription(TypedDict):
     """Describes a single metric."""
 
-    name: str
-    doc: str
+    name: ReadOnly[str]
+    doc: ReadOnly[str]
 
 
 class MetricsProcessorDescription(TypedDict):
     """Documents a single metrics processor."""
 
-    classname: NotRequired[str]
-    doc: str
-    code_path: str
-    line_no: int
-    metrics: list[MetricDescription]
+    classname: NotRequired[ReadOnly[str]]
+    doc: ReadOnly[str]
+    code_path: ReadOnly[str]
+    line_no: ReadOnly[int]
+    metrics: ReadOnly[Sequence[MetricDescription]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,7 +133,7 @@ class TestCaseResult:
 
     @staticmethod
     def write_fuchsiaperf_json(
-        results: Collection["TestCaseResult"],
+        results: Collection[TestCaseResult],
         test_suite: str,
         output_path: pathlib.Path,
     ) -> None:
@@ -157,17 +157,17 @@ class TestCaseResult:
 class SuiteDescription(TypedDict):
     """Description of a test suite class."""
 
-    test_suite: str
-    test_class: str
-    doc: str
-    code_path: str
-    line_no: int
+    test_suite: ReadOnly[str]
+    test_class: ReadOnly[str]
+    doc: ReadOnly[str]
+    code_path: ReadOnly[str]
+    line_no: ReadOnly[int]
 
 
 class SuiteDocumentation(SuiteDescription):
     """Documentation for a test suite, including code that generates metrics."""
 
-    metrics_processors: list[MetricsProcessorDescription]
+    metrics_processors: ReadOnly[Sequence[MetricsProcessorDescription]]
 
 
 @dataclasses.dataclass
@@ -200,9 +200,9 @@ class Report:
 class CallableDescription(TypedDict):
     """Documentation for a callable used to generate metrics."""
 
-    doc: str
-    code_path: str
-    line_no: int
+    doc: ReadOnly[str]
+    code_path: ReadOnly[str]
+    line_no: ReadOnly[int]
 
 
 def describe_callable(c: Callable[..., Any]) -> CallableDescription:

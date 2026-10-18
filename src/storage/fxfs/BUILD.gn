@@ -59,6 +59,7 @@ fxfs_deps = [
   "//third_party/rust_crates:rustc-hash",
   "//third_party/rust_crates:scopeguard",
   "//third_party/rust_crates:serde",
+  "//third_party/rust_crates:smallvec",
   "//third_party/rust_crates:static_assertions",
   "//third_party/rust_crates:thiserror",
   "//third_party/rust_crates:uuid",
@@ -68,6 +69,7 @@ fxfs_deps = [
 fxfs_test_deps = [
   "//src/lib/fuchsia",
   "//src/lib/mundane",
+  "//src/lib/test_util",
   "//src/storage/crypt/fxfs/common:lib",
   "//src/storage/fxfs/crypto/insecure",
   "//third_party/rust_crates:test-case",
@@ -396,7 +398,6 @@ group("tests") {
     "//src/storage/fxfs/benches:tests",
     "//src/storage/fxfs/test:tests",
     "//src/storage/fxfs/tools:tests",
-    "//src/storage/fxfs/trace:tests",
     "//src/storage/fxfs/unicode:tests",
   ]
 }

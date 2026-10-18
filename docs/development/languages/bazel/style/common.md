@@ -1,4 +1,4 @@
-# Common Bazel style guide and best practices
+# Common style and best practices
 
 [TOC]
 
@@ -20,6 +20,44 @@ by considering whether the lists are substantially similar or merely share a
 few common items.
 
 **No subtraction**: Never remove an item from a list variable.
+
+## Do not use glob() {:#do-not-use-glob}
+
+Do NOT use `glob()` _\[<span style="color:red">SHAC error</span>\]_. List
+files explicitly instead.
+
+`fx build` runs Bazel from Ninja actions, and Ninja only tracks the files a
+`glob()` matched the last time it ran. If you add a file that a `glob()` would
+now match, Ninja doesn't notice. Incremental builds and `fx test` runs then keep
+using the old file list. When files are listed explicitly, adding a file means
+editing a `BUILD.bazel` file, which Ninja does track.
+
+This rule is specific to Fuchsia. The official Bazel style guide allows
+non-recursive globs, and they may be allowed again once Bazel no longer runs
+inside Ninja.
+
+Existing uses of `glob()` are listed in `build/bazel/shac/glob_allowlist.json`
+at the root of each repository that runs the check (for example,
+`//build/bazel/shac/glob_allowlist.json` and
+`//vendor/google/build/bazel/shac/glob_allowlist.json`). Don't add new entries
+without approval from the Build team. Upstream code under `third_party/`
+directories is not checked.
+
+### Never use recursive globs {:#never-use-recursive-globs}
+
+Do NOT use recursive globs (`**`)
+_\[<span style="color:red">SHAC error</span>\]_ in any Bazel code, whether or
+not Ninja is involved. The official Bazel style guide
+[forbids recursive globs for source files][bazel-official-build-style-recursive-globs]{:.external}.
+They skip subdirectories that contain their own `BUILD.bazel` file, so it's
+hard to tell which files they match. They also cache and parallelize worse than
+a `BUILD.bazel` file in each directory.
+
+The only exceptions are specific cases for third-party libraries and other
+repositories, such as `//vendor/...` repositories, where it isn't practical to
+list every path. Outside `third_party/` directories, these still need an
+entry in `build/bazel/shac/recursive_glob_allowlist.json`, which is separate from
+the `glob()` allowlist.
 
 ## Visibility
 
@@ -52,7 +90,7 @@ target is used within five immediate subdirectories of `//src`, consider using
 use is added. However, if, for example, the target should only be used by
 drivers, limit it to packages that implement drivers.
 
-### Use package groups for common non-trivial visibility definitions
+### Use package groups for common non-trivial visibility definitions {:#use-package-groups-for-common-non-trivial-visibility-definitions}
 
 If the `visibility` of multiple targets should be restricted to the same set of
 labels, consider representing that set with a
@@ -196,6 +234,7 @@ to avoid the escaping.
 
 [bazel-official-build-style-no-dep-vars]: https://bazel.build/build/style-guide#no-dep-vars
 [bazel-official-build-style-python-diff]: https://bazel.build/build/style-guide#differences-python-style-guide
+[bazel-official-build-style-recursive-globs]: https://bazel.build/build/style-guide#recursive
 [bazel-official-build-style-visibility]: https://bazel.build/build/style-guide#visibility
 [bazel-package-group]: https://bazel.build/reference/be/functions#package_group
 [do-not-use-fuchsia-bazel-sdk-paths]: #do-not-use-fuchsia-bazel-sdk-paths

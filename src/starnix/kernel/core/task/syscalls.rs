@@ -671,8 +671,7 @@ pub fn sys_sched_getscheduler(current_task: &CurrentTask, pid: pid_t) -> Result<
 
     let target_task = get_task_or_current(current_task, pid)?;
     security::check_task_getscheduler_access(current_task, target_task.as_ref())?;
-    let current_scheduler_state = target_task.read().scheduler_state;
-    Ok(current_scheduler_state.policy_for_sched_getscheduler())
+    Ok(target_task.read().scheduler_state.policy_for_sched_getscheduler())
 }
 
 pub fn sys_sched_setscheduler(
@@ -695,7 +694,7 @@ pub fn sys_sched_setscheduler(
         policy.realtime_priority_from(current_task.read_object(param)?.sched_priority)?;
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state;
+    let current_state = target_task.read().scheduler_state.clone();
 
     // Check capabilities and permissions, if required, for the operation.
     let euid_friendly = current_task.is_euid_friendly_with(&target_task);
@@ -855,7 +854,7 @@ pub fn sys_sched_setparam(
     let target_task = get_task_or_current(current_task, pid)?;
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state;
+    let current_state = target_task.read().scheduler_state.clone();
 
     let realtime_priority = current_state
         .policy
@@ -1010,10 +1009,13 @@ pub fn sys_prctl(
             if arg2 != 0 && arg2 != 1 {
                 return error!(EINVAL);
             }
+            // Per PR_SET_KEEPCAPS(2const):
+            //   EPERM: The caller's SECBIT_KEEP_CAPS_LOCKED flag is set.
+            if current_task.current_creds().securebits.contains(SecureBits::KEEP_CAPS_LOCKED) {
+                return error!(EPERM);
+            }
             let mut creds = Credentials::clone(&current_task.current_creds());
-            let mut securebits = creds.securebits;
-            securebits.set(SecureBits::KEEP_CAPS, arg2 != 0);
-            creds.set_securebits(securebits)?;
+            creds.securebits.set(SecureBits::KEEP_CAPS, arg2 != 0);
             current_task.set_creds(creds);
             Ok(().into())
         }
@@ -1063,10 +1065,9 @@ pub fn sys_prctl(
         PR_SET_SECUREBITS => {
             security::check_task_capable(current_task, CAP_SETPCAP)?;
 
-            let securebits = SecureBits::from_bits(arg2 as u32).ok_or_else(|| {
-                track_stub!(TODO("https://fxbug.dev/322875244"), "PR_SET_SECUREBITS", arg2);
-                errno!(ENOSYS)
-            })?;
+            // Observed: Linux returns EPERM (not EINVAL) when unrecognized bits are set in flags.
+            let flags = u32::try_from(arg2).map_err(|_| errno!(EPERM))?;
+            let securebits = SecureBits::from_bits(flags).ok_or_else(|| errno!(EPERM))?;
 
             let mut creds = Credentials::clone(&current_task.current_creds());
             creds.set_securebits(securebits)?;
@@ -1625,7 +1626,7 @@ pub fn sys_setpriority(
     let normal_priority = NormalPriority::from_setpriority_syscall(priority);
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state;
+    let current_state = target_task.read().scheduler_state.clone();
 
     // Check capabilities and permissions, if required, for the operation.
     let euid_friendly = current_task.is_euid_friendly_with(&target_task);
@@ -1709,13 +1710,20 @@ pub fn sys_unshare(current_task: &CurrentTask, flags: u32) -> Result<(), Errno> 
 pub fn sys_swapon(
     current_task: &CurrentTask,
     user_path: UserCString,
-    _flags: i32,
+    flags: u32,
 ) -> Result<(), Errno> {
     const MAX_SWAPFILES: usize = 32; // See https://man7.org/linux/man-pages/man2/swapon.2.html
+    const SWAP_FLAGS_VALID: u32 = 0x7ffff; // Defined in include/linux/swap.h
+
+    if (flags & !SWAP_FLAGS_VALID) != 0 {
+        return error!(EINVAL);
+    }
 
     security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
 
-    track_stub!(TODO("https://fxbug.dev/322893905"), "swapon validate flags");
+    if flags != 0 {
+        track_stub!(TODO("https://fxbug.dev/322893905"), "swapon flags", flags);
+    }
 
     let path = current_task.read_path(user_path)?;
     let file = current_task.open_file(path.as_ref(), OpenFlags::RDWR)?;

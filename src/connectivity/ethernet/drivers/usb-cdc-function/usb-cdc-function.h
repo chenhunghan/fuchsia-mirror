@@ -115,6 +115,8 @@ class UsbCdcFunction : public fdf::DriverBase2,
                  SetActiveCompleter::Sync &completer) override;
   void GetMac(fdf::Arena &arena, GetMacCompleter::Sync &completer) override;
   void Removed(fdf::Arena &arena, RemovedCompleter::Sync &completer) override;
+  void GetPowerDependencyToken(fdf::Arena &arena,
+                               GetPowerDependencyTokenCompleter::Sync &completer) override;
 
   // MacAddr protocol:
   void GetAddress(fdf::Arena &arena, GetAddressCompleter::Sync &completer) override;
@@ -154,6 +156,7 @@ class UsbCdcFunction : public fdf::DriverBase2,
   usb_inspect::ThroughputTracker &GetThroughputTrackerForTesting() { return *throughput_tracker_; }
 
  private:
+  friend class UsbCdcTestHelper;
   struct SetConfiguredSharedState;
   struct SetInterfaceSharedState;
   void CancelSetInterface();
@@ -191,14 +194,6 @@ class UsbCdcFunction : public fdf::DriverBase2,
   fidl::Client<fuchsia_hardware_usb_function::UsbFunction> async_function_;
   std::string mac_addr_string_;
   fdf::WireClient<fuchsia_hardware_network_driver::NetworkDeviceIfc> netdevice_ifc_;
-
-  std::optional<inspect::ComponentInspector> inspector_;
-  inspect::Node inspect_node_;
-  inspect::BoolProperty online_property_;
-  usb_inspect::EndpointInspect bulk_in_inspect_;
-  usb_inspect::EndpointInspect bulk_out_inspect_;
-
-  std::optional<usb_inspect::ThroughputTracker> throughput_tracker_;
 
   compat::SyncInitializedDeviceServer child_;
   std::shared_ptr<fdf::Namespace> incoming_;
@@ -355,6 +350,14 @@ class UsbCdcFunction : public fdf::DriverBase2,
               .b_interval = 0,
           },
   };
+
+  std::optional<inspect::ComponentInspector> inspector_;
+  inspect::Node inspect_node_;
+  usb_inspect::FunctionDriverInspect function_inspect_;
+  usb_inspect::EndpointInspect bulk_in_inspect_;
+  usb_inspect::EndpointInspect bulk_out_inspect_;
+  usb_inspect::EndpointInspect intr_inspect_;
+  std::optional<usb_inspect::ThroughputTracker> throughput_tracker_;
 };
 
 }  // namespace usb_cdc_function

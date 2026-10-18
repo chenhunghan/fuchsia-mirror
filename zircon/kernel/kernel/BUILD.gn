@@ -17,12 +17,12 @@ source_set("kernel") {
     "brwlock.cc",
     "cpu_distance_map.cc",
     "cpu_search_set.cc",
-    "deadline.cc",
     "debug.cc",
     "dpc.cc",
     "event.cc",
     "event_ffi.cc",
     "idle_power_thread.cc",
+    "idle_power_thread_ffi.cc",
     "init.cc",
     "interrupt_ffi.cc",
     "koid_ffi.cc",
@@ -34,14 +34,14 @@ source_set("kernel") {
     "owned_wait_queue_ffi.cc",
     "owned_wait_queue_pool.cc",
     "percpu.cc",
-    "recurring_callback.cc",
     "restricted_ffi.cc",
     "rppm_ffi.cc",
     "scheduler.cc",
-    "scheduler_ffi.cc",
     "scheduler_pi.cc",
     "scheduler_state.cc",
+    "scheduler_state_ffi.cc",
     "semaphore.cc",
+    "semaphore_ffi.cc",
     "stats_ffi.cc",
     "task_runtime_stats.cc",
     "thread.cc",
@@ -98,6 +98,7 @@ library_headers("headers") {
 source_set("tests") {
   testonly = true
   sources = [
+    "idle_power_thread_tests.cc",
     "intensive_thread_test.cc",
     "mutex_tests.cc",
     "semaphore_tests.cc",
@@ -249,42 +250,217 @@ kernel_bindgen_crate("thread-lock-guard-bindings") {
   raw_lines = [ "#![no_std]" ]
 }
 
+kernel_bindgen_crate("wait-queue-bindings") {
+  visibility = [ "//zircon/kernel/*" ]
+  headers = [ "//zircon/kernel/include/kernel/wait.h" ]
+  non_rust_deps = [ ":kernel" ]
+  cpp = true
+
+  notice_year = 2026
+  function_allowlist = [ "cpp_wait_queue_.*" ]
+  type_allowlist = [
+    "ResourceOwnership",
+    "Interruptible",
+    "ForceInheritance",
+    "WaitQueueCollection",
+    "WaitQueueCollection::ThreadState",
+    "WaitQueueCollection_ThreadState",
+    "WaitQueueBase",
+    "WaitQueue",
+    "SchedulerState::EffectiveProfile",
+    "SchedulerState_EffectiveProfile",
+    "SchedulerState::WaitQueueInheritedSchedulerState",
+    "SchedulerState_WaitQueueInheritedSchedulerState",
+  ]
+  var_allowlist = [ "WaitQueue_kMagic" ]
+  var_blocklist = [ "WaitQueueCollection_kPrimaryKeyZero" ]
+  opaque_types = [
+    "SchedulerState::EffectiveProfile",
+    "SchedulerState_EffectiveProfile",
+    "SchedulerState::WaitQueueInheritedSchedulerState",
+    "SchedulerState_WaitQueueInheritedSchedulerState",
+  ]
+  rustified_enum = [
+    "ResourceOwnership",
+    "Interruptible",
+    "ForceInheritance",
+  ]
+  type_blocklist = [
+    "Deadline",
+    "Thread",
+    "Timer",
+    "WaitQueueCollection_BlockedThreadTreeTraits",
+    "WaitQueueCollection_MinRelativeDeadlineTraits.*",
+    "WaitQueueCollection_PrimaryKey",
+    "WaitQueueCollection_Key",
+    "WaitQueueBase_.*",
+    "WaitQueue_.*",
+    "SchedDuration",
+    "zx_instant_mono_t",
+    "zx_status_t",
+  ]
+  function_blocklist = [
+    "WaitQueueCollection_.*",
+    "WaitQueueBase_.*",
+    "WaitQueue_.*",
+    "SchedulerState_EffectiveProfile_.*",
+    "SchedulerState_WaitQueueInheritedSchedulerState_.*",
+  ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [ "//sdk/rust/zx-types" ]
+  expect_lints = [
+    "non_camel_case_types",
+    "non_upper_case_globals",
+  ]
+  raw_lines = [
+    "#![no_std]",
+    "pub use zx_types::{zx_duration_mono_t as SchedDuration, zx_instant_mono_t, zx_status_t};",
+    "pub use zx_types::zx_instant_mono_t as WaitQueueCollection_PrimaryKey;",
+    "pub type Deadline = core::ffi::c_void;",
+    "pub type Thread = core::ffi::c_void;",
+    "pub type Timer = core::ffi::c_void;",
+  ]
+}
+
+kernel_bindgen_crate("owned-wait-queue-bindings") {
+  visibility = [ "//zircon/kernel/*" ]
+  headers = [ "//zircon/kernel/include/kernel/owned_wait_queue.h" ]
+  non_rust_deps = [ ":kernel" ]
+  cpp = true
+
+  notice_year = 2026
+  function_allowlist = [
+    "cpp_owned_wait_queue_.*",
+    "cpp_thread_unblock_list_.*",
+  ]
+  type_allowlist = [
+    "WaitQueueBase",
+    "OwnedWaitQueue",
+    "OwnedWaitQueue::BAAOLockingDetails",
+    "OwnedWaitQueue_BAAOLockingDetails",
+    "OwnedWaitQueue::WakeThreadsResult",
+    "OwnedWaitQueue_WakeThreadsResult",
+    "OwnedWaitQueue::WakeOption",
+    "OwnedWaitQueue_WakeOption",
+    "ResourceOwnership",
+    "Interruptible",
+    "ForceInheritance",
+    "Result",
+    "SchedulerState::EffectiveProfile",
+    "SchedulerState_EffectiveProfile",
+    "Thread::UnblockList",
+    "Thread_UnblockList",
+  ]
+  var_allowlist = [ "OwnedWaitQueue_kOwnedMagic" ]
+  var_blocklist = [
+    "OwnedWaitQueue_AddSingleEdgeOp",
+    "OwnedWaitQueue_RemoveSingleEdgeOp",
+    "OwnedWaitQueue_BaseProfileChangedOp",
+    "OwnedWaitQueue_default_wake_hooks_",
+  ]
+  opaque_types = [
+    "WaitQueueBase",
+    "SchedulerState::EffectiveProfile",
+    "SchedulerState_EffectiveProfile",
+    "Thread::UnblockList",
+    "Thread_UnblockList",
+  ]
+  rustified_enum = [
+    "OwnedWaitQueue::WakeOption",
+    "OwnedWaitQueue_WakeOption",
+    "ResourceOwnership",
+    "Interruptible",
+    "ForceInheritance",
+    "Result",
+  ]
+  type_blocklist = [
+    "WaitQueueBase_.*",
+    "OwnedWaitQueue_IWakeRequeueHook",
+    "OwnedWaitQueue_ReplaceOwnerLockingDetails",
+    "OwnedWaitQueue_WakeRequeueThreadDetails",
+    "OwnedWaitQueue_RequeueLockingDetails",
+    "OwnedWaitQueue_PropagateOp",
+    "OwnedWaitQueue_PropagateOpTag",
+    "OwnedWaitQueue_DefaultWakeHooks",
+    "OwnedWaitQueue_LockingBehavior",
+    "Deadline",
+    "SchedulerState_BaseProfile",
+    "SchedulerState_WaitQueueInheritedSchedulerState",
+    "Thread",
+    "zx_status_t",
+  ]
+  function_blocklist = [
+    "WaitQueueBase_.*",
+    "OwnedWaitQueue_.*",
+    "SchedulerState_EffectiveProfile_.*",
+  ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [ "//sdk/rust/zx-types" ]
+  expect_lints = [
+    "non_camel_case_types",
+    "non_upper_case_globals",
+  ]
+  raw_lines = [
+    "#![no_std]",
+    "pub use zx_types::zx_status_t;",
+    "pub type Deadline = core::ffi::c_void;",
+    "pub type Thread = core::ffi::c_void;",
+    "pub type SchedulerState_BaseProfile = core::ffi::c_void;",
+    "pub type SchedulerState_WaitQueueInheritedSchedulerState = core::ffi::c_void;",
+  ]
+}
+
 kernel_rust_mod("kernel-rs") {
   output_name = "kernel"
   source_root = "mod.rs"
+
   sources = [
     "align.rs",
     "bits.rs",
     "deadline.rs",
     "event.rs",
+    "idle_power_thread.rs",
     "interrupt.rs",
     "koid.rs",
+    "lock_trace.rs",
     "mod.rs",
     "mp.rs",
     "owned_wait_queue.rs",
     "percpu.rs",
+    "recurring_callback.rs",
     "relaxed_atomic.rs",
     "restricted.rs",
     "restricted_state.rs",
     "scheduler.rs",
     "scheduler_state.rs",
+    "semaphore.rs",
+    "spin_tracing.rs",
     "stats.rs",
     "thread.rs",
     "timer.rs",
     "types.rs",
+    "wait_queue.rs",
   ]
   deps = [
     ":event-bindings",
+    ":owned-wait-queue-bindings",
     ":percpu-bindings",
     ":thread-lock-guard-bindings",
+    ":wait-queue-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
+    "//src/lib/ffl",
     "//src/lib/kalloc",
+    "//src/lib/kstring",
     "//src/lib/ksync",
+    "//src/lib/lockdep/rust:lockdep",
     "//src/lib/zr",
     "//third_party/rust_crates:paste",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/backtrace:backtrace-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/kconcurrent:kconcurrent_rs",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",
     "//zircon/system/ulib/fbl/rust:fbl",

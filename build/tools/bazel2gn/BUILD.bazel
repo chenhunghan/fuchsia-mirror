@@ -13,8 +13,10 @@ go_library(
     name = "bazel2gn_lib",
     srcs = [
         "bazel2gn.go",
+        "compiled_action.go",
         "constants.go",
         "genrule.go",
+        "rust_check_cfg.go",
         "rustenv.go",
         "select.go",
         "tags.go",
@@ -48,8 +50,10 @@ host_go_test(
     name = "bazel2gn_tests",
     srcs = [
         "bazel2gn_test.go",
+        "compiled_action_test.go",
         "constants_test.go",
         "genrule_test.go",
+        "rust_check_cfg_test.go",
         "rustenv_test.go",
         "select_test.go",
         "tags_test.go",

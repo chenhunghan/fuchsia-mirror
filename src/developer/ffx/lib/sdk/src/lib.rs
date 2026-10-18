@@ -120,9 +120,6 @@ pub struct FfxToolFiles {
 /// atom collection is used to locate the host and companion tools. This is done to avoid building
 ///  the complete IDK and results in dramatically reduced build times for common developer workflows.
 ///  When using SdkRoot in-tree, the root should be the $root_build_dir.
-///
-/// TODO(https://fxbug.dev/397989792) tracks removing this hard coded default path for in-tree IDK usage.
-///
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SdkRoot {
     /// Full SDK root is actually referring to the root directory of an IDK.  This means it
@@ -157,35 +154,41 @@ impl SdkRoot {
     pub fn from_paths(start_path: Option<&Path>) -> Result<Self, SdkError> {
         // All gets in this function should declare that they don't want the build directory searched, because
         // if there is a build directory it *is* generally the sdk.
-        let sdk_root = match start_path {
-            Some(root) => root.to_owned(),
-            _ => {
-                let exe_path = find_exe_path()?;
-
-                match Self::find_sdk_root(&Path::new(&exe_path)) {
-                    Ok(Some(root)) => root,
-                    Ok(None) => {
-                        log::debug!(
-                            "Could not find an SDK manifest in any parent of ffx's directory. \
-                             Using {:?} as HostTools root",
-                            exe_path.parent().unwrap()
-                        );
-                        return Ok(SdkRoot::HostTools {
-                            root: exe_path.parent().unwrap().to_path_buf(),
-                        });
-                    }
-                    Err(e) => {
-                        return Err(SdkError::NotFoundWithHelp {
-                            help: SDK_NOT_FOUND_HELP.to_string(),
-                            source: Box::new(e),
-                        });
-                    }
-                }
+        match start_path {
+            Some(root) => {
+                let sdk_root = root.to_owned();
+                log::debug!("Found full Fuchsia SDK at {sdk_root:?}");
+                Ok(SdkRoot::Full { root: sdk_root, manifest: None })
             }
-        };
+            None => {
+                let exe_path = find_exe_path()?;
+                Self::from_exe_path(&exe_path)
+            }
+        }
+    }
 
-        log::debug!("Found full Fuchsia SDK at {sdk_root:?}");
-        Ok(SdkRoot::Full { root: sdk_root, manifest: None })
+    /// Resolves the SDK root by searching parent directories of `exe_path` for an SDK manifest,
+    /// falling back to `SdkRoot::HostTools` at the executable's parent directory if none is found.
+    pub fn from_exe_path(exe_path: &Path) -> Result<Self, SdkError> {
+        match Self::find_sdk_root(exe_path) {
+            Ok(Some(root)) => {
+                log::debug!("Found full Fuchsia SDK at {root:?}");
+                Ok(SdkRoot::Full { root, manifest: None })
+            }
+            Ok(None) => {
+                let parent = exe_path.parent().unwrap_or_else(|| Path::new(""));
+                log::debug!(
+                    "Could not find an SDK manifest in any parent of ffx's directory. \
+                     Using {:?} as HostTools root",
+                    parent
+                );
+                Ok(SdkRoot::HostTools { root: parent.to_path_buf() })
+            }
+            Err(e) => Err(SdkError::NotFoundWithHelp {
+                help: SDK_NOT_FOUND_HELP.to_string(),
+                source: Box::new(e),
+            }),
+        }
     }
 
     fn find_sdk_root(start_path: &Path) -> Result<Option<PathBuf>, SdkError> {

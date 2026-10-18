@@ -43,6 +43,7 @@ group("tests") {
     "python:tests($host_toolchain)",
     "rbe:tests",
     "rbe:type_checked_scripts($host_toolchain)",
+    "resultstore:tests",
     "rust:tests",
     "scripts:tests",
     "sdk:tests",
@@ -64,7 +65,10 @@ if (is_host) {
                "//build/bazel/scripts/get_git_head_commit.py",
                "//build/regenerator.py",
              ] + libc_headers.idk_generate_inputs
-    deps = [ "//build/rbe:rbe_settings" ]
+    deps = [
+      "//build/rbe:rbe_settings",
+      "//build/scripts:properties_lib",
+    ]
   }
 
   python_build_time_tests("build_tests_json_tests") {
@@ -106,6 +110,7 @@ if (is_host) {
       "bazel/bazel_idk/prebuild_info.py",
       "bazel/bazel_sdk/compare_bazel_sdks.py",
       "bazel/bazel_sdk/idk_to_bazel_sdk.py",
+      "bazel/config/toolchain_tags/update.py",
       "bazel/debug_symbols/tests/check_debug_binaries.py",
       "bazel/drivers/verify_driver_package.py",
       "bazel/examples/hello_python/bin.py",
@@ -118,7 +123,6 @@ if (is_host) {
       "bazel/rules/host_tests/tests/py/test_with_py_binary.py",
       "bazel/rules/host_tests/tests/py/test_with_py_library.py",
       "bazel/rules/host_tests/tests/py/test_with_unittests.py",
-      "bazel/update-rustc-third-party/remove_incorrect_aliases.py",
       "beads/.agent/skills/analyzing_migration_dag/scripts/analyze_migration_dag.py",
       "check_product_bundles_manifest.py",
       "config/clang/generate_config_json.py",
@@ -165,6 +169,8 @@ if (is_host) {
       "python/package_python_binary.py",
       "python/pyright_config.py",
       "python/python_action_runner.py",
+      "resultstore/rs_profile.py",
+      "resultstore/rs_profile_test.py",
       "rust/bindgen.py",
       "rust/clippy_wrapper.py",
       "rust/discover_rust_project.py",
@@ -289,6 +295,7 @@ group("non_hermetic_deps") {
     "//src/developer/ffx/plugins/profile/heapdump:*",
     "//src/developer/ffx/plugins/profile/stacktrack:*",
     "//src/developer/ffx/plugins/target/package/explore/tests:*",
+    "//src/developer/ffx/tests/target:*",
     "//src/devices/block/drivers/ufs/test/e2e/*",
     "//src/lib/elfldltl/test/*",
     "//src/security/lib/scrutiny/collector/*",
@@ -495,7 +502,6 @@ group("non_hermetic_deps") {
     "//src/connectivity/bluetooth/hci/virtual:virtual.package",
     "//src/connectivity/wlan/tools/third_party/broadcom:wl_pkg",
     "//src/connectivity/wlan/tools/third_party/broadcom:wl_pkg.package",
-    "//src/diagnostics/archivist/tests/pipeline_test:*",
     "//src/graphics/drivers/arm-mali/icd:libvulkan_arm_g52_r0p0",
     "//src/graphics/drivers/arm-mali/icd:libvulkan_arm_g52_r0p0.package",
     "//src/ui/backlight/drivers:chromebook-keyboard-backlight",
@@ -511,8 +517,8 @@ group("non_hermetic_deps") {
   visibility += [ "//tools/check-licenses/build/*" ]
 
   visibility += [
+    "//src/bringup/bin/userboot/tests:*",
     "//src/tests/early-boot-coverage/*",
-    "//zircon/kernel/lib/userabi/userboot/tests:*",
   ]
 
   # TODO(https://fxbug.dev/331492588): Template driver example wraps Bazel output in Ninja, and

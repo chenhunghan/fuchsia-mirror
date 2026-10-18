@@ -782,6 +782,28 @@ impl<'a> TestRealm<'a> {
         Ok(fdio::create_fd(sock.into()).context("failed to create fd")?.into())
     }
 
+    /// Creates a raw [`socket2::Socket`] backed by the implementation of
+    /// `fuchsia.posix.socket.raw/Provider` in this realm and with the specified
+    /// options.
+    pub async fn raw_socket_with_options(
+        &self,
+        domain: fposix_socket::Domain,
+        association: fposix_socket_raw::ProtocolAssociation,
+        options: fposix_socket::SocketCreationOptions,
+    ) -> Result<socket2::Socket> {
+        let socket_provider = self
+            .connect_to_protocol::<fposix_socket_raw::ProviderMarker>()
+            .context("failed to connect to socket provider")?;
+        let sock = socket_provider
+            .socket_with_options(domain, &association, options)
+            .await
+            .context("failed to call socket")?
+            .map_err(|e| std::io::Error::from_raw_os_error(e.into_primitive()))
+            .context("failed to create socket")?;
+
+        Ok(fdio::create_fd(sock.into()).context("failed to create fd")?.into())
+    }
+
     /// Creates a [`socket2::Socket`] backed by the implementation of
     /// [`fuchsia.posix.socket.packet/Provider`] in this realm.
     ///
@@ -792,6 +814,26 @@ impl<'a> TestRealm<'a> {
             .context("failed to connect to socket provider")?;
 
         fposix_socket_ext::packet_socket(&socket_provider, kind)
+            .await
+            .context("failed to call socket")?
+            .context("failed to create socket")
+    }
+
+    /// Creates a [`socket2::Socket`] backed by the implementation of
+    /// [`fuchsia.posix.socket.packet/Provider`] in this realm and with the specified
+    /// options.
+    ///
+    /// [`fuchsia.posix.socket.packet/Provider`]: fposix_socket_packet::ProviderMarker
+    pub async fn packet_socket_with_options(
+        &self,
+        kind: fposix_socket_packet::Kind,
+        options: fposix_socket::SocketCreationOptions,
+    ) -> Result<socket2::Socket> {
+        let socket_provider = self
+            .connect_to_protocol::<fposix_socket_packet::ProviderMarker>()
+            .context("failed to connect to socket provider")?;
+
+        fposix_socket_ext::packet_socket_with_options(&socket_provider, kind, options)
             .await
             .context("failed to call socket")?
             .context("failed to create socket")

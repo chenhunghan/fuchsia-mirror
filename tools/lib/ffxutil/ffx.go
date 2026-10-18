@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -97,9 +99,14 @@ func (b *legacyFfxCmdBuilder) command(ffxPath string, args []string) []string {
 }
 
 func (b *legacyFfxCmdBuilder) commandWithConfigs(ffxPath string, args []string, configs map[string]any) []string {
+	keys := make([]string, 0, len(configs))
+	for key := range configs {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
 	configArgs := []string{}
-	for key, val := range configs {
-		configArgs = append(configArgs, []string{"-c", fmt.Sprintf("%s=%v", key, val)}...)
+	for _, key := range keys {
+		configArgs = append(configArgs, "-c", fmt.Sprintf("%s=%v", key, configs[key]))
 	}
 	args = append(configArgs, args...)
 	return append([]string{ffxPath, "--isolate-dir", b.isolateDir}, args...)
@@ -181,17 +188,20 @@ func (b *strictFfxCmdBuilder) commandWithConfigs(ffxPath string, args []string, 
 	// TODO(slgrady): Eventually use the specific configs required for
 	// particular commands. Unfortunately that information is not
 	// available from ffx yet.
+	mergedConfigs := make(map[string]any)
 	b.configs.Range(func(k, v any) bool {
-		key := k.(string)
-		// The caller may have already provided the config
-		if _, exists := configs[key]; !exists {
-			cmd = append(cmd, "-c", fmt.Sprintf("%s=%v", key, v))
-		}
+		mergedConfigs[k.(string)] = v
 		return true
 	})
+	maps.Copy(mergedConfigs, configs)
 
-	for k, v := range configs {
-		cmd = append(cmd, "-c", fmt.Sprintf("%s=%v", k, v))
+	keys := make([]string, 0, len(mergedConfigs))
+	for k := range mergedConfigs {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		cmd = append(cmd, "-c", fmt.Sprintf("%s=%v", k, mergedConfigs[k]))
 	}
 	return append(cmd, args...)
 }
@@ -635,6 +645,88 @@ func (f *ffxInvoker) cmd() *exec.Cmd {
 	})
 }
 
+var targetSpecPattern = regexp.MustCompile(`Target specification "[^"]+"`)
+
+// extractFFXMachineError parses the last JSON machine error emitted by ffx on
+// stdout and normalizes dynamic target identifiers or NUL bytes so callers and
+// LUCI Analysis get a deterministic, actionable failure reason.
+func extractFFXMachineError(rawOutput string, target string) string {
+	lines := strings.Split(strings.TrimSpace(rawOutput), "\n")
+	var msg string
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload struct {
+			Type      string `json:"type"`
+			Message   string `json:"message"`
+			UserError struct {
+				Message string `json:"message"`
+			} `json:"user_error"`
+			UnexpectedError struct {
+				Message string `json:"message"`
+			} `json:"unexpected_error"`
+			Finished struct {
+				Success      *bool  `json:"success"`
+				ErrorMessage string `json:"error_message"`
+			} `json:"finished"`
+		}
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			continue
+		}
+		switch {
+		case payload.Message != "" && (payload.Type == "unexpected" || payload.Type == "user" || payload.Type == "config" || payload.Type == "error" || strings.HasSuffix(payload.Type, "_error")):
+			msg = payload.Message
+		case payload.UnexpectedError.Message != "":
+			msg = payload.UnexpectedError.Message
+		case payload.UserError.Message != "":
+			msg = payload.UserError.Message
+		case payload.Finished.Success != nil && !*payload.Finished.Success && payload.Finished.ErrorMessage != "":
+			msg = payload.Finished.ErrorMessage
+		}
+		if msg != "" {
+			break
+		}
+	}
+	if msg == "" {
+		return ""
+	}
+	// Strip trailing or embedded NUL bytes emitted by fastboot device firmware.
+	msg = strings.ReplaceAll(msg, "\x00", "")
+	// Keep the concise first-line summary (or first "Error: ..." line for BUG envelopes)
+	// rather than the multi-line "Caused by:" chain.
+	for _, line := range strings.Split(msg, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "BUG: An internal command error occurred") {
+			continue
+		}
+		msg = strings.TrimPrefix(trimmed, "Error: ")
+		break
+	}
+	if target != "" {
+		msg = strings.ReplaceAll(msg, target, "<target>")
+		for _, prefix := range []string{"id:", "serial:"} {
+			if rawTarget, ok := strings.CutPrefix(target, prefix); ok && rawTarget != "" {
+				msg = strings.ReplaceAll(msg, rawTarget, "<target>")
+			}
+		}
+	}
+	msg = targetSpecPattern.ReplaceAllString(msg, `Target specification "<target>"`)
+	return strings.TrimSpace(msg)
+}
+
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 // This function should only be invoked once in an ffxInvoker.
 // The proper idiom is to construct the ffxInvoker, then immediately
 // run (or use the `cmd()` method) without storing it
@@ -653,12 +745,22 @@ func (f *ffxInvoker) run(ctx context.Context) error {
 		// Store the output in our buffer
 		var output bytes.Buffer
 		f.output = &output
-		stdout := io.MultiWriter(f.output, f.stdout)
-		f.stdout = stdout
+		if f.stdout != nil && f.stdout == f.stderr {
+			sw := &syncWriter{w: f.stdout}
+			f.stdout = io.MultiWriter(f.output, sw)
+			f.stderr = sw
+		} else {
+			f.stdout = io.MultiWriter(f.output, f.stdout)
+		}
 	}
 	cmd := f.cmd()
 	if err := f.ffx.runner.RunCommand(ctx, cmd); err != nil {
-		return fmt.Errorf("%s (%s): %w", constants.CommandFailedMsg, cmd.String(), err)
+		if f.output != nil {
+			if msg := extractFFXMachineError(f.output.String(), f.target); msg != "" {
+				return fmt.Errorf("%s (ffx %s): %s: %w", constants.CommandFailedMsg, strings.Join(f.args, " "), msg, err)
+			}
+		}
+		return fmt.Errorf("%s (ffx %s): %w", constants.CommandFailedMsg, strings.Join(f.args, " "), err)
 	}
 	return nil
 }
@@ -779,10 +881,11 @@ func (f *FFXInstance) GetLastRebootReason(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("getting reboot reason is not supported on emulator targets (b/496577711)")
 	}
 
-	stdout, err := f.RunAndGetOutput(ctx, "--target", f.target, "--machine", "json", "target", "show")
-	if err != nil {
+	i := f.invoker([]string{"--machine", "json", "target", "show"}).setTarget(f.target).setCaptureOutput()
+	if err := i.run(ctx); err != nil {
 		return "", fmt.Errorf("ffx target show failed: %w", err)
 	}
+	stdout := strings.TrimSpace(i.output.String())
 
 	var showInfo struct {
 		Target struct {
@@ -858,7 +961,7 @@ func (f *FFXInstance) BootloaderBoot(ctx context.Context, target, productBundle 
 		"discovery.timeout":      30000,
 	}
 
-	return f.invoker([]string{"target", "bootloader", "--product-bundle", productBundle, "boot"}).setTarget(target).setTimeout(0).setConfigs(configs).run(ctx)
+	return f.invoker([]string{"target", "bootloader", "--product-bundle", productBundle, "boot"}).setTarget(target).setMachineFormat(MachineJson).setCaptureOutput().setTimeout(0).setConfigs(configs).run(ctx)
 }
 
 // TestEarlyBootProfile puts a target's early boot profile in the specified directory
@@ -866,7 +969,7 @@ func (f *FFXInstance) TestEarlyBootProfile(ctx context.Context, outputDirectory 
 	if f.target == "" {
 		return fmt.Errorf("no target is set")
 	}
-	return f.invoker([]string{"test", "early-boot-profile", "--output-directory", outputDirectory}).setTarget(f.target).setTimeout(0).run(ctx)
+	return f.invoker([]string{"test", "early-boot-profile", "--output-directory", outputDirectory}).setTarget(f.target).setCaptureOutput().setTimeout(0).run(ctx)
 }
 
 // List lists all available targets.
@@ -879,7 +982,7 @@ func (f *FFXInstance) TargetWait(ctx context.Context, args ...string) error {
 	if f.target == "" {
 		return fmt.Errorf("no target is set")
 	}
-	return f.invoker(append([]string{"--config", "log.level=debug", "target", "wait"}, args...)).setTarget(f.target).run(ctx)
+	return f.invoker(append([]string{"--config", "log.level=debug", "target", "wait"}, args...)).setTarget(f.target).setCaptureOutput().run(ctx)
 }
 
 // EmuStart returns an invoker to start the emulator with the specified
@@ -889,7 +992,7 @@ func (f *FFXInstance) EmuStart(args ...string) *ffxInvoker {
 }
 
 func (f *FFXInstance) EmuStop(ctx context.Context, args ...string) error {
-	return f.invoker(append([]string{"emu", "stop"}, args...)).run(ctx)
+	return f.invoker(append([]string{"emu", "stop"}, args...)).setCaptureOutput().run(ctx)
 }
 
 // USBDriver starts up a USB driver to talk to the device associated with the provided serialNum.
@@ -902,7 +1005,7 @@ func (f *FFXInstance) PackageResolve(ctx context.Context, packageURL string) err
 	if f.target == "" {
 		return fmt.Errorf("no target is set")
 	}
-	return f.invoker([]string{"target", "package", "resolve", packageURL}).setTarget(f.target).setTimeout(0).run(ctx)
+	return f.invoker([]string{"target", "package", "resolve", packageURL}).setTarget(f.target).setCaptureOutput().setTimeout(0).run(ctx)
 }
 
 // TestRun runs a test suite.
@@ -951,7 +1054,7 @@ func (f *FFXInstance) Snapshot(ctx context.Context, outDir string, snapshotFilen
 	if f.target == "" {
 		return fmt.Errorf("no target is set")
 	}
-	err := f.invoker([]string{"target", "snapshot", "--dir", outDir}).setTarget(f.target).run(ctx)
+	err := f.invoker([]string{"target", "snapshot", "--dir", outDir}).setTarget(f.target).setCaptureOutput().run(ctx)
 	if err != nil {
 		return err
 	}

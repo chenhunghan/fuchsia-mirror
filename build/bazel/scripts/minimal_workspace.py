@@ -22,16 +22,22 @@ The workspace/ sub-directory will be populated with:
 """
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import build_utils
 import remote_services_utils
 
 _THIS_SCRIPT = Path(__file__)
 _SCRIPT_DIR = _THIS_SCRIPT.resolve().parent
+_FUCHSIA_DIR = _SCRIPT_DIR.parent.parent.parent
+
+if str(_FUCHSIA_DIR) not in sys.path:
+    sys.path.insert(0, str(_FUCHSIA_DIR))
+
+from build.rbe import rbe_settings
 
 
 def _main_arg_parser() -> argparse.ArgumentParser:
@@ -77,7 +83,7 @@ def write_file(dest: Path, content: str) -> None:
 
 
 def main(argv: Sequence[str]) -> int:
-    args = _MAIN_ARG_PARSER.parse_args()
+    args = _MAIN_ARG_PARSER.parse_args(argv)
     verbosity = args.verbose - args.quiet
 
     if args.fuchsia_dir:
@@ -164,22 +170,47 @@ def main(argv: Sequence[str]) -> int:
     # Generate args.json expected by fuchsia_platform_build.bzl
     write_file(workspace_dir / "fuchsia_build_generated" / "args.json", "{}")
 
+    # Generate synthetic rbe_settings.json for remote execution testing
+    rbe_settings_data = {
+        "final": {
+            "bazel_enable": True,
+            "bazel_exec_strategy": "remote",
+            "bazel_download_outputs": "all",
+            "cxx_download_objects": True,
+            "cxx_enable": True,
+            "cxx_exec_strategy": "remote",
+            "cxx_minimalist_wrapper": True,
+            "link_download_unstripped_outputs": True,
+            "link_enable": True,
+            "link_exec_strategy": "remote",
+            "rust_download_rlibs": True,
+            "rust_download_unstripped_binaries": True,
+            "rust_enable": True,
+            "rust_exec_strategy": "remote",
+            "needs_reproxy": True,
+            "needs_auth": True,
+        }
+    }
+    write_file(
+        topdir / "rbe_settings.json", json.dumps(rbe_settings_data, indent=2)
+    )
+
+    fake_settings = rbe_settings.fake(
+        bazel_enable=True, needs_reproxy=True, needs_auth=True
+    )
+
     # Generate remote_services.bazelrc
     remote_services_utils.generate_remote_services_bazelrc(
         fuchsia_dir=fuchsia_dir,
+        build_dir=topdir,
         output_path=workspace_dir / "remote_services.bazelrc",
         download_outputs="all",  # does not matter here.
+        settings=fake_settings,
     )
 
     # Generate the content of .bazelrc
-    fuchsia_dir / "build" / "bazel" / "templates"
-
-    def expand_template_file(template_file: Path, **kwargs: Any) -> str:
-        return template_file.read_text().format(**kwargs)
-
-    bazelrc_content: str = ""
     # platform excerpt from template.bazelrc
-    bazelrc_content += """
+    bazelrc_content = """
 build --platforms=//build/bazel/platforms:{default_platform}
 build --host_platform=//build/bazel/platforms:{host_platform}
 import remote_services.bazelrc

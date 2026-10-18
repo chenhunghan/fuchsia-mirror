@@ -102,18 +102,15 @@ if (toolchain_environment == "kernel.phys" ||
       "feature.cc",
       "fpu.cc",
       "handoff.cc",
-      "mexec.S",
       "mmu.cc",
       "mp.cc",
       "perf_mon.cc",
       "periphmap.cc",
       "registers.cc",
-      "restricted.cc",
       "secondary.S",
       "secondary.cc",
       "smccc.S",
       "spinlock.cc",
-      "sysreg.cc",
       "thread.cc",
       "uarch.cc",
       "uspace_entry.S",
@@ -144,7 +141,7 @@ if (toolchain_environment == "kernel.phys" ||
       "//zircon/kernel/lib/thread-stack",
       "//zircon/kernel/lib/userabi:headers",
       "//zircon/kernel/object",
-      "//zircon/kernel/phys:handoff",
+      "//zircon/kernel/phys/handoff",
       "//zircon/kernel/platform:headers",
       "//zircon/kernel/vm",
       "//zircon/system/ulib/bitmap",
@@ -201,20 +198,42 @@ if (toolchain_environment == "kernel.phys" ||
     notice_year = 2026
   }
 
+  kernel_bindgen_crate("arm64-restricted-bindings") {
+    headers = [ "include/arch/restricted.h" ]
+    cpp = true
+    non_rust_deps = [ ":headers" ]
+    notice_year = 2026
+    raw_lines = [ "#![no_std]" ]
+    type_allowlist = [ "ArchSavedNormalState" ]
+    explicit_padding = false
+    std_derives = [
+      "default",
+      "eq",
+      "partialeq",
+    ]
+    expect_lints = []
+  }
+
   kernel_rust_mod("arch-arm64-rs") {
     output_name = "arch_arm64"
     source_root = "src/mod.rs"
     sources = [
       "src/cache.rs",
       "src/mod.rs",
+      "src/restricted.rs",
+      "src/sysreg.rs",
       "src/vm.rs",
     ]
     deps = [
       ":arch-arm64-aspace-bindings",
       ":arch-arm64-vm-bindings",
+      ":arm64-restricted-bindings",
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
+      "//src/lib/kprint",
+      "//src/lib/regio",
       "//zircon/kernel/arch:arch-types-bindings",
+      "//zircon/kernel/lib/arch:arch-rs",
       "//zircon/kernel/lib/debug",
     ]
     test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]

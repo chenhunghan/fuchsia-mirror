@@ -52,6 +52,7 @@ use packet::{
 use packet_formats::error::{Ipv6ParseError, ParseError};
 use packet_formats::ip::{DscpAndEcn, IpPacket as _, IpPacketBuilder as _};
 use packet_formats::ipv4::{Ipv4FragmentType, Ipv4Packet};
+use packet_formats::ipv6::ext_hdrs::Ipv6ExtensionHeader;
 use packet_formats::ipv6::{Ipv6Packet, Ipv6PacketRaw};
 use thiserror::Error;
 use zerocopy::SplitByteSlice;
@@ -130,9 +131,7 @@ pub const DEFAULT_HOP_LIMITS: HopLimits =
     HopLimits { unicast: DEFAULT_TTL, multicast: NonZeroU8::new(1).unwrap() };
 
 /// The IPv6 subnet that contains all addresses; `::/0`.
-// Safe because 0 is less than the number of IPv6 address bits.
-pub const IPV6_DEFAULT_SUBNET: Subnet<Ipv6Addr> =
-    unsafe { Subnet::new_unchecked(Ipv6::UNSPECIFIED_ADDRESS, 0) };
+pub const IPV6_DEFAULT_SUBNET: Subnet<Ipv6Addr> = Ipv6::ALL_ADDRS_SUBNET;
 
 /// Sidecar metadata passed along with the packet.
 ///
@@ -453,6 +452,11 @@ impl<I: IpExt, A, BT: FilterBindingsTypes + TxMetadataBindingsTypes>
         &self.marks
     }
 
+    /// Returns the GSO metadata attached to this packet, if any.
+    pub(crate) fn gso_info(&self) -> Option<GsoInfo> {
+        self.gso_info
+    }
+
     /// Sets the packet type on this metadata.
     pub fn set_packet_type(&mut self, packet_type: PacketType) {
         self.packet_type = packet_type;
@@ -505,6 +509,10 @@ impl<I: packet_formats::ip::IpExt, A, BT: FilterBindingsTypes + TxMetadataBindin
 
     fn packet_type(&self) -> PacketType {
         self.packet_type
+    }
+
+    fn gso_info(&self) -> Option<GsoInfo> {
+        self.gso_info
     }
 }
 
@@ -2763,6 +2771,7 @@ fn dispatch_receive_ipv4_packet<
 
     let marks = packet_metadata.marks;
     let packet_type = packet_metadata.packet_type;
+    let gso_info = packet_metadata.gso_info;
     packet_metadata.acknowledge_drop();
 
     match filter_verdict {
@@ -2819,7 +2828,7 @@ fn dispatch_receive_ipv4_packet<
     let buffer = Buf::new(body, ..);
     let header_info = Ipv4HeaderInfo { prefix, options: options.as_ref() };
     let mut receive_info =
-        LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks, packet_type };
+        LocalDeliveryPacketInfo { meta: receive_meta, header_info, marks, packet_type, gso_info };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -2897,6 +2906,7 @@ fn dispatch_receive_ipv6_packet<
 
     let marks = packet_metadata.marks;
     let packet_type = packet_metadata.packet_type;
+    let gso_info = packet_metadata.gso_info;
     packet_metadata.acknowledge_drop();
 
     match filter_verdict {
@@ -2953,7 +2963,8 @@ fn dispatch_receive_ipv6_packet<
     let (fixed, extension, body) = packet.parts_with_body_mut();
     let buffer = Buf::new(body, ..);
     let header_info = Ipv6HeaderInfo { fixed, extension };
-    let mut receive_info = LocalDeliveryPacketInfo { meta, header_info, marks, packet_type };
+    let mut receive_info =
+        LocalDeliveryPacketInfo { meta, header_info, marks, packet_type, gso_info };
 
     core_ctx
         .dispatch_receive_ip_packet(
@@ -3761,6 +3772,39 @@ where
     }
 }
 
+/// Reassembles an IPv6 atomic fragment.
+///
+/// An atomic fragment is a packet with a Fragment header whose Fragment Offset
+/// and M flag are both zero. Per RFC 8200 Section 4.5:
+///
+///   If the fragment is a whole datagram (that is, both the Fragment Offset
+///   field and the M flag are zero), then it does not need any further
+///   reassembly and should be processed as a fully reassembled packet (i.e.,
+///   updating Next Header, adjust Payload Length, removing the Fragment
+///   header, etc.).
+///
+/// On success, returns a buffer containing `packet` with its Fragment header
+/// removed, along with the length of `packet` to be used as the maximum
+/// fragment length of the reassembled packet.
+///
+/// # Panics
+///
+/// Panics if `packet` does not have a Fragment header.
+fn reassemble_ipv6_atomic_fragment<B: SplitByteSlice>(
+    packet: &Ipv6Packet<B>,
+) -> Result<(Vec<u8>, usize), Ipv6ParseError> {
+    let body = packet.body();
+    let max_fragment_len = packet.header_len() + body.len();
+    let header = packet.copy_header_bytes_for_fragment();
+    let mut buffer = Buf::new(alloc::vec![0; header.len() + body.len()], ..);
+    Ipv6Packet::reassemble_fragmented_packet(
+        buffer.buffer_view_mut(),
+        &header,
+        core::iter::once(body),
+    )?;
+    Ok((buffer.into_inner(), max_fragment_len))
+}
+
 // TODO(joshlf): Can we turn `try_parse_ip_packet` into a function? So far, I've
 // been unable to get the borrow checker to accept it.
 
@@ -4395,40 +4439,77 @@ pub fn receive_ipv6_packet<
                 // possible when the packet has the fragment extension
                 // header (even if the fragment data has values that implies
                 // that the packet is not fragmented).
-                match process_fragment(core_ctx, bindings_ctx, device, packet) {
-                    ProcessFragmentResult::Done => return,
-                    ProcessFragmentResult::NotNeeded(packet) => {
-                        // While strange, it's possible for there to be a Fragment
-                        // header that says the packet doesn't need defragmentation.
-                        // As per RFC 8200 4.5:
-                        //
-                        //   If the fragment is a whole datagram (that is, both the
-                        //   Fragment Offset field and the M flag are zero), then it
-                        //   does not need any further reassembly and should be
-                        //   processed as a fully reassembled packet (i.e., updating
-                        //   Next Header, adjust Payload Length, removing the
-                        //   Fragment header, etc.).
-                        //
-                        // In this case, we're not technically reassembling the
-                        // packet, since, per the RFC, that would mean removing the
-                        // Fragment header.
-                        (packet, Some(Ipv6PacketAction::Continue), None)
-                    }
-                    ProcessFragmentResult::Reassembled { buffer: buf, max_fragment_len } => {
-                        let buf = Buf::new(buf, ..);
-                        buffer = packet::Either::B(buf);
-
-                        match buffer.parse_mut() {
-                            Ok(packet) => (packet, None, Some(max_fragment_len)),
-                            Err(err) => {
-                                core_ctx.increment_both(device, |c| &c.fragment_reassembly_error);
-                                debug!(
-                                    "receive_ip_packet: fragmented, failed to reassemble: {:?}",
-                                    err
-                                );
-                                return;
+                let (buf, max_fragment_len) =
+                    match process_fragment(core_ctx, bindings_ctx, device, packet) {
+                        ProcessFragmentResult::Done => return,
+                        ProcessFragmentResult::NotNeeded(packet) => {
+                            // While strange, it's possible for there to be a
+                            // Fragment header that says the packet doesn't need
+                            // defragmentation (an atomic fragment). Such a packet
+                            // must still be processed as a fully reassembled packet,
+                            // which means removing the Fragment header and parsing
+                            // any extension headers that follow it, as they are part
+                            // of the Fragmentable Part of the packet.
+                            match reassemble_ipv6_atomic_fragment(&packet) {
+                                Ok(result) => result,
+                                Err(err) => {
+                                    core_ctx
+                                        .increment_both(device, |c| &c.fragment_reassembly_error);
+                                    debug!(
+                                        "receive_ip_packet: failed to reassemble atomic \
+                                        fragment: {:?}",
+                                        err
+                                    );
+                                    return;
+                                }
                             }
                         }
+                        ProcessFragmentResult::Reassembled { buffer: buf, max_fragment_len } => {
+                            (buf, max_fragment_len)
+                        }
+                    };
+
+                let buf = Buf::new(buf, ..);
+                buffer = packet::Either::B(buf);
+
+                // Extension headers that follow the Fragment header are only
+                // parsed after reassembly, so parsing the reassembled packet
+                // may result in errors that require an ICMP response.
+                match try_parse_ip_packet!(buffer) {
+                    Ok(packet) => {
+                        let packet: Ipv6Packet<_> = packet;
+                        // Drop reassembled packets that still contain a
+                        // Fragment header.
+                        if packet
+                            .iter_extension_hdrs()
+                            .any(|h| matches!(h, Ipv6ExtensionHeader::Fragment { .. }))
+                        {
+                            core_ctx.increment_both(device, |c| &c.fragment_reassembly_error);
+                            debug!(
+                                "receive_ipv6_packet: found fragment header after reassembly; \
+                                dropping"
+                            );
+                            return;
+                        }
+                        (packet, None, Some(max_fragment_len))
+                    }
+                    Err(error) => {
+                        core_ctx.increment_both(device, |c| &c.fragment_reassembly_error);
+                        debug!(
+                            "receive_ip_packet: fragmented, failed to parse reassembled packet: \
+                            {:?}",
+                            error
+                        );
+                        handle_ipv6_parse_error(
+                            core_ctx,
+                            bindings_ctx,
+                            device,
+                            frame_dst,
+                            device_ip_layer_metadata,
+                            buffer,
+                            error,
+                        );
+                        return;
                     }
                 }
             }
@@ -4629,8 +4710,9 @@ pub fn receive_ipv6_packet<
                     .unwrap_or_else(|icmp_sender| icmp_sender.send(core_ctx, bindings_ctx, buffer));
                 }
                 Ipv6PacketAction::ProcessFragment => {
-                    debug!("receive_ipv6_packet: found fragment header after reassembly; dropping");
-                    packet_metadata.acknowledge_drop();
+                    // Reassembled packets that still contain a Fragment
+                    // header are dropped immediately after reassembly.
+                    unreachable!("found fragment header after reassembly")
                 }
             }
         }

@@ -47,6 +47,9 @@ impl CopyOperand {
         user_offset: OffsetPtr,
     ) -> Result<Self, Errno> {
         let file = current_task.files().get(fd)?;
+        if !user_offset.is_null() && !file.is_seekable() {
+            return error!(ESPIPE);
+        }
         let maybe_offset = maybe_read_offset(current_task, user_offset)?;
         Ok(Self { file, user_offset, maybe_offset })
     }
@@ -176,6 +179,10 @@ pub fn splice(
     mut len: usize,
     flags: u32,
 ) -> Result<usize, Errno> {
+    if len == 0 {
+        return Ok(0);
+    }
+
     const KNOWN_FLAGS: u32 =
         uapi::SPLICE_F_MOVE | uapi::SPLICE_F_NONBLOCK | uapi::SPLICE_F_MORE | uapi::SPLICE_F_GIFT;
     if flags & !KNOWN_FLAGS != 0 {
@@ -183,21 +190,19 @@ pub fn splice(
         return error!(EINVAL);
     }
 
-    if len == 0 {
-        return Ok(0);
-    }
-
     let non_blocking = flags & uapi::SPLICE_F_NONBLOCK != 0;
 
     let operand_in = CopyOperand::new(current_task, fd_in, off_in)?;
     let operand_out = CopyOperand::new(current_task, fd_out, off_out)?;
 
-    if operand_in.maybe_offset.is_some() && !operand_in.file.is_seekable() {
-        return error!(ESPIPE);
-    }
-
-    if operand_out.maybe_offset.is_some() && !operand_out.file.is_seekable() {
-        return error!(ESPIPE);
+    // Validate endpoint open modes upfront so that pipe-to-pipe transfers and pipe endpoints in
+    // asymmetric transfers reject descriptors not opened for the required direction with EBADF
+    // before locking pipe buffers or invoking read()/write() on non-pipe endpoints.
+    // TODO: https://fxbug.dev/572276669 - Pipe buffer operations in splice(), tee(), and
+    // vmsplice() do not invoke LSM file_permission hooks on the pipe endpoints themselves; only
+    // non-pipe endpoints check file_permission via their underlying read()/write() calls.
+    if !operand_in.file.can_read() || !operand_out.file.can_write() {
+        return error!(EBADF);
     }
 
     if operand_out.maybe_offset.is_some() && operand_out.file.offset.read() < 0 {
@@ -294,17 +299,17 @@ pub fn vmsplice(
     let file = current_task.files().get(fd)?;
     let should_write = file.can_write();
     let should_read = file.can_read();
+    if !should_write && !should_read {
+        return error!(EBADF);
+    }
 
     let iovec = current_task.read_iovec(iovec_addr, iovec_count)?;
     let pipe = file.downcast_file::<PipeFileObject>().ok_or_else(|| errno!(EBADF))?;
     let mut bytes_transferred = 0;
 
     if should_write {
-        bytes_transferred +=
-            pipe.vmsplice_from(current_task, &file, iovec.clone(), non_blocking)?;
-    }
-
-    if should_read {
+        bytes_transferred += pipe.vmsplice_from(current_task, &file, iovec, non_blocking)?;
+    } else if should_read {
         bytes_transferred += pipe.vmsplice_to(current_task, &file, iovec, non_blocking)?;
     }
 
@@ -379,10 +384,18 @@ pub fn tee(
         return error!(EINVAL);
     }
 
+    if len == 0 {
+        return Ok(0);
+    }
+
     let non_blocking = flags & uapi::SPLICE_F_NONBLOCK != 0;
 
     let file_in = current_task.files().get(fd_in)?;
     let file_out = current_task.files().get(fd_out)?;
+
+    if !file_in.can_read() || !file_out.can_write() {
+        return error!(EBADF);
+    }
 
     // tee requires that both files are pipes.
     let PipeOperands { mut read, mut write } =

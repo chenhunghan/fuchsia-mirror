@@ -5,7 +5,6 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
-import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 import("//zircon/kernel/params.gni")
 
@@ -34,16 +33,8 @@ source_set("impl") {
   visibility = [ ":*" ]
   sources = [
     "driver.cc",
-    "futex.cc",
-    "handle_ops.cc",
     "membarrier_ffi.cc",
-    "object.cc",
-    "object_info_ffi.cc",
     "object_property_ffi.cc",
-    "object_wait.cc",
-    "port.cc",
-    "system.cc",
-    "system_${zircon_cpu}.cc",
     "system_ffi.cc",
     "test.cc",
     "thread_ffi.cc",
@@ -72,13 +63,13 @@ source_set("impl") {
     "//zircon/kernel/lib/thread_sampler",
     "//zircon/kernel/lib/user_copy",
     "//zircon/kernel/lib/userabi:headers",
-    "//zircon/kernel/lib/wake-vector",
     "//zircon/kernel/object",
     "//zircon/kernel/platform:headers",
     "//zircon/system/ulib/explicit-memory",
     "//zircon/system/ulib/region-alloc",
   ]
   if (current_cpu == "x64") {
+    sources += [ "system_x86.cc" ]
     deps += [ "//zircon/kernel/platform/pc" ]
   }
 }
@@ -124,7 +115,10 @@ kernel_rust_mod("syscalls-rs") {
     "event.rs",
     "exceptions.rs",
     "fifo.rs",
+    "futex.rs",
     "guest.rs",
+    "handle_ops.rs",
+    "interrupt.rs",
     "iob.rs",
     "iommu.rs",
     "job.rs",
@@ -132,11 +126,13 @@ kernel_rust_mod("syscalls-rs") {
     "mod.rs",
     "msi.rs",
     "nanosleep.rs",
+    "object.rs",
     "object_info.rs",
     "object_property.rs",
     "object_wait.rs",
     "pager.rs",
     "pmt.rs",
+    "port.rs",
     "process.rs",
     "profile.rs",
     "resource.rs",
@@ -146,6 +142,8 @@ kernel_rust_mod("syscalls-rs") {
     "socket.rs",
     "stream.rs",
     "system.rs",
+    "system_x86.rs",
+    "system_x86_ffi.rs",
     "task.rs",
     "test.rs",
     "thread.rs",
@@ -168,6 +166,7 @@ kernel_rust_mod("syscalls-rs") {
     "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/lib/wake-vector:wake-vector-rs",
     "//zircon/system/ulib/fbl/rust:fbl",
     "//zircon/vdso:private",
   ]

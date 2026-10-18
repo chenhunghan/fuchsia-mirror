@@ -228,19 +228,19 @@ group("bitfield-0.19.5") {
 }
 
 group("bitflags") {
-  public_deps = [ ":bitflags-v2_13_0" ]
+  public_deps = [ ":bitflags-v2_13_2" ]
 }
 
-group("bitflags-2.13.0") {
-  public_deps = [ ":bitflags-v2_13_0" ]
+group("bitflags-2.13.2") {
+  public_deps = [ ":bitflags-v2_13_2" ]
 }
 
 group("blocking") {
-  public_deps = [ ":blocking-v1_6_2" ]
+  public_deps = [ ":blocking-v1_7_0" ]
 }
 
-group("blocking-1.6.2") {
-  public_deps = [ ":blocking-v1_6_2" ]
+group("blocking-1.7.0") {
+  public_deps = [ ":blocking-v1_7_0" ]
 }
 
 group("bstr") {
@@ -324,11 +324,11 @@ group("bytes-1.12.1") {
 }
 
 group("camino") {
-  public_deps = [ ":camino-v1_2_5" ]
+  public_deps = [ ":camino-v1_2_6" ]
 }
 
-group("camino-1.2.5") {
-  public_deps = [ ":camino-v1_2_5" ]
+group("camino-1.2.6") {
+  public_deps = [ ":camino-v1_2_6" ]
 }
 
 if (!(current_os == "fuchsia")) {
@@ -974,11 +974,11 @@ group("http-body-1.1.0") {
 }
 
 group("http-body-util") {
-  public_deps = [ ":http-body-util-v0_1_4" ]
+  public_deps = [ ":http-body-util-v0_1_5" ]
 }
 
-group("http-body-util-0.1.4") {
-  public_deps = [ ":http-body-util-v0_1_4" ]
+group("http-body-util-0.1.5") {
+  public_deps = [ ":http-body-util-v0_1_5" ]
 }
 
 group("humansize") {
@@ -1912,11 +1912,11 @@ if (!(current_os == "fuchsia")) {
 }
 
 group("rustls") {
-  public_deps = [ ":rustls-v0_23_42" ]
+  public_deps = [ ":rustls-v0_23_45" ]
 }
 
-group("rustls-0.23.42") {
-  public_deps = [ ":rustls-v0_23_42" ]
+group("rustls-0.23.45") {
+  public_deps = [ ":rustls-v0_23_45" ]
 }
 
 if (!(current_os == "fuchsia")) {
@@ -2297,11 +2297,11 @@ if (!(current_os == "fuchsia")) {
 }
 
 group("simplelog") {
-  public_deps = [ ":simplelog-v0_10_2" ]
+  public_deps = [ ":simplelog-v0_12_2" ]
 }
 
-group("simplelog-0.10.2") {
-  public_deps = [ ":simplelog-v0_10_2" ]
+group("simplelog-0.12.2") {
+  public_deps = [ ":simplelog-v0_12_2" ]
 }
 
 group("siphasher") {
@@ -3995,7 +3995,7 @@ rustc_library("async-fs-v2_2_0") {
 
   deps = []
   deps += [ ":async-lock-v3_4_2" ]
-  deps += [ ":blocking-v1_6_2" ]
+  deps += [ ":blocking-v1_7_0" ]
   deps += [ ":futures-lite-v2_6_1" ]
 
   rustenv = []
@@ -4941,18 +4941,18 @@ rustc_library("bitflags-v1_3_2") {
   applicable_licenses = [ ":bitflags-v1_3_2.license" ]
 }
 
-license("bitflags-v2_13_0.license") {
+license("bitflags-v2_13_2.license") {
   public_package_name = "bitflags"
   license_files = [
-    "//third_party/rust_crates/vendor/bitflags-2.13.0/LICENSE-APACHE",
-    "//third_party/rust_crates/vendor/bitflags-2.13.0/LICENSE-MIT",
+    "//third_party/rust_crates/vendor/bitflags-2.13.2/LICENSE-APACHE",
+    "//third_party/rust_crates/vendor/bitflags-2.13.2/LICENSE-MIT",
   ]
 }
 
-rustc_library("bitflags-v2_13_0") {
+rustc_library("bitflags-v2_13_2") {
   crate_name = "bitflags"
-  source_root = "//third_party/rust_crates/vendor/bitflags-2.13.0/src/lib.rs"
-  output_name = "bitflags-2043246776ae7a71"
+  source_root = "//third_party/rust_crates/vendor/bitflags-2.13.2/src/lib.rs"
+  output_name = "bitflags-199dea9a1aaf3a6f"
   edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
@@ -4965,8 +4965,8 @@ rustc_library("bitflags-v2_13_0") {
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=2043246776ae7a71",
-    "-Cextra-filename=-2043246776ae7a71",
+    "-Cmetadata=199dea9a1aaf3a6f",
+    "-Cextra-filename=-199dea9a1aaf3a6f",
     "--cfg=feature=\"serde\"",
     "--cfg=feature=\"serde_core\"",
     "--cfg=feature=\"std\"",
@@ -4977,7 +4977,7 @@ rustc_library("bitflags-v2_13_0") {
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":bitflags-v2_13_0.license" ]
+  applicable_licenses = [ ":bitflags-v2_13_2.license" ]
 }
 
 license("block-buffer-v0_10_4.license") {
@@ -5082,18 +5082,18 @@ rustc_library("block-padding-v0_4_2") {
   applicable_licenses = [ ":block-padding-v0_4_2.license" ]
 }
 
-license("blocking-v1_6_2.license") {
+license("blocking-v1_7_0.license") {
   public_package_name = "blocking"
   license_files = [
-    "//third_party/rust_crates/vendor/blocking-1.6.2/LICENSE-APACHE",
-    "//third_party/rust_crates/vendor/blocking-1.6.2/LICENSE-MIT",
+    "//third_party/rust_crates/vendor/blocking-1.7.0/LICENSE-APACHE",
+    "//third_party/rust_crates/vendor/blocking-1.7.0/LICENSE-MIT",
   ]
 }
 
-rustc_library("blocking-v1_6_2") {
+rustc_library("blocking-v1_7_0") {
   crate_name = "blocking"
-  source_root = "//third_party/rust_crates/vendor/blocking-1.6.2/src/lib.rs"
-  output_name = "blocking-a09092a681ef405e"
+  source_root = "//third_party/rust_crates/vendor/blocking-1.7.0/src/lib.rs"
+  output_name = "blocking-5bdcf039c165b313"
   edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
@@ -5110,13 +5110,13 @@ rustc_library("blocking-v1_6_2") {
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=a09092a681ef405e",
-    "-Cextra-filename=-a09092a681ef405e",
+    "-Cmetadata=5bdcf039c165b313",
+    "-Cextra-filename=-5bdcf039c165b313",
   ]
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":blocking-v1_6_2.license" ]
+  applicable_licenses = [ ":blocking-v1_7_0.license" ]
 }
 
 rustc_library("borsh-v1_8_1") {
@@ -5670,18 +5670,18 @@ rustc_library("bytes-v1_12_1") {
   applicable_licenses = [ ":bytes-v1_12_1.license" ]
 }
 
-license("camino-v1_2_5.license") {
+license("camino-v1_2_6.license") {
   public_package_name = "camino"
   license_files = [
-    "//third_party/rust_crates/vendor/camino-1.2.5/LICENSE-APACHE",
-    "//third_party/rust_crates/vendor/camino-1.2.5/LICENSE-MIT",
+    "//third_party/rust_crates/vendor/camino-1.2.6/LICENSE-APACHE",
+    "//third_party/rust_crates/vendor/camino-1.2.6/LICENSE-MIT",
   ]
 }
 
-rustc_library("camino-v1_2_5") {
+rustc_library("camino-v1_2_6") {
   crate_name = "camino"
-  source_root = "//third_party/rust_crates/vendor/camino-1.2.5/src/lib.rs"
-  output_name = "camino-29a9562f21f050f2"
+  source_root = "//third_party/rust_crates/vendor/camino-1.2.6/src/lib.rs"
+  output_name = "camino-128469037764beca"
   edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
@@ -5695,8 +5695,8 @@ rustc_library("camino-v1_2_5") {
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=29a9562f21f050f2",
-    "-Cextra-filename=-29a9562f21f050f2",
+    "-Cmetadata=128469037764beca",
+    "-Cextra-filename=-128469037764beca",
     "--cfg=feature=\"proptest1\"",
     "--cfg=feature=\"serde1\"",
     "--cfg=absolute_path",
@@ -5710,7 +5710,7 @@ rustc_library("camino-v1_2_5") {
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":camino-v1_2_5.license" ]
+  applicable_licenses = [ ":camino-v1_2_6.license" ]
 }
 
 license("cargo_metadata-v0_23_1.license") {
@@ -5731,7 +5731,7 @@ rustc_library("cargo_metadata-v0_23_1") {
 
   deps = []
   deps += [ ":semver-v1_0_28" ]
-  deps += [ ":camino-v1_2_5" ]
+  deps += [ ":camino-v1_2_6" ]
   deps += [ ":cargo-platform-v0_3_1" ]
   deps += [ ":serde-v1_0_229" ]
   deps += [ ":serde_json-v1_0_151" ]
@@ -8373,30 +8373,6 @@ rustc_library("digest-v0_11_3") {
   applicable_licenses = [ ":digest-v0_11_3.license" ]
 }
 
-rustc_library("dirs-next-v2_0_0") {
-  crate_name = "dirs_next"
-  source_root = "//third_party/rust_crates/empty/dirs-next-2.0.0/src/lib.rs"
-  output_name = "dirs_next-ccbbecfd0234cf73"
-  edition = "2015"
-  disable_clippy = true
-  enforce_source_listing = false
-  configs -= [ "//build/config/rust:2018_idioms" ]
-
-  deps = []
-
-  rustenv = []
-
-  rustflags = [
-    "--cap-lints=allow",
-    "-Cmetadata=ccbbecfd0234cf73",
-    "-Cextra-filename=-ccbbecfd0234cf73",
-  ]
-
-  visibility = [ ":*" ]
-
-  applicable_licenses = [ "//build/licenses:fuchsia_license" ]
-}
-
 license("displaydoc-v0_2_7.license") {
   public_package_name = "displaydoc"
   license_files = [
@@ -10938,7 +10914,7 @@ rustc_library("gpt-v4_1_0") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":crc-v3_4_0" ]
   deps += [ ":simple-bytes-v0_2_14" ]
   deps += [ ":uuid-v1_23_3" ]
@@ -11397,7 +11373,7 @@ rustc_library("hickory-net-v0_26_3") {
 
   deps = []
   deps += [ ":async-trait-v0_1_92($host_toolchain)" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":cfg-if-v1_0_4" ]
   deps += [ ":data-encoding-v2_11_1" ]
   deps += [ ":futures-channel-v0_3_34" ]
@@ -11454,7 +11430,7 @@ rustc_library("hickory-proto-v0_26_3") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":data-encoding-v2_11_1" ]
   deps += [ ":idna-v1_1_0" ]
   deps += [ ":ipnet-v2_11_0" ]
@@ -11802,17 +11778,17 @@ rustc_library("http-body-v1_1_0") {
   applicable_licenses = [ ":http-body-v1_1_0.license" ]
 }
 
-license("http-body-util-v0_1_4.license") {
+license("http-body-util-v0_1_5.license") {
   public_package_name = "http_body_util"
   license_files =
-      [ "//third_party/rust_crates/vendor/http-body-util-0.1.4/LICENSE" ]
+      [ "//third_party/rust_crates/vendor/http-body-util-0.1.5/LICENSE" ]
 }
 
-rustc_library("http-body-util-v0_1_4") {
+rustc_library("http-body-util-v0_1_5") {
   crate_name = "http_body_util"
   source_root =
-      "//third_party/rust_crates/vendor/http-body-util-0.1.4/src/lib.rs"
-  output_name = "http_body_util-72c0a73c1a60e1b2"
+      "//third_party/rust_crates/vendor/http-body-util-0.1.5/src/lib.rs"
+  output_name = "http_body_util-94e4d1bbadbabe77"
   edition = "2018"
   disable_clippy = true
   enforce_source_listing = false
@@ -11829,14 +11805,14 @@ rustc_library("http-body-util-v0_1_4") {
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=72c0a73c1a60e1b2",
-    "-Cextra-filename=-72c0a73c1a60e1b2",
+    "-Cmetadata=94e4d1bbadbabe77",
+    "-Cextra-filename=-94e4d1bbadbabe77",
     "--cfg=feature=\"default\"",
   ]
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":http-body-util-v0_1_4.license" ]
+  applicable_licenses = [ ":http-body-util-v0_1_5.license" ]
 }
 
 license("httparse-v1_10_1.license") {
@@ -12051,7 +12027,7 @@ rustc_library("hyper-rustls-v0_27_9") {
   deps += [ ":hyper-util-v0_1_20" ]
   deps += [ ":hyper-v1_11_1" ]
   deps += [ ":rustls-native-certs-v0_8_4" ]
-  deps += [ ":rustls-v0_23_42" ]
+  deps += [ ":rustls-v0_23_45" ]
   deps += [ ":tokio-rustls-v0_26_4" ]
   deps += [ ":tower-service-v0_3_3" ]
 
@@ -12709,7 +12685,7 @@ rustc_library("inotify-v0_11_5") {
 
   deps = []
   deps += [ ":libc-v0_2_189" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":inotify-sys-v0_1_8" ]
 
   rustenv = []
@@ -14569,7 +14545,7 @@ rustc_library("nix-v0_29_0") {
 
   deps = []
   deps += [ ":libc-v0_2_189" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":cfg-if-v1_0_4" ]
   deps += [ ":memoffset-v0_9_1" ]
 
@@ -14631,7 +14607,7 @@ rustc_library("nix-v0_31_3") {
 
   deps = []
   deps += [ ":libc-v0_2_189" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":cfg-if-v1_0_4" ]
   deps += [ ":memoffset-v0_9_1" ]
 
@@ -14811,7 +14787,7 @@ rustc_library("notify-v8_2_0") {
     deps += [ ":mio-v1_2_1" ]
   }
   if (current_os == "mac") {
-    deps += [ ":bitflags-v2_13_0" ]
+    deps += [ ":bitflags-v2_13_2" ]
     deps += [ ":fsevent-sys-v4_1_0" ]
   }
   if (false) {
@@ -14851,7 +14827,7 @@ rustc_library("notify-types-v2_1_0") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
 
   rustenv = []
 
@@ -15400,7 +15376,7 @@ rustc_library("omaha_client-v0_4_1") {
   deps += [ ":elliptic-curve-v0_14_1" ]
   deps += [ ":futures-v0_3_34" ]
   deps += [ ":hex-v0_4_3" ]
-  deps += [ ":http-body-util-v0_1_4" ]
+  deps += [ ":http-body-util-v0_1_5" ]
   deps += [ ":http-body-v1_1_0" ]
   deps += [ ":http-v1_5_0" ]
   deps += [ ":hyper-util-v0_1_20" ]
@@ -15561,7 +15537,7 @@ rustc_library("openssl-v0_10_81") {
 
   deps = []
   deps += [ ":libc-v0_2_189" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":cfg-if-v1_0_4" ]
   deps += [ ":foreign-types-v0_3_2" ]
   deps += [ ":openssl-macros-v0_1_1($host_toolchain)" ]
@@ -16093,7 +16069,7 @@ rustc_library("pathdiff-v0_2_3") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":camino-v1_2_5" ]
+  deps += [ ":camino-v1_2_6" ]
 
   rustenv = []
 
@@ -17072,7 +17048,7 @@ rustc_library("png-v0_18_1") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":crc32fast-v1_5_0" ]
   deps += [ ":fdeflate-v0_3_7" ]
   deps += [ ":flate2-v1_1_9" ]
@@ -17544,7 +17520,7 @@ rustc_library("prettytable-rs-v0_10_0") {
   deps += [ ":csv-v1_4_0" ]
   deps += [ ":encode_unicode-v1_0_0" ]
   deps += [ ":lazy_static-v1_5_0" ]
-  deps += [ ":term-v0_7_0" ]
+  deps += [ ":term-v1_2_1" ]
   deps += [ ":unicode-width-v0_1_14" ]
 
   rustenv = []
@@ -17706,7 +17682,7 @@ rustc_library("proptest-v1_11_0") {
   deps = []
   deps += [ ":bit-set-v0_8_0" ]
   deps += [ ":bit-vec-v0_8_0" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":num-traits-v0_2_19" ]
   deps += [ ":rand-v0_9_4" ]
   deps += [ ":rand_chacha-v0_9_0" ]
@@ -18066,7 +18042,7 @@ rustc_library("pulldown-cmark-v0_13_4") {
 
   deps = []
   deps += [ ":memchr-v2_8_3" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":getopts-v0_2_24" ]
   deps += [ ":pulldown-cmark-escape-v0_11_0" ]
   deps += [ ":serde-v1_0_229" ]
@@ -19355,21 +19331,21 @@ rustc_library("ring-v0_17_14") {
   visibility += [ ":hickory-proto-v0_26_3.actual.rust_compilation_deps" ]
   visibility += [ ":ring" ]
   visibility += [ ":ring-0.17.14" ]
-  visibility += [ ":rustls-v0_23_42.actual" ]
-  visibility += [ ":rustls-v0_23_42.rustdoc" ]
-  visibility += [ ":rustls-v0_23_42.aux.deps.deps" ]
-  visibility += [ ":rustls-v0_23_42.aux.deps.transdeps" ]
-  visibility += [ ":rustls-v0_23_42.actual.rust_compilation_deps" ]
+  visibility += [ ":rustls-v0_23_45.actual" ]
+  visibility += [ ":rustls-v0_23_45.rustdoc" ]
+  visibility += [ ":rustls-v0_23_45.aux.deps.deps" ]
+  visibility += [ ":rustls-v0_23_45.aux.deps.transdeps" ]
+  visibility += [ ":rustls-v0_23_45.actual.rust_compilation_deps" ]
   visibility += [ ":rustls-webpki-v0_102_8.actual" ]
   visibility += [ ":rustls-webpki-v0_102_8.rustdoc" ]
   visibility += [ ":rustls-webpki-v0_102_8.aux.deps.deps" ]
   visibility += [ ":rustls-webpki-v0_102_8.aux.deps.transdeps" ]
   visibility += [ ":rustls-webpki-v0_102_8.actual.rust_compilation_deps" ]
-  visibility += [ ":rustls-webpki-v0_103_13.actual" ]
-  visibility += [ ":rustls-webpki-v0_103_13.rustdoc" ]
-  visibility += [ ":rustls-webpki-v0_103_13.aux.deps.deps" ]
-  visibility += [ ":rustls-webpki-v0_103_13.aux.deps.transdeps" ]
-  visibility += [ ":rustls-webpki-v0_103_13.actual.rust_compilation_deps" ]
+  visibility += [ ":rustls-webpki-v0_103_15.actual" ]
+  visibility += [ ":rustls-webpki-v0_103_15.rustdoc" ]
+  visibility += [ ":rustls-webpki-v0_103_15.aux.deps.deps" ]
+  visibility += [ ":rustls-webpki-v0_103_15.aux.deps.transdeps" ]
+  visibility += [ ":rustls-webpki-v0_103_15.actual.rust_compilation_deps" ]
   visibility += [ ":tuf-v0_3_0-beta14.actual" ]
   visibility += [ ":tuf-v0_3_0-beta14.rustdoc" ]
   visibility += [ ":tuf-v0_3_0-beta14.aux.deps.deps" ]
@@ -19987,7 +19963,7 @@ rustc_library("rustix-v1_1_4") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   if ((current_os == "linux" || false) &&
       (false || false ||
        !(current_os == "linux" && (true || (false || false)) &&
@@ -20079,19 +20055,19 @@ rustc_library("rustix-v1_1_4") {
   applicable_licenses = [ ":rustix-v1_1_4.license" ]
 }
 
-license("rustls-v0_23_42.license") {
+license("rustls-v0_23_45.license") {
   public_package_name = "rustls"
   license_files = [
-    "//third_party/rust_crates/vendor/rustls-0.23.42/LICENSE-APACHE",
-    "//third_party/rust_crates/vendor/rustls-0.23.42/LICENSE-ISC",
-    "//third_party/rust_crates/vendor/rustls-0.23.42/LICENSE-MIT",
+    "//third_party/rust_crates/vendor/rustls-0.23.45/LICENSE-APACHE",
+    "//third_party/rust_crates/vendor/rustls-0.23.45/LICENSE-ISC",
+    "//third_party/rust_crates/vendor/rustls-0.23.45/LICENSE-MIT",
   ]
 }
 
-rustc_library("rustls-v0_23_42") {
+rustc_library("rustls-v0_23_45") {
   crate_name = "rustls"
-  source_root = "//third_party/rust_crates/vendor/rustls-0.23.42/src/lib.rs"
-  output_name = "rustls-9d5664445026fc4f"
+  source_root = "//third_party/rust_crates/vendor/rustls-0.23.45/src/lib.rs"
+  output_name = "rustls-67000af76276dab1"
   edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
@@ -20103,15 +20079,15 @@ rustc_library("rustls-v0_23_42") {
   deps += [ ":once_cell-v1_21_4" ]
   deps += [ ":ring-v0_17_14" ]
   deps += [ ":rustls-pki-types-v1_15_1" ]
-  deps += [ ":rustls-webpki-v0_103_13" ]
+  deps += [ ":rustls-webpki-v0_103_15" ]
   deps += [ ":subtle-v2_6_1" ]
 
   rustenv = []
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=9d5664445026fc4f",
-    "-Cextra-filename=-9d5664445026fc4f",
+    "-Cmetadata=67000af76276dab1",
+    "-Cextra-filename=-67000af76276dab1",
     "--cfg=feature=\"log\"",
     "--cfg=feature=\"logging\"",
     "--cfg=feature=\"ring\"",
@@ -20121,11 +20097,11 @@ rustc_library("rustls-v0_23_42") {
 
   aliased_deps = {
     pki_types = ":rustls-pki-types-v1_15_1.actual"
-    webpki = ":rustls-webpki-v0_103_13.actual"
+    webpki = ":rustls-webpki-v0_103_15.actual"
   }
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":rustls-v0_23_42.license" ]
+  applicable_licenses = [ ":rustls-v0_23_45.license" ]
 }
 
 license("rustls-native-certs-v0_8_4.license") {
@@ -20334,7 +20310,7 @@ rustc_library("rustyline-v18_0_1") {
   deps = []
   deps += [ ":memchr-v2_8_3" ]
   deps += [ ":libc-v0_2_189" ]
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
   deps += [ ":cfg-if-v1_0_4" ]
   deps += [ ":home-v0_5_12" ]
   deps += [ ":log-v0_4_29" ]
@@ -22509,38 +22485,38 @@ rustc_library("simple-bytes-v0_2_14") {
   applicable_licenses = [ ":simple-bytes-v0_2_14.license" ]
 }
 
-license("simplelog-v0_10_2.license") {
+license("simplelog-v0_12_2.license") {
   public_package_name = "simplelog"
   license_files = [
-    "//third_party/rust_crates/vendor/simplelog-0.10.2/LICENSE.APACHE2",
-    "//third_party/rust_crates/vendor/simplelog-0.10.2/LICENSE.MIT",
+    "//third_party/rust_crates/vendor/simplelog-0.12.2/LICENSE.APACHE2",
+    "//third_party/rust_crates/vendor/simplelog-0.12.2/LICENSE.MIT",
   ]
 }
 
-rustc_library("simplelog-v0_10_2") {
+rustc_library("simplelog-v0_12_2") {
   crate_name = "simplelog"
-  source_root = "//third_party/rust_crates/vendor/simplelog-0.10.2/src/lib.rs"
-  output_name = "simplelog-21aad7a3c5a1179d"
+  source_root = "//third_party/rust_crates/vendor/simplelog-0.12.2/src/lib.rs"
+  output_name = "simplelog-6865747f6513fdb8"
   edition = "2018"
   disable_clippy = true
   enforce_source_listing = false
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":chrono-v0_4_45" ]
   deps += [ ":log-v0_4_29" ]
+  deps += [ ":time-v0_3_55" ]
 
   rustenv = []
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=21aad7a3c5a1179d",
-    "-Cextra-filename=-21aad7a3c5a1179d",
+    "-Cmetadata=6865747f6513fdb8",
+    "-Cextra-filename=-6865747f6513fdb8",
   ]
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":simplelog-v0_10_2.license" ]
+  applicable_licenses = [ ":simplelog-v0_12_2.license" ]
 }
 
 license("siphasher-v1_0_3.license") {
@@ -23311,7 +23287,7 @@ rustc_library("redox_syscall-v0_5_17") {
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":bitflags-v2_13_0" ]
+  deps += [ ":bitflags-v2_13_2" ]
 
   rustenv = []
 
@@ -23444,42 +23420,40 @@ rustc_library("tempfile-v3_27_0") {
   applicable_licenses = [ ":tempfile-v3_27_0.license" ]
 }
 
-license("term-v0_7_0.license") {
+license("term-v1_2_1.license") {
   public_package_name = "term"
   license_files = [
-    "//third_party/rust_crates/vendor/term-0.7.0/LICENSE-APACHE",
-    "//third_party/rust_crates/vendor/term-0.7.0/LICENSE-MIT",
+    "//third_party/rust_crates/vendor/term-1.2.1/LICENSE-APACHE",
+    "//third_party/rust_crates/vendor/term-1.2.1/LICENSE-MIT",
   ]
 }
 
-rustc_library("term-v0_7_0") {
+rustc_library("term-v1_2_1") {
   crate_name = "term"
-  source_root = "//third_party/rust_crates/vendor/term-0.7.0/src/lib.rs"
-  output_name = "term-7609218970e74e32"
-  edition = "2018"
+  source_root = "//third_party/rust_crates/vendor/term-1.2.1/src/lib.rs"
+  output_name = "term-6f8a45dfedae1bbe"
+  edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
   configs -= [ "//build/config/rust:2018_idioms" ]
 
   deps = []
-  deps += [ ":dirs-next-v2_0_0" ]
   if (false) {
-    deps += [ ":rustversion-v1_0_22($host_toolchain)" ]
-    deps += [ ":winapi-v0_3_9" ]
+    deps += [ ":windows-sys-v0_61_2" ]
   }
 
   rustenv = []
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=7609218970e74e32",
-    "-Cextra-filename=-7609218970e74e32",
+    "-Cmetadata=6f8a45dfedae1bbe",
+    "-Cextra-filename=-6f8a45dfedae1bbe",
     "--cfg=feature=\"default\"",
   ]
 
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":term-v0_7_0.license" ]
+  applicable_licenses = [ ":term-v1_2_1.license" ]
 }
 
 license("term_grid-v0_2_0.license") {
@@ -23939,6 +23913,7 @@ rustc_library("time-v0_3_55") {
   deps += [ ":powerfmt-v0_2_1" ]
   deps += [ ":serde_core-v1_0_229" ]
   deps += [ ":time-core-v0_1_9" ]
+  deps += [ ":time-macros-v0_2_32($host_toolchain)" ]
 
   rustenv = []
 
@@ -23948,6 +23923,8 @@ rustc_library("time-v0_3_55") {
     "-Cextra-filename=-f6832e24a0571c23",
     "--cfg=feature=\"alloc\"",
     "--cfg=feature=\"default\"",
+    "--cfg=feature=\"formatting\"",
+    "--cfg=feature=\"macros\"",
     "--cfg=feature=\"std\"",
   ]
 
@@ -23986,6 +23963,41 @@ rustc_library("time-core-v0_1_9") {
   visibility = [ ":*" ]
 
   applicable_licenses = [ ":time-core-v0_1_9.license" ]
+}
+
+license("time-macros-v0_2_32.license") {
+  public_package_name = "time_macros"
+  license_files = [
+    "//third_party/rust_crates/vendor/time-macros-0.2.32/LICENSE-Apache",
+    "//third_party/rust_crates/vendor/time-macros-0.2.32/LICENSE-MIT",
+  ]
+}
+
+rustc_macro("time-macros-v0_2_32") {
+  crate_name = "time_macros"
+  source_root = "//third_party/rust_crates/vendor/time-macros-0.2.32/src/lib.rs"
+  output_name = "time_macros-2ae3e3329a38cd1e"
+  edition = "2024"
+  disable_clippy = true
+  enforce_source_listing = false
+  configs -= [ "//build/config/rust:2018_idioms" ]
+
+  deps = []
+  deps += [ ":num-conv-v0_2_2" ]
+  deps += [ ":time-core-v0_1_9" ]
+
+  rustenv = []
+
+  rustflags = [
+    "--cap-lints=allow",
+    "-Cmetadata=2ae3e3329a38cd1e",
+    "-Cextra-filename=-2ae3e3329a38cd1e",
+    "--cfg=feature=\"formatting\"",
+  ]
+
+  visibility = [ ":*" ]
+
+  applicable_licenses = [ ":time-macros-v0_2_32.license" ]
 }
 
 license("tinystr-v0_8_4.license") {
@@ -24346,7 +24358,7 @@ rustc_library("tokio-rustls-v0_26_4") {
 
   deps = []
   deps += [ ":tokio-v1_53_1" ]
-  deps += [ ":rustls-v0_23_42" ]
+  deps += [ ":rustls-v0_23_45" ]
 
   rustenv = []
 
@@ -25119,7 +25131,7 @@ rustc_library("tuf-v0_3_0-beta14") {
   deps += [ ":data-encoding-v2_11_1" ]
   deps += [ ":futures-io-v0_3_34" ]
   deps += [ ":futures-util-v0_3_34" ]
-  deps += [ ":http-body-util-v0_1_4" ]
+  deps += [ ":http-body-util-v0_1_5" ]
   deps += [ ":http-v1_5_0" ]
   deps += [ ":hyper-util-v0_1_20" ]
   deps += [ ":hyper-v1_11_1" ]
@@ -25173,7 +25185,7 @@ rustc_test("tuf-v0_3_0-beta14.test") {
   deps += [ ":futures-executor-v0_3_34" ]
   deps += [ ":futures-io-v0_3_34" ]
   deps += [ ":futures-util-v0_3_34" ]
-  deps += [ ":http-body-util-v0_1_4" ]
+  deps += [ ":http-body-util-v0_1_5" ]
   deps += [ ":http-v1_5_0" ]
   deps += [ ":hyper-util-v0_1_20" ]
   deps += [ ":hyper-v1_11_1" ]
@@ -26632,17 +26644,17 @@ rustc_library("rustls-webpki-v0_102_8") {
   applicable_licenses = [ ":rustls-webpki-v0_102_8.license" ]
 }
 
-license("rustls-webpki-v0_103_13.license") {
+license("rustls-webpki-v0_103_15.license") {
   public_package_name = "webpki"
   license_files =
-      [ "//third_party/rust_crates/vendor/rustls-webpki-0.103.13/LICENSE" ]
+      [ "//third_party/rust_crates/vendor/rustls-webpki-0.103.15/LICENSE" ]
 }
 
-rustc_library("rustls-webpki-v0_103_13") {
+rustc_library("rustls-webpki-v0_103_15") {
   crate_name = "webpki"
   source_root =
-      "//third_party/rust_crates/vendor/rustls-webpki-0.103.13/src/lib.rs"
-  output_name = "webpki-5670558c97419088"
+      "//third_party/rust_crates/vendor/rustls-webpki-0.103.15/src/lib.rs"
+  output_name = "webpki-b518ef048079e6cc"
   edition = "2021"
   disable_clippy = true
   enforce_source_listing = false
@@ -26657,8 +26669,8 @@ rustc_library("rustls-webpki-v0_103_13") {
 
   rustflags = [
     "--cap-lints=allow",
-    "-Cmetadata=5670558c97419088",
-    "-Cextra-filename=-5670558c97419088",
+    "-Cmetadata=b518ef048079e6cc",
+    "-Cextra-filename=-b518ef048079e6cc",
     "--cfg=feature=\"alloc\"",
     "--cfg=feature=\"ring\"",
     "--cfg=feature=\"std\"",
@@ -26669,7 +26681,7 @@ rustc_library("rustls-webpki-v0_103_13") {
   }
   visibility = [ ":*" ]
 
-  applicable_licenses = [ ":rustls-webpki-v0_103_13.license" ]
+  applicable_licenses = [ ":rustls-webpki-v0_103_15.license" ]
 }
 
 license("which-v8_0_4.license") {
@@ -26740,7 +26752,6 @@ rustc_library("winapi-v0_3_9") {
     "--cfg=feature=\"processenv\"",
     "--cfg=feature=\"sysinfoapi\"",
     "--cfg=feature=\"winbase\"",
-    "--cfg=feature=\"wincon\"",
     "--cfg=feature=\"windef\"",
     "--cfg=feature=\"winerror\"",
     "--cfg=feature=\"winioctl\"",
@@ -26937,6 +26948,7 @@ rustc_library("windows-sys-v0_61_2") {
     "--cfg=feature=\"Win32_Security_Authentication_Identity\"",
     "--cfg=feature=\"Win32_Security_Credentials\"",
     "--cfg=feature=\"Win32_Security_Cryptography\"",
+    "--cfg=feature=\"Win32_Storage\"",
     "--cfg=feature=\"Win32_Storage_FileSystem\"",
     "--cfg=feature=\"Win32_System_Com\"",
     "--cfg=feature=\"Win32_System_Console\"",

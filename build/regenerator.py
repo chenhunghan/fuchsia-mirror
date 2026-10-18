@@ -45,6 +45,7 @@ import remote_services_utils
 import workspace_utils
 from bazel_action_file_copy_utils import write_file_if_changed
 from build.rbe import rbe_settings
+from build.scripts import properties
 from fuchsia_idk import generate_repository
 from idk_generator.idk_generator import IdkGenerator
 from pyright_config import create_pyright_base_config
@@ -187,7 +188,13 @@ def update_prebuilt_build_ids_list(fuchsia_dir: Path, list_file: Path) -> None:
 
     list_content = "\n".join(sorted(build_id_files))
     if not list_file.exists() or list_file.read_text() != list_content:
-        list_file.write_text(list_content)
+        # Write to a PID-scoped temporary file and atomically replace list_file
+        # so that concurrent //build/regenerator.py invocations sharing the same
+        # source checkout never observe a truncated/partially-written file or
+        # corrupt it with overlapping writes.
+        tmp_file = list_file.with_name(f".{list_file.name}.{os.getpid()}.tmp")
+        tmp_file.write_text(list_content)
+        os.replace(tmp_file, list_file)
 
 
 def patch_build_ninja_d(
@@ -239,6 +246,21 @@ def main() -> int:
         "--no-export-rust-project",
         action="store_true",
         help="Disable generation of the rust-project.json file.",
+    )
+    parser.add_argument(
+        "--no-gn-ide-json",
+        action="store_true",
+        help="Disable passing --ide=json to gn gen.",
+    )
+    parser.add_argument(
+        "--no-gn-check",
+        action="store_true",
+        help="Disable passing --check=system to gn gen.",
+    )
+    parser.add_argument(
+        "--no-bazel-warm-up",
+        action="store_true",
+        help="Skip the separate bazel warm-up query before dumping root repo mapping.",
     )
     parser.add_argument(
         "--color", action="store_true", help="Force colored output."
@@ -340,11 +362,13 @@ def main() -> int:
             "args" if args.update_args else "gen",
             os.path.relpath(build_dir, fuchsia_dir),
             "--fail-on-unused-args",
-            "--check=system",
             f"--ninja-executable={fuchsia_dir}/{prebuilt_ninja_subpath}",
             "--ninja-outputs-file=ninja_outputs.json",
-            "--ide=json",
         ]
+        if not args.no_gn_check:
+            gn_cmd_args += ["--check=system"]
+        if not args.no_gn_ide_json:
+            gn_cmd_args += ["--ide=json"]
         if not args.no_export_rust_project:
             gn_cmd_args += ["--export-rust-project"]
 
@@ -594,6 +618,7 @@ def main() -> int:
         extra_ninja_build_inputs |= (
             remote_services_utils.generate_remote_services_bazelrc(
                 fuchsia_dir=fuchsia_dir,
+                build_dir=build_dir,
                 output_path=remote_services_bazelrc_file,
                 download_outputs=remote_download_outputs,
             )
@@ -643,17 +668,18 @@ def main() -> int:
             gn_target_cpu=target_cpu,
         )
 
-        # Bazel warm-up: perform a minimalistic query that ensures that the Bazel
-        # daemon is started for the current build directory and that
-        # toplevel.MODULE.bazel is processed
-        time_profile.start(
-            "bazel_warm_up", "Launching Bazel daemon with minimal query"
-        )
         bazel_paths = build_utils.BazelPaths(fuchsia_dir, build_dir)
         bazel_launcher = build_utils.BazelLauncher(bazel_paths.launcher)
-        returncode = bazel_warm_up(bazel_launcher)
-        if returncode != 0:
-            return returncode
+        if not args.no_bazel_warm_up:
+            # Bazel warm-up: perform a minimalistic query that ensures that the Bazel
+            # daemon is started for the current build directory and that
+            # toplevel.MODULE.bazel is processed
+            time_profile.start(
+                "bazel_warm_up", "Launching Bazel daemon with minimal query"
+            )
+            returncode = bazel_warm_up(bazel_launcher)
+            if returncode != 0:
+                return returncode
 
         # Dump root repository mapping from Bazel
         time_profile.start(
@@ -871,8 +897,67 @@ def main() -> int:
         # make out/dir a symlink of the buildDir for backwards compatibility
         make_relative_symlink(out_default, build_dir)
 
+    if not do_not_change_fuchsia_checkout:
+        maybe_backup_out_config(fuchsia_dir, build_dir)
+
     log("Done.")
     return 0
+
+
+# Backup build configurations to account for ABFS workspace unmounts.
+# See http://artifax/9020260014f8dc51
+_BACKUP_OUT_CONFIG_FLAG_RELPATH = Path(".fx/config/backup-out-config")
+_OUT_CONFIG_BACKUPS_RELPATH = Path(".fx/out-config-backups")
+_BACKUP_OUT_CONFIG_FILES = ("args.gn", "fx.config")
+
+
+def is_backup_out_config_enabled(fuchsia_dir: Path) -> bool:
+    """Returns True if //.fx/config/backup-out-config enables BACKUP_OUT_CONFIG."""
+    props = properties.load_properties(
+        fuchsia_dir / _BACKUP_OUT_CONFIG_FLAG_RELPATH
+    )
+    return properties.str_to_bool(
+        props.get("BACKUP_OUT_CONFIG", ""), default=False
+    )
+
+
+def maybe_backup_out_config(fuchsia_dir: Path, build_dir: Path) -> None:
+    """Mirrors build_dir/{args.gn,fx.config} and the out/default symlink into //.fx/out-config-backups/.
+
+    When //.fx/config/backup-out-config sets BACKUP_OUT_CONFIG=1 (e.g. in ABFS
+    workspaces where //out is excluded from snapshots), this backs up the active
+    build directory's args.gn, fx.config, and out/default symlink under
+    //.fx/out-config-backups/ (matching //out's structure 1:1) so they can be
+    restored across workspace unmounts.
+    """
+    if not is_backup_out_config_enabled(fuchsia_dir):
+        return
+
+    resolved_build_dir = build_dir.resolve()
+    backups_root = fuchsia_dir / _OUT_CONFIG_BACKUPS_RELPATH
+    backup_dir = backups_root / resolved_build_dir.name
+    if backup_dir.is_symlink():
+        backup_dir.unlink()
+    for fname in _BACKUP_OUT_CONFIG_FILES:
+        src = resolved_build_dir / fname
+        if src.is_file():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            write_file_if_changed(backup_dir / fname, src.read_text())
+
+    out_default = fuchsia_dir / "out" / "default"
+    if out_default.is_symlink():
+        backups_root.mkdir(parents=True, exist_ok=True)
+        backup_default = backups_root / "default"
+        target = os.readlink(out_default)
+        if backup_default.is_symlink():
+            if os.readlink(backup_default) == target:
+                return
+            backup_default.unlink()
+        elif backup_default.is_dir():
+            shutil.rmtree(backup_default)
+        elif backup_default.exists():
+            backup_default.unlink()
+        backup_default.symlink_to(target)
 
 
 def write_icu_build_config(fuchsia_dir: Path, build_dir: Path) -> None:

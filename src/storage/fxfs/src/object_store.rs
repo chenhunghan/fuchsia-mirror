@@ -37,8 +37,8 @@ pub use store_object_handle::{MAX_INLINE_XATTR_SIZE, SetExtendedAttributeMode, S
 
 use crate::errors::FxfsError;
 use crate::filesystem::{
-    ApplyContext, ApplyMode, FxFilesystem, JournalingObject, MAX_FILE_SIZE, SyncOptions,
-    TruncateGuard,
+    ApplyContext, ApplyMode, Filesystem, FxFilesystem, JournalingObject, MAX_FILE_SIZE,
+    SyncOptions, TruncateGuard,
 };
 use crate::log::*;
 use crate::lsm_tree::cache::ObjectCache;
@@ -50,9 +50,9 @@ use crate::object_store::graveyard::Graveyard;
 use crate::object_store::journal::{JournalCheckpoint, JournalCheckpointV32, JournaledTransaction};
 use crate::object_store::key_manager::KeyManager;
 use crate::object_store::transaction::{
-    AssocObj, AssociatedObject, LockKey, LockKeys, MutationV59, ObjectMutationIterator,
-    ObjectStoreMutation, Operation, Options, ReservationOptions, Transaction, WriteGuard,
-    lock_keys,
+    AssocObj, AssociatedObject, LockKey, LockKeys, MutationV59, MutationV61,
+    ObjectMutationIterator, ObjectStoreMutation, Operation, Options, ReservationOptions,
+    Transaction, WriteGuard, lock_keys,
 };
 use crate::serialized_types::{
     AES_JOURNAL_ENCRYPTION_VERSION, DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Version, Versioned,
@@ -97,14 +97,15 @@ const OBJECT_ID_HI_MASK: u64 = 0xffffffff00000000;
 // At time of writing, this threshold limits transactions that delete extents to about 10,000 bytes.
 const TRANSACTION_MUTATION_THRESHOLD: usize = 200;
 
-// The number of keys we want to pre-cache for flushes.  We cache up to 2 keys.  One is for the
-// current flush, and one is pre-cached for the next flush so that we don't need to call the crypt
-// service during a flush.  To understand why, consider two threads T1 and T2.  Just prior to
-// committing a transaction, T1 ensures there are two keys.  Then, before T1 has committed the
-// transaction, T2 flushes and consumes one of the keys.  T1 then commits the transaction. The next
-// time a flush occurs, there's a key ready. If T1 had only ensured there was one key, there'd be no
-// key.
-const CACHED_KEYS_LIMIT: usize = 2;
+// The number of keys we want to pre-cache for flushes.  We cache up to 4 keys so that we don't need
+// to call the crypt service during a flush:
+// - Up to 2 flushes can occur between `prepare_commit` and acquiring `commit_mutex` on a
+//   transaction T1 (one minor flush for prior journal mutations, followed by one major compaction
+//   when `immutable_layer_count() > 1` and `needs_flush == false`).
+// - Up to 2 flushes can occur after T1 commits without a subsequent transaction calling
+//   `prepare_commit` (one minor flush for T1's mutations, followed by one major compaction when
+//   `immutable_layer_count() > 1` and `needs_flush == false`).
+const CACHED_KEYS_LIMIT: usize = 4;
 
 // Encrypted files and directories use the fscrypt key (identified by `FSCRYPT_KEY_ID`) to encrypt
 // file contents and filenames respectively. All non-fscrypt encrypted files otherwise default to
@@ -585,6 +586,25 @@ impl Drop for ReservedId<'_> {
     }
 }
 
+#[async_trait]
+pub trait ObjectStoreTrait: Send + Sync + 'static {
+    /// Purges an object that is in the graveyard.
+    async fn purge(
+        &self,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error>;
+
+    /// Purges an object that is in the graveyard asynchronously.
+    fn purge_async(&self, object_id: u64);
+
+    /// Returns a reference to the store's LSM tree.
+    fn tree(&self) -> &LSMTree<ObjectKey, ObjectValue>;
+
+    /// Returns the filesystem that this store belongs to.
+    fn filesystem(&self) -> Arc<dyn Filesystem>;
+}
+
 /// An object store supports a file like interface for objects.  Objects are keyed by a 64 bit
 /// identifier.  And object store has to be backed by a parent object store (which stores metadata
 /// for the object store).  The top-level object store (a.k.a. the root parent object store) is
@@ -594,7 +614,7 @@ pub struct ObjectStore {
     store_object_id: u64,
     device: Arc<dyn Device>,
     block_size: BlockSize,
-    filesystem: Weak<FxFilesystem>,
+    filesystem: Weak<dyn Filesystem>,
     // Lock ordering: This must be taken before `lock_state`.
     store_info: Mutex<Option<StoreInfo>>,
     tree: LSMTree<ObjectKey, ObjectValue>,
@@ -644,13 +664,13 @@ impl ObjectStore {
     fn new(
         parent_store: Option<Arc<ObjectStore>>,
         store_object_id: u64,
-        filesystem: Arc<FxFilesystem>,
+        filesystem: Arc<dyn Filesystem>,
         store_info: Option<StoreInfo>,
         object_cache: Option<Box<dyn ObjectCache<ObjectKey, ObjectValue>>>,
         lock_state: LockState,
         last_object_id: LastObjectId,
     ) -> Arc<ObjectStore> {
-        let device = filesystem.device();
+        let device = filesystem.ensure_local().device();
         let block_size = filesystem.block_size();
         Arc::new(ObjectStore {
             parent_store,
@@ -725,7 +745,7 @@ impl ObjectStore {
     /// Used to set filesystem on root_parent stores at bootstrap time after the filesystem has
     /// been created.
     pub fn attach_filesystem(mut this: ObjectStore, filesystem: Arc<FxFilesystem>) -> ObjectStore {
-        this.filesystem = Arc::downgrade(&filesystem);
+        this.filesystem = Arc::downgrade(&filesystem) as Weak<dyn Filesystem>;
         this
     }
 
@@ -736,8 +756,7 @@ impl ObjectStore {
         locks: LockKeys,
         options: Options<'a>,
     ) -> Result<Transaction<'a>, Error> {
-        let fs = self.filesystem();
-        Transaction::new(fs, options, locks).await
+        self.filesystem().new_transaction(locks, options).await
     }
 
     /// Ensures that `cached_keys` is filled up to `CACHED_KEYS_LIMIT`.
@@ -990,7 +1009,7 @@ impl ObjectStore {
         self.block_size
     }
 
-    pub fn filesystem(&self) -> Arc<FxFilesystem> {
+    pub fn filesystem(&self) -> Arc<dyn Filesystem> {
         self.filesystem.upgrade().unwrap()
     }
 
@@ -1951,10 +1970,7 @@ impl ObjectStore {
                 .context("Failed to read object store layers")?;
         }
 
-        fs.object_manager().update_reservation(
-            store_object_id,
-            tree::reservation_amount_from_layer_size(total_layer_size),
-        );
+        fs.ensure_local().object_manager().update_layer_size(store_object_id, total_layer_size);
 
         Ok(store)
     }
@@ -2022,26 +2038,65 @@ impl ObjectStore {
             LockState::Unlocking => panic!("Store is being unlocked"),
         }
 
-        // --- PHASE 1: Do everything that uses the crypt service outside of the flush lock ---
+        // --- PHASE 1: Take the flush lock to read StoreInfo and encrypted mutations ---
 
-        let mut last_num_flushes = self.counters.lock().num_flushes;
+        let fs = self.filesystem();
+        let guard =
+            fs.lock_manager().write_lock(lock_keys![LockKey::flush(self.store_object_id())]).await;
+
+        let last_num_flushes = self.counters.lock().num_flushes;
         let mut store_info = self.load_store_info().await?;
-        let crypt_fields = CryptFields::from(&store_info);
 
-        let mut update_store_info = async |store_info: &mut StoreInfo| -> Result<(), Error> {
-            let new_num_flushes = self.counters.lock().num_flushes;
-            if last_num_flushes == new_num_flushes {
-                return Ok(());
-            }
-            last_num_flushes = new_num_flushes;
-            *store_info = self.load_store_info().await?;
-            if crypt_fields != CryptFields::from(&*store_info) {
-                return Err(
-                    anyhow!(FxfsError::Inconsistent).context("Crypt fields changed during unlock")
+        // Read mutations.
+        let mut mutations = {
+            if store_info.encrypted_mutations_object_id == INVALID_OBJECT_ID {
+                EncryptedMutations::default()
+            } else {
+                let parent_store = self.parent_store.as_ref().unwrap();
+                let handle = ObjectStore::open_object(
+                    &parent_store,
+                    store_info.encrypted_mutations_object_id,
+                    HandleOptions::default(),
+                    None,
+                )
+                .await?;
+                let mut cursor = std::io::Cursor::new(
+                    handle
+                        .contents(MAX_ENCRYPTED_MUTATIONS_SIZE)
+                        .await
+                        .context(FxfsError::Inconsistent)?,
                 );
+                let mut mutations = EncryptedMutations::deserialize_with_version(&mut cursor)
+                    .context("Failed to deserialize EncryptedMutations")?
+                    .0;
+                let len = cursor.get_ref().len() as u64;
+                while cursor.position() < len {
+                    mutations.extend(
+                        &EncryptedMutations::deserialize_with_version(&mut cursor)
+                            .context("Failed to deserialize EncryptedMutations")?
+                            .0,
+                    );
+                }
+                mutations
             }
-            Ok(())
         };
+
+        // This assumes that the journal has no buffered mutations for this store (see Self::lock).
+        let journaled = EncryptedMutations::from_replayed_mutations(
+            self.store_object_id,
+            fs.ensure_local()
+                .journal()
+                .read_transactions_for_object(self.store_object_id)
+                .await
+                .context("Failed to read encrypted mutations from journal")?,
+        );
+        mutations.extend(&journaled);
+
+        // Drop the lock before we do any crypt operations (opening layers, unwrapping/creating
+        // keys, and decrypting mutations).
+        std::mem::drop(guard);
+
+        // --- PHASE 2: Perform all crypt operations and decrypt mutations outside of the lock ---
 
         // Open layers (uses crypt).
         let (layers, _) = open_layers(
@@ -2096,70 +2151,6 @@ impl ObjectStore {
             }
         }
 
-        // --- PHASE 2: Take the flush lock to read mutations ---
-
-        let do_not_use_crypt = crypt;
-
-        let fs = self.filesystem();
-        let guard =
-            fs.lock_manager().write_lock(lock_keys![LockKey::flush(self.store_object_id())]).await;
-
-        update_store_info(&mut store_info).await?;
-
-        // Read mutations.
-        let mut mutations = {
-            if store_info.encrypted_mutations_object_id == INVALID_OBJECT_ID {
-                EncryptedMutations::default()
-            } else {
-                let parent_store = self.parent_store.as_ref().unwrap();
-                let handle = ObjectStore::open_object(
-                    &parent_store,
-                    store_info.encrypted_mutations_object_id,
-                    HandleOptions::default(),
-                    None,
-                )
-                .await?;
-                let mut cursor = std::io::Cursor::new(
-                    handle
-                        .contents(MAX_ENCRYPTED_MUTATIONS_SIZE)
-                        .await
-                        .context(FxfsError::Inconsistent)?,
-                );
-                let mut mutations = EncryptedMutations::deserialize_with_version(&mut cursor)
-                    .context("Failed to deserialize EncryptedMutations")?
-                    .0;
-                let len = cursor.get_ref().len() as u64;
-                while cursor.position() < len {
-                    mutations.extend(
-                        &EncryptedMutations::deserialize_with_version(&mut cursor)
-                            .context("Failed to deserialize EncryptedMutations")?
-                            .0,
-                    );
-                }
-                mutations
-            }
-        };
-
-        // This assumes that the journal has no buffered mutations for this store (see Self::lock).
-        let journaled = EncryptedMutations::from_replayed_mutations(
-            self.store_object_id,
-            fs.journal()
-                .read_transactions_for_object(self.store_object_id)
-                .await
-                .context("Failed to read encrypted mutations from journal")?,
-        );
-        mutations.extend(&journaled);
-
-        // Drop the lock before we do any crypt operations (decryption/unwrapping).
-        std::mem::drop(guard);
-
-        // It's safe to use the crypt service now because we're not holding the flush lock.
-        let crypt = do_not_use_crypt;
-
-        self.filesystem().hooks().on_unlock_resources_acquired();
-
-        // --- PHASE 3: Decrypt mutations (outside of lock) ---
-
         let EncryptedMutations { transactions, mut data, mutations_key_roll } = mutations;
 
         let mut unwrapped_key_rolls = Vec::with_capacity(mutations_key_roll.len());
@@ -2170,6 +2161,8 @@ impl ObjectStore {
                 .context("Failed to unwrap mutations keys")?;
             unwrapped_key_rolls.push((offset, unwrapped));
         }
+
+        self.filesystem().hooks().on_unlock_resources_acquired();
 
         let mut mutations_to_apply = Vec::new();
 
@@ -2226,14 +2219,29 @@ impl ObjectStore {
             cipher_sequence_number = cipher.current_tweak();
         }
 
-        // --- PHASE 4: Re-acquire the flush lock and apply changes ---
+        // --- PHASE 3: Re-acquire the flush lock and apply changes ---
 
         let do_not_use_crypt = crypt;
 
         let guard =
             fs.lock_manager().write_lock(lock_keys![LockKey::flush(self.store_object_id())]).await;
 
-        update_store_info(&mut store_info).await?;
+        // While the flush lock was dropped in Phase 2, a concurrent `flush_locked` may have run.
+        // Because the store is `Locked`, no new transactions can be committed to it; `flush_locked`
+        // only takes the journaled encrypted mutations we already read in Phase 1 and appends them
+        // to the encrypted mutations file, advancing the store's journal checkpoint and potentially
+        // updating `store_info.encrypted_mutations_object_id`. The `mutations` read in Phase 1 are
+        // therefore still complete and identical, and we only need to reload `store_info` to pick
+        // up any updated `encrypted_mutations_object_id` (and verify no other fields changed).
+        if self.counters.lock().num_flushes != last_num_flushes {
+            let new_store_info = self.load_store_info().await?;
+            if CryptFields::from(&store_info) != CryptFields::from(&new_store_info) {
+                return Err(
+                    anyhow!(FxfsError::Inconsistent).context("Crypt fields changed during unlock")
+                );
+            }
+            store_info = new_store_info;
+        }
 
         let _ = std::mem::replace(&mut *self.lock_state.lock(), LockState::Unlocking);
 
@@ -2296,7 +2304,7 @@ impl ObjectStore {
             self.flush_with_reason(FlushReason::EncryptedMutations).await?;
 
             // Reap purged files within this store.
-            let _ = self.filesystem().graveyard().initial_reap(&self).await?;
+            let _ = self.filesystem().ensure_local().graveyard().initial_reap(&self).await?;
         }
 
         // Return and cancel the clean up.
@@ -2561,7 +2569,7 @@ impl ObjectStore {
             self.write_store_info(&mut transaction, &new_store_info).await?;
 
             transaction
-                .commit_with_callback(|_| {
+                .commit_with_callback(move |_| {
                     self.store_info.lock().as_mut().unwrap().last_object_id =
                         new_store_info.last_object_id;
                     match &mut *self.last_object_id.lock() {
@@ -2587,7 +2595,7 @@ impl ObjectStore {
     }
 
     fn allocator(&self) -> Arc<Allocator> {
-        self.filesystem().allocator()
+        self.filesystem().ensure_local().allocator()
     }
 
     // If |transaction| has an impending mutation for the underlying object, returns that.
@@ -2968,6 +2976,49 @@ impl ObjectStore {
             .ok_or(FxfsError::NotFound)??;
         Ok(size)
     }
+
+    /// Purges an object that is in the graveyard.
+    pub async fn purge(
+        &self,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error> {
+        self.filesystem().tombstone_object(self.store_object_id, object_id, truncate_guard).await
+    }
+
+    /// Purges an object that is in the graveyard asynchronously.
+    pub fn purge_async(&self, object_id: u64) {
+        self.filesystem().queue_tombstone_object(self.store_object_id, object_id);
+    }
+}
+
+#[async_trait]
+impl ObjectStoreTrait for ObjectStore {
+    async fn purge(
+        &self,
+        object_id: u64,
+        truncate_guard: Option<&TruncateGuard<'_>>,
+    ) -> Result<(), Error> {
+        self.purge(object_id, truncate_guard).await
+    }
+
+    fn purge_async(&self, object_id: u64) {
+        self.purge_async(object_id);
+    }
+
+    fn tree(&self) -> &LSMTree<ObjectKey, ObjectValue> {
+        self.tree()
+    }
+
+    fn filesystem(&self) -> Arc<dyn Filesystem> {
+        self.filesystem()
+    }
+}
+
+impl AsRef<dyn ObjectStoreTrait> for ObjectStore {
+    fn as_ref(&self) -> &dyn ObjectStoreTrait {
+        self
+    }
 }
 
 #[async_trait]
@@ -2981,7 +3032,7 @@ impl JournalingObject for ObjectStore {
         match &*self.lock_state.lock() {
             LockState::Locked | LockState::Locking => {
                 ensure!(
-                    matches!(mutation, Mutation::BeginFlush | Mutation::EndFlush)
+                    matches!(mutation, Mutation::BeginFlush | Mutation::EndFlush(_))
                         || matches!(
                             mutation,
                             Mutation::EncryptedObjectStore(_) | Mutation::UpdateMutationsKey(_)
@@ -3089,7 +3140,7 @@ impl JournalingObject for ObjectStore {
                 ensure!(self.parent_store.is_some(), FxfsError::Inconsistent);
                 self.tree.seal();
             }
-            Mutation::EndFlush => ensure!(self.parent_store.is_some(), FxfsError::Inconsistent),
+            Mutation::EndFlush(_) => ensure!(self.parent_store.is_some(), FxfsError::Inconsistent),
             Mutation::EncryptedObjectStore(_) | Mutation::UpdateMutationsKey(_) => {
                 // We will process these during Self::unlock.
                 ensure!(
@@ -3176,6 +3227,7 @@ impl JournalingObject for ObjectStore {
                     Mutation::ObjectStore(_) | Mutation::CreateInternalDir(_) => {
                         encrypted_transaction.0.push(mutation)
                     }
+
                     // `EncryptedObjectStore` and `UpdateMutationsKey` are both obviously
                     // associated with encrypted object stores, but are either the encrypted
                     // mutation data itself or metadata governing how the data will be encrypted.
@@ -3186,16 +3238,21 @@ impl JournalingObject for ObjectStore {
                             "Only this method should generate encrypted mutations"
                         );
                     }
+                    Mutation::UpdateBorrowed(_) => {
+                        unreachable!(
+                            "UpdateBorrowed is only produced when replaying legacy journals"
+                        );
+                    }
+
                     // `BeginFlush` and `EndFlush` are not needed during `unlock()` and are needed
-                    // during the initial journal replay, so should not be encrypted. `Allocator`,
-                    // `DeleteVolume`, `UpdateBorrowed` mutations are never associated with an
-                    // encrypted store as we do not encrypt the allocator or root/root-parent
-                    // stores so we can avoid the locking.
+                    // during the initial journal replay, so should not be encrypted. `Allocator`
+                    // and `DeleteVolume` mutations are never associated with an encrypted store as
+                    // we do not encrypt the allocator or root/root-parent stores so we can avoid
+                    // the locking.
                     Mutation::Allocator(_)
                     | Mutation::BeginFlush
-                    | Mutation::EndFlush
-                    | Mutation::DeleteVolume
-                    | Mutation::UpdateBorrowed(_) => {
+                    | Mutation::EndFlush(_)
+                    | Mutation::DeleteVolume => {
                         writer.write(mutation);
                     }
                 }
@@ -3228,7 +3285,7 @@ impl JournalingObject for ObjectStore {
 
 /// The plaintext serialization of the mutations for a transaction that are encrypted then wrapped
 /// in `Mutation::EncryptedObjectStore`.
-pub type EncryptedTransaction = EncryptedTransactionV59;
+pub type EncryptedTransaction = EncryptedTransactionV61;
 
 static_assertions::const_assert!(EncryptedTransaction::MAX_CHUNK_SIZE % 16 == 0);
 impl EncryptedTransaction {
@@ -3278,24 +3335,49 @@ impl EncryptedTransaction {
 // wrapped in Mutation and the version associated with it will come from some parent type above
 // Mutation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct EncryptedTransactionV61(pub Vec<MutationV61>);
+
+impl TypeFingerprint for EncryptedTransactionV61 {
+    fn fingerprint() -> String {
+        format!(
+            "struct{{MAX_CHUNK_SIZE: {}, {}}}",
+            // The MAX_CHUNK_SIZE is an important part of the format.
+            Self::MAX_CHUNK_SIZE,
+            Vec::<MutationV61>::fingerprint()
+        )
+    }
+}
+
+impl Versioned for EncryptedTransactionV61 {
+    // This can serialize much larger sizes. They will be broken up before being wrapped in
+    // EncryptedObjectStore.
+    fn max_serialized_size() -> Option<u64> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EncryptedTransactionV59(pub Vec<MutationV59>);
 
 impl TypeFingerprint for EncryptedTransactionV59 {
     fn fingerprint() -> String {
         format!(
             "struct{{MAX_CHUNK_SIZE: {}, {}}}",
-            // The MAX_CHUNK_SIZE is an important part of the format.
-            Self::MAX_CHUNK_SIZE,
+            EncryptedTransaction::MAX_CHUNK_SIZE,
             Vec::<MutationV59>::fingerprint()
         )
     }
 }
 
 impl Versioned for EncryptedTransactionV59 {
-    // This can serialize much larger sizes. They will be broken up before being wrapped in
-    // EncryptedObjectStore.
     fn max_serialized_size() -> Option<u64> {
         None
+    }
+}
+
+impl From<EncryptedTransactionV59> for EncryptedTransactionV61 {
+    fn from(old: EncryptedTransactionV59) -> Self {
+        Self(old.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -3345,9 +3427,8 @@ impl AsRef<ObjectStore> for ObjectStore {
 
 fn layer_size_from_encrypted_mutations_size(size: u64) -> u64 {
     // This is similar to reserved_space_from_journal_usage. It needs to be a worst case estimate of
-    // the amount of metadata space that might need to be reserved to allow the encrypted mutations
-    // to be written to layer files.  It needs to be >= than reservation_amount_from_layer_size will
-    // return once the data has been written to layer files and <= than
+    // the layer size so that the metadata space reserved for it is >= what will be required once
+    // the encrypted mutations have been written to layer files and <= what
     // reserved_space_from_journal_usage would use.  We can't just use
     // reserved_space_from_journal_usage because the encrypted mutations file includes some extra
     // data (it includes the checkpoints) that isn't written in the same way to the journal.
@@ -3457,7 +3538,7 @@ mod tests {
     };
     use fxfs_insecure_crypto::new_insecure_crypt;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
     use std::time::Duration;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
@@ -4782,6 +4863,13 @@ mod tests {
 
         store.unlock_read_only(crypt.clone()).await.expect("unlock failed");
         root_directory.lookup("test").await.expect("lookup failed").expect("not found");
+
+        // Flushing a read-only unlocked store (e.g. from a background compaction while fsck is
+        // running on the volume) should behave as if the store were still locked and succeed so the
+        // rest of the filesystem can continue operating normally.
+        assert_eq!(store.store_info().unwrap().encrypted_mutations_object_id, INVALID_OBJECT_ID);
+        store.flush().await.expect("flush failed");
+        assert_ne!(store.store_info().unwrap().encrypted_mutations_object_id, INVALID_OBJECT_ID);
         store.lock_read_only();
         store.unlock_read_only(crypt).await.expect("unlock failed");
         root_directory.lookup("test").await.expect("lookup failed").expect("not found");
@@ -6580,5 +6668,177 @@ mod tests {
                 ObjectValue::inline_extended_attribute(vec![0u8; MAX_INLINE_XATTR_SIZE])
             );
         }
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_unlock_concurrent_with_locked_flush() {
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fs = test_filesystem_with_hooks(fs_hooks).await;
+        let crypt = Arc::new(new_insecure_crypt());
+        let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
+
+        // Advance the root store's last_object_id past 250 so that any newly allocated
+        // encrypted_mutations_object_id uses a 3-byte varint encoding in bincode (instead of 1 byte
+        // for INVALID_OBJECT_ID = 0), growing the serialized StoreInfo size during `flush_locked`.
+        fs.root_store().update_last_object_id(256);
+
+        let root_store_id = fs.root_store().store_object_id();
+        let target_store_id = Arc::new(AtomicU64::new(0));
+        let target_store_id_clone = target_store_id.clone();
+        let is_end_flush = Arc::new(AtomicBool::new(false));
+        let is_end_flush_clone = is_end_flush.clone();
+        hooks.set_pre_commit(move |txn| {
+            let store_id = target_store_id_clone.load(Ordering::SeqCst);
+            if store_id != 0
+                && txn
+                    .get_object_mutation(
+                        root_store_id,
+                        ObjectKey::attribute(store_id, AttributeId::DATA, AttributeKey::Attribute),
+                    )
+                    .is_some()
+            {
+                is_end_flush_clone.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        });
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let go = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
+        let go_clone = go.clone();
+        let is_end_flush_clone = is_end_flush.clone();
+        hooks.set_before_commit(move || {
+            if is_end_flush_clone.swap(false, Ordering::SeqCst) {
+                ready_clone.store(true, Ordering::SeqCst);
+                while !go_clone.load(Ordering::SeqCst) {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        for i in 0..50 {
+            let store = root_vol
+                .new_volume(
+                    &format!("vol_{i}"),
+                    NewChildStoreOptions {
+                        options: StoreOptions {
+                            crypt: Some(crypt.clone()),
+                            ..StoreOptions::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("new_volume failed");
+            let root_dir =
+                Directory::open(&store, store.root_directory_object_id()).await.expect("open");
+            let mut txn = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            root_dir.create_child_file(&mut txn, "f").await.expect("create_child_file failed");
+            txn.commit().await.expect("commit failed");
+
+            store.lock().await.expect("lock failed");
+            is_end_flush.store(false, Ordering::SeqCst);
+            ready.store(false, Ordering::SeqCst);
+            go.store(false, Ordering::SeqCst);
+            target_store_id.store(store.store_object_id(), Ordering::SeqCst);
+
+            let store_clone = store.clone();
+            let flush_task = fasync::Task::spawn(async move {
+                store_clone.flush().await.expect("flush failed");
+            });
+
+            while !ready.load(Ordering::SeqCst) {
+                fasync::yield_now().await;
+            }
+            go.store(true, Ordering::SeqCst);
+            for _ in 0..(i * 100) {
+                std::hint::spin_loop();
+            }
+            store.unlock_read_only(crypt.clone()).await.expect("unlock_read_only failed");
+            store.lock_read_only();
+            flush_task.await;
+            target_store_id.store(0, Ordering::SeqCst);
+        }
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_object_store_trait() {
+        let fs = test_filesystem().await;
+        let root_store = fs.root_store();
+        let store_trait: &dyn super::ObjectStoreTrait = (*root_store).as_ref();
+
+        // Test filesystem() and tree() accessors via trait
+        let fs_from_trait = store_trait.filesystem();
+        assert_eq!(fs_from_trait.block_size(), fs.block_size());
+
+        // Create two objects to test purge and purge_async
+        let mut transaction =
+            root_store.new_transaction(lock_keys![], Options::default()).await.expect("new_txn");
+        let obj1 = ObjectStore::create_object(
+            &root_store,
+            &mut transaction,
+            HandleOptions::default(),
+            None,
+        )
+        .await
+        .expect("create_object 1 failed");
+        let obj2 = ObjectStore::create_object(
+            &root_store,
+            &mut transaction,
+            HandleOptions::default(),
+            None,
+        )
+        .await
+        .expect("create_object 2 failed");
+        root_store.add_to_graveyard(&mut transaction, obj1.object_id());
+        root_store.add_to_graveyard(&mut transaction, obj2.object_id());
+        transaction.commit().await.expect("commit failed");
+
+        let obj1_id = obj1.object_id();
+        let obj2_id = obj2.object_id();
+        std::mem::drop(obj1);
+        std::mem::drop(obj2);
+
+        // Verify objects exist in the tree via trait
+        assert!(
+            store_trait
+                .tree()
+                .find(&ObjectKey::object(obj1_id))
+                .await
+                .expect("find failed")
+                .is_some()
+        );
+
+        // Test synchronous purge via trait
+        store_trait.purge(obj1_id, None).await.expect("purge failed");
+        assert!(
+            store_trait
+                .tree()
+                .find(&ObjectKey::object(obj1_id))
+                .await
+                .expect("find failed")
+                .is_none()
+        );
+
+        // Test asynchronous purge via trait
+        store_trait.purge_async(obj2_id);
+        fs.graveyard().wait_for_reap().await;
+        assert!(
+            store_trait
+                .tree()
+                .find(&ObjectKey::object(obj2_id))
+                .await
+                .expect("find failed")
+                .is_none()
+        );
+
+        fs.close().await.expect("close failed");
     }
 }

@@ -11,6 +11,8 @@
 #include <lib/kconcurrent/chainlock.h>
 #include <lib/kconcurrent/chainlock_transaction.h>
 #include <stdint.h>
+#include <zircon/compiler.h>
+#include <zircon/types.h>
 
 #include <fbl/macros.h>
 #include <kernel/ffi.h>
@@ -39,6 +41,16 @@ FFI_ALWAYS_INLINE void cpp_thread_lock_guard_init(ffi::Uninitialized<ThreadLockG
                                                   Thread* thread, const fxt::InternedString* label,
                                                   uint32_t line);
 FFI_ALWAYS_INLINE void cpp_thread_lock_guard_destroy(ThreadLockGuard* guard);
+FFI_ALWAYS_INLINE void cpp_thread_current_migrate_to_cpu(cpu_num_t target_cpu);
+FFI_ALWAYS_INLINE cpu_mask_t cpp_scheduler_state_hard_affinity(const SchedulerState* state);
+FFI_ALWAYS_INLINE bool cpp_thread_preempt_is_enabled();
+
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_restricted_kick(Thread* thread);
+FFI_ALWAYS_INLINE void cpp_thread_set_memory_stall_state_inactive(Thread* thread);
+FFI_ALWAYS_INLINE void cpp_thread_current_exit(int retcode) __NO_RETURN;
+FFI_ALWAYS_INLINE void cpp_thread_current_kill();
+FFI_ALWAYS_INLINE void cpp_thread_get_backtrace(Thread* thread, Backtrace* out_bt);
+FFI_ALWAYS_INLINE void cpp_thread_dump(const Thread* thread, bool full);
 
 __END_CDECLS
 

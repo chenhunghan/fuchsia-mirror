@@ -26,6 +26,11 @@ pub enum BoardFeature {
     /// `component_manager_policy_debug_uart_suspend.json5`, which grants it only to the driver
     /// monikers it lists (today Iris's `uart-db61000`). Other boards must add theirs there.
     DebugUartSuspend,
+    /// Request the deep system suspend state (`ZX_SYSTEM_SUSPEND_OPTION_DEEP`) when suspending.
+    /// Routed as `fuchsia.power.DeepSuspendEnabled` to suspend drivers (e.g. generic-suspend);
+    /// only has an effect when suspend is enabled. Products can disable it with
+    /// `platform.power.deep_suspend_enabled`.
+    DeepSuspend,
     /// Eager startup for power-manager component.
     EagerPowerManager,
     /// Fake battery driver for testing or emulators.
@@ -96,6 +101,8 @@ pub enum BoardFeature {
     UfsPci,
     /// Universal Flash Storage over Platform Device support.
     UfsPdev,
+    /// USB Bus driver support.
+    UsbBus,
     /// USB Host mode support.
     UsbHost,
     /// USB Peripheral/Device mode support.
@@ -126,6 +133,7 @@ impl AsRef<str> for BoardFeature {
             Self::CpuPowerBoost => "fuchsia::cpu_power_boost",
             Self::CustomAudioCore => "fuchsia::custom_audio_core",
             Self::DebugUartSuspend => "fuchsia::debug_uart_suspend",
+            Self::DeepSuspend => "fuchsia::deep_suspend",
             Self::EagerPowerManager => "fuchsia::eager_power_manager",
             Self::FakeBattery => "fuchsia::fake_battery",
             Self::FakeDisplay => "fuchsia::fake_display",
@@ -163,6 +171,7 @@ impl AsRef<str> for BoardFeature {
             Self::SuspendingToken => "fuchsia::suspending_token",
             Self::UfsPci => "fuchsia::ufs_pci",
             Self::UfsPdev => "fuchsia::ufs_pdev",
+            Self::UsbBus => "fuchsia::usb_bus",
             Self::UsbHost => "fuchsia::usb_host",
             Self::UsbPeripheralSupport => "fuchsia::usb_peripheral_support",
             Self::UtcStartAtStartup => "fuchsia::utc_start_at_startup",

@@ -4,7 +4,7 @@
 
 use crate::mm::memory::MemoryObject;
 use crate::mm::{
-    DesiredAddress, MappingName, MappingOptions, MemoryAccessorExt, ProtectionFlags, VMEX_RESOURCE,
+    DesiredAddress, MappingName, MappingOptions, MemoryAccessorExt, MemoryManager, ProtectionFlags,
 };
 use crate::power::OnWakeOps;
 use crate::security;
@@ -228,6 +228,16 @@ pub trait FileOps: Send + Sync + AsAny + 'static {
         default_mmap(file, current_task, addr, memory_offset, length, prot_flags, options)
     }
 
+    /// Returns whether [`Self::mmap`] can map the file with `PROT_EXEC`, if the file can otherwise
+    /// be executed (see [`FileObject::can_exec`]).
+    ///
+    /// Files whose `mmap()` maps memory that can't be executable, e.g. memory shared with Starnix,
+    /// must return `false`, so that `PROT_EXEC` isn't implied when mapping them (e.g. by the
+    /// `READ_IMPLIES_EXEC` personality).
+    fn can_map_executable(&self) -> bool {
+        true
+    }
+
     /// Respond to a `getdents` or `getdents64` calls.
     ///
     /// The `file.offset` lock will be held while entering this method. The implementation must look
@@ -436,6 +446,10 @@ impl<T: FileOps + CloseFreeSafe, P: Deref<Target = T> + Send + Sync + 'static> F
         options: MappingOptions,
     ) -> Result<UserAddress, Errno> {
         self.deref().mmap(file, current_task, addr, memory_offset, length, prot_flags, options)
+    }
+
+    fn can_map_executable(&self) -> bool {
+        self.deref().can_map_executable()
     }
 
     fn readdir(
@@ -1086,7 +1100,7 @@ pub fn default_mmap(
     memory_offset: u64,
     length: usize,
     prot_flags: ProtectionFlags,
-    options: MappingOptions,
+    mut options: MappingOptions,
 ) -> Result<UserAddress, Errno> {
     fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "FileOpsDefaultMmap");
     let min_memory_size = (memory_offset as usize)
@@ -1096,27 +1110,30 @@ pub fn default_mmap(
         fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetSharedVmo");
         file.ops.get_memory(file, current_task, Some(min_memory_size), prot_flags)?
     } else {
-        fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetPrivateVmo");
         // TODO(tbodt): Use PRIVATE_CLONE to have the filesystem server do the clone for us.
         let base_prot_flags = (prot_flags | ProtectionFlags::READ) - ProtectionFlags::WRITE;
         let memory =
             file.ops.get_memory(file, current_task, Some(min_memory_size), base_prot_flags)?;
-        let mut clone_flags = zx::VmoChildOptions::SNAPSHOT_AT_LEAST_ON_WRITE;
         if !prot_flags.contains(ProtectionFlags::WRITE) {
-            clone_flags |= zx::VmoChildOptions::NO_WRITE;
+            fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetPrivateReadOnlyVmo");
+            // Read-only private mapping: Avoid eagerly creating a child VMO clone.
+            // Map the underlying file VMO directly. If the mapping is later made writable
+            // via mprotect(PROT_WRITE), it will be lazily cloned in MemoryManager::protect().
+            options |= MappingOptions::LAZY_PRIVATE_FILE;
+            let write_rights = zx::Rights::WRITE | zx::Rights::RESIZE;
+            if memory.get_rights().intersects(write_rights) {
+                Arc::new(
+                    memory
+                        .duplicate_handle(memory.get_rights() - write_rights)
+                        .map_err(impossible_error)?,
+                )
+            } else {
+                memory
+            }
+        } else {
+            fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetPrivateWritableVmo");
+            Arc::new(memory.create_private_child().map_err(MemoryManager::get_errno_for_map_err)?)
         }
-        fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "CreatePrivateChildVmo");
-        let mut child =
-            memory.create_child(clone_flags, 0, memory.get_size()).map_err(impossible_error)?;
-        // Zircon removes `Rights::EXECUTE` from snapshot children created without `NO_WRITE`
-        // (see `zx_vmo_create_child`). If the parent memory was executable, restore the right on
-        // the writable child so that `PROT_WRITE | PROT_EXEC` private mappings can be created.
-        if prot_flags.contains(ProtectionFlags::WRITE | ProtectionFlags::EXEC)
-            && memory.get_rights().contains(zx::Rights::EXECUTE)
-        {
-            child = child.replace_as_executable(&VMEX_RESOURCE).map_err(impossible_error)?;
-        }
-        Arc::new(child)
     };
 
     // Write guard is necessary only for shared mappings. Note that this doesn't depend on
@@ -1247,6 +1264,9 @@ impl FileOps for ProxyFileOps {
     }
     fn is_seekable(&self) -> bool {
         self.0.ops().is_seekable()
+    }
+    fn can_map_executable(&self) -> bool {
+        self.0.ops().can_map_executable()
     }
     fn flush(&self, _file: &FileObject, current_task: &CurrentTask) {
         self.0.ops().flush(&self.0, current_task);

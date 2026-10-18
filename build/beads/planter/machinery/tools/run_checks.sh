@@ -158,11 +158,36 @@ signal.signal(signal.SIGTERM, on_sigterm)
 
 
 def machinery_lock_paths():
-    # planter's lockMachinery lock: <os.TempDir()>/planter-machinery-<sha256(abs dir)[:8]>.lock.
-    # The agent's TMPDIR can differ from planter's, so /tmp is tried as well.
+    # planter's lockMachinery lock: <lockDir>/planter-machinery-<sha256(abs dir)[:16]>.lock.
+    # Check PLANTER_LOCK_DIR, $(dirname PLANTER_DB)/locks, ~/.planter/locks, TMPDIR, and /tmp.
     name = "planter-machinery-" + hashlib.sha256(project_dir.encode()).hexdigest()[:16] + ".lock"
-    dirs = [os.environ.get("TMPDIR") or "/tmp", "/tmp"]
-    return list(dict.fromkeys(os.path.join(d, name) for d in dirs))
+    dirs = []
+    if os.environ.get("PLANTER_LOCK_DIR"):
+        dirs.append(os.environ["PLANTER_LOCK_DIR"])
+    if os.environ.get("PLANTER_DB"):
+        dirs.append(os.path.join(os.path.dirname(os.path.abspath(os.environ["PLANTER_DB"])), "locks"))
+    dirs.extend([
+        os.path.expanduser("~/.planter/locks"),
+        os.environ.get("TMPDIR") or "/tmp",
+        "/tmp",
+    ])
+    return list(dict.fromkeys(os.path.join(d, name) for d in dirs if d))
+
+
+_held_machinery_locks = []
+
+
+def release_machinery_locks():
+    while _held_machinery_locks:
+        fd = _held_machinery_locks.pop()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+import atexit
+atexit.register(release_machinery_locks)
 
 
 def evolution_running():
@@ -173,12 +198,21 @@ def evolution_running():
             continue  # No evolution has run since the lock file was cleaned up.
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            # Keep the shared lock open while reading manifest/scripts so mergeEvolution
+            # cannot atomically overwrite check files mid-read.
+            _held_machinery_locks.append(fd)
         except BlockingIOError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            release_machinery_locks()
             return True
         except OSError:
-            pass
-        finally:
-            os.close(fd)  # Also releases the shared lock.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     return False
 
 
@@ -284,10 +318,10 @@ if list_only:
 enabled = [s for s in specs if s["enabled"]]
 disabled = [s for s in specs if not s["enabled"]]
 if only:
-    known = {s["name"] for s in specs}
+    known = {s["name"] for s in specs} | {"review_diff"}
     unknown = [n for n in only if n not in known]
     if unknown:
-        usage_error(f"unknown check(s): {', '.join(unknown)}; checks: {', '.join(s['name'] for s in specs)}")
+        usage_error(f"unknown check(s): {', '.join(unknown)}; checks: {', '.join(s['name'] for s in specs)}, review_diff")
     wanted = set(only)
     enabled = [s for s in enabled if s["name"] in wanted]
     disabled = [s for s in disabled if s["name"] in wanted]
@@ -560,6 +594,12 @@ def commit_msg_only_since_upload():
     if not uploaded_commit or not workdir:
         return False
     try:
+        head_sha = subprocess.check_output(
+            ["git", "-C", workdir, "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if not head_sha or head_sha == uploaded_commit:
+            return False
         up_tree = subprocess.check_output(
             ["git", "-C", workdir, "rev-parse", f"{uploaded_commit}^{{tree}}"],
             stderr=subprocess.DEVNULL, text=True,
@@ -582,14 +622,75 @@ def commit_msg_only_since_upload():
                 stderr=subprocess.DEVNULL, text=True,
             ).splitlines() if u.strip()
         ]
-        if any(any(u == d or u.startswith(d + "/") for d in target_dirs) for u in untracked):
+        if untracked:
             return False
+        vg = os.path.join(workdir, "vendor", "google")
+        if os.path.exists(os.path.join(vg, ".git")):
+            diff_vg = subprocess.check_output(
+                ["git", "-C", vg, "diff", "--name-only", "HEAD", "--"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+            if diff_vg:
+                return False
+            untracked_vg = [
+                u.strip() for u in subprocess.check_output(
+                    ["git", "-C", vg, "ls-files", "--others", "--exclude-standard"],
+                    stderr=subprocess.DEVNULL, text=True,
+                ).splitlines() if u.strip()
+            ]
+            if untracked_vg:
+                return False
         return True
     except Exception:
         return False
 
 
-COMMIT_MSG_CHECKS = {"confidentiality_check", "cq_reachability", "build_verification"}
+def find_planter_bin():
+    import shutil
+    p = shutil.which("planter")
+    if p:
+        return p
+    cand = os.path.expanduser("~/.local/bin/planter")
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    return None
+
+
+def run_review_diff(existing_findings):
+    planter_bin = find_planter_bin()
+    if not planter_bin or not workdir:
+        return None
+    env = dict(os.environ)
+    env.update(
+        {
+            "PLANTER_WORKDIR": workdir,
+            "PLANTER_TARGET_DIRS": " ".join(target_dirs),
+            "PLANTER_CHANGE_BASE": change_base,
+        }
+    )
+    out, _, _ = execute(
+        [planter_bin, "diff", "--local", "--check-findings", f"--workdir={workdir}"],
+        workdir,
+        env,
+        "review_diff",
+    )
+    findings, parsed_ok = parse_findings(out.strip())
+    if not parsed_ok:
+        return []
+    seen = {(f["category"], f["file"], f["line"], f["message"]) for f in existing_findings}
+    results = []
+    for f in findings:
+        f["source"] = "review_diff"
+        f["severity"] = normalize_severity(f["severity"])
+        key = (f["category"], f["file"], f["line"], f["message"])
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(f)
+    return results
+
+
+COMMIT_MSG_CHECKS = {"confidentiality_check", "cq_reachability", "commit_message_format", "build_verification"}
 commit_msg_only = not only and commit_msg_only_since_upload()
 if commit_msg_only:
     enabled = [s for s in enabled if s["name"] in COMMIT_MSG_CHECKS]
@@ -614,11 +715,19 @@ rows = []
 all_findings = []
 try:
     for n, spec in enumerate(enabled, 1):
+        if spec["name"] == "build_verification":
+            release_machinery_locks()
         log(f"({n}/{len(enabled)}) {spec['name']}...")
         started = time.monotonic()
         findings = run_check(spec)
         rows.append((spec, findings, time.monotonic() - started))
         all_findings.extend(findings)
+    if not commit_msg_only and (not only or "review_diff" in only):
+        started = time.monotonic()
+        diff_findings = run_review_diff(all_findings)
+        if diff_findings is not None:
+            rows.append(({"name": "review_diff", "enabled": True}, diff_findings, time.monotonic() - started))
+            all_findings.extend(diff_findings)
 except KeyboardInterrupt:
     log("interrupted")
     sys.exit(130)

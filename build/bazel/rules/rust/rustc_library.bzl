@@ -6,11 +6,11 @@
 
 load(
     "@fuchsia_rules_common//build_flags:rust.bzl",
-    "BUILD_FLAGS_RUST_ATTRS_KWARGS",
+    "BUILD_FLAGS_RUST_MACRO_ATTRS",
     "wrap_rust_macro_args_with_build_flags",
 )
 load("@rules_rust//rust:defs.bzl", "rust_library")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rustc_flags")
+load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_tags", "with_fuchsia_rustc_flags")
 load("//build/bazel/rules/rust:generate_unit_tests.bzl", "generate_unit_tests")
 
 def _rustc_library_impl(
@@ -34,15 +34,13 @@ def _rustc_library_impl(
     # stays in the same directory in incremental builds, and rustc's search
     # for crates also matches the stale file, which breaks the build (see
     # //src/storage/lib/vfs/rust:vfs_static).
-    if disable_clippy:
-        lint_config = "//build/config/rust/lints:clippy_allow_all"
-        test_lint_config = "//build/config/rust/lints:clippy_allow_all"
-    elif lint_config == None:
+    if lint_config == None:
         lint_config = "//build/config/rust/lints:clippy_warn_production"
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
         test_lint_config = lint_config
 
+    kwargs["tags"] = with_fuchsia_rust_tags(kwargs.get("tags"), disable_clippy)
     kwargs["rustc_flags"] = with_fuchsia_rustc_flags(rustc_flags)
 
     library_kwargs = wrap_rust_macro_args_with_build_flags(
@@ -131,5 +129,5 @@ keep output paths stable when migrating an existing GN target. Ignored by
 Bazel.""",
             configurable = False,
         ),
-    } | BUILD_FLAGS_RUST_ATTRS_KWARGS,
+    } | BUILD_FLAGS_RUST_MACRO_ATTRS,
 )

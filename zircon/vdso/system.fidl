@@ -5,23 +5,6 @@ library zx;
 
 
 
-type SystemPowerctlArg = struct {
-        // TODO(scottmg): More unnamed unions.
-        //union {
-        //  struct {
-        //    uint8_t target_s_state; // Value between 1 and 5 indicating which S-state
-        //    uint8_t sleep_type_a;   // Value from ACPI VM (SLP_TYPa)
-        //    uint8_t sleep_type_b;   // Value from ACPI VM (SLP_TYPb)
-        //  } acpi_transition_s_state;
-        //  struct {
-        //    uint32_t power_limit; // PL1 value in milliwatts
-        //    uint32_t time_window; // PL1 time window in microseconds
-        //    uint8_t clamp;        // PL1 clamping enable
-        //    uint8_t enable;       // PL1 enable
-        //  } x86_power_limit;
-        //};
-        };
-
 /// Options which can be passed to `zx_system_suspend_enter` syscalls via the
 /// `options` parameter.
 type SystemSuspendOption = flexible bits : uint64 {
@@ -818,125 +801,6 @@ closed protocol System {
 
     /// ## Summary
     ///
-    /// Soft reboot the system with a new kernel and bootimage.
-    ///
-    /// ## Declaration
-    ///
-    /// ```c
-    /// #include <zircon/syscalls.h>
-    ///
-    /// zx_status_t zx_system_mexec(zx_handle_t resource,
-    ///                             zx_handle_t kernel_vmo,
-    ///                             zx_handle_t bootimage_vmo);
-    /// ```
-    ///
-    /// ## Description
-    ///
-    /// `zx_system_mexec()` accepts two vmo handles: *kernel_vmo* should contain a
-    /// kernel image and *bootimage_vmo* should contain an initrd whose address shall
-    /// be passed to the new kernel as a kernel argument.
-    ///
-    /// To supplant the running kernel, a *resource* of `ZX_RSRC_KIND_SYSTEM` with base
-    /// `ZX_RSRC_SYSTEM_MEXEC_BASE` must be supplied.
-    ///
-    /// Upon success, `zx_system_mexec()` shall supplant the currently running kernel
-    /// image with the kernel image contained within *kernel_vmo*, load the ramdisk
-    /// contained within *bootimage_vmo* to a location in physical memory and branch
-    /// directly into the new kernel while providing the address of the loaded initrd
-    /// to the new kernel.
-    ///
-    /// To use the `zx_system_mexec()` function, you must specify
-    /// `kernel.enable-debugging-syscalls=true` on the kernel command line. Otherwise,
-    /// the function returns `ZX_ERR_NOT_SUPPORTED`.
-    ///
-    /// ## Rights
-    ///
-    /// *resource* must have resource kind `ZX_RSRC_KIND_SYSTEM` with base
-    /// `ZX_RSRC_SYSTEM_MEXEC_BASE`.
-    ///
-    /// *kernel_vmo* must be of type `ZX_OBJ_TYPE_VMO` and have `ZX_RIGHT_READ`.
-    ///
-    /// *bootimage_vmo* must be of type `ZX_OBJ_TYPE_VMO` and have `ZX_RIGHT_READ`.
-    ///
-    /// ## Return value
-    ///
-    /// `zx_system_mexec()` shall not return upon success.
-    ///
-    /// `ZX_ERR_NOT_SUPPORTED`  `kernel.enable-debugging-syscalls` is not set to `true`
-    /// on the kernel command line.
-    ///
-    /// ## See also
-    ///
-    ///  - [`zx_system_mexec_payload_get()`]
-    ///
-    /// [`zx_system_mexec_payload_get()`]: system_mexec_payload_get.md
-    strict Mexec(resource struct {
-        resource Handle:RESOURCE;
-        kernel_vmo Handle:VMO;
-        bootimage_vmo Handle:VMO;
-    }) -> () error Status;
-
-    /// ## Summary
-    ///
-    /// Return a ZBI containing ZBI entries necessary to boot this system.
-    ///
-    /// ## Declaration
-    ///
-    /// ```c
-    /// #include <zircon/syscalls.h>
-    ///
-    /// zx_status_t zx_system_mexec_payload_get(zx_handle_t resource,
-    ///                                         void* buffer,
-    ///                                         size_t buffer_size);
-    /// ```
-    ///
-    /// ## Description
-    ///
-    /// `zx_system_mexec_payload_get()` accepts a resource handle and a
-    /// pointer/length corresponding to an output buffer. The head of the buffer is
-    /// overwritten with non-bootable ZBI containing a sequence of entries that should
-    /// be appended to a ZBI before passing that image to [`zx_system_mexec()`]; the
-    /// tail of the buffer is left untouched.
-    ///
-    /// *resource* must be of type `ZX_RSRC_KIND_SYSTEM` with base
-    /// `ZX_RSRC_SYSTEM_MEXEC_BASE`.
-    ///
-    /// *buffer* and *buffer_size* must point to a buffer that is no longer than 16KiB.
-    ///
-    /// To use the `zx_system_mexec_payload_get()` function, you must specify
-    /// `kernel.enable-debugging-syscalls=true` on the kernel command line. Otherwise,
-    /// the function returns `ZX_ERR_NOT_SUPPORTED`.
-    ///
-    /// ## Rights
-    ///
-    /// *resource* must have resource kind `ZX_RSRC_KIND_SYSTEM` with base
-    /// `ZX_RSRC_SYSTEM_MEXEC_BASE`.
-    ///
-    /// ## Return value
-    ///
-    /// `zx_system_mexec_payload_get()` returns `ZX_OK` on success.
-    ///
-    /// `ZX_ERR_NOT_SUPPORTED`  `kernel.enable-debugging-syscalls` is not set to `true`
-    /// on the kernel command line.
-    ///
-    /// `ZX_ERR_BUFFER_TOO_SMALL`  If the provided buffer is too small for the ZBI.
-    /// In this case, the caller is expected to make the syscall again with a larger
-    /// buffer.
-    ///
-    /// ## See also
-    ///
-    ///  - [`zx_system_mexec()`]
-    ///
-    /// [`zx_system_mexec()`]: system_mexec.md
-    strict MexecPayloadGet(resource struct {
-        resource Handle:RESOURCE;
-    }) -> (struct {
-        @voidptr
-        buffer vector<byte>:MAX;
-    }) error Status;
-
-    /// ## Summary
-    ///
     /// TODO(https://fxbug.dev/42108078)
     ///
     /// ## Declaration
@@ -944,9 +808,7 @@ closed protocol System {
     /// ```c
     /// #include <zircon/syscalls.h>
     ///
-    /// zx_status_t zx_system_powerctl(zx_handle_t resource,
-    ///                                uint32_t cmd,
-    ///                                const zx_system_powerctl_arg_t* arg);
+    /// zx_status_t zx_system_powerctl(zx_handle_t resource, uint32_t cmd);
     /// ```
     ///
     /// ## Description
@@ -955,81 +817,31 @@ closed protocol System {
     /// *cmd*.  Zircon may not be able to put the system in a given power state,
     /// depending on its level of support for the architecture being used.
     ///
-    /// *arg* is an optional pointer to a struct which provides further information
-    /// about the command to be executed.
-    ///
     /// ## COMMANDS
-    ///
-    /// ### ZX_SYSTEM_POWERCTL_ENABLE_ALL_CPUS
-    ///
-    /// Sets all processor cores as active.
-    ///
-    /// *arg* type: `n/a`
-    ///
-    /// ### ZX_SYSTEM_POWERCTL_DISABLE_ALL_CPUS_BUT_PRIMARY
-    ///
-    /// Set only the primary CPU as active.
-    ///
-    /// *arg* type: `n/a`
-    ///
-    /// ### ZX_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE
-    ///
-    /// Only defined for x86-64, but is no longer supported.
-    ///
-    /// Returns `ZX_ERR_NOT_SUPPORTED`.
-    ///
-    /// ### ZX_SYSTEM_POWERCTL_X86_SET_PKG_PL1
-    ///
-    /// Only defined for x86-64.
-    ///
-    /// Set CPU to power level 1.
-    ///
-    /// *arg* type: `zx_system_powerctl_arg_t` with only the `x86_power_limit` union
-    /// element considered valid.
-    ///
-    /// ```c
-    /// struct {
-    ///     uint32_t power_limit;  // PL1 value in milliwatts
-    ///     uint32_t time_window;  // PL1 time window in microseconds
-    ///     uint8_t clamp;         // PL1 clamping enable
-    ///     uint8_t enable;        // PL1 enable
-    ///     uint8_t padding2[2];
-    /// } x86_power_limit;
-    /// ```
     ///
     /// ### ZX_SYSTEM_POWERCTL_REBOOT
     ///
     /// Restart the system, control should go through any relevant firmware and
     /// bootloaders.
     ///
-    /// *arg* type: `n/a`
-    ///
     /// ### ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER
     ///
     /// Restart the system, but stop in the bootloader instead of loading the operating
     /// system.
-    ///
-    /// *arg* type: `n/a`
     ///
     /// ### ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY
     ///
     /// Restart the system, but load the recovery operating system instead of the
     /// primary OS.
     ///
-    /// *arg* type: `n/a`
-    ///
     /// ### ZX_SYSTEM_POWERCTL_SHUTDOWN
     ///
     /// Turn the system off.
-    ///
-    /// *arg* type: `n/a`
     ///
     /// ### ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT
     ///
     /// Used by userspace when it is ready for a reboot in response to a previous signal
     /// from the kernel that the kernel wanted to reboot the system.
-    ///
-    /// *arg* type: `n/a`
     ///
     /// Returns `ZX_ERR_BAD_STATE` if the kernel has not previously signaled a desire
     /// to reboot.
@@ -1052,7 +864,6 @@ closed protocol System {
     strict Powerctl(resource struct {
         resource Handle:RESOURCE;
         cmd uint32;
-        arg SystemPowerctlArg;
     }) -> () error Status;
 
     /// # Summary

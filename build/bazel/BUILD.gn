@@ -74,6 +74,7 @@ group("tests") {
     "rules/tests:bazel_tests",
     "scripts:tests",
     "update-rustc-third-party:generate_crate_annotations_test($host_toolchain)",
+    "update-rustc-third-party:postprocess_crates_vendor_test($host_toolchain)",
   ]
 }
 
@@ -336,6 +337,23 @@ generated_file("gn_build_variables_for_bazel") {
   # LINT.ThenChange(//build/config/fuchsia/get_platform_version.py)
   # END platform_version.gni
 
+  # LINT.IfChange(current_build_target_api_level)
+  declaration = "//build/config/fuchsia/target_api_level.gni"
+  import(declaration)
+
+  # GN supports both an integer and a string. Ensure the level is a string as
+  # required by Bazel.
+  contents += [
+    {
+      name = "current_build_target_api_level"
+      value = "${current_build_target_api_level}"
+      type = "string"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/fuchsia/target_api_level.gni)
+
   # LINT.IfChange
   declaration = "//build/testing/config.gni"
   import(declaration)
@@ -360,6 +378,24 @@ generated_file("gn_build_variables_for_bazel") {
       type = "string"
       location = declaration
     },
+    {
+      name = "rust_debug_assertions"
+      value = rust_debug_assertions
+      type = "bool"
+      location = declaration
+    },
+    {
+      name = "rust_parallel_frontend_threads"
+      value = rust_parallel_frontend_threads
+      type = "string_or_false"
+      location = declaration
+    },
+    {
+      name = "rust_v0_symbol_mangling"
+      value = rust_v0_symbol_mangling
+      type = "bool"
+      location = declaration
+    },
   ]
 
   # LINT.ThenChange(//build/rust/config.gni)
@@ -377,20 +413,34 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//build/config/fuchsia_cxx_version.gni:experimental_cxx_version)
+
+  # LINT.IfChange(riscv64_enable_vector)
+  declaration = "//build/config/riscv64/riscv64.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "riscv64_enable_vector"
+      value = riscv64_enable_vector
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/riscv64/riscv64.gni:riscv64_enable_vector)
 }
 
 if (current_toolchain == default_toolchain) {
   group("bazel_args_json") {
     deps = [
-      "//build/bazel/config:bazel_args_json($default_toolchain)",
-      "//build/bazel/config:bazel_args_json($host_toolchain)",
+      "//build/bazel/config:bazel_args_json($fuchsia_default_variant_toolchain)",
+      "//build/bazel/config:bazel_args_json($host_default_variant_toolchain)",
     ]
   }
 
   group("bazel_default_configs_json") {
     deps = [
-      "//build/bazel/config:bazel_default_configs_json($default_toolchain)",
-      "//build/bazel/config:bazel_default_configs_json($host_toolchain)",
+      "//build/bazel/config:bazel_default_configs_json($fuchsia_default_variant_toolchain)",
+      "//build/bazel/config:bazel_default_configs_json($host_default_variant_toolchain)",
     ]
   }
 }

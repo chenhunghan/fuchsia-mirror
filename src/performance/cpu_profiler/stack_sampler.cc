@@ -15,6 +15,7 @@
 #include <zircon/syscalls/debug.h>
 #include <zircon/syscalls/object.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -26,7 +27,8 @@
 
 namespace profiler {
 
-constexpr size_t kStackCaptureSize = 4096ul * 4;  // 16 kib
+constexpr size_t kDefaultStackCaptureSize = fuchsia_cpu_profiler::kDefaultStackSize;
+constexpr size_t kMaxStackCaptureSize = 4096ul * 16;  // 64 kib
 
 #if defined(__aarch64__)
 // CPSR/SPSR M[4]: set when a thread is executing in AArch32 mode.
@@ -44,44 +46,13 @@ bool IsAarch32(const T& state) {
 
 zx::result<> StackSampler::Start(size_t buffer_size_mb) {
   TRACE_DURATION("cpu_profiler", __PRETTY_FUNCTION__);
-
-  // TODO(https://fxbug.dev/468419097): Deduplicate watcher code.
-  zx::result<> res = targets_.ForEachProcess([this](std::span<const zx_koid_t> job_path,
-                                                    const ProcessTarget& p) -> zx::result<> {
-    TRACE_DURATION("cpu_profiler", "StackSampler::Start/ForEachProcess");
-    std::vector<zx_koid_t> saved_path{job_path.begin(), job_path.end()};
+  if (zx::result<> res = WatchTargets(); res.is_error()) {
+    return res;
+  }
+  (void)targets_.ForEachProcess([](std::span<const zx_koid_t>, const ProcessTarget& p) {
     (void)RefreshMappings(p);
-
-    auto process_watcher = std::make_unique<ProcessWatcher>(
-        p.handle.borrow(),
-        [saved_path, this](zx_koid_t pid, zx_koid_t tid, zx::thread t) {
-          AddThread(saved_path, pid, tid, std::move(t));
-        },
-        [saved_path, this](zx_koid_t pid, zx_koid_t tid) { RemoveThread(saved_path, pid, tid); });
-
-    auto [it, emplaced] = process_watchers_.emplace(p.pid, std::move(process_watcher));
-    if (emplaced) {
-      if (zx::result watch_result = it->second->Watch(dispatcher_); watch_result.is_error()) {
-        FX_PLOGS(WARNING, watch_result.status_value()) << "Failed to watch process: " << p.pid;
-      }
-    }
     return zx::ok();
   });
-
-  if (res.is_error()) {
-    return res;
-  }
-
-  if (auto res = targets_.ForEachJob([this](const JobTarget& target) {
-        if (zx::result res = WatchTarget(target); res.is_error()) {
-          FX_PLOGS(WARNING, res.status_value())
-              << "Failed to watch job [" << target.job_id << "] and its children";
-        }
-        return zx::ok();
-      });
-      res.is_error()) {
-    return res;
-  }
 
   return zx::make_result(sample_task_.Post(dispatcher_));
 }
@@ -94,12 +65,17 @@ zx::result<> StackSampler::Stop() {
 void StackSampler::AddThread(std::vector<zx_koid_t> job_path, zx_koid_t pid, zx_koid_t tid,
                              zx::thread t) {
   TRACE_DURATION("cpu_profiler", __PRETTY_FUNCTION__);
+  if (!contexts_.contains(pid)) {
+    ScheduleCacheModules(job_path, pid);
+  }
   std::string thread_name = profiler::GetThreadName(t);
   zx::result res = targets_.AddThread(
       job_path, pid,
       ThreadTarget{.handle = std::move(t), .tid = tid, .name = std::move(thread_name)});
   if (res.is_error()) {
-    FX_PLOGS(ERROR, res.status_value()) << "Failed to add thread to session: " << tid;
+    if (res.error_value() != ZX_ERR_ALREADY_EXISTS) {
+      FX_PLOGS(ERROR, res.status_value()) << "Failed to add thread to session: " << tid;
+    }
   } else {
     zx::result<ProcessTarget*> process_target = targets_.GetProcess(job_path, pid);
     if (process_target.is_ok() && process_target.value() != nullptr) {
@@ -171,6 +147,18 @@ uint64_t StackSampler::GetRestrictedSP(const zx_restricted_state_t& restricted_s
 #endif
 }
 
+size_t StackSampler::GetStackCaptureSize() const {
+  if (!sample_specs_.empty() && sample_specs_[0].sample().has_value() &&
+      sample_specs_[0].sample()->callgraph().has_value() &&
+      sample_specs_[0].sample()->callgraph()->stack_size().has_value()) {
+    uint64_t requested = sample_specs_[0].sample()->callgraph()->stack_size().value();
+    if (requested > 0) {
+      return static_cast<size_t>(std::min<uint64_t>(requested, kMaxStackCaptureSize));
+    }
+  }
+  return kDefaultStackCaptureSize;
+}
+
 void StackSampler::CollectSamples(async_dispatcher_t* dispatcher, async::TaskBase* task,
                                   zx_status_t status) {
   zx::ticks start_time = zx::ticks::now();
@@ -179,8 +167,10 @@ void StackSampler::CollectSamples(async_dispatcher_t* dispatcher, async::TaskBas
     return;
   }
 
-  (void)targets_.ForEachProcess([this](std::span<const zx_koid_t>,
-                                       const ProcessTarget& target) -> zx::result<> {
+  const size_t stack_capture_size = GetStackCaptureSize();
+  (void)targets_.ForEachProcess([this, stack_capture_size](
+                                    std::span<const zx_koid_t>,
+                                    const ProcessTarget& target) -> zx::result<> {
     TRACE_DURATION("cpu_profiler", "StackSampler::CollectSamples/ForEachProcess");
 
     for (const auto& [tid, thread] : target.threads) {
@@ -278,7 +268,7 @@ void StackSampler::CollectSamples(async_dispatcher_t* dispatcher, async::TaskBas
       }
 
       BufferedStackMemory stack_memory(target.handle.borrow(), {}, target.cached_mappings);
-      stack_memory.CaptureStack(sp, kStackCaptureSize);
+      stack_memory.CaptureStack(sp, stack_capture_size);
 
       if (thread.restricted_state_addr.has_value()) {
         uint64_t restricted_base = thread.restricted_state_addr.value();
@@ -290,7 +280,7 @@ void StackSampler::CollectSamples(async_dispatcher_t* dispatcher, async::TaskBas
           if (!stack_memory.ReadBytes(restricted_base, sizeof(restricted_state), &restricted_state)
                    .has_err()) {
             sp = GetRestrictedSP(restricted_state);
-            stack_memory.CaptureStack(sp, kStackCaptureSize);
+            stack_memory.CaptureStack(sp, stack_capture_size);
           } else {
             thread.restricted_state_addr.reset();
           }

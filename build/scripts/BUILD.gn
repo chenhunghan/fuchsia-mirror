@@ -9,23 +9,66 @@ if (is_host) {
   python_library("main_build_lib") {
     sources = [
       "main_build.py",
-      "signal_utils.py",
+      "properties.py",
     ]
+    deps = [ ":signal_utils_lib" ]
     library_deps = [
       "//build/auth:gcloud",
       "//build/auth:gcloud_creds",
       "//build/rbe:build_summary",
+      "//build/rbe:casfs",
+      "//build/rbe:rbe_profile",
       "//build/rbe:rbe_settings",
+      "//build/resultstore:rs_profile",
     ]
-    data_deps = [ "//build/auth:select_auth_method" ]
+    data_deps = [
+      ":build_timeout",
+      "//build/auth:select_auth_method",
+    ]
+  }
+
+  python_library("managed_process_lib") {
+    sources = [ "managed_process.py" ]
+  }
+
+  python_library("properties_lib") {
+    sources = [ "properties.py" ]
   }
 
   python_library("signal_utils_lib") {
     sources = [ "signal_utils.py" ]
+    deps = [ ":managed_process_lib" ]
+  }
+
+  python_library("pstree_lib") {
+    sources = [ "pstree.py" ]
+    library_deps = [ "//build/profile:procfs" ]
+  }
+
+  python_library("graceful_timeout_lib") {
+    sources = [ "graceful_timeout.py" ]
+    library_deps = [ "//build/python/modules/serialization" ]
+    deps = [
+      ":managed_process_lib",
+      ":signal_utils_lib",
+    ]
+  }
+
+  python_library("build_timeout") {
+    sources = [ "build_timeout.py" ]
+    deps = [
+      ":graceful_timeout_lib",
+      ":managed_process_lib",
+      ":pstree_lib",
+    ]
   }
 
   python_library("ninjatrace2json_lib") {
     sources = [ "ninjatrace2json.py" ]
+  }
+
+  python_library("service_profile_lib") {
+    sources = [ "service_profile.py" ]
   }
 
   python_build_time_tests("main_build_test") {
@@ -38,9 +81,52 @@ if (is_host) {
     ]
   }
 
+  python_build_time_tests("managed_process_test") {
+    tests = [ "managed_process_test.py" ]
+    deps = [ ":managed_process_lib" ]
+  }
+
+  python_build_time_tests("properties_test") {
+    tests = [ "properties_test.py" ]
+    deps = [ ":properties_lib" ]
+  }
+
+  python_build_time_tests("service_profile_test") {
+    tests = [ "service_profile_test.py" ]
+    deps = [ ":service_profile_lib" ]
+  }
+
   python_build_time_tests("signal_utils_test") {
     tests = [ "signal_utils_test.py" ]
-    deps = [ ":signal_utils_lib" ]
+    deps = [
+      ":managed_process_lib",
+      ":signal_utils_lib",
+    ]
+  }
+
+  python_build_time_tests("build_timeout_test") {
+    tests = [ "build_timeout_test.py" ]
+    deps = [
+      ":build_timeout",
+      ":graceful_timeout_lib",
+      ":managed_process_lib",
+      ":pstree_lib",
+    ]
+  }
+
+  python_build_time_tests("pstree_test") {
+    tests = [ "pstree_test.py" ]
+    deps = [ ":pstree_lib" ]
+  }
+
+  python_build_time_tests("graceful_timeout_test") {
+    tests = [ "graceful_timeout_test.py" ]
+    deps = [
+      ":graceful_timeout_lib",
+      ":managed_process_lib",
+      ":signal_utils_lib",
+      "//build/python/modules/serialization",
+    ]
   }
 
   python_build_time_tests("ninjatrace2json_test") {
@@ -52,8 +138,14 @@ if (is_host) {
 group("tests") {
   testonly = true
   deps = [
+    ":build_timeout_test($host_toolchain)",
+    ":graceful_timeout_test($host_toolchain)",
     ":main_build_test($host_toolchain)",
+    ":managed_process_test($host_toolchain)",
     ":ninjatrace2json_test($host_toolchain)",
+    ":properties_test($host_toolchain)",
+    ":pstree_test($host_toolchain)",
+    ":service_profile_test($host_toolchain)",
     ":signal_utils_test($host_toolchain)",
   ]
 }

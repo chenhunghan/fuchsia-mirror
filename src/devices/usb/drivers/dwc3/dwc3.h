@@ -15,9 +15,9 @@
 #include <fidl/fuchsia.hardware.usb.phy/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.policy/cpp/common_types_format.h>
 #include <fidl/fuchsia.hardware.usb.policy/cpp/fidl.h>
-#include <fidl/fuchsia.power.broker/cpp/fidl.h>
 #include <fidl/fuchsia.power.system/cpp/fidl.h>
 #include <lib/async/cpp/irq.h>
+#include <lib/async/cpp/task.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/dma-buffer/buffer.h>
 #include <lib/driver/component/cpp/driver_base2.h>
@@ -25,6 +25,7 @@
 #include <lib/driver/metadata/cpp/metadata_server.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+#include <lib/fit/result.h>
 #include <lib/inspect/component/cpp/component.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/zx/eventpair.h>
@@ -58,6 +59,7 @@ class PlatformExtension {
  public:
   virtual ~PlatformExtension() = default;
   virtual zx::result<> Start() = 0;
+  virtual void Stop() {}
   virtual zx::result<> Suspend() = 0;
   virtual zx::result<> Resume() = 0;
   virtual bool PowersDownCoreOnDisconnect() const { return true; }
@@ -89,8 +91,9 @@ class Dwc3 : public fdf::DriverBase2,
 
   inspect::ComponentInspector& inspector() { return *inspector_; }
 
-  std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementRunner>> take_power_element_runner() {
-    return std::move(power_element_runner_);
+  fuchsia_hardware_usb_descriptor::UsbSpeed max_speed() const { return max_speed_; }
+  void set_max_speed_for_testing(fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+    max_speed_ = speed;
   }
 
   void ConnectToEndpoint(ConnectToEndpointRequest& request,
@@ -142,7 +145,6 @@ class Dwc3 : public fdf::DriverBase2,
   }
 
   // For testing.
-  bool poll_end_xfer() const { return poll_end_xfer_; }
   bool supports_gfladj() const { return supports_gfladj_; }
   std::optional<uint32_t> fladj() const { return fladj_; }
   bool fladj_refclk_lpm_sel() const { return fladj_refclk_lpm_sel_; }
@@ -167,11 +169,21 @@ class Dwc3 : public fdf::DriverBase2,
   class EpServer : public usb::EndpointServer {
    public:
     EpServer(const zx::bti& bti, Dwc3* dwc3, UserEndpoint* uep)
-        : usb::EndpointServer{bti, uep->ep.ep_num, usb::ScatterGatherSupport::kUnsupported},
+        : usb::EndpointServer{bti, uep->ep.ep_num, usb::ScatterGatherSupport::kSupported},
           dwc3_{dwc3},
           uep_{uep} {}
 
-    void CancelAll(zx_status_t reason, bool force = false);
+    // Cancels every request on the endpoint. While the core is running, the active transfer is
+    // ended with DEPENDXFER (CMDIOC=1) and the requests are completed from the resulting
+    // DEPEVT_CMD_CMPLT. With the core stopped there is nothing left to end and the requests are
+    // completed immediately.
+    void CancelAll(zx_status_t reason);
+    // Teardown counterpart of CancelAll(): ends the active transfer synchronously (DEPENDXFER
+    // with CMDIOC=0, waiting for DEPCMD.CMDACT to clear) and completes every active and queued
+    // request right away. Only for the moment the core is about to be stopped, reset or powered
+    // down and no further endpoint event will be delivered; function drivers are expected to have
+    // disabled their endpoints through CancelAll() before.
+    void RemoveRequests(zx_status_t reason);
 
     std::queue<usb::RequestVariant> queued_reqs;  // requests waiting to be processed
     struct RequestState {
@@ -260,6 +272,7 @@ class Dwc3 : public fdf::DriverBase2,
     uint64_t command_failures{0};
     uint32_t stale_starts_to_end{0};
     uint32_t stale_cancels_to_ignore{0};
+    size_t queued_trbs{0};
     uint8_t usb_endpoint_address{0};
 
     bool TransferStateIsActive() const {
@@ -404,6 +417,8 @@ class Dwc3 : public fdf::DriverBase2,
     fdescriptor::wire::UsbSetup cur_setup;
     fdescriptor::wire::UsbSpeed cur_speed{fdescriptor::wire::UsbSpeed::kUndefined};
     uint64_t setup_generation{0};
+    // Latched 8-bit USB 2.0 test mode selector from the upper byte of wIndex (wIndex[15:8]).
+    uint8_t test_mode{0};
   };
 
   friend struct std::formatter<Ep0::State>;
@@ -474,26 +489,27 @@ class Dwc3 : public fdf::DriverBase2,
   void DoControlCall(fuchsia_hardware_usb_descriptor::wire::UsbSetup setup, size_t length);
   void HandleEp0TransferCompleteEvent(uint8_t ep_num);
   void HandleEp0TransferNotReadyEvent(uint8_t ep_num, uint32_t stage);
-  // This method clears the fifo, ends any ongoing transfers, and stalls the endpoint.
-  // It's used in preparation of gracefully restarting a failed control transfer.
+  // Cancels any active or starting transfers on EP0 IN/OUT and retires uncompleted TRBs.
+  void Ep0CancelTransfers();
+  // Ends any ongoing transfers, retires uncompleted TRBs, and stalls the endpoint.
+  // Used in preparation for gracefully restarting a failed control transfer.
   void Ep0EndAndStall(Endpoint& ep);
 
   // General EP stuff
   void EpEnable(Endpoint& ep, bool enable);
   void EpSetConfig(Endpoint& ep, bool enable);
   zx_status_t EpSetStall(Endpoint& ep, bool stall);
-  void EpStartTransfer(Endpoint& ep, TrbFifo& fifo, uint32_t type, zx_paddr_t buffer, size_t length,
-                       bool zlp = false);
+  void EpStartSingleTransfer(Endpoint& ep, TrbFifo& fifo, uint32_t type, zx_paddr_t buffer,
+                             size_t length);
   // This method is safe to call with the core powered down.
   void EpReset(Endpoint& ep);
 
   // Methods specific to user endpoints
   // This method is safe to call with the core powered down.
-  // When `force` is false (default, used when the event FIFO remains active such as USB bus reset),
-  // active transfers enter `kCanceling` (`CMDIOC=1`) and defer `DALEPENA` clearing until
-  // `DEPEVT_CMD_CMPL` arrives. When `force` is true (used prior to `StopEvents()` / power-off),
-  // active transfers are ended synchronously (`CMDIOC=0`) so `DALEPENA` is cleared immediately.
-  void UserEpReset(UserEndpoint& uep, bool force = false);
+  // Cancels the endpoint's requests gracefully (see EpServer::CancelAll()) and unconfigures it;
+  // used while the event ring stays live (USB bus reset, SET_CONFIGURATION), where `kCanceling`
+  // completes from DEPEVT_CMD_CMPLT and `DALEPENA` is cleared once the transfer has ended.
+  void UserEpReset(UserEndpoint& uep);
   void UserEpQueueNext(UserEndpoint& uep);
   void UserEpQueueNextSingle(UserEndpoint& uep);
   void UserEpQueueNextOngoing(UserEndpoint& uep, bool start_transfer);
@@ -504,10 +520,24 @@ class Dwc3 : public fdf::DriverBase2,
   void CancelAllEndpointIdleCallbacks();
 
   // Resets only user endpoints without touching EP0 or its state.
-  void ResetUserEndpoints(bool force = false);
+  void ResetUserEndpoints();
+
+  enum class QueueRequestError {
+    kEmpty,
+    kError,
+    kNotEnoughSpace,
+  };
+  using QueueRequestResult = fit::result<QueueRequestError, zx_paddr_t>;
+  QueueRequestResult QueueNextRequest(UserEndpoint& uep, bool is_single);
 
   // This method is safe to call with the core powered down.
-  void ResetEndpoints(bool force = false);
+  void ResetEndpoints();
+
+  // The last step before the core stops delivering endpoint events: ends whatever transfer a
+  // function driver left running synchronously (EpServer::RemoveRequests()), returns the requests,
+  // unconfigures the user endpoints and finally EP0. Nothing here waits for an event; in a graceful
+  // teardown the function drivers have already disabled their endpoints and this finds them idle.
+  void StopActiveTransfers();
 
   // Commands
   bool CmdStartNewConfig(const Endpoint& ep, uint32_t rsrc_id_base);
@@ -524,12 +554,36 @@ class Dwc3 : public fdf::DriverBase2,
   void StartPeripheralMode();
   void ResetConfiguration();
 
+  void QuiesceCore();
+  void PowerDownCore();
+  // Reports the core state to the PHY over fuchsia.hardware.usb.phy/UsbPhy.ConnectStatusChanged.
+  // `connected = true`: core powered and running (sent at power-up and at SET_CONFIGURATION).
+  // `connected = false`: core quiesced, DCI disconnect drained and powered down (`power_on_` is
+  // false); the PHY may remove the core's clocks, resets and power after this. Only
+  // ApplyConnectStatusChanged() may send `false`.
+  void NotifyPhyConnectStatus(bool connected);
+  // Sends UsbDciInterface.SetConnected(false) and invokes `on_done` once usb-peripheral has
+  // replied (synchronously if no DCI interface is bound). `disconnect_in_flight_` is true in
+  // between.
+  void NotifyDciDisconnectedThen(fit::callback<void()> on_done);
+  // Applies a connect status handed over by the PHY: powers the core up/down, (re)starts
+  // peripheral mode and tells the PHY and usb-peripheral about it. For a disconnect this spans the
+  // asynchronous DCI drain; `on_done` runs once the status is fully applied and the PHY has been
+  // informed. Statuses are applied strictly one at a time: OnConnectStatusChanged() does not
+  // re-arm the hanging get until `on_done` runs.
+  void ApplyConnectStatusChanged(bool connected, fit::callback<void()> on_done = {});
+
   void HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_status_t status,
                  const zx_packet_interrupt_t* interrupt);
 
   // OnConnectStatusChanged() is how the phy notifies the dwc3 driver of plug/unplug changes.
   void OnConnectStatusChanged(
       fidl::Result<fuchsia_hardware_usb_phy::ConnectionWatcher::WatchConnectStatusChanged>& result);
+  // Issues the next ConnectionWatcher.WatchConnectStatusChanged hanging get. Only called once the
+  // previously returned status has been fully applied (see ApplyConnectStatusChanged()), so the PHY
+  // may treat a parked hanging get that follows a disconnect as "DWC3 no longer touches the core".
+  // `setup_wake_lease` is handed back to the PHY to keep the system awake across the hand-over.
+  void RearmConnectionWatcher(zx::eventpair setup_wake_lease);
 
   fdf::PDev pdev_;
 
@@ -550,14 +604,10 @@ class Dwc3 : public fdf::DriverBase2,
   bool power_on_{true};
   bool link_connected_{false};
 
-  // Returns true if PHY power is on and the controller has been started by the client.
-  bool is_active() const { return power_on_ && controller_started_; }
+  // Returns true if PHY power is on, the controller has been started by the client, and no
+  // disconnect drain is in flight.
+  bool is_active() const { return power_on_ && controller_started_ && !disconnect_in_flight_; }
   fuchsia_hardware_usb_descriptor::UsbSpeed connection_speed() const { return connection_speed_; }
-
-  // True if the EndTransfer core command can be polled via CmdAct instead of waiting on a
-  // CommandComplete endpoint irq event. Only available to core versions >= 3.10a. Set during
-  // initialization based on core version.
-  bool poll_end_xfer_{false};
 
   fuchsia_hardware_usb_descriptor::UsbSpeed connection_speed_{
       fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined};
@@ -568,10 +618,22 @@ class Dwc3 : public fdf::DriverBase2,
 
   std::unique_ptr<PlatformExtension> platform_extension_;
 
-  fidl::SyncClient<fuchsia_hardware_usb_phy::UsbPhy> phy_;
+  fidl::Client<fuchsia_hardware_usb_phy::UsbPhy> phy_;
   fidl::Client<fuchsia_hardware_usb_phy::ConnectionWatcher> connection_watcher_;
   zx::eventpair connection_lease_;
-  uint64_t connect_status_generation_{0};
+  // True while UsbDciInterface.SetConnected(false) is being drained by usb-peripheral: the core is
+  // kept powered only so function drivers can disable their endpoints.
+  bool disconnect_in_flight_{false};
+  bool stopping_{false};
+
+  // A DCI disconnect drain (SetConnected(false)) completes once every function driver has answered
+  // SetConfigured(false), normally within milliseconds. Nothing bounds that wait: a function driver
+  // that never answers leaves the core powered, the connection wake lease held, the PHY untold and
+  // the connection watcher disarmed until the driver is stopped. There is no recovery for that yet;
+  // the watchdog only makes it visible in the logs and in Inspect.
+  static inline constexpr zx::duration kDciDisconnectDrainStallDelay{zx::sec(5)};
+  zx::duration dci_disconnect_drain_stall_delay_{kDciDisconnectDrainStallDelay};
+  async::TaskClosure dci_disconnect_drain_watchdog_;
 
   fidl::ServerBindingGroup<fuchsia_hardware_usb_dci::UsbDci> dci_bindings_;
   fidl::SyncClient<fuchsia_driver_framework::NodeController> child_;
@@ -580,7 +642,6 @@ class Dwc3 : public fdf::DriverBase2,
       mac_address_metadata_server_;
   fdf_metadata::MetadataServer<fuchsia_boot_metadata::SerialNumberMetadata>
       serial_number_metadata_server_;
-  fdf_metadata::MetadataServer<fuchsia_hardware_usb_phy::Metadata> usb_phy_metadata_server_;
 
   std::shared_ptr<fdf::Namespace> incoming_;
   std::optional<dwc3_config::Config> config_;
@@ -590,8 +651,6 @@ class Dwc3 : public fdf::DriverBase2,
   bool supports_gfladj_ = false;
 
   std::optional<inspect::ComponentInspector> inspector_;
-
-  std::optional<fidl::ServerEnd<fuchsia_power_broker::ElementRunner>> power_element_runner_;
 
   // The basic model here is:
   //   * Record data outside of Inspect structures for better memory efficiency
@@ -614,6 +673,9 @@ class Dwc3 : public fdf::DriverBase2,
 
   uint32_t num_in_eps_ = 0;
   uint32_t num_out_eps_ = 0;
+
+  fuchsia_hardware_usb_descriptor::UsbSpeed max_speed_{
+      fuchsia_hardware_usb_descriptor::UsbSpeed::kSuper};
 
   void SetDeviceState(fuchsia_hardware_usb_policy::DeviceState state);
   void SetDeviceState(fuchsia_hardware_usb_policy::DeviceState state, uint8_t address);

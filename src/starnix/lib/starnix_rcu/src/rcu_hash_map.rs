@@ -4,56 +4,66 @@
 
 use fuchsia_rcu::{RcuDroppable, RcuReadScope};
 use fuchsia_rcu_collections::rcu_raw_hash_map::{InsertionResult, RcuRawHashMap};
-use starnix_sync::Mutex;
+use starnix_sync::{DynamicLockDepMutex, LockDepGuard, LockLevel, RcuHashMapLock};
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash};
+use std::marker::PhantomData;
+use std::ops::Deref;
 
-/// A concurrent hash map that uses RCU for read synchronization and a mutex for write synchronization.
-///
-/// This map allows concurrent readers to access entries without blocking, while writers are
-/// synchronized via a `Mutex`.
-///
-/// By default, this map uses `rapidhash::RapidBuildHasher`, which provides high performance.
-/// However, if this map holds keys which may be attacker-controlled, consider using
-/// `std::collections::hash_map::RandomState` instead.
+/// A concurrent hash map that uses RCU for read synchronization and a mutex with a dynamically
+/// specified lock level for write synchronization.
 #[derive(RcuDroppable)]
-pub struct RcuHashMap<K, V, S = rapidhash::RapidBuildHasher>
+pub struct DynamicRcuHashMap<K, V, S = rapidhash::RapidBuildHasher>
 where
     K: Eq + Hash + Clone + RcuDroppable + Sync,
     V: Clone + RcuDroppable + Sync,
     S: BuildHasher + Send + Sync + 'static,
 {
     map: RcuRawHashMap<K, V, S>,
-    mutex: Mutex<()>,
+    mutex: DynamicLockDepMutex<()>,
 }
 
-impl<K, V> Default for RcuHashMap<K, V, rapidhash::RapidBuildHasher>
+impl<K, V> Default for DynamicRcuHashMap<K, V, rapidhash::RapidBuildHasher>
 where
     K: Eq + Hash + Clone + RcuDroppable + Sync,
     V: Clone + RcuDroppable + Sync,
 {
     fn default() -> Self {
-        Self { map: Default::default(), mutex: Mutex::new(()) }
+        Self::new::<RcuHashMapLock>()
     }
 }
 
-impl<K, V, S> RcuHashMap<K, V, S>
+impl<K, V> DynamicRcuHashMap<K, V, rapidhash::RapidBuildHasher>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+{
+    /// Creates a new hash map with the given LockDep lock level.
+    pub fn new<L: LockLevel>() -> Self {
+        Self { map: Default::default(), mutex: DynamicLockDepMutex::new::<L>(()) }
+    }
+}
+
+impl<K, V, S> DynamicRcuHashMap<K, V, S>
 where
     K: Eq + Hash + Clone + RcuDroppable + Sync,
     V: Clone + RcuDroppable + Sync,
     S: BuildHasher + Send + Sync + 'static,
 {
-    /// Creates a new hash map with the given capacity and hasher.
-    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
+    /// Creates a new hash map with the given capacity, hasher, and LockDep lock level.
+    pub fn with_capacity_and_hasher<L: LockLevel>(capacity: usize, hash_builder: S) -> Self {
         Self {
             map: RcuRawHashMap::with_capacity_and_hasher(capacity, hash_builder),
-            mutex: Mutex::new(()),
+            mutex: DynamicLockDepMutex::new::<L>(()),
         }
     }
 
-    /// Creates a new hash map with the given hasher.
-    pub fn with_hasher(hash_builder: S) -> Self {
-        Self { map: RcuRawHashMap::with_hasher(hash_builder), mutex: Mutex::new(()) }
+    /// Creates a new hash map with the given hasher and LockDep lock level.
+    pub fn with_hasher<L: LockLevel>(hash_builder: S) -> Self {
+        Self {
+            map: RcuRawHashMap::with_hasher(hash_builder),
+            mutex: DynamicLockDepMutex::new::<L>(()),
+        }
     }
 
     /// Returns a reference to the value associated with the given key, if it exists.
@@ -103,21 +113,213 @@ where
         self.iter(scope).map(|(k, _)| k)
     }
 
+    /// Returns an iterator over the map's values.
+    pub fn values<'a>(&'a self, scope: &'a RcuReadScope) -> impl Iterator<Item = &'a V> {
+        self.iter(scope).map(|(_, v)| v)
+    }
+
     /// Returns the number of entries in the map.
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    /// Returns true if the map contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Removes all entries from the map while preserving active RCU reader snapshots.
+    pub fn clear(&self) {
+        self.lock().clear();
+    }
+}
+
+impl<K, V, S> starnix_sync::MutexLike for DynamicRcuHashMap<K, V, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    type Guard<'a>
+        = RcuHashMapGuard<'a, K, V, S>
+    where
+        Self: 'a;
+    type Context = <DynamicLockDepMutex<()> as starnix_sync::MutexLike>::Context;
+
+    #[inline(always)]
+    fn context() -> Self::Context {
+        <DynamicLockDepMutex<()> as starnix_sync::MutexLike>::context()
+    }
+
+    #[inline(always)]
+    fn lock(&self, context: &mut Self::Context) -> Self::Guard<'_> {
+        RcuHashMapGuard {
+            map: &self.map,
+            _guard: <DynamicLockDepMutex<()> as starnix_sync::MutexLike>::lock(
+                &self.mutex,
+                context,
+            ),
+        }
+    }
+}
+
+impl<K, V, S> fuchsia_sync::ResetDependencies for DynamicRcuHashMap<K, V, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    #[inline(always)]
+    unsafe fn reset_dependencies(&self) {
+        // SAFETY: The caller must uphold the safety requirements of `ResetDependencies`.
+        unsafe {
+            self.mutex.reset_dependencies();
+        }
+    }
 }
 
 // TODO(https://fxbug.dev/482462174): switch back to #[derive(Debug)]
-impl<K, V, S> std::fmt::Debug for RcuHashMap<K, V, S>
+impl<K, V, S> std::fmt::Debug for DynamicRcuHashMap<K, V, S>
 where
     K: Eq + Hash + std::fmt::Debug + Clone + RcuDroppable + Sync,
     V: std::fmt::Debug + Clone + RcuDroppable + Sync,
     S: BuildHasher + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RcuHashMap").field("map", &self.map).finish()
+        f.debug_struct("DynamicRcuHashMap").field("map", &self.map).finish()
+    }
+}
+
+/// A concurrent hash map that uses RCU for read synchronization and a mutex with a statically
+/// typed LockDep level for write synchronization.
+///
+/// By default, this map uses `rapidhash::RapidBuildHasher`, which provides high performance.
+/// However, if this map holds keys which may be attacker-controlled, consider using
+/// `std::collections::hash_map::RandomState` instead.
+#[derive(RcuDroppable)]
+pub struct RcuHashMap<K, V, L = RcuHashMapLock, S = rapidhash::RapidBuildHasher>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    L: LockLevel,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    inner: DynamicRcuHashMap<K, V, S>,
+    _level: PhantomData<L>,
+}
+
+impl<K, V> Default for RcuHashMap<K, V, RcuHashMapLock, rapidhash::RapidBuildHasher>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V, L> RcuHashMap<K, V, L, rapidhash::RapidBuildHasher>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    L: LockLevel,
+{
+    /// Creates a new hash map.
+    pub fn new() -> Self {
+        Self { inner: DynamicRcuHashMap::new::<L>(), _level: PhantomData }
+    }
+}
+
+impl<K, V, S> RcuHashMap<K, V, RcuHashMapLock, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    /// Creates a new hash map with the given capacity and hasher.
+    pub fn with_capacity_and_hasher(capacity: usize, hash_builder: S) -> Self {
+        Self {
+            inner: DynamicRcuHashMap::with_capacity_and_hasher::<RcuHashMapLock>(
+                capacity,
+                hash_builder,
+            ),
+            _level: PhantomData,
+        }
+    }
+
+    /// Creates a new hash map with the given hasher.
+    pub fn with_hasher(hash_builder: S) -> Self {
+        Self {
+            inner: DynamicRcuHashMap::with_hasher::<RcuHashMapLock>(hash_builder),
+            _level: PhantomData,
+        }
+    }
+}
+
+impl<K, V, L, S> Deref for RcuHashMap<K, V, L, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    L: LockLevel,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    type Target = DynamicRcuHashMap<K, V, S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<K, V, L, S> starnix_sync::MutexLike for RcuHashMap<K, V, L, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    L: LockLevel,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    type Guard<'a>
+        = RcuHashMapGuard<'a, K, V, S>
+    where
+        Self: 'a;
+    type Context = <DynamicRcuHashMap<K, V, S> as starnix_sync::MutexLike>::Context;
+
+    #[inline(always)]
+    fn context() -> Self::Context {
+        <DynamicRcuHashMap<K, V, S> as starnix_sync::MutexLike>::context()
+    }
+
+    #[inline(always)]
+    fn lock(&self, context: &mut Self::Context) -> Self::Guard<'_> {
+        <DynamicRcuHashMap<K, V, S> as starnix_sync::MutexLike>::lock(&self.inner, context)
+    }
+}
+
+impl<K, V, L, S> fuchsia_sync::ResetDependencies for RcuHashMap<K, V, L, S>
+where
+    K: Eq + Hash + Clone + RcuDroppable + Sync,
+    V: Clone + RcuDroppable + Sync,
+    L: LockLevel,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    #[inline(always)]
+    unsafe fn reset_dependencies(&self) {
+        // SAFETY: The caller must uphold the safety requirements of `ResetDependencies`.
+        unsafe {
+            self.inner.reset_dependencies();
+        }
+    }
+}
+
+// TODO(https://fxbug.dev/482462174): switch back to #[derive(Debug)]
+impl<K, V, L, S> std::fmt::Debug for RcuHashMap<K, V, L, S>
+where
+    K: Eq + Hash + std::fmt::Debug + Clone + RcuDroppable + Sync,
+    V: std::fmt::Debug + Clone + RcuDroppable + Sync,
+    L: LockLevel,
+    S: BuildHasher + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RcuHashMap").field("map", &self.inner.map).finish()
     }
 }
 
@@ -129,7 +331,7 @@ where
     S: BuildHasher + Send + Sync + 'static,
 {
     map: &'a RcuRawHashMap<K, V, S>,
-    _guard: starnix_sync::MutexGuard<'a, ()>,
+    _guard: LockDepGuard<'a, ()>,
 }
 
 impl<'a, K, V, S> RcuHashMapGuard<'a, K, V, S>
@@ -166,6 +368,29 @@ where
     {
         // SAFETY: We have exclusive access to the map because we have exclusive access to the mutex.
         unsafe { self.map.remove(key) }
+    }
+
+    /// Removes all entries from the map while preserving active RCU reader snapshots.
+    pub fn clear(&mut self) {
+        // SAFETY: Exclusive access to the map is guaranteed by the held mutex guard.
+        unsafe {
+            self.map.clear();
+        }
+    }
+
+    /// Returns the number of entries in the map.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Returns true if the map contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Returns an iterator over the map's entries under the provided RCU read scope.
+    pub fn iter<'b>(&'b self, scope: &'b RcuReadScope) -> impl Iterator<Item = (&'b K, &'b V)> {
+        self.map.iter(scope)
     }
 
     /// Removes all values from the map and returns them.
@@ -470,8 +695,10 @@ mod tests {
     #[test]
     fn test_rcu_hash_map_capacity_zero() {
         use std::collections::hash_map::RandomState;
-        let map =
-            RcuHashMap::<i32, i32, RandomState>::with_capacity_and_hasher(0, RandomState::new());
+        let map = RcuHashMap::<i32, i32, RcuHashMapLock, RandomState>::with_capacity_and_hasher(
+            0,
+            RandomState::new(),
+        );
         let mut guard = map.lock();
 
         assert_eq!(guard.get(&1), None);

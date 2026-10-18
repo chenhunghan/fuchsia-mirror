@@ -89,12 +89,14 @@ build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 
 # TODO(https://fxbug.dev/540978591): Switch to build_flags() when it's available.
 #
-# Host Rust coverage flags based on GN's //build/config/profile:coverage-rust.
+# Host and Fuchsia target Rust coverage flags based on GN's //build/config/profile:coverage-rust
+# and //build/config:optimize_coverage.
 #
 # `remap-path-prefix` is only set in Bazel. It instructs rustc to rewrite source file paths that
 # begin with . (the current working directory) so that they begin with ../.. in the coverage mapping
 # data. This changes source file paths to formats expected by downstream coverage pipeline.
 build:host_rust_coverage --@rules_rust//rust/settings:extra_rustc_flags=-Cinstrument-coverage,-Cllvm-args=-profile-correlate=binary,-Cllvm-args=-runtime-counter-relocation,--remap-path-prefix=.=../..
+build:fuchsia_rust_coverage --@rules_rust//rust/settings:extra_rustc_flags=-Cinstrument-coverage,-Cllvm-args=-profile-correlate=binary,-Copt-level=1,--remap-path-prefix=.=../..,-Clink-arg=-lzircon,-Clink-arg=build/config/profile/llvm_profile_counter_bias.ld
 
 # Restore the repository rule behavior of adding an implicit watch() for
 # any Label value passed to repository_ctx.path(), as this is heavily used
@@ -145,6 +147,8 @@ build --@io_bazel_rules_go//go/config:pure=True
 # TODO(https://fxbug.dev/478896548): When migraating to Bazel 9, this will need
 # to be changed to `--incompatible_exclude_starlark_flags_from_exec_config`.
 common --experimental_exclude_starlark_flags_from_exec_config
+common --experimental_propagate_custom_flag=@io_bazel_rules_go//go/config:gc_linkopts
+common --experimental_propagate_custom_flag=@io_bazel_rules_go//go/config:pure
 
 # Do not propagate defines to the exec config by default.
 # Explicitly propagate `EXECUTOR`, which is used in remote builds.
@@ -177,3 +181,9 @@ build --@rules_python//python/config_settings:venvs_use_declare_symlink=no
 # absl-related fixes and remove these copts.
 build --per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
 build --host_per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
+
+# Ignore upstream BUILD.bazel files inside third_party/boringssl/src so that
+# //third_party/boringssl/BUILD.bazel and //third_party/boringssl/rust/BUILD.bazel
+# can reference upstream sources directly without crossing subpackage boundaries.
+common --deleted_packages=third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys
+

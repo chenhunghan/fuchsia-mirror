@@ -161,6 +161,22 @@ Drivers must never perform manual bitwise operations (for example,
 `val |= 1 << 5;`) on raw integers when accessing MMIO registers. Instead,
 they should use the `mmio::register!` and `mmio::register_block!` macros
 
+Check the range of lengths, offsets, indices, and IDs that come from outside
+the driver before they are written to a register, used as a DMA transfer size,
+or used as a VMO index, and confirm that a client ID was registered by that
+client ([VMO registration][vmo-registration]). `mmio::register!` setters
+silently truncate out-of-range values.
+
+Atomics (`Ordering::Release`) order memory accesses between CPUs, not accesses
+by a device, and `MmioRegion` stores do not include a barrier: explicitly order
+a DMA descriptor write before the store that tells the device about it.
+
+Call `Pmt::unpin()` when a transfer completes, fails, or is canceled, and at
+shutdown, only after the device has stopped; if you cannot confirm that, leave
+it pinned. Do not unpin in `Drop`, which cannot know whether the device has
+stopped. Dropping a `zx::Pmt` without unpinning quarantines the pages until
+`zx_bti_release_quarantine()`.
+
 ### Clocks
 
 Clocks are controlled via the [fuchsia.hardware.clock FIDL service][clock-fidl].
@@ -240,3 +256,4 @@ When testing drivers that use `MmioRegion`:
 [examples-drivers]: /examples/drivers
 [dtr-lib]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_driver_test/index.html
 [mock-memory-ops]: https://fuchsia-docs.firebaseapp.com/rust/mmio/mock/struct.MockMemoryOps.html
+[vmo-registration]: /docs/development/drivers/best_practices/vmo-registration-pattern.md

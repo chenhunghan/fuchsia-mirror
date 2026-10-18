@@ -97,7 +97,7 @@ impl<'a> DeferredOps<'a> {
 /// * Handles traversing up the `VmCowPages` hierarchy to ensure that high priority status is
 /// propagated.
 ///
-/// Callers should prefer `VmMapping::SetMemoryPriorityLocked`,
+/// Callers should prefer `VmMapping::set_memory_priority_locked`,
 /// `VmMapping::set_memory_priority_default_locked_object`, or
 /// `VmMapping::set_memory_priority_high_already_positive_locked_object`, if applicable.
 ///
@@ -746,6 +746,14 @@ impl VmCowPages {
             );
         }
         counts
+    }
+
+    /// Dumps all the reclamation counters to the debuglog.
+    pub fn debug_dump_reclaim_counters() {
+        // SAFETY: `cpp_vm_cow_pages_debug_dump_reclaim_counters` has no preconditions.
+        unsafe {
+            bindings::cpp_vm_cow_pages_debug_dump_reclaim_counters();
+        }
     }
 }
 

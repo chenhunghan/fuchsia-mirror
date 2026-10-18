@@ -8,6 +8,7 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_THREAD_DISPATCHER_H_
 
 #include <arch.h>
+#include <lib/object-constants.h>
 #include <platform.h>
 #include <sys/types.h>
 #include <zircon/compiler.h>
@@ -31,13 +32,68 @@
 #include <object/exceptionate.h>
 #include <object/futex_context.h>
 #include <object/handle.h>
+#include <object/opaque_storage.h>
 #include <object/thread_state.h>
 #include <vm/vm_address_region.h>
 
 class ProcessDispatcher;
 class ThreadDispatcher;
 
-class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAULT_THREAD_RIGHTS>,
+// These are declared ahead of the class because ThreadDispatcher befriends
+// cpp_thread_dispatcher_alloc, and a friend declaration requires the declaration it names to
+// already be visible.
+extern "C" {
+// Allocates and constructs a ThreadDispatcher. The Rust ThreadDispatcher::create() calls this
+// and then attaches a lower-level kernel Thread to the result.
+zx_status_t cpp_thread_dispatcher_alloc(
+    ProcessDispatcher* process, uint32_t flags,
+    ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle);
+void cpp_thread_dispatcher_set_core_thread(ThreadDispatcher* thread, Thread* core_thread);
+Thread* cpp_thread_dispatcher_get_core_thread(const ThreadDispatcher* thread);
+void cpp_thread_dispatcher_set_user_entry(ThreadDispatcher* thread, const UserEntryState* entry);
+void cpp_thread_dispatcher_attach_to_core_thread(ThreadDispatcher* thread, Thread* core_thread);
+int cpp_thread_start_routine_entry(void* thread);
+
+// Rust FFI prototypes:
+zx_status_t rust_thread_dispatcher_create(
+    ProcessDispatcher* process, uint32_t flags, const char* name_ptr, size_t name_len,
+    ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle,
+    ffi::Uninitialized<zx_rights_t>* out_rights);
+void rust_thread_dispatcher_state_init(void* state, const ThreadDispatcher* disp,
+                                       ProcessDispatcher* process);
+void rust_thread_dispatcher_state_destroy(void* state);
+Lock<CriticalMutex>* rust_thread_dispatcher_state_get_lock(const void* state);
+zx_koid_t rust_thread_dispatcher_get_related_koid(const ThreadDispatcher* thread);
+ProcessDispatcher* rust_thread_dispatcher_get_process(const ThreadDispatcher* thread);
+void rust_thread_dispatcher_assert_canary(const ThreadDispatcher* thread);
+bool rust_thread_dispatcher_is_dying_or_dead(const ThreadDispatcher* thread);
+bool rust_thread_dispatcher_is_dying_or_dead_locked(const ThreadDispatcher* thread);
+bool rust_thread_dispatcher_has_started(const ThreadDispatcher* thread);
+bool rust_thread_dispatcher_has_started_locked(const ThreadDispatcher* thread);
+zx_status_t rust_thread_dispatcher_initialize(const ThreadDispatcher* thread);
+zx_status_t rust_thread_dispatcher_start(const ThreadDispatcher* thread,
+                                         const UserEntryState* entry, bool ensure_initial_thread);
+zx_status_t rust_thread_dispatcher_make_runnable(const ThreadDispatcher* thread,
+                                                 const UserEntryState* entry, bool suspended);
+void rust_thread_dispatcher_kill(const ThreadDispatcher* thread);
+zx_status_t rust_thread_dispatcher_suspend(const ThreadDispatcher* thread);
+void rust_thread_dispatcher_resume(const ThreadDispatcher* thread);
+zx_status_t rust_thread_dispatcher_restricted_kick(const ThreadDispatcher* thread);
+void rust_thread_dispatcher_suspending(const ThreadDispatcher* thread);
+void rust_thread_dispatcher_resuming(const ThreadDispatcher* thread);
+
+// TRANSITIONAL. These bridge the thread state machine, which now lives in the Rust
+// ThreadDispatcherState, to the ThreadDispatcher methods that have not been ported yet. All are
+// deleted once those methods move to Rust; do not add callers. Prefer the lifecycle_locked(),
+// SetStateLocked() and SetExceptionStateLocked() wrappers on the class, which restore the enum
+// types.
+uint32_t rust_thread_dispatcher_lifecycle_locked(const ThreadDispatcher* thread);
+void rust_thread_dispatcher_set_state_locked(const ThreadDispatcher* thread, uint32_t lifecycle);
+void rust_thread_dispatcher_set_exception_state_locked(const ThreadDispatcher* thread,
+                                                       uint32_t exception);
+}
+
+class ThreadDispatcher final : public Dispatcher,
                                public fbl::DoublyLinkedListable<ThreadDispatcher*> {
  public:
   // When in a blocking syscall, or blocked in an exception, the blocking reason.
@@ -81,9 +137,26 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   // the kernel stack unwinds.
   static void KillCurrent() { Thread::Current::Kill(); }
 
+  // Asserts that the Rust ThreadDispatcherState's canary is valid.
+  void AssertCanary() const { rust_thread_dispatcher_assert_canary(this); }
+
   // Dispatcher implementation.
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_THREAD; }
-  zx_koid_t get_related_koid() const final;
+  zx_koid_t get_related_koid() const final {
+    AssertCanary();
+    return rust_thread_dispatcher_get_related_koid(this);
+  }
+
+  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_THREAD_RIGHTS; }
+  bool is_waitable() const final { return ZX_DEFAULT_THREAD_RIGHTS & ZX_RIGHT_WAIT; }
+
+  zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
+    return UserSignalSelfSolo(this, clear_mask, set_mask, 0);
+  }
+
+  zx_status_t user_signal_peer(uint32_t clear_mask, uint32_t set_mask) final {
+    return ZX_ERR_NOT_SUPPORTED;
+  }
 
   // Sets whether or not this is the initial thread in its process.
   // Should only be called by ProcessDispatcher upon adding the initialized thread.
@@ -91,40 +164,53 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
 
   // Performs initialization on a newly constructed ThreadDispatcher
   // If this fails, then the object is invalid and should be deleted
-  zx_status_t Initialize() TA_EXCL(get_lock());
+  zx_status_t Initialize() TA_EXCL(get_lock()) { return rust_thread_dispatcher_initialize(this); }
   // Start this thread running inside the parent process with the provided entry state, only
   // valid to be called on a thread in the INITIALIZED state that has not yet been started. If
   // `ensure_initial_thread` is true, the thread will only start if it is the first thread in the
   // process.
-  zx_status_t Start(const EntryState& entry, bool ensure_initial_thread);
+  zx_status_t Start(const EntryState& entry, bool ensure_initial_thread) {
+    return rust_thread_dispatcher_start(this, &entry, ensure_initial_thread);
+  }
   // Transitions a thread from the INITIALIZED state to either the RUNNING or SUSPENDED state.
   // Is the caller's responsibility to ensure this thread is registered with the parent process,
   // as such this is only expected to be called from the ProcessDispatcher.
-  zx_status_t MakeRunnable(const EntryState& entry, bool suspended);
-  void Kill();
+  zx_status_t MakeRunnable(const EntryState& entry, bool suspended) {
+    return rust_thread_dispatcher_make_runnable(this, &entry, suspended);
+  }
+  void Kill() { rust_thread_dispatcher_kill(this); }
 
   // Suspends the thread.
   // Returns ZX_OK on success, or ZX_ERR_BAD_STATE iff the thread is dying or dead.
-  zx_status_t Suspend();
-  void Resume();
+  zx_status_t Suspend() { return rust_thread_dispatcher_suspend(this); }
+  void Resume() { rust_thread_dispatcher_resume(this); }
 
   // Issues a restricted kick on the thread which will kick the thread out of restricted
   // mode to normal mode if it's currently in restricted mode or remember the kick state for
   // the next attempt to enter restricted state.
   // Returns ZX_OK on success or ZX_ERR_BAD_STATE iff the thread is dying or dead.
-  zx_status_t RestrictedKick();
+  zx_status_t RestrictedKick() { return rust_thread_dispatcher_restricted_kick(this); }
 
   // accessors
-  ProcessDispatcher* process() const { return process_.get(); }
+  ProcessDispatcher* process() const { return rust_thread_dispatcher_get_process(this); }
 
+  // Returns the lower level kernel thread backing this dispatcher, or nullptr once
+  // ExitingCurrent() has cleared it.
+  Thread* core_thread() const TA_REQ(get_lock()) { return core_thread_; }
+
+  // Stores the register values userspace will start executing with. Only meaningful before the
+  // thread has started, so this is not guarded.
+  void set_user_entry(const EntryState& entry) { user_entry_ = entry; }
   // Returns true if the thread is dying or dead. Threads never return to a previous state
   // from dying/dead so once this is true it will never flip back to false.
-  bool IsDyingOrDead() const TA_EXCL(get_lock());
+  bool IsDyingOrDead() const TA_EXCL(get_lock()) {
+    return rust_thread_dispatcher_is_dying_or_dead(this);
+  }
 
   // Returns true if the thread was ever started (even if it is dead now).
   // Threads never return to an INITIAL state after starting, so once this is
   // true it will never flip back to false.
-  bool HasStarted() const TA_EXCL(get_lock());
+  bool HasStarted() const TA_EXCL(get_lock()) { return rust_thread_dispatcher_has_started(this); }
 
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final __NONNULL((2))
       TA_EXCL(get_lock());
@@ -218,9 +304,9 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   void ExitingCurrent();
 
   // callback from kernel when thread is suspending
-  void Suspending();
+  void Suspending() { rust_thread_dispatcher_suspending(this); }
   // callback from kernel when thread is resuming
-  void Resuming();
+  void Resuming() { rust_thread_dispatcher_resuming(this); }
 
   // Update the runtime stats for this thread/process. This is called by
   // Scheduler to update the runtime stats of the thread as it changes thread
@@ -292,7 +378,52 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
     return CoreThreadObservation{core_thread_, &core_thread_lock_.lock()};
   }
 
+  // WARNING: The members below, through `get_lock`, are public *only* so that the Rust port of
+  // FutexContext (object/futex_context.rs) can reach them through FFI shims. In C++ they were
+  // private and accessed exclusively by FutexContext via `friend class FutexContext`.
+  //
+  // It is *not* generally correct to use any of them outside of FutexContext. In particular,
+  // holding the locks named in their thread-safety annotations (if any) is strictly insufficient
+  // for safe usage: callers must also follow FutexContext's synchronization protocol (holding the
+  // owning FutexContext's state lock, holding pending-operation references on the involved
+  // threads, and obeying its chain-lock ordering). Do not add new callers.
+  //
+  // TODO(https://fxbug.dev/565800859): Find a better way to hide these from everything other than
+  // FutexContext.
+
+  // Returns true if the thread is dying or dead. Same as `IsDyingOrDead`, but requires the caller
+  // to already hold `get_lock()`.
+  //
+  // Only intended for use by FutexContext; see the WARNING above.
+  bool IsDyingOrDeadLocked() const TA_REQ(get_lock()) {
+    return rust_thread_dispatcher_is_dying_or_dead_locked(this);
+  }
+
+  // Accessors for `blocking_futex_id_`, the ID of the futex this thread is currently waiting on.
+  // These are guarded by FutexContext's own locking protocol, which cannot be expressed with
+  // static thread-safety annotations (see the comment on `blocking_futex_id_`).
+  //
+  // Only intended for use by FutexContext; see the WARNING above.
+  FutexId blocking_futex_id() const { return blocking_futex_id_; }
+  void set_blocking_futex_id(FutexId id) { blocking_futex_id_ = id; }
+
+  // Exposes this thread's dispatcher lock so that FutexContext can acquire it (as a "null-able"
+  // guard on a potential futex owner) through FFI shims. The lock itself is supplied by the Rust
+  // ThreadDispatcherState's KMutex.
+  //
+  // Only intended for use by FutexContext; see the WARNING above.
+  Lock<CriticalMutex>* get_lock() const final;
+
  private:
+  // The constructor, StartRoutine, and set_core_thread stay private. They are only reachable
+  // through these shims, and friendship does not follow the caller across the FFI boundary, so
+  // the shims themselves are the friends rather than the Rust code that calls them.
+  friend zx_status_t cpp_thread_dispatcher_alloc(
+      ProcessDispatcher* process, uint32_t flags,
+      ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle);
+  friend void cpp_thread_dispatcher_set_core_thread(ThreadDispatcher* thread, Thread* core_thread);
+  friend int cpp_thread_start_routine_entry(void* thread);
+
   ThreadDispatcher(fbl::RefPtr<ProcessDispatcher> process, uint32_t flags);
   ThreadDispatcher(const ThreadDispatcher&) = delete;
   ThreadDispatcher& operator=(const ThreadDispatcher&) = delete;
@@ -316,11 +447,36 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   bool SuspendedOrInExceptionLocked() TA_REQ(get_lock());
 
   // change states of the object, do what is appropriate for the state transition
-  void SetStateLocked(ThreadState::Lifecycle lifecycle) TA_REQ(get_lock());
+  //
+  // TRANSITIONAL: forwards to Rust while ExitingCurrent() remains in C++; it is the last caller.
+  // ExitingCurrent() cannot move until runtime_stats_ does, so this is expected to go with them.
+  // See rust_thread_dispatcher_set_state_locked.
+  void SetStateLocked(ThreadState::Lifecycle lifecycle) TA_REQ(get_lock()) {
+    rust_thread_dispatcher_set_state_locked(this, static_cast<uint32_t>(lifecycle));
+  }
 
-  bool IsDyingOrDeadLocked() const TA_REQ(get_lock());
+  // TRANSITIONAL: forwards to Rust while exception_ and exceptionate_type_, which this axis
+  // travels with, remain C++ fields. See rust_thread_dispatcher_set_exception_state_locked.
+  void SetExceptionStateLocked(ThreadState::Exception exception) TA_REQ(get_lock()) {
+    rust_thread_dispatcher_set_exception_state_locked(this, static_cast<uint32_t>(exception));
+  }
 
-  bool HasStartedLocked() const TA_REQ(get_lock());
+  // TRANSITIONAL: reads the lifecycle back out of the Rust state and restores the enum type, so
+  // that the not-yet-ported methods can keep reading it. The surviving callers are
+  // ~ThreadDispatcher(), SuspendedOrInExceptionLocked(), GetInfoForUserspace(), SetBaseProfile()
+  // and SetSoftAffinity(). SuspendedOrInExceptionLocked() reads exception_, so this is expected
+  // to outlive SetStateLocked() above. See rust_thread_dispatcher_lifecycle_locked.
+  ThreadState::Lifecycle lifecycle_locked() const TA_REQ(get_lock()) {
+    const uint32_t value = rust_thread_dispatcher_lifecycle_locked(this);
+    // Switching on an out-of-range enum class is undefined, and this cast is exactly the seam
+    // where an out-of-range value could appear.
+    DEBUG_ASSERT(value <= static_cast<uint32_t>(ThreadState::Lifecycle::DEAD));
+    return static_cast<ThreadState::Lifecycle>(value);
+  }
+
+  bool HasStartedLocked() const TA_REQ(get_lock()) {
+    return rust_thread_dispatcher_has_started_locked(this);
+  }
 
   template <typename T, typename F>
   zx_status_t ReadStateGeneric(F get_state_func, user_out_ptr<void> buffer, size_t buffer_size)
@@ -329,28 +485,31 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   zx_status_t WriteStateGeneric(F set_state_func, user_in_ptr<const void> buffer,
                                 size_t buffer_size) TA_EXCL(get_lock());
 
+  // Sets the lower level kernel thread backing this dispatcher.
+  //
+  // Thread safety analysis is disabled here because this runs before the dispatcher has been
+  // published anywhere, so there is nothing to race with and no need to take the lock.
+  void set_core_thread(Thread* core_thread) TA_NO_THREAD_SAFETY_ANALYSIS {
+    core_thread_ = core_thread;
+  }
+
   void ResetCoreThread() TA_REQ(get_lock(), core_thread_lock_) {
     DEBUG_ASSERT(core_thread_ != nullptr);
     core_thread_ = nullptr;
   }
-
-  // a ref pointer back to the parent process.
-  const fbl::RefPtr<ProcessDispatcher> process_;
 
   // The runtime stats for this thread. Placed near the front of ThreadDispatcher due to frequent
   // updates by the scheduler.
   ThreadRuntimeStats runtime_stats_;
 
   // The thread as understood by the lower kernel. This is set to nullptr when
-  // `state_` transitions to DEAD.
+  // the thread's lifecycle transitions to DEAD.
   Thread* core_thread_ TA_GUARDED(get_lock()) = nullptr;
 
   // User thread starting register values.
   EntryState user_entry_;
 
-  ThreadState state_ TA_GUARDED(get_lock());
-
-  // This is only valid while |state_.lifecycle()| is RUNNING.
+  // This is only valid while |lifecycle_locked()| is RUNNING.
   //
   // This field is an atomic because it may be accessed concurrently by multiple
   // threads.  It may be read by any thread, but may only be updated by the
@@ -377,10 +536,6 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   // which may be our |exceptionate_| or one of our parents'.
   uint32_t exceptionate_type_ TA_GUARDED(get_lock()) = ZX_EXCEPTION_CHANNEL_TYPE_NONE;
 
-  // Tracks the number of times Suspend() has been called. Resume() will resume this thread
-  // only when this reference count reaches 0.
-  int suspend_count_ TA_GUARDED(get_lock()) = 0;
-
   // Per-thread structure used while waiting in a ChannelDispatcher::Call.
   // Needed to support the requirements of being able to interrupt a Call
   // in order to suspend a thread.
@@ -403,24 +558,24 @@ class ThreadDispatcher final : public SoloDispatcher<ThreadDispatcher, ZX_DEFAUL
   // requirements when blocking a thread in a futex and declaring a new owner in
   // the process.
   DECLARE_SPINLOCK(ThreadDispatcher) core_thread_lock_;
+
+  // Stores the Rust ThreadDispatcherState instance. It currently holds the canary, the parent
+  // process reference, and the state lock; the remaining fields above migrate into it as the
+  // methods that use them move to Rust.
+  OpaqueStorage<kThreadDispatcherStateSize, kThreadDispatcherStateAlign> opaque_storage_;
 };
 
 extern "C" {
+ThreadDispatcher* cpp_thread_dispatcher_current();
 bool cpp_thread_dispatcher_is_current(const ThreadDispatcher* thread);
-zx_status_t cpp_thread_dispatcher_create(
-    ProcessDispatcher* process, uint32_t flags, const char* name_ptr, size_t name_len,
-    ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle,
-    ffi::Uninitialized<zx_rights_t>* out_rights);
-zx_status_t cpp_thread_dispatcher_initialize(ThreadDispatcher* thread);
-zx_status_t cpp_thread_dispatcher_start(ThreadDispatcher* thread, zx_vaddr_t entry,
-                                        zx_vaddr_t stack, uint64_t arg1, uint64_t arg2, uint64_t tp,
-                                        uint64_t abi_reg, bool ensure_initial_thread);
-void cpp_thread_dispatcher_exit_current();
-void cpp_thread_dispatcher_kill_current();
-void cpp_thread_dispatcher_kill(ThreadDispatcher* thread);
-zx_status_t cpp_thread_dispatcher_suspend(ThreadDispatcher* thread);
-void cpp_thread_dispatcher_resume(ThreadDispatcher* thread);
-zx_status_t cpp_thread_dispatcher_restricted_kick(ThreadDispatcher* thread);
+uintptr_t cpp_thread_dispatcher_blocking_futex_id(const ThreadDispatcher* thread);
+void cpp_thread_dispatcher_set_blocking_futex_id(ThreadDispatcher* thread, uintptr_t id);
+bool cpp_thread_dispatcher_lock_acquire(ThreadDispatcher* thread);
+void cpp_thread_dispatcher_lock_release(ThreadDispatcher* thread, bool should_clear);
+void cpp_thread_dispatcher_observe_core_thread(
+    ThreadDispatcher* thread, ffi::Uninitialized<ThreadDispatcher::CoreThreadObservation>* out_obs);
+void cpp_thread_dispatcher_release_core_thread_observation(
+    ThreadDispatcher::CoreThreadObservation* obs);
 zx_status_t cpp_thread_dispatcher_read_state(ThreadDispatcher* thread, uint32_t state_kind,
                                              void* buffer, size_t buffer_size);
 zx_status_t cpp_thread_dispatcher_write_state(ThreadDispatcher* thread, uint32_t state_kind,
@@ -442,7 +597,6 @@ ThreadDispatcher::Blocked cpp_thread_dispatcher_set_blocked_reason(
 zx_status_t cpp_thread_dispatcher_get_exception_report(
     const ThreadDispatcher* thread, ffi::Uninitialized<zx_exception_report_t>* out_report);
 ChannelDispatcher::MessageWaiter* cpp_thread_dispatcher_get_current_message_waiter();
-const ProcessDispatcher* cpp_thread_dispatcher_process(const ThreadDispatcher* thread);
 Exceptionate* cpp_thread_dispatcher_exceptionate(ThreadDispatcher* thread);
 }
 

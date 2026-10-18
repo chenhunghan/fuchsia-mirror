@@ -9,6 +9,7 @@ package(default_applicable_licenses = ["//:license"])
 fidl_library(
     name = "fuchsia.hardware.pci",
     srcs = [
+        "debug.fidl",
         "metadata.fidl",
         "pci.fidl",
     ],
@@ -16,7 +17,7 @@ fidl_library(
     category = "partner",
     enable_rust = True,
     enable_rust_next = True,
-    stable = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//zircon/vdso/zx",

@@ -3,20 +3,23 @@
 // found in the LICENSE file.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::perf::lockless_ring_buffer::LocklessRingBuffer;
 use crate::task::Kernel;
 use crate::vfs::OutputBuffer;
+use fuchsia_inspect::Property;
 use fuchsia_rcu::RcuDroppableArc;
+use paged_ring_buffer::LocklessRingBuffer;
 use starnix_logging::log_error;
+use starnix_sync::{LockDepMutex, PerfTraceEventQueueListLock};
+use starnix_types::PAGE_SIZE;
 use starnix_uapi::errors::Errno;
+use starnix_uapi::{errno, error};
 use zerocopy::native_endian::{I32, U16, U32, U64};
 use zerocopy::{Immutable, IntoBytes, Unaligned};
 use zx::BootTimeline;
 
 // The default ring buffer size (2MB).
-// TODO(https://fxbug.dev/357665908): This should be based on /sys/kernel/tracing/buffer_size_kb.
 const DEFAULT_RING_BUFFER_SIZE_BYTES: usize = 2097152;
 
 // The event id for atrace events.
@@ -157,11 +160,15 @@ const STATIC_WRITE_TRACK_NAMES: [&str; 8] = [
 
 impl<'a> TraceEventQueue {
     pub(crate) fn new(cpu_id: u32) -> Result<Self, Errno> {
+        Self::new_with_size(cpu_id, DEFAULT_RING_BUFFER_SIZE_BYTES)
+    }
+
+    pub(crate) fn new_with_size(cpu_id: u32, size_bytes: usize) -> Result<Self, Errno> {
         let async_id_read = fuchsia_trace::Id::new();
         let async_id_write = fuchsia_trace::Id::new();
         let ring_buffer = Arc::new(
-            LocklessRingBuffer::new(DEFAULT_RING_BUFFER_SIZE_BYTES, true, async_id_write)
-                .map_err(|_| starnix_uapi::errno!(ENOMEM))?,
+            LocklessRingBuffer::new(size_bytes, true, async_id_write)
+                .map_err(|_| errno!(ENOMEM))?,
         );
         ring_buffer.disable()?;
 
@@ -204,7 +211,7 @@ impl<'a> TraceEventQueue {
     /// From https://docs.kernel.org/trace/ring-buffer-design.html, when memory is mapped, a reader
     /// page can be swapped with the header page to avoid copying memory.
     pub fn read(&self, buf: &mut dyn OutputBuffer) -> Result<usize, Errno> {
-        self.ring_buffer.read().read(buf)
+        self.ring_buffer.read().read(&mut RingOutputBuffer(buf))
     }
 
     /// Write `event` into `ring_buffer`.
@@ -223,13 +230,13 @@ impl<'a> TraceEventQueue {
 
         let (res, _timestamp, delta) = match ring_buffer.reserve(size) {
             Ok(res) => res,
-            Err(e) if e == starnix_uapi::errno!(EINVAL) => {
+            Err(e) if e == errno!(EINVAL) => {
                 log_error!("Invalid reservation size: {}", size);
-                return Err(starnix_uapi::errno!(EINVAL));
+                return Err(errno!(EINVAL));
             }
-            Err(e) if e == starnix_uapi::errno!(ENOSPC) => {
+            Err(e) if e == errno!(ENOSPC) => {
                 log_error!("Ring buffer full, dropping event of size: {}", size);
-                return Err(starnix_uapi::errno!(ENOSPC));
+                return Err(errno!(ENOSPC));
             }
             Err(e) => return Err(e),
         };
@@ -250,31 +257,119 @@ impl<'a> TraceEventQueue {
 
 pub struct TraceEventQueueList {
     pub queues: Vec<Arc<TraceEventQueue>>,
+    // Serializes `enable()`, `disable()`, and `set_buffer_size_kb()`, so that the queues,
+    // `tracing_enabled`, and `configured_buffer_size_kb` change together, as Linux
+    // `trace_types_lock` does. Readers of `tracing_enabled` and `configured_buffer_size_kb`
+    // and writers to the queues do not take it.
+    state_mutex: LockDepMutex<(), PerfTraceEventQueueListLock>,
     tracing_enabled: Arc<AtomicBool>,
+    configured_buffer_size_kb: AtomicUsize,
     tracefs_node: fuchsia_inspect::Node,
+    buffer_size_kb_property: fuchsia_inspect::UintProperty,
+    total_capacity_bytes_property: fuchsia_inspect::UintProperty,
 }
 
 impl TraceEventQueueList {
     pub fn from(kernel: &Kernel) -> Arc<Self> {
         kernel.expando.get_or_init(|| {
-            let num_cpus = zx::system_get_num_cpus();
-            let tracing_enabled = Arc::new(AtomicBool::new(false));
-            let tracefs_node = kernel.inspect_node.create_child("tracefs");
-
-            let mut queues = vec![];
-            for cpu in 0..num_cpus {
-                let queue = Arc::new(TraceEventQueue::new(cpu as u32).expect("create queue"));
-                queues.push(queue);
-            }
-            Self { queues, tracing_enabled, tracefs_node }
+            let num_cpus = zx::system_get_num_cpus() as usize;
+            Self::new(num_cpus, kernel.inspect_node.create_child("tracefs"))
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_testing(
+        num_cpus: usize,
+        inspect_parent: &fuchsia_inspect::Node,
+    ) -> Arc<Self> {
+        Arc::new(Self::new(num_cpus, inspect_parent.create_child("tracefs")))
+    }
+
+    fn new(num_cpus: usize, tracefs_node: fuchsia_inspect::Node) -> Self {
+        let default_size_kb = DEFAULT_RING_BUFFER_SIZE_BYTES / 1024;
+        let buffer_size_kb_property =
+            tracefs_node.create_uint("buffer_size_kb", default_size_kb as u64);
+        let total_capacity_bytes_property = tracefs_node.create_uint(
+            "total_capacity_bytes",
+            (DEFAULT_RING_BUFFER_SIZE_BYTES * num_cpus) as u64,
+        );
+        let queues = (0..num_cpus)
+            .map(|cpu| Arc::new(TraceEventQueue::new(cpu as u32).expect("create queue")))
+            .collect();
+        Self {
+            queues,
+            state_mutex: Default::default(),
+            tracing_enabled: Arc::new(AtomicBool::new(false)),
+            configured_buffer_size_kb: AtomicUsize::new(default_size_kb),
+            tracefs_node,
+            buffer_size_kb_property,
+            total_capacity_bytes_property,
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
         self.tracing_enabled.load(Ordering::Acquire)
     }
 
+    pub fn buffer_size_kb(&self) -> usize {
+        self.configured_buffer_size_kb.load(Ordering::Acquire)
+    }
+
+    /// Replaces every queue's ring buffer with an empty one of at least `size_kb` KiB, rounded up
+    /// to whole pages and to `LocklessRingBuffer`'s 3-page minimum, and returns the size used.
+    /// The new buffers keep the current `tracing_on` state.
+    ///
+    /// Unlike Linux `ring_buffer_resize()`, which adds or removes pages in place, this discards
+    /// every unread event, including events from writers still holding the old buffer. The old
+    /// buffer's dropped-page count is discarded too, so `DROPPED_PAGES` misses it.
+    // TODO(https://fxbug.dev/574072344): Count the events and pages a resize discards.
+    pub fn set_buffer_size_kb(&self, size_kb: usize) -> Result<usize, Errno> {
+        if size_kb == 0 {
+            return error!(EINVAL);
+        }
+        let _lock = self.state_mutex.lock();
+        let enabled = self.is_enabled();
+
+        let page_size_kb = (*PAGE_SIZE as usize) / 1024;
+        let requested_pages = size_kb.div_ceil(page_size_kb);
+        // LocklessRingBuffer requires at least 3 pages (read page, head page, and swap page).
+        let pages = std::cmp::max(3, requested_pages);
+        let actual_size_kb = pages.checked_mul(page_size_kb).ok_or_else(|| errno!(ENOMEM))?;
+        let target_bytes = actual_size_kb.checked_mul(1024).ok_or_else(|| errno!(ENOMEM))?;
+        let total_capacity_bytes =
+            target_bytes.checked_mul(self.queues.len()).ok_or_else(|| errno!(ENOMEM))?;
+
+        // Transactional allocation: pre-allocate all per-CPU ring buffers first.
+        let mut new_buffers = Vec::with_capacity(self.queues.len());
+        for queue in &self.queues {
+            let ring_buffer = Arc::new(
+                LocklessRingBuffer::new(target_bytes, true, queue.async_id_write)
+                    .map_err(|_| errno!(ENOMEM))?,
+            );
+            if !enabled {
+                ring_buffer.disable()?;
+            }
+            new_buffers.push(ring_buffer);
+        }
+
+        // All succeeded; swap in the new buffers.
+        for (queue, new_buffer) in self.queues.iter().zip(new_buffers) {
+            queue.ring_buffer.update(new_buffer);
+        }
+
+        self.configured_buffer_size_kb.store(actual_size_kb, Ordering::Release);
+        self.buffer_size_kb_property.set(actual_size_kb as u64);
+        self.total_capacity_bytes_property.set(total_capacity_bytes as u64);
+
+        Ok(actual_size_kb)
+    }
+
+    /// Enables every queue. A queue that is already enabled is left alone, as Linux
+    /// `rb_simple_write()` does when `tracing_on` is set to its current state. Unlike Linux, which
+    /// keeps the buffer readable after `tracing_on` is cleared, `disable()` discards each queue's
+    /// contents, so enabling a disabled queue starts from empty.
     pub fn enable(&self) -> Result<(), Errno> {
+        let _lock = self.state_mutex.lock();
         let mut first_error = None;
         for queue in &self.queues {
             if let Err(e) = queue.enable() {
@@ -291,6 +386,7 @@ impl TraceEventQueueList {
     }
 
     pub fn disable(&self) -> Result<(), Errno> {
+        let _lock = self.state_mutex.lock();
         // Set disabled to stop new access to the queue, then clean up each one.
         self.tracing_enabled.store(false, Ordering::Release);
         let mut first_error = None;
@@ -315,11 +411,32 @@ impl TraceEventQueueList {
     }
 }
 
+/// Adapts a starnix_core `OutputBuffer` to the `paged_ring_buffer::OutputBuffer` that
+/// `LocklessRingBuffer::read()` takes.
+struct RingOutputBuffer<'a>(&'a mut dyn OutputBuffer);
+
+impl paged_ring_buffer::OutputBuffer for RingOutputBuffer<'_> {
+    fn available(&self) -> usize {
+        self.0.available()
+    }
+    fn write_each(
+        &mut self,
+        callback: &mut paged_ring_buffer::OutputBufferCallback<'_>,
+    ) -> Result<usize, Errno> {
+        self.0.write_each(callback)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_RING_BUFFER_SIZE_BYTES, LocklessRingBuffer, TraceEvent, TraceEventQueue};
+    use super::{
+        DEFAULT_RING_BUFFER_SIZE_BYTES, LocklessRingBuffer, TraceEvent, TraceEventQueue,
+        TraceEventQueueList,
+    };
     use crate::vfs::OutputBuffer;
     use crate::vfs::buffers::VecOutputBuffer;
+    use diagnostics_assertions::assert_data_tree;
+    use std::sync::Arc;
 
     use starnix_types::PAGE_SIZE;
     use starnix_uapi::error;
@@ -348,9 +465,8 @@ mod tests {
         let queue = TraceEventQueue::new(0).expect("create queue");
         assert!(!queue.ring_buffer.read().is_enabled());
 
-        // Enable tracing and check the queue's state.
+        // Enable tracing.
         assert!(queue.enable().is_ok());
-        assert_eq!(queue.ring_buffer.read().size_bytes(), DEFAULT_RING_BUFFER_SIZE_BYTES);
 
         // Confirm we can push an event.
         let data = b"B|1234|slice_name";
@@ -363,6 +479,68 @@ mod tests {
         // Disable tracing and check that the queue's state has been reset.
         assert!(queue.disable().is_ok());
         assert!(!queue.ring_buffer.read().is_enabled());
+    }
+
+    #[fuchsia::test]
+    fn buffer_size_kb_configuration() {
+        let inspector = fuchsia_inspect::Inspector::default();
+        let list = TraceEventQueueList::new_for_testing(2, inspector.root());
+        assert_eq!(list.buffer_size_kb(), DEFAULT_RING_BUFFER_SIZE_BYTES / 1024);
+
+        // Resize when disabled succeeds.
+        let new_size_kb = list.set_buffer_size_kb(4096).expect("set buffer size");
+        assert_eq!(new_size_kb, 4096);
+        assert_eq!(list.buffer_size_kb(), 4096);
+        for queue in &list.queues {
+            assert_eq!(queue.ring_buffer.read().size_bytes(), 4096 * 1024);
+            assert!(!queue.ring_buffer.read().is_enabled());
+        }
+
+        // Small size is clamped to minimum 3 pages (12 KB on 4KB page system).
+        let clamped_size_kb = list.set_buffer_size_kb(4).expect("clamp buffer size");
+        assert_eq!(clamped_size_kb, 12);
+        assert_eq!(list.buffer_size_kb(), 12);
+        for queue in &list.queues {
+            assert_eq!(queue.ring_buffer.read().size_bytes(), 12 * 1024);
+            assert!(!queue.ring_buffer.read().is_enabled());
+        }
+
+        // Zero returns EINVAL.
+        assert_eq!(list.set_buffer_size_kb(0), error!(EINVAL));
+
+        // When enabled, resizing succeeds and keeps the new buffers enabled.
+        list.enable().expect("enable tracing");
+        let enabled_size_kb = list.set_buffer_size_kb(2048).expect("set buffer size while enabled");
+        assert_eq!(enabled_size_kb, 2048);
+        assert_eq!(list.buffer_size_kb(), 2048);
+        for queue in &list.queues {
+            assert_eq!(queue.ring_buffer.read().size_bytes(), 2048 * 1024);
+            assert!(queue.ring_buffer.read().is_enabled());
+        }
+        list.disable().expect("disable tracing");
+    }
+
+    #[fuchsia::test]
+    async fn buffer_size_kb_inspect_updates_in_place() {
+        let inspector = fuchsia_inspect::Inspector::default();
+        let list = TraceEventQueueList::new_for_testing(2, inspector.root());
+        assert_data_tree!(inspector, root: {
+            tracefs: {
+                buffer_size_kb: (DEFAULT_RING_BUFFER_SIZE_BYTES / 1024) as u64,
+                total_capacity_bytes: (DEFAULT_RING_BUFFER_SIZE_BYTES * 2) as u64,
+            }
+        });
+
+        // Each resize must update the existing properties rather than add new ones, so the tree
+        // must still have exactly one of each.
+        list.set_buffer_size_kb(4096).expect("set buffer size");
+        list.set_buffer_size_kb(1024).expect("set buffer size");
+        assert_data_tree!(inspector, root: {
+            tracefs: {
+                buffer_size_kb: 1024u64,
+                total_capacity_bytes: (1024 * 1024 * 2) as u64,
+            }
+        });
     }
 
     #[fuchsia::test]
@@ -439,5 +617,35 @@ mod tests {
         // Try reading another page.
         let mut buffer = VecOutputBuffer::new(*PAGE_SIZE as usize);
         assert_eq!(queue.read(&mut buffer), error!(EAGAIN));
+    }
+
+    // Races list-level enable() against disable() and checks that the queues and
+    // `tracing_enabled` agree afterwards. Without `state_mutex`, enable() can enable every queue,
+    // then disable() can clear `tracing_enabled` and disable every queue, and then enable() can
+    // set `tracing_enabled`, leaving it set with every queue disabled. That needs disable() to
+    // run in the short window between enable()'s queue loop and its store, so this test catches
+    // a regression only on some runs.
+    #[fuchsia::test]
+    fn concurrent_enable_disable_keeps_list_consistent() {
+        let list = TraceEventQueueList::new_for_testing(4, &fuchsia_inspect::Node::default());
+        for _ in 0..200 {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let enabler = {
+                let list = Arc::clone(&list);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    list.enable().unwrap();
+                })
+            };
+            barrier.wait();
+            list.disable().unwrap();
+            enabler.join().unwrap();
+
+            let enabled = list.is_enabled();
+            for queue in &list.queues {
+                assert_eq!(queue.ring_buffer.read().is_enabled(), enabled);
+            }
+        }
     }
 }

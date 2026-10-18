@@ -27,7 +27,15 @@ set -euo pipefail
 #      Exception: with `build/bazel/rules/testing/fx_test.bzl` in the checkout, a
 #      GN test package (or host test) may become a `bazel_test_suite` of the same
 #      name exporting its migrated Bazel tests (C++ and Rust alike: tests move to
-#      Bazel and bazel2gn does not translate them).
+#      Bazel and bazel2gn does not translate them). A GN host binary or
+#      `install_host_tools` target (`rustc_binary`, `go_binary`, `executable`,
+#      `install_host_tools`) may likewise become a `bazel_host_tool` (or a
+#      forwarding `group` in a `BUILD.gn` that defines a `bazel_host_tool`), and a
+#      `bazel_input_file` or `bazel_input_directory` whose generator moved to
+#      Bazel may become an empty `group` for soft transitions (while keeping
+#      `bazel_input_file` for a Bazel-migrated/`bazel_host_tool` generator or
+#      leaving `@gn_targets//.../<pkg>` references under `build/bazel/` is an
+#      error).
 # - If the GN target is gone (BUILD.gn deleted in a full removal, or the target
 #   removed) and BUILD.bazel defines a cc_library or fx_cc_library of the same
 #   name, its `alwayslink` must match the GN type:
@@ -51,6 +59,16 @@ target_dir = sys.argv[2].strip().strip("/")
 change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
 
 GN_TARGET = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
+GN_TEMPLATE = re.compile(r'\btemplate\(\s*"([^"$]+)"\s*\)\s*\{')
+GN_INNER_TARGET = re.compile(r'\b([A-Za-z_]\w*)\(\s*([^)]+?)\s*\)\s*\{')
+TARGET_NAME_ARGS = {
+    "target_name",
+    '"$target_name"',
+    '"${target_name}"',
+    "invoker.target_name",
+    '"$invoker.target_name"',
+    '"${invoker.target_name}"',
+}
 NOT_TARGETS = {"template", "declare_args", "foreach", "forward_variables_from", "if", "config"}
 CC_RULE = re.compile(r'(?<![\w.])(cc_library|fx_cc_library)\s*\(')
 BAZEL_NAME = re.compile(r'\bname\s*=\s*"([^"]+)"')
@@ -61,6 +79,8 @@ FX_TEST_AVAILABLE = os.path.isfile(os.path.join(workdir, "build/bazel/rules/test
 GN_TEST_TEMPLATES = {
     "fuchsia_unittest_package",
     "fuchsia_test_package",
+    "fuchsia_unittest_component",
+    "fuchsia_test_component",
     "fuchsia_test",
     "python_host_test",
     "host_test",
@@ -68,6 +88,67 @@ GN_TEST_TEMPLATES = {
     "go_test",
     "test",
 }
+GN_HOST_TOOL_TEMPLATES = {
+    "rustc_binary",
+    "go_binary",
+    "executable",
+    "install_host_tools",
+}
+GN_BAZEL_INPUT_TEMPLATES = {
+    "bazel_input_file",
+    "bazel_input_directory",
+}
+GN_CONVERTIBLE_SYMMETRY_TEMPLATES = {
+    "static_library",
+    "source_set",
+    "shared_library",
+    "library_headers",
+    "rustc_library",
+    "rustc_macro",
+    "go_library",
+    "python_library",
+    "fidl",
+    "sdk_source_set",
+    "sdk_static_library",
+    "sdk_shared_library",
+    "zx_library",
+}
+
+
+def is_testonly_target(gn_text, name):
+    if not gn_text:
+        return False
+    code = blank_comments(gn_text)
+    pat = re.compile(r'\b[A-Za-z_]\w*\(\s*"' + re.escape(name) + r'"\s*\)\s*\{')
+    for m in pat.finditer(code):
+        body = code[m.end() - 1 : call_end(code, m.end() - 1)]
+        if re.search(r"\btestonly\s*=\s*true\b", body):
+            return True
+    return False
+
+
+def bazel_input_generator_migrated(gn_text, name, pkg, bazel_names, new_map):
+    if not gn_text:
+        return False
+    code = blank_comments(gn_text)
+    pat = re.compile(r'\b(?:bazel_input_file|bazel_input_directory)\(\s*"' + re.escape(name) + r'"\s*\)\s*\{')
+    for m in pat.finditer(code):
+        body = code[m.end() - 1 : call_end(code, m.end() - 1)]
+        gm = re.search(r'\bgenerator\s*=\s*"([^"]+)"', body)
+        if not gm:
+            continue
+        gen = gm.group(1).split("(")[0].strip()
+        if gen.startswith(":"):
+            gname = gen[1:]
+        elif gen.startswith(f"//{pkg}:"):
+            gname = gen[len(f"//{pkg}:") :]
+        elif gen == f"//{pkg}":
+            gname = os.path.basename(pkg)
+        else:
+            continue
+        if gname in bazel_names or "bazel_host_tool" in new_map.get(gname, (set(), 0))[0]:
+            return True
+    return False
 
 
 def git_lines(args):
@@ -124,31 +205,8 @@ def line_of(code, offset):
     return code.count("\n", 0, offset) + 1
 
 
-def gn_types(text):
-    """Maps each GN target name to the set of templates defining it (several under if/else) and a line."""
-    code = blank_comments(text)
-    local_tmpls = {}
-    for m in re.finditer(r'\btemplate\(\s*"([^"$]+)"\s*\)\s*\{', code):
-        body = code[m.end() : call_end(code, m.end() - 1) - 1]
-        tvars = {"target_name"} | {
-            vm.group(1) for vm in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*target_name\b", body)
-        }
-        for im in re.finditer(r"\b([A-Za-z_]\w*)\(\s*([A-Za-z_]\w*|\$\{?target_name\}?)\s*\)\s*\{", body):
-            if im.group(1) not in NOT_TARGETS and (im.group(2) in tvars or "target_name" in im.group(2)):
-                local_tmpls.setdefault(m.group(1), set()).add(im.group(1))
-    out = {}
-    for m in GN_TARGET.finditer(code):
-        tmpl, name = m.group(1), m.group(2)
-        if tmpl in NOT_TARGETS:
-            continue
-        types, line = out.get(name, (set(), line_of(code, m.start())))
-        types.update(local_tmpls.get(tmpl, {tmpl}))
-        out[name] = (types, line)
-    return out
-
-
 def call_end(code, open_paren):
-    """Index just past the `)` closing the `(` at code[open_paren] (comments are already blank)."""
+    """Index just past the `)` or `}` closing the `(` or `{` at code[open_paren] (comments are already blank)."""
     depth, quote, i = 0, None, open_paren
     while i < len(code):
         c = code[i]
@@ -168,6 +226,46 @@ def call_end(code, open_paren):
                 return i + 1
         i += 1
     return len(code)
+
+
+def gn_types(text):
+    """Maps each GN target name to the set of templates defining it (resolving file-local single-target templates)."""
+    code = blank_comments(text)
+    local_templates = {}
+    tmpl_spans = []
+    for m in GN_TEMPLATE.finditer(code):
+        end = call_end(code, m.end() - 1)
+        tmpl_spans.append((m.start(), end))
+        body = code[m.end() : end - 1]
+        target_name_tmpls = set()
+        has_non_test_side_target = False
+        for im in GN_INNER_TARGET.finditer(body):
+            inner_tmpl, arg = im.group(1), im.group(2).strip()
+            if inner_tmpl in NOT_TARGETS:
+                continue
+            if arg in TARGET_NAME_ARGS:
+                target_name_tmpls.add(inner_tmpl)
+            elif inner_tmpl not in GN_TEST_TEMPLATES:
+                has_non_test_side_target = True
+        if target_name_tmpls and not has_non_test_side_target:
+            local_templates[m.group(1)] = target_name_tmpls
+    for _ in range(len(local_templates)):
+        for k, vals in list(local_templates.items()):
+            expanded = set()
+            for v in vals:
+                expanded |= local_templates.get(v, {v})
+            local_templates[k] = expanded
+    out = {}
+    for m in GN_TARGET.finditer(code):
+        if any(s <= m.start() < e for s, e in tmpl_spans):
+            continue
+        tmpl, name = m.group(1), m.group(2)
+        if tmpl in NOT_TARGETS:
+            continue
+        types, line = out.get(name, (set(), line_of(code, m.start())))
+        types |= local_templates.get(tmpl, {tmpl})
+        out[name] = (types, line)
+    return out
 
 
 def bazel_cc_libraries(text):
@@ -292,15 +390,76 @@ for pkg in sorted(candidate_dirs):
     old = gn_types(before)
     new = gn_types(after) if after is not None else {}
     bazel_text = new_text(bazel_rel)
+    bazel_names = set(BAZEL_NAME.findall(blank_comments(bazel_text))) if bazel_text else set()
     cc_libs = bazel_cc_libraries(bazel_text) if bazel_text else {}
+    has_bazel_host_tool = any("bazel_host_tool" in t for t, _ in new.values())
+    had_bazel_input = any(t & GN_BAZEL_INPUT_TEMPLATES for t, _ in old.values())
     for name, (old_types, _) in sorted(old.items()):
         label = f"//{pkg}:{name}"
         if name in new:
             new_types, line = new[name]
-            if new_types != old_types and not (
+            if new_types & GN_BAZEL_INPUT_TEMPLATES and (
+                has_bazel_host_tool or bazel_input_generator_migrated(after, name, pkg, bazel_names, new)
+            ):
+                findings.append(
+                    {
+                        "source": "gn_target_type_parity",
+                        "category": "stale_bazel_input_target",
+                        "severity": "ERROR",
+                        "file": gn_rel,
+                        "line": line,
+                        "message": (
+                            f"`{label}` in `{gn_rel}` still uses `bazel_input_file`/`bazel_input_directory` for a "
+                            f"target now built in `{bazel_rel}` (or wrapped by `bazel_host_tool()`). A "
+                            "`bazel_host_tool()` or Bazel-migrated target must never be bridged back to Bazel via "
+                            "`bazel_input_file()`."
+                        ),
+                        "remediation": (
+                            f"Replace `bazel_input_file(\"{name}\")` (and any `else` branch) in `{gn_rel}` with an "
+                            f"empty `group(\"{name}\") {{}}` for soft-transitioning references in other repositories "
+                            "(or delete it if unreferenced), wrap migrated host binaries in `bazel_host_tool()` "
+                            "instead of dual-building them with `bazel2gn`, and update any "
+                            f"`@gn_targets//.../{pkg}:...` references in `.bzl` or `BUILD.bazel` files to point "
+                            f"directly at the migrated target in `//{pkg}`."
+                        ),
+                    }
+                )
+                continue
+            is_test_suite_conversion = (
                 FX_TEST_AVAILABLE
                 and new_types == {"bazel_test_suite"}
                 and old_types <= GN_TEST_TEMPLATES
+            )
+            is_host_tool_conversion = (
+                has_bazel_host_tool
+                and new_types <= {"bazel_host_tool", "group"}
+                and old_types <= GN_HOST_TOOL_TEMPLATES | GN_BAZEL_INPUT_TEMPLATES | {"group"}
+            )
+            is_bazel_input_transition = (
+                bool(bazel_text)
+                and new_types == {"group"}
+                and old_types <= GN_BAZEL_INPUT_TEMPLATES | {"group"}
+            )
+            # Check whether a rustc_library_with_features template expanded into explicit
+            # rustc_library targets for the base target and all feature_sets variants.
+            is_feature_set_expansion = False
+            if old_types == {"rustc_library_with_features"} and new_types == {"rustc_library"}:
+                code_before = blank_comments(before)
+                pat = re.compile(r'\brustc_library_with_features\(\s*"' + re.escape(name) + r'"\s*\)\s*\{')
+                variant_names = set()
+                for fm in pat.finditer(code_before):
+                    fbody = code_before[fm.end() - 1 : call_end(code_before, fm.end() - 1)]
+                    for vm in re.finditer(r'\btarget_name\s*=\s*"([^"$]+)"', fbody):
+                        if vm.group(1):
+                            variant_names.add(vm.group(1))
+                is_feature_set_expansion = all(
+                    "rustc_library" in new.get(v, (set(), 0))[0] for v in variant_names
+                )
+            if new_types != old_types and not (
+                is_test_suite_conversion
+                or is_host_tool_conversion
+                or is_bazel_input_transition
+                or is_feature_set_expansion
             ):
                 findings.append(type_change_finding(label, name, pkg, gn_rel, line, old_types, new_types))
         elif name in cc_libs:
@@ -308,6 +467,67 @@ for pkg in sorted(candidate_dirs):
             f = alwayslink_finding(label, name, pkg, bazel_rel, rule, alwayslink, line, old_types)
             if f:
                 findings.append(f)
+        elif (
+            bazel_text
+            and name not in bazel_names
+            and (old_types <= GN_CONVERTIBLE_SYMMETRY_TEMPLATES)
+            and not is_testonly_target(before, name)
+        ):
+            was = "/".join(sorted(old_types))
+            findings.append(
+                {
+                    "source": "gn_target_type_parity",
+                    "category": "missing_migrated_target",
+                    "severity": "ERROR",
+                    "file": bazel_rel,
+                    "line": 1,
+                    "message": (
+                        f"`{label}` (GN `{was}`) existed in `{gn_rel}` at `{change_base}` but is missing from both "
+                        f"`{bazel_rel}` and `{gn_rel}`. Every convertible non-test GN target must have a "
+                        f"corresponding target in `{bazel_rel}` (or remain in `{gn_rel}` above the BAZEL2GN SENTINEL "
+                        "if blocked by a GN-only attribute)."
+                    ),
+                    "remediation": (
+                        f"Migrate `{name}` (`{was}`) to `{bazel_rel}` and run `fx bazel2gn -d {pkg}` (or restore it "
+                        f"in `{gn_rel}` if it cannot be migrated). If dropping `{label}` was intentional because it "
+                        "had zero reverse dependencies and is dead code, dispute this finding in the CoderReport."
+                    ),
+                }
+            )
+
+    if bazel_text and (had_bazel_input or has_bazel_host_tool):
+        gn_targets_pat = re.compile(r'@gn_targets//(?:[^\s"\':]+/)?' + re.escape(pkg) + r'(?::([^\s"\']+))?')
+        bazel_dir = os.path.join(workdir, "build/bazel")
+        if os.path.isdir(bazel_dir):
+            for root, _, files in os.walk(bazel_dir):
+                for fn in sorted(files):
+                    if not (fn in ("BUILD.bazel", "BUILD") or fn.endswith(".bzl")):
+                        continue
+                    rel_f = os.path.relpath(os.path.join(root, fn), workdir)
+                    txt = new_text(rel_f)
+                    if not txt:
+                        continue
+                    code_f = blank_comments(txt)
+                    for gm in gn_targets_pat.finditer(code_f):
+                        findings.append(
+                            {
+                                "source": "gn_target_type_parity",
+                                "category": "stale_gn_targets_reference",
+                                "severity": "ERROR",
+                                "file": rel_f,
+                                "line": line_of(code_f, gm.start()),
+                                "message": (
+                                    f"`{rel_f}` still references `{gm.group(0)}`, which bridged `//{pkg}` from GN "
+                                    f"via `bazel_input_file`, even though `//{pkg}` is now migrated to `{bazel_rel}`."
+                                ),
+                                "remediation": (
+                                    f"Replace `{gm.group(0)}` in `{rel_f}` with the migrated Bazel target label in "
+                                    f"`//{pkg}` (e.g. `//{pkg}:<target>`) so Bazel rules use the Bazel-compiled "
+                                    f"target directly, and ensure `{bazel_rel}` grants visibility to `{rel_f}`'s "
+                                    "package or callers (such as `\"//build/bazel:__subpackages__\"`)."
+                                ),
+                            }
+                        )
 
 print(json.dumps(findings, indent=2))
 PYEOF

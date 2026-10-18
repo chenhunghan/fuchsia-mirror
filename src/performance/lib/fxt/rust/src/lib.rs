@@ -30,7 +30,7 @@ pub use blob::{BlobRecord, BlobType, LargeBlobMetadata, LargeBlobRecord};
 pub use error::{ParseError, ParseWarning};
 pub use event::{EventPayload, EventRecord, RawEventRecord, symbolize};
 pub use log::LogRecord;
-pub use metadata::{Provider, ProviderEvent};
+pub use metadata::{FXT_MAGIC_BYTES, Provider, ProviderEvent, is_magic};
 pub use objects::{KernelObjRecord, UserspaceObjRecord};
 pub use scheduling::{
     ContextSwitchEvent, LegacyContextSwitchEvent, SchedulingRecord, ThreadState, ThreadWakeupEvent,
@@ -171,6 +171,10 @@ const SCHEDULING_RECORD_TYPE: u8 = 8;
 const LOG_RECORD_TYPE: u8 = 9;
 const PROFILER_RECORD_TYPE: u8 = 10;
 const LARGE_RECORD_TYPE: u8 = 15;
+
+/// Largest size of a record that is not a large record, in 8-byte words, header included. The
+/// record header stores the size in 12 bits.
+pub const MAX_RECORD_SIZE_WORDS: usize = 0xFFF;
 
 impl<'a> RawTraceRecord<'a> {
     fn parse(buf: &'a [u8]) -> ParseResult<'a, ParsedWithOriginalBytes<'a, Self>> {

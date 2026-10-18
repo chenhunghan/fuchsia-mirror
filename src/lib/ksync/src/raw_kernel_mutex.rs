@@ -108,13 +108,15 @@ impl Default for RawMutex {
 
 // SAFETY: RawMutex is safe to share and access across threads.
 unsafe impl Sync for RawMutex {}
+// SAFETY: RawMutex is safe to send across threads.
 unsafe impl Send for RawMutex {}
 
 zr::unsafe_pinned_drop_ffi!(RawMutex, cpp_mutex_destroy);
 
 pub struct RawMutexPolicy;
 
-impl crate::LockPolicy<RawMutex> for RawMutexPolicy {
+// SAFETY: `cpp_mutex_acquire` and `cpp_mutex_release` enforce mutual exclusion on `RawMutex`.
+unsafe impl crate::LockPolicy<RawMutex> for RawMutexPolicy {
     type AcquireArgs = ();
     type GuardState = ();
 
@@ -137,6 +139,7 @@ impl crate::LockPolicy<RawMutex> for RawMutexPolicy {
         entry: *mut LockEntryStorage,
         state: &mut Self::GuardState,
     ) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
         *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
@@ -150,7 +153,8 @@ impl crate::LockPolicy<RawMutex> for RawMutexPolicy {
     }
 }
 
-impl crate::RawLock for RawMutex {
+// SAFETY: `RawMutex` is a physical kernel mutex with a unique storage address.
+unsafe impl crate::RawLock for RawMutex {
     type LockEntry = LockEntryStorage;
     type DefaultPolicy = RawMutexPolicy;
 
@@ -219,13 +223,16 @@ impl Default for RawCriticalMutex {
 
 // SAFETY: RawCriticalMutex is safe to share and access across threads.
 unsafe impl Sync for RawCriticalMutex {}
+// SAFETY: RawCriticalMutex is safe to send across threads.
 unsafe impl Send for RawCriticalMutex {}
 
 zr::unsafe_pinned_drop_ffi!(RawCriticalMutex, cpp_critical_mutex_destroy);
 
 pub struct RawCriticalMutexPolicy;
 
-impl crate::LockPolicy<RawCriticalMutex> for RawCriticalMutexPolicy {
+// SAFETY: `cpp_critical_mutex_acquire` and `cpp_critical_mutex_release` enforce mutual exclusion
+// on `RawCriticalMutex`.
+unsafe impl crate::LockPolicy<RawCriticalMutex> for RawCriticalMutexPolicy {
     type AcquireArgs = ();
     type GuardState = bool;
 
@@ -246,6 +253,7 @@ impl crate::LockPolicy<RawCriticalMutex> for RawCriticalMutexPolicy {
         entry: *mut LockEntryStorage,
         state: &mut Self::GuardState,
     ) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
         *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
@@ -263,7 +271,8 @@ impl crate::LockPolicy<RawCriticalMutex> for RawCriticalMutexPolicy {
     }
 }
 
-impl crate::RawLock for RawCriticalMutex {
+// SAFETY: `RawCriticalMutex` is a physical kernel critical mutex with a unique storage address.
+unsafe impl crate::RawLock for RawCriticalMutex {
     type LockEntry = LockEntryStorage;
     type DefaultPolicy = RawCriticalMutexPolicy;
 

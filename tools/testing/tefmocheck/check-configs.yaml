@@ -1,8 +1,10 @@
+failure_mode_checks:
+
 # ==============================================================================
 # CATEGORY 1: Swarming & CAS Upload Failures
 # Priority checks for Swarming task infrastructure & CAS upload errors.
 # ==============================================================================
-failure_mode_checks:
+
 # For https://fxbug.dev/42166822
 # This is printed by Swarming after a Swarming task's command completes, and
 # suggests that a test leaked a subprocess that modified one of the task's
@@ -183,25 +185,6 @@ failure_mode_checks:
   string: "failed to write blob"
   log_types: ["serialLogType"]
 # LINT.ThenChange(/src/storage/fxfs/platform/src/fuchsia/fxblob/writer.rs:blob_write_failure)
-
-# For https://fxbug.dev/328273002.
-# This detects critical process failures for tests that depend on mexec.
-- kind: "string_in_log"
-  string: "critical to root job killed with"
-  log_types: ["swarmingOutputType"]
-  except_blocks:
-  # Mobly tests tend to be e2e tests that sometimes reboot the
-  # target, leading to expected job failures.
-  # LINT.IfChange(mobly_test_start)
-  - start_string: "======== Mobly config content ========"
-  # LINT.ThenChange(//src/testing/end_to_end/mobly_driver/mobly_driver/api/api_infra.py:mobly_test_start)
-  # LINT.IfChange(mobly_test_end)
-    end_string: "[=====MOBLY RESULTS=====]"
-  # LINT.ThenChange(//src/testing/end_to_end/mobly_driver/mobly_driver/api/api_infra.py:mobly_test_end)
-  - start_string: "=== RUN   TestKillCriticalProcess"
-    end_string: "--- PASS: TestKillCriticalProcess"
-  - start_string: "=== RUN   TestOOMHard"
-    end_string: "--- PASS: TestOOMHard"
 
 # For https://fxbug.dev/343550891.
 # LINT.IfChange(watchdog_tefmo)
@@ -683,6 +666,22 @@ failure_mode_checks:
   string: "FAILED (Status read failed (Protocol error))"
   log_types: ["swarmingOutputType"]
 
+# For https://fxbug.dev/559487345.
+- kind: "string_in_log"
+  string: "Target specification \"<target>\" was not found"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "timed out writing to fastboot interface"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "Could not verify upload: Timed out"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
 # For https://fxbug.dev/42130478.
 - kind: "string_in_log"
   string: "botanist ERROR: start target error"
@@ -901,6 +900,27 @@ failure_mode_checks:
   string: "mobly.signals.TestFailure: Details=Conne[57 chars]code=92, is_credential_rejected=False, is_reconnect=False)) != Conne[57 chars]code=<StatusCode.SUCCESS: 0>, is_credential_re[29 chars]lse)), Extras=None"
   log_types: ["swarmingOutputType"]
 
+# For https://fxbug.dev/565930479.
+# Keep near the end of Category 3 so more specific device, test, and timeout
+# checks above take precedence when ffx usb-driver exits as a side effect.
+# LINT.IfChange(ffx_usb_driver_failed)
+- kind: "string_in_log"
+  string: "botanist ERROR: ffx usb-driver process finished with err:"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+  attribute_to_test: true
+  add_tag: true
+# LINT.ThenChange(/tools/botanist/common.go:process_finished_with_err, /tools/botanist/cmd/run.go:ffx_usb_driver_failed)
+
+# For https://fxbug.dev/559487345.
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to run health check"
+  log_types: ["swarmingOutputType"]
+
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to reconnect to target"
+  log_types: ["swarmingOutputType"]
+
 # General ffx error check. Keep near the end of Category 3 so more specific
 # test, SSH, and FFX checks above take precedence.
 - kind: "string_in_log"
@@ -918,6 +938,17 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "botanist ERROR: failed to run snapshot over ssh"
   log_types: ["swarmingOutputType"]
+
+# For https://fxbug.dev/565930479.
+# Catch unhandled Go runtime panics in host tools (e.g. botanist or testrunner)
+# that exit before logging a top-level botanist failure message. Attribute to
+# the running test when a panic appears in test output.
+- kind: "string_in_log"
+  string: "panic: runtime error:"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+  attribute_to_test: true
+  add_tag: true
 
 # ==============================================================================
 # CATEGORY 4: Catch-all Botanist Execution Failure

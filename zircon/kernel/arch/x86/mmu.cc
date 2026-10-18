@@ -27,7 +27,7 @@
 #include <arch/x86/mmu_mem_types.h>
 #include <kernel/mp.h>
 #include <ktl/span.h>
-#include <phys/arch/arch-handoff.h>
+#include <phys/handoff/handoff.h>
 #include <vm/arch_vm_aspace.h>
 #include <vm/physmap.h>
 #include <vm/pmm.h>
@@ -58,7 +58,7 @@ static_assert(X86_PAGE_SIZE == kPageSize);
 /* Default address width including virtual/physical address.
  * newer versions fetched below */
 static uint8_t g_max_vaddr_width = 48;
-uint8_t g_max_paddr_width = 32;
+extern "C" uint8_t g_max_paddr_width = 32;
 
 /* True if the system supports 1GB pages */
 static bool supports_huge_pages = false;

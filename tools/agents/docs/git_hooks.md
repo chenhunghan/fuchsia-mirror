@@ -17,14 +17,15 @@ unstaged edits:
 - **Automatic Formatting**: `fx format-code` formats fully staged files with automatic re-staging
   (`git add`). Partially staged files are evaluated strictly in read-only check mode under stash
   isolation.
-- **Static Analysis & Code Linting**: `fx lint` runs on staged files for agent commits (and when
-  forced via `FUCHSIA_FORCE_HOOKS=1`), validating compliance with all platform linters (GN format,
-  Python format, fidl-lint, clippy, mdlint, etc.). Fully staged files get two passes: an advisory
-  `fx lint --fix` pass that applies automated replacements (re-staged by the pipeline), followed by a
-  check pass that gates the commit. The second pass is required because `--fix` delegates to
-  `shac fix`, which skips formatter checks and exits 0 even when findings remain. Partially staged
-  files run the check pass only, under stash isolation. Interactive human commits skip `pre-commit`
-  entirely (0s overhead) to avoid blocking local iteration, relying on CQ for platform verification.
+- **Static Analysis & Code Linting**: `fx lint` runs as a single read-only check pass on staged
+  files for every commit after `fx format-code`, validating compliance with platform linters (GN
+  format, fidl-lint, clippy, mdlint, etc.). Partially staged files are checked under stash
+  isolation. `clang_tidy` and `python_format` (`ALWAYS_SKIPPED_LINTERS`) are skipped on all commits:
+  `clang_tidy` takes ~10-20s per C++ file, does not emit auto-fixes in shac, and only emits non-blocking
+  warnings, while `python_format` takes ~1.1s per Python file and already runs during the preceding
+  `fx format-code` pass. Human commits also skip `check_licenses` (`HUMAN_SKIPPED_LINTERS`) because
+  it can take over a minute when triggered; agents run `check_licenses` so automated changes are
+  CQ-clean before upload.
 - **Commit Message Style Verification**: Validates subject line length ($\le 50$ chars recommended,
   $> 65$ warned), 72-character body line wrapping, and mandatory footers (`Bug:`, `Test:`,
   `Change-Id:`) via `scripts/shac/commit_msg_checker.py`.
@@ -53,8 +54,8 @@ root hook wrappers (`pre-commit`, `commit-msg`).
   │
   └──► .git/hooks/pre-commit.d/
          ├── 05-author-check.sh         (Upstream Googler email check)
-         ├── 10-fuchsia-agent.sh        (Automated formatting & staging isolation)
          ├── 10-unstage-submodules.sh   (Submodule reset check)
+         ├── 20-fuchsia-agent.sh        (Automated formatting & staging isolation)
          └── 50-team-tool.sh            (Modular team/user scripts)
 ```
 
@@ -70,13 +71,13 @@ implementation.
    - Resolves hooks directory via `git rev-parse --git-path hooks` (ensuring compatibility with Git
      worktrees and subdirectories).
    - `install_git_hooks` creates `.git/hooks/<hook_name>.d/` and writes or updates
-     `10-fuchsia-agent.sh`.
+     `20-fuchsia-agent.sh`.
    - It does NOT touch or overwrite `.git/hooks/<hook_name>`.
-2. **Uninstallation / Reset (`fx agents setup --reset`)**:
-   - Uses `uninstall_git_hooks` to delete only `.git/hooks/<hook_name>.d/10-fuchsia-agent.sh`.
+2. **Uninstallation / Reset (`fx agents setup --no-git-hooks` or `fx agents setup --reset`)**:
+   - Uses `uninstall_git_hooks` to delete only `.git/hooks/<hook_name>.d/20-fuchsia-agent.sh`.
    - Leaves the `.git/hooks/<hook_name>` wrappers and `<hook_name>.d/` directory intact.
    - Any user or team scripts in `<hook_name>.d/` continue executing without disruption.
-   - You can inspect the status with `get_git_hooks_status`.
+   - You can inspect the status with `fx agents setup --status` (`get_git_hooks_status`).
 
 ---
 
@@ -94,14 +95,14 @@ The Git staging and hook subsystem is split into three layers:
   - Terminal reporters (`ConsoleReporter`) and the hook CLI dispatcher (`runner.py`).
 - **Layer 3: Installer & Setup (`commands/setup.py`, `lib/githooks/installer.py`)**:
   - Discovers checkout repositories across `//` and `//vendor/*`.
-  - Idempotently installs and uninstalls `10-fuchsia-agent.sh` within `.git/hooks/<hook_name>.d/`.
+  - Idempotently installs and uninstalls `20-fuchsia-agent.sh` within `.git/hooks/<hook_name>.d/`.
 
 For the complete repository and test file layout, see
 [`tools/agents/DEVELOPMENT.md#directory-layout`](../DEVELOPMENT.md#directory-layout).
 
 ### 3.1 Standalone Hook Execution
 
-The `10-fuchsia-agent.sh` hook fragment exports `PYTHONPATH="$FUCHSIA_DIR/tools:$PYTHONPATH"` and
+The `20-fuchsia-agent.sh` hook fragment exports `PYTHONPATH="$FUCHSIA_DIR/tools:$PYTHONPATH"` and
 executes `$FUCHSIA_DIR/scripts/fuchsia-vendored-python`. This allows hooks to run during
 `git commit` without depending on Ninja/GN build artifacts or an active build directory.
 
@@ -184,27 +185,26 @@ implementation.
 
 ## 6. Bypasses & Agent Execution
 
-### 6.1 Bypassing & Forcing Hooks
+### 6.1 Bypassing Hooks
 
-Hooks can be bypassed or forced using standard Git flags, environment variables, or `fx agents setup` (see
+Hooks can be bypassed using standard Git flags, environment variables, or `fx agents setup` (see
 [`tools/agents/README.md#git-hooks-integration`](../README.md#git-hooks-integration)):
 
-1. **Forcing Hooks for Humans**:
-   - `FUCHSIA_FORCE_HOOKS=1 git commit ...` forces `pre-commit` to execute formatting and linting for
-     human developers.
-2. **Native Git Per-Commit Bypass**:
+1. **Native Git Per-Commit Bypass**:
    - `git commit -n` or `git commit --no-verify` (standard Git flag, skips `pre-commit` and
      `commit-msg` natively).
-3. **Environment Variable Bypass (Scripts / CI)**:
+2. **Environment Variable Bypass (Scripts / CI)**:
    - `FUCHSIA_SKIP_HOOKS=1 git commit ...` (immediately exits 0 from the hook runner).
-4. **Configuration Options**:
-   - `fx agents setup` installs `.git/hooks/<hook_name>.d/10-fuchsia-agent.sh`.
+3. **Configuration Options**:
+   - `fx agents setup` (or `fx agents setup --git-hooks`) installs
+     `.git/hooks/<hook_name>.d/20-fuchsia-agent.sh`.
    - `fx agents setup --status`: Displays current configuration and reports Git hook configuration
      across all checkout repositories.
    - `--git-hooks` / `--no-git-hooks`: CLI flags for `fx agents setup` controlling Git hook
-     installation across checkout repositories (default: `--git-hooks`). Passing `--no-git-hooks`
-     configures agent permissions and profiles without installing or modifying Git hooks.
-   - `fx agents setup --reset` removes `10-fuchsia-agent.sh` while leaving dispatcher and user
+     management across checkout repositories (default: `--git-hooks`). Passing `--no-git-hooks`
+     configures agent permissions and profiles while skipping hook installation and actively
+     uninstalling any existing `20-fuchsia-agent.sh` hooks across checkout repositories.
+   - `fx agents setup --reset` removes `20-fuchsia-agent.sh` while leaving dispatcher and user
      scripts intact.
    - `fx agents setup --reset --no-git-hooks`: Resets Fuchsia-managed rules and configuration while
      preserving existing Git hooks intact (skips hook uninstallation).
@@ -227,8 +227,8 @@ an agent is actually executing:
   configured the developer checkout, but does **not** mean an automated AI agent is executing a
   given commit.
 - Developers routinely perform manual `git commit` commands in repositories configured with
-  `fx agents setup`. These interactive human commits bypass `pre-commit` completely (0s overhead)
-  and receive advisory warnings on `commit-msg` (`ConsoleReporter`, non-blocking warnings).
+  `fx agents setup`. These interactive human commits receive human-oriented UX (`ConsoleReporter`,
+  advisory warnings, colored summaries).
 
 #### How Agents Are Detected
 
@@ -237,12 +237,11 @@ variables:
 
 - **Agent Environment Detection**: Query `is_invoked_by_agent()`, which checks the canonical agent
   environment variables defined in `AGENT_ENV_VARS` (`ANTIGRAVITY_AGENT`, `GEMINI_CLI`,
-  `ANTIGRAVITY_EDITOR_APP_ROOT`) or `FUCHSIA_FORCE_HOOKS`.
+  `ANTIGRAVITY_EDITOR_APP_ROOT`).
 
 When active runtime agent execution is detected:
 
-- **Pre-Commit Enforcement**: Executes `pre-commit` pipeline (`fx format-code` auto-formatting and
-  `fx lint` static analysis).
+- **Auto-Formatting**: Formats fully staged files in-place and re-stages them automatically.
 - **Strict Validation**: Runs `commit_msg_checker.py --strict` so non-compliant messages are
   rejected before reaching CQ.
 
@@ -258,7 +257,7 @@ When active runtime agent execution is detected:
 | **Stash Restoration Failure**                   | **Fail-Closed**                                             | Print recovery command; exit 1.                         | Prevent silent data loss or corrupted working trees.                                 |
 | **Code Syntax / Formatter Error**               | **Fail-Closed**                                             | Print formatter error; exit 1.                          | Catch broken code before creating commits.                                           |
 | **Partially Staged Formatting Error**           | **Fail-Closed**                                             | Print remediation hint; exit 1.                         | Avoid committing unformatted code or corrupting unstaged hunks.                      |
-| **Code Linting / Static Analysis (`fx lint`)**   | **Skip** (Human)<br>**Fail-Closed** (Agent / Forced)        | Apply `--fix` where possible; reject commit on findings.| Keep human commit latency at 0s while keeping agent changes CQ-clean before upload. |
+| **Code Linting / Static Analysis (`fx lint`)**   | **Fail-Closed**                                             | Reject commit on lint findings (`fx format-code` formats files first). | Keep lint violations out of the tree; `FUCHSIA_SKIP_HOOKS=1` remains the escape hatch. |
 | **Commit Message Warnings**                     | **Fail-Open** (Human)<br>**Fail-Closed** (Agent)            | Advisory warning for humans; error for agents.          | Warn human developers without blocking commits; block commits from automated agents. |
 
 ### 7.2 Performance Optimizations

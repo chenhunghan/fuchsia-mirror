@@ -14,26 +14,12 @@
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" {
-FFI_ALWAYS_INLINE fbl::RefCounted<VmAddressRegionOrMapping>* cpp_vm_mapping_get_ref_counted(
-    VmMapping* mapping) {
-  return mapping;
-}
 FFI_ALWAYS_INLINE void cpp_vm_mapping_free(VmMapping* mapping) { delete mapping; }
+FFI_ALWAYS_INLINE void* cpp_vm_mapping_state(VmMapping* mapping) {
+  return &mapping->opaque_storage_;
+}
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping) {
   return mapping->Destroy();
-}
-FFI_ALWAYS_INLINE const fbl::RefPtr<VmAspace>* cpp_vm_mapping_aspace(VmMapping* mapping) {
-  return &mapping->aspace();
-}
-FFI_ALWAYS_INLINE vaddr_t cpp_vm_mapping_base(VmMapping* mapping) { return mapping->base(); }
-FFI_ALWAYS_INLINE size_t cpp_vm_mapping_size(VmMapping* mapping) { return mapping->size(); }
-FFI_ALWAYS_INLINE uint32_t cpp_vm_mapping_flags(VmMapping* mapping) { return mapping->flags(); }
-FFI_ALWAYS_INLINE uint64_t cpp_vm_mapping_object_offset(VmMapping* mapping) {
-  return mapping->object_offset();
-}
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_decommit_range(VmMapping* mapping, size_t offset,
-                                                            size_t len) {
-  return mapping->DecommitRange(offset, len);
 }
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_map_range(VmMapping* mapping, size_t offset,
                                                        size_t len, bool commit,
@@ -49,9 +35,18 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, v
                                                            arch_mmu_flags_t new_arch_mmu_flags) {
   return mapping->DebugProtect(base, size, new_arch_mmu_flags);
 }
-FFI_ALWAYS_INLINE const VmObject* cpp_vm_mapping_vmo(VmMapping* mapping) {
-  fbl::RefPtr<VmObject> vmo = mapping->vmo();
-  return fbl::ExportToRawPtr(&vmo);
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_enumerate_protection_ranges_locked(
+    const VmMapping* mapping, vaddr_t base, size_t size,
+    cpp_vm_mapping_enumerate_protection_ranges_cb cb, void* ctx) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return mapping->EnumerateProtectionRangesLocked(
+      base, size, [cb, ctx](vaddr_t base, size_t len, arch_mmu_flags_t flags) {
+        return cb(ctx, base, len, flags);
+      });
+}
+FFI_ALWAYS_INLINE VmMapping::FlagsRange cpp_vm_mapping_arch_mmu_flags_range_locked(
+    const VmMapping* mapping, vaddr_t offset) {
+  AssertHeld(mapping->lock_ref());
+  return mapping->arch_mmu_flags_range_locked(offset);
 }
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping,
                                                             VmMapping** out_mapping) {
@@ -65,5 +60,16 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping,
 }
 FFI_ALWAYS_INLINE void cpp_vm_mapping_mark_mergeable(VmMapping* mapping) {
   VmMapping::MarkMergeable(fbl::ImportFromRawPtr(mapping));
+}
+FFI_ALWAYS_INLINE arch_mmu_flags_t cpp_vm_mapping_arch_mmu_flags_locked(
+    const VmMapping* mapping, vaddr_t offset) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return mapping->arch_mmu_flags_locked(offset);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_mapping_page_fault_locked(
+    VmMapping* mapping, vaddr_t va, uint32_t pf_flags, size_t additional_pages,
+    MultiPageRequest* page_request, uint32_t* out_mapped) TA_NO_THREAD_SAFETY_ANALYSIS {
+  auto [status, mapped] = mapping->PageFaultLocked(va, pf_flags, additional_pages, page_request);
+  *out_mapped = mapped;
+  return status;
 }
 }  // extern "C"

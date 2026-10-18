@@ -4,7 +4,7 @@
 
 use crate::sys_net::{
     PingGroupRangeFile, ProcSysNetIpv4Conf, ProcSysNetIpv4Neigh, ProcSysNetIpv6Conf,
-    ProcSysNetIpv6Neigh, RmemMaxFile, TcpRmemFile, WmemMaxFile,
+    ProcSysNetIpv6Neigh, RmemMaxFile, TcpRmemFile, TcpWmemFile, WmemMaxFile,
 };
 use crate::sysctl_directory::{SysctlDirectory, SysctlDirectoryMutator};
 use starnix_core::security;
@@ -17,10 +17,11 @@ use starnix_logging::{bug_ref, track_stub};
 use starnix_uapi::auth::{CAP_LAST_CAP, CAP_SYS_ADMIN, CAP_SYS_RESOURCE, Capabilities};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
+use starnix_uapi::resource_limits::default_threads_max;
 use starnix_uapi::version::{KERNEL_RELEASE, KERNEL_VERSION};
 use starnix_uapi::{errno, error, uapi};
 use std::borrow::Cow;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use uuid::Uuid;
 
 pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
@@ -191,11 +192,7 @@ pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
         );
         dir.entry("unprivileged_bpf_disabled", UnprivilegedBpfDisabled::new_node(), mode);
         dir.entry("dmesg_restrict", DmesgRestrict::new_node(), mode);
-        dir.entry(
-            "kptr_restrict",
-            StubBytesFile::new_node(bug_ref!("https://fxbug.dev/322873878")),
-            mode,
-        );
+        dir.entry("kptr_restrict", KptrRestrictFile::new_node(), mode);
         dir.entry(
             "osrelease",
             BytesFile::new_node(|| Ok(format!("{}\n", KERNEL_RELEASE))),
@@ -206,6 +203,13 @@ pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
         dir.entry("overflowgid", BytesFile::new_node(b"65534".to_vec()), mode);
         dir.entry("printk", BytesFile::new_node(b"4\t4\t1\t7\n".to_vec()), mode);
         dir.entry("pid_max", BytesFile::new_node(b"4194304".to_vec()), mode);
+        dir.entry(
+            "threads-max",
+            BytesFile::new_node(
+                format!("{}\n", default_threads_max(zx::system_get_physmem())).into_bytes(),
+            ),
+            mode,
+        );
         dir.subdir("random", 0o555, |dir| {
             // Generate random UUID
             let boot_id = Uuid::new_v4().hyphenated().to_string();
@@ -493,6 +497,7 @@ fn sysctl_net_directory(dir: &SysctlDirectoryMutator<'_, { uapi::CAP_NET_ADMIN }
             file_mode,
         );
         dir.entry("tcp_rmem", TcpRmemFile::new_node(), file_mode);
+        dir.entry("tcp_wmem", TcpWmemFile::new_node(), file_mode);
     });
     dir.subdir("ipv6", 0o555, |dir| {
         dir.entry("conf", ProcSysNetIpv6Conf, dir_mode);
@@ -531,6 +536,55 @@ impl BytesFileOps for DmesgRestrict {
         Ok(format!("{}\n", current_task.kernel().restrict_dmesg.load(Ordering::Relaxed) as u32)
             .into_bytes()
             .into())
+    }
+}
+
+const MAX_KPTR_RESTRICT: u8 = 2;
+
+#[derive(Debug, Default)]
+pub struct KptrRestrict(AtomicU8);
+
+impl KptrRestrict {
+    pub fn load(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn store(&self, value: u8) {
+        self.0.store(value, Ordering::Relaxed);
+    }
+}
+
+struct KptrRestrictFile {}
+
+impl KptrRestrictFile {
+    fn new_node() -> impl FsNodeOps {
+        BytesFile::new_node(Self {})
+    }
+}
+
+impl BytesFileOps for KptrRestrictFile {
+    fn write(&self, current_task: &CurrentTask, data: Vec<u8>) -> Result<(), Errno> {
+        security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+        if data.is_empty() {
+            return Ok(());
+        }
+        let trimmed = data.trim_ascii();
+        if trimmed.is_empty() || trimmed.starts_with(b"+") {
+            return error!(EINVAL);
+        }
+        let setting: u8 = std::str::from_utf8(trimmed)
+            .map_err(|_| errno!(EINVAL))?
+            .parse()
+            .map_err(|_| errno!(EINVAL))?;
+        if setting > MAX_KPTR_RESTRICT {
+            return error!(EINVAL);
+        }
+        current_task.kernel().expando.get::<KptrRestrict>().store(setting);
+        Ok(())
+    }
+    fn read(&self, current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
+        let setting = current_task.kernel().expando.get::<KptrRestrict>().load();
+        Ok(format!("{setting}\n").into_bytes().into())
     }
 }
 

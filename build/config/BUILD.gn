@@ -49,6 +49,7 @@ config("language") {
 
 # LINT.ThenChange(//build/config/BUILD.bazel:language)
 
+# LINT.IfChange(cxx_versions)
 # These configs can be used to override the C++ version for a particular
 # target.  This is used primarily for tests to specifically validate building
 # under supported modes other than $fuchsia_cxx_version.
@@ -68,6 +69,8 @@ foreach(cxx_version, fuchsia_sdk_cxx_supported_versions) {
     }
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:cxx_versions)
 
 compiler_config("color_diagnostics") {
   # GCC correctly defaults this from the terminal, so leave it alone.
@@ -968,8 +971,7 @@ config("Wno-vla-cxx-extension") {
     "//src/connectivity/bluetooth/hci/transport/usb:*",
     "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:*",
     "//src/connectivity/ethernet/drivers/gvnic:*",
-    "//src/connectivity/network/netstack/udp_serde:*",
-    "//src/connectivity/network/tests/benchmarks/udp-serde:*",
+    "//src/connectivity/network/lib/udp_serde:*",
     "//src/connectivity/network/tests/external_network:*",
     "//src/connectivity/network/tests/socket:*",
     "//src/connectivity/telephony/drivers/qmi-usb-transport:*",
@@ -982,7 +984,6 @@ config("Wno-vla-cxx-extension") {
     "//src/devices/spi/bin/spiutil:*",
     "//src/graphics/display/drivers/amlogic-display:*",
     "//src/graphics/display/drivers/intel-i915:*",
-    "//src/graphics/lib/compute/spinel/platforms/vk/tests/spinel_vk_tests:*",
     "//src/graphics/lib/magma/src/libmagma_virt:*",
     "//src/media/audio/examples/effects:*",
     "//src/media/drivers/amlogic_decoder:*",
@@ -1074,7 +1075,6 @@ config("Wno-conversion") {
     "//src/graphics/drivers/misc/goldfish:*",
     "//src/graphics/drivers/misc/goldfish_address_space:*",
     "//src/graphics/drivers/misc/goldfish_sync:*",
-    "//src/graphics/lib/compute/svg:*",
     "//src/lib/chunked-compression:*",
     "//src/lib/cobalt/cpp:*",
     "//src/lib/containers/cpp:*",
@@ -1351,15 +1351,19 @@ config("no_profile") {
   ]
 }
 
+# LINT.IfChange(icf)
 compiler_config("icf") {
   # This changes C/C++ semantics and might be incompatible with third-party
   # code that relies on function pointers comparison.
+  # TODO(https://fxbug.dev/572722205): Consider --icf=safe.
   if (is_pecoff) {
     linker_flags = [ "/opt:icf=all" ]
   } else if (linker == "gold" || linker == "lld") {
     linker_flags = [ "--icf=all" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:icf)
 
 # "_ALL_SOURCE" is used by some system headers to expose more features (say in
 # fcntl.h) beyond those strictly defined in standard.

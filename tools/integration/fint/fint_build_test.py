@@ -29,7 +29,7 @@ if protobuf_wheel.exists() and str(protobuf_wheel) not in sys.path:
 
 # Bypass strict protobuf gencode/runtime version check to align prebuilts at build-time (see b/537501139)
 try:
-    import google.protobuf.runtime_version as rv  # type: ignore
+    import google.protobuf.runtime_version as rv
 
     rv.ValidateProtobufRuntimeVersion = lambda *args, **kwargs: None
 except ImportError:
@@ -275,6 +275,8 @@ class BuildArtifactsTest(unittest.TestCase):
     ) -> None:
         """Verifies that produce_build_artifacts generates and copies ninja traces."""
         mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
             checkout_dir = temp_path / "checkout"
@@ -387,6 +389,8 @@ class BuildArtifactsTest(unittest.TestCase):
     ) -> None:
         """Verifies that subbuild traces are merged with ninjatrace tool resolved relative to build_dir."""
         mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        mock_run.return_value.stderr = ""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
             checkout_dir = temp_path / "checkout"
@@ -666,6 +670,274 @@ class BuildArtifactsTest(unittest.TestCase):
                     )
 
 
+class ResolveAffectedTestNamesTest(unittest.TestCase):
+    """Tests the resolve_affected_test_names function."""
+
+    def test_resolve_affected_test_names(self) -> None:
+        specs = [
+            fint_build.TestSpec(
+                label="//src/foo:foo_test(//build/toolchain/fuchsia:x64)",
+                os="fuchsia",
+                cpu="x64",
+                path="",
+                name="fuchsia-pkg://fuchsia.com/foo#meta/foo.cm",
+                package_label="//src/foo:foo_pkg(//build/toolchain/fuchsia:x64)",
+            ),
+            fint_build.TestSpec(
+                label="@@//src/bar:bar_test",
+                os="linux",
+                cpu="x64",
+                path="host_x64/bar_test",
+                name="host_x64/bar_test",
+                source_label="//src/bar:bar_test",
+            ),
+            fint_build.TestSpec(
+                label="//src/recovery/simulator:recovery_simulator_boot_test(//build/toolchain/fuchsia:x64)",
+                os="fuchsia",
+                cpu="x64",
+                path="",
+                name="recovery_simulator_boot_test",
+            ),
+        ]
+        cases = [
+            (
+                "exact label",
+                ["//src/foo:foo_test(//build/toolchain/fuchsia:x64)"],
+                ["fuchsia-pkg://fuchsia.com/foo#meta/foo.cm"],
+            ),
+            (
+                "package label without toolchain",
+                ["//src/foo:foo_pkg"],
+                ["fuchsia-pkg://fuchsia.com/foo#meta/foo.cm"],
+            ),
+            (
+                "bazel source label",
+                ["//src/bar:bar_test"],
+                ["host_x64/bar_test"],
+            ),
+            (
+                "test name",
+                ["host_x64/bar_test"],
+                ["host_x64/bar_test"],
+            ),
+            (
+                "never affected",
+                ["//src/recovery/simulator:recovery_simulator_boot_test"],
+                [],
+            ),
+            (
+                "unknown label passes through",
+                ["//src/unknown:test"],
+                ["//src/unknown:test"],
+            ),
+            (
+                "duplicates removed",
+                ["//src/foo:foo_test", "//src/foo:foo_pkg"],
+                ["fuchsia-pkg://fuchsia.com/foo#meta/foo.cm"],
+            ),
+        ]
+        for name, labels, expected in cases:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    fint_build.resolve_affected_test_names(specs, labels),
+                    expected,
+                )
+
+
+class FindAffectedTestsTest(unittest.TestCase):
+    """Tests the _find_affected_tests method on BuildContext."""
+
+    def _make_ctx(
+        self,
+        temp_path: pathlib.Path,
+        changed_files: list[str],
+    ) -> fint_build.BuildContext:
+        build_dir = temp_path / "build"
+        artifact_dir = temp_path / "artifact"
+        checkout_dir = temp_path / "checkout"
+        for d in (build_dir, artifact_dir, checkout_dir):
+            d.mkdir()
+        (build_dir / fint_build.TESTS_JSON).write_text(
+            json.dumps(
+                [
+                    {
+                        "test": {
+                            "label": "//src/foo:foo_test(//build/toolchain/fuchsia:x64)",
+                            "name": "foo_test",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                        }
+                    }
+                ]
+            )
+        )
+        context_spec = context_pb2.Context(
+            build_dir=str(build_dir),
+            artifact_dir=str(artifact_dir),
+            checkout_dir=str(checkout_dir),
+            changed_files=[
+                context_pb2.Context.ChangedFile(path=f) for f in changed_files
+            ],
+        )
+        return fint_build.BuildContext(
+            static_pb2.Static(),
+            context_spec,
+            fint_build.HostProperties(os="linux", cpu="x64"),
+        )
+
+    @mock.patch.object(subprocess, "run")
+    def test_success(self, mock_run: MagicMock) -> None:
+        files_list_contents: list[str] = []
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> MagicMock:
+            files_list = next(
+                a for a in cmd if a.startswith("--files-list=")
+            ).removeprefix("--files-list=")
+            files_list_contents.append(pathlib.Path(files_list).read_text())
+            return MagicMock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "test_targets": [
+                            {"label": "//src/foo:foo_test", "env": "device"},
+                        ],
+                        "build_not_affected": False,
+                    }
+                ),
+            )
+
+        mock_run.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            ctx = self._make_ctx(
+                temp_path, ["src/foo/foo.cc", "src/foo/BUILD.gn"]
+            )
+            result = fint_build.BuildExecution(command=["ninja"])
+            ctx._find_affected_tests(result)
+
+            self.assertEqual(result.affected_tests, ["foo_test"])
+            self.assertFalse(result.build_not_affected)
+            self.assertEqual(
+                files_list_contents, ["src/foo/foo.cc\nsrc/foo/BUILD.gn\n"]
+            )
+            cmd = mock_run.call_args.args[0]
+            self.assertEqual(
+                cmd[:4],
+                [
+                    str(temp_path / "checkout" / "build" / "api" / "client"),
+                    "--build-dir",
+                    str(temp_path / "build"),
+                    "affected_tests",
+                ],
+            )
+            self.assertEqual(cmd[-1], "--format=json")
+            # The temporary changed files list should be cleaned up.
+            self.assertEqual(list((temp_path / "artifact").iterdir()), [])
+
+    @mock.patch.object(subprocess, "run")
+    def test_build_not_affected(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"test_targets": [], "build_not_affected": True}),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = self._make_ctx(pathlib.Path(temp_dir), ["README.md"])
+            result = fint_build.BuildExecution(command=["ninja"])
+            ctx._find_affected_tests(result)
+            self.assertEqual(result.affected_tests, [])
+            self.assertTrue(result.build_not_affected)
+
+    @mock.patch.object(subprocess, "run")
+    def test_no_changed_files(self, mock_run: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = self._make_ctx(pathlib.Path(temp_dir), [])
+            result = fint_build.BuildExecution(command=["ninja"])
+            ctx._find_affected_tests(result)
+            mock_run.assert_not_called()
+            self.assertEqual(result.affected_tests, [])
+            self.assertFalse(result.build_not_affected)
+
+    @mock.patch.object(subprocess, "run")
+    def test_tool_failure(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx = self._make_ctx(pathlib.Path(temp_dir), ["src/foo/foo.cc"])
+            result = fint_build.BuildExecution(command=["ninja"])
+            with self.assertRaises(RuntimeError):
+                ctx._find_affected_tests(result)
+
+    @mock.patch.object(fint_build, "check_ninja_noop", return_value=(0, None))
+    @mock.patch.object(fint_build, "run_gn_check", return_value=(0, None))
+    def test_failure_sets_failure_summary(
+        self, mock_gn_check: MagicMock, mock_noop: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            ctx = self._make_ctx(temp_path, ["src/foo/foo.cc"])
+            result = fint_build.BuildExecution(command=["ninja"])
+            with (
+                mock.patch.object(
+                    fint_build.BuildContext, "_export_debug_symbols"
+                ),
+                mock.patch.object(
+                    fint_build.BuildContext,
+                    "_find_affected_tests",
+                    side_effect=RuntimeError("boom"),
+                ),
+            ):
+                ctx._run_post_ninja_checks(
+                    result, ["default"], temp_path / "build" / "stamp"
+                )
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(
+                result.failure_summary, "Failed to find affected tests: boom"
+            )
+
+    @mock.patch.object(fint_build, "check_ninja_noop", return_value=(0, None))
+    @mock.patch.object(fint_build, "run_gn_check", return_value=(0, None))
+    def test_export_debug_symbols_failure_sets_failure_summary(
+        self, mock_gn_check: MagicMock, mock_noop: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            ctx = self._make_ctx(temp_path, ["src/foo/foo.cc"])
+            result = fint_build.BuildExecution(command=["ninja"])
+            with mock.patch.object(
+                fint_build.BuildContext,
+                "_export_debug_symbols",
+                side_effect=RuntimeError(
+                    "export_last_build_debug_symbols failed with exit code 1"
+                ),
+            ):
+                ctx._run_post_ninja_checks(
+                    result, ["default"], temp_path / "build" / "stamp"
+                )
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(
+                result.failure_summary,
+                "Failed to export debug symbols: export_last_build_debug_symbols failed with exit code 1",
+            )
+
+    def test_produce_build_artifacts_includes_affected_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            ctx = self._make_ctx(temp_path, [])
+            ctx.produce_build_artifacts(
+                42,
+                affected_tests=["foo_test", "bar_test"],
+                build_not_affected=True,
+            )
+            manifest = json.loads(
+                (
+                    temp_path / "artifact" / fint_build.BUILD_ARTIFACTS_JSON
+                ).read_text()
+            )
+            self.assertEqual(
+                manifest["affectedTests"], ["foo_test", "bar_test"]
+            )
+            self.assertTrue(manifest["buildNotAffected"])
+
+
 class ExportDebugSymbolsTest(unittest.TestCase):
     """Tests the _export_debug_symbols method on BuildContext."""
 
@@ -817,6 +1089,197 @@ class ParseNinjaFailuresTest(unittest.TestCase):
         # Missing failures
         self.assertIsNone(fint_build.format_ninja_failures({"version": 1}))
 
+    def test_format_elides_collateral_failures(self) -> None:
+        """Verifies output-less failures are omitted if a Bazel action failed with output."""
+        stamp = ".fuchsia_sdk_arm64.bazel_target_can_only_be_referenced_by_one_bazel_action"
+        mock_data: fint_build.JSONObject = {
+            "version": 1,
+            "failures": [
+                {
+                    "artifacts": [f"obj/foo{stamp}", "obj/foo.far"],
+                    "exit_code": 1,
+                    "output": "",
+                },
+                {
+                    "artifacts": [f"obj/bar{stamp}", "obj/bar.far"],
+                    "exit_code": 1,
+                    "output": "ERROR: bar failed",
+                },
+                {
+                    "artifacts": ["obj/baz.stamp"],
+                    "exit_code": 1,
+                    "output": "",
+                },
+                {
+                    "artifacts": ["obj/qux.o"],
+                    "exit_code": 1,
+                    "output": "qux.cc: error",
+                },
+            ],
+        }
+        res = fint_build.format_ninja_failures(mock_data)
+        expected = (
+            f"FAILED: [code=1] obj/bar{stamp} obj/bar.far\n\n"
+            "ERROR: bar failed\n\n"
+            "FAILED: [code=1] obj/qux.o\n\n"
+            "qux.cc: error"
+        )
+        self.assertEqual(res, expected)
+
+    def test_format_keeps_output_less_failures_without_bazel_output(
+        self,
+    ) -> None:
+        """Verifies output-less failures are kept if no Bazel action failed with output."""
+        stamp = ".fuchsia_sdk_arm64.bazel_target_can_only_be_referenced_by_one_bazel_action"
+        mock_data: fint_build.JSONObject = {
+            "version": 1,
+            "failures": [
+                {
+                    "artifacts": [f"obj/foo{stamp}"],
+                    "exit_code": 1,
+                    "output": "",
+                },
+                {
+                    "artifacts": ["obj/qux.o"],
+                    "exit_code": 1,
+                    "output": "qux.cc: error",
+                },
+            ],
+        }
+        res = fint_build.format_ninja_failures(mock_data)
+        expected = (
+            f"FAILED: [code=1] obj/foo{stamp}\n\n"
+            "FAILED: [code=1] obj/qux.o\n\n"
+            "qux.cc: error"
+        )
+        self.assertEqual(res, expected)
+
+    def test_format_condenses_bazel_output(self) -> None:
+        """Verifies format_ninja_failures strips Bazel progress noise."""
+        bazel_output = "\n".join(
+            [
+                "Starting local Bazel server (8.5.1) and connecting to it...",
+                "... still trying to connect to local Bazel server (298708) after 10 seconds ...",
+                "INFO: Invocation ID: 83f12aa8-a9bf-4d83-b876-22dcd83493d1",
+                "INFO: Streaming build results to: http://go/fxbtx/83f12aa8",
+                "Computing main repo mapping: ",
+                "Loading: 5 packages loaded",
+                "Analyzing: 4 targets (12 packages loaded, 8 targets configured)",
+                "",
+                "",
+                "[3 / 3] no actions running",
+                "INFO: Analyzed 4 targets (1207 packages loaded, 28611 targets configured).",
+                "[1,222 / 4,436] Compiling foo.cc; 4s remote ... (318 actions, 229 running)",
+                "ERROR: /out/BUILD.bazel:53:11: Compiling foo.cc failed: (Exit 1): clang failed: error executing CppCompile command (from target //foo:foo)",
+                "  (cd /out/execroot/_main && \\",
+                "  exec env - \\",
+                "    PATH=/bin:/usr/bin:/usr/local/bin \\",
+                "  external/clang/bin/clang -c foo.cc -o foo.o)",
+                "# Configuration: e55a32e603a87d351114726c7559d6a5c72b7566a4fbd41dbd1e0c01e14999c9",
+                "# Execution platform: //build/bazel/platforms:linux_x64",
+                "foo.cc:1:2: error: something is wrong",
+                "1 error generated.",
+                "INFO: Elapsed time: 34.007s, Critical Path: 23.95s",
+                "INFO: 8251 processes: 13403 action cache hit, 1 remote.",
+                "ERROR: Build did NOT complete successfully",
+            ]
+        )
+        mock_data: fint_build.JSONObject = {
+            "version": 1,
+            "failures": [
+                {
+                    "artifacts": ["obj/foo.stamp"],
+                    "exit_code": 1,
+                    "output": bazel_output,
+                }
+            ],
+        }
+        res = fint_build.format_ninja_failures(mock_data)
+        expected = "\n".join(
+            [
+                "FAILED: [code=1] obj/foo.stamp",
+                "",
+                "ERROR: /out/BUILD.bazel:53:11: Compiling foo.cc failed: (Exit 1): clang failed: error executing CppCompile command (from target //foo:foo)",
+                "  (command elided)",
+                "# Execution platform: //build/bazel/platforms:linux_x64",
+                "foo.cc:1:2: error: something is wrong",
+                "1 error generated.",
+                "ERROR: Build did NOT complete successfully",
+            ]
+        )
+        self.assertEqual(res, expected)
+
+    def test_condense_bazel_output_leaves_non_bazel_output_alone(self) -> None:
+        """Verifies output that doesn't come from Bazel isn't modified."""
+        output = "Loading: foo\n\n\n[1/2] something\nerror: bad"
+        self.assertEqual(fint_build.condense_bazel_output(output), output)
+
+    def test_condense_bazel_output_without_error(self) -> None:
+        """Verifies non-noise lines are kept if there is no error."""
+        output = "\n".join(
+            [
+                "INFO: Invocation ID: abc",
+                "Loading: 5 packages loaded",
+                "WARNING: something is off",
+                "some tool failed",
+            ]
+        )
+        self.assertEqual(
+            fint_build.condense_bazel_output(output),
+            "WARNING: something is off\nsome tool failed",
+        )
+
+    def test_condense_bazel_output_multiple_commands(self) -> None:
+        """Verifies errors following each elided command are preserved."""
+        output = "\n".join(
+            [
+                "INFO: Invocation ID: abc",
+                "ERROR: first failed",
+                "  (cd /out/execroot/_main && \\",
+                "  exec env - \\",
+                "  clang -c a.cc)",
+                "a.cc:1:2: error: first error",
+                "INFO: Invocation ID: def",
+                "ERROR: second failed",
+                "  (cd /out/execroot/_main && \\",
+                "  clang -c b.cc)",
+                "# Configuration: 1234",
+                "b.cc:1:2: error: second error",
+            ]
+        )
+        expected = "\n".join(
+            [
+                "ERROR: first failed",
+                "  (command elided)",
+                "a.cc:1:2: error: first error",
+                "ERROR: second failed",
+                "  (command elided)",
+                "b.cc:1:2: error: second error",
+            ]
+        )
+        self.assertEqual(fint_build.condense_bazel_output(output), expected)
+
+    def test_condense_bazel_output_crlf(self) -> None:
+        """Verifies CRLF line endings are handled."""
+        output = (
+            "INFO: Invocation ID: abc\r\nLoading: 5 packages\r\nERROR: bad\r\n"
+        )
+        self.assertEqual(
+            fint_build.condense_bazel_output(output), "ERROR: bad\n"
+        )
+
+    def test_condense_bazel_output_unterminated_command(self) -> None:
+        """Verifies output is left alone if it ends partway through a command."""
+        output = "\n".join(
+            [
+                "INFO: Invocation ID: abc",
+                "ERROR: foo failed",
+                "  (cd /out/execroot/_main && \\",
+                "  exec env - \\",
+            ]
+        )
+        self.assertEqual(fint_build.condense_bazel_output(output), output)
+
     def test_parse_file_handling(self) -> None:
         """Verifies parse_ninja_failures correctly loads files and delegates."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -856,24 +1319,32 @@ class RunGnCheckTest(unittest.TestCase):
 
     @mock.patch.object(subprocess, "run")
     def test_run_gn_check_success(self, mock_run: MagicMock) -> None:
-        """Verifies run_gn_check returns 0 on success."""
+        """Verifies run_gn_check returns (0, None) on success."""
         mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "Header dependency check OK\n"
         host = fint_build.HostProperties(os="linux", cpu="x64")
-        status = fint_build.run_gn_check(
+        status, summary = fint_build.run_gn_check(
             pathlib.Path("fake_checkout"), pathlib.Path("fake_build"), host
         )
         self.assertEqual(status, 0)
+        self.assertIsNone(summary)
         mock_run.assert_called_once()
 
     @mock.patch.object(subprocess, "run")
     def test_run_gn_check_failure(self, mock_run: MagicMock) -> None:
-        """Verifies run_gn_check returns non-zero on failure."""
+        """Verifies run_gn_check returns non-zero and output summary on failure."""
         mock_run.return_value.returncode = 12
+        mock_run.return_value.stdout = (
+            "ERROR at //foo/bar.cc:10:11: Include not allowed.\n"
+        )
         host = fint_build.HostProperties(os="linux", cpu="x64")
-        status = fint_build.run_gn_check(
+        status, summary = fint_build.run_gn_check(
             pathlib.Path("fake_checkout"), pathlib.Path("fake_build"), host
         )
         self.assertEqual(status, 12)
+        self.assertEqual(
+            summary, "ERROR at //foo/bar.cc:10:11: Include not allowed."
+        )
 
 
 class CheckNinjaNoopTest(unittest.TestCase):
@@ -881,23 +1352,25 @@ class CheckNinjaNoopTest(unittest.TestCase):
 
     @mock.patch.object(subprocess, "run")
     def test_check_ninja_noop_converges(self, mock_run: MagicMock) -> None:
-        """Verifies check_ninja_noop returns 0 if ninja converges."""
+        """Verifies check_ninja_noop returns (0, None) if ninja converges."""
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = (
             "ninja: Entering directory ...\nninja: no work to do."
         )
+        mock_run.return_value.stderr = ""
         host = fint_build.HostProperties(os="linux", cpu="x64")
-        status = fint_build.check_ninja_noop(
+        status, summary = fint_build.check_ninja_noop(
             pathlib.Path("fake_checkout"),
             pathlib.Path("fake_build"),
             host,
             [],
         )
         self.assertEqual(status, 0)
+        self.assertIsNone(summary)
 
     @mock.patch.object(subprocess, "run")
     def test_check_ninja_noop_diverges(self, mock_run: MagicMock) -> None:
-        """Verifies check_ninja_noop returns non-zero if ninja diverges and handles dirty sources."""
+        """Verifies check_ninja_noop returns non-zero and a failure summary if ninja diverges."""
 
         def mock_run_impl(
             cmd: list[str], *args: Any, **kwargs: Any
@@ -910,33 +1383,51 @@ class CheckNinjaNoopTest(unittest.TestCase):
             return MagicMock(
                 returncode=0,
                 stdout="ninja: Entering directory ...\nbuilding target foo.o",
+                stderr="ninja explain: output foo.o older than most recent input foo.cc\nninja explain: foo.o is dirty\n",
             )
 
         mock_run.side_effect = mock_run_impl
         host = fint_build.HostProperties(os="linux", cpu="x64")
-        status = fint_build.check_ninja_noop(
+        status, summary = fint_build.check_ninja_noop(
             pathlib.Path("fake_checkout"),
             pathlib.Path("fake_build"),
             host,
             [],
         )
         self.assertEqual(status, 1)
+        self.assertEqual(
+            summary,
+            "\n".join(
+                [
+                    "Ninja build did not converge to no-op.",
+                    "See: https://fuchsia.dev/fuchsia-src/development/build/ninja_no_op",
+                    "",
+                    "First line of ninja explain output:",
+                    "",
+                    "output foo.o older than most recent input foo.cc",
+                ]
+            ),
+        )
 
     @mock.patch.object(subprocess, "run")
     def test_check_ninja_noop_subprocess_fails(
         self, mock_run: MagicMock
     ) -> None:
-        """Verifies check_ninja_noop returns ninja's exit code if subprocess fails."""
+        """Verifies check_ninja_noop returns ninja's exit code and summary if subprocess fails."""
         mock_run.return_value.returncode = 2
         mock_run.return_value.stdout = "ninja: error: ..."
+        mock_run.return_value.stderr = ""
         host = fint_build.HostProperties(os="linux", cpu="x64")
-        status = fint_build.check_ninja_noop(
+        status, summary = fint_build.check_ninja_noop(
             pathlib.Path("fake_checkout"),
             pathlib.Path("fake_build"),
             host,
             [],
         )
         self.assertEqual(status, 2)
+        self.assertEqual(
+            summary, "ninja dry-run check failed:\nninja: error: ..."
+        )
 
 
 class HostPropertiesTest(unittest.TestCase):
@@ -1159,6 +1650,21 @@ class NinjaBuildWrapTest(unittest.TestCase):
         self.assertEqual(spec.os, "linux")
         self.assertEqual(spec.cpu, "x64")
         self.assertEqual(spec.path, "host_test_1")
+        self.assertEqual(spec.name, "")
+
+        bazel_spec = fint_build.TestSpec.from_dict(
+            {
+                "test": {
+                    "label": "@@//src/foo:foo_test",
+                    "name": "host_x64/foo_test",
+                    "package_label": "//src/foo:pkg",
+                    "source_label": "//src/foo:foo_test",
+                }
+            }
+        )
+        self.assertEqual(bazel_spec.name, "host_x64/foo_test")
+        self.assertEqual(bazel_spec.package_label, "//src/foo:pkg")
+        self.assertEqual(bazel_spec.source_label, "//src/foo:foo_test")
 
         # Non-dict and missing key structures raise ValueError strictly
         with self.assertRaises(ValueError):
@@ -1197,6 +1703,7 @@ class NinjaBuildWrapTest(unittest.TestCase):
         # Mock subprocess run to simulate successful execution of GN check and Ninja no-op check
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "ninja: no work to do."
+        mock_run.return_value.stderr = ""
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             static_spec = static_pb2.Static(incremental=True)
@@ -1366,6 +1873,7 @@ class MainExecutionTest(unittest.TestCase):
                 mock_managed.return_value.run.return_value = 0
                 mock_run.return_value.returncode = 0
                 mock_run.return_value.stdout = "ninja: no work to do."
+                mock_run.return_value.stderr = ""
 
                 real_argv = [
                     "--static",
@@ -1438,6 +1946,7 @@ class MainExecutionTest(unittest.TestCase):
                 mock_managed.return_value.run.return_value = 1
                 mock_run.return_value.returncode = 0
                 mock_run.return_value.stdout = "ninja: build failed."
+                mock_run.return_value.stderr = ""
 
                 real_argv = [
                     "--static",
@@ -1478,6 +1987,195 @@ class MainExecutionTest(unittest.TestCase):
                 os.unlink(static_path)
                 os.unlink(context_path)
 
+    @mock.patch.object(subprocess, "run")
+    @mock.patch.object(signal_utils, "SignalManagedProcess")
+    def test_main_propagates_ninja_noop_failure_summary(
+        self, mock_managed: MagicMock, mock_run: MagicMock
+    ) -> None:
+        """Verifies that a post-build ninja no-op failure propagates its summary to build_artifacts.json."""
+        with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
+            static_path = os.path.join(build_dir, "static.textproto")
+            pathlib.Path(static_path).write_text("incremental: true")
+            context_path = os.path.join(build_dir, "context.textproto")
+            pathlib.Path(context_path).write_text(
+                f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"'
+            )
+
+            def mock_run_impl(
+                cmd: list[str], *args: Any, **kwargs: Any
+            ) -> MagicMock:
+                if "check" in cmd:
+                    return MagicMock(returncode=0, stdout="", stderr="")
+                return MagicMock(
+                    returncode=0,
+                    stdout="ninja: Entering directory ...\n[1/1] CXX foo.o",
+                    stderr="ninja explain: restat of output foo.o older than input foo.cc\n",
+                )
+
+            mock_managed.return_value.run.return_value = 0
+            mock_run.side_effect = mock_run_impl
+
+            exit_code = fint_build.main(
+                [
+                    "--static",
+                    static_path,
+                    "--context",
+                    context_path,
+                    "--",
+                    "ninja",
+                    "target",
+                ]
+            )
+            self.assertEqual(exit_code, 1)
+
+            manifest_path = os.path.join(
+                artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
+            )
+            with open(manifest_path, "r") as f:
+                manifest_content = json.loads(f.read())
+            self.assertEqual(
+                manifest_content["failureSummary"],
+                "\n".join(
+                    [
+                        "Ninja build did not converge to no-op.",
+                        "See: https://fuchsia.dev/fuchsia-src/development/build/ninja_no_op",
+                        "",
+                        "First line of ninja explain output:",
+                        "",
+                        "restat of output foo.o older than input foo.cc",
+                    ]
+                ),
+            )
+
+    @mock.patch.object(subprocess, "run")
+    @mock.patch.object(signal_utils, "SignalManagedProcess")
+    def test_main_propagates_gn_check_failure_summary(
+        self, mock_managed: MagicMock, mock_run: MagicMock
+    ) -> None:
+        """Verifies that a post-build gn check failure propagates its output to build_artifacts.json."""
+        with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
+            static_path = os.path.join(build_dir, "static.textproto")
+            pathlib.Path(static_path).write_text("incremental: true")
+            context_path = os.path.join(build_dir, "context.textproto")
+            pathlib.Path(context_path).write_text(
+                f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"'
+            )
+
+            mock_managed.return_value.run.return_value = 0
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stdout="ERROR at //src/foo/bar.cc:5:10: Include not allowed.\n",
+                stderr="",
+            )
+
+            exit_code = fint_build.main(
+                [
+                    "--static",
+                    static_path,
+                    "--context",
+                    context_path,
+                    "--",
+                    "ninja",
+                    "target",
+                ]
+            )
+            self.assertEqual(exit_code, 1)
+
+            manifest_path = os.path.join(
+                artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
+            )
+            with open(manifest_path, "r") as f:
+                manifest_content = json.loads(f.read())
+            self.assertEqual(
+                manifest_content["failureSummary"],
+                "ERROR at //src/foo/bar.cc:5:10: Include not allowed.",
+            )
+
+    @mock.patch.object(subprocess, "run")
+    @mock.patch.object(signal_utils, "SignalManagedProcess")
+    def test_main_propagates_affected_tests(
+        self, mock_managed: MagicMock, mock_run: MagicMock
+    ) -> None:
+        """Verifies that post-build affected tests are written to build_artifacts.json."""
+        with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
+            static_path = os.path.join(build_dir, "static.textproto")
+            pathlib.Path(static_path).write_text("incremental: true")
+            context_path = os.path.join(build_dir, "context.textproto")
+            pathlib.Path(context_path).write_text(
+                f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"\nchanged_files {{ path: "src/foo.cc" }}'
+            )
+            tests_json_path = pathlib.Path(build_dir) / fint_build.TESTS_JSON
+            tests_json_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "test": {
+                                "name": "foo_test",
+                                "label": "//src:foo_test(//toolchain)",
+                                "os": "linux",
+                            }
+                        },
+                        {
+                            "test": {
+                                "name": "bar_test",
+                                "label": "//src:bar_test(//toolchain)",
+                                "os": "linux",
+                            }
+                        },
+                    ]
+                )
+            )
+
+            def mock_run_impl(
+                cmd: list[str], *args: Any, **kwargs: Any
+            ) -> MagicMock:
+                if "affected_tests" in cmd:
+                    return MagicMock(
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "test_targets": [
+                                    {"label": "//src:foo_test"},
+                                    {"label": "//src:bar_test"},
+                                ],
+                                "build_not_affected": True,
+                            }
+                        ),
+                        stderr="",
+                    )
+                return MagicMock(
+                    returncode=0,
+                    stdout="ninja: no work to do.",
+                    stderr="",
+                )
+
+            mock_managed.return_value.run.return_value = 0
+            mock_run.side_effect = mock_run_impl
+
+            exit_code = fint_build.main(
+                [
+                    "--static",
+                    static_path,
+                    "--context",
+                    context_path,
+                    "--",
+                    "ninja",
+                    "target",
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+
+            manifest_path = os.path.join(
+                artifact_dir, fint_build.BUILD_ARTIFACTS_JSON
+            )
+            with open(manifest_path, "r") as f:
+                manifest_content = json.loads(f.read())
+            self.assertEqual(
+                manifest_content["affectedTests"],
+                ["foo_test", "bar_test"],
+            )
+            self.assertTrue(manifest_content["buildNotAffected"])
+
     def _run_main_with_action_metrics(
         self,
         mock_managed: MagicMock,
@@ -1516,6 +2214,7 @@ class MainExecutionTest(unittest.TestCase):
                 mock_managed.return_value.run.return_value = 0
                 mock_run.return_value.returncode = 0
                 mock_run.return_value.stdout = "ninja: no work to do."
+                mock_run.return_value.stderr = ""
 
                 real_argv = [
                     "--static",
@@ -1597,6 +2296,7 @@ class MainExecutionTest(unittest.TestCase):
                     mock_managed.return_value.run.return_value = 0
                     mock_run.return_value.returncode = 0
                     mock_run.return_value.stdout = "ninja: no work to do."
+                    mock_run.return_value.stderr = ""
 
                     real_argv = [
                         "--static",

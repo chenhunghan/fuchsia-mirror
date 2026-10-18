@@ -6,8 +6,11 @@
 
 //! Types and structures for kernel scheduler state (`include/kernel/scheduler_state.h`).
 
-use core::mem::MaybeUninit;
+use crate::kernel::types::{cpu_mask_t, cpu_num_t};
+use core::mem::{MaybeUninit, align_of, size_of};
 use object_constants_rs as object_constants;
+use wait_queue_bindings as bindings;
+use zr::OpaqueFacade;
 
 /// The scheduling state of a thread matching C++ `enum thread_state : uint8_t`.
 // LINT.IfChange(ThreadStateKind)
@@ -37,6 +40,38 @@ pub enum ThreadStateKind {
 zr::static_assert!(core::mem::size_of::<ThreadStateKind>() == 1);
 zr::static_assert!(core::mem::align_of::<ThreadStateKind>() == 1);
 
+/// Facade for the C++ `SchedulerState` class.
+#[repr(C)]
+pub struct SchedulerState {
+    _facade: OpaqueFacade,
+}
+
+zr::static_assert!(core::mem::size_of::<SchedulerState>() == 0);
+
+impl SchedulerState {
+    /// Returns the CPU the thread is currently assigned to, or `INVALID_CPU` if it is not
+    /// currently assigned to a CPU.
+    #[inline]
+    pub fn curr_cpu(&self) -> cpu_num_t {
+        // SAFETY: `self` is a valid `SchedulerState` reference.
+        unsafe { cpp_scheduler_state_curr_cpu(self) }
+    }
+
+    /// Returns the CPU the thread last ran on, or `INVALID_CPU` if it has never run.
+    #[inline]
+    pub fn last_cpu(&self) -> cpu_num_t {
+        // SAFETY: `self` is a valid `SchedulerState` reference.
+        unsafe { cpp_scheduler_state_last_cpu(self) }
+    }
+
+    /// Returns the hard CPU affinity mask of the thread.
+    #[inline]
+    pub fn hard_affinity(&self) -> cpu_mask_t {
+        // SAFETY: `self` is a valid `SchedulerState` reference.
+        unsafe { cpp_scheduler_state_hard_affinity(self) }
+    }
+}
+
 /// Opaque wrapper around C++ `SchedulerState::BaseProfile`.
 #[repr(C, align(8))]
 pub struct SchedulerStateBaseProfile(
@@ -55,6 +90,9 @@ unsafe extern "C" {
         priority: i32,
         inheritable: bool,
     );
+    fn cpp_scheduler_state_curr_cpu(state: *const SchedulerState) -> cpu_num_t;
+    fn cpp_scheduler_state_last_cpu(state: *const SchedulerState) -> cpu_num_t;
+    fn cpp_scheduler_state_hard_affinity(state: *const SchedulerState) -> cpu_mask_t;
 }
 
 // thread priority
@@ -77,10 +115,16 @@ pub const HIGH_PRIORITY: i32 = (NUM_PRIORITIES / 4) * 3;
 
 impl SchedulerStateBaseProfile {
     /// Creates a fair `SchedulerStateBaseProfile` with the given priority and inheritable flag.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `priority` is outside `LOWEST_PRIORITY..=HIGHEST_PRIORITY`.
     pub fn fair(priority: i32, inheritable: bool) -> Self {
+        assert!((LOWEST_PRIORITY..=HIGHEST_PRIORITY).contains(&priority));
         let mut profile = MaybeUninit::uninit();
-        // SAFETY: `cpp_scheduler_state_base_profile_init_fair` unconditionally initializes
-        // a scheduler state into the provided storage.
+        // SAFETY: `priority` is validated to be within `LOWEST_PRIORITY..=HIGHEST_PRIORITY`, and
+        // `cpp_scheduler_state_base_profile_init_fair` unconditionally initializes a scheduler
+        // state into the provided storage.
         unsafe {
             cpp_scheduler_state_base_profile_init_fair(&mut profile, priority, inheritable);
             profile.assume_init()
@@ -92,3 +136,34 @@ impl SchedulerStateBaseProfile {
         self.0.get()
     }
 }
+
+/// An opaque type representing the C++ `SchedulerState::WaitQueueInheritedSchedulerState`
+/// struct.
+#[repr(C)]
+pub struct WaitQueueInheritedSchedulerState {
+    raw: zr::Opaque<bindings::SchedulerState_WaitQueueInheritedSchedulerState>,
+}
+
+zr::static_assert!(
+    size_of::<WaitQueueInheritedSchedulerState>()
+        == size_of::<bindings::SchedulerState_WaitQueueInheritedSchedulerState>()
+);
+zr::static_assert!(
+    align_of::<WaitQueueInheritedSchedulerState>()
+        == align_of::<bindings::SchedulerState_WaitQueueInheritedSchedulerState>()
+);
+
+/// An opaque type representing the C++ `SchedulerState::EffectiveProfile` struct.
+#[repr(C)]
+pub struct SchedulerStateEffectiveProfile {
+    raw: zr::Opaque<bindings::SchedulerState_EffectiveProfile>,
+}
+
+zr::static_assert!(
+    size_of::<SchedulerStateEffectiveProfile>()
+        == size_of::<bindings::SchedulerState_EffectiveProfile>()
+);
+zr::static_assert!(
+    align_of::<SchedulerStateEffectiveProfile>()
+        == align_of::<bindings::SchedulerState_EffectiveProfile>()
+);

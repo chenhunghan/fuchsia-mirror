@@ -8,8 +8,8 @@ fuchsia_unittest_package("rust-http-sse-tests") {
   manifest = "meta/http-sse-lib-test.cml"
   deps = [
     ":http_sse_test",
-    "//src/connectivity/network:netstack-for-tests",
     "//src/connectivity/network/dns:component",
+    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/testing:fake-ssl-certs",
   ]
@@ -45,12 +45,6 @@ group("tests") {
 # rerun bazel2gn.
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
-
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
 
 rustc_library("http_sse") {
   sources = [

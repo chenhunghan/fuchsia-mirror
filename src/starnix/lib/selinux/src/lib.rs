@@ -4,28 +4,18 @@
 
 #![warn(variant_size_differences)]
 
+mod exceptions_config;
+mod kernel;
 pub mod permission_check;
 pub mod policy;
 pub mod security_server;
-
-mod new_policy;
-
-pub use security_server::{PolicySeqNo, SecurityServer};
-
-mod exceptions_config;
-mod kernel;
 mod sid_table;
 mod sync;
 
-/// Allow callers to use the kernel class & permission definitions.
 pub use kernel::*;
-
-/// Numeric class Ids are provided to the userspace AVC surfaces (e.g. "create", "access", etc).
-pub use policy::ClassId;
-
+pub use policy::{ClassId, FsUseType, PolicyCap};
+pub use security_server::{PolicySeqNo, SecurityServer};
 pub use starnix_uapi::selinux::{InitialSid, ReferenceInitialSid, SecurityId, TaskAttrs};
-
-use new_policy::FsUseType;
 
 /// A borrowed byte slice that contains no `NUL` characters by truncating the input slice at the
 /// first `NUL` (if any) upon construction.
@@ -116,8 +106,6 @@ pub trait SeLinuxStatusPublisher: Send + Sync {
     /// Sets the value part of the associated selinuxfs status file.
     fn set_status(&mut self, policy_status: SeLinuxStatus);
 }
-
-pub use new_policy::PolicyCap;
 
 #[cfg(test)]
 mod tests {

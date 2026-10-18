@@ -163,13 +163,11 @@ fn cbpf_to_ebpf(
                     if bpf_src(bpf_instruction) == BPF_K {
                         // Division and remainder by 0 are rejected.
                         if (op == BPF_DIV || op == BPF_MOD) && bpf_instruction.k == 0 {
-                            return Err(EbpfError::ProgramVerifyError("Division by 0".to_string()));
+                            return Err(InvalidCbpfInstruction(bpf_instruction.code));
                         }
                         // LSH and RSH by more than 31 are rejected.
                         if (op == BPF_LSH || op == BPF_RSH) && bpf_instruction.k >= 32 {
-                            return Err(EbpfError::ProgramVerifyError(
-                                "Shift by 32 or more".to_string(),
-                            ));
+                            return Err(InvalidCbpfInstruction(bpf_instruction.code));
                         }
                         ebpf_code.push(EbpfInstruction::new(
                             bpf_instruction.code as u8,
@@ -446,7 +444,7 @@ pub fn convert_and_verify_cbpf(
         packet_type: Some(packet_type),
     };
     let ebpf_code = cbpf_to_ebpf(bpf_code, config)?;
-    verify_program(ebpf_code, context, &mut NullVerifierLogger)
+    Ok(verify_program(ebpf_code, context, &mut NullVerifierLogger)?)
 }
 
 /// Converts, verifies and links a cBPF program for execution in the specified context.
@@ -464,7 +462,7 @@ pub fn convert_and_link_cbpf<C: BpfProgramContext + StaticHelperSet>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MemoryId, NoMap, empty_static_helper_set};
+    use crate::{MemoryId, NoMap, PointerOrigin, empty_static_helper_set};
     use linux_uapi::{
         AUDIT_ARCH_AARCH64, AUDIT_ARCH_X86_64, SECCOMP_RET_ALLOW, SECCOMP_RET_TRAP, seccomp_data,
         sock_filter,
@@ -638,6 +636,7 @@ mod tests {
         id: MemoryId::new(),
         offset: 0.into(),
         buffer_size: 0,
+        origin: PointerOrigin::KernelReadOnly,
     });
 
     impl ProgramArgument for &'_ seccomp_data {
@@ -860,6 +859,7 @@ mod tests {
         id: MemoryId::new(),
         offset: 0.into(),
         buffer_size: size_of::<VariableLengthPacket>() as u64,
+        origin: PointerOrigin::KernelReadOnly,
     });
 
     impl ProgramArgument for &'_ VariableLengthPacket {

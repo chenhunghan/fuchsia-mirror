@@ -100,16 +100,19 @@ AddressSpace::pte_t* AddressSpace::PageDirectory::GetPageTableEntry(uint32_t pag
   return table->entry(page_table_index);
 }
 
-void AddressSpace::PageDirectory::PageTableUpdated(uint32_t page_directory_index,
-                                                   uint32_t valid_count) {
+std::unique_ptr<magma::PlatformBusMapper::BusMapping> AddressSpace::PageDirectory::PageTableUpdated(
+    uint32_t page_directory_index, uint32_t valid_count) {
   DASSERT(valid_count <= kPageDirectoryEntries);
   DASSERT(page_directory_index < kPageDirectoryEntries);
   valid_counts_[page_directory_index] = valid_count;
   page_tables_[page_directory_index]->Flush();
+  std::unique_ptr<magma::PlatformBusMapper::BusMapping> bus_mapping;
   if (valid_count == 0) {
     *entry(page_directory_index) = kInvalidPde;
+    bus_mapping = page_tables_[page_directory_index]->release_bus_mapping();
     page_tables_[page_directory_index].reset();
   }
+  return bus_mapping;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -141,6 +144,8 @@ bool AddressSpace::InsertLocked(uint64_t addr, magma::PlatformBusMapper::BusMapp
   DASSERT(magma::is_page_aligned(addr));
   DASSERT(guard_page_count == 0);
 
+  uint64_t start_addr = addr;
+
   auto& bus_addr_array = bus_mapping->Get();
   uint64_t page_count = bus_addr_array.size();
 
@@ -159,15 +164,22 @@ bool AddressSpace::InsertLocked(uint64_t addr, magma::PlatformBusMapper::BusMapp
   auto page_table_entry =
       root_->GetPageTableEntry(page_directory_index, page_table_index, &valid_count);
 
+  bool writeable = bus_mapping->writeable();
   for (uint64_t i = 0; i < page_count; i++) {
     pte_t pte;
-    if (!pte_encode(bus_addr_array[i], true, true, true, &pte)) {
+    if (!pte_encode(bus_addr_array[i], true, writeable, true, &pte)) {
       MAGMA_LOG(ERROR, "failed to encode pte");
+      if (i > 0) {
+        ClearLocked(start_addr, i);
+      }
       return false;
     }
 
     if (!page_table_entry) {
       MAGMA_LOG(ERROR, "couldn't get page table entry");
+      if (i > 0) {
+        ClearLocked(start_addr, i);
+      }
       return false;
     }
 
@@ -177,7 +189,10 @@ bool AddressSpace::InsertLocked(uint64_t addr, magma::PlatformBusMapper::BusMapp
     *page_table_entry++ = pte;
 
     if (++page_table_index == kPageTableEntries) {
-      root_->PageTableUpdated(page_directory_index, valid_count);
+      auto released_pt_bus_mapping = root_->PageTableUpdated(page_directory_index, valid_count);
+      if (released_pt_bus_mapping) {
+        mappings_to_release_.emplace_back(std::move(released_pt_bus_mapping));
+      }
       page_table_index = 0;
 
       if (++page_directory_index == kPageDirectoryEntries) {
@@ -189,14 +204,20 @@ bool AddressSpace::InsertLocked(uint64_t addr, magma::PlatformBusMapper::BusMapp
     }
   }
 
-  root_->PageTableUpdated(page_directory_index, valid_count);
+  auto released_pt_bus_mapping = root_->PageTableUpdated(page_directory_index, valid_count);
+  if (released_pt_bus_mapping) {
+    mappings_to_release_.emplace_back(std::move(released_pt_bus_mapping));
+  }
 
   return true;
 }
 
 bool AddressSpace::ClearLocked(uint64_t addr, magma::PlatformBusMapper::BusMapping* bus_mapping) {
+  return ClearLocked(addr, bus_mapping->page_count());
+}
+
+bool AddressSpace::ClearLocked(uint64_t addr, uint64_t page_count) {
   DASSERT(magma::is_page_aligned(addr));
-  uint64_t page_count = bus_mapping->page_count();
 
   const size_t page_shift = PageShift();
   if ((addr >> page_shift) + page_count > (1l << (kVirtualAddressBits - page_shift))) {
@@ -220,14 +241,19 @@ bool AddressSpace::ClearLocked(uint64_t addr, magma::PlatformBusMapper::BusMappi
     }
 
     if (*page_table_entry != kInvalidPte) {
-      DASSERT(valid_count > 0);
-      valid_count--;
+      // If rolling back a partial insert, valid_count won't be set.
+      if (valid_count > 0) {
+        valid_count--;
+      }
       *page_table_entry = kInvalidPte;
     }
     page_table_entry++;
 
     if (++page_table_index == kPageTableEntries) {
-      root_->PageTableUpdated(page_directory_index, valid_count);
+      auto released_pt_bus_mapping = root_->PageTableUpdated(page_directory_index, valid_count);
+      if (released_pt_bus_mapping) {
+        mappings_to_release_.emplace_back(std::move(released_pt_bus_mapping));
+      }
       page_table_index = 0;
 
       if (++page_directory_index == kPageDirectoryEntries) {
@@ -239,7 +265,10 @@ bool AddressSpace::ClearLocked(uint64_t addr, magma::PlatformBusMapper::BusMappi
     }
   }
 
-  root_->PageTableUpdated(page_directory_index, valid_count);
+  auto released_pt_bus_mapping = root_->PageTableUpdated(page_directory_index, valid_count);
+  if (released_pt_bus_mapping) {
+    mappings_to_release_.emplace_back(std::move(released_pt_bus_mapping));
+  }
 
   return true;
 }

@@ -58,6 +58,7 @@ class EventRingHarness : public ::testing::Test {
       ERDP reg;
       reg.set_reg_value(value);
       erdp_ = reg.Pointer();
+      last_erdp_ = reg;
     });
 
     // Port/per-slot registers
@@ -83,6 +84,8 @@ class EventRingHarness : public ::testing::Test {
   void TearDown() override { ASSERT_TRUE(driver_test().StopDriver().is_ok()); }
 
   void Interrupt() { ring_->HandleIRQ(); }
+
+  zx_status_t Ring0Bringup() { return ring_->Ring0Bringup(); }
 
   void AddTRB(const TRB& trb) {
     auto ptr = ddk_fake::PhysToVirt<TRB*>(erdp_);
@@ -128,7 +131,9 @@ class EventRingHarness : public ::testing::Test {
     AddTRB(trb);
   }
 
-  TRB* trb() { return ddk_fake::PhysToVirt<TRB*>(erdp_); }
+  TRB* trb() const { return ddk_fake::PhysToVirt<TRB*>(erdp_); }
+
+  const ERDP& last_erdp() const { return last_erdp_; }
 
   using TestRequest = usb::CallbackRequest<sizeof(max_align_t)>;
   template <typename Callback>
@@ -230,6 +235,8 @@ class EventRingHarness : public ::testing::Test {
   }
 
   fdf_testing::ForegroundDriverTest<EmptyTestConfig>& driver_test() { return driver_test_; }
+  PORTSC& port_sc() { return port_sc_; }
+  EventRing* event_ring() { return ring_; }
 
  private:
   fdf_testing::ForegroundDriverTest<EmptyTestConfig> driver_test_;
@@ -247,10 +254,13 @@ class EventRingHarness : public ::testing::Test {
   CommandRing command_ring_;
   uint64_t dcbaa_[128];
   uint64_t erdp_;
+  ERDP last_erdp_;
   std::optional<fake_mmio::FakeMmioRegRegion> region_;
 };
 
 // UsbXhci Methods
+bool UsbXhci::Running() const { return running_; }
+
 zx::result<> UsbXhci::Init(std::unique_ptr<dma_buffer::BufferFactory> buffer_factory) {
   buffer_factory_ = std::move(buffer_factory);
 
@@ -275,6 +285,7 @@ zx::result<> UsbXhci::Init(std::unique_ptr<dma_buffer::BufferFactory> buffer_fac
   if (!ac.check()) {
     return zx::error(ZX_ERR_NO_MEMORY);
   }
+  params_.set_MaxPorts(32);
   zx_status_t status = GetTestHarness<EventRingHarness>()->InitRing(&interrupters_[0].ring());
   if (status != ZX_OK) {
     return zx::error(status);
@@ -572,5 +583,61 @@ TEST_F(EventRingHarness, Usb3DeviceAttach) {
   ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
   ASSERT_FALSE(cmd->hub);
 }
+
+namespace {
+
+TEST_F(EventRingHarness, Usb2DeviceAttachNonPollingPortSpeed) {
+  ConnectDevice();
+  // Simulate controller where PLS does not transition through Polling (e.g. RxDetect),
+  // but PortSpeed indicates USB 2.0 (speed 3 = High Speed).
+  port_sc().set_PLS(PORTSC::RxDetect);
+  port_sc().set_PortSpeed(3);
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_TRUE(PortResetPending());
+  ASSERT_FALSE(HasCommand());
+  LinkUp();
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(cmd->hub);
+}
+
+TEST_F(EventRingHarness, HandleIRQClearsEhbWhenNoTrbsProcessed) {
+  // Trigger HandleIRQ without queuing any event TRBs.
+  // When processed_trbs == 0, ERDP is written with EHB=1 to clear Event Handler Busy
+  // and acknowledge to the controller that the event ring was checked.
+  Interrupt();
+  EXPECT_TRUE(last_erdp().EHB());
+}
+
+TEST_F(EventRingHarness, Ring0BringupFailsWhenNotRunning) {
+  driver_test().driver()->SetRunningForTesting(false);
+  driver_test().driver()->SignalBringupForTesting();
+  EXPECT_STATUS(Ring0Bringup(), ZX_ERR_BAD_STATE);
+}
+
+TEST_F(EventRingHarness, DestroyWithPendingPortStatusChangeWait) {
+  ConnectDevice();
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_TRUE(PortResetPending());
+  ASSERT_FALSE(HasCommand());
+}
+
+TEST_F(EventRingHarness, ClearPendingPortStatusChangesAbortsWait) {
+  ConnectDevice();
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_TRUE(PortResetPending());
+  ASSERT_FALSE(HasCommand());
+  event_ring()->ClearPendingPortStatusChanges();
+  EXPECT_FALSE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+}
+
+}  // namespace
 
 }  // namespace usb_xhci

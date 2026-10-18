@@ -92,17 +92,19 @@ func TestSet(t *testing.T) {
 		}
 	})
 
-	t.Run("propagates GN stdout to failure summary in case of failure", func(t *testing.T) {
+	t.Run("propagates regenerator stdout and stderr to failure summary in case of failure", func(t *testing.T) {
 		runner := &fakeSubprocessRunner{
-			mockStdout: []byte("some stdout"),
+			mockStdout: []byte("some stdout\n"),
+			mockStderr: []byte("some stderr\n"),
 			fail:       true,
 		}
 		artifacts, err := setImpl(ctx, runner, staticSpec, contextSpec, "linux-x64", false, []string{})
 		if !errors.Is(err, errSubprocessFailure) {
 			t.Fatalf("Unexpected error from setImpl: %s", err)
 		}
-		if artifacts.FailureSummary != string(runner.mockStdout) {
-			t.Errorf("Expected setImpl to propagate GN stdout to failure summary: %q != %q", runner.mockStdout, artifacts.FailureSummary)
+		want := string(runner.mockStdout) + string(runner.mockStderr)
+		if artifacts.FailureSummary != want {
+			t.Errorf("Expected setImpl to propagate regenerator stdout and stderr to failure summary: %q != %q", want, artifacts.FailureSummary)
 		}
 	})
 
@@ -536,10 +538,14 @@ func TestGenArgs(t *testing.T) {
 		{
 			name: "test durations file",
 			staticSpec: &fintpb.Static{
-				TestDurationsFile: "test_durations/foo.json",
+				TestDurationsFile:        "test_durations/foo.json",
+				DefaultTestDurationsFile: "test_durations/default.json",
 			},
 			checkoutFiles: []string{"test_durations/foo.json"},
-			expectedArgs:  []string{`test_durations_file="test_durations/foo.json"`},
+			expectedArgs: []string{
+				`default_test_durations_file="test_durations/default.json"`,
+				`test_durations_file="test_durations/foo.json"`,
+			},
 		},
 		{
 			name: "fall back to default test durations file",
@@ -547,7 +553,8 @@ func TestGenArgs(t *testing.T) {
 				TestDurationsFile:        "test_durations/foo.json",
 				DefaultTestDurationsFile: "test_durations/default.json",
 			},
-			expectedArgs: []string{`test_durations_file="test_durations/default.json"`},
+			expectedArgs:   []string{`test_durations_file="test_durations/default.json"`},
+			unexpectedArgs: []string{`default_test_durations_file="test_durations/default.json"`},
 		},
 		{
 			name: "product",

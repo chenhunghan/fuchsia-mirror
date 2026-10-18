@@ -2,13 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-assert(is_host, "protocols is for use with the host toolchain only")
-
-group("target") {
-  testonly = true
-
-  deps = [ ":lib" ]
-}
+assert(is_host, "ssh is for use with the host toolchain only")
 
 group("ssh") {
   testonly = true
@@ -40,12 +34,6 @@ group("ssh") {
 # rerun bazel2gn.
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
-
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
 
 if (is_host) {
   rustc_library("lib") {

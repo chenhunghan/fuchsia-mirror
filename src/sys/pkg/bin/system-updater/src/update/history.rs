@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::update::{BuildInfo, SOURCE_EPOCH_RAW, SystemInfo};
+use crate::update::{NamespaceSystemInfo, SOURCE_EPOCH_RAW};
 use anyhow::{Error, anyhow};
 use bounded_node::BoundedNode;
 use fidl_fuchsia_paver::{BootManagerProxy, DataSinkProxy};
@@ -126,6 +126,7 @@ impl PendingAttempt {
 
 #[derive(Debug)]
 pub struct UpdateHistory {
+    current_version: Option<Version>,
     update_attempts: VecDeque<UpdateAttempt>,
     inspectable_update_attempts: BoundedNode<inspect::Node>,
 }
@@ -154,37 +155,37 @@ impl UpdateHistory {
 
     /// Start a new update attempt, returns an PendingAttempt with initial information, caller
     /// should fill in additional information and pass it back to `record_update_attempt()`.
-    pub fn start_update_attempt<'a>(
-        &self,
+    pub async fn start_update_attempt(
+        &mut self,
         options: Options,
-        update_url: &'a http::Uri,
+        update_url: &http::Uri,
         start_time: SystemTime,
-        data_sink: &'a DataSinkProxy,
-        boot_manager: &'a BootManagerProxy,
-        build_info: &'a impl BuildInfo,
-        system_info: &'a impl SystemInfo,
-    ) -> impl Future<Output = PendingAttempt> + 'a {
-        let latest_target_version = self.latest_successful_target_version().cloned();
-
-        async move {
-            // Generate a random UUID like 6fa28c38-d149-4c8b-a1fc-2cdbc714aad2.
-            let attempt_id = uuid::Uuid::new_v4().to_string();
-            let source_version = Version::current(
-                latest_target_version.as_ref(),
-                data_sink,
-                boot_manager,
-                build_info,
-                system_info,
-                SOURCE_EPOCH_RAW,
-            )
-            .await;
-            PendingAttempt {
-                attempt_id,
-                source_version,
-                options,
-                update_url: update_url.to_string(),
-                start_time,
+        data_sink: &DataSinkProxy,
+        boot_manager: &BootManagerProxy,
+    ) -> PendingAttempt {
+        // Generate a random UUID like 6fa28c38-d149-4c8b-a1fc-2cdbc714aad2.
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let source_version = match &self.current_version {
+            Some(current_version) => current_version.clone(),
+            None => {
+                let current_version = Version::current(
+                    self.latest_successful_target_version(),
+                    data_sink,
+                    boot_manager,
+                    &NamespaceSystemInfo,
+                    SOURCE_EPOCH_RAW,
+                )
+                .await;
+                self.current_version = Some(current_version.clone());
+                current_version
             }
+        };
+        PendingAttempt {
+            attempt_id,
+            source_version,
+            options,
+            update_url: update_url.to_string(),
+            start_time,
         }
     }
 
@@ -216,6 +217,7 @@ impl UpdateHistory {
     {
         match Self::load_from(reader).await {
             Ok(update_attempts) => Self {
+                current_version: None,
                 inspectable_update_attempts: {
                     let mut bounded_node =
                         BoundedNode::from_node_and_capacity(node, MAX_UPDATE_ATTEMPTS);
@@ -235,6 +237,7 @@ impl UpdateHistory {
             Err(e) => {
                 warn!("Could not load update history: {:#}", anyhow!(e));
                 Self {
+                    current_version: None,
                     update_attempts: Default::default(),
 
                     // BoundedNode doesn't implement Default, so we need to set a default here ourselves.
@@ -260,25 +263,21 @@ impl UpdateHistory {
     }
 
     /// Save the update history to disk.
-    pub fn save(&mut self) -> impl Future<Output = ()> + use<> {
+    pub async fn save(&self) {
         let writer = |bytes| async move {
             let _ = fuchsia_fs::file::write_in_namespace(UPDATE_HISTORY_PATH, &bytes).await;
         };
-        self.save_to(writer)
+        self.save_to(writer).await
     }
 
-    fn save_to<W, F>(&self, writer: W) -> impl Future<Output = ()> + use<W, F>
+    async fn save_to<W, F>(&self, writer: W)
     where
         W: FnOnce(Vec<u8>) -> F,
         F: Future<Output = ()>,
     {
         let history = UpdateHistoryJson::Version1(self.update_attempts.clone());
-        let bytes = serde_json::to_vec(&history);
-
-        async move {
-            if let Ok(bytes) = bytes {
-                writer(bytes).await
-            }
+        if let Ok(bytes) = serde_json::to_vec(&history) {
+            writer(bytes).await
         }
     }
 }
@@ -345,7 +344,6 @@ mod serde_system_time {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::environment::{FakeSystemInfo, NamespaceBuildInfo};
     use anyhow::anyhow;
     use diagnostics_assertions::assert_data_tree;
     use fidl_fuchsia_update_installer_ext::{
@@ -366,6 +364,7 @@ mod tests {
     impl Default for UpdateHistory {
         fn default() -> UpdateHistory {
             UpdateHistory {
+                current_version: None,
                 update_attempts: Default::default(),
                 inspectable_update_attempts: default_inspectable_update_attempts(),
             }
@@ -386,13 +385,13 @@ mod tests {
         let paver = Arc::new(MockPaverServiceBuilder::new().build());
         let data_sink = paver.spawn_data_sink_service();
         let boot_manager = paver.spawn_boot_manager_service();
-        let system_info = FakeSystemInfo(None);
         let opts = Options {
             initiator: Initiator::User,
             allow_attach_to_existing_attempt: false,
             should_write_recovery: true,
             manifest_range: None,
             manifest_headers: vec![],
+            should_commit: true,
         };
         let update_attempt = history
             .start_update_attempt(
@@ -401,8 +400,6 @@ mod tests {
                 SystemTime::UNIX_EPOCH + Duration::from_nanos(i as u64),
                 &data_sink,
                 &boot_manager,
-                &NamespaceBuildInfo,
-                &system_info,
             )
             .await;
         history.record_update_attempt(
@@ -478,6 +475,7 @@ mod tests {
                 should_write_recovery: true,
                 manifest_range: None,
                 manifest_headers: vec![],
+                should_commit: true,
             },
             update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
             start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -597,6 +595,7 @@ mod tests {
                             size: 456,
                         }),
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -612,6 +611,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(123),
@@ -650,6 +650,7 @@ mod tests {
                                 "initiator": "User",
                                 "allow_attach_to_existing_attempt": false,
                                 "should_write_recovery": true,
+                                "should_commit": true,
                             },
                             "update_url": "fuchsia-pkg://fuchsia.test/update",
                             "start_time": "1970-01-01T00:00:00.000000123+00:00",
@@ -686,6 +687,7 @@ mod tests {
                                 "initiator": "User",
                                 "allow_attach_to_existing_attempt": false,
                                 "should_write_recovery": true,
+                                "should_commit": true,
                                 "manifest_range": {
                                     "offset": 123u64,
                                     "size": 456u64,
@@ -744,6 +746,7 @@ mod tests {
                                 "initiator": "User",
                                 "allow_attach_to_existing_attempt": false,
                                 "should_write_recovery": true,
+                                "should_commit": true,
                             },
                             "update_url": "fuchsia-pkg://fuchsia.test/update",
                             "start_time": "1970-01-01T00:00:00.000000123+00:00",
@@ -780,6 +783,7 @@ mod tests {
                                 "initiator": "User",
                                 "allow_attach_to_existing_attempt": false,
                                 "should_write_recovery": true,
+                                "should_commit": true,
                                 "manifest_range": {
                                     "offset": 123u64,
                                     "size": 456u64,
@@ -820,6 +824,7 @@ mod tests {
                                 "initiator": "User",
                                 "allow_attach_to_existing_attempt": false,
                                 "should_write_recovery": true,
+                                "should_commit": true,
                             },
                             "update_url": "fuchsia-pkg://fuchsia.test/update",
                             "start_time": "1970-01-01T00:00:00.000000042+00:00",
@@ -839,7 +844,8 @@ mod tests {
         let completed_target_version =
             Version::for_hash_and_empty_paver_hashes("completed target version");
 
-        let history = UpdateHistory {
+        let mut history = UpdateHistory {
+            current_version: None,
             update_attempts: VecDeque::from(vec![
                 UpdateAttempt {
                     attempt_id: "id".to_owned(),
@@ -851,6 +857,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -866,6 +873,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -877,29 +885,44 @@ mod tests {
         let paver = Arc::new(MockPaverServiceBuilder::new().build());
         let data_sink = paver.spawn_data_sink_service();
         let boot_manager = paver.spawn_boot_manager_service();
-        let system_info = FakeSystemInfo(None);
 
-        assert_eq!(
-            history
-                .start_update_attempt(
-                    Options {
-                        initiator: Initiator::User,
-                        allow_attach_to_existing_attempt: false,
-                        should_write_recovery: true,
-                        manifest_range: None,
-                        manifest_headers: vec![],
-                    },
-                    &"fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
-                    SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
-                    &data_sink,
-                    &boot_manager,
-                    &NamespaceBuildInfo,
-                    &system_info,
-                )
-                .await
-                .source_version,
-            completed_target_version
+        let opts = Options {
+            initiator: Initiator::User,
+            allow_attach_to_existing_attempt: false,
+            should_write_recovery: true,
+            manifest_range: None,
+            manifest_headers: vec![],
+            should_commit: true,
+        };
+        let attempt = history
+            .start_update_attempt(
+                opts.clone(),
+                &"fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
+                &data_sink,
+                &boot_manager,
+            )
+            .await;
+        assert_eq!(attempt.source_version, completed_target_version);
+
+        // Recording a new successful attempt in the same boot and starting another attempt should
+        // reuse the cached current_version without querying paver again.
+        let events_after_first = paver.take_events();
+        assert!(!events_after_first.is_empty());
+        history.record_update_attempt(
+            attempt.finish(Version::for_hash("newer target version"), make_reboot_state()),
         );
+        let second_attempt = history
+            .start_update_attempt(
+                opts,
+                &"fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(43),
+                &data_sink,
+                &boot_manager,
+            )
+            .await;
+        assert_eq!(second_attempt.source_version, completed_target_version);
+        assert_eq!(paver.take_events(), vec![]);
     }
 
     #[fuchsia::test]
@@ -912,6 +935,7 @@ mod tests {
             should_write_recovery: true,
             manifest_range: None,
             manifest_headers: vec![],
+            should_commit: true,
         };
 
         let mut history = UpdateHistory::default();
@@ -959,6 +983,7 @@ mod tests {
                         "allow_attach_to_existing_attempt": false,
                         "initiator": "User",
                         "should_write_recovery": true,
+                        "should_commit": true,
                         "manifest_range": null,
                     },
                     "url": "fuchsia-pkg://fuchsia.test/update",
@@ -993,6 +1018,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(i as u64),
@@ -1051,6 +1077,7 @@ mod tests {
     #[fuchsia::test]
     async fn attempts_for_only_matches_most_recent_attempts() {
         let history = UpdateHistory {
+            current_version: None,
             update_attempts: VecDeque::from(vec![
                 UpdateAttempt {
                     attempt_id: "id".to_owned(),
@@ -1062,6 +1089,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1077,6 +1105,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1092,6 +1121,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1108,6 +1138,7 @@ mod tests {
     #[fuchsia::test]
     async fn mismatching_source_version_attempts_history_1_attempt() {
         let history = UpdateHistory {
+            current_version: None,
             update_attempts: VecDeque::from(vec![
                 UpdateAttempt {
                     attempt_id: "id".to_owned(),
@@ -1119,6 +1150,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1134,6 +1166,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1149,6 +1182,7 @@ mod tests {
     #[fuchsia::test]
     async fn mismatching_target_version_attempts_history_1_attempt() {
         let history = UpdateHistory {
+            current_version: None,
             update_attempts: VecDeque::from(vec![
                 UpdateAttempt {
                     attempt_id: "id".to_owned(),
@@ -1160,6 +1194,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),
@@ -1175,6 +1210,7 @@ mod tests {
                         should_write_recovery: true,
                         manifest_range: None,
                         manifest_headers: vec![],
+                        should_commit: true,
                     },
                     update_url: "fuchsia-pkg://fuchsia.test/update".parse().unwrap(),
                     start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(42),

@@ -23,7 +23,7 @@ use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
 use starnix_types::user_buffer::{UserBuffer, UserBuffers};
 use starnix_types::vfs::default_statfs;
 use starnix_uapi::auth::CAP_SYS_RESOURCE;
-use starnix_uapi::errors::Errno;
+use starnix_uapi::errors::{EPIPE, Errno};
 use starnix_uapi::file_mode::mode;
 use starnix_uapi::fs_type::FileSystemTypeFlags;
 use starnix_uapi::open_flags::OpenFlags;
@@ -105,7 +105,7 @@ impl Pipe {
             //  ENXIO  O_NONBLOCK | O_WRONLY is set, the named file is a FIFO,
             //         and no process has the FIFO open for reading.
             if flags.contains(OpenFlags::NONBLOCK) && pipe_locked.reader_count == 0 {
-                assert!(!flags.can_read()); // Otherwise we would have called add_reader() above.
+                assert!(!flags.can_read()); // Otherwise add_reader() would have run above.
                 return error!(ENXIO);
             }
             if !pipe_locked.had_writer {
@@ -217,18 +217,14 @@ impl Pipe {
         // POSIX requires that a write smaller than PIPE_BUF be atomic, but requires no
         // atomicity for writes larger than this.
         self.had_reader
-            && (available_capacity >= data_size
+            && (self.reader_count == 0
+                || available_capacity >= data_size
                 || (available_capacity > 0 && data_size > uapi::PIPE_BUF as usize))
     }
 
     pub fn read(&mut self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
-        // If there isn't any data to read from the pipe, then the behavior
-        // depends on whether there are any open writers. If there is an
-        // open writer, then we return EAGAIN, to signal that the callers
-        // should wait for the writer to write something into the pipe.
-        // Otherwise, we'll fall through the rest of this function and
-        // return that we have read zero bytes, which will let the caller
-        // know that they're done reading the pipe.
+        // Return EAGAIN if the pipe is empty and still has at least one open writer so the caller
+        // blocks; otherwise fall through and return 0 to indicate EOF.
 
         if !self.is_readable() {
             return error!(EAGAIN);
@@ -237,17 +233,12 @@ impl Pipe {
         self.messages.read_stream(data).map(|(info, _)| info.bytes_read)
     }
 
-    pub fn write(
-        &mut self,
-        current_task: &CurrentTask,
-        data: &mut dyn InputBuffer,
-    ) -> Result<usize, Errno> {
+    pub fn write(&mut self, data: &mut dyn InputBuffer) -> Result<usize, Errno> {
         if !self.had_reader {
             return error!(EAGAIN);
         }
 
         if self.reader_count == 0 {
-            send_standard_signal(current_task, SignalInfo::kernel(SIGPIPE));
             return error!(EPIPE);
         }
 
@@ -267,12 +258,12 @@ impl Pipe {
             if writer_closed {
                 events |= FdEvents::POLLHUP;
             }
-            if !writer_closed || has_data {
+            if has_data {
                 events |= FdEvents::POLLIN;
             }
         }
 
-        if flags.can_write() && self.is_writable(1) {
+        if flags.can_write() && self.is_writable(uapi::PIPE_BUF as usize) {
             if self.reader_count == 0 && self.had_reader {
                 events |= FdEvents::POLLERR;
             }
@@ -478,10 +469,14 @@ impl FileOps for PipeFileObject {
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
         debug_assert!(offset == 0);
+        if data.available() == 0 {
+            return Ok(0);
+        }
         file.blocking_op(current_task, FdEvents::POLLIN | FdEvents::POLLHUP, None, || {
             let mut pipe = self.pipe.lock();
+            let was_writable = pipe.is_writable(uapi::PIPE_BUF as usize);
             let actual = pipe.read(data)?;
-            if actual > 0 && pipe.is_empty() {
+            if !was_writable && pipe.is_writable(uapi::PIPE_BUF as usize) {
                 pipe.notify_fd_events(FdEvents::POLLOUT);
             }
             Ok(actual)
@@ -497,14 +492,23 @@ impl FileOps for PipeFileObject {
     ) -> Result<usize, Errno> {
         debug_assert!(offset == 0);
         debug_assert!(data.bytes_read() == 0);
+        if data.available() == 0 {
+            return Ok(0);
+        }
 
         let result = file.blocking_op(current_task, FdEvents::POLLOUT, None, || {
             let mut pipe = self.pipe.lock();
-            let was_empty = pipe.is_empty();
             let offset_before = data.bytes_read();
-            let bytes_written = pipe.write(current_task, data)?;
+            let bytes_written = match pipe.write(data) {
+                Err(e) if e == EPIPE => {
+                    std::mem::drop(pipe);
+                    send_standard_signal(current_task, SignalInfo::kernel(SIGPIPE));
+                    return Err(e);
+                }
+                result => result?,
+            };
             debug_assert!(data.bytes_read() - offset_before == bytes_written);
-            if bytes_written > 0 && was_empty {
+            if bytes_written > 0 {
                 pipe.notify_fd_events(FdEvents::POLLIN);
             }
             if data.available() > 0 {
@@ -515,8 +519,7 @@ impl FileOps for PipeFileObject {
 
         let bytes_written = data.bytes_read();
         if bytes_written == 0 {
-            // We can only return an error if no data was actually sent. If partial data was
-            // sent, swallow the error and return how much was sent.
+            // Return an error only if no data was sent; return partial progress otherwise.
             result?;
         }
         Ok(bytes_written)
@@ -827,13 +830,13 @@ impl PipeFileObject {
     where
         G: Fn() -> Result<V, Errno>,
     {
-        if non_blocking {
+        let (other, pipe) = if non_blocking {
             let other = pregen()?;
             let pipe = self.pipe.lock();
             if !pipe.is_writable(len) {
                 return error!(EAGAIN);
             }
-            Ok((other, pipe))
+            (other, pipe)
         } else {
             self.wait_for_condition(
                 current_task,
@@ -841,8 +844,14 @@ impl PipeFileObject {
                 |pipe| pipe.is_writable(len),
                 pregen,
                 FdEvents::POLLOUT,
-            )
+            )?
+        };
+        if pipe.reader_count == 0 {
+            std::mem::drop((other, pipe));
+            send_standard_signal(current_task, SignalInfo::kernel(SIGPIPE));
+            return error!(EPIPE);
         }
+        Ok((other, pipe))
     }
 
     fn lock_pipe_for_writing<'a>(
@@ -875,11 +884,18 @@ impl PipeFileObject {
         let mut pipe = self.lock_pipe_for_writing(current_task, self_file, non_blocking, len)?;
         let len = std::cmp::min(len, pipe.messages.available_capacity());
         let mut buffer = SpliceOutputBuffer { pipe: &mut pipe, len, available: len };
-        if let Some(offset) = maybe_offset {
+        let result = if let Some(offset) = maybe_offset {
             from.read_at(current_task, offset, &mut buffer)
         } else {
             from.read(current_task, &mut buffer)
+        };
+        std::mem::drop(pipe);
+        if let Err(err) = &result
+            && *err == EPIPE
+        {
+            send_standard_signal(current_task, SignalInfo::kernel(SIGPIPE));
         }
+        result
     }
 
     /// Splice from this pipe to the given file handle.
@@ -922,17 +938,14 @@ impl PipeFileObject {
             current_task.maximum_valid_address().ok_or_else(|| errno!(EINVAL))?,
             &mut iovec,
         )?;
+        if available == 0 {
+            return Ok(0);
+        }
         let mappings = current_task.mm()?.get_mappings_for_vmsplice(&iovec)?;
 
         let mut pipe =
             self.lock_pipe_for_writing(current_task, self_file, non_blocking, available)?;
 
-        if pipe.reader_count == 0 {
-            send_standard_signal(current_task, SignalInfo::kernel(SIGPIPE));
-            return error!(EPIPE);
-        }
-
-        let was_empty = pipe.is_empty();
         let mut remaining = std::cmp::min(available, pipe.messages.available_capacity());
 
         let mut bytes_transferred = 0;
@@ -948,7 +961,7 @@ impl PipeFileObject {
                 break;
             }
         }
-        if bytes_transferred > 0 && was_empty {
+        if bytes_transferred > 0 {
             pipe.notify_fd_events(FdEvents::POLLIN);
         }
         Ok(bytes_transferred)
@@ -964,12 +977,17 @@ impl PipeFileObject {
         iovec: UserBuffers,
         non_blocking: bool,
     ) -> Result<usize, Errno> {
-        let mut pipe = self.lock_pipe_for_reading(current_task, self_file, non_blocking)?;
-
         let mut data = UserBuffersOutputBuffer::unified_new(current_task, iovec)?;
-        let len = std::cmp::min(data.available(), pipe.messages.len());
-        let mut buffer = SpliceInputBuffer { pipe: &mut pipe, len, available: len };
-        data.write_buffer(&mut buffer)
+        if data.available() == 0 {
+            return Ok(0);
+        }
+        let mut pipe = self.lock_pipe_for_reading(current_task, self_file, non_blocking)?;
+        let was_writable = pipe.is_writable(uapi::PIPE_BUF as usize);
+        let actual = pipe.read(&mut data)?;
+        if !was_writable && pipe.is_writable(uapi::PIPE_BUF as usize) {
+            pipe.notify_fd_events(FdEvents::POLLOUT);
+        }
+        Ok(actual)
     }
 
     /// Obtain the pipe objects from the given file handles, if they are both pipes.
@@ -1018,4 +1036,147 @@ impl PipeFileObject {
 pub struct PipeOperands<'a, 'b> {
     pub read: MutexGuard<'a, Pipe>,
     pub write: MutexGuard<'b, Pipe>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
+    use crate::testing::{anon_test_file, spawn_kernel_and_run};
+    use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
+
+    struct StaticSourceFile {
+        payload: &'static [u8],
+    }
+
+    impl FileOps for StaticSourceFile {
+        fileops_impl_nonseekable!();
+        fileops_impl_noop_sync!();
+
+        fn read(
+            &self,
+            _file: &FileObject,
+            _current_task: &CurrentTask,
+            _offset: usize,
+            data: &mut dyn OutputBuffer,
+        ) -> Result<usize, Errno> {
+            data.write(self.payload)
+        }
+
+        fn write(
+            &self,
+            _file: &FileObject,
+            _current_task: &CurrentTask,
+            _offset: usize,
+            _data: &mut dyn InputBuffer,
+        ) -> Result<usize, Errno> {
+            error!(ENOTSUP)
+        }
+    }
+
+    #[::fuchsia::test]
+    async fn test_splice_from_closed_reader_returns_epipe_and_queues_sigpipe() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            std::mem::drop(pipe_out);
+            current_task.trigger_delayed_releaser();
+
+            let source_file = anon_test_file(
+                &current_task,
+                Box::new(StaticSourceFile { payload: b"DATA" }),
+                OpenFlags::RDONLY,
+            );
+            let err = pipe_in
+                .downcast_file::<PipeFileObject>()
+                .unwrap()
+                .splice_from(&current_task, &pipe_in, &source_file, None, 4, true)
+                .unwrap_err();
+            assert_eq!(err, errno!(EPIPE));
+            assert!(current_task.write().signals_mut().has_queued(SIGPIPE));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_partial_read_wakes_blocked_writer() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let capacity =
+                pipe_in.downcast_file::<PipeFileObject>().unwrap().pipe.lock().capacity();
+            let fill = vec![b'A'; capacity];
+            assert_eq!(
+                pipe_in.write(&current_task, &mut VecInputBuffer::new(&fill)).unwrap(),
+                capacity
+            );
+
+            let pipe_in_clone = pipe_in.clone();
+            let (writer_join, req) = SpawnRequestBuilder::new()
+                .with_sync_closure(move |worker_task: &CurrentTask| {
+                    pipe_in_clone
+                        .write(worker_task, &mut VecInputBuffer::new(b"BBBB"))
+                        .expect("blocked write should succeed after partial read")
+                })
+                .build_with_sync_result();
+            kernel.kthreads.spawner().spawn_from_request(req);
+
+            while pipe_in.downcast_file::<PipeFileObject>().unwrap().pipe.lock().waiters.is_empty()
+            {
+                std::thread::yield_now();
+            }
+
+            // Read one page from the full pipe; the pipe is still non-empty, but has space.
+            let page_size = *PAGE_SIZE as usize;
+            let mut partial = VecOutputBuffer::new(page_size);
+            assert_eq!(pipe_out.read(&current_task, &mut partial).unwrap(), page_size);
+            assert_eq!(partial.data(), &fill[..page_size]);
+
+            assert_eq!(writer_join().unwrap(), 4);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_zero_length_pipe_io_and_no_empty_message_enqueued() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+
+            let (pipe_out, pipe_in) = new_pipe(&current_task).unwrap();
+            let pipe_ops = pipe_out.downcast_file::<PipeFileObject>().unwrap();
+
+            // Zero-length read and vmsplice_to on an empty pipe return 0 without blocking or EAGAIN.
+            assert_eq!(pipe_out.read(&current_task, &mut VecOutputBuffer::new(0)).unwrap(), 0);
+            assert_eq!(
+                pipe_ops
+                    .vmsplice_to(&current_task, &pipe_out, UserBuffers::default(), true)
+                    .unwrap(),
+                0
+            );
+
+            // Zero-length write via `Pipe::write` does not enqueue an empty message in `MessageQueue`.
+            assert_eq!(pipe_ops.pipe.lock().write(&mut VecInputBuffer::new(b"")).unwrap(), 0);
+            assert_eq!(pipe_ops.pipe.lock().messages.peek_queue().len(), 0);
+
+            // Close the reader: zero-length write and vmsplice_from on a broken pipe return 0
+            // without EPIPE or SIGPIPE.
+            std::mem::drop(pipe_out);
+            current_task.trigger_delayed_releaser();
+            assert_eq!(pipe_in.write(&current_task, &mut VecInputBuffer::new(b"")).unwrap(), 0);
+            let pipe_in_ops = pipe_in.downcast_file::<PipeFileObject>().unwrap();
+            assert_eq!(
+                pipe_in_ops
+                    .vmsplice_from(&current_task, &pipe_in, UserBuffers::default(), true)
+                    .unwrap(),
+                0
+            );
+            assert!(!current_task.write().signals_mut().has_queued(SIGPIPE));
+        })
+        .await;
+    }
 }

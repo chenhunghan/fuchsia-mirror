@@ -28,23 +28,21 @@ class VmAddressRegion;
 class VmMapping;
 class VmAddressRegionOrMapping;
 
-namespace hypervisor {
-class GuestPhysicalAspace;
-}  // namespace hypervisor
-
 class VmObject;
 
 class VmAspace;
 extern "C" void cpp_vm_aspace_free(VmAspace* aspace);
 extern "C" void* cpp_vm_aspace_lock(const VmAspace* aspace);
 extern "C" void* cpp_vm_aspace_region_lock(const VmAspace* aspace);
+extern "C" VmAddressRegion* cpp_vm_aspace_root_vmar_locked(VmAspace* aspace);
+extern "C" void cpp_vm_aspace_change_high_priority_count_locked(VmAspace* aspace, int64_t delta);
 
 class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCounted<VmAspace> {
  public:
   enum class Type : uint8_t {
     User = 0,
     Kernel,
-    // You probably do not want to use LOW_KERNEL. It is primarily used for SMP bootstrap or mexec
+    // You probably do not want to use LOW_KERNEL. It is primarily used for SMP bootstrap or EFI
     // to allow mappings of very low memory using the standard VMM subsystem.
     LowKernel,
     // Used to construct an address space representing hypervisor guest memory.
@@ -230,12 +228,11 @@ class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCou
   bool IsHighMemoryPriority() const;
 
  protected:
-  // Share the aspace lock with VmAddressRegion/VmMapping/GuestPhysicalAspace so they can serialize
+  // Share the aspace lock with VmAddressRegion/VmMapping so they can serialize
   // changes to the aspace.
   friend class VmAddressRegionOrMapping;
   friend class VmAddressRegion;
   friend class VmMapping;
-  friend class hypervisor::GuestPhysicalAspace;
   Lock<CriticalMutex>* lock() const TA_RET_CAP(lock_) { return &lock_; }
   Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(lock_) { return lock_; }
   Lock<CriticalMutex>* region_lock() const TA_RET_CAP(region_lock_) { return &region_lock_; }
@@ -275,6 +272,8 @@ class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCou
   friend void ::cpp_vm_aspace_free(VmAspace* aspace);
   friend void* ::cpp_vm_aspace_lock(const VmAspace* aspace);
   friend void* ::cpp_vm_aspace_region_lock(const VmAspace* aspace);
+  friend VmAddressRegion* ::cpp_vm_aspace_root_vmar_locked(VmAspace* aspace);
+  friend void ::cpp_vm_aspace_change_high_priority_count_locked(VmAspace* aspace, int64_t delta);
 
   // complete initialization, may fail in OOM cases
   zx_status_t Init(ShareOpt share_opt);

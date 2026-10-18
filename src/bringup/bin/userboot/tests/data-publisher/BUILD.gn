@@ -1,0 +1,28 @@
+# Copyright 2022 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/rust/rustc_library.gni")
+import("//src/bringup/bin/userboot/tests/rust_zbi_test_executable.gni")
+
+if (is_fuchsia) {
+  rustc_library("published-data") {
+    testonly = true
+    edition = "2024"
+    source_root = "published_data.rs"
+    sources = [ "published_data.rs" ]
+  }
+
+  # This 'test' will just publish a vmo containing "Hello World!" with sink
+  # "data-publisher" using '__sanitizer_publish_data'. Its whole purpose is to
+  # fake the behaviour of an actual test publishing data.
+  rust_zbi_test_executable("early-boot-data-publisher-bin") {
+    source_root = "main.rs"
+    sources = [ "main.rs" ]
+    deps = [
+      ":published-data",
+      "//sdk/lib/c/rust",
+      "//sdk/rust/zx",
+    ]
+  }
+}

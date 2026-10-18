@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::update::{Config, EnvironmentConnector, RebootController, Updater};
+use crate::update::{Config, Environment, RebootController, Updater};
 use anyhow::anyhow;
 use event_queue::{EventQueue, Notify};
 use fidl_fuchsia_update_installer::{
@@ -28,28 +28,23 @@ const MAX_NUM_CANCEL_REQUESTS: usize = 100;
 /// Start a install manager task that:
 ///  * Runs an update attempt in a seperate task.
 ///  * Provides a control handle to forward FIDL requests to the update attempt task.
-pub async fn start_install_manager<N, U, E>(
+pub async fn start_install_manager<N, U>(
     updater: U,
     node: inspect::Node,
 ) -> (InstallManagerControlHandle<N>, impl Future<Output = ()>)
 where
     N: Notify<Event = State> + Send + 'static,
     U: Updater,
-    E: EnvironmentConnector,
 {
     let (send, recv) = mpsc::channel(0);
-    (InstallManagerControlHandle(send), run::<N, U, E>(recv, updater, node))
+    (InstallManagerControlHandle(send), run::<N, U>(recv, updater, node))
 }
 
 /// The install manager task.
-async fn run<N, U, E>(
-    mut recv: mpsc::Receiver<ControlRequest<N>>,
-    mut updater: U,
-    node: inspect::Node,
-) where
+async fn run<N, U>(mut recv: mpsc::Receiver<ControlRequest<N>>, mut updater: U, node: inspect::Node)
+where
     N: Notify<Event = State> + Send + 'static,
     U: Updater,
-    E: EnvironmentConnector,
 {
     // Set up event queue to keep track of all the Monitors.
     let (monitor_queue_fut, mut monitor_queue) = EventQueue::new();
@@ -77,7 +72,7 @@ async fn run<N, U, E>(
 
         // We connect to FIDL services on each update attempt (rather than once at the
         // beginning) to prevent stale connections.
-        let env = match E::connect() {
+        let env = match Environment::connect_in_namespace() {
             Ok(env) => env,
             Err(e) => {
                 error!("Error connecting to services: {:#}", anyhow!(e));
@@ -90,6 +85,7 @@ async fn run<N, U, E>(
         // Now we can actually start the task that manages the update attempt.
         let update_url = &config.update_url.clone();
         let should_write_recovery = config.options.should_write_recovery;
+        let should_commit = config.options.should_commit;
         let manifest_range = config.options.manifest_range;
         let (cancel_sender, cancel_receiver) = oneshot::channel();
         let (attempt_id, attempt_stream) =
@@ -149,6 +145,7 @@ async fn run<N, U, E>(
                         &attempt_id,
                         update_url,
                         should_write_recovery,
+                        should_commit,
                         manifest_range,
                         &mut suspend_state,
                         suspend_deadline,
@@ -231,6 +228,7 @@ async fn handle_active_control_request<N>(
     attempt_id: &str,
     update_url: &http::Uri,
     should_write_recovery: bool,
+    should_commit: bool,
     manifest_range: Option<fidl_fuchsia_update_installer_ext::options::Range>,
     suspend_state: &mut SuspendState,
     suspend_deadline: fasync::BootInstant,
@@ -256,6 +254,7 @@ async fn handle_active_control_request<N>(
                 && config.options.allow_attach_to_existing_attempt
                 && &config.update_url == update_url
                 && config.options.should_write_recovery == should_write_recovery
+                && config.options.should_commit == should_commit
                 && config.options.manifest_range == manifest_range
             {
                 if let Err(e) = monitor_queue.add_client(monitor).await {
@@ -447,6 +446,10 @@ impl<N: Notify> ControlRequest<N> {
                     format!("{:?}", data.config.options.should_write_recovery),
                 );
                 node.record_string(
+                    "should_commit",
+                    format!("{:?}", data.config.options.should_commit),
+                );
+                node.record_string(
                     "allow_attach_to_existing_attempt",
                     format!("{:?}", data.config.options.allow_attach_to_existing_attempt),
                 );
@@ -531,26 +534,15 @@ impl SuspendState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::{
-        ConfigBuilder, Environment, NamespaceBuildInfo, NamespaceCobaltConnector,
-        NamespaceSystemInfo,
-    };
-    use async_trait::async_trait;
+    use crate::update::ConfigBuilder;
     use diagnostics_assertions::{AnyProperty, assert_data_tree};
     use event_queue::ClosedClient;
-    use fidl_fuchsia_hardware_power_statecontrol::AdminMarker as PowerStateControlMarker;
-    use fidl_fuchsia_paver::{BootManagerMarker, DataSinkMarker};
-    use fidl_fuchsia_pkg::{
-        PackageCacheMarker, PackageResolverMarker, RetainedBlobsMarker, RetainedPackagesMarker,
-    };
-    use fidl_fuchsia_pkg_garbagecollector::ManagerMarker as SpaceManagerMarker;
     use fidl_fuchsia_update_installer_ext::{
         PrepareFailureReason, Progress, UpdateInfo, UpdateInfoAndProgress,
     };
     use fuchsia_inspect::Inspector;
     use fuchsia_sync::Mutex;
     use mpsc::{Receiver, Sender};
-    use std::pin::Pin;
     use std::sync::Arc;
     use std::task::Poll;
 
@@ -574,38 +566,6 @@ mod tests {
         }
     }
 
-    struct StubEnvironmentConnector;
-    impl EnvironmentConnector for StubEnvironmentConnector {
-        fn connect() -> Result<Environment, anyhow::Error> {
-            let (data_sink, _) = fidl::endpoints::create_proxy::<DataSinkMarker>();
-            let (boot_manager, _) = fidl::endpoints::create_proxy::<BootManagerMarker>();
-            let (pkg_resolver, _) = fidl::endpoints::create_proxy::<PackageResolverMarker>();
-            let (pkg_cache, _) = fidl::endpoints::create_proxy::<PackageCacheMarker>();
-            let (retained_packages, _) = fidl::endpoints::create_proxy::<RetainedPackagesMarker>();
-            let (retained_blobs, _) = fidl::endpoints::create_proxy::<RetainedBlobsMarker>();
-            let (space_manager, _) = fidl::endpoints::create_proxy::<SpaceManagerMarker>();
-            let (power_state_control, _) =
-                fidl::endpoints::create_proxy::<PowerStateControlMarker>();
-            let (ota_downloader, _) =
-                fidl::endpoints::create_proxy::<fidl_fuchsia_pkg_internal::OtaDownloaderMarker>();
-
-            Ok(Environment {
-                data_sink,
-                boot_manager,
-                pkg_resolver,
-                pkg_cache,
-                retained_packages,
-                retained_blobs,
-                space_manager,
-                power_state_control,
-                ota_downloader,
-                build_info: NamespaceBuildInfo,
-                cobalt_connector: NamespaceCobaltConnector,
-                system_info: NamespaceSystemInfo,
-            })
-        }
-    }
-
     struct FakeUpdater(mpsc::Receiver<(String, mpsc::Receiver<State>)>);
     impl FakeUpdater {
         fn new(receiver: mpsc::Receiver<(String, mpsc::Receiver<State>)>) -> Self {
@@ -613,17 +573,14 @@ mod tests {
         }
     }
 
-    #[async_trait(?Send)]
     impl Updater for FakeUpdater {
-        type UpdateStream = mpsc::Receiver<State>;
-
         async fn update(
             &mut self,
             _config: Config,
             _env: Environment,
             _reboot_controller: RebootController,
             _cancel_receiver: oneshot::Receiver<()>,
-        ) -> (String, Self::UpdateStream) {
+        ) -> (String, impl FusedStream<Item = State>) {
             self.0.next().await.unwrap()
         }
     }
@@ -657,10 +614,7 @@ mod tests {
         let updater = FakeUpdater::new(updater_receiver);
         let (state_sender, state_receiver) = mpsc::channel(0);
         let (install_manager_ch, fut) =
-            start_install_manager::<FakeStateNotifier, FakeUpdater, StubEnvironmentConnector>(
-                updater, node,
-            )
-            .await;
+            start_install_manager::<FakeStateNotifier, FakeUpdater>(updater, node).await;
         let install_manager_task = fasync::Task::local(fut);
 
         // We just use try_send because send calls are blocked on the receiver receiving the
@@ -1004,24 +958,21 @@ mod tests {
 
     struct CancelableUpdater;
 
-    #[async_trait(?Send)]
     impl Updater for CancelableUpdater {
-        type UpdateStream = Pin<Box<dyn FusedStream<Item = State>>>;
-
         async fn update(
             &mut self,
             _config: Config,
             _env: Environment,
             _reboot_controller: RebootController,
             cancel_receiver: oneshot::Receiver<()>,
-        ) -> (String, Self::UpdateStream) {
+        ) -> (String, impl FusedStream<Item = State>) {
             let stream = async_generator::generate(move |mut co| async move {
                 co.yield_(State::Prepare).await;
                 let () = cancel_receiver.await.expect("cancel sender should not be dropped");
                 co.yield_(State::Canceled).await;
             })
             .into_yielded();
-            ("my-attempt".to_string(), Box::pin(stream))
+            ("my-attempt".to_string(), stream)
         }
     }
 
@@ -1029,12 +980,9 @@ mod tests {
     async fn cancel_update() {
         let inspector = Inspector::default();
         let node = inspector.root().create_child("current_attempt");
-        let (mut install_manager_ch, fut) = start_install_manager::<
-            FakeStateNotifier,
-            CancelableUpdater,
-            StubEnvironmentConnector,
-        >(CancelableUpdater, node)
-        .await;
+        let (mut install_manager_ch, fut) =
+            start_install_manager::<FakeStateNotifier, CancelableUpdater>(CancelableUpdater, node)
+                .await;
         let _install_manager_task = fasync::Task::local(fut);
 
         assert_eq!(
@@ -1096,12 +1044,9 @@ mod tests {
     async fn cancel_update_limit() {
         let inspector = Inspector::default();
         let node = inspector.root().create_child("current_attempt");
-        let (mut install_manager_ch, fut) = start_install_manager::<
-            FakeStateNotifier,
-            CancelableUpdater,
-            StubEnvironmentConnector,
-        >(CancelableUpdater, node)
-        .await;
+        let (mut install_manager_ch, fut) =
+            start_install_manager::<FakeStateNotifier, CancelableUpdater>(CancelableUpdater, node)
+                .await;
         let _install_manager_task = fasync::Task::local(fut);
 
         for _ in 0..MAX_NUM_CANCEL_REQUESTS {
@@ -1211,6 +1156,24 @@ mod tests {
                         .build()
                         .unwrap(),
                     notifier3,
+                    None
+                )
+                .await,
+            Ok(Err(UpdateNotStartedReason::AlreadyInProgress))
+        );
+
+        // Fails because incompatible configs (i.e. should_commit is different).
+        let (notifier_commit, _state_receiver_commit) =
+            FakeStateNotifier::new_callback_and_receiver();
+        assert_eq!(
+            install_manager_ch
+                .start_update(
+                    ConfigBuilder::new()
+                        .allow_attach_to_existing_attempt(true)
+                        .should_commit(false)
+                        .build()
+                        .unwrap(),
+                    notifier_commit,
                     None
                 )
                 .await,
@@ -1344,6 +1307,7 @@ mod tests {
                             allow_attach_to_existing_attempt: "false",
                             initiator: "User",
                             should_write_recovery: "true",
+                            should_commit: "true",
                             update_url: "fuchsia-pkg://fuchsia.test/update",
                         },
                     },

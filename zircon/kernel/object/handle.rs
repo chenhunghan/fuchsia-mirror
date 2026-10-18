@@ -27,6 +27,7 @@ impl HandleValue {
     }
 
     /// Returns the underlying raw handle value.
+    #[inline]
     pub fn raw_value(&self) -> zx_handle_t {
         self.value
     }
@@ -138,15 +139,27 @@ pub struct HandleOwner {
 }
 
 impl HandleOwner {
-    /// Creates a new `HandleOwner` from a non-null raw handle pointer.
+    /// Creates a new `HandleOwner` from a raw handle pointer, returning `None` if null.
     ///
     /// # Safety
-    /// `ptr` must be a valid, owned `Handle*` created by C++ `Handle::Make` or `Handle::Dup`.
+    /// `ptr` must be null or a valid, owned `Handle*` created by C++ `Handle::Make` or
+    /// `Handle::Dup`.
+    #[inline]
     pub unsafe fn from_raw(ptr: *mut core::ffi::c_void) -> Option<Self> {
         NonNull::new(ptr).map(|ptr| Self { ptr })
     }
 
+    /// Creates a new `HandleOwner` from a non-null raw handle pointer.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid, non-null owned `Handle*`.
+    #[inline]
+    pub unsafe fn from_raw_non_null(ptr: NonNull<core::ffi::c_void>) -> Self {
+        Self { ptr }
+    }
+
     /// Releases the raw pointer from `HandleOwner` without running its destructor.
+    #[inline]
     pub fn release(self) -> *mut core::ffi::c_void {
         let ptr = self.ptr.as_ptr();
         core::mem::forget(self);
@@ -154,6 +167,7 @@ impl HandleOwner {
     }
 
     /// Duplicates this handle with the given rights.
+    #[inline]
     pub fn dup(&self, rights: zx_rights_t) -> Result<Self, Status> {
         // SAFETY: `self.ptr` is guaranteed to be a valid non-null handle pointer.
         let raw = unsafe { cpp_handle_dup(self.ptr.as_ptr(), rights) };
@@ -162,11 +176,13 @@ impl HandleOwner {
     }
 
     /// Returns the raw pointer backing this handle owner.
+    #[inline]
     pub fn as_raw(&self) -> *mut core::ffi::c_void {
         self.ptr.as_ptr()
     }
 
     /// Returns the rights associated with this handle.
+    #[inline]
     pub fn rights(&self) -> zx_rights_t {
         // SAFETY: `self.ptr` is guaranteed to be a valid non-null handle pointer.
         unsafe { cpp_handle_get_rights(self.ptr.as_ptr()) }
@@ -223,6 +239,7 @@ impl HandleOwner {
 }
 
 impl Drop for HandleOwner {
+    #[inline]
     fn drop(&mut self) {
         // SAFETY: `self.ptr` is valid and owned.
         unsafe { cpp_handle_destroy(self.ptr.as_ptr()) };
@@ -245,6 +262,7 @@ impl<'a> HandleRef<'a> {
     ///
     /// The caller must ensure that `ptr` is a valid handle pointer and the handle table lock
     /// is held for the lifetime `'a`.
+    #[inline]
     pub unsafe fn from_raw(ptr: NonNull<core::ffi::c_void>) -> Self {
         Self { ptr, _marker: core::marker::PhantomData }
     }
@@ -264,6 +282,7 @@ impl<'a> HandleRef<'a> {
     }
 
     /// Duplicates this handle with the given rights.
+    #[inline]
     pub fn dup(&self, rights: zx_rights_t) -> Result<HandleOwner, Status> {
         // SAFETY: `self.ptr` is guaranteed to be a valid non-null handle pointer.
         let raw = unsafe { cpp_handle_dup(self.ptr.as_ptr(), rights) };
@@ -294,6 +313,12 @@ impl<'a> HandleRef<'a> {
     #[inline]
     pub fn as_ptr(&self) -> *const core::ffi::c_void {
         self.ptr.as_ptr()
+    }
+
+    /// Returns the non-null pointer to the handle.
+    #[inline]
+    pub(crate) fn as_non_null(&self) -> NonNull<core::ffi::c_void> {
+        self.ptr
     }
 }
 

@@ -16,11 +16,6 @@ from typing import Any, FrozenSet
 from antlion import utils
 from antlion.capabilities.ssh import SSHConfig, SSHProvider
 from antlion.controllers.pdu import PduDevice, get_pdu_port_for_device
-from antlion.controllers.utils_lib.commands import (
-    ip,
-    route,
-)
-from antlion.controllers.utils_lib.commands.tcpdump import LinuxTcpdumpCommand
 from honeydew.typing.custom_types import MacAddress
 from legacy_access_point.ap_lib import hostapd_constants
 from legacy_access_point.ap_lib.ap_get_interface import ApInterfaces
@@ -45,14 +40,18 @@ from legacy_access_point.ap_lib.wireless_network_management import (
 )
 from libs.commands import (
     command,
+    ip,
     journalctl,
+    route,
 )
 from libs.commands.date import LinuxDateCommand
+from libs.commands.tcpdump import LinuxTcpdumpCommand
 from libs.proc.runner import CalledProcessError
 from libs.ssh import connection, settings
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
 from mobly import logger
+from mobly import utils as mobly_utils
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "AccessPoint"
 
@@ -511,7 +510,9 @@ class AccessPoint:
             path: Path to write logs to.
         """
         timestamp = logger.normalize_log_line_timestamp(
-            logger.epoch_to_log_line_timestamp(utils.get_current_epoch_time())
+            logger.epoch_to_log_line_timestamp(
+                mobly_utils.get_current_epoch_time()
+            )
         )
 
         dhcp_log = self.get_dhcp_logs()
@@ -675,6 +676,11 @@ class AccessPoint:
             BRIDGE_DEL = f"brctl delbr {iface}"
             self.ssh.run(BRIDGE_DOWN)
             self.ssh.run(BRIDGE_DEL)
+        # Stopping hostapd resets the wireless interface to station mode, which
+        # causes shill on Whirlwind/Gale APs to claim and enable it. Bring the
+        # interface down and set its type back to AP mode so shill ignores it.
+        self.ssh.run(f"ip link set {identifier} down")
+        self.ssh.run(f"iw dev {identifier} set type __ap")
 
     def stop_all_aps(self) -> None:
         """Stops all running aps on this device."""

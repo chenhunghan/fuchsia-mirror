@@ -58,7 +58,8 @@ TEST_F(UsbInspectTest, TestEndpointInspect) {
               PropertyList(::testing::UnorderedElementsAre(
                   UintIs("tx_pending_requests", 10), UintIs("rx_pending_requests", 20),
                   UintIs("rx_pending_processing", 30), UintIs("total_bytes_tx", 1024),
-                  UintIs("total_bytes_rx", 2048), UintIs("max_bytes_per_second", 3072))));
+                  UintIs("total_bytes_rx", 2048), UintIs("max_bytes_per_second", 3072),
+                  BoolIs("cancelled", false))));
 
   // Assert event history circular list size is exactly capacity 3
   auto* history_node = hierarchy.GetByPath({"endpoint_test", "event_history"});
@@ -73,17 +74,23 @@ TEST_F(UsbInspectTest, TestDciInspect) {
   dci.Init(inspector.GetRoot(), "dci_test");
   dci.UpdateState("kPeripheralReady");
   dci.UpdateConnectionStatus(true, USB_SPEED_SUPER);
+  dci.UpdateSpeed(USB_SPEED_HIGH);
   dci.UpdateUsbMode(UsbMode::kPeripheral);
+
+  dci.RecordSetConfiguration(1);
 
   auto hierarchy = ReadInspect(inspector);
 
   auto* dci_node = hierarchy.GetByPath({"dci_test"});
   ASSERT_THAT(dci_node, ::testing::NotNull());
 
-  EXPECT_THAT(dci_node->node(),
-              PropertyList(::testing::UnorderedElementsAre(
-                  StringIs("state", "kPeripheralReady"), BoolIs("connected", true),
-                  StringIs("speed", "super"), StringIs("usb_mode", "PERIPHERAL"))));
+  EXPECT_THAT(
+      dci_node->node(),
+      PropertyList(::testing::UnorderedElementsAre(
+          StringIs("state", "kPeripheralReady"), BoolIs("connected", true),
+          StringIs("speed", "high"), StringIs("usb_mode", "PERIPHERAL"), UintIs("connect_count", 1),
+          UintIs("disconnect_count", 0), UintIs("set_configuration_count", 1),
+          IntIs("last_connect_time_ns", ::testing::_), IntIs("last_disconnect_time_ns", 0))));
 }
 
 TEST_F(UsbInspectTest, TestFunctionInspect) {
@@ -628,6 +635,149 @@ TEST_F(UsbInspectTest, TestGenericDescriptorAtRoot) {
   EXPECT_THAT(root_desc->node(), PropertyList(::testing::UnorderedElementsAre(
                                      UintIs("type_code", 0xFF), UintIs("length", 5),
                                      StringIs("hex_payload", "aa bb cc"))));
+}
+
+TEST_F(UsbInspectTest, TestEndpointInspectPoolAndCancel) {
+  inspect::Inspector inspector;
+  EndpointInspect endpoint;
+  endpoint.Init(inspector.GetRoot(), "endpoint_test");
+
+  // Verify cancelled is visible even without pool counts callback set.
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* ep_node = hierarchy.GetByPath({"endpoint_test"});
+    ASSERT_THAT(ep_node, ::testing::NotNull());
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(BoolIs("cancelled", false))));
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Not(::testing::Contains(
+                                     UintIs("in_flight_requests", ::testing::_)))));
+  }
+
+  endpoint.SetPoolCountsCallback([]() -> std::pair<size_t, size_t> { return {3u, 16u}; });
+
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* ep_node = hierarchy.GetByPath({"endpoint_test"});
+    ASSERT_THAT(ep_node, ::testing::NotNull());
+    EXPECT_THAT(ep_node->node(),
+                PropertyList(::testing::Contains(UintIs("in_flight_requests", 3u))));
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(UintIs("total_requests", 16u))));
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(BoolIs("cancelled", false))));
+  }
+
+  endpoint.OnCancelAllComplete();
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* ep_node = hierarchy.GetByPath({"endpoint_test"});
+    ASSERT_THAT(ep_node, ::testing::NotNull());
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(BoolIs("cancelled", true))));
+    auto* slot_0 = hierarchy.GetByPath({"endpoint_test", "event_history", "0"});
+    ASSERT_THAT(slot_0, ::testing::NotNull());
+    EXPECT_THAT(slot_0->node(),
+                PropertyList(::testing::Contains(StringIs("event", "CancelAll complete"))));
+  }
+
+  endpoint.SetCancelled(false);
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* ep_node = hierarchy.GetByPath({"endpoint_test"});
+    ASSERT_THAT(ep_node, ::testing::NotNull());
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(BoolIs("cancelled", false))));
+  }
+
+  // Re-initialization should clear pool callback and reset cancelled.
+  endpoint.Init(inspector.GetRoot(), "endpoint_test");
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* ep_node = hierarchy.GetByPath({"endpoint_test"});
+    ASSERT_THAT(ep_node, ::testing::NotNull());
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Contains(BoolIs("cancelled", false))));
+    EXPECT_THAT(ep_node->node(), PropertyList(::testing::Not(::testing::Contains(
+                                     UintIs("in_flight_requests", ::testing::_)))));
+  }
+}
+
+TEST_F(UsbInspectTest, TestFunctionDriverInspect) {
+  inspect::Inspector inspector;
+  inspect::Node driver_node = inspector.GetRoot().CreateChild("func_drv");
+  FunctionDriverInspect func;
+  func.Init(driver_node, "kAwaitingUsbConnection");
+
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(
+        node->node(),
+        PropertyList(::testing::UnorderedElementsAre(
+            BoolIs("online", false), StringIs("state", "kAwaitingUsbConnection"),
+            BoolIs("configured", false), BoolIs("unconfiguring", false),
+            UintIs("set_configured_true_count", 0u), UintIs("set_configured_false_count", 0u),
+            IntIs("last_unconfigure_duration_ns", 0))));
+    EXPECT_THAT(hierarchy.GetByPath({"func_drv", "event_history"}), ::testing::IsNull());
+  }
+
+  func.OnConfigured();
+  func.SetOnline(true);
+  func.SetState("kOnline");
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("online", true))));
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(StringIs("state", "kOnline"))));
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("configured", true))));
+    EXPECT_THAT(node->node(),
+                PropertyList(::testing::Contains(UintIs("set_configured_true_count", 1u))));
+    auto* slot_0 = hierarchy.GetByPath({"func_drv", "event_history", "0"});
+    ASSERT_THAT(slot_0, ::testing::NotNull());
+    EXPECT_THAT(slot_0->node(),
+                PropertyList(::testing::Contains(StringIs("event", "SetConfigured(true)"))));
+  }
+
+  func.OnUnconfigureStart();
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("unconfiguring", true))));
+    EXPECT_THAT(node->node(),
+                PropertyList(::testing::Contains(UintIs("set_configured_false_count", 1u))));
+  }
+
+  func.OnUnconfigureComplete();
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("configured", false))));
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("unconfiguring", false))));
+    const auto* dur =
+        node->node().get_property<inspect::IntPropertyValue>("last_unconfigure_duration_ns");
+    ASSERT_NE(dur, nullptr);
+    EXPECT_GE(dur->value(), 0);
+  }
+
+  func.OnUnconfigureStart();
+  func.OnUnconfigureComplete(/*immediate=*/true);
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(node->node(),
+                PropertyList(::testing::Contains(IntIs("last_unconfigure_duration_ns", 0))));
+  }
+
+  // Verify ResetUnconfiguring clears unconfiguring without altering duration or logging reply.
+  func.OnUnconfigureStart();
+  EXPECT_TRUE(func.is_unconfiguring());
+  func.ResetUnconfiguring();
+  EXPECT_FALSE(func.is_unconfiguring());
+  {
+    auto hierarchy = ReadInspect(inspector);
+    auto* node = hierarchy.GetByPath({"func_drv"});
+    ASSERT_THAT(node, ::testing::NotNull());
+    EXPECT_THAT(node->node(), PropertyList(::testing::Contains(BoolIs("unconfiguring", false))));
+  }
 }
 
 }  // namespace usb_inspect

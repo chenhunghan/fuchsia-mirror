@@ -232,12 +232,6 @@ system after it has signaled an out-of-memory (OOM) event. This option is
 only relevant when `kernel.oom.behavior` is set to `reboot`.
 )""")
 
-DEFINE_OPTION("kernel.mexec-force-high-ramdisk", bool, mexec_force_high_ramdisk, {false}, R"""(
-This option is intended for test use only. When set to `true` it forces the
-mexec syscall to place the ramdisk for the following kernel in high memory
-(64-bit address space, >= 4GiB offset).
-)""")
-
 DEFINE_OPTION("kernel.oom.enable", bool, oom_enabled, {true}, R"""(
 This option turns on out-of-memory (OOM) monitoring in the kernel, which takes action
 per `kernel.oom.behavior` when the PMM has less than `kernel.oom.outofmemory-mb` free memory,
@@ -520,8 +514,6 @@ When disabled, certain debugging-related syscalls will fail with
 * `zx_mtrace_control()`
 * `zx_object_get_property()` with `ZX_PROP_PROCESS_HW_TRACE_CONTEXT_ID`
 * `zx_process_write_memory()`
-* `zx_system_mexec()`
-* `zx_system_mexec_payload_get()`
 * `zx_thread_write_state()` (When using the `ZX_THREAD_STATE_DEBUG_REGS` kind.)
 * `zx_vmo_op_range()` with `ZX_VMO_OP_CACHE_INVALIDATE`
 )""")
@@ -561,6 +553,10 @@ DEFINE_OPTION("kernel.halt-on-panic", bool, halt_on_panic, {false}, R"""(
 If this option is set, the system will halt on a kernel panic instead
 of rebooting. To enable halt-on-panic, pass the kernel command line
 argument `kernel.halt-on-panic=true`.
+
+This option is ignored (i.e. the system will reboot) if the kernel panics while
+usermode has suspended the kernel's access to the debug serial port (see
+`zx_debug_suspend`), since the panic shell would be unreachable.
 
 Since the kernel can't reliably draw to a framebuffer when the GPU is enabled,
 the system will reboot by default if the kernel crashes or panics.
@@ -972,6 +968,8 @@ loader and early boot code with the debugger attached and then interrupt the
 spin interactively in the debugger to set breakpoints or step through boot code.
 )""")
 
+// TODO(https://fxbug.dev/568786401): Remove this option along with
+// platform_serial_prepare_for_suspend and platform_serial_wakeup_from_suspend.
 DEFINE_OPTION("kernel.allow_debug_uart_suspend", bool,
               allow_debug_uart_suspend, {false},
               R"""(

@@ -17,6 +17,11 @@ set -euo pipefail
 #    - missing //build/bazel/versioning:is_api_level_PLATFORM visibility in
 #      build/bazel/versioning/BUILD.bazel when calling legacy host-tool macros
 #      (go_binary_host_tool, py_binary_host_tool)
+#    - unwrapped external C/C++ or Rust rules (cc_library, cc_binary from
+#      @rules_cc//, or rust_library, rust_binary, rust_proc_macro, rust_test,
+#      rust_shared_library, rust_dylib_library from @rules_rust//) when
+#      Fuchsia-specific wrapper macros (fx_cc_library, fx_cc_binary, rustc_*)
+#      exist under //build/bazel/rules/
 #    - private or duplicate external rule load() statements (@...//.../private/...)
 #    and genrule commands added by the change that derive paths or arguments with
 #    shell command substitution ($$(dirname ...), $$(python3 -c ...), backticks) or
@@ -29,7 +34,7 @@ set -euo pipefail
 # 3. Flags drive-by edits to unrelated packages and shared Bazel rule/macro
 #    definitions (`build/bazel/rules/**`, `build/bazel/aspects/**`, etc.) outside
 #    PLANTER_TARGET_DIR / PLANTER_TARGET_DIRS (except centralized registration
-#    lists, direct parent BUILD.gn/BUILD.bazel test groups, and dependency
+#    lists, ancestor BUILD.gn/BUILD.bazel test groups/suites, and dependency
 #    packages the change migrates: a new BUILD.bazel referenced, transitively,
 #    from a target package's BUILD.bazel, and the in-tree build of
 #    third_party/rust_crates: its BUILD files, Cargo.toml/Cargo.lock and compat/
@@ -170,6 +175,39 @@ def referenced_shared_configs():
 allowed_gni_files, allowed_lint_pkgs = referenced_shared_configs()
 
 
+def references_in_scope_package_at_base(norm: str) -> bool:
+    """True when `norm` (or its package's BUILD.gn at `change_base`) references an in-scope migrated package."""
+    in_scope = list(target_dirs) + sorted(dependency_dirs)
+    if not in_scope:
+        return False
+    pkg_dir = os.path.dirname(norm).strip("/")
+    if pkg_dir.endswith("/meta"):
+        pkg_dir = os.path.dirname(pkg_dir).strip("/")
+    candidates = [norm]
+    if pkg_dir:
+        for alt in (os.path.join(pkg_dir, "BUILD.gn"), os.path.join(pkg_dir, "BUILD.bazel")):
+            if alt not in candidates:
+                candidates.append(alt)
+    texts = []
+    for cand in candidates:
+        base_txt = "\n".join(git_lines(["show", f"{change_base}:{cand}"]))
+        if base_txt:
+            texts.append(base_txt)
+        try:
+            with open(os.path.join(workdir, cand), encoding="utf-8") as f:
+                texts.append(f.read())
+        except OSError:
+            pass
+    if not texts:
+        return False
+    combined = "\n".join(texts)
+    for td in in_scope:
+        pat = r'(?:@gn_targets//(?:[^\s"\':]+/)?|//)' + re.escape(td) + r'(?=[:"/\s\'])'
+        if re.search(pat, combined):
+            return True
+    return False
+
+
 def is_allowed_scope(path: str) -> bool:
     if not target_dirs:
         return True
@@ -178,10 +216,12 @@ def is_allowed_scope(path: str) -> bool:
     for td in list(target_dirs) + sorted(dependency_dirs):
         if norm == td or norm.startswith(td + "/"):
             return True
-        if pkg_dir == os.path.dirname(td) and os.path.basename(norm) in ("BUILD.gn", "BUILD.bazel"):
+        if pkg_dir and td.startswith(pkg_dir + "/") and os.path.basename(norm) in ("BUILD.gn", "BUILD.bazel"):
             return True
     if is_shared_bazel_rule_file(norm):
-        return False
+        return references_in_scope_package_at_base(norm)
+    if (os.path.basename(norm) in ("BUILD.bazel", "BUILD", "BUILD.gn") or norm.endswith((".bzl", ".gni", ".cml"))) and references_in_scope_package_at_base(norm):
+        return True
     if norm in allowed_gni_files:
         return True
     if pkg_dir in allowed_lint_pkgs and os.path.basename(norm) in ("BUILD.gn", "BUILD.bazel"):
@@ -365,6 +405,76 @@ for rel_path, full_path in bazel_files:
 
         target_name, _ = kw_map.get("name", ("", 0))
 
+        # 0. Enforce Fuchsia-specific wrapper macros (fx_cc_*, rustc_*) instead of raw
+        #    @rules_cc// or @rules_rust// rules per the Fuchsia Bazel style guide.
+        UNWRAPPED_FUCHSIA_RULES = {
+            "cc_library": (
+                "fx_cc_library",
+                "//build/bazel/rules/cc:fx_cc_library.bzl",
+                "build/bazel/rules/cc/fx_cc_library.bzl",
+            ),
+            "cc_binary": (
+                "fx_cc_binary",
+                "//build/bazel/rules/cc:fx_cc_binary.bzl",
+                "build/bazel/rules/cc/fx_cc_binary.bzl",
+            ),
+            "rust_library": (
+                "rustc_library",
+                "//build/bazel/rules/rust:rustc_library.bzl",
+                "build/bazel/rules/rust/rustc_library.bzl",
+            ),
+            "rust_binary": (
+                "rustc_binary",
+                "//build/bazel/rules/rust:rustc_binary.bzl",
+                "build/bazel/rules/rust/rustc_binary.bzl",
+            ),
+            "rust_proc_macro": (
+                "rustc_proc_macro",
+                "//build/bazel/rules/rust:rustc_proc_macro.bzl",
+                "build/bazel/rules/rust/rustc_proc_macro.bzl",
+            ),
+            "rust_test": (
+                "rustc_test",
+                "//build/bazel/rules/rust:rustc_test.bzl",
+                "build/bazel/rules/rust/rustc_test.bzl",
+            ),
+            "rust_shared_library": (
+                "rustc_dylib",
+                "//build/bazel/rules/rust:rustc_dylib.bzl",
+                "build/bazel/rules/rust/rustc_dylib.bzl",
+            ),
+            "rust_dylib_library": (
+                "rustc_dylib",
+                "//build/bazel/rules/rust:rustc_dylib.bzl",
+                "build/bazel/rules/rust/rustc_dylib.bzl",
+            ),
+        }
+        if (
+            rule_name in UNWRAPPED_FUCHSIA_RULES
+            and not rel_path.startswith("build/bazel/")
+        ):
+            wrapper_rule, wrapper_bzl, wrapper_path = UNWRAPPED_FUCHSIA_RULES[rule_name]
+            if os.path.isfile(os.path.join(workdir, wrapper_path)):
+                pkg_d = os.path.dirname(rel_path).strip("/")
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "unwrapped_external_language_rule",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": getattr(node, "lineno", 1),
+                    "message": (
+                        f"Target '{target_name}' in '{rel_path}' uses unwrapped `{rule_name}()` "
+                        f"instead of the Fuchsia-specific wrapper `{wrapper_rule}()` from "
+                        f"`{wrapper_bzl}` (see "
+                        "https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/common#use_fuchsia-specific_wrappers)."
+                    ),
+                    "remediation": (
+                        f"Replace `load(..., \"{rule_name}\")` and `{rule_name}(...)` in "
+                        f"'{rel_path}' with `load(\"{wrapper_bzl}\", \"{wrapper_rule}\")` and "
+                        f"`{wrapper_rule}(...)`, then re-run `fx bazel2gn -d {pkg_d}` if dual-building."
+                    ),
+                })
+
         # 1. Redundant crate_name matching name (or name with '-' -> '_').
         # On rustc_binary, bazel2gn maps crate_name to GN output_name, so crate_name is intentional when output_name is needed.
         if "crate_name" in kw_map and target_name and rule_name != "rustc_binary":
@@ -385,7 +495,7 @@ for rel_path, full_path in bazel_files:
                     ),
                 })
 
-        # 2. Redundant version = "0.1.0" (or dummy negative version like "-1.1.0") on rustc_* targets
+        # 2. Redundant version = "0.1.0" (or placeholder negative version like "-1.1.0") on rustc_* targets
         if rule_name.startswith("rustc_") and "version" in kw_map:
             ver, lineno = kw_map["version"]
             if ver in ("0.1.0", "0.0.1") or ver.startswith("-"):
@@ -396,7 +506,7 @@ for rel_path, full_path in bazel_files:
                     "file": rel_path,
                     "line": lineno,
                     "message": (
-                        f"Target '{target_name}' ({rule_name}) specifies redundant or dummy `version = \"{ver}\"`, "
+                        f"Target '{target_name}' ({rule_name}) specifies redundant or placeholder `version = \"{ver}\"`, "
                         "which defaults to \"0.1.0\" in Fuchsia's Rust Bazel rules and is not emitted by bazel2gn."
                     ),
                     "remediation": (
@@ -622,6 +732,204 @@ for rel_path, full_path in bazel_files:
                         "no script or tool uses it anymore)."
                     ),
                 })
+
+    # 7. @bazel2gn:path_overwrite hygiene: reject multi-label overwrites, reject real
+    #    Bazel targets (including same-package fidl_library targets for missing
+    #    _rust_next bindings) used as placeholder stand-ins for unmigrated GN-only deps,
+    #    and require a separate # @bazel2gn:skip filegroup per overwritten path
+    #    using a unique name derived from the overwritten path.
+    src_lines = source.splitlines()
+    cur_gn_text = ""
+    try:
+        with open(os.path.join(workdir, pkg_dir, "BUILD.gn"), encoding="utf-8") as gf:
+            cur_gn_text = gf.read()
+    except OSError:
+        pass
+
+    local_fgs = {}
+    for stmt in tree.body:
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "filegroup"
+        ):
+            continue
+        fg_name = ""
+        has_srcs = False
+        for kw in stmt.value.keywords:
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                fg_name = kw.value.value
+            elif kw.arg == "srcs":
+                has_srcs = True
+        if fg_name and not has_srcs:
+            fg_skipped = False
+            idx = stmt.lineno - 2
+            while idx >= 0:
+                s_line = src_lines[idx].strip()
+                if not s_line:
+                    idx -= 1
+                    continue
+                if s_line.startswith("#"):
+                    if "@bazel2gn:skip" in s_line:
+                        fg_skipped = True
+                    idx -= 1
+                    continue
+                break
+            if not fg_skipped and 0 < stmt.lineno <= len(src_lines) and "@bazel2gn:skip" in src_lines[stmt.lineno - 1]:
+                fg_skipped = True
+            local_fgs[fg_name] = (stmt.lineno, fg_skipped)
+
+    for fg_name, (fg_line, fg_skipped) in local_fgs.items():
+        if not fg_skipped:
+            findings.append({
+                "source": "bazel_minimality",
+                "category": "path_overwrite_placeholder_hygiene",
+                "severity": "error",
+                "file": rel_path,
+                "line": fg_line,
+                "message": (
+                    f"Placeholder target `filegroup(name = \"{fg_name}\")` in '{rel_path}' lacks `# @bazel2gn:skip`."
+                ),
+                "remediation": (
+                    f"Add `# @bazel2gn:skip` directly above `filegroup(name = \"{fg_name}\")` in '{rel_path}' "
+                    f"and re-run `fx bazel2gn -d {pkg_dir}`."
+                ),
+            })
+        if fg_name.lower() in ("bazel2gn_placeholder", "placeholder"):
+            findings.append({
+                "source": "bazel_minimality",
+                "category": "path_overwrite_placeholder_hygiene",
+                "severity": "error",
+                "file": rel_path,
+                "line": fg_line,
+                "message": (
+                    f"Placeholder `filegroup(name = \"{fg_name}\")` in '{rel_path}' uses a generic name instead of "
+                    "a unique name derived from the overwritten GN dependency path."
+                ),
+                "remediation": (
+                    "Replace generic placeholder filegroups with one `# @bazel2gn:skip` `filegroup(name = \"<unique_name>\")` "
+                    "per overwritten dependency, using a unique name derived from the overwritten path (e.g., "
+                    "`board_structured_config`, `fuchsia.driver.framework_rust_next`, `sdk_lib_driver_runtime_rust_fidl`), "
+                    f"and re-run `fx bazel2gn -d {pkg_dir}`."
+                ),
+            })
+
+    def derive_fg_name(gn_label: str) -> str:
+        s = gn_label.strip().lstrip("/")
+        if s.startswith(":"):
+            return s[1:]
+        if ":" in s:
+            _, t = s.split(":", 1)
+            return t
+        return s.replace("/", "_")
+
+    for lineno, line_txt in enumerate(src_lines, 1):
+        po_m = re.match(r'^\s*"([^"]+)"\s*,\s*#\s*@bazel2gn:path_overwrite:(.+)$', line_txt)
+        if not po_m:
+            continue
+        bz_label = po_m.group(1).strip()
+        gn_spec = po_m.group(2).strip()
+        if (
+            "$" in gn_spec
+            or bz_label.startswith(("@", "//third_party/", "//:", "//src/zircon/lib/zircon"))
+            or "//third_party/" in gn_spec
+        ):
+            continue
+        gn_labels = [tok.strip().strip('"') for tok in gn_spec.split('", "') if tok.strip().strip('"')]
+        if len(gn_labels) > 1:
+            suggested = ", ".join(
+                f'`":{derive_fg_name(gl)}",  # @bazel2gn:path_overwrite:{gl}`' for gl in gn_labels
+            )
+            findings.append({
+                "source": "bazel_minimality",
+                "category": "path_overwrite_placeholder_hygiene",
+                "severity": "error",
+                "file": rel_path,
+                "line": lineno,
+                "message": (
+                    f"Line {lineno} of '{rel_path}' packs multiple GN labels into a single `# @bazel2gn:path_overwrite:` "
+                    f"comment (`{gn_spec}`). Each overwritten dependency must have its own list entry and its own "
+                    "`# @bazel2gn:skip` `filegroup` with a unique name derived from the overwritten path."
+                ),
+                "remediation": (
+                    f"Split line {lineno} into one entry per overwritten path ({suggested}), define a matching "
+                    f"`# @bazel2gn:skip` `filegroup(name = \"...\")` for each in '{rel_path}', and re-run "
+                    f"`fx bazel2gn -d {pkg_dir}`."
+                ),
+            })
+            continue
+        if not gn_labels:
+            continue
+        gl = gn_labels[0]
+        if bz_label.startswith("//"):
+            bz_pkg, has_colon, bz_target = bz_label[2:].partition(":")
+            bz_pkg = bz_pkg.strip("/")
+            bz_target = bz_target or os.path.basename(bz_pkg)
+            # Legitimate real-target overwrites:
+            # 1) Explicit target in the same package when GN uses the package-default label //<pkg>
+            #    (e.g. "//src/lib/diagnostics/inspect/rust:fuchsia-inspect" for "//src/lib/diagnostics/inspect/rust")
+            # 2) Same-package C/C++ library for a GN-only *_static wrapper (not a missing FIDL *_rust_next binding)
+            # 3) Package-local forwarding group("...") in BUILD.gn that forwards to //<bz_pkg>
+            is_missing_fidl_binding = bool(re.search(r":.+_(?:rust_next|rust|cpp|hlcpp|banjo)\b", gl))
+            related = False
+            if gl == f"//{bz_pkg}" and has_colon:
+                related = True
+            elif gl.startswith(f"//{bz_pkg}:") and not is_missing_fidl_binding:
+                related = True
+            elif gl.startswith(":"):
+                gn_local = gl[1:]
+                if cur_gn_text and re.search(
+                    r'\bgroup\(\s*"' + re.escape(gn_local) + r'"\s*\)\s*\{[^}]*//' + re.escape(bz_pkg),
+                    cur_gn_text,
+                    re.S,
+                ):
+                    related = True
+            if not related:
+                sug_name = derive_fg_name(gl)
+                findings.append({
+                    "source": "bazel_minimality",
+                    "category": "unrelated_path_overwrite_target",
+                    "severity": "error",
+                    "file": rel_path,
+                    "line": lineno,
+                    "message": (
+                        f"Line {lineno} of '{rel_path}' uses real Bazel target `\"{bz_label}\"` as a stand-in for "
+                        f"`# @bazel2gn:path_overwrite:{gl}`. Unmigrated dependencies in `@bazel2gn:path_overwrite` "
+                        "(including missing FIDL bindings such as `*_rust_next`) must use a local `# @bazel2gn:skip` "
+                        "`filegroup` with a unique name derived from the overwritten path."
+                    ),
+                    "remediation": (
+                        f"Replace `\"{bz_label}\"` on line {lineno} of '{rel_path}' with `\":{sug_name}\"` "
+                        f"(`\":{sug_name}\",  # @bazel2gn:path_overwrite:{gl}`), define `# @bazel2gn:skip` "
+                        f"`filegroup(name = \"{sug_name}\")` in '{rel_path}', and re-run `fx bazel2gn -d {pkg_dir}`."
+                    ),
+                })
+        elif bz_label.startswith(":"):
+            fg_ref = bz_label[1:]
+            if fg_ref in local_fgs:
+                ctx_start = max(0, lineno - 20)
+                ctx_comment = "\n".join(
+                    s for s in src_lines[ctx_start:lineno] if "#" in s
+                ).lower()
+                if not any(w in ctx_comment for w in ("placeholder", "filegroup", "todo", "remove")):
+                    findings.append({
+                        "source": "bazel_minimality",
+                        "category": "path_overwrite_placeholder_hygiene",
+                        "severity": "error",
+                        "file": rel_path,
+                        "line": lineno,
+                        "message": (
+                            f"Placeholder overwrite `\"{bz_label}\"` on line {lineno} of '{rel_path}' lacks a comment "
+                            "explaining why the placeholder filegroups are needed and that they should be removed once "
+                            "the real Bazel targets exist."
+                        ),
+                        "remediation": (
+                            f"Add a comment (with `TODO(...)`) above the placeholder overwrites in '{rel_path}' "
+                            "explaining which GN-only targets lack a Bazel build and noting that the placeholder "
+                            "filegroups should be removed once they are available."
+                        ),
+                    })
 
 
 

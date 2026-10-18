@@ -11,8 +11,9 @@
 #            //<dir> (gn_secondary_tree). A change that modifies no file versus
 #            its parent migrates nothing: INFO instead of subject findings.
 #   Test: footers: `fx bazel` commands need --config=..., Bazel labels start
-#            with @//, no redundant //a/b:b labels, bazel2gn verification is
-#            the single line `Test: fx bazel2gn`, listed last.
+#            with @//, no redundant //a/b:b labels, shac/bazel2gn verification is
+#            the single line `Test: fx host-tool shac check`, listed last.
+#            TODO(https://fxbug.dev/538640644): Replace with fx lint once it runs these shac checks.
 # Only runs when HEAD is the task's own commit (PLANTER_CHANGE_BASE != HEAD).
 
 WORKDIR="${PLANTER_WORKDIR:-.}"
@@ -20,7 +21,7 @@ TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 BASE="${PLANTER_CHANGE_BASE:-HEAD}"
 
 python3 - "$WORKDIR" "$TARGET_DIR" "$BASE" <<'PYEOF'
-import collections, json, re, subprocess, sys
+import collections, json, os, re, subprocess, sys
 
 workdir, target_dir, base = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -119,10 +120,15 @@ if head and base_rev and head != base_rev:
                 add("test_footer_redundant_label", ln,
                     f"`Test:` footer label `//{pkg}:{name}` repeats the package name.",
                     f"Write `//{pkg}` instead of `//{pkg}:{name}`.")
-        if re.search(r"\bfx bazel2gn\s+\S", cmd) or re.search(r"verify_bazel2gn", cmd):
+        # TODO(https://fxbug.dev/538640644): Replace with fx lint once it runs these shac checks.
+        if (
+            re.search(r"\bfx bazel2gn\b", cmd)
+            or re.search(r"verify_bazel2gn", cmd)
+            or (re.search(r"\bshac\s+check\b", cmd) and cmd != "fx host-tool shac check")
+        ):
             add("test_footer_bazel2gn_form", ln,
-                f"`Test:` footer `{cmd}` verifies bazel2gn in a narrower or indirect form.",
-                "Use the single line `Test: fx host-tool shac check --only verify_bazel2gn` (covers affected bazel2gn targets).")
+                f"`Test:` footer `{cmd}` verifies bazel2gn/shac in a narrower or indirect form.",
+                "Use the single line `Test: fx host-tool shac check` (runs `verify_bazel2gn` and all other shac checks).")
         if re.search(r"\bfx bazel build\b.*:all\b", cmd):
             add("test_footer_build_all_not_test", ln,
                 f"`Test:` footer `{cmd}` builds `:all` instead of building or running the migrated test target.",
@@ -136,7 +142,7 @@ if head and base_rev and head != base_rev:
             with open(f"{workdir}/{d}/BUILD.bazel") as fh:
                 own = fh.read()
             has_tests |= bool(re.search(r'with_host_unit_tests\s*=\s*True|with_unit_tests\s*=\s*"(host|both|fuchsia)"'
-                                        r'|^\s*(host_\w*test|rustc_test|fx_test|test_suite)\(', own, re.M))
+                                        r'|^\s*(host_\w*test|rustc_test|fx_test|fx_unittest_package|test_suite)\(', own, re.M))
         except OSError:
             pass
         parts = d.split("/")
@@ -169,7 +175,7 @@ if head and base_rev and head != base_rev:
             "invent one: say in the summary that the developer must choose or define the `test_suite()` (possibly "
             "consulting the Build team).", severity="info")
     # Body: changes not specific to the migrated targets must be described.
-    body = "\n".join(l for l in lines[1:] if not re.match(r"^(Test|Bug|Fixed|Change-Id|Multiply|Cq-[\w-]+):", l))
+    body = "\n".join(l for l in lines[1:] if not re.match(r"^(Test|Bug|Fixed|Bazel-Migration-Target|Skip-Readme-Check|TAG|Change-Id|Multiply|Cq-[\w-]+):", l))
     in_dirs = lambda f: any(f == d or f.startswith(d + "/") for d in dirs)
     for f in changed:
         if in_dirs(f) or not (f.endswith(".bzl") or f.rsplit("/", 1)[-1] == "MODULE.bazel"):
@@ -221,10 +227,165 @@ if head and base_rev and head != base_rev:
                     f"Refer to the target by name and give the crate name separately, e.g. target \"{tgt}\" "
                     f"(crate name \"{crate}\"), and say which attribute generates \"{tgt}_test\".")
                 break
-    b2g = [ln for ln, l in test_lines if re.search(r"\bfx bazel2gn\b|verify_bazel2gn", l)]
+    b2g = [ln for ln, l in test_lines if re.search(r"\bfx bazel2gn\b|verify_bazel2gn|\bshac\s+check\b", l)]
     if b2g and test_lines and b2g[-1] != test_lines[-1][0]:
         add("test_footer_bazel2gn_not_last", b2g[-1],
-            "The bazel2gn verification `Test:` line is not last.",
-            "Group build/test commands together and put `Test: fx bazel2gn` last.")
+            "The shac/bazel2gn verification `Test:` line is not last.",
+            "Group build/test commands together and put `Test: fx host-tool shac check` last.")
+    # Bazel-Migration-Target: footers (required for every non-empty migration commit).
+    is_empty = not changed and not git("status", "--porcelain", "--ignore-submodules=all")
+    bmt_lines = [(i + 1, l) for i, l in enumerate(lines) if re.match(r"^Bazel-Migration-Target\s*:", l)]
+    migrated_targets = []
+    excluded_bmt = {}
+    helper_rules = {"package", "exports_files", "alias", "config_setting",
+                    "fx_packaged_binary", "fx_component_manifest", "fx_test_component",
+                    "fx_unittest_component"}
+    ut_re = r'^\s*(with_unit_tests\s*=\s*"(host|both|fuchsia)"|with_unit_tests\s*=\s*True|with_host_unit_tests\s*=\s*True)'
+    for d in dirs:
+        try:
+            with open(f"{workdir}/{d}/BUILD.bazel") as fh:
+                btxt = fh.read()
+        except OSError:
+            continue
+        base_btxt = git("show", f"{base_rev}:{d}/BUILD.bazel")
+        base_gtxt = git("show", f"{base_rev}:{d}/BUILD.gn")
+        base_bazel_names = set()
+        for m in re.finditer(r"^([A-Za-z_]\w*)\((.*?)^\)", base_btxt, re.M | re.S):
+            n = re.search(r'^\s*name\s*=\s*"([^"]+)"', m.group(2), re.M)
+            if n:
+                base_bazel_names.add(n.group(1))
+                if re.search(ut_re, m.group(2), re.M):
+                    base_bazel_names.add(f"{n.group(1)}_test")
+        base_gn_names = set(re.findall(r'^\s*[A-Za-z_]\w*\(\s*"([^"]+)"\s*\)', base_gtxt, re.M))
+        blocks = list(re.finditer(r"^([A-Za-z_]\w*)\((.*?)^\)", btxt, re.M | re.S))
+        explicit_names = set()
+        test_wrapped_pkgs = set()
+        wrapped_bins = set()
+        for m in blocks:
+            rule, blk = m.group(1), m.group(2)
+            n = re.search(r'^\s*name\s*=\s*"([^"]+)"', blk, re.M)
+            if n:
+                explicit_names.add(n.group(1))
+            if rule == "fx_test":
+                p = re.search(r'^\s*package\s*=\s*":([^"]+)"', blk, re.M)
+                if p:
+                    test_wrapped_pkgs.add(p.group(1))
+            if rule in ("host_test", "fx_packaged_binary", "fx_unittest_component"):
+                b = re.search(r'^\s*binary\s*=\s*":([^"]+)"', blk, re.M)
+                if b and b.group(1) not in base_gn_names:
+                    wrapped_bins.add(b.group(1))
+            if rule == "fx_unittest_package":
+                u = re.search(r'unit_tests\s*=\s*\[(.*?)\]', blk, re.S)
+                if u:
+                    for b in re.findall(r'":([^"]+)"', u.group(1)):
+                        if b not in base_gn_names:
+                            wrapped_bins.add(b)
+        all_dir_targets, new_dir_targets = [], []
+        for m in blocks:
+            rule, blk = m.group(1), m.group(2)
+            n = re.search(r'^\s*name\s*=\s*"([^"]+)"', blk, re.M)
+            if not n:
+                continue
+            tname = n.group(1)
+            lbl = f"//{d}:{tname}"
+            if rule in helper_rules or (rule == "fx_package" and tname in test_wrapped_pkgs) or tname in wrapped_bins:
+                excluded_bmt[lbl] = "is an internal Bazel packaging/test-wrapper helper target, not a migrated GN target"
+                continue
+            all_dir_targets.append(lbl)
+            if tname not in base_bazel_names:
+                new_dir_targets.append(lbl)
+            if re.search(ut_re, blk, re.M) and f"{tname}_test" not in explicit_names:
+                tlbl = f"//{d}:{tname}_test"
+                all_dir_targets.append(tlbl)
+                if f"{tname}_test" not in base_bazel_names:
+                    new_dir_targets.append(tlbl)
+        if new_dir_targets:
+            for lbl in all_dir_targets:
+                if lbl not in new_dir_targets:
+                    excluded_bmt[lbl] = "already existed in `BUILD.bazel` before this commit"
+            migrated_targets.extend(new_dir_targets)
+        else:
+            migrated_targets.extend(all_dir_targets)
+    if not is_empty:
+        migrated_targets = list(dict.fromkeys(
+            t if len(f"Bazel-Migration-Target: {t}") <= 72 else t.split(":", 1)[0]
+            for t in migrated_targets
+            if len(f"Bazel-Migration-Target: {t.split(':', 1)[0]}") <= 72
+        ))
+        footer_ln = test_lines[-1][0] if test_lines else max(1, len(lines))
+        example_bmt = ", ".join(f"`Bazel-Migration-Target: {t}`" for t in (migrated_targets or [f"//{first}"]))
+        if not bmt_lines:
+            add("missing_bazel_migration_target_footer", footer_ln,
+                "Commit message is missing `Bazel-Migration-Target:` footer(s) recording the migrated target label(s).",
+                "Add `Bazel-Migration-Target:` footer line(s) (each line <= 72 chars total; use `//<dir>` when `//<dir>:<target>` would exceed 72 chars) in the single "
+                "contiguous footer block at the bottom of the commit message (after `Test:` and before `TAG:`/"
+                f"`Change-Id:`, with no blank lines between footers and no line wrapping), e.g. {example_bmt}.")
+        for ln, l in bmt_lines:
+            val = l.split(":", 1)[1].strip()
+            canon_val = val if ":" in val else f"{val}:{val.rsplit('/', 1)[-1]}"
+            wrapped = ln < len(lines) and bool(lines[ln].strip()) and not re.match(r"^[A-Za-z0-9\-]+\s*:", lines[ln])
+            if len(l) > 72:
+                short_pkg = val.split(":", 1)[0]
+                add("bazel_migration_target_line_too_long", ln,
+                    f"`Bazel-Migration-Target:` footer `{l}` is {len(l)} characters, exceeding the 72-character upload limit.",
+                    f"Replace `{l}` with `Bazel-Migration-Target: {short_pkg}` (or omit it if another `Bazel-Migration-Target:` line <= 72 chars is already present) so every `Bazel-Migration-Target:` line is <= 72 characters.",
+                    severity="error")
+            elif not re.match(r"^//[\w./\-]+(:[\w.\-]+)?$", val) or wrapped:
+                add("bazel_migration_target_footer_format", ln,
+                    f"`Bazel-Migration-Target:` footer `{l}` must specify a single canonical `//<dir>:<target>` "
+                    "label on one unwrapped line (without a leading `@`).",
+                    f"Write one unwrapped line (<= 72 chars) per migrated target, e.g. {example_bmt}.")
+            elif ":" in val and canon_val in excluded_bmt:
+                add("bazel_migration_target_not_migrated", ln,
+                    f"`Bazel-Migration-Target:` footer `{l}` names `{val}`, which {excluded_bmt[canon_val]}.",
+                    f"List only targets migrated from GN in this commit, e.g. {example_bmt}.")
+        skip_readme_lines = [(i + 1, l) for i, l in enumerate(lines) if re.match(r"^Skip-Readme-Check\s*:", l)]
+        has_valid_skip_readme = False
+        for ln, l in skip_readme_lines:
+            if len(l) > 72:
+                add("skip_readme_check_line_too_long", ln,
+                    f"`Skip-Readme-Check:` footer `{l}` is {len(l)} characters, exceeding the 72-character upload limit.",
+                    "Shorten it to `Skip-Readme-Check: No version change, Bazel build files only.` (<= 72 characters).",
+                    severity="error")
+            elif l.split(":", 1)[1].strip():
+                has_valid_skip_readme = True
+            else:
+                add("skip_readme_check_empty_reason", ln,
+                    "The `Skip-Readme-Check:` footer must be followed by a non-empty reason.",
+                    "Write `Skip-Readme-Check: No version change, Bazel build files only.` in the contiguous footer block at the bottom of the commit message.",
+                    severity="error")
+        all_changed = set(changed) | {f for f in git("diff", "--name-only", base_rev).splitlines() if f}
+        missing_readmes = set()
+        for f in sorted(all_changed):
+            if not f.startswith("third_party/") or f.startswith("third_party/rust_crates/"):
+                continue
+            parts = f.split("/")
+            for depth in range(len(parts) - 1, 1, -1):
+                cand = "/".join(parts[:depth])
+                readme = f"{cand}/README.fuchsia"
+                if os.path.isfile(f"{workdir}/{readme}"):
+                    if f != readme and readme not in all_changed:
+                        missing_readmes.add((cand, readme))
+                    break
+        if missing_readmes and not has_valid_skip_readme:
+            cand, readme = sorted(missing_readmes)[0]
+            add("missing_skip_readme_check_footer", footer_ln,
+                f"Files under `{cand}` were modified without modifying `{readme}`, which fails the CQ `third_party_readme_update` shac check unless waived by a `Skip-Readme-Check:` footer.",
+                "Because GN-to-Bazel migrations must not modify `README.fuchsia` (`build_only_scope`), add `Skip-Readme-Check: No version change, Bazel build files only.` to the contiguous footer block at the bottom of the commit message (before `TAG:`/`Change-Id:`).",
+                severity="error")
+        nonempty_idxs = [i for i, l in enumerate(lines) if l.strip()]
+        if nonempty_idxs:
+            final_start = nonempty_idxs[-1]
+            while final_start > 0 and lines[final_start - 1].strip():
+                final_start -= 1
+            for ln, l in bmt_lines + test_lines + skip_readme_lines:
+                if ln - 1 < final_start:
+                    add("footer_block_not_contiguous", ln,
+                        f"Footer `{l}` is separated from the final footer block by a blank line, so Gerrit will not "
+                        "index it as a commit footer (breaking `hasfooter:Bazel-Migration-Target` queries).",
+                        "Group all footers (`Bug:`/`Fixed:`, `Skip-Readme-Check:`, `Test:`, `Bazel-Migration-Target:`, `TAG:`, "
+                        "`Change-Id:`) into a single contiguous block at the very bottom of the commit message with "
+                        "no blank lines between them.")
+                    break
 print(json.dumps(findings, indent=2))
 PYEOF

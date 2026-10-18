@@ -41,7 +41,6 @@ use starnix_core::execution::{
     create_init_process, create_system_task, execute_task_with_prerun_result,
 };
 use starnix_core::fs::fuchsia::new_remotefs_in_root;
-use starnix_core::fs::sysfs::init_power_residency_device;
 use starnix_core::fs::tmpfs::TmpFs;
 use starnix_core::security;
 use starnix_core::task::container_namespace::ContainerNamespace;
@@ -53,12 +52,9 @@ use starnix_logging::{
     CATEGORY_STARNIX, NAME_CREATE_CONTAINER, log_debug, log_error, log_info, log_warn,
 };
 use starnix_modules::{
-    init_common_devices, register_common_file_systems, register_common_syscalls,
+    LayeredFsBuilder, LayeredFsMounts, OverlayStack, init_common_devices,
+    register_common_file_systems, register_common_syscalls,
 };
-use starnix_modules_layeredfs::{LayeredFsBuilder, LayeredFsMounts};
-use starnix_modules_magma::get_magma_params;
-use starnix_modules_overlayfs::OverlayStack;
-use starnix_modules_rtc::rtc_device_init;
 
 use starnix_task_command::TaskCommand;
 use starnix_uapi::errors::{ENOENT, SourceContext};
@@ -237,6 +233,23 @@ impl ContainerStartInfo {
             runtime_dir: start_info.runtime_dir,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        features: Vec<String>,
+        modules: Vec<String>,
+        config: ContainerStructuredConfig,
+    ) -> Self {
+        Self {
+            program: ContainerProgram { features, modules, ..Default::default() },
+            config,
+            outgoing_dir: None,
+            container_namespace: ContainerNamespace::new(),
+            runtime_dir: None,
+            break_on_start: None,
+            component_instance: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -259,6 +272,10 @@ pub struct ContainerProgram {
     /// The features enabled for this container.
     #[serde(default)]
     pub features: Vec<String>,
+
+    /// The modules enabled for this container.
+    #[serde(default)]
+    pub modules: Vec<String>,
 
     /// The resource limits to apply to this container.
     #[serde(default)]
@@ -585,6 +602,27 @@ async fn get_serial_number() -> Result<String, Error> {
         .map_err(|status| anyhow!("Failed to get serial number: {:?}", status))
 }
 
+const ANDROID_HARDWARE_DDR_BOOTLOADER_FILE: &str = "androidboot.hardware.ddr";
+
+async fn get_bootloader_file_hardware_ddr() -> Result<Option<String>, Error> {
+    let items =
+        connect_to_protocol::<fboot::ItemsMarker>().context("Failed to connect to boot items")?;
+
+    let Some(vmo) = items
+        .get_bootloader_file(ANDROID_HARDWARE_DDR_BOOTLOADER_FILE)
+        .await
+        .context("FIDL: Failed to get bootloader file")?
+    else {
+        return Ok(None);
+    };
+
+    // `fuchsia.boot.Items` sets ZX_PROP_VMO_CONTENT_SIZE to the file's content size.
+    let size = vmo.get_content_size().context("Failed to get bootloader file content size")?;
+    let bytes = vmo.read_to_vec(0, size).context("Failed to read bootloader file vmo")?;
+
+    Ok(Some(String::from_utf8(bytes).context("Bootloader file is not valid UTF-8")?))
+}
+
 async fn create_container(
     start_info: &mut ContainerStartInfo,
     kernel_extra_features: &[String],
@@ -609,14 +647,15 @@ async fn create_container(
             None
         }
     };
-    let mut features = parse_features(&start_info, kernel_extra_features)?;
+    let (mut features, modules) = parse_features(&start_info, kernel_extra_features)?;
 
-    log_debug!("Creating container with {:#?}", features);
+    log_debug!("Creating container with {features:#?}, {modules:#?}");
     let mut kernel_cmdline = BString::from(start_info.program.kernel_cmdline.as_bytes());
     let mut devicetree_bootreason = None;
 
     let mut bootargs_has_serialno = false;
     let mut bootargs_has_verifiedbootstate = false;
+    let mut bootargs_has_hardware_ddr = false;
     // TODO(https://fxbug.dev/526770691): Newer versions of Android replace the 'androidboot.*'
     // kernel parameters with 'bootconfig'. We should expose this to the container to avoid having
     // to manage 'androidboot.*' parameters here.
@@ -634,6 +673,9 @@ async fn create_container(
                         }
                         if item.starts_with("androidboot.verifiedbootstate") {
                             bootargs_has_verifiedbootstate = true;
+                        }
+                        if item.starts_with("androidboot.hardware.ddr") {
+                            bootargs_has_hardware_ddr = true;
                         }
                         if item.starts_with("androidboot.bootreason") && features.android_bootreason
                         {
@@ -671,6 +713,18 @@ async fn create_container(
         if !bootargs_has_verifiedbootstate {
             kernel_cmdline.extend(b" androidboot.verifiedbootstate=orange");
         }
+        if !bootargs_has_hardware_ddr {
+            match get_bootloader_file_hardware_ddr().await {
+                Ok(Some(ddr)) => {
+                    kernel_cmdline.extend(b" androidboot.hardware.ddr=");
+                    kernel_cmdline.extend(ddr.bytes());
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log_warn!("Could not get androidboot.hardware.ddr boot item: {err:?}");
+                }
+            }
+        }
     }
     if features.android_bootreason {
         let bootloader_file_bootreason = match get_bootloader_file_bootreason().await {
@@ -707,9 +761,8 @@ async fn create_container(
             }
         }
     }
-    if let Some(supported_vendors) = &features.magma_supported_vendors {
+    if let Some(params) = modules.extra_cmdline_params()? {
         kernel_cmdline.extend(b" ");
-        let params = get_magma_params(supported_vendors);
         kernel_cmdline.extend(&*params);
     }
 
@@ -728,6 +781,7 @@ async fn create_container(
     let kernel_node = node.create_child("kernel");
     kernel_node.record_int("created_at", zx::MonotonicInstant::get().into_nanos());
     features.record_inspect(&kernel_node);
+    modules.record_inspect(&kernel_node);
 
     let security_state = security::kernel_init_security(
         features.selinux.enabled,
@@ -792,14 +846,9 @@ async fn create_container(
         log_warn!("Suspend/Resume manager initialization failed: ({e:?})");
     }
 
-    // Real Time clock is present in all configuration.
-    log_info!("Initializing RTC device.");
-    rtc_device_init(&system_task).context("in starnix_kernel_runner, while initializing RTC")?;
-
     // Register common devices and add them in sysfs and devtmpfs.
     log_info!("Registering devices and filesystems.");
     init_common_devices(&kernel)?;
-    init_power_residency_device(&kernel);
     register_common_file_systems(&kernel);
 
     register_common_syscalls(&kernel);
@@ -808,10 +857,12 @@ async fn create_container(
     mount_filesystems(&system_task, start_info, &pkg_dir_proxy)
         .source_context("mounting filesystems")?;
 
-    // Run all common features that were specified in the .cml.
+    // Run all common features and modules that were specified in the .cml.
     {
         log_info!("Running container features.");
         run_container_features(&kernel, &features)?;
+        log_info!("Initializing container modules.");
+        modules.init_modules(&kernel)?;
     }
 
     log_info!("Initializing remote block devices.");
@@ -980,19 +1031,16 @@ fn create_fs_context(
     Ok((FsContext::new(Namespace::new_with_flags(root_fs, root.flags)), feature_mounts))
 }
 
-fn parse_rlimits(rlimits: &[String]) -> Result<Vec<(Resource, u64)>, Error> {
+pub(crate) fn parse_rlimits(rlimits: &[String]) -> Result<Vec<(Resource, u64)>, Error> {
     let mut res = Vec::new();
 
     for rlimit in rlimits {
         let (key, value) =
             rlimit.split_once('=').ok_or_else(|| anyhow!("Invalid rlimit: {rlimit}"))?;
-        let value = value.parse::<u64>()?;
-        let kv = match key {
-            "RLIMIT_NOFILE" => (Resource::NOFILE, value),
-            "RLIMIT_RTPRIO" => (Resource::RTPRIO, value),
-            _ => bail!("Unknown rlimit: {key}"),
-        };
-        res.push(kv);
+        let value = value.parse::<u64>().with_context(|| format!("Invalid rlimit: {rlimit}"))?;
+        let name = key.strip_prefix("RLIMIT_").ok_or_else(|| anyhow!("Unknown rlimit: {key}"))?;
+        let resource = name.parse::<Resource>().map_err(|_| anyhow!("Unknown rlimit: {key}"))?;
+        res.push((resource, value));
     }
 
     Ok(res)
@@ -1008,8 +1056,11 @@ fn mount_filesystems(
         start_info.program.mounts.iter().chain(start_info.config.additional_mounts.iter());
     let _ = mounts_iter.next();
     for mount_spec in mounts_iter {
-        let action = MountAction::from_spec(system_task, pkg_dir_proxy, mount_spec)
-            .with_source_context(|| format!("creating filesystem from spec: {}", mount_spec))?;
+        let Some(action) = MountAction::from_spec(system_task, pkg_dir_proxy, mount_spec)
+            .with_source_context(|| format!("creating filesystem from spec: {}", mount_spec))?
+        else {
+            continue;
+        };
         let mount_point = system_task
             .lookup_path_from_root(action.path.as_ref())
             .with_source_context(|| format!("lookup path from root: {}", action.path))?;
@@ -1137,7 +1188,7 @@ async fn serve_task_provider(mut job_requests: TaskProviderRequestStream) -> Res
 
 #[cfg(test)]
 mod test {
-    use super::wait_for_init_file;
+    use super::{parse_rlimits, wait_for_init_file};
 
     use futures::{SinkExt, StreamExt};
     use starnix_core::testing::spawn_kernel_and_run;
@@ -1145,8 +1196,27 @@ mod test {
     use starnix_uapi::CLONE_FS;
     use starnix_uapi::file_mode::FileMode;
     use starnix_uapi::open_flags::OpenFlags;
+    use starnix_uapi::resource_limits::Resource;
     use starnix_uapi::signals::SIGCHLD;
     use starnix_uapi::vfs::ResolveFlags;
+
+    #[fuchsia::test]
+    fn test_parse_rlimits() {
+        let rlimits = vec![
+            "RLIMIT_NOFILE=131072".to_string(),
+            "RLIMIT_RTPRIO=20".to_string(),
+            "RLIMIT_MEMLOCK=65536".to_string(),
+        ];
+        assert_eq!(
+            parse_rlimits(&rlimits).expect("parse_rlimits"),
+            vec![(Resource::NOFILE, 131072), (Resource::RTPRIO, 20), (Resource::MEMLOCK, 65536),]
+        );
+
+        assert!(parse_rlimits(&["RLIMIT_NOFILE".to_string()]).is_err());
+        assert!(parse_rlimits(&["NOFILE=1024".to_string()]).is_err());
+        assert!(parse_rlimits(&["RLIMIT_UNKNOWN=100".to_string()]).is_err());
+        assert!(parse_rlimits(&["RLIMIT_NOFILE=not_a_number".to_string()]).is_err());
+    }
 
     #[fuchsia::test]
     async fn test_init_file_already_exists() {

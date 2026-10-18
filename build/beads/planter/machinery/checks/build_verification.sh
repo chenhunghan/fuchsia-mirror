@@ -23,13 +23,21 @@ set -uo pipefail
 #                              GN test after a dependency label or edge changed)
 #                              that Bazel builds and the default `fx build` miss.
 #                              Skipped when gn_build fails.
-#   3. verify_bazel2gn:        `fx host-tool shac check --only verify_bazel2gn
-#                              <changed dirs' BUILD.bazel/BUILD.gn>`, which fails
-#                              if a BUILD.gn has drifted from what `fx bazel2gn`
-#                              generates from BUILD.bazel.
-#   4. bazel_build_fuchsia:    `fx bazel build --config=fuchsia_platform //<dir>:all`
+#   3. shac_check:             `fx host-tool shac check`, which runs shac static
+#                              checks on the change (including `verify_bazel2gn`
+#                              for BUILD.gn/BUILD.bazel drift, buildifier,
+#                              gn_format, fidl_gn2bazel_migration_check, and
+#                              check_licenses), building
+#                              `fx build --host //bundles/buildbot/static_checks`
+#                              and retrying if a host static-check tool is
+#                              missing or out of date.
+#   4. bazel_build_fuchsia:    `fx bazel build --config=fuchsia_platform
+#                              --noexpand_test_suites //<dir>:all`
 #                              for every changed directory with a BUILD.bazel
-#                              (host-only targets are skipped as incompatible;
+#                              (host-only targets are skipped as incompatible,
+#                              and `--noexpand_test_suites` prevents `:all` from
+#                              expanding `test_suite` targets before checking
+#                              their `target_compatible_with`;
 #                              `_validate_json_action` targets such as
 #                              `<fidl>_validate_ir_json` are excluded from top-level
 #                              `:all` so `assert_no_deps_aspect` does not crash on
@@ -475,6 +483,29 @@ def validate_json_exclusions(d):
     return out
 
 
+def has_non_suite_bazel_targets(d):
+    """True when `d/BUILD.bazel` defines at least one rule/macro target other than `test_suite`,
+    `package`, `exports_files`, or `licenses` (so `bazel_build_fuchsia` does not build
+    `test_suite`-only ancestor aggregator packages under `--config=fuchsia_platform`)."""
+    text = read(f"{d}/BUILD.bazel")
+    if not text:
+        return False
+    non_build_calls = {"package", "exports_files", "licenses", "load", "test_suite"}
+    try:
+        tree = ast.parse(text)
+        for node in tree.body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                fn = node.value.func.id if isinstance(node.value.func, ast.Name) else (
+                    node.value.func.attr if isinstance(node.value.func, ast.Attribute) else None
+                )
+                if fn and fn not in non_build_calls:
+                    return True
+        return False
+    except SyntaxError:
+        calls = set(re.findall(r"^\s*([A-Za-z_]\w*)\s*\(", gn_code(text), re.M))
+        return bool(calls - non_build_calls)
+
+
 def bazel_target_args(pkg_dirs):
     pos = [f"//{d}:all" for d in pkg_dirs]
     neg = [lbl for d in pkg_dirs for lbl in validate_json_exclusions(d)]
@@ -489,13 +520,16 @@ steps = [
     ("gn_build", [fx, "build"]),
     ("gn_build_dependents", None),  # Labels are computed once gn_build has regenerated the GN graph.
 ]
-sync_files = [
-    os.path.join(d, f) for d in dirs for f in ("BUILD.bazel", "BUILD.gn") if os.path.isfile(os.path.join(workdir, d, f))
-]
-if sync_files:
-    steps.append(("verify_bazel2gn", [fx, "host-tool", "shac", "check", "--only", "verify_bazel2gn"] + sync_files))
-if bazel_dirs:
-    steps.append(("bazel_build_fuchsia", [fx, "bazel", "build", "--config=fuchsia_platform"] + bazel_target_args(bazel_dirs)))
+# TODO(https://fxbug.dev/538640644): Replace with fx lint once it runs these shac checks.
+# `shac check` without file arguments finds and checks all modified files itself.
+steps.append(("shac_check", [fx, "host-tool", "shac", "check"]))
+fuchsia_bazel_dirs = [d for d in bazel_dirs if has_non_suite_bazel_targets(d)]
+if fuchsia_bazel_dirs:
+    steps.append((
+        "bazel_build_fuchsia",
+        [fx, "bazel", "build", "--config=fuchsia_platform", "--noexpand_test_suites"]
+        + bazel_target_args(fuchsia_bazel_dirs),
+    ))
 if host_dirs:
     steps.append(("bazel_build_host", [fx, "bazel", "build", "--config=host"] + bazel_target_args(host_dirs)))
 if exported_tests["host_tests"]:
@@ -504,12 +538,29 @@ if exported_tests["host_tests"] or exported_tests["target_tests"]:
     steps.append(("bazel_tests_exported", None))  # Checks <build dir>/tests.json after gn_build.
 
 ERROR_LINE = re.compile(
-    r"(^ERROR:|^FAILED:|\berror(\[E\d+\])?:|^error\b|: error\b|\bundefined reference\b|"
-    r"no such (target|package)|is not visible|Unable to load|not declared|drift|differs|--- a/|\+\+\+ b/)",
+    r"(^ERROR:|^FAILED:|\berror(\[E\d+\])?:|^error\b|: error\b|/(?:error|warning)\]|^shac: fail:|\(error in\b|"
+    r"\bundefined reference\b|no such (target|package)|is not visible|Unable to load|not declared|"
+    r"out of sync|drift|differs|--- a/|\+\+\+ b/)",
     re.I,
 )
-LOCATION = re.compile(r"(?:-->\s*)?((?:\.\./\.\./)?[\w./+-]+\.(?:rs|cc|h|c|gn|gni|bazel|bzl)):(\d+)")
+# `<path>:<line>` or `<path>(<line>)`, where <path> starts a token (start of line, after whitespace, a
+# quote, or an opening bracket) so log text that merely contains a dotted word is not taken as a location.
+LOCATION = re.compile(
+    r"(?:-->\s*)?(?:^|(?<=[\s'\"`(\[<>]))"
+    r"((?:\.\./\.\./)?[\w./+-]+\.(?:rs|cc|h|c|gn|gni|bazel|bzl|cml|fidl|json5?|md|py|go|star|sh|txt))"
+    r"(?::|\()(\d+)\)?",
+    re.M,
+)
 BUILD_FILE_LOCATION = re.compile(r"((?:\.\./\.\./)?[\w./+-]*(?:BUILD\.gn|BUILD\.bazel|\.gni|\.bzl)):(\d+)")
+# Shac findings: `[<check>/error] <path>(<line>): ...` or `[<check>/warning] <path>: ...`.
+SHAC_FILE_LOCATION = re.compile(r"\[[\w_-]+/(?:error|warning)\]\s+([\w./+-]+)(?:\((\d+)\))?:")
+SHAC_MISSING_TOOL = re.compile(
+    r"(//bundles/buildbot/static_checks|fx build --host|tool_paths\.json|"
+    r"has not been built yet|out of date|flag provided but not defined|"
+    r"unknown flag|unrecognized option|no such file or directory|"
+    r"subcommand .* exited with code|bazel2gn failed:)",
+    re.I,
+)
 
 
 def summarize(output, location=LOCATION):
@@ -524,12 +575,12 @@ def summarize(output, location=LOCATION):
     if len(text) > 6000:
         text = text[:6000] + "\n... (truncated)"
     file, line = "", 0
-    m = location.search(text)
+    m = location.search(text) or SHAC_FILE_LOCATION.search(text)
     if m:
         file = m.group(1).replace("../../", "", 1)
         if file.startswith(workdir + "/"):
             file = file[len(workdir) + 1:]
-        line = int(m.group(2))
+        line = int(m.group(2) or 0)
     return text, file, line
 
 
@@ -545,8 +596,11 @@ REMEDIATION = {
                            "`gn_dep_parity` findings and \"Keep Every GN Dependency Label and Edge Kind\" in the coder "
                            "instructions), re-run `fx bazel2gn -d <dir>` and `fx build <failing label>`. Never edit sources "
                            "or the dependents' BUILD files to make it pass.",
-    "verify_bazel2gn": "BUILD.gn no longer matches BUILD.bazel. Run `fx bazel2gn -d <dir>` for every dual-build directory "
-                       "you touched (never hand-edit below the BAZEL2GN SENTINEL) and re-run this check.",
+    "shac_check": "Fix the `shac check` findings above: if BUILD.gn is out of sync with BUILD.bazel (`verify_bazel2gn`), "
+                  "run `fx bazel2gn -d <dir>` for every dual-build directory you touched (never hand-edit below the "
+                  "BAZEL2GN SENTINEL); if a build or manifest file is unformatted, format it (`fx format-code`); if a "
+                  "host static-check tool is missing or out of date, run `fx build --host //bundles/buildbot/static_checks`; "
+                  "then re-run this check.",
     "bazel_build_fuchsia": "Fix BUILD.bazel so the `bazel_build_fuchsia` command passes. If a dependency has no "
                            "Bazel target yet, migrate that dependency's directory in this change (see the coder instructions).",
     "bazel_build_host": "Fix BUILD.bazel so the `bazel_build_host` command passes. If a dependency has no Bazel target "
@@ -567,6 +621,22 @@ worktree_dirty_vs_head = bool(
 )
 if change_base != "HEAD" and not worktree_dirty_vs_head and (not uploaded_commit_env or head_sha != uploaded_commit_env):
     toolchains_map, _ = load_toolchains()
+    tests_json_targets = None
+    build_dir_rel = (read(".fx-build-dir") or "").strip()
+    if build_dir_rel:
+        try:
+            with open(os.path.join(workdir, build_dir_rel, "tests.json")) as f:
+                tj_data = json.load(f)
+            if isinstance(tj_data, list):
+                tests_json_targets = set()
+                for entry in tj_data:
+                    t_obj = entry.get("test", {}) if isinstance(entry, dict) else {}
+                    for k in ("label", "source_label", "name", "package_url"):
+                        val = t_obj.get(k)
+                        if isinstance(val, str) and val.strip():
+                            tests_json_targets.add(re.sub(r"^@@?//", "//", val.strip()).split("(", 1)[0])
+        except (OSError, ValueError):
+            tests_json_targets = None
     commit_msg = "\n".join(git_lines(["log", "-1", "--format=%B", "HEAD"]))
     test_footer_lines = []
     for m_line in commit_msg.splitlines():
@@ -650,6 +720,41 @@ if change_base != "HEAD" and not worktree_dirty_vs_head and (not uploaded_commit
                         "`PLANTER_BUILD_DRY_RUN=1 run_checks.sh --only build_verification`)."
                     ),
                 })
+        if tests_json_targets is not None and re.search(r"\bfx\s+(?:-t\s+\S+\s+)?test\b", test_cmd):
+            fx_test_lbls = [
+                re.sub(r"^@@?//", "//", lbl).split("(", 1)[0]
+                for lbl in re.findall(r"@?//[^\s,;\"'`]+", test_cmd)
+            ]
+            missing_fx_tests = []
+            if not tests_json_targets:
+                missing_fx_tests = fx_test_lbls or [test_cmd]
+            else:
+                for lbl in fx_test_lbls:
+                    pkg_prefix = lbl.split(":", 1)[0]
+                    if lbl not in tests_json_targets and not any(
+                        t == lbl or t.startswith(pkg_prefix + ":") for t in tests_json_targets
+                    ):
+                        missing_fx_tests.append(lbl)
+            if missing_fx_tests:
+                findings.append({
+                    "source": "build_verification",
+                    "category": "unconfigured_fx_test_footer_label",
+                    "severity": "ERROR",
+                    "file": "",
+                    "line": 0,
+                    "message": (
+                        f"Commit `Test:` footer `{m_line.strip()}` runs `fx test` on target(s) not present in "
+                        f"`<build dir>/tests.json`: {' '.join(missing_fx_tests)} "
+                        f"({len(tests_json_targets)} total tests in `<build dir>/tests.json`). "
+                        "Planter's `test_verifier` runs `fx test --dry` and fails when a test target is not in `tests.json`."
+                    ),
+                    "remediation": (
+                        "Replace `Test: fx test ...` in the commit message (and `CoderReport.tests_run`) with a Bazel "
+                        "command that runs or builds the migrated test directly, such as "
+                        "`Test: fx bazel test --config=host @//<dir>:<test>` (or the ancestor `test_suite()`) for host "
+                        "tests or `Test: fx bazel build --config=fuchsia_platform @//<dir>:<test>` for device tests."
+                    ),
+                })
     if len(test_footer_lines) > 3:
         findings.append({
             "source": "build_verification",
@@ -661,15 +766,67 @@ if change_base != "HEAD" and not worktree_dirty_vs_head and (not uploaded_commit
                 f"Commit message has {len(test_footer_lines)} `Test:` footer lines (at most 3 allowed). "
                 "Per-package incremental build or query lines clutter the commit message when more than 3 `Test:` lines are present."
             ),
+            # TODO(https://fxbug.dev/538640644): Replace with fx lint once it runs these shac checks.
             "remediation": (
                 "Consolidate the commit message `Test:` footers (and `CoderReport.tests_run`) to at most 3 lines: "
                 "one `fx bazel test|build --config=fuchsia_platform @//<dir>:<test>` line for the migrated test targets, "
-                "one `fx bazel test --config=host @//<dir>:<host test>` line when host tests exist, and `fx bazel2gn` last; "
+                "one `fx bazel test --config=host @//<dir>:<host test>` line when host tests exist, and "
+                "`fx host-tool shac check` last; "
                 "remove redundant per-package `fx build` / `fx bazel build` / `fx bazel query` lines."
             ),
         })
 
 STEP_BLOCKING = ("ERROR", "WARNING")
+BUILD_FILE_NAMES = {"BUILD.bazel", "BUILD", "BUILD.gn", "MODULE.bazel"}
+BUILD_FILE_EXTS = (".bazel", ".bzl", ".gn", ".gni")
+
+
+def _subrepo_dirs():
+    subrepos = []
+    vg = os.path.join(workdir, "vendor", "google")
+    if os.path.exists(os.path.join(vg, ".git")):
+        subrepos.append(vg)
+    for d in dirs:
+        abs_d = os.path.join(workdir, d)
+        if not os.path.isdir(abs_d):
+            continue
+        try:
+            top = subprocess.check_output(
+                ["git", "-C", abs_d, "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+            if top and os.path.realpath(top) != os.path.realpath(workdir) and top not in subrepos:
+                subrepos.append(top)
+        except Exception:
+            pass
+    return subrepos
+
+
+def _subrepos_clean_since_upload():
+    for sr in _subrepo_dirs():
+        try:
+            diff_sr = subprocess.check_output(
+                ["git", "-C", sr, "diff", "--name-only", "HEAD", "--"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+            if diff_sr:
+                return False
+            untracked_sr = [
+                u.strip() for u in subprocess.check_output(
+                    ["git", "-C", sr, "ls-files", "--others", "--exclude-standard"],
+                    stderr=subprocess.DEVNULL, text=True,
+                ).splitlines() if u.strip()
+            ]
+            if any(
+                os.path.basename(u) in BUILD_FILE_NAMES or u.endswith(BUILD_FILE_EXTS)
+                for u in untracked_sr
+            ):
+                return False
+        except Exception:
+            return False
+    return True
+
+
 uploaded_commit = os.environ.get("PLANTER_UPLOADED_COMMIT", "").strip()
 if uploaded_commit and not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", "").strip() in ("", "0"):
     try:
@@ -687,8 +844,10 @@ if uploaded_commit and not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", 
     untracked_in_dirs = [
         u for u in git_lines(["ls-files", "--others", "--exclude-standard"])
         if any(u == d or u.startswith(d + "/") for d in dirs)
+        or os.path.basename(u) in BUILD_FILE_NAMES
+        or u.endswith(BUILD_FILE_EXTS)
     ]
-    if up_tree and up_tree == head_tree and not diff_worktree and not untracked_in_dirs:
+    if up_tree and up_tree == head_tree and not diff_worktree and not untracked_in_dirs and _subrepos_clean_since_upload():
         findings.append({
             "source": "build_verification",
             "category": "build_reused",
@@ -703,8 +862,8 @@ reuse_key = None
 reused = None
 reused_time = 0
 if not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", "").strip() in ("", "0"):
-    def _git_bytes(args):
-        return subprocess.run(["git", "-C", workdir] + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout
+    def _git_bytes(args, repo_dir=workdir):
+        return subprocess.run(["git", "-C", repo_dir] + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True).stdout
 
     def _file_digest(path):
         h = hashlib.sha256()
@@ -719,11 +878,26 @@ if not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", "").strip() in ("", 
             h.update(b"missing")
         return h.hexdigest()
 
-    def _worktree_tree():
+    def _worktree_tree(repo_dir=workdir):
         # The git tree of the whole working tree (tracked edits and untracked, non-ignored files),
         # so committing the change after a run does not change the fingerprint. Uses a copy of
         # the index so the real one is untouched and its stat cache keeps this fast.
-        git_dir = _git_bytes(["rev-parse", "--absolute-git-dir"]).decode().strip()
+        subprocess.run(["git", "-C", repo_dir, "update-index", "-q", "--refresh"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        dirty_out = subprocess.run(
+            ["git", "-C", repo_dir, "diff", "--name-only", "--ignore-submodules=all", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        ).stdout
+        untracked_out = subprocess.run(
+            ["git", "-C", repo_dir, "ls-files", "--others", "--exclude-standard"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        ).stdout
+        dirty = sorted({
+            l.strip() for l in (dirty_out.splitlines() + untracked_out.splitlines()) if l.strip()
+        })
+        if not dirty:
+            return _git_bytes(["rev-parse", "HEAD^{tree}"], repo_dir=repo_dir)
+        git_dir = _git_bytes(["rev-parse", "--absolute-git-dir"], repo_dir=repo_dir).decode().strip()
         fd, index = tempfile.mkstemp(dir=git_dir, prefix=".planter-build-verification-index.")
         os.close(fd)
         try:
@@ -732,9 +906,9 @@ if not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", "").strip() in ("", 
             except OSError:
                 os.unlink(index)
             env = dict(os.environ, GIT_INDEX_FILE=index)
-            subprocess.run(["git", "-C", workdir, "add", "-A", "."], env=env, stdout=subprocess.DEVNULL,
+            subprocess.run(["git", "-C", repo_dir, "add", "-A", "--"] + dirty, env=env, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, check=True)
-            return subprocess.run(["git", "-C", workdir, "write-tree"], env=env, stdout=subprocess.PIPE,
+            return subprocess.run(["git", "-C", repo_dir, "write-tree"], env=env, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, check=True).stdout
         finally:
             try:
@@ -750,7 +924,13 @@ if not dry_run and os.environ.get("PLANTER_BUILD_NO_REUSE", "").strip() in ("", 
                 data = data.encode()
             h.update(label.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
 
-        _add("tree", _worktree_tree())
+        _add("tree", _worktree_tree(workdir))
+        for sr in _subrepo_dirs():
+            try:
+                rel_sr = os.path.relpath(sr, workdir)
+                _add(f"subrepo:{rel_sr}", _worktree_tree(sr))
+            except Exception:
+                pass
         _add("dirs", json.dumps([sorted(dirs), sorted(bazel_dirs), sorted(host_dirs)]))
         _add("steps", json.dumps([[n, c] for n, c in steps]))
         _add("env", json.dumps([timeout, dependent_limit]))
@@ -805,15 +985,68 @@ if skip_build:
     sys.exit(0)
 
 FROM_TARGET = re.compile(r"\(from target (?:@@?[\w.~+-]*)?(//[^\s)]+)\)")
+NINJA_STEP_TARGET = re.compile(r"^\[[0-9]+/[0-9]+\]\s+\S+\s+(//([A-Za-z0-9_./+-]+):([^\s(]+))")
+# Extract the transitive dependency manifest path from clippy or rustc Ninja command lines.
+TRANSDEPS_ARG = re.compile(r"(?:--transdeps\s+|--rust-compilation-deps-path=|@shell:)(\S+)")
+
+
+# Check whether a native Ninja failure in `fx build` is in an unrelated GN target
+# outside the changed packages and their reverse dependencies.
+def unrelated_gn_ninja_failure(output):
+    if not bazel_dirs or any(p.endswith((".gni", ".bzl", "MODULE.bazel")) for p in changed):
+        return None
+    if re.search(r"ninja: error:|ERROR at //", output):
+        return None
+    for m in LOCATION.finditer(output):
+        loc_path = m.group(1).replace("../../", "", 1)
+        if any(loc_path == d or loc_path.startswith(d + "/") for d in dirs):
+            return None
+    rdep_pkgs = {os.path.dirname(f) for f in rdep_build_files()}
+    build_dir = (read(".fx-build-dir") or "").strip()
+    lines = output.splitlines()
+    failed_targets = []
+    for i, l in enumerate(lines):
+        if not l.startswith("FAILED:"):
+            continue
+        if i == 0:
+            return None
+        sm = NINJA_STEP_TARGET.match(lines[i - 1].strip())
+        if not sm:
+            return None
+        full_lbl, pkg = sm.group(1), sm.group(2).strip("/")
+        if any(pkg == d or pkg.startswith(d + "/") or d.startswith(pkg + "/") for d in dirs):
+            return None
+        if pkg in rdep_pkgs or git_lines(["diff", "--name-only", change_base, "--", pkg]):
+            return None
+        cmd_line = lines[i + 1] if i + 1 < len(lines) else ""
+        tm = TRANSDEPS_ARG.search(cmd_line)
+        if tm and build_dir:
+            t_content = read(os.path.join(build_dir, tm.group(1)))
+            if t_content is None or any(f"/{d}/" in t_content for d in dirs):
+                return None
+        else:
+            return None
+        if full_lbl not in failed_targets:
+            failed_targets.append(full_lbl)
+    if not failed_targets:
+        return None
+    return (
+        f"the failing GN targets ({' '.join(failed_targets)}) are outside the changed packages "
+        "and have no dependency path to any changed package, so the failure predates the change "
+        "(pre-existing upstream build failure). Do not edit them; the changed packages and their "
+        "GN dependents are still verified by the remaining steps."
+    )
 
 
 def unrelated_bazel_failure(output):
     """Returns a note when `fx build` failed only in Bazel actions of targets that live in another git
     repository than the change and have no Bazel dependency path to any changed package (typically a
-    checkout whose repositories are out of sync), else None. Any native Ninja failure, unparsable
-    output, change to shared .bzl/MODULE.bazel files, or query error keeps the failure an ERROR."""
+    checkout whose repositories are out of sync), or in native GN/Ninja actions whose transitive deps
+    do not include any changed package, else None."""
     targets = sorted(set(FROM_TARGET.findall(output)))
-    if not targets or not bazel_dirs:
+    if not targets:
+        return unrelated_gn_ninja_failure(output)
+    if not bazel_dirs:
         return None
     if any(p.endswith((".bzl", "MODULE.bazel")) for p in changed):
         return None
@@ -893,6 +1126,34 @@ for name, cmd in steps:
         output += f"\n(timed out after {timeout}s)"
     if code == 0:
         continue
+    if name == "shac_check" and code != "timeout" and SHAC_MISSING_TOOL.search(output):
+        static_checks_cmd = [fx, "build", "--host", "//bundles/buildbot/static_checks"]
+        try:
+            sc_proc = subprocess.run(
+                static_checks_cmd,
+                cwd=workdir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+            )
+            sc_code, sc_output = sc_proc.returncode, sc_proc.stdout
+        except subprocess.TimeoutExpired as e:
+            sc_code = "timeout"
+            sc_output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+            sc_output += f"\n(timed out after {timeout}s)"
+        if sc_code == 0:
+            try:
+                proc = subprocess.run(cmd, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+                code, output = proc.returncode, proc.stdout
+            except subprocess.TimeoutExpired as e:
+                code = "timeout"
+                output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                output += f"\n(timed out after {timeout}s)"
+            if code == 0:
+                continue
+        else:
+            output += f"\n\n`{fmt_cmd(static_checks_cmd)}` also failed ({sc_code}):\n{sc_output}"
     if name == "gn_build":
         note = unrelated_bazel_failure(output)
         if note:

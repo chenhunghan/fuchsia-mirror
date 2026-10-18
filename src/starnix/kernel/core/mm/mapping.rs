@@ -194,6 +194,73 @@ impl Mapping {
         self.flags.contains(MappingFlags::EXEC)
     }
 
+    /// Returns whether this mapping is allowed to be executable, as reported by `me` in
+    /// `/proc/[pid]/smaps`. For file mappings, this is false if the file is on a `noexec` mount
+    /// or is sealed against execution. Security checks (see `security::file_mprotect()`) may still
+    /// deny making the mapping executable.
+    pub fn may_exec(&self) -> bool {
+        self.max_access().contains(Access::EXEC)
+    }
+
+    /// Returns whether this is a private file mapping with pages that were modified via
+    /// copy-on-write, and are therefore no longer shared with the mapped file.
+    ///
+    /// Writable private file mappings created by `default_mmap()` are backed by a copy-on-write
+    /// child of the file's memory, created for each `mmap()` call. This over-approximates the
+    /// modified pages to the whole region that was mapped, rather than just the pages of this
+    /// mapping. Read-only ones (`MappingFlags::LAZY_PRIVATE_FILE`) are backed by the file's memory
+    /// until they are written, so they have no modified pages.
+    ///
+    /// Zircon only reports the number of pages that a memory object holds, not which ones, so the
+    /// whole memory object is considered.
+    ///
+    /// TODO(https://fxbug.dev/409256444): This also reports pages that were committed without
+    /// being written (e.g. with `MAP_POPULATE`), and, for files whose memory isn't pager-backed
+    /// (e.g. tmpfs), pages that the file stopped sharing because the file was modified.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the information about the memory object can't be retrieved (e.g. if its handle
+    /// lacks `Rights::INSPECT`), in which case whether it holds modified pages is unknown.
+    pub fn has_cow_modifications(&self) -> Result<bool, Errno> {
+        if self.flags.intersects(MappingFlags::SHARED | MappingFlags::ANONYMOUS) {
+            return Ok(false);
+        }
+        let MappingNameRef::File(_) = self.name() else {
+            return Ok(false);
+        };
+        let MappingBacking::Memory(backing) = &self.backing else {
+            return Ok(false);
+        };
+        if backing.is_cow_modified() {
+            return Ok(true);
+        }
+        if self.flags.contains(MappingFlags::LAZY_PRIVATE_FILE) {
+            return Ok(false);
+        }
+        let memory = backing.memory();
+        // Memory-mapped clocks have no VMO to query.
+        if memory.is_clock() {
+            return Ok(false);
+        }
+        let info = memory.info()?;
+        Ok(info.flags.contains(zx::VmoInfoFlags::IS_COW_CLONE) && info.populated_private_bytes > 0)
+    }
+
+    /// Records that the memory of this mapping holds pages modified via copy-on-write. See
+    /// `Mapping::has_cow_modifications`.
+    pub fn set_cow_modified(&mut self) {
+        if let MappingBacking::Memory(backing) = &mut self.backing {
+            backing.set_cow_modified();
+        }
+    }
+
+    /// Returns whether the memory of this mapping is already known to hold pages modified via
+    /// copy-on-write.
+    pub fn is_known_cow_modified(&self) -> bool {
+        matches!(&self.backing, MappingBacking::Memory(backing) if backing.is_cow_modified())
+    }
+
     pub fn private_anonymous(&self) -> bool {
         if let MappingBacking::PrivateAnonymous = &self.backing {
             return true;
@@ -293,6 +360,15 @@ pub enum MappingBacking {
     PrivateAnonymous,
 }
 
+impl MappingBacking {
+    pub fn as_memory(&self) -> Option<&MappingBackingMemory> {
+        match self {
+            Self::Memory(memory) => Some(memory),
+            Self::PrivateAnonymous => None,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, split_enum_storage::SplitStorage)]
 pub enum MappingName {
     /// No name.
@@ -327,19 +403,57 @@ pub enum MappingName {
     AioContext(Arc<AioContext>),
 }
 
+impl<'a> MappingNameRef<'a> {
+    pub fn as_file(&self) -> Option<&'a Arc<FileMapping>> {
+        match self {
+            Self::File(file) => Some(file),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct MappingBackingMemory {
     /// The memory object that contains the memory used in this mapping.
     memory: Arc<MemoryObject>,
 
-    /// The delta to convert from a user address to an offset in the memory object.
-    address_to_offset_delta: u64,
+    /// The delta to convert from a user address to an offset in the memory object, and flags in
+    /// its lowest bits (see `ADDRESS_TO_OFFSET_DELTA_FLAGS`). Both the base address and the offset
+    /// of a mapping are page-aligned, so these bits of the delta are otherwise always zero.
+    address_to_offset_delta_and_flags: u64,
 }
+
+// Keep the size of the backing of memory mappings, which are allocated for each mapping.
+static_assertions::assert_eq_size!(MappingBackingMemory, [u8; 16]);
+
+/// Set in `MappingBackingMemory::address_to_offset_delta_and_flags` when the memory is known to
+/// hold pages modified via copy-on-write that are no longer shared with the mapped file, even if
+/// they are no longer attributed to the memory alone (e.g. after `fork()`). See
+/// `Mapping::has_cow_modifications`.
+const COW_MODIFIED: u64 = 1;
+
+/// The flags stored in `MappingBackingMemory::address_to_offset_delta_and_flags`.
+const ADDRESS_TO_OFFSET_DELTA_FLAGS: u64 = COW_MODIFIED;
 
 impl MappingBackingMemory {
     pub fn new(base: UserAddress, memory: Arc<MemoryObject>, memory_offset: u64) -> Self {
         let address_to_offset_delta = memory_offset.wrapping_sub(base.ptr() as u64);
-        Self { memory, address_to_offset_delta }
+        debug_assert_eq!(
+            address_to_offset_delta & ADDRESS_TO_OFFSET_DELTA_FLAGS,
+            0,
+            "mapping base {base:?} and memory offset {memory_offset:#x} must be page-aligned"
+        );
+        Self { memory, address_to_offset_delta_and_flags: address_to_offset_delta }
+    }
+
+    /// Records that the memory holds pages modified via copy-on-write.
+    pub fn set_cow_modified(&mut self) {
+        self.address_to_offset_delta_and_flags |= COW_MODIFIED;
+    }
+
+    /// Returns whether the memory is known to hold pages modified via copy-on-write.
+    fn is_cow_modified(&self) -> bool {
+        self.address_to_offset_delta_and_flags & COW_MODIFIED != 0
     }
 
     pub fn memory(&self) -> &Arc<MemoryObject> {
@@ -377,37 +491,43 @@ impl MappingBackingMemory {
 
     /// Converts a `UserAddress` to an offset in this mapping's memory object.
     pub fn address_to_offset(&self, addr: UserAddress) -> u64 {
-        (addr.ptr() as u64).wrapping_add(self.address_to_offset_delta)
+        (addr.ptr() as u64)
+            .wrapping_add(self.address_to_offset_delta_and_flags & !ADDRESS_TO_OFFSET_DELTA_FLAGS)
     }
 }
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     #[rustfmt::skip]  // Preserve column alignment.
-    pub struct MappingFlags: u16 {
-        const READ           = 1 <<  0;  // PROT_READ
-        const WRITE          = 1 <<  1;  // PROT_WRITE
-        const EXEC           = 1 <<  2;  // PROT_EXEC
-        const SHARED         = 1 <<  3;
-        const ANONYMOUS      = 1 <<  4;
-        const LOWER_32BIT    = 1 <<  5;
-        const GROWSDOWN      = 1 <<  6;
-        const ELF_BINARY     = 1 <<  7;
-        const DONTFORK       = 1 <<  8;
-        const WIPEONFORK     = 1 <<  9;
-        const DONT_SPLIT     = 1 << 10;
-        const DONT_EXPAND    = 1 << 11;
-        const LOCKED         = 1 << 12;
-        const UFFD           = 1 << 13;
-        const UFFD_MISSING   = 1 << 14;
-        const MAPPED_IN_VMAR = 1 << 15;
+    pub struct MappingFlags: u32 {
+        const READ              = 1 <<  0;  // PROT_READ
+        const WRITE             = 1 <<  1;  // PROT_WRITE
+        const EXEC              = 1 <<  2;  // PROT_EXEC
+        const SHARED            = 1 <<  3;
+        const ANONYMOUS         = 1 <<  4;
+        const LOWER_32BIT       = 1 <<  5;
+        const GROWSDOWN         = 1 <<  6;
+        const ELF_BINARY        = 1 <<  7;
+        const DONTFORK          = 1 <<  8;
+        const WIPEONFORK        = 1 <<  9;
+        const DONT_SPLIT        = 1 << 10;
+        const DONT_EXPAND       = 1 << 11;
+        /// A read-only `MAP_PRIVATE` file mapping that is still backed directly by the file's
+        /// VMO, through a handle without `WRITE` rights. It must be promoted to a copy-on-write
+        /// child VMO before it can become writable (see
+        /// `MemoryManagerState::promote_to_private_child`).
+        const LAZY_PRIVATE_FILE = 1 << 12;
+        const LOCKED            = 1 << 13;
+        const UFFD              = 1 << 14;
+        const UFFD_MISSING      = 1 << 15;
+        const MAPPED_IN_VMAR    = 1 << 16;
     }
 }
 
 // The low three bits of MappingFlags match ProtectionFlags.
-const_assert_eq!(MappingFlags::READ.bits(), PROT_READ as u16);
-const_assert_eq!(MappingFlags::WRITE.bits(), PROT_WRITE as u16);
-const_assert_eq!(MappingFlags::EXEC.bits(), PROT_EXEC as u16);
+const_assert_eq!(MappingFlags::READ.bits(), PROT_READ);
+const_assert_eq!(MappingFlags::WRITE.bits(), PROT_WRITE);
+const_assert_eq!(MappingFlags::EXEC.bits(), PROT_EXEC);
 
 // The next bits of MappingFlags match MappingOptions, shifted up.
 const_assert_eq!(MappingFlags::SHARED.bits(), MappingOptions::SHARED.bits() << 3);
@@ -419,6 +539,10 @@ const_assert_eq!(MappingFlags::DONTFORK.bits(), MappingOptions::DONTFORK.bits() 
 const_assert_eq!(MappingFlags::WIPEONFORK.bits(), MappingOptions::WIPEONFORK.bits() << 3);
 const_assert_eq!(MappingFlags::DONT_SPLIT.bits(), MappingOptions::DONT_SPLIT.bits() << 3);
 const_assert_eq!(MappingFlags::DONT_EXPAND.bits(), MappingOptions::DONT_EXPAND.bits() << 3);
+const_assert_eq!(
+    MappingFlags::LAZY_PRIVATE_FILE.bits(),
+    MappingOptions::LAZY_PRIVATE_FILE.bits() << 3
+);
 
 /// `MappingOptions` that only affect how a mapping is created. They have no corresponding
 /// `MappingFlags` bit and are dropped when converting between the two.
@@ -437,19 +561,18 @@ const_assert_eq!(
         | MappingFlags::WIPEONFORK.bits()
         | MappingFlags::DONT_SPLIT.bits()
         | MappingFlags::DONT_EXPAND.bits()
+        | MappingFlags::LAZY_PRIVATE_FILE.bits()
 );
 
 impl MappingFlags {
     pub fn access_flags(&self) -> ProtectionFlags {
-        ProtectionFlags::from_bits_truncate(
-            self.bits() as u32 & ProtectionFlags::ACCESS_FLAGS.bits(),
-        )
+        ProtectionFlags::from_bits_truncate(self.bits() & ProtectionFlags::ACCESS_FLAGS.bits())
     }
 
     pub fn with_access_flags(&self, prot_flags: ProtectionFlags) -> Self {
         let mapping_flags =
             *self & (MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXEC).complement();
-        mapping_flags | Self::from_bits_truncate(prot_flags.access_flags().bits() as u16)
+        mapping_flags | Self::from_bits_truncate(prot_flags.access_flags().bits())
     }
 
     pub fn options(&self) -> MappingOptions {
@@ -460,7 +583,7 @@ impl MappingFlags {
         prot_flags: ProtectionFlags,
         options: MappingOptions,
     ) -> Self {
-        Self::from_bits_truncate(prot_flags.access_flags().bits() as u16)
+        Self::from_bits_truncate(prot_flags.access_flags().bits())
             | Self::from_bits_truncate(options.difference(CREATION_ONLY_OPTIONS).bits() << 3)
     }
 }
@@ -552,5 +675,26 @@ impl MappingKindSummary {
         node.record_uint("num_shared", self.num_shared);
         node.record_uint("num_memory_objects", self.num_memory_objects);
         node.record_uint("num_private_anon", self.num_private_anon);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::fuchsia::test]
+    fn cow_modified_flag_preserves_address_to_offset() {
+        let memory = Arc::new(MemoryObject::from(zx::Vmo::create(0x10000).expect("create VMO")));
+        let base = UserAddress::from(0x200000u64);
+        let addr = UserAddress::from(0x201000u64);
+        // The memory offset may be larger or smaller than the base address.
+        for (memory_offset, expected_offset) in [(0x3000, 0x4000), (0, 0x1000)] {
+            let mut backing = MappingBackingMemory::new(base, memory.clone(), memory_offset);
+            assert!(!backing.is_cow_modified());
+            assert_eq!(backing.address_to_offset(addr), expected_offset);
+            backing.set_cow_modified();
+            assert!(backing.is_cow_modified());
+            assert_eq!(backing.address_to_offset(addr), expected_offset);
+        }
     }
 }

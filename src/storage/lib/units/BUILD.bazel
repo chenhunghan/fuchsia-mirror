@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "units",
+    srcs = ["src/lib.rs"] + select({
+        "@platforms//os:fuchsia": ["src/page.rs"],
+        "//conditions:default": [],
+    }),
+    crate_name = "storage_units",
+    edition = "2024",
+    visibility = ["//src/storage/fxfs:__subpackages__"],
+    deps = select({
+        "@platforms//os:fuchsia": ["//sdk/rust/zx"],
+        "//conditions:default": [],
+    }),
+)
+
+# The tests run through Bazel only, via the //src/storage test suites.
+# @bazel2gn:skip
+rustc_test(
+    name = "units_test",
+    crate = ":units",
+    edition = "2024",
+    deps = ["//src/lib/fuchsia"],
+)
+
+# @bazel2gn:skip
+wrap_host_rust_test(
+    name = "units_host_test",
+    binary_name = "units_test",
+    visibility = ["//src/storage:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "storage-units-tests",
+    # The multiplication overflow panic tests produce ERROR logs.
+    max_log_severity = "ERROR",
+    unit_tests = [":units_test"],
+    visibility = ["//src/storage:__pkg__"],
+)

@@ -27,14 +27,9 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 fidl("fuchsia.hardware.pci") {
   sources = [
+    "debug.fidl",
     "metadata.fidl",
     "pci.fidl",
   ]
@@ -42,7 +37,7 @@ fidl("fuchsia.hardware.pci") {
   sdk_category = "partner"
   enable_rust = true
   enable_rust_next = true
-  stable = true
+  stable = false
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]
 }

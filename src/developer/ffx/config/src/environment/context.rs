@@ -82,8 +82,6 @@ pub struct EnvironmentContext {
     override_target_spec: Option<Option<String>>,
     /// if true, do not read or write any environment files.
     pub(crate) no_environment: bool,
-    queried_configs:
-        std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
 }
 
 impl Default for EnvironmentContext {
@@ -98,9 +96,6 @@ impl Default for EnvironmentContext {
             override_target_spec: None,
             self_path: std::env::current_exe().unwrap(),
             no_environment: false,
-            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeMap::new(),
-            )),
         }
     }
 }
@@ -191,9 +186,6 @@ impl EnvironmentContext {
             override_target_spec: None,
             self_path: std::env::current_exe().unwrap(),
             no_environment,
-            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeMap::new(),
-            )),
         })
     }
 
@@ -211,9 +203,6 @@ impl EnvironmentContext {
             override_target_spec: None,
             config: Config::new(None, None, None, runtime_args.clone(), ConfigMap::new()),
             self_path: std::env::current_exe().unwrap(),
-            queried_configs: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::BTreeMap::new(),
-            )),
         };
 
         // Since environment variables won't be
@@ -307,14 +296,6 @@ impl EnvironmentContext {
                 no_environment,
             )
         }
-    }
-
-    pub fn query_configs(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
-        self.queried_configs.lock().unwrap().clone()
-    }
-
-    pub(crate) fn record_query(&self, name: &str, value: &serde_json::Value) {
-        self.queried_configs.lock().unwrap().insert(name.to_string(), value.clone());
     }
 
     pub fn is_strict(&self) -> bool {
@@ -574,23 +555,37 @@ impl EnvironmentContext {
         // Out of tree, we will always want to pull the config from the normal config path, which
         // we can defer to the SdkRoot's mechanisms for.
         let runtime_root: Option<PathBuf> = self.get("sdk.root").ok();
+        let from_exe = || {
+            if self.exe_kind == ExecutableKind::Test {
+                SdkRoot::from_exe_path(&self.self_path)
+            } else {
+                SdkRoot::from_paths(None)
+            }
+        };
         match (&self.kind, runtime_root) {
-            (EnvironmentKind::InTree { build_dir: Some(build_dir), .. }, None) => {
-                let host_arch = match std::env::consts::ARCH {
-                    "x86_64" => "host_x64",
-                    "aarch64" => "host_arm64",
-                    _ => "host_x64",
-                };
-                let host_tools_dir = build_dir.join(host_arch);
-                if host_tools_dir.exists() {
-                    Ok(SdkRoot::HostTools { root: host_tools_dir })
-                } else {
-                    SdkRoot::from_paths(None).map_err(|e| ContextError::Sdk(e.to_string()))
+            (EnvironmentKind::InTree { build_dir, .. }, None) => {
+                // If the running ffx executable is located inside an unpacked SDK directory
+                // containing `meta/manifest.json` (for example, an IDK unpacked into a staging
+                // directory within the source tree), use that SDK root rather than the in-tree
+                // build directory's host tools.
+                let exe_sdk_root = from_exe();
+                if let Ok(sdk_root @ SdkRoot::Full { .. }) = exe_sdk_root {
+                    return Ok(sdk_root);
                 }
+                if let Some(build_dir) = build_dir {
+                    let host_arch = match std::env::consts::ARCH {
+                        "x86_64" => "host_x64",
+                        "aarch64" => "host_arm64",
+                        _ => "host_x64",
+                    };
+                    let host_tools_dir = build_dir.join(host_arch);
+                    if host_tools_dir.exists() {
+                        return Ok(SdkRoot::HostTools { root: host_tools_dir });
+                    }
+                }
+                exe_sdk_root.map_err(|e| ContextError::Sdk(e.to_string()))
             }
-            (EnvironmentKind::InTree { .. }, None) => {
-                SdkRoot::from_paths(None).map_err(|e| ContextError::Sdk(e.to_string()))
-            }
+            (_, None) => from_exe().map_err(|e| ContextError::Sdk(e.to_string())),
             (_, runtime_root) => SdkRoot::from_paths(runtime_root.as_deref())
                 .map_err(|e| ContextError::Sdk(e.to_string())),
         }

@@ -244,7 +244,11 @@ void MsdVsiDevice::KillCurrentContext() {
 }
 
 void MsdVsiDevice::Reset() {
-  HardwareReset();
+  if (!HardwareReset()) {
+    MAGMA_LOG(ERROR, "HardwareReset failed! Aborting to prevent DMA corruption.");
+    // This is not know to occur.
+    abort();
+  }
 
   // Save the pending batches that have been posted to the ringbuffer.
   std::vector<DeferredRequest> pending_batches;
@@ -727,20 +731,9 @@ bool MsdVsiDevice::HardwareReset() {
   // This number was chosen arbitrarily and can be adjusted as needed.
   constexpr uint32_t kMaxResetAttempts = 3;
 
-  bool initial_reset_succeeded = false;
+  bool power_reset_done = false;
   uint32_t failed_resets = 0;
   while (failed_resets < kMaxResetAttempts) {
-    if (initial_reset_succeeded) {
-      // We have been seeing issues where a soft reset is not enough to restart the hardware and
-      // the hardware is hung forever. A simple fix for this is to fully reset the device's power.
-      // The device needs to be idle to do a power reset, so we have to do one soft reset first.
-      // The flow is: Soft Reset -> Hard Reset -> Soft Reset.
-      magma_status_t status = platform_device_->ResetPower();
-      if (status != MAGMA_STATUS_OK) {
-        MAGMA_LOG(ERROR, "Failed to reset power");
-      }
-    }
-
     // Power on is needed to write to pulse-eater.
     PowerOn();
 
@@ -784,12 +777,28 @@ bool MsdVsiDevice::HardwareReset() {
       failed_resets += 1;
       MAGMA_LOG(WARNING, "Hardware reset attempt failed %d/%d: is_idle %d is_idle_3d %d",
                 failed_resets, kMaxResetAttempts, is_idle, is_idle_3d);
+      if (!power_reset_done) {
+        // If the first soft reset failed, fall back to hard reset.
+        magma_status_t status = platform_device_->ResetPower();
+        if (status != MAGMA_STATUS_OK) {
+          MAGMA_LOG(ERROR, "Failed to reset power");
+        }
+        power_reset_done = true;
+      }
       continue;
     }
 
     // If we haven't power cycled yet then go back through the loop.
-    if (!initial_reset_succeeded) {
-      initial_reset_succeeded = true;
+    if (!power_reset_done) {
+      // We have been seeing issues where a soft reset is not enough to restart the hardware and
+      // the hardware is hung forever. A simple fix for this is to fully reset the device's power.
+      // The device needs to be idle to do a power reset, so we have to do one soft reset first.
+      // The flow is: Soft Reset -> Hard Reset -> Soft Reset.
+      magma_status_t status = platform_device_->ResetPower();
+      if (status != MAGMA_STATUS_OK) {
+        MAGMA_LOG(ERROR, "Failed to reset power");
+      }
+      power_reset_done = true;
       continue;
     }
 
@@ -1337,7 +1346,7 @@ magma::Status MsdVsiDevice::ProcessBatch(std::unique_ptr<MappedBatch> batch, boo
   return MAGMA_STATUS_OK;
 }
 
-std::unique_ptr<MsdVsiConnection> MsdVsiDevice::OpenVsiConnection(msd::msd_client_id_t client_id) {
+std::shared_ptr<MsdVsiConnection> MsdVsiDevice::OpenVsiConnection(msd::msd_client_id_t client_id) {
   uint32_t page_table_array_slot;
   if (!page_table_slot_allocator_->Alloc(&page_table_array_slot)) {
     MAGMA_LOG(ERROR, "couldn't allocate page table slot");
@@ -1352,11 +1361,11 @@ std::unique_ptr<MsdVsiConnection> MsdVsiDevice::OpenVsiConnection(msd::msd_clien
 
   page_table_arrays_->AssignAddressSpace(page_table_array_slot, address_space.get());
 
-  return std::make_unique<MsdVsiConnection>(this, std::move(address_space), client_id);
+  return MsdVsiConnection::Create(this, std::move(address_space), client_id);
 }
 
 std::unique_ptr<msd::Connection> MsdVsiDevice::MsdOpen(msd::msd_client_id_t client_id) {
-  auto connection = OpenVsiConnection(client_id);
+  std::shared_ptr<MsdVsiConnection> connection = OpenVsiConnection(client_id);
   if (connection) {
     return std::make_unique<MsdVsiAbiConnection>(std::move(connection));
   } else {

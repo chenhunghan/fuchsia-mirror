@@ -10,7 +10,7 @@ use core::num::{NonZeroU8, NonZeroU16, NonZeroUsize};
 use core::time::Duration;
 
 use ip_test_macro::ip_test;
-use net_declare::{net_ip_v4, net_ip_v6};
+use net_declare::{net_ip_v4, net_ip_v6, net_mac};
 use net_types::ethernet::Mac;
 use net_types::ip::{
     AddrSubnet, GenericOverIp, Ip, IpAddr, IpAddress, IpInvariant, IpVersion, Ipv4, Ipv4Addr, Ipv6,
@@ -38,11 +38,11 @@ use packet_formats::ip::{
 use packet_formats::ipv4::options::Ipv4Option;
 use packet_formats::ipv4::{Ipv4PacketBuilder, Ipv4PacketBuilderWithOptions};
 use packet_formats::ipv6::ext_hdrs::{
-    ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData,
+    ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData, IPV6_FRAGMENT_EXT_HDR_LEN,
 };
 use packet_formats::ipv6::{
-    Ipv6PacketBuilder, Ipv6PacketBuilderBeforeFragment, Ipv6PacketBuilderWithFragmentHeader,
-    Ipv6PacketBuilderWithHbhOptions,
+    IPV6_FIXED_HDR_LEN, Ipv6Packet, Ipv6PacketBuilder, Ipv6PacketBuilderBeforeFragment,
+    Ipv6PacketBuilderWithFragmentHeader, Ipv6PacketBuilderWithHbhOptions,
 };
 use packet_formats::testutil::parse_icmp_packet_in_ip_packet_in_ethernet_frame;
 use packet_formats::udp::UdpPacketBuilder;
@@ -653,6 +653,201 @@ fn test_ip_packet_reassembly_not_needed<I: TestIpExt + IpExt>() {
     IpCounterExpectations::<I>::expect_dispatched(1).assert_counters(&ctx.core_ctx(), &device);
 }
 
+/// Builds an IPv6 atomic fragment (Fragment Offset and M flag both zero) whose
+/// Fragmentable Part consists of an 8-byte Destination Options extension header
+/// containing the 6-byte `dest_opts_option`, with no following header.
+fn ipv6_atomic_fragment_with_dest_opts(dest_opts_option: [u8; 6]) -> Buf<Vec<u8>> {
+    // Destination Options header: Next Header = No Next Header, Hdr Ext Len =
+    // 0, followed by the provided option.
+    let body: Vec<u8> =
+        [Ipv6Proto::NoNextHeader.into(), 0].into_iter().chain(dest_opts_option).collect();
+
+    let builder = Ipv6PacketBuilderWithFragmentHeader::new(
+        Ipv6PacketBuilder::new(
+            TEST_ADDRS_V6.remote_ip,
+            TEST_ADDRS_V6.local_ip,
+            64,
+            Ipv6Proto::Other(Ipv6ExtHdrType::DestinationOptions.into()),
+        ),
+        FragmentOffset::ZERO,
+        /* more_fragments */ false,
+        /* identification */ 5,
+    );
+    wrap_body(builder, body)
+}
+
+// Test that an atomic fragment whose Fragmentable Part begins with an
+// extension header is processed as a fully reassembled packet and
+// dispatched to the upper layer.
+#[test]
+fn test_ipv6_atomic_fragment_with_dest_opts() {
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(TEST_ADDRS_V6).build();
+    let device: DeviceId<_> = device_ids[0].clone().into();
+
+    // PadN option with 4 bytes of padding.
+    const PADN: [u8; 6] = [1, 4, 0, 0, 0, 0];
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device,
+        Some(LocalFrameDestination::Individual { local: () }),
+        ipv6_atomic_fragment_with_dest_opts(PADN),
+    );
+
+    // Make sure the packet got dispatched.
+    IpCounterExpectations::<Ipv6>::expect_dispatched(1).assert_counters(&ctx.core_ctx(), &device);
+}
+
+// Test that the options in an extension header following the Fragment
+// header of an atomic fragment are processed.
+#[test]
+fn test_ipv6_atomic_fragment_with_dest_opts_unrecognized_option() {
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(TEST_ADDRS_V6).build();
+    let device: DeviceId<_> = device_ids[0].clone().into();
+
+    // Unrecognized option type with action = discard & send ICMP.
+    // According to RFC 8200:
+    //
+    //   The Option Type identifiers are internally encoded such that their
+    //   highest-order 2 bits specify the action that must be taken if the
+    //   processing IPv6 node does not recognize the Option Type:
+    //
+    //      10 - discard the packet and, regardless of whether or not the
+    //      packet's Destination Address was a multicast address, send an
+    //      ICMP Parameter Problem, Code 2, message to the packet's
+    //      Source Address, pointing to the unrecognized Option Type.
+    let unrecognized_option = [0b1000_0000, 4, 0, 0, 0, 0];
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device,
+        Some(LocalFrameDestination::Individual { local: () }),
+        ipv6_atomic_fragment_with_dest_opts(unrecognized_option),
+    );
+
+    let frames = ctx.bindings_ctx.take_ethernet_frames();
+    let (_dev, frame) = assert_matches!(&frames[..], [frame] => frame);
+    // The option type is located after the IPv6 fixed header, the Fragment
+    // header and the Destination Options' Next Header and Hdr Ext Len fields.
+    const DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN: usize = 2;
+    let option_type_offset =
+        IPV6_FIXED_HDR_LEN + IPV6_FRAGMENT_EXT_HDR_LEN + DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN;
+    verify_icmp_for_unrecognized_ext_hdr_option(
+        Icmpv6ParameterProblemCode::UnrecognizedIpv6Option,
+        u32::try_from(option_type_offset).unwrap(),
+        &frame[..],
+    );
+}
+
+// Test that a reassembled packet that still contains a Fragment header is
+// dropped.
+#[test]
+fn test_ipv6_reassembled_packet_with_fragment_header_dropped() {
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(TEST_ADDRS_V6).build();
+    let device: DeviceId<_> = device_ids[0].clone().into();
+
+    // An atomic fragment whose Fragmentable Part begins with another atomic
+    // Fragment header.
+    const INNER_IDENTIFICATION: u32 = 6;
+    let body: Vec<u8> = [
+        Ipv6Proto::NoNextHeader.into(), // Next Header
+        0,                              // Reserved
+        0,                              // Fragment Offset MSB
+        0,                              // Fragment Offset LS5bits w/ Res w/ M Flag
+    ]
+    .into_iter()
+    .chain(INNER_IDENTIFICATION.to_be_bytes())
+    .collect();
+    let builder = Ipv6PacketBuilderWithFragmentHeader::new(
+        Ipv6PacketBuilder::new(
+            TEST_ADDRS_V6.remote_ip,
+            TEST_ADDRS_V6.local_ip,
+            64,
+            Ipv6Proto::Other(Ipv6ExtHdrType::Fragment.into()),
+        ),
+        FragmentOffset::ZERO,
+        /* more_fragments */ false,
+        /* identification */ 5,
+    );
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device,
+        Some(LocalFrameDestination::Individual { local: () }),
+        wrap_body(builder, body),
+    );
+
+    assert_matches!(ctx.bindings_ctx.take_ethernet_frames()[..], []);
+    IpCounterExpectations::<Ipv6> {
+        receive_ip_packet: 1,
+        fragment_reassembly_error: 1,
+        ..Default::default()
+    }
+    .assert_counters(&ctx.core_ctx(), &device);
+}
+
+// Test that a forwarded atomic fragment has its Fragment header removed,
+// and that a Packet Too Big error is sent if the original atomic fragment
+// (including its Fragment header) does not fit in the outbound MTU.
+#[test_case(0; "fits")]
+#[test_case(4; "fits only without fragment header")]
+fn test_ipv6_forward_atomic_fragment(bytes_over_mtu: usize) {
+    const MTU: usize = 1280;
+
+    let fake_config = Ipv6::TEST_ADDRS;
+    let mut dispatcher_builder = FakeCtxBuilder::with_addrs(fake_config.clone());
+    let extra_ip = UnicastAddr::new(Ipv6::get_other_ip_address(7).get()).unwrap();
+    let extra_mac = UnicastAddr::new(net_mac!("00:11:22:33:44:55")).unwrap();
+    dispatcher_builder.add_ndp_table_entry(0, extra_ip, extra_mac);
+    dispatcher_builder.add_ndp_table_entry(
+        0,
+        extra_mac.to_ipv6_link_local().addr().get(),
+        extra_mac,
+    );
+    let (mut ctx, device_ids) = dispatcher_builder.build();
+
+    let device: DeviceId<_> = device_ids[0].clone().into();
+    ctx.test_api().set_unicast_forwarding_enabled::<Ipv6>(&device, true);
+    let frame_dst = LocalFrameDestination::Individual { local: () };
+
+    // An atomic fragment from some node destined to a remote on this
+    // network, arriving locally.
+    let atomic_fragment_len = MTU + bytes_over_mtu;
+    let body_len = atomic_fragment_len - IPV6_FIXED_HDR_LEN - IPV6_FRAGMENT_EXT_HDR_LEN;
+    let mut rng = new_rng(70812476915813);
+    let body: Vec<u8> = core::iter::repeat_with(|| rng.random()).take(body_len).collect();
+    let builder = Ipv6PacketBuilderWithFragmentHeader::new(
+        Ipv6PacketBuilder::new(extra_ip, fake_config.remote_ip, 64, Ipv6Proto::NoNextHeader),
+        FragmentOffset::ZERO,
+        /* more_fragments */ false,
+        /* identification */ 5,
+    );
+    let buf = wrap_body(builder, body.clone());
+    assert_eq!(buf.as_ref().len(), atomic_fragment_len);
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(&device, Some(frame_dst), buf);
+
+    let Ctx { core_ctx, bindings_ctx } = &mut ctx;
+    let frames = bindings_ctx.take_ethernet_frames();
+    let (_dev, frame) = assert_matches!(&frames[..], [frame] => frame);
+    if bytes_over_mtu == 0 {
+        assert_eq!(core_ctx.common_icmp::<Ipv6>().tx_counters.packet_too_big.get(), 0);
+        let mut buffer = Buf::new(&frame[..], ..);
+        let _frame =
+            buffer.parse_with::<_, EthernetFrame<_>>(EthernetFrameLengthCheck::NoCheck).unwrap();
+        let packet = buffer.parse::<Ipv6Packet<_>>().unwrap();
+        assert_eq!(packet.src_ip(), extra_ip.get());
+        assert_eq!(packet.dst_ip(), fake_config.remote_ip.get());
+        assert_eq!(packet.proto(), Ipv6Proto::NoNextHeader);
+        assert_eq!(packet.iter_extension_hdrs().count(), 0);
+        assert_eq!(packet.body(), &body[..]);
+    } else {
+        assert_eq!(core_ctx.common_icmp::<Ipv6>().tx_counters.packet_too_big.get(), 1);
+        let (_, _, _, _, _, message, code) =
+            parse_icmp_packet_in_ip_packet_in_ethernet_frame::<Ipv6, _, Icmpv6PacketTooBig, _>(
+                &frame[..],
+                EthernetFrameLengthCheck::NoCheck,
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(code, IcmpZeroCode);
+        assert_eq!(message, Icmpv6PacketTooBig::new(u32::try_from(MTU).unwrap()));
+    }
+}
+
 #[ip_test(I)]
 #[test_case(true; "with_header_options")]
 #[test_case(false; "without_header_options")]
@@ -968,6 +1163,7 @@ fn forward_coalesced_gso_tcp<I: TestIpExt + IpExt>() {
             parsing_context: NetworkParsingContext::default(),
             gso_info: Some(netstack3_base::GsoInfo {
                 gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                gso_segs: NonZeroU16::new(NUM_SEGMENTS).unwrap(),
                 ipv4_id_mode: match I::VERSION {
                     IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
                     IpVersion::V6 => None,
@@ -995,6 +1191,65 @@ fn forward_coalesced_gso_tcp<I: TestIpExt + IpExt>() {
 
     // The packet is forwarded as `NUM_SEGMENTS` discrete segments.
     assert_eq!(ctx.bindings_ctx.take_ethernet_frames().len(), usize::from(NUM_SEGMENTS));
+}
+
+#[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+fn deliver_coalesced_tcp_passes_gso_info_to_socket_ingress_filter<I: TestIpExt + IpExt>() {
+    const GSO_SIZE: u16 = 1000;
+    const NUM_SEGMENTS: u16 = 2;
+    const LOCAL_PORT: NonZeroU16 = NonZeroU16::new(80).unwrap();
+
+    let TestAddrs { subnet: _, local_ip, local_mac, remote_ip, remote_mac } = I::TEST_ADDRS;
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(I::TEST_ADDRS).build();
+    let device_id = assert_matches!(<[_; 1]>::try_from(device_ids), Ok([id]) => id);
+
+    let mut tcp_api = ctx.core_api().tcp::<I>();
+    let listener = tcp_api.create(Default::default());
+    tcp_api.bind(&listener, Some(ZonedAddr::Unzoned(local_ip)), Some(LOCAL_PORT)).unwrap();
+    tcp_api.listen(&listener, NonZeroUsize::new(1).unwrap()).unwrap();
+
+    let payload = vec![0xAB; usize::from(NUM_SEGMENTS * GSO_SIZE)];
+    let frame = Buf::new(payload, ..)
+        .wrap_in(packet_formats::tcp::TcpSegmentBuilder::new(
+            *remote_ip,
+            *local_ip,
+            NonZeroU16::new(1234).unwrap(),
+            LOCAL_PORT,
+            1,
+            Some(1),
+            65535,
+        ))
+        .wrap_in(I::PacketBuilder::new(*remote_ip, *local_ip, 64, IpProto::Tcp.into()))
+        .wrap_in(EthernetFrameBuilder::new(*remote_mac, *local_mac, I::ETHER_TYPE, 0))
+        .serialize_vec_outer(&mut NetworkSerializationContext::default())
+        .unwrap()
+        .unwrap_b();
+
+    let gso_info = netstack3_base::GsoInfo {
+        gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+        gso_segs: NonZeroU16::new(NUM_SEGMENTS).unwrap(),
+        ipv4_id_mode: match I::VERSION {
+            IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
+            IpVersion::V6 => None,
+        },
+    };
+    ctx.core_api().device::<EthernetLinkDevice>().receive_frame(
+        RecvEthernetFrameMeta {
+            device_id,
+            parsing_context: NetworkParsingContext::default(),
+            gso_info: Some(gso_info),
+        },
+        frame,
+    );
+
+    let filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
+    assert_matches!(
+        &filter_metadata[..],
+        [(_sock_info, _marks, PacketType::Host, recorded_gso_info)] => {
+            assert_eq!(*recorded_gso_info, Some(gso_info));
+        }
+    );
 }
 
 #[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
@@ -1032,6 +1287,7 @@ fn forward_coalesced_gso_tcp_oversized_segments<I: TestIpExt + IpExt>() {
             parsing_context: NetworkParsingContext::default(),
             gso_info: Some(netstack3_base::GsoInfo {
                 gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                gso_segs: NonZeroU16::new(2).unwrap(),
                 ipv4_id_mode: match I::VERSION {
                     IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
                     IpVersion::V6 => None,
@@ -1129,6 +1385,7 @@ fn forward_coalesced_not_segmentable_sent_whole<I: TestIpExt + IpExt>() {
             parsing_context: NetworkParsingContext::default(),
             gso_info: Some(netstack3_base::GsoInfo {
                 gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+                gso_segs: NonZeroU16::new(2).unwrap(),
                 ipv4_id_mode: match I::VERSION {
                     IpVersion::V4 => Some(netstack3_base::Ipv4IdMode::Incrementing),
                     IpVersion::V6 => None,
@@ -3460,7 +3717,7 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
 
     let udp_filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
     assert_eq!(udp_filter_metadata.len(), 1);
-    let (_sock_info, marks, packet_type) = &udp_filter_metadata[0];
+    let (_sock_info, marks, packet_type, _gso_info) = &udp_filter_metadata[0];
     // Mark1 (SO_MARK) comes from the packet (kept on egress from sender).
     assert_eq!(marks.get(MarkDomain::Mark1), &Mark(Some(100)));
     // Mark2 (SOCKET_UID) comes from the destination socket (set on ingress from
@@ -3489,19 +3746,20 @@ fn test_socket_ops_filter_on_ingress_marks<I: IpExt + TestIpExt>() {
     assert_eq!(tcp_filter_metadata.len(), 3);
     // 1. SYN arriving at the listener: Mark1 from client (400), Mark2 from
     //    listener (3000).
-    let (_syn_sock_info, syn_marks, syn_packet_type) = &tcp_filter_metadata[0];
+    let (_syn_sock_info, syn_marks, syn_packet_type, _syn_gso_info) = &tcp_filter_metadata[0];
     assert_eq!(syn_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(syn_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
     assert_eq!(*syn_packet_type, PacketType::Host);
     // 2. SYN-ACK arriving at the client: Mark1 from child socket (inherited
     //    from SYN: 400), Mark2 from client (4000).
-    let (_syn_ack_sock_info, syn_ack_marks, syn_ack_packet_type) = &tcp_filter_metadata[1];
+    let (_syn_ack_sock_info, syn_ack_marks, syn_ack_packet_type, _syn_ack_gso_info) =
+        &tcp_filter_metadata[1];
     assert_eq!(syn_ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(syn_ack_marks.get(MarkDomain::Mark2), &Mark(Some(4000)));
     assert_eq!(*syn_ack_packet_type, PacketType::Host);
     // 3. Final ACK arriving at the listener: Mark1 from client (400), Mark2
     //    from child socket (3000).
-    let (_ack_sock_info, ack_marks, ack_packet_type) = &tcp_filter_metadata[2];
+    let (_ack_sock_info, ack_marks, ack_packet_type, _ack_gso_info) = &tcp_filter_metadata[2];
     assert_eq!(ack_marks.get(MarkDomain::Mark1), &Mark(Some(400)));
     assert_eq!(ack_marks.get(MarkDomain::Mark2), &Mark(Some(3000)));
     assert_eq!(*ack_packet_type, PacketType::Host);
@@ -3566,6 +3824,6 @@ fn test_socket_ops_filter_on_ingress_multicast<I: IpExt + TestIpExt>() {
 
     let mcast_filter_metadata = core::mem::take(&mut ctx.bindings_ctx.state_mut().packet_metadata);
     assert_eq!(mcast_filter_metadata.len(), 1);
-    let (_sock_info, _marks, mcast_packet_type) = &mcast_filter_metadata[0];
+    let (_sock_info, _marks, mcast_packet_type, _gso_info) = &mcast_filter_metadata[0];
     assert_eq!(*mcast_packet_type, PacketType::Multicast);
 }

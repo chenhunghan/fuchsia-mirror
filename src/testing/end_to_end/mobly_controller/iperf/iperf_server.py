@@ -19,7 +19,7 @@ import threading
 import time
 from typing import IO
 
-from antlion import context, utils
+from antlion import utils
 from libs.commands import nmcli
 from libs.commands.command import (
     LinuxCommand,
@@ -33,6 +33,7 @@ from libs.ssh import connection, settings
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
 from mobly import logger, signals
+from mobly import utils as mobly_utils
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "IPerfServer"
 KILOBITS = 1024
@@ -331,9 +332,9 @@ class IPerfServerBase(object):
 
     @property
     def log_path(self) -> str:
-        current_context = context.get_current_context()
+        # Set by Mobly in base_test.BaseTestClass.run.
         full_out_dir = os.path.join(
-            current_context.get_full_output_path(), f"IPerfServer{self.port}"
+            getattr(logging, "log_path"), f"IPerfServer{self.port}"
         )
 
         # Ensure the directory exists.
@@ -664,7 +665,9 @@ class IPerfServerOverSsh(IPerfServerBase):
             path: Path to write logs to.
         """
         timestamp = logger.normalize_log_line_timestamp(
-            logger.epoch_to_log_line_timestamp(utils.get_current_epoch_time())
+            logger.epoch_to_log_line_timestamp(
+                mobly_utils.get_current_epoch_time()
+            )
         )
 
         # OpenWrt does not use systemd/journalctl; skip downloading when journalctl is unavailable

@@ -7,17 +7,31 @@ use blob_pager_and_verifier::{BlobPagerAndVerifier, DeliveryQueueProcessor, Test
 use blob_writer::BlobWriter;
 use block_client::BlockClient as _;
 use delivery_blob::{CompressionMode, Type1Blob, Type3Blob};
-use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions};
+use fidl::endpoints::{DiscoverableProtocolMarker as _, create_proxy};
+use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions, VolumesMarker};
 use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobReaderMarker};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping::MappingProviderMarker;
 use fidl_fuchsia_storage_partitions as fpartitions;
-use fs_management::filesystem::{BlockConnector as _, Filesystem as FsManagementFilesystem};
-use fuchsia_component::client::{Service, connect_to_protocol, connect_to_protocol_at_dir_svc};
+use fs_management::filesystem::{
+    BlockConnector as _, DirBasedBlockConnector, Filesystem as FsManagementFilesystem,
+};
+use fs_management::{Fvm, Fxfs};
+use fuchsia_async as fasync;
+use fuchsia_component::client::{
+    Service, connect_to_protocol, connect_to_protocol_at_dir_root, connect_to_protocol_at_dir_svc,
+};
 use fuchsia_merkle::Hash;
+use fuchsia_runtime::vmar_root_self;
+use std::hint::black_box;
+use std::slice::from_raw_parts;
 use std::sync::Arc;
+use storage_profile::{BlobMessage, Message as _};
 use test_case::test_case;
+use test_vmo_backed_block_server::{
+    InitialContents, VmoBackedServer, VmoBackedServerConnector, VmoBackedServerOptions,
+};
 
 struct TestBlob {
     data: Vec<u8>,
@@ -84,11 +98,11 @@ impl TestPartitionEnv {
                 let block_count = 256 * 1024 * 1024 / block_size;
                 let vmo = zx::Vmo::create(block_count * block_size)?;
                 let block_server = Arc::new(
-                    vmo_backed_block_server::VmoBackedServer::from_vmo(block_size as u32, vmo)
+                    VmoBackedServer::from_vmo(block_size as u32, vmo)
                         .context("Failed to create VmoBackedServer")?,
                 );
                 let gpt_fs = FsManagementFilesystem::new(
-                    vmo_backed_block_server::VmoBackedServerConnector::new(block_server),
+                    VmoBackedServerConnector::new(block_server),
                     fs_management::Gpt { ..fs_management::Gpt::dynamic_child() },
                 );
                 let serving = gpt_fs.serve_multi_volume().await.context("Failed to start GPT")?;
@@ -547,5 +561,218 @@ async fn test_unlink_open_blob(backend: PagingBackend) -> Result<(), Error> {
         backend:?;
         "Successfully verified unlinked blob remained valid and readable if blob remains opened"
     );
+    Ok(())
+}
+
+#[fuchsia::test(threads = 4)]
+async fn test_profile_record_and_replay() -> Result<(), Error> {
+    let env = TestPartitionEnv::new().await?;
+
+    let blob_a = TestBlob::new_type1_compressed(vec![0xAAu8; 64 * 1024]);
+    let blob_b = TestBlob::new_uncompressed(vec![0xBBu8; 32 * 1024]);
+    let blob_c = TestBlob::new_type3_compressed(vec![0xCCu8; 200 * 1024]);
+    env.write_blob(&blob_a).await?;
+    env.write_blob(&blob_b).await?;
+    env.write_blob(&blob_c).await?;
+
+    // 1. Start `.boot` profile recording from `BlobPagerAndVerifier` and read all three blobs.
+    let blob_pager_1 = BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
+        .await
+        .context("Failed to create BlobPagerAndVerifier (run 1)")?;
+    let recording_1 = blob_pager_1
+        .start_profile(".boot")
+        .await
+        .context("Failed to start profile recording (run 1)")?;
+
+    for blob in [&blob_a, &blob_b, &blob_c] {
+        let vmo = blob_pager_1.create_vmo(&blob.hash.into()).await?;
+        let expected_len = blob.data.len();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = vec![0u8; expected_len];
+            vmo.read(&mut buf, 0).expect("paged vmo read failed");
+            buf
+        });
+        assert_eq!(reader_thread.join().expect("reader_thread panicked"), blob.data);
+    }
+
+    recording_1.stop().await.context("Failed to stop profile recording (run 1)")?;
+    drop(blob_pager_1);
+
+    // 2. Create a fresh `BlobPagerAndVerifier` (empty cache) and start a second `.boot` profile
+    // run. It replays `blob_a`, `blob_b`, and `blob_c` into `blob_pager_2`'s VMO cache.
+    let blob_pager_2 = BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
+        .await
+        .context("Failed to create BlobPagerAndVerifier (run 2)")?;
+    let recording_2 = blob_pager_2
+        .start_profile(".boot")
+        .await
+        .context("Failed to start profile recording (run 2)")?;
+
+    // Open `blob_a` and `blob_c` as a client during run 2 without reading them, so only
+    // background replay's `ZX_VMO_OP_PREFETCH` faults their pages through the driver. Leave
+    // `blob_b` unopened during run 2 so it is filtered out of the new `.boot` recording.
+    let _vmo_a = blob_pager_2.create_vmo(&blob_a.hash.into()).await?;
+    let _vmo_c = blob_pager_2.create_vmo(&blob_c.hash.into()).await?;
+
+    // Stopping `recording_2` waits for replay threads to finish prefetching all replayed blobs,
+    // stops driver recording, filters out unopened `blob_b`, and commits the new `.boot` profile
+    // containing only `blob_a` and `blob_c`.
+    recording_2.stop().await.context("Failed to stop profile recording (run 2)")?;
+    drop(_vmo_a);
+    drop(_vmo_c);
+    drop(blob_pager_2);
+
+    // 3. Call `MappingSession.GetProfile(".boot")` to verify that the persisted `.boot` profile
+    // from run 2 contains `blob_a` and both 128 KiB readahead windows of `blob_c`, and filtered
+    // out `blob_b`.
+    let (mapping_session, mapping_session_server) = fidl::endpoints::create_proxy();
+    let _mapping_vmo = env
+        .mapping_provider
+        .open_session(mapping_session_server)
+        .await
+        .context("FIDL error on open_session (run 3)")?
+        .map_err(zx::Status::err_from_raw)
+        .context("Failed to open mapping session (run 3)")?;
+    let replay_vmo = mapping_session
+        .get_profile(".boot")
+        .await
+        .context("FIDL error on get_profile (run 3)")?
+        .map_err(zx::Status::err_from_raw)
+        .context("Failed to get profile (run 3)")?;
+
+    let messages: Vec<_> = BlobMessage::decode_from_vmo(replay_vmo, 4096)
+        .context("Failed to decode replay_vmo in run 3")?
+        .collect();
+    assert_eq!(messages.len(), 3);
+    assert!(messages.contains(&BlobMessage { id: blob_a.hash, offset: 0 }));
+    assert!(messages.contains(&BlobMessage { id: blob_c.hash, offset: 0 }));
+    assert!(messages.contains(&BlobMessage { id: blob_c.hash, offset: 128 * 1024 }));
+    assert!(!messages.iter().any(|m| m.id == blob_b.hash));
+
+    env.shutdown().await?;
+    Ok(())
+}
+
+#[fuchsia::test(threads = 4)]
+async fn test_mapper_close_during_read_on_fvm() -> Result<(), Error> {
+    let block_size = 4096u64;
+    let block_count = 256 * 1024 * 1024 / block_size;
+    let vmo = zx::Vmo::create(block_count * block_size)?;
+    let block_server = Arc::new(
+        VmoBackedServerOptions {
+            block_size: block_size as u32,
+            initial_contents: InitialContents::FromVmo(vmo),
+            max_jitter_usec: Some(5000),
+            ..Default::default()
+        }
+        .build()
+        .context("Failed to create VmoBackedServer")?,
+    );
+
+    let mut fvm_fs = FsManagementFilesystem::new(
+        VmoBackedServerConnector::new(block_server),
+        Fvm { slice_size: 8 * 1024 * 1024, ..Fvm::dynamic_child() },
+    );
+    fvm_fs.format().await.context("Failed to format FVM")?;
+    let fvm = fvm_fs.serve_multi_volume().await.context("Failed to serve FVM")?;
+    let volumes = connect_to_protocol_at_dir_root::<VolumesMarker>(fvm.exposed_dir())
+        .context("Failed to connect to FVM Volumes")?;
+
+    let (volume_dir, server_end) = create_proxy::<fio::DirectoryMarker>();
+    volumes
+        .create(
+            "fxfs",
+            server_end,
+            CreateOptions {
+                initial_size: Some(64 * 1024 * 1024),
+                type_guid: Some([1u8; 16]),
+                guid: Some([2u8; 16]),
+                ..Default::default()
+            },
+            MountOptions::default(),
+        )
+        .await
+        .context("FIDL error creating FVM volume")?
+        .map_err(zx::Status::err_from_raw)
+        .context("Failed to create FVM volume")?;
+
+    let connector = Arc::new(DirBasedBlockConnector::new(
+        volume_dir,
+        format!("svc/{}", fblock::BlockMarker::PROTOCOL_NAME),
+    ));
+
+    let mut fxfs = FsManagementFilesystem::new(
+        connector.clone(),
+        Fxfs { allow_type3_blobs: true, ..Default::default() },
+    );
+    fxfs.format().await.context("Failed to format Fxfs")?;
+    let serving = fxfs.serve_multi_volume().await.context("Failed to serve Fxfs")?;
+    let volume = serving
+        .create_volume(
+            "blob",
+            CreateOptions::default(),
+            MountOptions { as_blob: Some(true), ..Default::default() },
+        )
+        .await
+        .context("Failed to create blob volume")?;
+
+    let blob_creator = connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(volume.exposed_dir())?;
+    let mapping_provider =
+        connect_to_protocol_at_dir_svc::<MappingProviderMarker>(volume.exposed_dir())?;
+    let block_proxy = connector.connect_block()?.into_proxy();
+    let (mapper_proxy, mapper_server) = create_proxy::<fblock::MapperMarker>();
+    block_proxy
+        .connect_mapper(mapper_server)
+        .await
+        .context("FIDL error on ConnectMapper")?
+        .map_err(zx::Status::err_from_raw)
+        .context("ConnectMapper failed")?;
+    drop(block_proxy);
+
+    let blob = TestBlob::new_type1_compressed(vec![0xAAu8; 128 * 1024]);
+    let writer_client_end = blob_creator
+        .create(&blob.hash.into(), false)
+        .await?
+        .map_err(|e| anyhow!("CreateBlob error: {e:?}"))?;
+    let mut blob_writer =
+        BlobWriter::create(writer_client_end.into_proxy(), blob.delivery_data.len() as u64).await?;
+    blob_writer.write(&blob.delivery_data).await?;
+
+    let root_hash = <[u8; 32]>::from(blob.hash);
+    let blob_pager = BlobPagerAndVerifier::new(&mapping_provider, &mapper_proxy).await?;
+    let paged_vmo = blob_pager.create_vmo(&root_hash).await?;
+    fasync::unblock(move || {
+        let len = 128 * 1024;
+        let addr = vmar_root_self()
+            .map(0, &paged_vmo, 0, len, zx::VmarFlags::PERM_READ)
+            .expect("vmar map failed");
+
+        // SAFETY: `addr` is mapped for `len` bytes and remains mapped until `unmap` below.
+        let slice = unsafe { from_raw_parts(addr as *const u8, len) };
+
+        // Faulting at 0 triggers a 128 KiB readahead that flushes the first 96 KiB early for
+        // verification, waking this thread before 96..128 KiB is supplied. Faulting immediately at
+        // 96 KiB queues a second pager read that is still in flight when `blob_pager` is dropped
+        // below.
+        black_box(slice[0]);
+        black_box(slice[96 * 1024]);
+
+        // SAFETY: Unmaps the region mapped above after `slice` is no longer used.
+        unsafe {
+            let _ = vmar_root_self().unmap(addr, len);
+        }
+    })
+    .await;
+    drop(blob_pager);
+
+    serving.shutdown().await.context("Failed to shutdown Fxfs")?;
+    drop(connector);
+    volumes
+        .remove("fxfs")
+        .await
+        .context("FIDL error removing FVM volume")?
+        .map_err(zx::Status::err_from_raw)
+        .context("Failed to destroy FVM volume")?;
+
     Ok(())
 }

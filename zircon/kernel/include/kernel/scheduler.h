@@ -26,7 +26,9 @@
 #include <fbl/intrusive_wavl_tree.h>
 #include <fbl/wavl_tree_augmented_invariant_observer.h>
 #include <ffl/fixed.h>
+#include <kernel/cpu_search_set.h>
 #include <kernel/dpc.h>
+#include <kernel/ffi.h>
 #include <kernel/mp.h>
 #include <kernel/owned_wait_queue.h>
 #include <kernel/scheduler_state.h>
@@ -43,6 +45,31 @@
 // Forward declarations.
 struct percpu;
 struct cpu_stats;
+
+struct RunQueueIterator {
+  Thread* current;
+};
+static_assert(sizeof(RunQueueIterator) == 8 && alignof(RunQueueIterator) == 8);
+
+extern "C" {
+void* cpp_thread_get_queue_node(Thread* t);
+void rust_kernel_run_queue_insert(void* rq, Thread* thread);
+Thread* rust_kernel_run_queue_erase(void* rq, Thread* thread);
+Thread* rust_kernel_run_queue_find_earliest_eligible_thread(const void* rq, SchedTime eligible_time,
+                                                            bool (*predicate)(const Thread*,
+                                                                              const void*),
+                                                            const void* context);
+size_t rust_kernel_run_queue_size(const void* rq);
+bool rust_kernel_run_queue_is_empty(const void* rq);
+Thread* rust_kernel_run_queue_front(const void* rq);
+RunQueueIterator rust_kernel_run_queue_iterator_create(const void* rq);
+bool rust_kernel_run_queue_iterator_is_valid(const RunQueueIterator* iter);
+Thread* rust_kernel_run_queue_iterator_get(const RunQueueIterator* iter);
+void rust_kernel_run_queue_iterator_next(RunQueueIterator* iter);
+Thread* rust_kernel_run_queue_root(const void* rq);
+void rust_kernel_run_queue_init(void* rq);
+void rust_kernel_run_queue_destroy(void* rq);
+}
 
 // Ensure this define has a value when not defined globally by the build system.
 #ifndef SCHEDULER_TRACING_LEVEL
@@ -80,13 +107,208 @@ constexpr zx_cpu_performance_scale_t ToUserPerformanceScale(SchedProcessingRate 
           .fractional_part = static_cast<uint32_t>(fractional)};
 }
 
+class Scheduler;
+
+extern "C" {
+
+Scheduler* cpp_scheduler_get(cpu_num_t cpu);
+void cpp_scheduler_save_state_list_push_front(Scheduler* sched, Thread* thread);
+
+cpu_stats* cpp_get_cpu_stats(cpu_num_t cpu_num);
+void cpp_scheduler_get_projected_cpu_stats(cpu_num_t cpu_num, ffi::Uninitialized<cpu_stats>* out);
+uint64_t cpp_scheduler_power_state_active_power_coefficient_nw(const Scheduler* sched);
+uint64_t cpp_scheduler_power_level_control_max_idle_power_coefficient_nw(const Scheduler* sched);
+
+void rust_kernel_scheduler_dump(Scheduler* sched, FILE* output_target, bool queue_state_only);
+void rust_kernel_scheduler_dump_active_thread(Scheduler* sched, FILE* output_target);
+void cpp_dump_write_str(FILE* output_target, const char* str, size_t len);
+void cpp_thread_dump_active(const Thread* thread, FILE* output_target);
+void cpp_scheduler_lock_queue(Scheduler* sched);
+void cpp_scheduler_unlock_queue(Scheduler* sched);
+uint64_t cpp_scheduler_lock_queue_irq_save(Scheduler* sched);
+void cpp_scheduler_unlock_queue_irq_restore(Scheduler* sched, uint64_t state);
+void cpp_thread_update_runtime_stats(Thread* thread, int32_t state);
+void rust_kernel_scheduler_lock_handoff();
+void rust_kernel_scheduler_block(Thread* current_thread);
+void rust_kernel_scheduler_timer_tick(SchedTime now);
+int32_t cpp_thread_get_disposition(const Thread* thread);
+bool cpp_thread_is_idle(const Thread* thread);
+bool cpp_thread_has_migrate_fn(const Thread* thread);
+bool cpp_thread_migrate_pending(const Thread* thread);
+SchedulerState* cpp_thread_get_scheduler_state(Thread* t);
+void cpp_stall_accumulator_apply_context_switch(Thread* current_thread, Thread* next_thread);
+Thread* cpp_scheduler_get_idle_thread(const Scheduler* sched);
+bool cpp_scheduler_has_pending_power_work(const Scheduler* sched);
+
+bool cpp_scheduler_power_level_control_is_enabled(const Scheduler* sched);
+bool cpp_scheduler_power_state_scheduler_control_enabled(const Scheduler* sched);
+bool cpp_scheduler_power_state_is_serving(const Scheduler* sched);
+bool cpp_scheduler_power_state_is_valid_active_power_level(const Scheduler* sched,
+                                                           uint8_t power_level);
+cpu_mask_t cpp_scheduler_power_state_domain_cpus(const Scheduler* sched);
+SchedProcessingRate cpp_scheduler_power_state_target_processing_rate(const Scheduler* sched);
+SchedProcessingRate cpp_scheduler_power_state_preceding_target_processing_rate(
+    const Scheduler* sched);
+bool cpp_scheduler_power_state_has_preceding_target_power_level(const Scheduler* sched);
+const power_management::PowerLevel* cpp_scheduler_power_state_find_active_power_level_for_rate(
+    const Scheduler* sched, SchedProcessingRate rate);
+uint8_t cpp_power_level_get_level(const power_management::PowerLevel* power_level);
+bool cpp_scheduler_power_state_request_transition(
+    Scheduler* sched, cpu_num_t cpu, uint8_t power_level,
+    power_management::PowerLevelUpdateRequest* out_req);
+cpu_mask_t cpp_scheduler_power_state_post_update_request(
+    const Scheduler* sched, const power_management::PowerLevelUpdateRequest* req);
+zx_status_t cpp_scheduler_power_state_update_active_power_level(
+    Scheduler* sched, uint8_t power_level, SchedProcessingRate* out_active_rate);
+SchedulerQueueState* cpp_thread_get_queue_state(Thread* thread);
+zx_koid_t cpp_thread_get_tid(const Thread* thread);
+SchedUtilization cpp_scheduler_power_level_control_update_normalized_utilization(
+    Scheduler* sched, SchedUtilization delta);
+uint32_t cpp_scheduler_power_level_control_domain_id(const Scheduler* sched);
+SchedUtilization cpp_scheduler_power_level_control_total_normalized_utilization(
+    const Scheduler* sched);
+const CpuSearchSet::Entry* cpp_get_cpu_search_set_entries(cpu_num_t cpu);
+size_t cpp_get_cpu_search_set_count(cpu_num_t cpu);
+size_t cpp_scheduler_get_power_domain_set_count(const Scheduler* sched);
+uint64_t cpp_scheduler_lookup_power_cost(const Scheduler* sched, cpu_num_t cpu,
+                                         SchedProcessingRate rate);
+SchedUtilization cpp_scheduler_lookup_total_normalized_utilization(const Scheduler* sched,
+                                                                   cpu_num_t cpu);
+void cpp_thread_canary_assert(const Thread* thread);
+void cpp_timer_queue_preempt_reset(cpu_num_t cpu, zx_instant_mono_t deadline);
+bool cpp_timer_queue_preempt_armed(cpu_num_t cpu);
+void cpp_thread_call_context_switch_fn_locked(Thread* thread);
+VmAspace* cpp_thread_get_aspace(Thread* thread);
+void cpp_vmm_context_switch(VmAspace* old_aspace, VmAspace* new_aspace);
+void cpp_arch_context_switch(Thread* current_thread, Thread* next_thread);
+void cpp_thread_signal_check_restartable_sequence_if_needed(Thread* thread);
+
+WaitQueueBase* cpp_thread_get_blocking_wait_queue(const Thread* thread);
+void cpp_wait_queue_update_blocked_thread_effective_profile(WaitQueueBase* wq, Thread* thread);
+void cpp_thread_call_migrate_fn_locked(Thread* thread, int32_t stage);
+void cpp_thread_call_migrate_fn_for_cpu(cpu_num_t cpu);
+const ChainLock* cpp_wait_queue_get_lock(const WaitQueueBase* wq);
+SchedulerState::WaitQueueInheritedSchedulerState* cpp_owq_get_inherited_state(OwnedWaitQueue* owq);
+const SchedulerState::WaitQueueInheritedSchedulerState* cpp_owq_get_inherited_state_const(
+    const OwnedWaitQueue* owq);
+SchedUtilization cpp_scheduler_get_normalized_utilization(const Scheduler* sched);
+void cpp_thread_preempts_pending_add(Thread* thread, cpu_mask_t mask);
+cpu_mask_t cpp_thread_preempts_pending(const Thread* thread);
+void cpp_thread_preempts_pending_clear(Thread* thread);
+bool cpp_thread_preempt_evaluate_timeslice_extension(Thread* thread);
+uint32_t cpp_thread_preempt_eager_resched_disable_count(const Thread* thread);
+void cpp_thread_set_ready(Thread* thread);
+Thread* cpp_unblock_list_pop_back(Thread::UnblockList* list);
+
+void rust_scheduler_unblock(Thread* thread) TA_REL(thread->get_lock());
+void rust_scheduler_unblock_list(Thread::UnblockList* list);
+void rust_scheduler_unblock_synchronous(Thread* thread) TA_REL(thread->get_lock());
+void rust_scheduler_unblock_idle(Thread* thread);
+void rust_scheduler_yield(Thread* current_thread);
+void rust_scheduler_preempt(uint8_t preempt_type);
+void rust_scheduler_preempt_locked(Thread* current_thread, uint8_t preempt_type);
+void rust_scheduler_reschedule(Thread* current_thread);
+void rust_scheduler_reschedule_internal(Thread* current_thread);
+void rust_scheduler_reschedule_mask(cpu_mask_t cpus_to_reschedule_mask);
+cpu_mask_t rust_scheduler_peek_active_mask();
+cpu_mask_t rust_scheduler_peek_idle_mask();
+void rust_scheduler_set_idle(const Scheduler* sched, bool is_idle);
+void rust_scheduler_set_curr_cpu_active(bool is_active);
+bool rust_scheduler_enable_new_wakeup_accounting();
+void rust_scheduler_validate_invariants_unconditional(const Scheduler* sched);
+void rust_scheduler_on_power_domain_set_updated(Scheduler* sched, SchedProcessingRate active_rate,
+                                                SchedProcessingRate max_rate, bool has_domain);
+zx_status_t rust_scheduler_update_active_power_level(Scheduler* sched, uint8_t power_level);
+void rust_scheduler_initialize_processing_rate(Scheduler* sched, SchedProcessingRate scale);
+bool rust_scheduler_request_power_level_for_testing(Scheduler* sched, uint8_t power_level);
+void rust_scheduler_update_processing_rates(zx_cpu_performance_info_t* info, size_t count);
+void rust_scheduler_get_performance_scales(zx_cpu_performance_info_t* info, size_t count);
+void rust_scheduler_get_default_performance_scales(zx_cpu_performance_info_t* info, size_t count);
+void rust_scheduler_update_processing_limits(const zx_cpu_perf_limit_t* limits, size_t count);
+void rust_scheduler_get_processing_limits(zx_cpu_perf_limit_t* limits, size_t count);
+
+void rust_kernel_scheduler_initialize_thread(Thread* thread,
+                                             const SchedulerState::BaseProfile* profile);
+void rust_kernel_scheduler_initialize_first_thread(Thread* thread);
+void rust_kernel_scheduler_remove_first_thread(Thread* thread);
+cpu_mask_t rust_kernel_scheduler_set_cpu_affinity(Thread* thread, cpu_mask_t affinity,
+                                                  int32_t affinity_type);
+void rust_kernel_scheduler_migrate_unpinned_threads(Scheduler* sched);
+
+void rust_kernel_scheduler_pi_thread_base_profile_changed(Thread* thread);
+void rust_kernel_scheduler_pi_upstream_thread_base_profile_changed_thread(const Thread* upstream,
+                                                                          Thread* target);
+void rust_kernel_scheduler_pi_upstream_thread_base_profile_changed_owq(const Thread* upstream,
+                                                                       OwnedWaitQueue* target);
+void rust_kernel_scheduler_pi_join_thread_thread(const Thread* upstream, Thread* target,
+                                                 ForceInheritance force_inheritance);
+void rust_kernel_scheduler_pi_join_thread_owq(const Thread* upstream, OwnedWaitQueue* target,
+                                              ForceInheritance force_inheritance);
+void rust_kernel_scheduler_pi_join_owq_thread(const OwnedWaitQueue* upstream, Thread* target,
+                                              ForceInheritance force_inheritance);
+void rust_kernel_scheduler_pi_join_owq_owq(const OwnedWaitQueue* upstream, OwnedWaitQueue* target,
+                                           ForceInheritance force_inheritance);
+void rust_kernel_scheduler_pi_split_thread_thread(
+    Thread* upstream, Thread* target, const SchedulerState::EffectiveProfile* old_target_ep);
+void rust_kernel_scheduler_pi_split_thread_owq(
+    Thread* upstream, OwnedWaitQueue* target,
+    const SchedulerState::EffectiveProfile* old_target_ep);
+void rust_kernel_scheduler_pi_split_owq_thread(
+    OwnedWaitQueue* upstream, Thread* target,
+    const SchedulerState::EffectiveProfile* old_target_ep);
+void rust_kernel_scheduler_pi_split_owq_owq(OwnedWaitQueue* upstream, OwnedWaitQueue* target,
+                                            const SchedulerState::EffectiveProfile* old_target_ep);
+void rust_kernel_scheduler_state_recompute_effective_profile(SchedulerState* state);
+int32_t rust_kernel_effective_profile_get_weight_or_packed_deadline_params(
+    SchedulerState::EffectiveProfile* ep);
+void rust_kernel_scheduler_get_projected_cpu_stats(cpu_num_t cpu, cpu_stats* stats);
+
+void cpp_unblock_list_init(ffi::Uninitialized<Thread::UnblockList>* holder);
+void cpp_unblock_list_destroy(Thread::UnblockList* holder);
+void cpp_unblock_list_push_back(Thread::UnblockList* holder, Thread* thread);
+Thread* cpp_unblock_list_pop_front(Thread::UnblockList* holder);
+bool cpp_unblock_list_is_empty(const Thread::UnblockList* holder);
+
+bool cpp_scheduler_save_state_list_is_empty(Scheduler* sched);
+void cpp_scheduler_save_state_list_move(Scheduler* sched,
+                                        ffi::Uninitialized<Thread::SaveStateList>* holder);
+Thread* cpp_save_state_list_pop(Thread::SaveStateList* holder);
+void cpp_save_state_list_destroy(Thread::SaveStateList* holder);
+void rust_scheduler_update_fair_bandwidth_period(const Scheduler* sched, SchedTime now);
+Thread* rust_scheduler_find_earlier_deadline_thread(const Scheduler* sched, SchedTime eligible_time,
+                                                    const Thread* reference_thread);
+SchedTime rust_scheduler_get_next_eligible_time(const Scheduler* sched);
+SchedDuration rust_scheduler_calculate_timeslice(const Scheduler* sched, const Thread* thread);
+SchedTime rust_scheduler_clamp_to_deadline(const Scheduler* sched, SchedTime completion_time);
+SchedTime rust_scheduler_clamp_to_earlier_deadline(const Scheduler* sched,
+                                                   SchedTime completion_time,
+                                                   const Thread* reference_thread);
+SchedTime rust_scheduler_next_thread_timeslice(const Scheduler* sched, Thread* thread,
+                                               SchedTime now);
+void rust_scheduler_update_activation(const Scheduler* sched, Thread* thread, SchedTime now);
+void rust_scheduler_adjust_fair_bandwidth(const Scheduler* sched, Thread* thread, SchedTime now);
+void rust_scheduler_user_set_processing_rate(const Scheduler* sched, SchedProcessingRate rate);
+bool rust_scheduler_user_set_processing_rate_limits(const Scheduler* sched, SchedProcessingRate min,
+                                                    SchedProcessingRate max);
+bool rust_scheduler_pend_power_level_request(const Scheduler* sched, uint8_t power_level);
+bool rust_scheduler_pend_power_level_request_for_rate(const Scheduler* sched,
+                                                      SchedProcessingRate processing_rate);
+void rust_scheduler_reevaluate_current_power_level(const Scheduler* sched);
+void rust_scheduler_update_total_deadline_utilization(const Scheduler* sched,
+                                                      SchedUtilization delta);
+bool rust_scheduler_update_processing_rate(const Scheduler* sched,
+                                           zx_instant_boot_ticks_t boot_ticks);
+}
 // Implements fair and deadline scheduling algorithms and manages the associated
 // per-CPU state.
 class Scheduler {
  public:
+  class RunQueue;
+  using Affine = sched::Affine<10>;
+
   // Returns true if new scheduler wakeup accounting is enabled either by boot
   // option or gn arg.
-  static bool EnableNewWakeupAccounting();
+  static bool EnableNewWakeupAccounting() { return rust_scheduler_enable_new_wakeup_accounting(); }
 
   // Helper type used to implement various PI operations. See
   // //zircon/kernel/kernel/scheduler_pi.cc to see how it is used.
@@ -164,55 +386,76 @@ class Scheduler {
   void DumpActiveThread(FILE* output_target = stdout) TA_EXCL(queue_lock_);
 
   // Returns the number of the CPU this scheduler instance is associated with.
-  cpu_num_t this_cpu() const { return this_cpu_; }
+  cpu_num_t this_cpu() const TA_NO_THREAD_SAFETY_ANALYSIS { return rust_state_.this_cpu; }
 
   // Returns the index of the logical cluster of the CPU this scheduler instance
   // is associated with.
-  size_t cluster() const { return cluster_; }
+  size_t cluster() const TA_NO_THREAD_SAFETY_ANALYSIS { return rust_state_.cluster; }
 
   // Returns the lock-free value of the estimated queue time for the CPU this
   // scheduler is associated with.
-  SchedDuration exported_queue_time_ns() const { return exported_queue_time_ns_.load(); }
+  SchedDuration exported_queue_time_ns() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_queue_time_ns.load();
+  }
+  SchedDuration fair_period() const TA_REQ(queue_lock_) { return rust_state_.fair_period; }
+  SchedUtilization reciprocal_fair_period() const TA_REQ(queue_lock_) {
+    return rust_state_.reciprocal_fair_period;
+  }
+  SchedWeight weight_total() const TA_REQ(queue_lock_) { return rust_state_.weight_total; }
+  const RunQueue* critical_deadline_run_queue() const TA_REQ(queue_lock_) {
+    return &rust_state_.critical_deadline_run_queue;
+  }
+  const RunQueue* deadline_run_queue() const TA_REQ(queue_lock_) {
+    return &rust_state_.deadline_run_queue;
+  }
+  const RunQueue* fair_run_queue() const TA_REQ(queue_lock_) { return &rust_state_.fair_run_queue; }
+  SchedUtilization normalized_utilization() const TA_REQ(queue_lock_) {
+    return power_level_control_.normalized_deadline_utilization();
+  }
 
   // Returns the lock-free value of the estimated deadline utilization for the
   // CPU this scheduler is associated with.
-  SchedUtilization exported_deadline_utilization() const {
-    return exported_deadline_utilization_.load();
+  SchedUtilization exported_deadline_utilization() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_deadline_utilization.load();
   }
 
   // Returns the lock-free value of the estimated deadline utilization for the
   // CPU, clamped to the current rate limits, for the CPU this scheduler is
   // associated with.
-  SchedUtilization exported_clamped_deadline_utilization() const {
-    return exported_clamped_deadline_utilization_.load();
+  SchedUtilization exported_clamped_deadline_utilization() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_clamped_deadline_utilization.load();
   }
 
   // Returns the lock-free value of the estimated fair utilization for the
   // CPU this scheduler is associated with.
-  SchedUtilization exported_fair_utilization() const { return exported_fair_utilization_.load(); }
+  SchedUtilization exported_fair_utilization() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_fair_utilization.load();
+  }
 
   // Returns the lock-free value of the estimated fair utilization for the
   // CPU, clamped to the current rate limits, for the CPU this scheduler is
   // associated with.
-  SchedUtilization exported_clamped_fair_utilization() const {
-    return exported_clamped_fair_utilization_.load();
+  SchedUtilization exported_clamped_fair_utilization() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_clamped_fair_utilization.load();
   }
 
   // Returns the lock-free value of the total estimated utilization (deadline + fair)
   // for the CPU, clamped to the current rate limits, for the CPU this scheduler
   // is associated with.
-  SchedUtilization exported_clamped_total_utilization() const {
-    return exported_clamped_total_utilization_.load();
+  SchedUtilization exported_clamped_total_utilization() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_clamped_total_utilization.load();
   }
 
   // Returns the lock-free value of the processing rate for the CPU this
   // scheduler is associated with.
-  SchedProcessingRate exported_processing_rate() const { return exported_processing_rate_.load(); }
+  SchedProcessingRate exported_processing_rate() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_processing_rate.load();
+  }
 
   // Returns the lock-free value of the max processing rate for the CPU this
   // scheduler is associated with.
-  SchedProcessingRate exported_max_processing_rate() const {
-    return exported_max_processing_rate_.load();
+  SchedProcessingRate exported_max_processing_rate() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.exported_max_processing_rate.load();
   }
 
   // Returns the processing rate of the CPU this scheduler instance is
@@ -226,8 +469,21 @@ class Scheduler {
   SchedProcessingRate processing_rate_reciprocal() const TA_REQ(queue_lock_) {
     return power_level_control_.processing_rate_reciprocal();
   }
-
-  int32_t runnable_task_count() const TA_REQ(queue_lock_) { return runnable_task_count_; }
+  bool cpu_deactivating() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.cpu_deactivating.load(ktl::memory_order_relaxed);
+  }
+  void set_cpu_deactivating(bool deactivating) TA_NO_THREAD_SAFETY_ANALYSIS {
+    rust_state_.cpu_deactivating.store(deactivating, ktl::memory_order_release);
+  }
+  Thread* previous_thread() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_state_.previous_thread.load(ktl::memory_order_relaxed);
+  }
+  void set_previous_thread(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
+    rust_state_.previous_thread.store(thread, ktl::memory_order_relaxed);
+  }
+  int32_t runnable_task_count() const TA_REQ(queue_lock_) {
+    return rust_state_.runnable_task_count;
+  }
 
   // Returns a pointer to the currently running thread, if any.
   //
@@ -237,7 +493,7 @@ class Scheduler {
   // thread member.
   Thread* active_thread() const TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return active_thread_;
+    return rust_state_.active_thread;
   }
 
   // Public entry points.
@@ -408,7 +664,9 @@ class Scheduler {
   // values requested by userspace, even if they have not yet taken effect.
   //
   // Requires info.size() <= num CPUs.
-  static void GetPerformanceScales(ktl::span<zx_cpu_performance_info_t> info) TA_EXCL(queue_lock_);
+  static void GetPerformanceScales(ktl::span<zx_cpu_performance_info_t> info) TA_EXCL(queue_lock_) {
+    rust_scheduler_get_performance_scales(info.data(), info.size());
+  }
 
   // Gets the default performance scales of up to info.size() CPUs. Returns the
   // initial values determined by the system topology, or 1.0 when no topology
@@ -416,7 +674,9 @@ class Scheduler {
   //
   // Requires info.size() <= num CPUs.
   static void GetDefaultPerformanceScales(ktl::span<zx_cpu_performance_info_t> info)
-      TA_EXCL(queue_lock_);
+      TA_EXCL(queue_lock_) {
+    rust_scheduler_get_default_performance_scales(info.data(), info.size());
+  }
 
   // Updates the performance limits of the requested CPUs.
   //
@@ -426,7 +686,9 @@ class Scheduler {
   // Gets the processing limits of up to limits.size() CPUs.
   //
   // Requires limits.size() <= num CPUs.
-  static void GetProcessingLimits(ktl::span<zx_cpu_perf_limit_t> limits) TA_EXCL(queue_lock_);
+  static void GetProcessingLimits(ktl::span<zx_cpu_perf_limit_t> limits) TA_EXCL(queue_lock_) {
+    rust_scheduler_get_processing_limits(limits.data(), limits.size());
+  }
 
   // Returns the CPU stats for the given CPU number, forward projected to
   // account for idle or normalized busy time elapsed since the last relevant
@@ -480,17 +742,13 @@ class Scheduler {
   // scheduler's queue lock while the bit is changed, enforcing the invariant
   // that a scheduler's active bit can only ever change while holding that
   // scheduler's lock.
-  static void SetCurrCpuActive(bool is_active) {
-    Scheduler& scheduler = *Get();
-    Guard<MonitoredSpinLock, IrqSave> guard{&scheduler.queue_lock_, SOURCE_TAG};
-    scheduler.SetIsActive(is_active);
-  }
+  static void SetCurrCpuActive(bool is_active) { rust_scheduler_set_curr_cpu_active(is_active); }
 
   // Peek at the current active mask for all schedulers.
   //
   // Note that this is just a lockless atomic load.  Baring special
   // circumstances, the set of active schedulers can change at any time.
-  static cpu_mask_t PeekActiveMask() { return active_schedulers_.load(ktl::memory_order_relaxed); }
+  static cpu_mask_t PeekActiveMask() { return rust_scheduler_peek_active_mask(); }
 
   // Peek at the current active mask state for a given CPU's scheduler.
   //
@@ -502,28 +760,23 @@ class Scheduler {
   }
 
   // Accessors for the "idle" state mask; similar to the active state mask.
-  void SetIdle(bool is_idle) const {
-    const cpu_mask_t mask = cpu_num_to_mask(this_cpu_);
-    if (is_idle) {
-      idle_schedulers_.fetch_or(mask, ktl::memory_order_relaxed);
-    } else {
-      idle_schedulers_.fetch_and(~mask, ktl::memory_order_relaxed);
-    }
-  }
-  static cpu_mask_t PeekIdleMask() { return idle_schedulers_.load(ktl::memory_order_relaxed); }
+  void SetIdle(bool is_idle) const { rust_scheduler_set_idle(this, is_idle); }
+  static cpu_mask_t PeekIdleMask() { return rust_scheduler_peek_idle_mask(); }
   static bool PeekIsIdle(cpu_num_t cpu) { return (PeekIdleMask() & cpu_num_to_mask(cpu)) != 0; }
 
   // Accumulates processor idle time.
-  void AddProcessorIdleTime(SchedDuration idle_time) {
-    processor_idle_time_ns_.fetch_add(idle_time.raw_value(), ktl::memory_order_relaxed);
+  void AddProcessorIdleTime(SchedDuration idle_time) TA_NO_THREAD_SAFETY_ANALYSIS {
+    rust_state_.processor_idle_time_ns.fetch_add(idle_time.raw_value(), ktl::memory_order_relaxed);
   }
 
   // Clears any accumulated processor idle time.
-  void ResetProcessorIdleTime() { processor_idle_time_ns_.store(0, ktl::memory_order_relaxed); }
+  void ResetProcessorIdleTime() TA_NO_THREAD_SAFETY_ANALYSIS {
+    rust_state_.processor_idle_time_ns.store(0, ktl::memory_order_relaxed);
+  }
 
   // Returns the accumulated processor idle time for assertions/diagnostics.
-  SchedDuration processor_idle_time() const {
-    return SchedDuration{processor_idle_time_ns_.load(ktl::memory_order_relaxed)};
+  SchedDuration processor_idle_time() const TA_NO_THREAD_SAFETY_ANALYSIS {
+    return SchedDuration{rust_state_.processor_idle_time_ns.load(ktl::memory_order_relaxed)};
   }
 
   // Reschedules the given CPU mask, applying any updated bookkeeping that may
@@ -536,12 +789,12 @@ class Scheduler {
   // Sets the power domain set for this scheduler instance, returning the previous set.
   PowerDomainSet ExchangePowerDomainSet(PowerDomainSet domain_set) TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    PowerDomainSet previous = power_level_control_.ExchangePowerDomainSet(ktl::move(domain_set));
-
-    // Update the cross-processor shadow value of the max processing rate to match the current power
-    // domain value.
-    exported_max_processing_rate_ = power_level_control_.clamped_max_processing_rate();
-
+    PowerDomainSet previous = power_state_.UpdatePowerDomainSet(ktl::move(domain_set), this_cpu());
+    const SchedProcessingRate active_rate = power_state_.active_processing_rate();
+    const bool has_domain = static_cast<bool>(power_state_.domain());
+    const SchedProcessingRate max_rate =
+        has_domain ? power_state_.domain()->model().max_processing_rate() : SchedProcessingRate{0};
+    rust_scheduler_on_power_domain_set_updated(this, active_rate, max_rate, has_domain);
     return previous;
   }
 
@@ -557,14 +810,13 @@ class Scheduler {
   // Updates the current power level for this CPU with the value reported by the power level
   // controller. Called by kernel tests and sys_system_set_processor_power_state.
   zx::result<> UpdateActivePowerLevel(uint8_t power_level) TA_EXCL(queue_lock_) {
-    Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.UpdateActivePowerLevel(power_level);
+    return zx::make_result(rust_scheduler_update_active_power_level(this, power_level));
   }
 
   // Returns the current active power level, if any.
   ktl::optional<uint8_t> GetActivePowerLevel() const TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.active_power_level();
+    return power_state_.active_power_level();
   }
 
   // Sends a power level request through this scheduler's power level controller for testing. This
@@ -577,25 +829,28 @@ class Scheduler {
   // Returns the current power domain set for this scheduler instance.
   PowerDomainSet GetPowerDomainSetForTesting() TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.power_domain_set();
+    return power_state_.power_domain_set();
   }
 
   // Returns the current power domain for this scheduler instance.
   fbl::RefPtr<PowerDomain> GetPowerDomainForTesting() TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.domain();
+    return power_state_.domain();
   }
 
   // Returns the current active power coefficient.
   ktl::optional<uint64_t> GetActivePowerCoefficientNwForTesting() const TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.active_power_coefficient_nw();
+    if (power_state_.domain()) {
+      return rust_state_.power_level_control.active_power_coefficient_nw;
+    }
+    return ktl::nullopt;
   }
 
   // Returns the max idle power coefficient.
   ktl::optional<uint64_t> GetMaxIdlePowerCoefficientNwForTesting() const TA_EXCL(queue_lock_) {
     Guard<MonitoredSpinLock, IrqSave> guard{&queue_lock_, SOURCE_TAG};
-    return power_level_control_.max_idle_power_coefficient_nw();
+    return power_state_.max_idle_power_coefficient_nw();
   }
 
   // Const accessor for static analysis.
@@ -603,6 +858,7 @@ class Scheduler {
 
  private:
   friend struct Thread;
+  friend void* ::cpp_thread_get_queue_node(Thread* t);
 
   // Allow percpu to init our cpu number and performance scale.
   friend struct percpu;
@@ -629,11 +885,83 @@ class Scheduler {
 
   // Sets the initial values of the CPU performance scales for this Scheduler
   // instance.
-  void InitializeProcessingRate(SchedProcessingRate scale);
+  void InitializeProcessingRate(SchedProcessingRate scale) TA_NO_THREAD_SAFETY_ANALYSIS {
+    DEBUG_ASSERT(!power_state_.domain());
+    rust_scheduler_initialize_processing_rate(this, scale);
+  }
 
   static inline void RescheduleMask(cpu_mask_t cpus_to_reschedule_mask);
   static void PreemptLocked(Thread* current_thread, PreemptType preempt_type)
       TA_REQ(chainlock_transaction_token, current_thread->get_lock());
+
+  static void AssertLayout() TA_NO_THREAD_SAFETY_ANALYSIS {
+    static_assert(kMinimumFairCapacity.raw_value() == 1'000'000);
+    static_assert(kDefaultFairPeriod.raw_value() == 10'000'000);
+    static_assert(kMinFairUtilization.raw_value() == 214'748'364);
+    static_assert(kReciprocalDefaultFairPeriod.raw_value() == 214);
+    static_assert(kInterClusterThreshold.raw_value() == 2'000'000);
+    static_assert(kIntraClusterThreshold.raw_value() == 25'000);
+    static_assert(kCpuUtilizationLimit.raw_value() == (1LL << 31));
+    static_assert(kThreadUtilizationMax.raw_value() == (1LL << 31));
+    static_assert(kExpectedRuntimeAlpha.raw_value() == 1);
+    static_assert(kExpectedRuntimeBeta.raw_value() == 1);
+    static_assert(sizeof(Affine) == 24);
+    static_assert(alignof(Affine) == 8);
+    static_assert(ktl::is_standard_layout_v<RustSchedulerState>);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+    static_assert(offsetof(Scheduler, rust_state_) == 0);
+#pragma clang diagnostic pop
+    static_assert(sizeof(PowerLevelControlState) == 104);
+    static_assert(alignof(PowerLevelControlState) == 8);
+    static_assert(offsetof(PowerLevelControlState, processing_rate) == 0);
+    static_assert(offsetof(PowerLevelControlState, processing_rate_reciprocal) == 8);
+    static_assert(offsetof(PowerLevelControlState, updated_processing_rate) == 16);
+    static_assert(offsetof(PowerLevelControlState, default_processing_rate) == 24);
+    static_assert(offsetof(PowerLevelControlState, max_processing_rate) == 32);
+    static_assert(offsetof(PowerLevelControlState, processing_rate_limit_min) == 40);
+    static_assert(offsetof(PowerLevelControlState, processing_rate_limit_max) == 48);
+    static_assert(offsetof(PowerLevelControlState, active_power_coefficient_nw) == 56);
+    static_assert(offsetof(PowerLevelControlState, pending_update_request) == 64);
+    static_assert(offsetof(PowerLevelControlState, has_pending_update_request) == 96);
+
+    // The overall size of Scheduler depends on build configuration (e.g. lockdep
+    // changes sizeof(MonitoredSpinLock)); the Rust side derives it from the
+    // bindgen-generated percpu bindings instead of a fixed constant.
+    static_assert(sizeof(RustSchedulerState) == 624);
+    static_assert(alignof(RustSchedulerState) == 8);
+    static_assert(offsetof(RustSchedulerState, fair_run_queue) == 0);
+    static_assert(offsetof(RustSchedulerState, deadline_run_queue) == 32);
+    static_assert(offsetof(RustSchedulerState, critical_deadline_run_queue) == 64);
+    static_assert(offsetof(RustSchedulerState, runnable_task_count) == 96);
+    static_assert(offsetof(RustSchedulerState, weight_total) == 104);
+    static_assert(offsetof(RustSchedulerState, scheduled_weight_total) == 112);
+    static_assert(offsetof(RustSchedulerState, active_thread) == 120);
+    static_assert(offsetof(RustSchedulerState, fair_period) == 128);
+    static_assert(offsetof(RustSchedulerState, reciprocal_fair_period) == 136);
+    static_assert(offsetof(RustSchedulerState, last_update_time_ns) == 144);
+    static_assert(offsetof(RustSchedulerState, start_of_current_time_slice_ns) == 152);
+    static_assert(offsetof(RustSchedulerState, target_preemption_time_ns) == 160);
+    static_assert(offsetof(RustSchedulerState, total_expected_runtime_ns) == 168);
+    static_assert(offsetof(RustSchedulerState, this_cpu) == 176);
+    static_assert(offsetof(RustSchedulerState, cluster) == 184);
+    static_assert(offsetof(RustSchedulerState, cpu_deactivating) == 192);
+    static_assert(offsetof(RustSchedulerState, exported_queue_time_ns) == 200);
+    static_assert(offsetof(RustSchedulerState, exported_deadline_utilization) == 208);
+    static_assert(offsetof(RustSchedulerState, exported_clamped_deadline_utilization) == 216);
+    static_assert(offsetof(RustSchedulerState, exported_fair_utilization) == 224);
+    static_assert(offsetof(RustSchedulerState, exported_clamped_fair_utilization) == 232);
+    static_assert(offsetof(RustSchedulerState, exported_clamped_total_utilization) == 240);
+    static_assert(offsetof(RustSchedulerState, exported_processing_rate) == 248);
+    static_assert(offsetof(RustSchedulerState, exported_max_processing_rate) == 256);
+    static_assert(offsetof(RustSchedulerState, previous_thread) == 264);
+    static_assert(offsetof(RustSchedulerState, critical_deadline_utilization) == 272);
+    static_assert(offsetof(RustSchedulerState, active_thread_weight) == 280);
+    static_assert(offsetof(RustSchedulerState, fair_affine_transform) == 288);
+    static_assert(offsetof(RustSchedulerState, processor_idle_time_ns) == 312);
+    static_assert(offsetof(RustSchedulerState, bandwidth_reservation_cache) == 320);
+    static_assert(offsetof(RustSchedulerState, power_level_control) == 520);
+  }
 
   // Unconditionally perform an expensive check of as many scheduler invariants
   // as we can.  Usually, this is not called directly; the ValidateInvariants
@@ -694,12 +1022,22 @@ class Scheduler {
   // Returns the current system time as a SchedTime value.
   static SchedTime CurrentTime() { return SchedTime{current_mono_time()}; }
 
+ public:
   // A coherent pair of corresponding time/ticks values in the monotonic and
   // boot timelines.
   struct SchedMonoTimeAndBootTicks {
     SchedTime mono_time;
     zx_instant_boot_ticks_t boot_ticks;
   };
+
+  static WaitQueueBase* GetBlockingWaitQueue(const Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
+    return thread->wait_queue_state().blocking_wait_queue_;
+  }
+
+  static void UpdateBlockedThreadEffectiveProfile(WaitQueueBase* wq,
+                                                  Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
+    wq->UpdateBlockedThreadEffectiveProfile(*thread);
+  }
 
   // Returns the current monotonic time / boot ticks using coherent samples of
   // the respective timelines.
@@ -718,6 +1056,7 @@ class Scheduler {
   // Returns the Scheduler instance for the given CPU.
   static Scheduler* Get(cpu_num_t cpu);
 
+ private:
   // Find an appropriate CPU for a thread to run on, then lock that scheduler,
   // confirm that it is still active, and invoke the user-supplied callback with
   // the scheduler's queue_lock held.
@@ -777,31 +1116,56 @@ class Scheduler {
   // declare the counter.
   static void IncFindTargetCpuRetriesKcounter();
 
-  // Change this scheduler's CPU's active state. We require that the scheduler's
-  // queue_lock be held during the operation. This enforces the invariant that
-  // "the scheduler's active bit only changes while holding the scheduler's
-  // queue lock".
-  //
-  // This means that things like "FindTargetCpu" are free to check the global
-  // active mask to see whether or not we _think_ that a given scheduler is
-  // likely to be active for selection purposes, but when it comes time to
-  // actually add a thread to a scheduler's queues, we check the active state of
-  // the scheduler's assigned CPU from within the safety of the queue lock using
-  // IsLockedSchedulerActive()
-  void SetIsActive(bool is_active) const TA_REQ(queue_lock_) {
-    const cpu_mask_t mask = cpu_num_to_mask(this_cpu_);
-    if (is_active) {
-      active_schedulers_.fetch_or(mask, ktl::memory_order_relaxed);
-    } else {
-      active_schedulers_.fetch_and(~mask, ktl::memory_order_relaxed);
-    }
-    arch_set_blocking_disallowed(!is_active);
-  }
-
   // Check to see if |this| scheduler is currently active while holding its
   // queue_lock, ensuring that it will stay in its current state until after we
   // drop the lock.
-  bool IsSchedulerActiveLocked() const TA_REQ(queue_lock_) { return PeekIsActive(this_cpu_); }
+  bool IsSchedulerActiveLocked() const TA_REQ(queue_lock_) { return PeekIsActive(this_cpu()); }
+
+  friend Scheduler* cpp_scheduler_get(cpu_num_t cpu);
+  friend uint64_t cpp_scheduler_power_state_active_power_coefficient_nw(const Scheduler* sched);
+  friend uint64_t cpp_scheduler_power_level_control_max_idle_power_coefficient_nw(
+      const Scheduler* sched);
+
+  friend void cpp_scheduler_lock_queue(Scheduler* sched);
+  friend void cpp_scheduler_unlock_queue(Scheduler* sched);
+  friend uint64_t cpp_scheduler_lock_queue_irq_save(Scheduler* sched);
+  friend void cpp_scheduler_unlock_queue_irq_restore(Scheduler* sched, uint64_t state);
+  friend SchedUtilization cpp_scheduler_power_level_control_update_normalized_utilization(
+      Scheduler* sched, SchedUtilization delta);
+  friend uint32_t cpp_scheduler_power_level_control_domain_id(const Scheduler* sched);
+  friend SchedUtilization cpp_scheduler_power_level_control_total_normalized_utilization(
+      const Scheduler* sched);
+  friend Thread* cpp_scheduler_get_idle_thread(const Scheduler* sched);
+  friend bool cpp_scheduler_power_level_control_is_enabled(const Scheduler* sched);
+  friend bool cpp_scheduler_power_state_scheduler_control_enabled(const Scheduler* sched);
+  friend bool cpp_scheduler_power_state_is_serving(const Scheduler* sched);
+  friend bool cpp_scheduler_power_state_is_valid_active_power_level(const Scheduler* sched,
+                                                                    uint8_t power_level);
+  friend cpu_mask_t cpp_scheduler_power_state_domain_cpus(const Scheduler* sched);
+  friend SchedProcessingRate cpp_scheduler_power_state_target_processing_rate(
+      const Scheduler* sched);
+  friend SchedProcessingRate cpp_scheduler_power_state_preceding_target_processing_rate(
+      const Scheduler* sched);
+  friend bool cpp_scheduler_power_state_has_preceding_target_power_level(const Scheduler* sched);
+  friend const power_management::PowerLevel*
+  cpp_scheduler_power_state_find_active_power_level_for_rate(const Scheduler* sched,
+                                                             SchedProcessingRate rate);
+  friend bool cpp_scheduler_power_state_request_transition(
+      Scheduler* sched, cpu_num_t cpu, uint8_t power_level,
+      power_management::PowerLevelUpdateRequest* out_req);
+  friend cpu_mask_t cpp_scheduler_power_state_post_update_request(
+      const Scheduler* sched, const power_management::PowerLevelUpdateRequest* req);
+  friend zx_status_t cpp_scheduler_power_state_update_active_power_level(
+      Scheduler* sched, uint8_t power_level, SchedProcessingRate* out_active_rate);
+  friend size_t cpp_scheduler_get_power_domain_set_count(const Scheduler* sched);
+  friend uint64_t cpp_scheduler_lookup_power_cost(const Scheduler* sched, cpu_num_t cpu,
+                                                  SchedProcessingRate rate);
+  friend SchedUtilization cpp_scheduler_lookup_total_normalized_utilization(const Scheduler* sched,
+                                                                            cpu_num_t cpu);
+  friend void cpp_scheduler_save_state_list_push_front(Scheduler* sched, Thread* thread);
+  friend void cpp_scheduler_save_state_list_move(Scheduler* sched,
+                                                 ffi::Uninitialized<Thread::SaveStateList>* holder);
+  friend bool cpp_scheduler_save_state_list_is_empty(Scheduler* sched);
 
   // Indicates whether the CPU stats being updated is for a busy or idle time
   // segment.
@@ -1072,8 +1436,9 @@ class Scheduler {
 
     const bool is_fair = state.discipline() == SchedDiscipline::Fair;
     const bool is_critical = state.effective_profile().is_critical();
-    RunQueue& queue = is_fair ? fair_run_queue_
-                              : (is_critical ? critical_deadline_run_queue_ : deadline_run_queue_);
+    RunQueue& queue = is_fair ? rust_state_.fair_run_queue
+                              : (is_critical ? rust_state_.critical_deadline_run_queue
+                                             : rust_state_.deadline_run_queue);
     queue.erase(*thread);
 
     if (is_fair) {
@@ -1089,7 +1454,8 @@ class Scheduler {
   // Returns true if there is at least one eligible deadline thread in the
   // run queue.
   bool IsDeadlineThreadEligible(SchedTime eligible_time) TA_REQ(queue_lock_) {
-    for (const RunQueue* queue : {&critical_deadline_run_queue_, &deadline_run_queue_}) {
+    for (const RunQueue* queue :
+         {&rust_state_.critical_deadline_run_queue, &rust_state_.deadline_run_queue}) {
       if (!queue->is_empty()) {
         const Thread& front = queue->front();
         AssertInRunQueue(front);
@@ -1104,13 +1470,13 @@ class Scheduler {
   // Returns true if there is at least one eligible fair thread in the run
   // queue.
   bool IsFairThreadEligible(SchedTime eligible_time) TA_REQ(queue_lock_) {
-    if (fair_run_queue_.is_empty()) {
+    if (rust_state_.fair_run_queue.is_empty()) {
       return false;
     }
 
     const SchedTime variable_eligible_time = MonotonicToVariable(eligible_time);
 
-    const Thread& front = fair_run_queue_.front();
+    const Thread& front = rust_state_.fair_run_queue.front();
     AssertInRunQueue(front);
     return front.scheduler_state().start_time() <= variable_eligible_time;
   }
@@ -1134,8 +1500,8 @@ class Scheduler {
       TA_REQ(current_thread->get_lock(), queue_lock_);
 
   // Returns and resets the accumulated processor idle time.
-  SchedDuration TakeProcessorIdleTime() {
-    return SchedDuration{processor_idle_time_ns_.exchange(0, ktl::memory_order_relaxed)};
+  SchedDuration TakeProcessorIdleTime() TA_NO_THREAD_SAFETY_ANALYSIS {
+    return SchedDuration{rust_state_.processor_idle_time_ns.exchange(0, ktl::memory_order_relaxed)};
   }
 
   // Utilities to scale up or down the given value by the performance scale of the CPU.
@@ -1152,54 +1518,88 @@ class Scheduler {
 
   // Traits type to adapt the WAVLTree to Thread with node state in the
   // scheduler_state member.
-  struct TaskTraits {
-    using KeyType = SchedulerState::KeyType;
-    static KeyType GetKey(const Thread& thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-      return thread.scheduler_state().key();
+ public:
+  class RunQueue {
+   public:
+    RunQueue() { rust_kernel_run_queue_init(opaque_state_); }
+    ~RunQueue() { rust_kernel_run_queue_destroy(opaque_state_); }
+
+    RunQueue(const RunQueue&) = delete;
+    RunQueue& operator=(const RunQueue&) = delete;
+    RunQueue(RunQueue&&) = delete;
+    RunQueue& operator=(RunQueue&&) = delete;
+
+    void insert(Thread* thread) { rust_kernel_run_queue_insert(opaque_state_, thread); }
+    Thread* erase(Thread& thread) { return rust_kernel_run_queue_erase(opaque_state_, &thread); }
+    bool is_empty() const { return rust_kernel_run_queue_is_empty(opaque_state_); }
+    size_t size() const { return rust_kernel_run_queue_size(opaque_state_); }
+    Thread& front() {
+      Thread* t = rust_kernel_run_queue_front(opaque_state_);
+      DEBUG_ASSERT(t != nullptr);
+      return *t;
     }
-    static bool LessThan(KeyType a, KeyType b) { return a < b; }
-    static bool EqualTo(KeyType a, KeyType b) { return a == b; }
-    static auto& node_state(Thread& thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-      return thread.scheduler_queue_state().run_queue_node();
+    const Thread& front() const {
+      Thread* t = rust_kernel_run_queue_front(opaque_state_);
+      DEBUG_ASSERT(t != nullptr);
+      return *t;
     }
+    const Thread* croot() const { return rust_kernel_run_queue_root(opaque_state_); }
+
+    class iterator {
+     public:
+      iterator() = default;
+      explicit iterator(RunQueueIterator iter) : iter_(iter) {}
+
+      bool IsValid() const { return rust_kernel_run_queue_iterator_is_valid(&iter_); }
+
+      Thread& operator*() const {
+        Thread* t = rust_kernel_run_queue_iterator_get(&iter_);
+        DEBUG_ASSERT(t != nullptr);
+        return *t;
+      }
+      Thread* operator->() const { return rust_kernel_run_queue_iterator_get(&iter_); }
+
+      iterator& operator++() {
+        rust_kernel_run_queue_iterator_next(&iter_);
+        return *this;
+      }
+
+      iterator operator++(int) {
+        iterator temp = *this;
+        rust_kernel_run_queue_iterator_next(&iter_);
+        return temp;
+      }
+
+      bool operator==(const iterator& other) const {
+        bool self_valid = IsValid();
+        bool other_valid = other.IsValid();
+        if (!self_valid && !other_valid) {
+          return true;
+        }
+        if (self_valid != other_valid) {
+          return false;
+        }
+        return rust_kernel_run_queue_iterator_get(&iter_) ==
+               rust_kernel_run_queue_iterator_get(&other.iter_);
+      }
+
+      bool operator!=(const iterator& other) const { return !(*this == other); }
+
+     private:
+      RunQueueIterator iter_{};
+    };
+
+    iterator begin() const {
+      return iterator(rust_kernel_run_queue_iterator_create(opaque_state_));
+    }
+
+    iterator end() const { return iterator{}; }
+
+   private:
+    alignas(8) uint8_t opaque_state_[32];
   };
 
-  // Observer that maintains the subtree invariant min_finish_time and
-  // min_weight as nodes are added to and removed from the run queue.
-  struct SubtreeInvariantTraits {
-    using SubtreeInvariants = SchedulerState::SubtreeInvariants;
-
-    static SubtreeInvariants GetNodeValue(const Thread& node) TA_NO_THREAD_SAFETY_ANALYSIS {
-      const SchedulerState& scheduler_state = node.scheduler_state();
-      const EffectiveProfile& effective_profile = scheduler_state.effective_profile();
-      const SchedWeight min_weight = effective_profile.weight_or(SchedWeight::Max());
-
-      return {.min_finish_time = scheduler_state.finish_time_, .min_weight = min_weight};
-    }
-
-    static SubtreeInvariants GetSubtreeValue(const Thread& node) TA_NO_THREAD_SAFETY_ANALYSIS {
-      return node.scheduler_state().subtree_invariants_;
-    }
-
-    static SubtreeInvariants CombineValues(SubtreeInvariants subtree, SubtreeInvariants node) {
-      return {.min_finish_time = ktl::min(subtree.min_finish_time, node.min_finish_time),
-              .min_weight = ktl::min(subtree.min_weight, node.min_weight)};
-    }
-
-    static void SetSubtreeValue(Thread& node,
-                                SubtreeInvariants value) TA_NO_THREAD_SAFETY_ANALYSIS {
-      node.scheduler_state().subtree_invariants_ = value;
-    }
-
-    static void ResetSubtreeValue(Thread& target) {}
-  };
-
-  using SubtreeObserver = fbl::WAVLTreeAugmentedInvariantObserver<SubtreeInvariantTraits>;
-
-  // Alias of the WAVLTree type for the run queue.
-  using RunQueue = fbl::WAVLTree<TaskTraits::KeyType, Thread*, TaskTraits, fbl::DefaultObjectTag,
-                                 fbl::SizeOrder::Constant, TaskTraits, SubtreeObserver>;
-
+ private:
   // Finds the next eligible thread in the given run queue.
   //
   // Note: Any Thread* returned by this method may only be used as long as the
@@ -1271,6 +1671,68 @@ class Scheduler {
   // updates that race with lock juggling.
   static void CountUpdateInTransition();
 
+  // Track bandwidth reservations for up to 8 recently blocked threads.
+  static constexpr size_t kMaxBandwidthReservations = 8;
+  using BandwidthReservationCache =
+      power_management::BandwidthReservationCache<kMaxBandwidthReservations>;
+
+ public:
+  struct PowerLevelControlState {
+    SchedProcessingRate processing_rate{1};
+    SchedProcessingRate processing_rate_reciprocal{1};
+    SchedProcessingRate updated_processing_rate{1};
+    SchedProcessingRate default_processing_rate{1};
+    SchedProcessingRate max_processing_rate{1};
+    SchedProcessingRate processing_rate_limit_min{0};
+    SchedProcessingRate processing_rate_limit_max{1};
+    uint64_t active_power_coefficient_nw{0};
+    power_management::PowerLevelUpdateRequest pending_update_request{};
+    bool has_pending_update_request{false};
+  };
+
+  struct RustSchedulerState {
+    Scheduler::RunQueue fair_run_queue;
+    Scheduler::RunQueue deadline_run_queue;
+    Scheduler::RunQueue critical_deadline_run_queue;
+    int32_t runnable_task_count{0};
+    SchedWeight weight_total{0};
+    SchedWeight scheduled_weight_total{0};
+    Thread* active_thread{nullptr};
+    SchedDuration fair_period{kDefaultFairPeriod};
+    SchedUtilization reciprocal_fair_period{kReciprocalDefaultFairPeriod};
+    SchedTime last_update_time_ns{0};
+    SchedTime start_of_current_time_slice_ns{0};
+    SchedTime target_preemption_time_ns{ZX_TIME_INFINITE};
+    SchedDuration total_expected_runtime_ns{0};
+    cpu_num_t this_cpu;
+    size_t cluster{0};
+    ktl::atomic<bool> cpu_deactivating{false};
+    RelaxedAtomic<SchedDuration> exported_queue_time_ns{SchedNs(0)};
+    RelaxedAtomic<SchedUtilization> exported_deadline_utilization{SchedUtilization{0}};
+    RelaxedAtomic<SchedUtilization> exported_clamped_deadline_utilization{SchedUtilization{0}};
+    RelaxedAtomic<SchedUtilization> exported_fair_utilization{SchedUtilization{0}};
+    RelaxedAtomic<SchedUtilization> exported_clamped_fair_utilization{SchedUtilization{0}};
+    RelaxedAtomic<SchedUtilization> exported_clamped_total_utilization{SchedUtilization{0}};
+    RelaxedAtomic<SchedProcessingRate> exported_processing_rate{SchedProcessingRate{1}};
+    RelaxedAtomic<SchedProcessingRate> exported_max_processing_rate{SchedProcessingRate{1}};
+    ktl::atomic<Thread*> previous_thread{nullptr};
+    SchedUtilization critical_deadline_utilization{0};
+    SchedWeight active_thread_weight{SchedWeight::Max()};
+    Affine fair_affine_transform{};
+    ktl::atomic<zx_duration_mono_t> processor_idle_time_ns{0};
+    BandwidthReservationCache bandwidth_reservation_cache{};
+    PowerLevelControlState power_level_control{};
+  };
+
+ private:
+  void set_this_cpu(cpu_num_t cpu) TA_NO_THREAD_SAFETY_ANALYSIS { rust_state_.this_cpu = cpu; }
+  void set_cluster(size_t cluster) TA_NO_THREAD_SAFETY_ANALYSIS { rust_state_.cluster = cluster; }
+
+  TA_GUARDED(queue_lock_) RustSchedulerState rust_state_;
+
+  static_assert(sizeof(RunQueue) == 32);
+  static_assert(alignof(RunQueue) == 8);
+
   // Protects run queues and associated metadata for this Scheduler instance.
   // The queue lock is the bottom most lock in the system for the CPU it is
   // associated with: no other locks may be nested within a queue lock. A queue
@@ -1314,9 +1776,9 @@ class Scheduler {
     // https://fxbug.dev/340551498 for details.
     DEBUG_ASSERT_MSG(thread.scheduler_state().curr_cpu() == this_cpu() ||
                          thread.scheduler_queue_state().stolen_by() == this_cpu() ||
-                         &thread == active_thread_,
+                         &thread == rust_state_.active_thread,
                      "Thread %lu expected to be a member of scheduler %u, but curr_cpu says %u",
-                     thread.tid(), this_cpu_, thread.scheduler_state().curr_cpu());
+                     thread.tid(), this_cpu(), thread.scheduler_state().curr_cpu());
   }
 
   // It would be nice to be able to make a stronger assertion here (that the
@@ -1329,7 +1791,7 @@ class Scheduler {
   // and just leaving this as a static analysis workaround, and nothing more.
   void AssertInRunQueue(const Thread& t) const TA_REQ(queue_lock_) TA_ASSERT_SHARED(t.get_lock())
       TA_ASSERT(t.get_scheduler_variable_lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
-    DEBUG_ASSERT((t.scheduler_state().curr_cpu_ == this_cpu_) &&
+    DEBUG_ASSERT((t.scheduler_state().curr_cpu_ == this_cpu()) &&
                  (t.scheduler_queue_state().in_queue()));
   }
 
@@ -1366,43 +1828,8 @@ class Scheduler {
   static void MarkInFindActiveSchedulerForThreadCbk(const Thread& t, const Scheduler& s)
       TA_ASSERT(t.get_scheduler_variable_lock()) TA_ASSERT(t.get_lock()) TA_ASSERT(s.queue_lock_) {}
 
-  // A mask of all of the currently active scheduler's in the system.  An
-  // "active" scheduler is one who will accept threads to be executed.  An
-  // "in-active" scheduler will not, and is typically the scheduler for a CPU
-  // which is in the process of being taken offline.
-  //
-  // Note that to change the active state of a scheduler for CPU X (eg; to
-  // toggle the state of bit X in the active_schedulers_ mask) that scheduler's
-  // queue_lock_ must be held.  Therefore, observations of the schedulers'
-  // active mask must typically be assumed to be volatile.  As soon as the mask
-  // is observed, it can immediately change.
-  static inline ktl::atomic<cpu_mask_t> active_schedulers_{0};
-
-  // A mask of all of the currently idle scheduler's in the system.  An
-  // "idle" scheduler is one which last selected the idle/power thread to run,
-  // while a "busy" scheduler is one which is running a non-idle thread.
-  //
-  // Like the active mask, the idle mask is volatile and subject to change at
-  // any time barring special circumstances.
-  static inline ktl::atomic<cpu_mask_t> idle_schedulers_{0};
-
   // Flow id counter for sched_latency flow events.
   inline static RelaxedAtomic<uint64_t> next_flow_id_{1};
-
-  // The run queue of fair scheduled threads ready to run, but not currently running.
-  TA_GUARDED(queue_lock_)
-  RunQueue fair_run_queue_;
-
-  // The run queue of deadline scheduled threads ready to run, but not currently running.
-  TA_GUARDED(queue_lock_)
-  RunQueue deadline_run_queue_;
-
-  // The run queue of critical deadline scheduled threads ready to run, but not currently running.
-  TA_GUARDED(queue_lock_)
-  RunQueue critical_deadline_run_queue_;
-
-  // The total critical deadline utilization of threads associated with this CPU.
-  SchedUtilization critical_deadline_utilization_{0};
 
   // The list of threads that need to run the Save stage of their migrate functions.
   //
@@ -1418,122 +1845,22 @@ class Scheduler {
   TA_GUARDED(queue_lock_)
   Thread::SaveStateList save_state_list_;
 
-  // Pointer to the thread actively running on this CPU.
   TA_GUARDED(queue_lock_)
-  Thread* active_thread_{nullptr};
-
-  TA_GUARDED(queue_lock_)
-  SchedWeight active_thread_weight_{SchedWeight::Max()};
-
-  // Count of the threads running on this CPU, including threads in the run
-  // queue and the currently running thread. Does not include the idle thread.
-  TA_GUARDED(queue_lock_)
-  int32_t runnable_task_count_{0};
-
-  // Total weights of threads running on this CPU, including threads in the
-  // run queue and the currently running thread. Does not include the idle
-  // thread.
-  TA_GUARDED(queue_lock_)
-  SchedWeight weight_total_{0};
-
-  // The value of |weight_total_| when the current thread was scheduled.
-  // Provides a reference for determining whether the total weights changed
-  // since the last reschedule.
-  SchedWeight scheduled_weight_total_{0};
-
-  // Alias of the affine transform type used for variable <-> monotonic timeline
-  // conversions.
-  using Affine = sched::Affine<10>;
-
-  // The affine transform for converting between monotonic and variable
-  // timelines for the fair run queue.
-  TA_GUARDED(queue_lock_)
-  Affine fair_affine_transform_;
-
-  TA_GUARDED(queue_lock_)
-  SchedDuration fair_period_{kDefaultFairPeriod};
-
-  TA_GUARDED(queue_lock_)
-  SchedUtilization reciprocal_fair_period_{kReciprocalDefaultFairPeriod};
+  power_management::PowerState power_state_;
 
   // Utilities to streamline affine transformations.
   constexpr SchedTime MonotonicToVariable(SchedTime t) const TA_REQ(queue_lock_) {
-    return fair_affine_transform_.MonotonicToVariable(t);
+    return rust_state_.fair_affine_transform.MonotonicToVariable(t);
   }
   constexpr SchedTime VariableToMonotonic(SchedTime v) const TA_REQ(queue_lock_) {
-    return fair_affine_transform_.VariableToMonotonic(v);
+    return rust_state_.fair_affine_transform.VariableToMonotonic(v);
   }
   constexpr void MonotonicToVariableInPlace(SchedTime& ref) const TA_REQ(queue_lock_) {
-    fair_affine_transform_.MonotonicToVariableInPlace(ref);
+    rust_state_.fair_affine_transform.MonotonicToVariableInPlace(ref);
   }
   constexpr void VariableToMonotonicInPlace(SchedTime& ref) const TA_REQ(queue_lock_) {
-    fair_affine_transform_.VariableToMonotonicInPlace(ref);
+    rust_state_.fair_affine_transform.VariableToMonotonicInPlace(ref);
   }
-
-  // The system time since the last update to the global virtual time.
-  TA_GUARDED(queue_lock_)
-  SchedTime last_update_time_ns_{0};
-
-  // Accumulates the time spent in an idle state since the last reschedule.
-  ktl::atomic<zx_duration_mono_t> processor_idle_time_ns_{0};
-
-  // The system time that the current time slice started.
-  SchedTime start_of_current_time_slice_ns_{0};
-
-  // The system time that the current thread should be preempted. Initialized to
-  // ZX_TIME_INFINITE to pass the assertion now < target_preemption_time_ns_ (or
-  // else the current time slice is expired) on the first entry into the
-  // scheduler.
-  SchedTime target_preemption_time_ns_{ZX_TIME_INFINITE};
-
-  // The sum of the expected runtimes of all active threads on this CPU. This
-  // value is an estimate of the average queuing time for this CPU, given the
-  // current set of active threads.
-  TA_GUARDED(queue_lock_)
-  SchedDuration total_expected_runtime_ns_{0};
-
-  // The CPU this scheduler instance is associated with.
-  // NOTE: This member is not initialized to prevent clobbering the value set
-  // by sched_early_init(), which is called before the global ctors that
-  // initialize the rest of the members of this class.
-  // TODO(eieio): Figure out a better long-term solution to determine which
-  // CPU is associated with each instance of this class. This is needed by
-  // non-static methods that are called from arbitrary CPUs, namely Insert().
-  cpu_num_t this_cpu_;
-
-  // The index of the logical cluster this CPU belongs to. CPUs with the same
-  // logical cluster index have the best chance of good cache affinity with
-  // respect to load distribution decisions.
-  size_t cluster_{0};
-
-  // Flag indicating that this Scheduler's CPU is in the process of becoming
-  // inactive.  When true, threads who have a migration function which must be
-  // run on this CPU are permitted to join this CPU's ready queue, even if the
-  // CPU has already been flagged as inactive.  The thread who is in charge of
-  // deactivating the CPU will make sure to run the migration function of the
-  // thread on this CPU before finishing the deactivation process.
-  ktl::atomic<bool> cpu_deactivating_{false};
-
-  // Values exported for lock-free access across CPUs. These are mirrors of the
-  // members of the same name without the exported_ prefix. This avoids
-  // unnecessary atomic loads when updating the values using arithmetic
-  // operations on the local CPU. These values are atomically readonly to other
-  // CPUs.
-  // TODO(eieio): Look at cache line alignment for these members to optimize
-  // cache performance.
-  RelaxedAtomic<SchedDuration> exported_queue_time_ns_{SchedNs(0)};
-  RelaxedAtomic<SchedUtilization> exported_deadline_utilization_{SchedUtilization{0}};
-  RelaxedAtomic<SchedUtilization> exported_clamped_deadline_utilization_{SchedUtilization{0}};
-  RelaxedAtomic<SchedUtilization> exported_fair_utilization_{SchedUtilization{0}};
-  RelaxedAtomic<SchedUtilization> exported_clamped_fair_utilization_{SchedUtilization{0}};
-  RelaxedAtomic<SchedUtilization> exported_clamped_total_utilization_{SchedUtilization{0}};
-  RelaxedAtomic<SchedProcessingRate> exported_processing_rate_{SchedProcessingRate{1}};
-  RelaxedAtomic<SchedProcessingRate> exported_max_processing_rate_{SchedProcessingRate{1}};
-
-  // The thread which ran just before this thread was scheduled.  Used by
-  // Scheduler::LockHandoff to release the previous thread's lock after a
-  // context switch operation has fully completed.
-  Thread* previous_thread_{nullptr};
 
   // Utility type that tracks values related to the thread being placed when
   // finding a target CPU for a waking or migrating thread.
@@ -1543,44 +1870,38 @@ class Scheduler {
   // placements when finding a target CPU for a waking or migrating thread.
   class CandidatePlacement;
 
-  // Track bandwidth reservations for up to 8 recently blocked threads.
-  static constexpr size_t kMaxBandwidthReservations = 8;
-  using BandwidthReservationCache =
-      power_management::BandwidthReservationCache<kMaxBandwidthReservations>;
-
-  TA_GUARDED(queue_lock_)
-  BandwidthReservationCache bandwidth_reservation_cache_;
-
   // PowerLevelControl encapsulates the CPU energy model and power level control interface for
   // energy aware scheduling.
   //
   // Instances of PowerLevelControl are protected by Scheduler::queue_lock_.
   class PowerLevelControl {
    public:
-    explicit PowerLevelControl(Scheduler* scheduler) : scheduler_{scheduler} {}
+    PowerLevelControl() = default;
 
     // Sets/resets the power domain set associated with this scheduler, returning the previous set.
     PowerDomainSet ExchangePowerDomainSet(PowerDomainSet new_domain_set) {
+      MarkHasSchedulerAccess(scheduler());
       PowerDomainSet previous_domain_set =
-          power_state_.UpdatePowerDomainSet(ktl::move(new_domain_set), cpu());
+          power_state().UpdatePowerDomainSet(ktl::move(new_domain_set), cpu());
 
       // Clear the request to ensure that a DPC racing with a domain change cannot latch a pending
       // request intended for the previous domain and the new domain ref pointer together.
-      pending_update_request_.reset();
+      state().pending_update_request = {};
+      state().has_pending_update_request = false;
 
       // Reset the processing rate using either the current rate for the domain or the default.
-      if (const SchedProcessingRate rate = power_state_.active_processing_rate(); rate > 0) {
-        updated_processing_rate_ = rate;
+      if (const SchedProcessingRate rate = power_state().active_processing_rate(); rate > 0) {
+        state().updated_processing_rate = rate;
       } else {
-        updated_processing_rate_ = default_processing_rate_;
+        state().updated_processing_rate = state().default_processing_rate;
       }
 
       // Set the active power coefficient from the power state config.
-      active_power_coefficient_nw_ = power_state_.active_power_coefficient_nw();
+      state().active_power_coefficient_nw = power_state().active_power_coefficient_nw();
 
       // Set the max processing rate for admission control comparisons.
-      max_processing_rate_ =
-          domain() ? domain()->model().max_processing_rate() : default_processing_rate_;
+      state().max_processing_rate =
+          domain() ? domain()->model().max_processing_rate() : state().default_processing_rate;
 
       return previous_domain_set;
     }
@@ -1589,17 +1910,18 @@ class Scheduler {
     // kernel power level control interface) for the domain associated with this scheduler to
     // acknowledge that a power level request has been completed.
     zx::result<> UpdateActivePowerLevel(uint8_t power_level) {
+      MarkHasSchedulerAccess(scheduler());
       ktrace::Scope trace = LOCAL_KTRACE_BEGIN_SCOPE(COMMON, "UpdateActivePowerLevel",
                                                      ("cpu", cpu()), ("power_level", power_level));
 
-      const zx::result result = power_state_.UpdateActivePowerLevel(power_level);
+      const zx::result result = power_state().UpdateActivePowerLevel(power_level);
       if (result.is_ok()) {
-        updated_processing_rate_ = power_state_.active_processing_rate();
+        state().updated_processing_rate = power_state().active_processing_rate();
       }
 
       trace = KTRACE_END_SCOPE(
-          ("processing_rate", Round<uint32_t>(1000 * processing_rate_)),
-          ("updated_processing_rate", Round<uint32_t>(1000 * updated_processing_rate_)));
+          ("processing_rate", Round<uint32_t>(1000 * processing_rate())),
+          ("updated_processing_rate", Round<uint32_t>(1000 * updated_processing_rate())));
 
       return result;
     }
@@ -1607,9 +1929,10 @@ class Scheduler {
     // Sets the processing rate on systems that don't provide an energy model and manage OPPs
     // exclusively from userspace. User requests are ignored if an energy model is set.
     void UserSetProcessingRate(SchedProcessingRate processing_rate) {
+      MarkHasSchedulerAccess(scheduler());
       DEBUG_ASSERT(processing_rate > 0);
       if (!domain()) {
-        updated_processing_rate_ = processing_rate;
+        state().updated_processing_rate = processing_rate;
       }
     }
 
@@ -1629,46 +1952,52 @@ class Scheduler {
     // which case the maximum limit takes precedence to correctly support using
     // the maximum for thermal mitigation.
     SchedUtilization ClampDemand(SchedUtilization demand) const {
-      return ktl::clamp(demand, ktl::min(processing_rate_limit_min_, processing_rate_limit_max_),
-                        processing_rate_limit_max_);
+      MarkHasSchedulerAccess(scheduler());
+      const SchedUtilization min_limit = state().processing_rate_limit_min;
+      const SchedUtilization max_limit = state().processing_rate_limit_max;
+      return ktl::clamp(demand, ktl::min(min_limit, max_limit), max_limit);
     }
 
     // Sets the initial processing rate from topology data during early boot.
     void TopologySetDefaultProcessingRate(SchedProcessingRate processing_rate) {
+      MarkHasSchedulerAccess(scheduler());
       DEBUG_ASSERT(processing_rate > 0);
       DEBUG_ASSERT(!domain());
-      processing_rate_ = processing_rate;
-      max_processing_rate_ = processing_rate;
-      default_processing_rate_ = processing_rate;
-      updated_processing_rate_ = processing_rate;
-      processing_rate_reciprocal_ = 1 / processing_rate;
+      state().processing_rate = processing_rate;
+      state().max_processing_rate = processing_rate;
+      state().default_processing_rate = processing_rate;
+      state().updated_processing_rate = processing_rate;
+      state().processing_rate_reciprocal = 1 / processing_rate;
     }
 
     // Returns true if the given power level is a valid active power level.
     bool IsValidActivePowerLevel(uint8_t power_level) const {
-      return power_state_.IsValidActivePowerLevel(power_level);
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().IsValidActivePowerLevel(power_level);
     }
 
     // Updates the current processing rate, reciprocal, and active power coefficient to the updated
     // values and returns the new processing rate. Called by RescheduleCommon after accounting is
     // performed for the time spent at the previous rate.
     SchedProcessingRate UpdateProcessingRate() {
+      MarkHasSchedulerAccess(scheduler());
       if (is_processing_rate_update_pending()) {
-        processing_rate_ = updated_processing_rate_;
-        processing_rate_reciprocal_ = 1 / processing_rate_;
-        active_power_coefficient_nw_ = power_state_.active_power_coefficient_nw();
+        state().processing_rate = state().updated_processing_rate;
+        state().processing_rate_reciprocal = 1 / state().processing_rate;
+        state().active_power_coefficient_nw = power_state().active_power_coefficient_nw();
         if (!domain()) {
-          max_processing_rate_ = processing_rate_;
+          state().max_processing_rate = state().processing_rate;
         }
       }
-      return processing_rate_;
+      return state().processing_rate;
     }
 
     // Updates the normalized utilization for this processor and the total
     // normalized utilization for the domain it belongs to with the given delta.
     // Returns the updated utilization for this processor.
     SchedUtilization UpdateNormalizedUtilization(SchedUtilization delta) {
-      return power_state_.UpdateUtilization(delta);
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().UpdateUtilization(delta);
     }
 
     // Pends a power level request that will later be flushed by
@@ -1698,31 +2027,51 @@ class Scheduler {
     cpu_mask_t SendPendingPowerLevelRequest(Guard<MonitoredSpinLock, NoIrqSave>& queue_guard);
 
     // Returns true if power control is enabled.
-    bool is_enabled() const { return power_state_.is_enabled(); }
+    bool is_enabled() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().is_enabled();
+    }
 
     // Returns the power domain set.
-    const PowerDomainSet& power_domain_set() const { return power_state_.power_domain_set(); }
+    const PowerDomainSet& power_domain_set() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().power_domain_set();
+    }
 
     // Returns the power domain associated with this scheduler.
-    const fbl::RefPtr<PowerDomain>& domain() const { return power_state_.domain(); }
+    const fbl::RefPtr<PowerDomain>& domain() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().domain();
+    }
 
     // Returns the id of the domain associated with this scheduler.
-    ktl::optional<uint32_t> domain_id() const { return power_state_.domain_id(); }
+    ktl::optional<uint32_t> domain_id() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().domain_id();
+    }
 
     // Returns the current active power level.
-    ktl::optional<uint8_t> active_power_level() const { return power_state_.active_power_level(); }
+    ktl::optional<uint8_t> active_power_level() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().active_power_level();
+    }
 
     // Returns the power coefficient for the current active power level.
-    uint64_t active_power_coefficient_nw() const { return active_power_coefficient_nw_; }
+    uint64_t active_power_coefficient_nw() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().active_power_coefficient_nw;
+    }
 
     // Returns the power coefficient of the maximum idle power level (e.g. clock gating).
     uint64_t max_idle_power_coefficient_nw() const {
-      return power_state_.max_idle_power_coefficient_nw();
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().max_idle_power_coefficient_nw();
     }
 
     // Returns the normalized deadline utilization of this processor.
     SchedUtilization normalized_deadline_utilization() const {
-      return power_state_.normalized_utilization();
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().normalized_utilization();
     }
 
     // Returns the normalized deadline utilization of this processor,
@@ -1733,15 +2082,14 @@ class Scheduler {
 
     // Returns the fair demand of this processor based on total expected runtime
     // of active fair threads.
-    SchedUtilization fair_demand() const TA_NO_THREAD_SAFETY_ANALYSIS {
-      return scheduler().total_expected_runtime_ns_ * kReciprocalDefaultFairPeriod;
+    SchedUtilization fair_demand() const {
+      MarkHasSchedulerAccess(scheduler());
+      return scheduler().rust_state_.total_expected_runtime_ns * kReciprocalDefaultFairPeriod;
     }
 
     // Returns the fair demand of this processor, clamped to the current
     // performance limits.
-    SchedUtilization clamped_fair_demand() const TA_NO_THREAD_SAFETY_ANALYSIS {
-      return ClampDemand(fair_demand());
-    }
+    SchedUtilization clamped_fair_demand() const { return ClampDemand(fair_demand()); }
 
     // Returns the total demand (deadline + fair) of this processor.
     SchedUtilization total_demand() const {
@@ -1754,69 +2102,99 @@ class Scheduler {
 
     // Returns the normalized deadline utilization of the domain this processor belongs to.
     SchedUtilization domain_deadline_utilization() const {
-      return power_state_.total_normalized_utilization();
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().total_normalized_utilization();
     }
 
     // Returns the normalized processing rate of this processor at its current active power level.
-    SchedProcessingRate processing_rate() const { return processing_rate_; }
+    SchedProcessingRate processing_rate() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().processing_rate;
+    }
 
     // Returns the reciprocal of the normalized processing rate.
-    SchedProcessingRate processing_rate_reciprocal() const { return processing_rate_reciprocal_; }
+    SchedProcessingRate processing_rate_reciprocal() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().processing_rate_reciprocal;
+    }
 
     // Returns the potentially pending update to the normalized processing rate. This value is set
     // whenever the power level controller acknowledges completion of a power level change request.
-    SchedProcessingRate updated_processing_rate() const { return updated_processing_rate_; }
+    SchedProcessingRate updated_processing_rate() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().updated_processing_rate;
+    }
 
     // Returns the maximum processing rate of this processor. Initially set from the CPU topology
     // data and updated whenever the energy model is set/updated by userspace.
-    SchedProcessingRate max_processing_rate() const { return max_processing_rate_; }
+    SchedProcessingRate max_processing_rate() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().max_processing_rate;
+    }
 
     // Returns the maximum processing rate of this processor, clamped to the
     // current performance limits.
     SchedProcessingRate clamped_max_processing_rate() const {
-      return ktl::min(max_processing_rate_, processing_rate_limit_max_);
+      MarkHasSchedulerAccess(scheduler());
+      return ktl::min(state().max_processing_rate, state().processing_rate_limit_max);
     }
 
     // Returns the minimum processing rate limit of this processor. Initially
     // set to 0.0 and updated by userspace to effect performance limits policy.
-    SchedProcessingRate processing_rate_limit_min() const { return processing_rate_limit_min_; }
+    SchedProcessingRate processing_rate_limit_min() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().processing_rate_limit_min;
+    }
 
     // Returns the maximum processing rate limit of this processor. Initially
     // set to 1.0 and updated by userspace to effect performance limits policy.
-    SchedProcessingRate processing_rate_limit_max() const { return processing_rate_limit_max_; }
+    SchedProcessingRate processing_rate_limit_max() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().processing_rate_limit_max;
+    }
 
     // Returns the processing rate of the active power level immediately before
     // the current power level. This rate is the lower bound of the performance
     // capacity of the current active power level. Returns a rate of 0.0 when
     // the current power level is the lowest possible active power level.
     SchedProcessingRate preceding_processing_rate() const {
-      return power_state_.preceding_active_processing_rate();
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().preceding_active_processing_rate();
     }
 
     // Returns the target processing rate of this processor (the in-flight
     // desired rate if a transition is pending, or the current processing rate).
     SchedProcessingRate target_processing_rate() const {
-      return domain() ? power_state_.target_processing_rate() : processing_rate_;
+      MarkHasSchedulerAccess(scheduler());
+      return domain() ? power_state().target_processing_rate() : state().processing_rate;
     }
 
     // Returns true if there is a pending request to change the active power level.
-    bool has_pending_request() const { return pending_update_request_.has_value(); }
+    bool has_pending_request() const {
+      MarkHasSchedulerAccess(scheduler());
+      return state().has_pending_update_request;
+    }
 
     // Returns whether the kernel scheduler should send power level update requests through the
     // control interface to handle utilization changes.
-    bool scheduler_control_enabled() const { return power_state_.scheduler_control_enabled(); }
+    bool scheduler_control_enabled() const {
+      MarkHasSchedulerAccess(scheduler());
+      return power_state().scheduler_control_enabled();
+    }
 
     // Returns the processing rate of the active power level immediately
     // preceding the target power level (the lower bound of the target power level).
     SchedProcessingRate preceding_target_processing_rate() const {
-      return domain() ? power_state_.preceding_target_processing_rate()
+      MarkHasSchedulerAccess(scheduler());
+      return domain() ? power_state().preceding_target_processing_rate()
                       : preceding_processing_rate();
     }
 
     // Returns true if the targeted active power level has an active power level
     // preceding it (i.e. is not the lowest active power level).
     bool has_preceding_target_power_level() const {
-      return domain() ? power_state_.has_preceding_target_power_level()
+      MarkHasSchedulerAccess(scheduler());
+      return domain() ? power_state().has_preceding_target_power_level()
                       : preceding_processing_rate() > 0;
     }
 
@@ -1845,40 +2223,45 @@ class Scheduler {
     // processed by the scheduler. Checked by RescheduleCommon after accounting has been updated for
     // the runtime segment covering the previous processing rate.
     bool is_processing_rate_update_pending() const {
-      return processing_rate_ != updated_processing_rate_;
+      MarkHasSchedulerAccess(scheduler());
+      return state().processing_rate != state().updated_processing_rate;
     }
 
    private:
-    Scheduler& scheduler() { return *scheduler_; }
-    const Scheduler& scheduler() const { return *scheduler_; }
+    Scheduler& scheduler();
+    const Scheduler& scheduler() const;
     cpu_num_t cpu() const { return scheduler().this_cpu(); }
-
-    SchedProcessingRate processing_rate_{1};
-    SchedProcessingRate processing_rate_reciprocal_{1};
-    SchedProcessingRate updated_processing_rate_{1};
-    SchedProcessingRate default_processing_rate_{1};
-    SchedProcessingRate max_processing_rate_{1};
-
-    // The min and max effective processing rate for this processor. These
-    // values influence both the actual processing rate of the power domain the
-    // processor belongs to and the effective processing rate of this specific
-    // processor.
-    SchedProcessingRate processing_rate_limit_min_{0};
-    SchedProcessingRate processing_rate_limit_max_{1};
-
-    uint64_t active_power_coefficient_nw_{0};
-
-    power_management::PowerState power_state_;
-    ktl::optional<power_management::PowerLevelUpdateRequest> pending_update_request_;
-    Scheduler* const scheduler_;
+    PowerLevelControlState& state() TA_REQ(scheduler().queue_lock_) {
+      return scheduler().rust_state_.power_level_control;
+    }
+    const PowerLevelControlState& state() const TA_REQ(scheduler().queue_lock_) {
+      return scheduler().rust_state_.power_level_control;
+    }
+    power_management::PowerState& power_state() TA_REQ(scheduler().queue_lock_) {
+      return scheduler().power_state_;
+    }
+    const power_management::PowerState& power_state() const TA_REQ(scheduler().queue_lock_) {
+      return scheduler().power_state_;
+    }
   };
 
-  TA_GUARDED(queue_lock_)
-  PowerLevelControl power_level_control_{this};
+  [[no_unique_address]] TA_GUARDED(queue_lock_) PowerLevelControl power_level_control_;
 };
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+inline Scheduler& Scheduler::PowerLevelControl::scheduler() {
+  return *reinterpret_cast<Scheduler*>(reinterpret_cast<uintptr_t>(this) -
+                                       offsetof(Scheduler, power_level_control_));
+}
+inline const Scheduler& Scheduler::PowerLevelControl::scheduler() const {
+  return *reinterpret_cast<const Scheduler*>(reinterpret_cast<uintptr_t>(this) -
+                                             offsetof(Scheduler, power_level_control_));
+}
+#pragma clang diagnostic pop
+
 extern "C" {
-cpu_mask_t cpp_scheduler_peek_active_mask();
+void cpp_current_mono_time_and_boot_ticks(Scheduler::SchedMonoTimeAndBootTicks* out);
 }  // extern "C"
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_SCHEDULER_H_

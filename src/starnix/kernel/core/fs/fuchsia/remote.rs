@@ -3560,14 +3560,13 @@ mod test {
                 .expect("new_fs failed");
 
                 let ns = Namespace::new_with_flags(fs, MountpointFlags::RELATIME);
-                let child = ns
+                let (child, _status) = ns
                     .root()
                     .open_create_node(
                         &current_task,
                         TEST_FILE.into(),
                         FileMode::ALLOW_ALL.with_type(FileMode::IFREG),
                         DeviceId::NONE,
-                        OpenFlags::empty(),
                     )
                     .expect("create_node failed");
 
@@ -4167,6 +4166,9 @@ mod test {
                             }
                         };
                         responder.send(Ok(new_offset)).unwrap();
+                    }
+                    fio::FileRequest::GetExtendedAttribute { responder, .. } => {
+                        responder.send(Err(zx::Status::NOT_FOUND.into_raw())).unwrap();
                     }
                     fio::FileRequest::Close { responder } => {
                         responder.send(Ok(())).unwrap();

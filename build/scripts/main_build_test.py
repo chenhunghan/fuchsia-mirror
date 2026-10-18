@@ -3,6 +3,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import sys
+from pathlib import Path
+
+# Dynamically resolve and insert the Fuchsia root directory into sys.path
+# to support standalone script package imports (e.g. from build.rbe).
+_FUCHSIA_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_FUCHSIA_DIR) not in sys.path:
+    sys.path.insert(0, str(_FUCHSIA_DIR))
+
 import argparse
 import builtins
 import contextlib
@@ -19,14 +28,18 @@ import tempfile
 import time
 import unittest
 from collections.abc import Generator
-from contextlib import contextmanager
 from typing import Any
 from unittest import mock
 
-import main_build
-import signal_utils
+# Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
+_FUCHSIA_ROOT = pathlib.Path(__file__).parent.parent.parent
+if str(_FUCHSIA_ROOT) not in sys.path:
+    sys.path.insert(0, str(_FUCHSIA_ROOT))
+
 from build.auth import gcloud
-from build.rbe import build_summary, rbe_settings
+from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
+from build.resultstore import rs_profile
+from build.scripts import main_build, signal_utils
 
 _FAKE_RBE_SETTINGS = rbe_settings.fake()
 
@@ -41,6 +54,29 @@ def default_args() -> argparse.Namespace:
 class MainBuildTestBase(unittest.TestCase):
     """Base class for main_build tests with shared helpers."""
 
+    def _get_fake_rbe_profile(
+        self, *args: Any, **kwargs: Any
+    ) -> rbe_profile.RbeProfile:
+        return rbe_profile.fake(
+            rbe_instance="projects/fake-rbe-instance/instances/default",
+            remote_exec_root=pathlib.Path("/fake/exec/root"),
+            worker_pools={
+                "default": "Pool=fake-default-pool",
+                "large": "Pool=fake-large-pool",
+            },
+            auth_type="fake-auth",
+        )
+
+    def _get_fake_rs_profile(
+        self, *args: Any, **kwargs: Any
+    ) -> rs_profile.RsProfile:
+        return rs_profile.fake(
+            rs_instance="projects/fake-rs-instance/instances/default",
+            cas_instance="projects/fake-cas-instance/instances/default",
+            results_url="http://fake-results-url",
+            auth_type="fake-auth",
+        )
+
     def setUp(self) -> None:
         # Default mock for read_json to avoid file system errors for rbe_settings.json etc.
         self.read_json_patcher = mock.patch.object(
@@ -48,6 +84,20 @@ class MainBuildTestBase(unittest.TestCase):
         )
         self.mock_read_json = self.read_json_patcher.start()
 
+        # Mock rbe_profile.load and rs_profile.load to return fresh fake test profiles
+        self.rbe_load_patcher = mock.patch.object(
+            rbe_profile,
+            "load",
+            return_value=self._get_fake_rbe_profile(),
+        )
+        self.mock_rbe_load = self.rbe_load_patcher.start()
+
+        self.rs_load_patcher = mock.patch.object(
+            rs_profile,
+            "load",
+            return_value=self._get_fake_rs_profile(),
+        )
+        self.mock_rs_load = self.rs_load_patcher.start()
         # Mock rbe_settings.load to avoid FileNotFoundError in tests
         self.rbe_settings_load_patcher = mock.patch.object(
             rbe_settings,
@@ -74,11 +124,13 @@ class MainBuildTestBase(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.read_json_patcher.stop()
+        self.rbe_load_patcher.stop()
+        self.rs_load_patcher.stop()
         self.rbe_settings_load_patcher.stop()
         self.isolate_creds_patcher.stop()
         self.run_select_patcher.stop()
 
-    @contextmanager
+    @contextlib.contextmanager
     def mock_invocation_context(
         self, build_uuid: str = "uuid-123", timestamp: str = "ts-456"
     ) -> Generator[tuple[mock.Mock, mock.Mock], None, None]:
@@ -241,6 +293,38 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             self.assertEqual(context.auth_type, "loas")
             mock_run.assert_called_once()
 
+    def test_needs_auth_matrix(self) -> None:
+        """Verifies needs_auth across combinations of RBE, ResultStore, and auth_types."""
+        auth_settings = rbe_settings.fake(needs_reproxy=True, needs_auth=True)
+        test_cases = [
+            # (rbe, rs_mode, rbe_auth, rs_auth, expected_needs_auth)
+            (True, "none", "google", "none", True),
+            (True, "none", "none", "none", False),
+            (True, "all", "none", "google", True),
+            (True, "all", "none", "none", False),
+            (False, "all", "none", "google", True),
+            (False, "all", "none", "none", False),
+            (False, "none", "google", "google", False),
+        ]
+        with mock.patch.object(
+            rbe_settings, "load", return_value=auth_settings
+        ):
+            for rbe, rs_mode, rbe_auth, rs_auth, expected in test_cases:
+                with self.subTest(
+                    rbe=rbe, rs=rs_mode, rbe_auth=rbe_auth, rs_auth=rs_auth
+                ):
+                    with mock.patch.object(
+                        rbe_profile,
+                        "load",
+                        return_value=rbe_profile.fake(auth_type=rbe_auth),
+                    ), mock.patch.object(
+                        rs_profile,
+                        "load",
+                        return_value=rs_profile.fake(auth_type=rs_auth),
+                    ):
+                        ctx = self.create_context(rbe=rbe, resultstore=rs_mode)
+                        self.assertEqual(ctx.needs_auth, expected)
+
     def test_run_select_auth_script_success(self) -> None:
         self.run_select_patcher.stop()
         try:
@@ -384,29 +468,9 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
                 # Even though max_concurrency is set to 16, the Fint job_count override (32) is returned directly
                 self.assertEqual(context.concurrency, 32)
 
-    def test_parse_properties(self) -> None:
-        test_cases = [
-            ("key=value\n", {"key": "value"}),
-            ("  key  =  value  \n", {"key": "value"}),
-            ('export key="value"\n', {"key": "value"}),
-            ("export key='value'\n", {"key": "value"}),
-            ('key="value" # comments!\n', {"key": "value"}),
-            ("=empty_key\nkey=value\n", {"key": "value"}),
-            ("# comments\n// comments\n\nkey=value\n", {"key": "value"}),
-            ("empty_val=\n", {}),
-            ("invalid_value\n", {}),
-            ('key="unclosed\nkey2=value\n', {"key2": "value"}),
-        ]
-        for content, expected in test_cases:
-            self.assertEqual(
-                main_build.parse_properties(content),
-                expected,
-                f"Failed parsing: {content!r}",
-            )
-
     def test_load_user_preference(self) -> None:
         with mock.patch.object(
-            main_build, "exists", return_value=True
+            pathlib.Path, "exists", return_value=True
         ), mock.patch.object(
             pathlib.Path, "read_text", return_value="resultstore=all\n"
         ):
@@ -451,6 +515,46 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
                     ctx.config.resultstore,
                     expected,
                     f"Failed precedence: args={args}, global={global_val}, local={local_val}",
+                )
+
+    def test_rbe_casfs_precedence_hierarchy(self) -> None:
+        # (args, env_val, config_val, expected_result)
+        test_cases: list[tuple[list[str], str | None, bool | None, bool]] = [
+            # Case A: No config file, no env, no flag -> defaults to False
+            ([], None, None, False),
+            # Case B: .fx/config/rbe_casfs present -> True
+            ([], None, True, True),
+            # Case C: Env FX_BUILD_INTERNAL_RBE_CASFS_VIRTUALIZE=1 overrides config False -> True
+            ([], "1", False, True),
+            # Case D: Env FX_BUILD_INTERNAL_RBE_CASFS_VIRTUALIZE=0 overrides config True -> False
+            ([], "0", True, False),
+            # Case E: CLI --rbe-casfs=true overrides env and config -> True
+            (["--rbe-casfs=true"], "0", False, True),
+            # Case F: CLI --no-rbe-casfs overrides env and config -> False
+            (["--no-rbe-casfs"], "1", True, False),
+            # Case G: CLI --rbe-casfs=false overrides env and config -> False
+            (["--rbe-casfs=false"], "1", True, False),
+        ]
+
+        for args, env_val, config_val, expected in test_cases:
+            environ = {"FUCHSIA_DIR": "/tmp/fuchsia"}
+            if env_val is not None:
+                environ[casfs.ENV_CASFS_VIRTUALIZE] = env_val
+            full_args = ["--build-dir", "out/default"] + args + ["ninja"]
+            parsed_args = main_build._MAIN_ARG_PARSER.parse_args(full_args)
+
+            with mock.patch.object(
+                casfs,
+                "_load_preference",
+                return_value=config_val,
+            ):
+                ctx = main_build.FuchsiaBuildContext.from_args(
+                    parsed_args, environ
+                )
+                self.assertEqual(
+                    ctx.config.rbe_casfs,
+                    expected,
+                    f"Failed precedence: args={args}, env={env_val}, config={config_val}",
                 )
 
     def test_log_dir_argument_parsing(self) -> None:
@@ -976,6 +1080,56 @@ class BuildInvocationTest(MainBuildTestBase):
                     custom_path / "invocation_id", "uuid-123\n"
                 )
 
+    def test_timeout_command_prefix(self) -> None:
+        """Verifies construction of the timeout command prefix."""
+        context = self.create_context()
+        context.config.timeout = "45m"
+        context.config.verbose = True
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            prefix = list(invocation.timeout_command_prefix())
+            self.assertEqual(prefix[0], sys.executable)
+            self.assertEqual(prefix[1], str(context.build_timeout_script))
+            self.assertIn("--timeout", prefix)
+            self.assertEqual(prefix[prefix.index("--timeout") + 1], "45m")
+            self.assertIn("--log-dir", prefix)
+            self.assertEqual(
+                prefix[prefix.index("--log-dir") + 1],
+                str(invocation.timeout_log_dir),
+            )
+            self.assertIn("--verbose", prefix)
+            self.assertEqual(prefix[-1], "--")
+
+    def test_timeout_command_prefix_empty_when_no_timeout(self) -> None:
+        """Verifies timeout_command_prefix yields nothing when timeout is not configured."""
+        context = self.create_context()
+        context.config.timeout = None
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            self.assertEqual(list(invocation.timeout_command_prefix()), [])
+
+    def test_timeout_command_prefix_tui(self) -> None:
+        """Verifies --no-separate-pgrp is passed when tui is enabled."""
+        context = self.create_context()
+        context.config.timeout = "45m"
+        context.config.tui = True
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            prefix = list(invocation.timeout_command_prefix())
+            self.assertIn("--no-separate-pgrp", prefix)
+
+    def test_timeout_command_prefix_grace_period(self) -> None:
+        """Verifies --grace-period is forwarded when timeout_grace_period is set."""
+        context = self.create_context()
+        context.config.timeout = "45m"
+        context.config.timeout_grace_period = "60s"
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            prefix = list(invocation.timeout_command_prefix())
+            self.assertIn("--grace-period", prefix)
+            idx = prefix.index("--grace-period")
+            self.assertEqual(prefix[idx + 1], "60s")
+
     def test_get_build_env(self) -> None:
         context = self.create_context()
         context.env = {"TERM": "xterm", "USER": "fuchsia-user", "EXTRA": "val"}
@@ -1005,6 +1159,8 @@ class BuildInvocationTest(MainBuildTestBase):
 
     def test_get_build_env_forward_rs_variables(self) -> None:
         context = self.create_context(
+            rbe=True,
+            resultstore="all",
             resultstore_instance="projects/fuchsia-infra/instances/default_instance",
             cas_instance="projects/fuchsia-infra/instances/default_instance",
             rbe_instance="projects/fuchsia-infra/instances/default_instance",
@@ -1026,37 +1182,50 @@ class BuildInvocationTest(MainBuildTestBase):
                 "projects/fuchsia-infra/instances/default_instance",
             )
 
-    def test_get_build_env_unconditional_forward_even_when_matching_defaults(
-        self,
-    ) -> None:
-        context = self.create_context(
-            resultstore_instance=main_build.DEFAULT_RESULTSTORE_INSTANCE,
-            cas_instance=main_build.DEFAULT_CAS_INSTANCE,
-            rbe_instance=main_build.DEFAULT_RBE_INSTANCE,
-        )
+    def test_get_build_env_contains_active_profile_defaults(self) -> None:
+        context = self.create_context(rbe=True, resultstore="all")
         context.env = {"USER": "fuchsia-user"}
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
             self.assertEqual(
+                env["RBE_instance"],
+                "projects/fake-rbe-instance/instances/default",
+            )
+            self.assertEqual(
                 env["RS_rs_instance"],
-                main_build.DEFAULT_RESULTSTORE_INSTANCE,
+                "projects/fake-rs-instance/instances/default",
             )
             self.assertEqual(
                 env["RS_cas_instance"],
-                main_build.DEFAULT_CAS_INSTANCE,
-            )
-            self.assertEqual(
-                env["RBE_instance"],
-                main_build.DEFAULT_RBE_INSTANCE,
+                "projects/fake-cas-instance/instances/default",
             )
 
-    def test_build_service_env_empty_defaults(self) -> None:
-        context = self.create_context()
-        self.assertEqual(context.build_service_env, {})
+    def test_build_service_env_profile_defaults(self) -> None:
+        context = self.create_context(rbe=True, resultstore="all")
+        env = context.build_service_env
+        self.assertEqual(
+            env["RBE_instance"], "projects/fake-rbe-instance/instances/default"
+        )
+        self.assertEqual(
+            env["RS_rs_instance"], "projects/fake-rs-instance/instances/default"
+        )
+        self.assertEqual(
+            env["RS_cas_instance"],
+            "projects/fake-cas-instance/instances/default",
+        )
+        self.assertEqual(
+            env["FX_BUILD_INTERNAL_RBE_REMOTE_EXEC_ROOT"], "/fake/exec/root"
+        )
+        self.assertEqual(
+            env["FX_BUILD_INTERNAL_RBE_WORKER_POOLS"],
+            '{"default": "Pool=fake-default-pool", "large": "Pool=fake-large-pool"}',
+        )
 
     def test_build_service_env_custom_overrides(self) -> None:
         context = self.create_context(
+            rbe=True,
+            resultstore="all",
             resultstore_instance="projects/custom-rs/instances/default",
             cas_instance="projects/custom-cas/instances/default",
             rbe_instance="projects/custom-rbe/instances/default",
@@ -1197,6 +1366,21 @@ class BuildInvocationTest(MainBuildTestBase):
             self.assertEqual(
                 env["FX_INTERNAL_RESULTSTORE_BAZEL"], "resultstore_infra"
             )
+
+    def test_get_build_env_rbe_casfs(self) -> None:
+        context_disabled = self.create_context(rbe_casfs=False)
+        context_disabled.env = {"USER": "fuchsia-user"}
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context_disabled)
+            env = invocation.get_build_env()
+            self.assertEqual(env[casfs.ENV_CASFS_VIRTUALIZE], "0")
+
+        context_enabled = self.create_context(rbe_casfs=True)
+        context_enabled.env = {"USER": "fuchsia-user"}
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context_enabled)
+            env = invocation.get_build_env()
+            self.assertEqual(env[casfs.ENV_CASFS_VIRTUALIZE], "1")
 
     def test_get_build_env_proxy_socket_propagation(self) -> None:
         """Verifies that remote_proxy_socket and resultstore_proxy_socket propagate correct environment variables."""
@@ -1465,18 +1649,6 @@ class GcpInstanceNameTest(unittest.TestCase):
                 main_build.gcp_instance_name(invalid)
 
 
-class StrToBoolTest(unittest.TestCase):
-    def test_str_to_bool(self) -> None:
-        self.assertTrue(main_build.str_to_bool("true"))
-        self.assertTrue(main_build.str_to_bool("1"))
-        self.assertTrue(main_build.str_to_bool("yes"))
-        self.assertFalse(main_build.str_to_bool("false"))
-        self.assertFalse(main_build.str_to_bool("0"))
-        self.assertFalse(main_build.str_to_bool("no"))
-        with self.assertRaises(Exception):
-            main_build.str_to_bool("maybe")
-
-
 class ParseCfgTest(unittest.TestCase):
     def test_parse_cfg_text_empty(self) -> None:
         self.assertEqual(main_build._parse_cfg_text(""), {})
@@ -1684,6 +1856,58 @@ class NewBuildCommandExecutionTest(MainBuildTestBase):
                         exec_info.full_command[idx + 1], str(metrics_path)
                     )
 
+    def test_new_build_command_execution_with_timeout(self) -> None:
+        context = self.create_context(rbe=False, resultstore="none")
+        context.config.timeout = "90m"
+        with self.mock_invocation_context("uuid-123", "ts-456"):
+            invocation = main_build.BuildInvocation(context)
+            with mock.patch.multiple(
+                main_build.FuchsiaBuildContext,
+                rbe_enabled=mock.PropertyMock(return_value=False),
+                needs_auth=mock.PropertyMock(return_value=False),
+            ):
+                with mock.patch.object(main_build, "mkdir") as mock_mkdir:
+                    exec_info = invocation.new_build_command_execution(
+                        "ninja", ["ninja", "target"]
+                    )
+                    mock_mkdir.assert_called_with(invocation.timeout_log_dir)
+
+                    full_cmd = exec_info.full_command
+                    self.assertEqual(full_cmd[0], sys.executable)
+                    self.assertEqual(
+                        full_cmd[1], str(context.build_timeout_script)
+                    )
+                    self.assertIn("--timeout", full_cmd)
+                    idx_timeout = full_cmd.index("--timeout")
+                    self.assertEqual(full_cmd[idx_timeout + 1], "90m")
+                    self.assertIn("--log-dir", full_cmd)
+                    idx_log = full_cmd.index("--log-dir")
+                    self.assertEqual(
+                        full_cmd[idx_log + 1], str(invocation.timeout_log_dir)
+                    )
+
+                    self.assertIn("--", full_cmd)
+                    sep_idx = full_cmd.index("--")
+                    self.assertEqual(
+                        full_cmd[sep_idx + 1], str(context.top_build_wrapper)
+                    )
+                    self.assertEqual(full_cmd[-1], "target")
+
+    def test_new_build_command_execution_non_build_ignores_timeout(
+        self,
+    ) -> None:
+        context = self.create_context(rbe=False, resultstore="none")
+        context.config.timeout = "90m"
+        with self.mock_invocation_context("uuid-123", "ts-456"):
+            invocation = main_build.BuildInvocation(context)
+            exec_info = invocation.new_build_command_execution(
+                "bazel", ["bazel", "query", "//..."], is_build=False
+            )
+            # When is_build=False, build_timeout wrapper is not applied
+            self.assertEqual(
+                exec_info.full_command, ["bazel", "query", "//..."]
+            )
+
 
 class PrepareFunctionsTest(MainBuildTestBase):
     def test_bazel(self) -> None:
@@ -1825,6 +2049,12 @@ class MainFunctionTest(MainBuildTestBase):
             ["--build-dir", "out/default", "--no-status", "ninja"]
         )
         self.assertFalse(args.status)
+
+    def test_arg_parser_timeout(self) -> None:
+        args = main_build._MAIN_ARG_PARSER.parse_args(
+            ["--build-dir", "out/default", "--timeout", "90m", "ninja"]
+        )
+        self.assertEqual(args.timeout, "90m")
 
     def test_main_catches_config_error(self) -> None:
         mock_args = default_args()
@@ -2743,6 +2973,26 @@ class CollectResultStoreMetadataTest(unittest.TestCase):
                 diagnostic_logs["nested/deep_subbuild/rsproxy.INFO"],
                 str(deep_subbuild_rsproxy_info.resolve()),
             )
+
+
+class CollectTimeoutMetadataTest(unittest.TestCase):
+    def test_collect_timeout_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = pathlib.Path(tmpdir)
+            timeout_dir = log_dir / main_build.TIMEOUT_LOGS_DIR
+            main_build.mkdir(timeout_dir)
+            (timeout_dir / "pstree_drain.json").write_text(
+                "{}", encoding="utf-8"
+            )
+
+            metadata = main_build._collect_timeout_metadata(log_dir)
+            self.assertEqual(metadata["log_dir"], str(timeout_dir.resolve()))
+            self.assertEqual(metadata["snapshots"], ["pstree_drain.json"])
+
+    def test_collect_timeout_metadata_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = pathlib.Path(tmpdir)
+            self.assertEqual(main_build._collect_timeout_metadata(log_dir), {})
 
 
 if __name__ == "__main__":

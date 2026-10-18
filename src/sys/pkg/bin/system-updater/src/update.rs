@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error, anyhow};
-use async_trait::async_trait;
 use fetch_url::fetch_url;
 use fidl::endpoints::ProtocolMarker as _;
 use fidl_fuchsia_mem as fmem;
@@ -14,7 +13,6 @@ use fidl_fuchsia_pkg_garbagecollector as fpkg_gc;
 use fidl_fuchsia_update_installer_ext as fupdate_installer_ext;
 use fuchsia_async::TimeoutExt as _;
 use fuchsia_hash::Hash;
-use fuchsia_sync::Mutex;
 use fuchsia_url::fuchsia_pkg::{
     AbsoluteComponentUrl, AbsolutePackageUrl, PinnedAbsolutePackageUrl,
 };
@@ -27,15 +25,12 @@ use include_str_from_working_dir::include_str_from_working_dir_env;
 use log::{error, info, warn};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
-use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 use update_package::manifest::OtaManifest;
 
 mod config;
 mod crash_report;
 mod environment;
-mod genutil;
 mod history;
 mod metrics;
 mod paver;
@@ -44,20 +39,13 @@ mod resolver;
 mod state;
 
 pub(super) use config::Config;
-pub(super) use environment::{
-    BuildInfo, CobaltConnector, Environment, EnvironmentConnector, NamespaceEnvironmentConnector,
-    SystemInfo,
-};
-pub(super) use genutil::GeneratorExt;
+pub(super) use environment::{Environment, NamespaceSystemInfo, SystemInfo};
 pub(super) use history::UpdateHistory;
 pub(super) use reboot::{ControlRequest, RebootController};
 pub(super) use resolver::ResolveError;
 
 #[cfg(test)]
-pub(super) use {
-    config::ConfigBuilder,
-    environment::{NamespaceBuildInfo, NamespaceCobaltConnector, NamespaceSystemInfo},
-};
+pub(super) use config::ConfigBuilder;
 
 const COBALT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 const SOURCE_EPOCH_RAW: &str = include_str_from_working_dir_env!("EPOCH_PATH");
@@ -256,45 +244,36 @@ pub enum CommitAction {
 }
 
 /// A trait to update the system in the given `Environment` using the provided config options.
-#[async_trait(?Send)]
 pub trait Updater {
-    type UpdateStream: FusedStream<Item = fupdate_installer_ext::State>;
-
     async fn update(
         &mut self,
         config: Config,
         env: Environment,
         reboot_controller: RebootController,
         cancel_receiver: oneshot::Receiver<()>,
-    ) -> (String, Self::UpdateStream);
+    ) -> (String, impl FusedStream<Item = fupdate_installer_ext::State>);
 }
 
 pub struct RealUpdater {
-    history: Arc<Mutex<UpdateHistory>>,
+    history: UpdateHistory,
     structured_config: system_updater_config::Config,
     crash_reporter: crash_report::CrashReporter,
 }
 
 impl RealUpdater {
-    pub fn new(
-        history: Arc<Mutex<UpdateHistory>>,
-        structured_config: system_updater_config::Config,
-    ) -> Self {
+    pub fn new(history: UpdateHistory, structured_config: system_updater_config::Config) -> Self {
         Self { history, structured_config, crash_reporter: crash_report::CrashReporter::new() }
     }
 }
 
-#[async_trait(?Send)]
 impl Updater for RealUpdater {
-    type UpdateStream = Pin<Box<dyn FusedStream<Item = fupdate_installer_ext::State>>>;
-
     async fn update(
         &mut self,
         config: Config,
         env: Environment,
         reboot_controller: RebootController,
         cancel_receiver: oneshot::Receiver<()>,
-    ) -> (String, Self::UpdateStream) {
+    ) -> (String, impl FusedStream<Item = fupdate_installer_ext::State>) {
         let manifest_public_keys = self
             .structured_config
             .manifest_public_keys
@@ -313,10 +292,10 @@ impl Updater for RealUpdater {
         let excessive_update_duration =
             NonZeroU32::new(self.structured_config.excessive_update_duration_seconds)
                 .map(|d| Duration::from_secs(d.get().into()));
-        let (attempt_id, attempt) = update(
+        update(
             config,
             env,
-            Arc::clone(&self.history),
+            &mut self.history,
             reboot_controller,
             self.structured_config.concurrent_package_resolves.into(),
             self.structured_config.concurrent_blob_fetches.into(),
@@ -324,10 +303,73 @@ impl Updater for RealUpdater {
             manifest_public_keys,
             excessive_update_duration,
             cancel_receiver,
-            self.crash_reporter.clone(),
+            &mut self.crash_reporter,
         )
-        .await;
-        (attempt_id, Box::pin(attempt))
+        .await
+    }
+}
+
+async fn run_attempt_to_commit(
+    config: &Config,
+    env: &Environment,
+    concurrent_package_resolves: usize,
+    concurrent_blob_fetches: usize,
+    verify_existing_blobs: bool,
+    manifest_public_keys: Vec<ring::signature::UnparsedPublicKey<Vec<u8>>>,
+    mut cancel_receiver: oneshot::Receiver<()>,
+    co: &mut state::Yield,
+    target_version: &mut history::Version,
+) -> Result<Option<(state::WaitToReboot, update_package::UpdateMode)>, AttemptError> {
+    let attempt_res = {
+        let attempt_fut = match config.update_url.scheme_str() {
+            Some("http" | "https") => PackagelessAttempt {
+                config,
+                env,
+                concurrent_blob_fetches,
+                verify_existing_blobs,
+                manifest_public_keys,
+            }
+            .run(co, target_version)
+            .left_future()
+            .fuse(),
+            _ => Attempt { config, env, concurrent_package_resolves }
+                .run(co, target_version)
+                .right_future()
+                .fuse(),
+        };
+
+        futures::pin_mut!(attempt_fut);
+
+        futures::select! {
+            attempt_res = attempt_fut => attempt_res,
+            cancel_res = cancel_receiver => match cancel_res {
+                Ok(()) => Err(AttemptError::UpdateCanceled),
+                Err(e) => Err(AttemptError::CancelSenderDropped(e)),
+            },
+        }
+    };
+    // at this point the attempt has finished running, drop the receiver to indicate that
+    // the update can no longer be canceled.
+    drop(cancel_receiver);
+    let (state, mode, current_configuration) = attempt_res?;
+
+    if !config.options.should_commit {
+        state.enter_complete_but_not_active(co).await;
+        return Ok(None);
+    }
+
+    // Commit the update
+    let state = state.enter_commit(co).await;
+    match commit_images(&env.boot_manager, mode, current_configuration).await {
+        Ok(()) => {
+            // Success!
+            let state = state.enter_wait_to_reboot(co).await;
+            Ok(Some((state, mode)))
+        }
+        Err(e) => {
+            state.fail(co).await;
+            Err(AttemptError::Commit(e))
+        }
     }
 }
 
@@ -343,39 +385,36 @@ impl Updater for RealUpdater {
 async fn update(
     config: Config,
     env: Environment,
-    history: Arc<Mutex<UpdateHistory>>,
+    history: &mut UpdateHistory,
     reboot_controller: RebootController,
     concurrent_package_resolves: usize,
     concurrent_blob_fetches: usize,
     verify_existing_blobs: bool,
     manifest_public_keys: Vec<ring::signature::UnparsedPublicKey<Vec<u8>>>,
     excessive_update_duration: Option<Duration>,
-    mut cancel_receiver: oneshot::Receiver<()>,
-    crash_reporter: crash_report::CrashReporter,
+    cancel_receiver: oneshot::Receiver<()>,
+    crash_reporter: &mut crash_report::CrashReporter,
 ) -> (String, impl FusedStream<Item = fupdate_installer_ext::State>) {
-    let attempt_fut = history.lock().start_update_attempt(
-        config.options.clone(),
-        &config.update_url,
-        config.start_time,
-        &env.data_sink,
-        &env.boot_manager,
-        &env.build_info,
-        &env.system_info,
-    );
-    let attempt = attempt_fut.await;
+    let attempt = history
+        .start_update_attempt(
+            config.options.clone(),
+            &config.update_url,
+            config.start_time,
+            &env.data_sink,
+            &env.boot_manager,
+        )
+        .await;
     let source_version = attempt.source_version().clone();
     let power_state_control = env.power_state_control.clone();
 
-    let history_clone = Arc::clone(&history);
     let attempt_id = attempt.attempt_id().to_string();
-    let stream = async_generator::generate(move |mut co| async move {
-        let history = history_clone;
+    let stream = async_generator::generate(move |co| async move {
+        let mut co = state::Yield::new(co);
         // The only operation allowed to fail in this function is update_attempt. The rest of the
         // functionality here sets up the update attempt and takes the appropriate actions based on
         // whether the update attempt succeeds or fails.
 
-        let mut phase = metrics::Phase::Tufupdate;
-        let (mut cobalt, cobalt_forwarder_task) = env.cobalt_connector.connect();
+        let (mut cobalt, cobalt_forwarder_task) = metrics::connect_to_cobalt();
         let cobalt_forwarder_task = fuchsia_async::Task::spawn(cobalt_forwarder_task);
 
         info!(config:?; "starting system update");
@@ -383,46 +422,33 @@ async fn update(
 
         let mut target_version = history::Version::default();
 
-        let attempt_res = {
-            let attempt_fut = match config.update_url.scheme_str() {
-                Some("http" | "https") => PackagelessAttempt {
-                    config: &config,
-                    env: &env,
-                    concurrent_blob_fetches,
-                    verify_existing_blobs,
-                    manifest_public_keys,
-                }
-                .run(&mut co, &mut phase, &mut target_version)
-                .left_future()
-                .fuse(),
-                _ => Attempt { config: &config, env: &env, concurrent_package_resolves }
-                    .run(&mut co, &mut phase, &mut target_version)
-                    .right_future()
-                    .fuse(),
-            };
+        let attempt_res = run_attempt_to_commit(
+            &config,
+            &env,
+            concurrent_package_resolves,
+            concurrent_blob_fetches,
+            verify_existing_blobs,
+            manifest_public_keys,
+            cancel_receiver,
+            &mut co,
+            &mut target_version,
+        )
+        .await;
 
-            futures::pin_mut!(attempt_fut);
-
-            let attempt_res = futures::select! {
-                attempt_res = attempt_fut => attempt_res,
-                cancel_res = cancel_receiver => {
-                    match cancel_res {
-                        Ok(()) => Err(AttemptError::UpdateCanceled),
-                        Err(e) => Err(AttemptError::CancelSenderDropped(e)),
-                    }
-                }
-            };
-            // at this point the attempt has finished running, drop the receiver to indicate that
-            // the update can no longer be canceled.
-            drop(cancel_receiver);
-            attempt_res
-        };
-
-        let status_code = metrics::result_to_status_code(attempt_res.as_ref().map(|_| ()));
         // TODO(https://fxbug.dev/568366644): account for suspend duration.
         let update_duration = config.start_time_mono.elapsed();
-        let attempt_res = match attempt_res {
-            Ok(ok) => {
+        info!("system update attempt completed in {}s, logging metrics", update_duration.as_secs());
+        cobalt.log_ota_result(
+            config.options.initiator,
+            history.attempts_for(&source_version, &target_version) + 1,
+            co.last_state(),
+            update_duration,
+            attempt_res.as_ref(),
+        );
+        drop(cobalt);
+
+        let wait_to_reboot = match attempt_res {
+            Ok(wait_to_reboot) => {
                 if let Some(threshold) = excessive_update_duration
                     && update_duration > threshold
                 {
@@ -433,7 +459,7 @@ async fn update(
                     );
                     crash_reporter.excessive_update_duration();
                 }
-                Some(ok)
+                wait_to_reboot
             }
             Err(e) => {
                 use crate::update::AttemptError::*;
@@ -451,72 +477,49 @@ async fn update(
             }
         };
 
-        info!("system update attempt completed in {}s, logging metrics", update_duration.as_secs());
-        cobalt.log_ota_result_attempt(
-            config.options.initiator,
-            history.lock().attempts_for(&source_version, &target_version) + 1,
-            phase,
-            status_code,
-        );
-        cobalt.log_ota_result_duration(
-            config.options.initiator,
-            phase,
-            status_code,
-            update_duration,
-        );
-        drop(cobalt);
-
         // wait for all cobalt events to be flushed to the service.
         info!("flushing cobalt events");
         let () = flush_cobalt(cobalt_forwarder_task, COBALT_FLUSH_TIMEOUT).await;
 
-        let Some((state, mode)) = attempt_res else {
-            return target_version;
-        };
-
-        info!(mode:?; "checking if reboot is required or should be deferred");
-        // Figure out if we should reboot.
-        match mode {
-            // First priority: Always reboot on ForceRecovery success, even if the caller
-            // asked to defer the reboot.
-            update_package::UpdateMode::ForceRecovery => {
-                info!("system update in ForceRecovery mode complete, rebooting...");
-            }
-            // Second priority: Use the attached reboot controller.
-            update_package::UpdateMode::Normal => {
-                info!("system update complete, waiting for initiator to signal reboot.");
-                match reboot_controller.wait_to_reboot().await {
-                    CommitAction::Reboot => {
-                        info!("initiator ready to reboot, rebooting...");
-                    }
-                    CommitAction::RebootDeferred => {
-                        info!("initiator deferred reboot to caller.");
-                        state.enter_defer_reboot(&mut co).await;
-                        return target_version;
+        if let Some((state, mode)) = wait_to_reboot {
+            info!(mode:?; "checking if reboot is required or should be deferred");
+            // Figure out if we should reboot.
+            match mode {
+                // First priority: Always reboot on ForceRecovery success, even if the caller
+                // asked to defer the reboot.
+                update_package::UpdateMode::ForceRecovery => {
+                    info!("system update in ForceRecovery mode complete, rebooting...");
+                    state.enter_reboot(&mut co).await;
+                }
+                // Second priority: Use the attached reboot controller.
+                update_package::UpdateMode::Normal => {
+                    info!("system update complete, waiting for initiator to signal reboot.");
+                    match reboot_controller.wait_to_reboot().await {
+                        CommitAction::Reboot => {
+                            info!("initiator ready to reboot, rebooting...");
+                            state.enter_reboot(&mut co).await;
+                        }
+                        CommitAction::RebootDeferred => {
+                            info!("initiator deferred reboot to caller.");
+                            state.enter_defer_reboot(&mut co).await;
+                        }
                     }
                 }
             }
         }
 
-        state.enter_reboot(&mut co).await;
-        target_version
+        let last_state = co.into_last_state();
+        let should_reboot = matches!(last_state, fupdate_installer_ext::State::Reboot { .. });
+
+        let attempt = attempt.finish(target_version, last_state);
+        history.record_update_attempt(attempt);
+        history.save().await;
+
+        if should_reboot {
+            reboot::reboot(&power_state_control).await;
+        }
     })
-    .when_done(
-        move |last_state: Option<fupdate_installer_ext::State>, target_version| async move {
-            let last_state = last_state.unwrap_or(fupdate_installer_ext::State::Prepare);
-
-            let should_reboot = matches!(last_state, fupdate_installer_ext::State::Reboot { .. });
-
-            let attempt = attempt.finish(target_version, last_state);
-            history.lock().record_update_attempt(attempt);
-            let save_fut = history.lock().save();
-            save_fut.await;
-
-            if should_reboot {
-                reboot::reboot(&power_state_control).await;
-            }
-        },
-    );
+    .into_yielded();
     (attempt_id, stream)
 }
 
@@ -762,10 +765,10 @@ impl Attempt<'_> {
     // early return point.
     async fn run(
         mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
-        phase: &mut metrics::Phase,
+        co: &mut state::Yield,
         target_version: &mut history::Version,
-    ) -> Result<(state::WaitToReboot, update_package::UpdateMode), AttemptError> {
+    ) -> Result<(state::Fetch, update_package::UpdateMode, paver::CurrentConfiguration), AttemptError>
+    {
         // Prepare
         let state = state::Prepare::enter(co).await;
 
@@ -792,7 +795,6 @@ impl Attempt<'_> {
                 packages_to_fetch.len() as u64 + 1,
             )
             .await;
-        *phase = metrics::Phase::ImageWrite;
 
         let () = match self
             .stage_images(
@@ -814,7 +816,6 @@ impl Attempt<'_> {
 
         // Fetch packages
         let mut state = state.enter_fetch(co).await;
-        *phase = metrics::Phase::PackageDownload;
 
         let () = match self
             .fetch_packages(co, &mut state, packages_to_fetch, mode, update_pkg.1)
@@ -827,23 +828,7 @@ impl Attempt<'_> {
             }
         };
 
-        // Commit the update
-        let state = state.enter_commit(co).await;
-        *phase = metrics::Phase::ImageCommit;
-
-        let () = match commit_images(&self.env.boot_manager, mode, current_configuration).await {
-            Ok(()) => (),
-            Err(e) => {
-                state.fail(co).await;
-                return Err(AttemptError::Commit(e));
-            }
-        };
-
-        // Success!
-        let state = state.enter_wait_to_reboot(co).await;
-        *phase = metrics::Phase::SuccessPendingReboot;
-
-        Ok((state, mode))
+        Ok((state, mode, current_configuration))
     }
 
     /// Acquire the necessary data to perform the update.
@@ -925,13 +910,14 @@ impl Attempt<'_> {
         match mode {
             update_package::UpdateMode::Normal => {}
             update_package::UpdateMode::ForceRecovery => {
-                if !self.config.options.should_write_recovery {
+                if !self.config.options.should_write_recovery || !self.config.options.should_commit
+                {
                     return Err(PrepareError::VerifyUpdateMode);
                 }
             }
         }
 
-        verify_board(&self.env.build_info, &update_pkg).await.map_err(PrepareError::VerifyBoard)?;
+        verify_board(&update_pkg).await.map_err(PrepareError::VerifyBoard)?;
 
         let packages_to_fetch = match mode {
             update_package::UpdateMode::Normal => {
@@ -1049,7 +1035,7 @@ impl Attempt<'_> {
     /// Pave the various raw images (zbi, firmware, vbmeta) for fuchsia and/or recovery.
     async fn stage_images(
         &mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
+        co: &mut state::Yield,
         state: &mut state::Stage,
         update_pkg: &(update_package::UpdatePackage, Option<Hash>),
         current_configuration: paver::CurrentConfiguration,
@@ -1122,7 +1108,7 @@ impl Attempt<'_> {
     /// Fetch all packages needed by the target OS.
     async fn fetch_packages(
         &mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
+        co: &mut state::Yield,
         state: &mut state::Fetch,
         packages_to_fetch: Vec<PinnedAbsolutePackageUrl>,
         mode: update_package::UpdateMode,
@@ -1209,14 +1195,14 @@ impl PackagelessAttempt<'_> {
     // early return point.
     async fn run(
         mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
-        phase: &mut metrics::Phase,
+        co: &mut state::Yield,
         target_version: &mut history::Version,
-    ) -> Result<(state::WaitToReboot, update_package::UpdateMode), AttemptError> {
+    ) -> Result<(state::Fetch, update_package::UpdateMode, paver::CurrentConfiguration), AttemptError>
+    {
         // Prepare
         let state = state::Prepare::enter(co).await;
 
-        let (current_configuration, manifest, manifest_size, blob_base_url) =
+        let (current_configuration, manifest, manifest_size, blob_base_url, blobfs) =
             match self.prepare(target_version).await {
                 Ok(tuple) => tuple,
                 Err(e) => {
@@ -1224,12 +1210,6 @@ impl PackagelessAttempt<'_> {
                     return Err(e.into());
                 }
             };
-
-        let blobfs = blobfs::Client::builder()
-            .creator()
-            .build()
-            .await
-            .map_err(|e| AttemptError::Prepare(PrepareError::OpenBlobfs(e)))?;
 
         let total_target_size = manifest_size
             + manifest
@@ -1248,7 +1228,6 @@ impl PackagelessAttempt<'_> {
             )
             .await;
         state.add_progress(co, manifest_size, manifest_size).await;
-        *phase = metrics::Phase::ImageWrite;
 
         let blob_base_url = blob_base_url.to_string();
         let () = match self
@@ -1264,7 +1243,6 @@ impl PackagelessAttempt<'_> {
 
         // Fetch blobs
         let mut state = state.enter_fetch(co).await;
-        *phase = metrics::Phase::PackageDownload;
 
         let () = match self.fetch_blobs(co, &mut state, &manifest, &blob_base_url, &blobfs).await {
             Ok(()) => (),
@@ -1274,25 +1252,7 @@ impl PackagelessAttempt<'_> {
             }
         };
 
-        // Commit the update
-        let state = state.enter_commit(co).await;
-        *phase = metrics::Phase::ImageCommit;
-
-        let () = match commit_images(&self.env.boot_manager, manifest.mode, current_configuration)
-            .await
-        {
-            Ok(()) => (),
-            Err(e) => {
-                state.fail(co).await;
-                return Err(AttemptError::Commit(e));
-            }
-        };
-
-        // Success!
-        let state = state.enter_wait_to_reboot(co).await;
-        *phase = metrics::Phase::SuccessPendingReboot;
-
-        Ok((state, manifest.mode))
+        Ok((state, manifest.mode, current_configuration))
     }
 
     /// Acquire the necessary data to perform the update.
@@ -1301,11 +1261,15 @@ impl PackagelessAttempt<'_> {
     /// target OS and partition images that need written.
     ///
     /// The returned tuple contains the current partition configuration, the update manifest, the
-    /// download size of the manifest in bytes, and the base URL for fetching blobs.
+    /// download size of the manifest in bytes, the base URL for fetching blobs, and the blobfs
+    /// client.
     async fn prepare(
         &mut self,
         target_version: &mut history::Version,
-    ) -> Result<(paver::CurrentConfiguration, OtaManifest, u64, http::Uri), PrepareError> {
+    ) -> Result<
+        (paver::CurrentConfiguration, OtaManifest, u64, http::Uri, blobfs::Client),
+        PrepareError,
+    > {
         // Ensure that the partition boot metadata is ready for the update to begin. Specifically:
         // - the current configuration must be Healthy and Active, and
         // - the non-current configuration must be Unbootable.
@@ -1368,7 +1332,8 @@ impl PackagelessAttempt<'_> {
         let zbi_slot = match manifest.mode {
             update_package::UpdateMode::Normal => update_package::manifest::Slot::AB,
             update_package::UpdateMode::ForceRecovery => {
-                if !self.config.options.should_write_recovery {
+                if !self.config.options.should_write_recovery || !self.config.options.should_commit
+                {
                     return Err(PrepareError::VerifyUpdateMode);
                 }
                 update_package::manifest::Slot::R
@@ -1386,19 +1351,20 @@ impl PackagelessAttempt<'_> {
             return Err(PrepareError::VerifyImages(update_package::VerifyError::MissingZbi));
         }
 
-        let () = verify_board_in_manifest(&self.env.build_info, &manifest)
-            .await
-            .map_err(PrepareError::VerifyBoard)?;
+        let () = verify_board_in_manifest(&manifest).await.map_err(PrepareError::VerifyBoard)?;
 
         let () = validate_epoch(SOURCE_EPOCH_RAW, manifest.epoch)?;
 
-        Ok((current_config, manifest, manifest_size, blob_base_url))
+        let blobfs =
+            blobfs::Client::builder().creator().build().await.map_err(PrepareError::OpenBlobfs)?;
+
+        Ok((current_config, manifest, manifest_size, blob_base_url, blobfs))
     }
 
     /// Pave the various raw images (zbi, firmware, vbmeta) for fuchsia and/or recovery.
     async fn stage_images(
         &mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
+        co: &mut state::Yield,
         state: &mut state::Stage,
         current_configuration: paver::CurrentConfiguration,
         manifest: &OtaManifest,
@@ -1549,7 +1515,7 @@ impl PackagelessAttempt<'_> {
     /// Fetch all blobs needed by the target OS.
     async fn fetch_blobs(
         &mut self,
-        co: &mut async_generator::Yield<fupdate_installer_ext::State>,
+        co: &mut state::Yield,
         state: &mut state::Fetch,
         manifest: &OtaManifest,
         blob_base_url: &str,
@@ -1897,22 +1863,16 @@ async fn resolve_update_package(
     resolver::resolve_update_package(pkg_resolver, update_url).await
 }
 
-async fn verify_board<B>(build_info: &B, pkg: &update_package::UpdatePackage) -> Result<(), Error>
-where
-    B: BuildInfo,
-{
-    let current_board = build_info.board().await.context("while determining current board")?;
+async fn verify_board(pkg: &update_package::UpdatePackage) -> Result<(), Error> {
+    let current_board = environment::board().await.context("while determining current board")?;
     if let Some(current_board) = current_board {
         let () = pkg.verify_board(&current_board).await.context("while verifying target board")?;
     }
     Ok(())
 }
 
-async fn verify_board_in_manifest<B>(build_info: &B, manifest: &OtaManifest) -> Result<(), Error>
-where
-    B: BuildInfo,
-{
-    let current_board = build_info.board().await.context("while determining current board")?;
+async fn verify_board_in_manifest(manifest: &OtaManifest) -> Result<(), Error> {
+    let current_board = environment::board().await.context("while determining current board")?;
     if let Some(current_board) = current_board
         && manifest.board != current_board
     {

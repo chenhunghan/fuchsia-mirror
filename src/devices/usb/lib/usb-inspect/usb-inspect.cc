@@ -48,19 +48,21 @@ void EndpointInspect::Init(inspect::Node& parent, const std::string& name, size_
     transfer_snapshot_capacity_ = transfer_snapshot_capacity;
     transfer_snapshots_.clear();
     transfer_snapshots_index_ = 0;
+    pool_counts_cb_ = nullptr;
   }
 
   // Initialize atomic values
-  tx_pending_requests_.store(0, std::memory_order_relaxed);
-  rx_pending_requests_.store(0, std::memory_order_relaxed);
-  rx_pending_processing_.store(0, std::memory_order_relaxed);
-  total_bytes_tx_.store(0, std::memory_order_relaxed);
-  total_bytes_rx_.store(0, std::memory_order_relaxed);
-  failed_bytes_tx_.store(0, std::memory_order_relaxed);
-  failed_bytes_rx_.store(0, std::memory_order_relaxed);
-  max_bytes_per_second_.store(0, std::memory_order_relaxed);
+  tx_pending_requests_ = 0;
+  rx_pending_requests_ = 0;
+  rx_pending_processing_ = 0;
+  total_bytes_tx_ = 0;
+  total_bytes_rx_ = 0;
+  failed_bytes_tx_ = 0;
+  failed_bytes_rx_ = 0;
+  max_bytes_per_second_ = 0;
+  cancelled_ = false;
 
-  last_total_bytes_val_ = 0;
+  last_total_bytes_val_.store(0, std::memory_order_relaxed);
 
   // Create the pure lazy node!
   lazy_node_ = parent.CreateLazyNode(name, [this]() {
@@ -69,25 +71,29 @@ void EndpointInspect::Init(inspect::Node& parent, const std::string& name, size_
 
     std::scoped_lock _(lock_);
 
-    uint64_t cur_tx = total_bytes_tx_.load(std::memory_order_relaxed);
-    uint64_t cur_rx = total_bytes_rx_.load(std::memory_order_relaxed);
-    uint64_t cur_max_rate = max_bytes_per_second_.load(std::memory_order_relaxed);
+    uint64_t cur_tx = total_bytes_tx_;
+    uint64_t cur_rx = total_bytes_rx_;
+    uint64_t cur_max_rate = max_bytes_per_second_;
 
-    root.CreateUint("tx_pending_requests", tx_pending_requests_.load(std::memory_order_relaxed),
-                    &inspector);
-    root.CreateUint("rx_pending_requests", rx_pending_requests_.load(std::memory_order_relaxed),
-                    &inspector);
-    root.CreateUint("rx_pending_processing", rx_pending_processing_.load(std::memory_order_relaxed),
-                    &inspector);
+    root.CreateUint("tx_pending_requests", tx_pending_requests_, &inspector);
+    root.CreateUint("rx_pending_requests", rx_pending_requests_, &inspector);
+    root.CreateUint("rx_pending_processing", rx_pending_processing_, &inspector);
     root.CreateUint("total_bytes_tx", cur_tx, &inspector);
     root.CreateUint("total_bytes_rx", cur_rx, &inspector);
-    if (auto failed_tx = failed_bytes_tx_.load(std::memory_order_relaxed); failed_tx > 0) {
+    if (uint64_t failed_tx = failed_bytes_tx_.load(std::memory_order_relaxed); failed_tx > 0) {
       root.CreateUint("failed_bytes_tx", failed_tx, &inspector);
     }
-    if (auto failed_rx = failed_bytes_rx_.load(std::memory_order_relaxed); failed_rx > 0) {
+    if (uint64_t failed_rx = failed_bytes_rx_.load(std::memory_order_relaxed); failed_rx > 0) {
       root.CreateUint("failed_bytes_rx", failed_rx, &inspector);
     }
     root.CreateUint("max_bytes_per_second", cur_max_rate, &inspector);
+    root.CreateBool("cancelled", cancelled_, &inspector);
+
+    if (pool_counts_cb_) {
+      auto [in_flight, total] = pool_counts_cb_();
+      root.CreateUint("in_flight_requests", in_flight, &inspector);
+      root.CreateUint("total_requests", total, &inspector);
+    }
 
     if (!event_history_.empty()) {
       auto event_node = root.CreateChild("event_history");
@@ -124,17 +130,16 @@ void EndpointInspect::Init(inspect::Node& parent, const std::string& name, size_
 void EndpointInspect::MeasureThroughput(zx::duration elapsed) {
   uint64_t total_bytes = total_bytes_tx_.load(std::memory_order_relaxed) +
                          total_bytes_rx_.load(std::memory_order_relaxed);
-  uint64_t last_val = last_total_bytes_val_.load(std::memory_order_relaxed);
-  uint64_t delta = total_bytes - last_val;
-  last_total_bytes_val_.store(total_bytes, std::memory_order_relaxed);
+  uint64_t last_val = last_total_bytes_val_.exchange(total_bytes, std::memory_order_relaxed);
+  uint64_t delta = total_bytes >= last_val ? total_bytes - last_val : 0;
 
   int64_t elapsed_ns = elapsed.to_nsecs();
   if (elapsed_ns > 0) {
     uint64_t rate =
         static_cast<uint64_t>((static_cast<unsigned __int128>(delta) * 1'000'000'000) / elapsed_ns);
     uint64_t max_rate = max_bytes_per_second_.load(std::memory_order_relaxed);
-    if (rate > max_rate) {
-      max_bytes_per_second_.store(rate, std::memory_order_relaxed);
+    while (rate > max_rate && !max_bytes_per_second_.compare_exchange_weak(
+                                  max_rate, rate, std::memory_order_relaxed)) {
     }
   }
 }
@@ -146,9 +151,9 @@ void EndpointInspect::SnapshotTransferStatsLocked(zx_instant_boot_t raw_time) {
   if (transfer_snapshots_.size() >= transfer_snapshot_capacity_) {
     transfer_snapshots_.pop_front();
   }
-  uint64_t tx = total_bytes_tx_.load(std::memory_order_relaxed);
-  uint64_t rx = total_bytes_rx_.load(std::memory_order_relaxed);
-  uint64_t max_rate = max_bytes_per_second_.load(std::memory_order_relaxed);
+  uint64_t tx = total_bytes_tx_;
+  uint64_t rx = total_bytes_rx_;
+  uint64_t max_rate = max_bytes_per_second_;
   transfer_snapshots_.push_back(TransferSnapshotEntry{
       .timestamp = raw_time,
       .stats =
@@ -169,7 +174,7 @@ void EndpointInspect::SnapshotTransferStats() {
   SnapshotTransferStatsLocked(zx_clock_get_boot());
 }
 
-void EndpointInspect::RecordEvent(const std::string& event_name) {
+void EndpointInspect::RecordEvent(std::string_view event_name) {
   if (event_history_capacity_ == 0) {
     return;
   }
@@ -181,7 +186,7 @@ void EndpointInspect::RecordEvent(const std::string& event_name) {
   zx_instant_boot_t raw_time = zx_clock_get_boot();
   event_history_.push_back(EventLogEntry{
       .timestamp = raw_time,
-      .event = event_name,
+      .event = std::string(event_name),
   });
   event_history_index_++;
   SnapshotTransferStatsLocked(raw_time);
@@ -207,6 +212,11 @@ void DciInspect::Init(inspect::Node& parent, const std::string& name, size_t ctr
     connected_ = false;
     speed_ = "undefined";
     usb_mode_ = "unknown";
+    connect_count_ = 0;
+    disconnect_count_ = 0;
+    set_configuration_count_ = 0;
+    last_connect_time_ns_ = 0;
+    last_disconnect_time_ns_ = 0;
   }
 
   // Create the pure lazy node!
@@ -219,6 +229,11 @@ void DciInspect::Init(inspect::Node& parent, const std::string& name, size_t ctr
     root.CreateBool("connected", connected_, &inspector);
     root.CreateString("speed", speed_, &inspector);
     root.CreateString("usb_mode", usb_mode_, &inspector);
+    root.CreateUint("connect_count", connect_count_, &inspector);
+    root.CreateUint("disconnect_count", disconnect_count_, &inspector);
+    root.CreateUint("set_configuration_count", set_configuration_count_, &inspector);
+    root.CreateInt("last_connect_time_ns", last_connect_time_ns_, &inspector);
+    root.CreateInt("last_disconnect_time_ns", last_disconnect_time_ns_, &inspector);
 
     if (!event_history_.empty()) {
       auto event_node = root.CreateChild("event_history");
@@ -259,10 +274,35 @@ void DciInspect::UpdateState(const std::string& state) {
   state_ = state;
 }
 
+void DciInspect::UpdateSpeed(usb_speed_t speed) {
+  std::lock_guard<std::mutex> _(lock_);
+  speed_ = SpeedToString(speed);
+}
+
 void DciInspect::UpdateConnectionStatus(bool connected, usb_speed_t speed) {
   std::lock_guard<std::mutex> _(lock_);
+  if (connected && !connected_) {
+    connect_count_++;
+    last_connect_time_ns_ = zx_clock_get_boot();
+  } else if (!connected && connected_) {
+    disconnect_count_++;
+    last_disconnect_time_ns_ = zx_clock_get_boot();
+  }
   connected_ = connected;
   speed_ = SpeedToString(speed);
+}
+
+void DciInspect::RecordSetConfiguration(uint8_t config) {
+  const std::string event = std::format("configuration set: {}", config);
+  std::lock_guard<std::mutex> _(lock_);
+  set_configuration_count_++;
+  if (event_history_capacity_ > 0) {
+    if (event_history_.size() >= event_history_capacity_) {
+      event_history_.pop_front();
+    }
+    event_history_.push_back(EventLogEntry{zx_clock_get_boot(), event});
+    event_history_index_++;
+  }
 }
 
 void DciInspect::UpdateUsbMode(UsbMode usb_mode) {
@@ -325,6 +365,7 @@ void FunctionInspect::Init(inspect::Node& parent, const std::string& name, uint8
     interface_class_ = 0;
     interface_subclass_ = 0;
     interface_protocol_ = 0;
+    descriptors_.clear();
   }
 
   lazy_node_ = parent.CreateLazyNode(name, [this]() {
@@ -600,6 +641,113 @@ void FunctionInspect::RecordEvent(const std::string& event_name) {
   zx_instant_boot_t raw_time = zx_clock_get_boot();
   event_history_.push_back(EventLogEntry{raw_time, event_name});
   event_history_index_++;
+}
+
+// ============================================================================
+// FunctionDriverInspect Implementation
+// ============================================================================
+
+void FunctionDriverInspect::Init(inspect::Node& driver_node,
+                                 std::optional<std::string_view> initial_state,
+                                 size_t event_capacity) {
+  {
+    std::scoped_lock _(lock_);
+    event_history_capacity_ = event_capacity;
+    event_history_.clear();
+    event_history_index_ = 0;
+    if (initial_state.has_value()) {
+      state_ = std::string(*initial_state);
+    } else {
+      state_.reset();
+    }
+  }
+
+  online_ = false;
+  configured_ = false;
+  unconfiguring_ = false;
+  set_configured_true_count_ = 0;
+  set_configured_false_count_ = 0;
+  unconfigure_start_boot_time_ = 0;
+  last_unconfigure_duration_ns_ = 0;
+
+  lazy_values_ = driver_node.CreateLazyValues("metrics", [this]() {
+    inspect::Inspector inspector;
+    auto& root = inspector.GetRoot();
+
+    std::scoped_lock _(lock_);
+    root.CreateBool("online", online_, &inspector);
+    if (state_.has_value()) {
+      root.CreateString("state", *state_, &inspector);
+    }
+    root.CreateBool("configured", configured_, &inspector);
+    root.CreateBool("unconfiguring", unconfiguring_, &inspector);
+    root.CreateUint("set_configured_true_count", set_configured_true_count_, &inspector);
+    root.CreateUint("set_configured_false_count", set_configured_false_count_, &inspector);
+    root.CreateInt("last_unconfigure_duration_ns", last_unconfigure_duration_ns_, &inspector);
+
+    if (!event_history_.empty()) {
+      auto event_node = root.CreateChild("event_history");
+      size_t index = event_history_index_ - event_history_.size();
+      for (const auto& entry : event_history_) {
+        auto node = event_node.CreateChild(std::to_string(index++));
+        node.CreateUint("@time", entry.timestamp, &inspector);
+        node.CreateString("event", entry.event, &inspector);
+        inspector.emplace(std::move(node));
+      }
+      inspector.emplace(std::move(event_node));
+    }
+
+    return fpromise::make_ok_promise(std::move(inspector));
+  });
+}
+
+void FunctionDriverInspect::RecordEventLocked(std::string_view event_name,
+                                              zx_instant_boot_t raw_time) {
+  if (event_history_capacity_ == 0) {
+    return;
+  }
+  if (event_history_.size() >= event_history_capacity_) {
+    event_history_.pop_front();
+  }
+  event_history_.push_back(EventLogEntry{
+      .timestamp = raw_time,
+      .event = std::string(event_name),
+  });
+  event_history_index_++;
+}
+
+void FunctionDriverInspect::RecordEvent(std::string_view event_name) {
+  std::scoped_lock _(lock_);
+  RecordEventLocked(event_name, zx_clock_get_boot());
+}
+
+void FunctionDriverInspect::OnConfigured() {
+  std::scoped_lock _(lock_);
+  unconfiguring_ = false;
+  unconfigure_start_boot_time_ = 0;
+  configured_ = true;
+  ++set_configured_true_count_;
+  RecordEventLocked("SetConfigured(true)", zx_clock_get_boot());
+}
+
+void FunctionDriverInspect::OnUnconfigureStart() {
+  std::scoped_lock _(lock_);
+  zx_instant_boot_t now = zx_clock_get_boot();
+  if (!unconfiguring_.exchange(true)) {
+    unconfigure_start_boot_time_ = now;
+  }
+  ++set_configured_false_count_;
+  RecordEventLocked("SetConfigured(false) start", now);
+}
+
+void FunctionDriverInspect::OnUnconfigureComplete(bool immediate) {
+  std::scoped_lock _(lock_);
+  zx_instant_boot_t now = zx_clock_get_boot();
+  unconfiguring_ = false;
+  configured_ = false;
+  int64_t start = unconfigure_start_boot_time_.exchange(0);
+  last_unconfigure_duration_ns_ = (!immediate && start > 0) ? (now - start) : 0;
+  RecordEventLocked("SetConfigured(false) reply", now);
 }
 
 }  // namespace usb_inspect

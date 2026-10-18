@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,7 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/lib/serial"
 	"go.fuchsia.dev/fuchsia/tools/lib/subprocess"
 	"go.fuchsia.dev/fuchsia/tools/lib/syslog"
+	"go.fuchsia.dev/fuchsia/tools/net/sshutil"
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 	"go.fuchsia.dev/fuchsia/tools/testing/testrunner"
 	testrunnerconstants "go.fuchsia.dev/fuchsia/tools/testing/testrunner/constants"
@@ -276,10 +278,12 @@ func (r *RunCommand) setupFFXUSBDriver(ctx context.Context, ffx *targets.FFXInst
 	if err := ffx.ConfigSet(ctx, "connectivity.usb_socket_path", socketPath); err != nil {
 		return cleanup, fmt.Errorf("failed to set connectivity.usb_socket_path to %s: %w", socketPath, err)
 	}
+	// LINT.IfChange(ffx_usb_driver_failed)
 	cleanup = botanist.WaitForProcess(ctx, func(processCtx context.Context) error {
 		logger.Debugf(ctx, "starting ffx usb driver")
 		return ffx.USBDriver(processCtx, serialNum, logDir)
 	}, "ffx usb-driver")
+	// LINT.ThenChange(/tools/testing/tefmocheck/check-configs.yaml:ffx_usb_driver_failed)
 	return func() {
 		cleanup()
 		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
@@ -342,10 +346,12 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 		if r.expectsSSH {
 			for _, t := range fuchsiaTargets {
 				t := t
-				client, err := t.SSHClient()
+				client, err := r.connectToSSH(ctx, t)
 				if err != nil {
-					if err := r.dumpSyslogOverSerial(ctx, t.SerialSocketPath()); err != nil {
-						logger.Errorf(ctx, err.Error())
+					if socketPath := t.SerialSocketPath(); socketPath != "" {
+						if err := r.dumpSyslogOverSerial(ctx, socketPath); err != nil {
+							logger.Errorf(ctx, "%v", err)
+						}
 					}
 					return err
 				}
@@ -515,7 +521,8 @@ func (r *RunCommand) execute(ctx context.Context, args []string) error {
 
 	if r.skipSetup {
 		if err := testrunner.SetupAndExecute(ctx, r.testrunnerOptions, testsPath); err != nil {
-			return fmt.Errorf("testrunner with flags: %v, with timeout: %s, failed: %w", r.testrunnerOptions, r.timeout, err)
+			logger.Debugf(ctx, "testrunner with flags: %v, with timeout: %s, failed: %s", r.testrunnerOptions, r.timeout, err)
+			return err
 		}
 		return nil
 	}
@@ -667,6 +674,83 @@ func (r *RunCommand) createTestbedConfig(baseTargets []targets.Base) ([]any, str
 	return testbedConfig, f.Name(), nil
 }
 
+// connectToSSH connects to the target over SSH. If the initial connection
+// attempt fails with a connection timeout while the parent context is still
+// valid, it attempts a single target reboot/recovery and retries once.
+func (r *RunCommand) connectToSSH(ctx context.Context, t targets.FuchsiaTarget) (*sshutil.Client, error) {
+	client, err := t.SSHClient()
+	if err == nil {
+		return client, nil
+	}
+	if isSSHConnectTimeout(err) && ctx.Err() == nil {
+		logger.Warningf(ctx, "SSH connection to %s timed out (%s); attempting target recovery and retry", t.Nodename(), err)
+		if rebootErr := r.rebootTarget(ctx, t); rebootErr != nil {
+			logger.Warningf(ctx, "failed to recover target %s: %s", t.Nodename(), rebootErr)
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		return t.SSHClient()
+	}
+	return nil, err
+}
+
+func isSSHConnectTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &netErr) && netErr.Timeout())
+}
+
+func (r *RunCommand) rebootTarget(ctx context.Context, t targets.FuchsiaTarget) error {
+	var recoveryErrs []error
+	if socketPath := t.SerialSocketPath(); socketPath != "" {
+		err := r.rebootOverSerial(ctx, socketPath)
+		if err == nil {
+			return nil
+		}
+		recoveryErrs = append(recoveryErrs, err)
+	}
+	if dmcPath := os.Getenv(testrunnerconstants.DMCPathEnvKey); dmcPath != "" && t.Nodename() != "" && t.Nodename() != targets.DefaultEmulatorNodename {
+		runner := subprocess.Runner{Env: os.Environ()}
+		cmd := []string{
+			dmcPath,
+			"set-power-state",
+			"--nodename",
+			t.Nodename(),
+			"--state",
+			"cycle",
+		}
+		err := runner.Run(ctx, cmd, subprocess.RunOptions{Setpgid: true})
+		if err == nil {
+			return nil
+		}
+		recoveryErrs = append(recoveryErrs, err)
+	}
+	if len(recoveryErrs) > 0 {
+		return errors.Join(recoveryErrs...)
+	}
+	return fmt.Errorf("no recovery mechanism available for %s", t.Nodename())
+}
+
+func (r *RunCommand) rebootOverSerial(ctx context.Context, socketPath string) error {
+	socket, err := serial.NewSocket(ctx, socketPath)
+	if err != nil {
+		return fmt.Errorf("serial.NewSocket failed: %w", err)
+	}
+	defer socket.Close()
+	cmds := []serial.Command{
+		{Cmd: []string{"dm", "reboot"}},
+	}
+	if err := serial.RunCommands(ctx, socket, cmds); err != nil {
+		return fmt.Errorf("failed to reboot over serial: %w", err)
+	}
+	return nil
+}
+
 // dumpSyslogOverSerial runs log_listener over serial to collect logs that may
 // help with debugging. This is intended to be used when SSH connection fails to
 // get some information about the failure mode prior to exiting.
@@ -757,7 +841,8 @@ func (r *RunCommand) runAgainstTarget(ctx context.Context, t targets.FuchsiaTarg
 	r.testrunnerOptions.TestbedConfig = testbedConfig
 
 	if err := testrunner.SetupAndExecute(ctx, r.testrunnerOptions, testsPath); err != nil {
-		return fmt.Errorf("testrunner with flags: %v, with timeout: %s, failed: %w", r.testrunnerOptions, r.timeout, err)
+		logger.Debugf(ctx, "testrunner with flags: %v, with timeout: %s, failed: %s", r.testrunnerOptions, r.timeout, err)
+		return err
 	}
 	return nil
 }

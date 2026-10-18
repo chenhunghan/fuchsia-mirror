@@ -69,9 +69,9 @@ class CodecAdapterSW : public CodecAdapter {
           "ordinal.");
       return;
     }
-    // Will always be 0 for now.
-    input_format_details_version_ordinal_ =
+    initial_input_format_details_version_ordinal_ =
         initial_input_format_details.format_details_version_ordinal();
+    input_format_details_version_ordinal_ = initial_input_format_details_version_ordinal_;
     zx_status_t result =
         input_processing_loop_.StartThread("input_processing_thread_", &input_processing_thread_);
     if (result != ZX_OK) {
@@ -112,6 +112,7 @@ class CodecAdapterSW : public CodecAdapter {
       std::lock_guard<std::mutex> lock(lock_);
       stream_active_ = true;
     }
+    input_format_details_version_ordinal_ = initial_input_format_details_version_ordinal_;
     // It's ok for RecycleInputPacket to make a packet free anywhere in this
     // sequence. Nothing else ought to be happening during CoreCodecStartStream
     // (in this or any other thread).
@@ -311,11 +312,22 @@ class CodecAdapterSW : public CodecAdapter {
   virtual void ProcessInputLoop() = 0;
 
   // Releases any resources from the just-ended stream.
-  virtual void CleanUpAfterStream() = 0;
+  virtual void CleanUpAfterStream() __TA_EXCLUDES(lock_) = 0;
 
   // Returns the format details of the output and the bytes needed to store each
   // output packet.
-  virtual std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails() = 0;
+  //
+  // Subclasses can assume this is only called after the stream's format details
+  // have been processed on `input_processing_thread_` and before
+  // `CleanUpAfterStream()` resets per-stream format state. When reached through
+  // `CoreCodecGetOutputFormat()` in production,
+  // `CodecImpl::onCoreCodecOutputPacket()` calls this synchronously on
+  // `input_processing_thread_`. Implementations must still acquire `lock_` when
+  // reading per-stream format state (such as `codec_params_` or `context_`) so
+  // that direct callers (such as unit tests) and any future off-thread callers
+  // are safe.
+  virtual std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+      __TA_EXCLUDES(lock_) = 0;
 
   BlockingMpscQueue<CodecInputItem> input_queue_;
   BlockingMpscQueue<CodecPacket*> free_output_packets_;
@@ -333,11 +345,44 @@ class CodecAdapterSW : public CodecAdapter {
   uint64_t input_format_details_version_ordinal_;
 
   async::Loop input_processing_loop_;
+
+  // Threading / Locking Rules for subclass per-stream state (such as
+  // `CodecAdapterSWImpl::codec_params_`, `CodecAdapterSbcDecoder::context_`, and
+  // `CodecAdapterSbcEncoder::context_`):
+  // - `std::optional` engagement (`emplace()` / `reset()`) and stream-invariant
+  //   format fields:
+  //   * Writers must hold `lock_` and can only run on `input_processing_thread_`
+  //     (during stream format initialization, e.g. `ProcessFormatDetails()` or
+  //     `CreateContext()`), OR on the `StreamControl` thread (during
+  //     `CleanUpAfterStream()` / `ResetCodecParams()`) after
+  //     `WaitForInputProcessingLoopToEnd()` has ensured the input processing
+  //     loop has ended.
+  //   * Readers on `input_processing_thread_` do not need to hold `lock_` (safe
+  //     because no concurrent lifecycle/format mutation is possible while the
+  //     input processing loop is active).
+  //   * `OutputFormatDetails()` runs on `input_processing_thread_` when reached
+  //     through `CoreCodecGetOutputFormat()`, and takes `lock_` so that direct
+  //     callers such as tests, and any future off-thread caller, are safe. Any
+  //     other reader not guaranteed to run on `input_processing_thread_` while
+  //     the input processing loop is active must also hold `lock_`.
+  // - Per-chunk working state inside the per-stream state struct:
+  //   * Mutated after stream format initialization exclusively on
+  //     `input_processing_thread_` during input chunk/packet processing without
+  //     holding `lock_`, and never accessed by other threads while the input
+  //     processing loop is active.
+  //
+  // We could potentially model the above rules as a TA reader/writer object,
+  // but as with any such object the TA analysis still wouldn't be watertight
+  // due to losing the association with the checked-on-creation-only `lock_`
+  // hold intervals potentially ending early without TA noticing.
   thrd_t input_processing_thread_;
 
   bool output_reconfig_pending_ FXL_GUARDED_BY(lock_) = false;
   bool stream_active_ FXL_GUARDED_BY(lock_) = false;
   std::condition_variable reconfig_cond_;
+
+ private:
+  uint64_t initial_input_format_details_version_ordinal_;
 };
 
 #endif  // SRC_MEDIA_CODEC_CODECS_SW_CODEC_ADAPTER_SW_H_

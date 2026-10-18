@@ -21,6 +21,8 @@ use fidl_fuchsia_net_resources as fnet_resources;
 use fidl_fuchsia_net_tun as fnet_tun;
 use fidl_fuchsia_netemul as fnetemul;
 use fidl_fuchsia_posix_socket as fposix_socket;
+use fidl_fuchsia_posix_socket_packet as fposix_socket_packet;
+use fidl_fuchsia_posix_socket_raw as fposix_socket_raw;
 use fidl_fuchsia_power_broker as fpower_broker;
 use fidl_fuchsia_power_system as fpower_system;
 use fidl_test_sagcontrol as fsagcontrol;
@@ -30,16 +32,19 @@ use futures::stream::FusedStream;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, Stream, StreamExt as _};
 use log::info;
 use net_declare::{fidl_subnet, std_socket_addr_v6};
+use net_types::ip::{Ip, IpAddress as _, IpVersion, Ipv4, Ipv6};
 use netemul::{RealmTcpStream as _, RealmUdpSocket as _};
 use netstack_testing_common::ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT;
 use netstack_testing_common::realms::{
-    KnownServiceProvider, Netstack3, NetstackVersion, TestSandboxExt as _,
+    KnownServiceProvider, Netstack3, NetstackVersion, TestRealmExt as _, TestSandboxExt as _,
 };
 use netstack_testing_macros::netstack_test;
 use packet::ParsablePacket as _;
 use packet_formats::ip::{IpPacket, IpProto, Ipv6Proto};
+use packet_formats::ipv4::Ipv4Packet;
 use packet_formats::ipv6::Ipv6Packet;
 use packet_formats::udp::{UdpPacket, UdpParseArgs};
+use sockaddr::IntoSockAddr as _;
 use test_case::test_case;
 use zx::Peered as _;
 
@@ -562,7 +567,7 @@ trait WakeupSocket {
     ) -> Self;
 
     /// Sends a message from the client to the server.
-    async fn client_write(&mut self);
+    async fn client_write(&mut self, realm: &netemul::TestRealm<'_>);
 
     /// Reads a message from the client.
     async fn server_read(&mut self);
@@ -614,7 +619,7 @@ impl WakeupSocket for TcpSocketPair {
         Self { client, server }
     }
 
-    async fn client_write(&mut self) {
+    async fn client_write(&mut self, _realm: &netemul::TestRealm<'_>) {
         let write_count =
             self.client.write(Self::PAYLOAD.as_bytes()).await.expect("send payload to server");
         assert_eq!(write_count, Self::PAYLOAD.as_bytes().len());
@@ -625,6 +630,59 @@ impl WakeupSocket for TcpSocketPair {
         let read_count = self.server.read(&mut buf).await.expect("read payload from client");
         assert_eq!(read_count, Self::PAYLOAD.as_bytes().len());
         assert_eq!(&buf[..read_count], Self::PAYLOAD.as_bytes());
+    }
+}
+
+struct TcpListener {
+    accept_stream: fasync::net::AcceptStream,
+    server_addr: std::net::SocketAddr,
+    clients: Vec<fasync::net::TcpStream>,
+}
+
+impl WakeupSocket for TcpListener {
+    async fn setup(
+        realm: &netemul::TestRealm<'_>,
+        wake_group: fnet_resources::WakeGroupToken,
+    ) -> Self {
+        let socket = realm
+            .stream_socket_with_options(
+                fposix_socket::Domain::Ipv4,
+                fposix_socket::StreamSocketProtocol::Tcp,
+                fposix_socket::SocketCreationOptions {
+                    group: Some(wake_group),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create stream socket");
+        let server_addr =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
+        socket.bind(&server_addr.into()).expect("bind server socket");
+        socket.listen(128).expect("listen on server socket");
+        let listener =
+            fasync::net::TcpListener::from_std(socket.into()).expect("socket2 into async listener");
+
+        Self { accept_stream: listener.accept_stream(), server_addr, clients: Vec::new() }
+    }
+
+    async fn client_write(&mut self, realm: &netemul::TestRealm<'_>) {
+        let client = fasync::net::TcpStream::connect_in_realm(realm, self.server_addr)
+            .await
+            .expect("connect to server");
+        self.clients.push(client);
+    }
+
+    async fn server_read(&mut self) {
+        assert!(!self.clients.is_empty());
+        for _client in self.clients.drain(..) {
+            let (_stream, from) = self
+                .accept_stream
+                .next()
+                .await
+                .expect("listener stream ended")
+                .expect("accept incoming connection");
+            assert_eq!(from.ip(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        }
     }
 }
 
@@ -668,7 +726,7 @@ impl WakeupSocket for UdpSocketPair {
         Self { client, client_addr, server, server_addr }
     }
 
-    async fn client_write(&mut self) {
+    async fn client_write(&mut self, _realm: &netemul::TestRealm<'_>) {
         let write_count = self
             .client
             .send_to(Self::PAYLOAD.as_bytes(), self.server_addr)
@@ -687,6 +745,125 @@ impl WakeupSocket for UdpSocketPair {
     }
 }
 
+struct RawSocket<I> {
+    socket: fasync::net::DatagramSocket,
+    addr: std::net::SocketAddr,
+    _marker: PhantomData<I>,
+}
+
+impl<I: Ip> WakeupSocket for RawSocket<I> {
+    async fn setup(
+        realm: &netemul::TestRealm<'_>,
+        wake_group: fnet_resources::WakeGroupToken,
+    ) -> Self {
+        let domain = match I::VERSION {
+            IpVersion::V4 => fposix_socket::Domain::Ipv4,
+            IpVersion::V6 => fposix_socket::Domain::Ipv6,
+        };
+        let socket = realm
+            .raw_socket_with_options(
+                domain,
+                fposix_socket_raw::ProtocolAssociation::Associated(IpProto::Udp.into()),
+                fposix_socket::SocketCreationOptions {
+                    group: Some(wake_group),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create raw socket");
+        let socket = fasync::net::DatagramSocket::new_from_socket(socket).expect("wrap raw socket");
+        let addr = std::net::SocketAddr::new(I::LOOPBACK_ADDRESS.to_ip_addr().into(), 0);
+
+        Self { socket, addr, _marker: PhantomData }
+    }
+
+    async fn client_write(&mut self, _realm: &netemul::TestRealm<'_>) {
+        let write_count = self
+            .socket
+            .send_to(Self::PAYLOAD.as_bytes(), self.addr.into())
+            .await
+            .expect("send payload to server");
+        assert_eq!(write_count, Self::PAYLOAD.as_bytes().len());
+    }
+
+    async fn server_read(&mut self) {
+        let mut buf = [0u8; 128];
+        let (read_count, from) =
+            self.socket.recv_from(&mut buf).await.expect("read payload from client");
+        assert_eq!(from.as_socket(), Some(self.addr));
+        let mut received = &buf[..read_count];
+        match I::VERSION {
+            IpVersion::V4 => {
+                let pkt = Ipv4Packet::parse(&mut received, ()).expect("parse ipv4 packet");
+                assert_eq!(pkt.body(), Self::PAYLOAD.as_bytes());
+            }
+            IpVersion::V6 => {
+                // Raw sockets omit the IPv6 header.
+                assert_eq!(received, Self::PAYLOAD.as_bytes());
+            }
+        }
+    }
+}
+
+struct PacketSocket {
+    socket: fasync::net::DatagramSocket,
+    addr: socket2::SockAddr,
+}
+
+impl WakeupSocket for PacketSocket {
+    async fn setup(
+        realm: &netemul::TestRealm<'_>,
+        wake_group: fnet_resources::WakeGroupToken,
+    ) -> Self {
+        let loopback_id = realm
+            .loopback_properties()
+            .await
+            .expect("get loopback properties")
+            .expect("loopback should exist")
+            .id;
+
+        let addr = libc::sockaddr_ll::from(sockaddr::EthernetSockaddr {
+            interface_id: Some(loopback_id),
+            addr: net_types::ethernet::Mac::UNSPECIFIED,
+            protocol: packet_formats::ethernet::EtherType::Ipv4,
+        })
+        .into_sockaddr();
+
+        let socket = realm
+            .packet_socket_with_options(
+                fposix_socket_packet::Kind::Network,
+                fposix_socket::SocketCreationOptions {
+                    group: Some(wake_group),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create packet socket");
+        socket.bind(&addr).expect("bind packet socket");
+        let socket =
+            fasync::net::DatagramSocket::new_from_socket(socket).expect("wrap packet socket");
+
+        Self { socket, addr }
+    }
+
+    async fn client_write(&mut self, _realm: &netemul::TestRealm<'_>) {
+        let write_count = self
+            .socket
+            .send_to(Self::PAYLOAD.as_bytes(), self.addr.clone())
+            .await
+            .expect("send payload to server");
+        assert_eq!(write_count, Self::PAYLOAD.as_bytes().len());
+    }
+
+    async fn server_read(&mut self) {
+        let mut buf = [0u8; Self::PAYLOAD.as_bytes().len()];
+        let (read_count, _from) =
+            self.socket.recv_from(&mut buf).await.expect("read payload from client");
+        assert_eq!(read_count, Self::PAYLOAD.as_bytes().len());
+        assert_eq!(&buf[..read_count], Self::PAYLOAD.as_bytes());
+    }
+}
+
 const GROUP_WAKEUP_SIGNAL: zx::Signals =
     zx::Signals::from_bits(fnet_power::GROUP_WAKEUP_SIGNAL).unwrap();
 const WAITER_AWAKE_SIGNAL: zx::Signals =
@@ -695,8 +872,12 @@ const WAITER_ASLEEP_SIGNAL: zx::Signals =
     zx::Signals::from_bits(fnet_power::WAITER_ASLEEP_SIGNAL).unwrap();
 
 #[netstack_test]
+#[test_case(PhantomData::<TcpListener>; "tcp_listener")]
 #[test_case(PhantomData::<TcpSocketPair>; "tcp")]
 #[test_case(PhantomData::<UdpSocketPair>; "udp")]
+#[test_case(PhantomData::<RawSocket<Ipv4>>; "raw_ipv4")]
+#[test_case(PhantomData::<RawSocket<Ipv6>>; "raw_ipv6")]
+#[test_case(PhantomData::<PacketSocket>; "packet")]
 async fn wake_group_sockets<S: WakeupSocket>(name: &str, _socket_type: PhantomData<S>) {
     let sandbox = netemul::TestSandbox::new().expect("create sandbox");
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
@@ -732,7 +913,7 @@ async fn wake_group_sockets<S: WakeupSocket>(name: &str, _socket_type: PhantomDa
 
     // If we send some data while the peer is awake, we will not be
     // notified.
-    setup.client_write().await;
+    setup.client_write(&realm).await;
     assert_matches!((&mut fut).now_or_never(), None);
     setup.server_read().await;
 
@@ -746,7 +927,7 @@ async fn wake_group_sockets<S: WakeupSocket>(name: &str, _socket_type: PhantomDa
     // times to give it a chance to catch up.
     let mut saw_wakeup = false;
     for _ in 0..60 {
-        setup.client_write().await;
+        setup.client_write(&realm).await;
 
         futures::select! {
             signals = fut => {
@@ -773,6 +954,6 @@ async fn wake_group_sockets<S: WakeupSocket>(name: &str, _socket_type: PhantomDa
     // can still be used after the wake group it was attached to has become
     // defunct.
     drop(wake_watcher_other);
-    setup.client_write().await;
+    setup.client_write(&realm).await;
     setup.server_read().await;
 }

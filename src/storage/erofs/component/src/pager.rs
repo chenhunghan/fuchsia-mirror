@@ -4,6 +4,7 @@
 
 use crate::file::ErofsFile;
 use fuchsia_async as fasync;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, Weak};
 use zx::sys::zx_page_request_command_t::{ZX_PAGER_VMO_COMPLETE, ZX_PAGER_VMO_READ};
@@ -25,42 +26,87 @@ pub enum FileHolder {
 /// A wrapper around Zircon's `zx::Pager`.
 pub struct ErofsPager {
     pager: Arc<zx::Pager>,
+    registrations: Mutex<HashMap<u64, fasync::ReceiverRegistration<ErofsPacketReceiver>>>,
 }
 
 impl ErofsPager {
     /// Creates a new ErofsPager.
     pub fn new() -> Result<Self, zx::Status> {
         let pager = Arc::new(zx::Pager::create(zx::PagerOptions::empty())?);
-        Ok(Self { pager })
+        Ok(Self { pager, registrations: Mutex::new(HashMap::new()) })
     }
 
-    /// Creates a pager-backed VMO and registers its packet receiver.
+    /// Creates a pager-backed VMO and registers its packet receiver, returning the VMO and its
+    /// receiver registration key.
     pub fn create_vmo(
         &self,
         file: Weak<ErofsFile>,
         initial_size: u64,
-    ) -> Result<(zx::Vmo, fasync::ReceiverRegistration<ErofsPacketReceiver>), zx::Status> {
+    ) -> Result<(zx::Vmo, u64), zx::Status> {
+        storage_trace::duration!("storage", "ErofsPager::create_vmo", "size" => initial_size);
         let receiver = ErofsPacketReceiver {
             file: Mutex::new(FileHolder::Weak(file)),
             pager: self.pager.clone(),
         };
 
         let registration = fasync::EHandle::local().register_receiver(receiver);
+        let key = registration.key();
 
         let vmo = self
             .pager
-            .create_vmo(
-                zx::VmoOptions::empty(),
-                fasync::EHandle::local().port(),
-                registration.key(),
-                initial_size,
-            )
+            .create_vmo(zx::VmoOptions::empty(), fasync::EHandle::local().port(), key, initial_size)
             .map_err(|e| {
                 log::error!("self.pager.create_vmo failed: {:?}", e);
                 e
             })?;
 
-        Ok((vmo, registration))
+        self.registrations.lock().unwrap().insert(key, registration);
+        Ok((vmo, key))
+    }
+
+    /// Instructs the pager to watch for the `VMO_ZERO_CHILDREN` signal on `vmo` for `key`.
+    ///
+    /// If the file is currently held weakly by the packet receiver, this method upgrades it to a
+    /// `Strong` reference to prevent the file from being deallocated while clients have active
+    /// mappings, and registers the signal wait on `vmo`. Returns `Ok(true)` if a transition to
+    /// `Strong` occurred.
+    pub fn watch_for_zero_children(&self, key: u64, vmo: &zx::Vmo) -> Result<bool, zx::Status> {
+        let registrations = self.registrations.lock().unwrap();
+        let registration = registrations.get(&key).ok_or(zx::Status::BAD_STATE)?;
+        let mut file_holder = registration.receiver().file.lock().unwrap();
+        match &*file_holder {
+            FileHolder::Weak(weak) => {
+                let strong = weak.upgrade().ok_or(zx::Status::BAD_STATE)?;
+                vmo.wait_async(
+                    fasync::EHandle::local().port(),
+                    key,
+                    zx::Signals::VMO_ZERO_CHILDREN,
+                    zx::WaitAsyncOpts::empty(),
+                )?;
+                *file_holder = FileHolder::Strong(strong);
+                Ok(true)
+            }
+            FileHolder::Strong(_) => Ok(false),
+        }
+    }
+
+    /// Unregisters and drops the packet receiver registration for `key`.
+    pub fn unregister(&self, key: u64) {
+        let registration = self.registrations.lock().unwrap().remove(&key);
+        drop(registration);
+    }
+
+    /// Unregisters and discards all active packet receiver registrations.
+    pub fn unregister_all(&self) {
+        let registrations = std::mem::take(&mut *self.registrations.lock().unwrap());
+        for (_, registration) in registrations {
+            let prev = std::mem::replace(
+                &mut *registration.receiver().file.lock().unwrap(),
+                FileHolder::Weak(Weak::new()),
+            );
+            drop(prev);
+            drop(registration);
+        }
     }
 }
 
@@ -81,6 +127,13 @@ impl ErofsPacketReceiver {
 
     fn page_in(&self, range: Range<u64>) -> Result<(), zx::Status> {
         let file = self.get_file()?;
+        storage_trace::duration!(
+            "storage",
+            "ErofsPager::page_in",
+            "nid" => file.node().nid(),
+            "offset" => range.start,
+            "len" => range.end - range.start
+        );
 
         // Align the read to 128 KiB slots (readahead).
         let readahead_start = (range.start / READAHEAD_ALIGNMENT) * READAHEAD_ALIGNMENT;
@@ -124,6 +177,7 @@ impl ErofsPacketReceiver {
     /// was created between the signal being emitted and us handling it, we re-register the
     /// watcher so it will trigger again.
     fn receive_signal_packet(&self, signals: zx::SignalPacket) {
+        storage_trace::duration!("storage", "ErofsPager::signal_zero_children");
         assert!(signals.observed().contains(zx::Signals::VMO_ZERO_CHILDREN));
 
         let mut file_holder = self.file.lock().unwrap();
@@ -153,6 +207,7 @@ impl ErofsPacketReceiver {
     fn receive_pager_packet(&self, contents: zx::PagerPacket) {
         let command = contents.command();
         if command == ZX_PAGER_VMO_COMPLETE {
+            storage_trace::duration!("storage", "ErofsPager::vmo_complete");
             return;
         }
 

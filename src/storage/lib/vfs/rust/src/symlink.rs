@@ -233,6 +233,10 @@ impl<T: Symlink> Connection<T> {
                 use fidl::epitaph::ChannelEpitaphExt;
                 let _ = object.close_with_epitaph(Status::NOT_DIR);
             }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::SymlinkRequest::GetToken { responder } => {
+                responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
+            }
             fio::SymlinkRequest::_UnknownMethod { ordinal: _ordinal, .. } => {
                 #[cfg(any(test, feature = "use_log"))]
                 log::warn!(_ordinal; "Received unknown method")
@@ -300,6 +304,8 @@ impl<T: Symlink> Connection<T> {
         if !target_rights.contains(fio::Rights::MODIFY_DIRECTORY) {
             return Err(Status::ACCESS_DENIED);
         }
+
+        let target_parent = target_parent.into_mutable_directory().ok_or(Status::INVALID_ARGS)?;
 
         self.symlink.clone().link_into(target_parent, target_name).await
     }

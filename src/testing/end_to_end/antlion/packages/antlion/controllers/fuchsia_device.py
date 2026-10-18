@@ -17,7 +17,7 @@ from typing import Any, Tuple
 
 import fuchsia_async_extension
 import honeydew
-from antlion import context, utils
+from antlion import utils
 from antlion.capabilities.ssh import DEFAULT_SSH_PORT, SSHConfig
 from antlion.controllers import pdu
 from antlion.controllers.fuchsia_lib.lib_controllers.wlan_controller import (
@@ -47,6 +47,7 @@ from honeydew.typing.custom_types import DeviceInfo, FidlEndpoint, IpPort
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
 from mobly import logger, signals
+from mobly import utils as mobly_utils
 
 MOBLY_CONTROLLER_CONFIG_NAME: str = "FuchsiaDevice"
 ACTS_CONTROLLER_REFERENCE_NAME = "fuchsia_devices"
@@ -207,7 +208,9 @@ class FuchsiaDevice:
             str, "country_code", FUCHSIA_DEFAULT_COUNTRY_CODE_US
         ).upper()
 
-        output_path = context.get_current_context().get_base_output_path()
+        # Set by Mobly in base_test.BaseTestClass.run.
+        output_path = getattr(logging, "log_path")
+        os.makedirs(output_path, exist_ok=True)
         self.ssh_config = os.path.join(output_path, f"ssh_config_{self.ip}")
         self._generate_ssh_config(self.ssh_config)
 
@@ -710,9 +713,13 @@ class FuchsiaDevice:
         self.log.info(f"Taking snapshot of {self.name}")
 
         time_stamp = logger.sanitize_filename(
-            logger.epoch_to_log_line_timestamp(utils.get_current_epoch_time())
+            logger.epoch_to_log_line_timestamp(
+                mobly_utils.get_current_epoch_time()
+            )
         )
-        out_dir = context.get_current_context().get_full_output_path()
+        # Set by Mobly in base_test.BaseTestClass.run.
+        out_dir = getattr(logging, "log_path")
+        os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, f"{self.name}_{time_stamp}.zip")
 
         try:
@@ -729,7 +736,9 @@ class FuchsiaDevice:
         """Takes a the bt-snoop log from the device and stores it in a file
         in a pcap format.
         """
-        bt_snoop_path = context.get_current_context().get_full_output_path()
+        # Set by Mobly in base_test.BaseTestClass.run.
+        bt_snoop_path = getattr(logging, "log_path")
+        os.makedirs(bt_snoop_path, exist_ok=True)
         time_stamp = logger.sanitize_filename(
             logger.epoch_to_log_line_timestamp(time.time())
         )

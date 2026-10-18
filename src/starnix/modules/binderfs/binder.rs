@@ -135,13 +135,6 @@ impl BinderConnection {
         self.device.find_process(self.identifier)
     }
 
-    pub fn interrupt(&self) {
-        log_trace!("interrupting BinderConnection id={}", self.identifier);
-        if let Some(binder_process) = self.device.procs.read().get(&self.identifier) {
-            binder_process.interrupt();
-        }
-    }
-
     fn close(&self, kernel: &Kernel) {
         log_trace!("closing BinderConnection id={}", self.identifier);
         if let Some(binder_process) = self.device.procs.write().remove(&self.identifier) {
@@ -246,6 +239,11 @@ impl FileOps for BinderConnection {
         error!(EINVAL)
     }
 
+    // The binder buffer is mapped through memory shared with Starnix, which isn't executable.
+    fn can_map_executable(&self) -> bool {
+        false
+    }
+
     fn mmap(
         &self,
         file: &FileObject,
@@ -346,8 +344,12 @@ impl RemoteBinderConnection {
         })
     }
 
-    pub fn interrupt(&self) {
-        self.binder_connection.interrupt();
+    pub fn unregister_current_thread(&self, current_task: &CurrentTask) {
+        if let Ok(binder_process) = self.binder_connection.proc() {
+            release_after!(binder_process, current_task.kernel(), {
+                binder_process.lock().unregister_thread(current_task, &current_task.tid);
+            });
+        }
     }
 
     pub fn close(&self, kernel: &Kernel) {
@@ -1336,7 +1338,7 @@ impl BinderDriver {
     fn get_active_command(
         thread_state: &mut BinderThreadState,
         proc_state: &mut crate::process::BinderProcessState,
-        worker_thread: &zx::Thread,
+        worker_thread: &Arc<zx::Thread>,
         available_buffer_len: usize,
         wait_for_proc_work: bool,
         is_first_command: bool,
@@ -1735,18 +1737,13 @@ impl BinderDriver {
             let (mut waiter, guard) = SimpleWaiter::new(&event);
             thread_state.command_queue.wait_async_simple(&mut waiter);
 
-            // Ensure the file descriptor has not been closed or interrupted, after registering
-            // for the waiters but before waiting. If some commands have already been written
-            // (e.g. the BR_TRANSACTION_COMPLETE of a two-way transaction whose reply is being
-            // waited for), return them rather than an error: they have already been dequeued, and
-            // on error `read_consumed` is not updated, so userspace would never see them.
+            // Ensure the file descriptor has not been closed, after registering for the waiters
+            // but before waiting. If some commands have already been written (e.g. the
+            // BR_TRANSACTION_COMPLETE of a two-way transaction whose reply is being waited for),
+            // return them rather than an error: they have already been dequeued, and on error
+            // `read_consumed` is not updated, so userspace would never see them.
             if proc_state.closed {
                 return if bytes_read > 0 { Ok(bytes_read) } else { error!(EBADF) };
-            }
-
-            if proc_state.interrupted {
-                proc_state.interrupted = false;
-                return if bytes_read > 0 { Ok(bytes_read) } else { error!(EINTR) };
             }
 
             // Drop locks before sleeping. Order matters: thread_state first, then proc_state

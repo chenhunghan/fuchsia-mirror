@@ -187,11 +187,11 @@ common_sources = [
   "src/bindings/time.rs",
   "src/bindings/timers.rs",
   "src/bindings/util.rs",
+  "src/bindings/util/data_available.rs",
   "src/bindings/util/rcu.rs",
   "src/bindings/util/result_ext.rs",
   "src/bindings/util/scope_ext.rs",
   "src/bindings/waker.rs",
-  "src/bindings/waker/state.rs",
   "src/main.rs",
 ]
 
@@ -242,6 +242,7 @@ config("compiler_profile") {
   visibility = [ ":*" ]
 }
 
+# LINT.IfChange(netstack3_configs)
 config("netstack3_configs") {
   if (is_release && !is_host) {
     configs = [
@@ -250,6 +251,8 @@ config("netstack3_configs") {
     ]
   }
 }
+
+# LINT.ThenChange(//src/connectivity/network/netstack3/BUILD.bazel:netstack3_configs)
 
 config("netstack3_debug_configs") {
   if (is_debug) {
@@ -309,7 +312,6 @@ fuchsia_structured_config_rust_lib("config_lib") {
 
 template("ns3_test_component") {
   _manifest_target = "${target_name}_manifest"
-  _config_target = "${target_name}_config"
 
   fuchsia_component_manifest(_manifest_target) {
     forward_variables_from(invoker,
@@ -320,22 +322,10 @@ template("ns3_test_component") {
     visibility = [ ":*" ]
   }
 
-  fuchsia_structured_config_values(_config_target) {
-    cm_label = ":${_manifest_target}"
-    values_source = invoker.config_values_source
-    visibility = [ ":*" ]
-  }
-
   fuchsia_component(target_name) {
     forward_variables_from(invoker, [ "deps" ])
     cm_label = ":${_manifest_target}"
     testonly = true
-
-    # For ease of using embedded test component, we mark the configuration
-    # values as a component dependency directly. This suits the current needs
-    # with very basic configuration. If structured config grows to be used more
-    # richly this should be revisited.
-    deps += [ ":${_config_target}" ]
   }
 }
 
@@ -343,7 +333,6 @@ template("ns3_test_component") {
 ns3_test_component("component-for-tests") {
   component_name = "netstack3"
   manifest = "meta/netstack3_test.cml"
-  config_values_source = "config/test.json5"
   deps = [ ":bin" ]
 }
 
@@ -352,7 +341,6 @@ ns3_test_component("component-for-tests") {
 ns3_test_component("component-debug") {
   component_name = "netstack3-debug"
   manifest = "meta/netstack3_debug.cml"
-  config_values_source = "config/test-debug.json5"
   deps = [ ":bin-instrumented" ]
 }
 
@@ -360,8 +348,7 @@ ns3_test_component("component-debug") {
 # verbosely to avoid timing out in infra.
 ns3_test_component("component-debug-less-logs") {
   component_name = "netstack3-debug"
-  manifest = "meta/netstack3_debug.cml"
-  config_values_source = "config/test.json5"
+  manifest = "meta/netstack3_debug_less_logs.cml"
   deps = [ ":bin-instrumented" ]
 }
 
@@ -369,23 +356,7 @@ ns3_test_component("component-debug-less-logs") {
 # convenience in conformance testing.
 ns3_test_component("component-conformance") {
   component_name = "netstack3-conformance"
-  manifest = "meta/netstack3_debug.cml"
-  config_values_source = "config/test-conformance.json5"
-  deps = [ ":bin-instrumented" ]
-}
-
-# Drop-in component with the name "netstack" rather than "netstack3."
-ns3_test_component("component-dropin") {
-  component_name = "netstack"
-  manifest = "meta/netstack3_test.cml"
-  config_values_source = "config/test.json5"
-  deps = [ ":bin" ]
-}
-
-ns3_test_component("component-debug-dropin") {
-  component_name = "netstack-debug"
-  manifest = "meta/netstack3_debug.cml"
-  config_values_source = "config/test-debug.json5"
+  manifest = "meta/netstack3_conformance.cml"
   deps = [ ":bin-instrumented" ]
 }
 

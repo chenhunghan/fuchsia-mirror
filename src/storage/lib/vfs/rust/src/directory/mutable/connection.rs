@@ -13,7 +13,7 @@ use crate::node::OpenNode;
 use crate::object_request::ConnectionCreator;
 use crate::path::Path;
 use crate::request_handler::{RequestHandler, RequestListener};
-use crate::token_registry::{TokenInterface, TokenRegistry, Tokenizable};
+use crate::token_registry::{TokenInterface, TokenRegistry, TokenTarget, Tokenizable};
 use crate::{ObjectRequestRef, ProtocolsExt};
 
 use anyhow::Error;
@@ -67,6 +67,25 @@ impl<DirectoryType: MutableDirectory> MutableConnection<DirectoryType> {
                 .trace(trace::trace_future_args!("storage", "Directory::Unlink"))
                 .await?;
             }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::DirectoryRequest::DeprecatedGetToken { responder } => {
+                trace::duration!("storage", "Directory::GetToken");
+                let (raw_status, token) = match Self::handle_get_token(this.into_ref()) {
+                    Ok(token) => (0, Some(token)),
+                    Err(status) => (status.into_raw(), None),
+                };
+                responder.send(raw_status, token)?;
+            }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::DirectoryRequest::GetToken { responder } => {
+                trace::duration!("storage", "Directory::GetToken");
+                let res = match Self::handle_get_token(this.into_ref()) {
+                    Ok(token) => Ok(token.into()),
+                    Err(status) => Err(status.into_raw()),
+                };
+                responder.send(res)?;
+            }
+            #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
             fio::DirectoryRequest::GetToken { responder } => {
                 trace::duration!("storage", "Directory::GetToken");
                 let (raw_status, token) = match Self::handle_get_token(this.into_ref()) {
@@ -177,10 +196,10 @@ impl<DirectoryType: MutableDirectory> MutableConnection<DirectoryType> {
     }
 
     fn handle_get_token(this: Pin<&Tokenizable<Self>>) -> Result<NullableHandle, Status> {
-        // TODO(https://fxbug.dev/503041342): The current GetToken method on directory requires
-        // specific rights to get the token in the first place. The new GetToken on Node will
-        // require no rights to get a token, but instead enforced on use of the token. When the old
-        // one is deleted this method (and therefore this check) will be deleted too.
+        // TODO(https://fxbug.dev/503041342): The current DeprecatedGetToken method on directory
+        // requires specific rights to get the token in the first place. The new GetToken on Node
+        // will require no rights to get a token, but instead enforced on use of the token. When
+        // the old one is deleted this method (and therefore this check) will be deleted too.
         if !this.base.options.rights.contains(fio::Rights::MODIFY_DIRECTORY) {
             return Err(Status::BAD_HANDLE);
         }
@@ -210,6 +229,7 @@ impl<DirectoryType: MutableDirectory> MutableConnection<DirectoryType> {
             .token_registry()
             .get_owner_and_rights(dst_parent_token)?
             .ok_or(Status::NOT_FOUND)?;
+        let dst_parent = dst_parent.into_mutable_directory().ok_or(Status::INVALID_ARGS)?;
 
         if !dst_rights.contains(fio::Rights::MODIFY_DIRECTORY) {
             return Err(Status::ACCESS_DENIED);
@@ -262,8 +282,8 @@ impl<DirectoryType: MutableDirectory> RequestHandler
 }
 
 impl<DirectoryType: MutableDirectory> TokenInterface for MutableConnection<DirectoryType> {
-    fn get_node(&self) -> Arc<dyn MutableDirectory> {
-        self.base.directory.clone()
+    fn get_node(&self) -> TokenTarget {
+        TokenTarget::Directory(self.base.directory.clone())
     }
 
     fn get_rights(&self) -> fio::Rights {
@@ -482,7 +502,7 @@ mod tests {
         let (_dir, proxy) = fs.clone().make_connection(fio::PERM_READABLE | fio::PERM_WRITABLE);
         let (dir2, proxy2) = fs.clone().make_connection(fio::PERM_READABLE | fio::PERM_WRITABLE);
 
-        let (status, token) = proxy2.get_token().await.unwrap();
+        let (status, token) = proxy2.deprecated_get_token().await.unwrap();
         assert_eq!(status, zx_status::sys::ZX_OK);
 
         let status = proxy.rename("src", token.unwrap().into(), "dest").await.unwrap();
@@ -530,7 +550,7 @@ mod tests {
         let (_dir, proxy) = fs.clone().make_connection(fio::PERM_READABLE | fio::PERM_WRITABLE);
         let (_dir2, proxy2) = fs.clone().make_connection(fio::PERM_READABLE | fio::PERM_WRITABLE);
 
-        let (status, token) = proxy2.get_token().await.unwrap();
+        let (status, token) = proxy2.deprecated_get_token().await.unwrap();
         assert_eq!(status, zx_status::sys::ZX_OK);
 
         let status = proxy.link("src", token.unwrap(), "dest").await.unwrap();

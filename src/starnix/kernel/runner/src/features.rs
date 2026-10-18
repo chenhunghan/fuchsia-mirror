@@ -4,42 +4,15 @@
 
 use crate::ContainerStartInfo;
 use anyhow::{Context, Error, anyhow};
-use fidl_fuchsia_ui_composition as fuicomposition;
-use fidl_fuchsia_ui_input as fuiinput;
-use fidl_fuchsia_ui_input3 as fuiinput3;
-use fidl_fuchsia_ui_policy as fuipolicy;
-use fidl_fuchsia_ui_views as fuiviews;
-use starnix_consent_sync::init as consent_sync_init;
 use starnix_container_structured_config::Config as ContainerStructuredConfig;
 use starnix_core::device::block::add_mmc_block_device;
 use starnix_core::mm::MlockPinFlavor;
-use starnix_core::task::{Kernel, KernelFeatures, SystemLimits, ThreadLockupDetector};
-use starnix_core::vfs::FsString;
+use starnix_core::task::{Kernel, KernelFeatures, SystemLimits};
 use starnix_features::Feature;
-use starnix_logging::log_error;
-use starnix_modules_android_usb::usb_device_init;
-use starnix_modules_ashmem::ashmem_device_init;
-use starnix_modules_boot::booted_device_init;
-use starnix_modules_fastrpc::fastrpc_device_init;
-use starnix_modules_framebuffer::{AspectRatio, Framebuffer};
-use starnix_modules_gpu::gpu_device_init;
-use starnix_modules_gralloc::gralloc_device_init;
-use starnix_modules_hvdcp_opti::hvdcp_opti_init;
-use starnix_modules_input::uinput::register_uinput_device;
-use starnix_modules_input::{EventProxyMode, StartRelaysArgs, new_input_relay};
-use starnix_modules_kgsl::kgsl_device_init;
-use starnix_modules_magma::magma_device_init;
-use starnix_modules_nanohub::nanohub_device_init;
-use starnix_modules_nmfs::nmfs_init;
-use starnix_modules_odpm::odpm_device_init;
-use starnix_modules_perfetto_consumer::start_perfetto_consumer_thread;
-use starnix_modules_thermal::{cooling_device_init, thermal_device_init};
-use starnix_modules_touch_power_policy::TouchPowerPolicyDevice;
-use starnix_modules_wakeup_test::register_wakeup_test_device;
-use std::sync::Arc;
-
+use starnix_modules::{Framebuffer, Modules, validate_module};
 use starnix_uapi::error;
 use starnix_uapi::errors::Errno;
+use std::sync::Arc;
 
 /// A collection of parsed features, and their arguments.
 #[derive(Default, Debug)]
@@ -53,42 +26,12 @@ pub struct Features {
     /// Limits value passed to the kernel during the initialization.
     pub system_limits: SystemLimits,
 
-    /// Whether to enable ashmem.
-    pub ashmem: bool,
-
-    /// Whether to enable a boot notifier device.
-    pub boot_notifier: bool,
-
-    /// Whether to enable consent sync.
-    pub data_collection_consent_sync: bool,
-
-    /// Whether to boost CPU for a fixed duration.
-    pub boot_notifier_cpu_boost: Option<zx::MonotonicDuration>,
-
-    /// Whether to enable a framebuffer device.
-    pub framebuffer: bool,
-
-    /// Display aspect ratio.
-    pub aspect_ratio: Option<AspectRatio>,
-
     /// This controls whether or not the default framebuffer background is black or colorful, to
     /// aid debugging.
     pub enable_visual_debugging: bool,
 
     /// The value of the initial view ID annotation.
     pub initial_view_id_annotation: String,
-
-    /// Whether to enable gralloc.
-    pub gralloc: bool,
-
-    /// Whether to enable the Kernel Graphics Support Layer (kgsl) device used by Adreno GPUs.
-    pub kgsl: bool,
-
-    /// Supported magma vendor IDs.
-    pub magma_supported_vendors: Option<Vec<u16>>,
-
-    /// Whether to enable gfxstream.
-    pub gfxstream: bool,
 
     /// Include the /container directory in the root file system.
     pub container: bool,
@@ -102,58 +45,22 @@ pub struct Features {
     /// Whether to provide android with a serial number.
     pub android_serialno: bool,
 
-    /// Optional perfetto configuration.
-    pub perfetto: Option<FsString>,
-
     /// Whether to allow the root filesystem to be read/write.
     pub rootfs_rw: bool,
 
-    /// Whether to enable network manager and its filesystem.
-    pub network_manager: bool,
-
-    /// Whether to enable the nanohub module.
-    pub nanohub: bool,
-
-    /// Whether to enable the fastrpc module.
-    pub fastrpc: bool,
-
     pub enable_utc_time_adjustment: bool,
-
-    pub thermal: bool,
-
-    /// Optional cooling features to enable. See [`cooling_device_init`] for a list of possible
-    /// values and their parameters.
-    pub cooling: Option<Vec<String>>,
 
     /// Whether to add android bootreason to kernel cmdline.
     pub android_bootreason: bool,
 
-    /// Whether to enable hvdcp_opti sysfs logic.
-    ///
-    /// Note: Statically registers IIO devices (`iio:device0`, `iio:device1`).
-    /// Conflicts with `google_odpm`, so they cannot both be enabled simultaneously.
-    pub hvdcp_opti: bool,
-
     pub additional_mounts: Option<Vec<String>>,
-
-    /// Support kernel level suspend/resume tests.
-    pub wakeup_test: bool,
 
     /// Add a stub block device entry for mmcblk0. This is required for certain containers that
     /// query certain functionality based on block device naming.
     pub mmcblk_stub: bool,
 
-    /// Whether to initialize Android-compatible USB monitoring sysfs logic.
-    pub android_usb: bool,
-
     /// Whether to initialize unified tracing with a Fuchsia trace observer.
     pub unified_tracing: bool,
-
-    /// Whether to enable google-odpm power monitoring sysfs logic.
-    ///
-    /// Note: Statically registers `iio:device0`.
-    /// Conflicts with `hvdcp_opti`, so they cannot both be enabled simultaneously.
-    pub google_odpm: bool,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -194,102 +101,31 @@ impl Features {
                     },
                 system_limits,
                 selinux,
-                ashmem,
-                boot_notifier,
-                boot_notifier_cpu_boost,
-                data_collection_consent_sync,
-                framebuffer,
-                aspect_ratio,
                 enable_visual_debugging,
-                gralloc,
-                kgsl,
-                magma_supported_vendors,
-                gfxstream,
                 container,
                 test_data,
                 custom_artifacts,
                 android_serialno,
-                perfetto,
                 rootfs_rw,
-                network_manager,
-                nanohub,
-                fastrpc,
                 enable_utc_time_adjustment,
-                thermal,
-                cooling,
                 android_bootreason,
-                hvdcp_opti,
                 additional_mounts,
-                wakeup_test,
                 mmcblk_stub,
-                android_usb,
                 unified_tracing,
-                google_odpm,
                 initial_view_id_annotation,
             } => {
-                inspect_node.record_bool("google_odpm", *google_odpm);
                 inspect_node.record_bool("selinux", selinux.enabled);
                 inspect_node.record_bool("unified_tracing", *unified_tracing);
-                inspect_node.record_bool("ashmem", *ashmem);
-                inspect_node.record_bool("boot_notifier", *boot_notifier);
                 inspect_node.record_string(
                     "initial_view_id_annotation",
                     initial_view_id_annotation.as_str(),
                 );
-                inspect_node
-                    .record_bool("data_collection_consent_sync", *data_collection_consent_sync);
-                inspect_node.record_string(
-                    "boot_notifier_cpu_boost",
-                    boot_notifier_cpu_boost
-                        .map(|d| format!("{}s", d.into_seconds()))
-                        .unwrap_or_else(|| "none".to_string()),
-                );
-                inspect_node.record_bool("framebuffer", *framebuffer);
-                inspect_node.record_bool("gralloc", *gralloc);
-                inspect_node.record_bool("kgsl", *kgsl);
-                inspect_node.record_string(
-                    "magma_supported_vendors",
-                    match magma_supported_vendors {
-                        Some(vendors) => vendors
-                            .iter()
-                            .map(|vendor| format!("0x{:x}", vendor))
-                            .collect::<Vec<String>>()
-                            .join(","),
-                        None => "".to_string(),
-                    },
-                );
-                inspect_node.record_bool("gfxstream", *gfxstream);
                 inspect_node.record_bool("container", *container);
                 inspect_node.record_bool("test_data", *test_data);
                 inspect_node.record_bool("custom_artifacts", *custom_artifacts);
                 inspect_node.record_bool("android_serialno", *android_serialno);
-                inspect_node.record_string(
-                    "aspect_ratio",
-                    aspect_ratio
-                        .as_ref()
-                        .map(|aspect_ratio| {
-                            format!("width: {} height: {}", aspect_ratio.width, aspect_ratio.height)
-                        })
-                        .unwrap_or_default(),
-                );
-                inspect_node.record_string(
-                    "perfetto",
-                    perfetto.as_ref().map(|p| p.to_string()).unwrap_or_default(),
-                );
                 inspect_node.record_bool("rootfs_rw", *rootfs_rw);
-                inspect_node.record_bool("network_manager", *network_manager);
-                inspect_node.record_bool("nanohub", *nanohub);
-                inspect_node.record_bool("fastrpc", *fastrpc);
-                inspect_node.record_bool("thermal", *thermal);
-                inspect_node.record_string(
-                    "cooling",
-                    match cooling {
-                        Some(devices) => devices.join(","),
-                        None => "".to_string(),
-                    },
-                );
                 inspect_node.record_bool("android_bootreason", *android_bootreason);
-                inspect_node.record_bool("hvdcp_opti", *hvdcp_opti);
                 inspect_node.record_string("ping_group_range", {
                     let range = system_limits.socket.icmp_ping_gids.lock();
                     std::format!("{},{}", range.start, range.end - 1)
@@ -324,9 +160,7 @@ impl Features {
                     inspect_node
                         .record_string("additional_mounts", format!("{:?}", additional_mounts));
                     inspect_node.record_uint("dirent_cache_size", *dirent_cache_size as u64);
-                    inspect_node.record_bool("wakeup_test", *wakeup_test);
                     inspect_node.record_bool("mmcblk_stub", *mmcblk_stub);
-                    inspect_node.record_bool("android_usb", *android_usb);
                     inspect_node.record_bool("fake_ion", *fake_ion);
                     inspect_node.record_bool("remotevol_in_process", *remotevol_in_process);
                 });
@@ -335,13 +169,14 @@ impl Features {
     }
 }
 
-/// Parses all the featurse in `entries`.
+/// Parses container features and modules from `start_info` and `kernel_extra_features`.
 ///
-/// Returns an error if parsing fails, or if an unsupported feature is present in `features`.
+/// Legacy module entries found in `program.features`, `kernel_extra_features`, or
+/// `config.extra_features` are translated into [`Modules`] entries for backwards compatibility.
 pub fn parse_features(
     start_info: &ContainerStartInfo,
     kernel_extra_features: &[String],
-) -> Result<Features, Error> {
+) -> Result<(Features, Modules), Error> {
     let ContainerStructuredConfig {
         crash_report_throttling,
         enable_utc_time_adjustment,
@@ -357,6 +192,11 @@ pub fn parse_features(
     } = &start_info.config;
 
     let mut features = Features::default();
+    let mut modules = Modules::default();
+
+    let mut legacy_boot_notifier_cpu_boost: Option<String> = None;
+    let mut legacy_aspect_ratio: Option<String> = None;
+
     for entry in start_info
         .program
         .features
@@ -369,16 +209,7 @@ pub fn parse_features(
             (Feature::AndroidSerialno, _) => features.android_serialno = true,
             (Feature::AndroidBootreason, _) => features.android_bootreason = true,
             (Feature::AspectRatio, Some(args)) => {
-                let e = anyhow!("Invalid aspect_ratio: {:?}", args);
-                let components: Vec<_> = args.split(':').collect();
-                if components.len() != 2 {
-                    return Err(e);
-                }
-                let width: u32 =
-                    components[0].parse().map_err(|_| anyhow!("Invalid aspect ratio width"))?;
-                let height: u32 =
-                    components[1].parse().map_err(|_| anyhow!("Invalid aspect ratio height"))?;
-                features.aspect_ratio = Some(AspectRatio { width, height });
+                legacy_aspect_ratio = Some(args);
             }
             (Feature::AspectRatio, None) => {
                 return Err(anyhow!(
@@ -387,51 +218,42 @@ pub fn parse_features(
             }
             (Feature::Container, _) => features.container = true,
             (Feature::CustomArtifacts, _) => features.custom_artifacts = true,
-            (Feature::Ashmem, _) => features.ashmem = true,
-            (Feature::BootNotifier, _) => features.boot_notifier = true,
-            (Feature::DataCollectionConsentSync, _) => features.data_collection_consent_sync = true,
+            (
+                Feature::AndroidUsb
+                | Feature::Ashmem
+                | Feature::BootNotifier
+                | Feature::DataCollectionConsentSync
+                | Feature::Fastrpc
+                | Feature::Framebuffer
+                | Feature::Gfxstream
+                | Feature::GoogleOdpm
+                | Feature::Gralloc
+                | Feature::HvdcpOpti
+                | Feature::Kgsl
+                | Feature::Magma
+                | Feature::Nanohub
+                | Feature::NetworkManager
+                | Feature::Thermal
+                | Feature::WakeupTest,
+                _,
+            ) => modules.enable(&feature.to_string()),
             (Feature::BootNotifierCpuBoost, Some(arg)) => {
-                let duration = zx::MonotonicDuration::from_seconds(arg.parse::<i64>()?);
-                features.boot_notifier_cpu_boost = Some(duration);
+                legacy_boot_notifier_cpu_boost = Some(arg);
             }
             (Feature::BootNotifierCpuBoost, None) => {
                 return Err(anyhow!(
                     "boot_notifier_cpu_boost feature must have an argument (e.g. \"boot_notifier_cpu_boost:60\")"
                 ));
             }
-            (Feature::Framebuffer, _) => features.framebuffer = true,
-            (Feature::Gralloc, _) => features.gralloc = true,
-            (Feature::Kgsl, _) => features.kgsl = true,
-            (Feature::Magma, _) => {
-                if features.magma_supported_vendors.is_none() {
-                    const VENDOR_ARM: u16 = 0x13B5;
-                    const VENDOR_INTEL: u16 = 0x8086;
-                    features.magma_supported_vendors = Some(vec![VENDOR_ARM, VENDOR_INTEL])
-                }
-            }
             (Feature::MagmaSupportedVendors, Some(arg)) => {
-                features.magma_supported_vendors = Some(
-                    arg.split(',')
-                        .map(|s| {
-                            let err = anyhow!(
-                                "Feature format must be: magma_supported_vendors:0x1234[,0xabcd]"
-                            );
-                            let trimmed = s.trim_start_matches("0x");
-                            u16::from_str_radix(trimmed, 16).map_err(|_| err)
-                        })
-                        .collect::<Result<Vec<u16>, Error>>()?,
-                );
+                modules.add_with_args("magma", vec!["--supported-vendors".to_string(), arg]);
             }
             (Feature::MagmaSupportedVendors, None) => {
                 return Err(anyhow!(
                     "Feature format must be: magma_supported_vendors:0x1234[,0xabcd]"
                 ));
             }
-            (Feature::Nanohub, _) => features.nanohub = true,
-            (Feature::Fastrpc, _) => features.fastrpc = true,
             (Feature::UnifiedTracing, _) => features.unified_tracing = true,
-            (Feature::NetworkManager, _) => features.network_manager = true,
-            (Feature::Gfxstream, _) => features.gfxstream = true,
             (Feature::Bpf, Some(version)) => features.kernel.bpf_v2 = version == "v2",
             (Feature::Bpf, None) => {
                 return Err(anyhow!("bpf feature must have an argument (e.g. \"bpf:v2\")"));
@@ -440,7 +262,7 @@ pub fn parse_features(
             (Feature::IoUring, _) => features.kernel.io_uring = true,
             (Feature::ErrorOnFailedReboot, _) => features.kernel.error_on_failed_reboot = true,
             (Feature::Perfetto, Some(socket_path)) => {
-                features.perfetto = Some(socket_path.into());
+                modules.add_with_args("perfetto", vec!["--socket-path".to_string(), socket_path]);
             }
             (Feature::Perfetto, None) => {
                 return Err(anyhow!("Perfetto feature must contain a socket path"));
@@ -471,37 +293,46 @@ pub fn parse_features(
             }
             (Feature::SelinuxTestSuite, _) => features.kernel.selinux_test_suite = true,
             (Feature::TestData, _) => features.test_data = true,
-            (Feature::Thermal, _) => features.thermal = true,
             (Feature::Cooling, Some(arg)) => {
-                features.cooling = Some(arg.split(',').map(String::from).collect::<Vec<String>>())
+                modules.add_with_args("thermal", vec!["--cooling".to_string(), arg]);
             }
             (Feature::Cooling, None) => {
                 return Err(anyhow!("cooling feature must have an argument"));
             }
-            (Feature::HvdcpOpti, _) => features.hvdcp_opti = true,
             (Feature::Wifi, _) => features.kernel.wifi = true,
             (Feature::AdditionalMounts, _) => {
                 features.additional_mounts = Some(additional_mounts.clone())
             }
-            (Feature::WakeupTest, _) => features.wakeup_test = true,
             (Feature::MmcblkStub, _) => features.mmcblk_stub = true,
             (Feature::FakeIon, _) => features.kernel.fake_ion = true,
-            (Feature::AndroidUsb, _) => features.android_usb = true,
-            (Feature::GoogleOdpm, _) => features.google_odpm = true,
             (Feature::RemotevolInProcess, _) => features.kernel.remotevol_in_process = true,
             (Feature::LogSysfsLookupMisses, _) => features.kernel.log_sysfs_lookup_misses = true,
         };
     }
 
-    if features.boot_notifier_cpu_boost.is_some() && !features.boot_notifier {
-        return Err(anyhow!("boot_notifier_cpu_boost feature requires boot_notifier"));
+    let legacy_boot_notifier = modules.is_enabled("boot_notifier");
+    for spec in &start_info.program.modules {
+        modules.add_spec(spec)?;
     }
 
-    if features.google_odpm && features.hvdcp_opti {
-        return Err(anyhow!(
-            "features 'google_odpm' and 'hvdcp_opti' cannot be enabled simultaneously"
-        ));
+    if let Some(secs) = legacy_boot_notifier_cpu_boost {
+        if !legacy_boot_notifier && !modules.is_enabled("boot_notifier") {
+            return Err(anyhow!("boot_notifier_cpu_boost feature requires boot_notifier"));
+        }
+        validate_module("boot_notifier", Some(&["--cpu-boost-secs", &secs]))?;
+        if modules.args("boot_notifier") == Some(&[]) {
+            modules.add_with_args("boot_notifier", vec!["--cpu-boost-secs".to_string(), secs]);
+        }
     }
+
+    if let Some(ratio) = legacy_aspect_ratio {
+        validate_module("framebuffer", Some(&["--aspect-ratio", &ratio]))?;
+        if modules.args("framebuffer") == Some(&[]) {
+            modules.add_with_args("framebuffer", vec!["--aspect-ratio".to_string(), ratio]);
+        }
+    }
+
+    modules.validate()?;
 
     if *ui_visual_debugging_level > 0 {
         features.enable_visual_debugging = true;
@@ -532,157 +363,21 @@ pub fn parse_features(
     features.kernel.cached_zx_map_info_bytes = *cached_zx_map_info_bytes;
     features.kernel.dirent_cache_size = *dirent_cache_size;
     features.initial_view_id_annotation = initial_view_id_annotation.clone();
+    modules.set_framebuffer_config(
+        features.enable_visual_debugging,
+        features.initial_view_id_annotation.clone(),
+    );
 
-    Ok(features)
+    Ok((features, modules))
 }
 
-/// Runs all the features that are enabled in `system_task.kernel()`.
-
+/// Runs container-level kernel features enabled in `features`.
 pub fn run_container_features(kernel: &Arc<Kernel>, features: &Features) -> Result<(), Error> {
-    if features.framebuffer {
-        let framebuffer = Framebuffer::device_init(
-            kernel,
-            features.aspect_ratio,
-            features.enable_visual_debugging,
-            features.initial_view_id_annotation.clone(),
-        )
-        .context("initializing framebuffer")?;
-
-        let (touch_source_client, touch_source_server) = fidl::endpoints::create_endpoints();
-        let (mouse_source_client, mouse_source_server) = fidl::endpoints::create_endpoints();
-        let view_bound_protocols = fuicomposition::ViewBoundProtocols {
-            touch_source_v2: Some(touch_source_server),
-            mouse_source_v2: Some(mouse_source_server),
-            ..Default::default()
-        };
-        let view_identity = fuiviews::ViewIdentityOnCreation::from(
-            fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair"),
-        );
-        let view_ref = fuchsia_scenic::duplicate_view_ref(&view_identity.view_ref)
-            .expect("Failed to dup view ref.");
-        let keyboard =
-            fuchsia_component::client::connect_to_protocol_sync::<fuiinput3::KeyboardMarker>()
-                .expect("Failed to connect to keyboard");
-        let registry_proxy = fuchsia_component::client::connect_to_protocol_sync::<
-            fuipolicy::DeviceListenerRegistryMarker,
-        >()
-        .context("Failed to connect to policy device listener registry")?;
-        let device_listener_registry = fuchsia_component::client::connect_to_protocol_sync::<
-            fuiinput::DeviceListenerRegistryMarker,
-        >()
-        .context("Failed to connect to device listener registry")?;
-
-        // These need to be set before `Framebuffer::start_server` is called.
-        // `Framebuffer::start_server` is only called when the `framebuffer` component feature is
-        // enabled. The container is the runner for said components, and `run_container_features`
-        // is performed before the Container is fully initialized. Therefore, it's safe to set
-        // these values at this point.
-        //
-        // In the future, we would like to avoid initializing a framebuffer unconditionally on the
-        // Kernel, at which point this logic will need to change.
-        *framebuffer.view_identity.lock() = Some(view_identity);
-        *framebuffer.view_bound_protocols.lock() = Some(view_bound_protocols);
-
-        let (display_width, display_height) = {
-            let framebuffer_info = framebuffer.info.read();
-            (framebuffer_info.xres as i32, framebuffer_info.yres as i32)
-        };
-
-        let (input_events_relay, input_events_relay_handle) = new_input_relay();
-        input_events_relay.start_relays(
-            &kernel,
-            StartRelaysArgs {
-                event_proxy_mode: EventProxyMode::WakeContainer,
-                touch_source_client_end: touch_source_client,
-                keyboard_proxy: keyboard,
-                mouse_source_client_end: mouse_source_client,
-                view_ref,
-                registry_proxy,
-                device_listener_registry: Some(device_listener_registry),
-                display_width,
-                display_height,
-            },
-        );
-
-        register_uinput_device(kernel, input_events_relay_handle)?;
-
-        // Channel we use to inform the relay of changes to `touch_standby`
-        let (touch_standby_sender, touch_standby_receiver) =
-            ThreadLockupDetector::tracked_channel::<bool>();
-        let touch_policy_device = TouchPowerPolicyDevice::new(touch_standby_sender);
-        touch_policy_device.clone().register(kernel);
-        touch_policy_device.start_relay(&kernel, touch_standby_receiver);
-
-        framebuffer.start_server(kernel, None);
-    }
-    if features.gralloc {
-        // The virtgralloc0 device allows vulkan_selector to indicate to gralloc
-        // whether swiftshader or magma will be used. This is separate from the
-        // magma feature because the policy choice whether to use magma or
-        // swiftshader is in vulkan_selector, and it can potentially choose
-        // switfshader for testing purposes even when magma0 is present. Also,
-        // it's nice to indicate swiftshader the same way regardless of whether
-        // the magma feature is enabled or disabled. If a call to gralloc AIDL
-        // IAllocator allocate2 occurs with this feature disabled, the call will
-        // fail.
-        gralloc_device_init(kernel);
-    }
-    if features.kgsl {
-        kgsl_device_init(kernel);
-    }
-    if let Some(supported_vendors) = &features.magma_supported_vendors {
-        magma_device_init(kernel, supported_vendors.clone());
-    }
-    if features.gfxstream {
-        gpu_device_init(kernel);
-    }
-    if let Some(socket_path) = features.perfetto.clone() {
-        start_perfetto_consumer_thread(kernel, socket_path)
-            .context("Failed to start perfetto consumer thread")?;
-    }
     if features.unified_tracing {
         kernel.trace_event_manager.init_trace_observer(kernel);
     }
-    if features.ashmem {
-        ashmem_device_init(kernel);
-    }
-    if features.boot_notifier {
-        booted_device_init(kernel, features.boot_notifier_cpu_boost);
-    }
-    if features.data_collection_consent_sync {
-        consent_sync_init(kernel);
-    }
-    if features.network_manager {
-        if let Err(e) = nmfs_init(kernel) {
-            log_error!("Network manager initialization failed: ({e:?})");
-        }
-    }
-    if features.nanohub {
-        nanohub_device_init(kernel);
-    }
-    if features.thermal {
-        thermal_device_init(kernel)?;
-    }
-    if let Some(devices) = &features.cooling {
-        cooling_device_init(kernel, devices.clone())?;
-    }
-    if features.hvdcp_opti {
-        hvdcp_opti_init(kernel)?;
-    }
-    if features.fastrpc {
-        fastrpc_device_init(kernel);
-    }
-    if features.wakeup_test {
-        register_wakeup_test_device(kernel)?;
-    }
     if features.mmcblk_stub {
         let _device = add_mmc_block_device(kernel).context("Failed to add stub mmcblk0 device")?;
-    }
-    if features.android_usb {
-        usb_device_init(kernel).context("Failed to add android usb device nodes")?;
-    }
-    if features.google_odpm {
-        odpm_device_init(kernel);
     }
     Ok(())
 }
@@ -704,4 +399,282 @@ pub fn run_component_features(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_start_info(features: Vec<String>, modules: Vec<String>) -> ContainerStartInfo {
+        ContainerStartInfo::new_for_test(
+            features,
+            modules,
+            ContainerStructuredConfig {
+                additional_mounts: Vec::new(),
+                cached_zx_map_info_bytes: 0,
+                crash_report_throttling: false,
+                dirent_cache_size: 0,
+                enable_utc_time_adjustment: false,
+                extra_features: Vec::new(),
+                initial_view_id_annotation: String::new(),
+                mlock_always_onfault: false,
+                mlock_pin_flavor: "noop".to_string(),
+                selinux_exceptions: Vec::new(),
+                ui_visual_debugging_level: 0,
+            },
+        )
+    }
+
+    #[fuchsia::test]
+    fn parse_program_modules() {
+        let start_info = test_start_info(
+            vec!["container".to_string()],
+            vec![
+                "ashmem".to_string(),
+                "boot_notifier --cpu-boost-secs 60".to_string(),
+                "framebuffer --aspect-ratio=9:16".to_string(),
+                "magma --supported-vendors 0x13B5,0x5143,0x8086".to_string(),
+                "perfetto --socket-path /dev/socket/traced_consumer".to_string(),
+                "thermal --cooling cpu,fcc=8".to_string(),
+            ],
+        );
+
+        let (features, modules) =
+            parse_features(&start_info, &[]).expect("parse_features should succeed");
+        assert!(features.container);
+        assert!(modules.is_enabled("ashmem"));
+        assert_eq!(modules.args("ashmem"), Some(&[][..]));
+        assert_eq!(
+            modules.args("boot_notifier"),
+            Some(&["--cpu-boost-secs".to_string(), "60".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("framebuffer"),
+            Some(&["--aspect-ratio".to_string(), "9:16".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("magma"),
+            Some(&["--supported-vendors".to_string(), "0x13B5,0x5143,0x8086".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("perfetto"),
+            Some(&["--socket-path".to_string(), "/dev/socket/traced_consumer".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("thermal"),
+            Some(&["--cooling".to_string(), "cpu,fcc=8".to_string()][..])
+        );
+    }
+
+    #[fuchsia::test]
+    fn parse_legacy_module_features() {
+        let start_info = test_start_info(
+            vec![
+                "ashmem".to_string(),
+                "boot_notifier".to_string(),
+                "boot_notifier_cpu_boost:45".to_string(),
+                "framebuffer".to_string(),
+                "aspect_ratio:16:9".to_string(),
+                "magma_supported_vendors:0x13B5,0x8086".to_string(),
+                "perfetto:/dev/socket/traced_consumer".to_string(),
+                "thermal".to_string(),
+                "cooling:cpu,fcc=8".to_string(),
+            ],
+            Vec::new(),
+        );
+
+        let (_features, modules) =
+            parse_features(&start_info, &[]).expect("legacy features should translate");
+        assert!(modules.is_enabled("ashmem"));
+        assert_eq!(
+            modules.args("boot_notifier"),
+            Some(&["--cpu-boost-secs".to_string(), "45".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("framebuffer"),
+            Some(&["--aspect-ratio".to_string(), "16:9".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("magma"),
+            Some(&["--supported-vendors".to_string(), "0x13B5,0x8086".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("perfetto"),
+            Some(&["--socket-path".to_string(), "/dev/socket/traced_consumer".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("thermal"),
+            Some(&["--cooling".to_string(), "cpu,fcc=8".to_string()][..])
+        );
+    }
+
+    #[fuchsia::test]
+    fn reject_boot_notifier_cpu_boost_without_boot_notifier() {
+        let start_info =
+            test_start_info(vec!["boot_notifier_cpu_boost:60".to_string()], Vec::new());
+        assert!(parse_features(&start_info, &[]).is_err());
+    }
+
+    #[fuchsia::test]
+    fn reject_mutually_exclusive_odpm_and_hvdcp_opti() {
+        let start_info =
+            test_start_info(Vec::new(), vec!["google_odpm".to_string(), "hvdcp_opti".to_string()]);
+        assert!(parse_features(&start_info, &[]).is_err());
+
+        let mixed_info =
+            test_start_info(vec!["google_odpm".to_string()], vec!["hvdcp_opti".to_string()]);
+        assert!(parse_features(&mixed_info, &[]).is_err());
+    }
+
+    #[fuchsia::test]
+    fn bare_module_does_not_overwrite_module_args() {
+        let start_info = test_start_info(
+            vec!["boot_notifier".to_string()],
+            vec![
+                "boot_notifier --cpu-boost-secs 60".to_string(),
+                "boot_notifier".to_string(),
+                "framebuffer --aspect-ratio=9:16".to_string(),
+                "framebuffer".to_string(),
+                "magma --supported-vendors 0x13B5".to_string(),
+                "magma".to_string(),
+                "thermal --cooling cpu,fcc=8".to_string(),
+                "thermal".to_string(),
+            ],
+        );
+
+        let (_features, modules) =
+            parse_features(&start_info, &[]).expect("parse_features should succeed");
+        assert_eq!(
+            modules.args("boot_notifier"),
+            Some(&["--cpu-boost-secs".to_string(), "60".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("framebuffer"),
+            Some(&["--aspect-ratio".to_string(), "9:16".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("magma"),
+            Some(&["--supported-vendors".to_string(), "0x13B5".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("thermal"),
+            Some(&["--cooling".to_string(), "cpu,fcc=8".to_string()][..])
+        );
+    }
+
+    #[fuchsia::test]
+    fn reject_empty_module_specification() {
+        let start_info = test_start_info(Vec::new(), vec!["   ".to_string()]);
+        assert!(parse_features(&start_info, &[]).is_err());
+    }
+
+    #[fuchsia::test]
+    fn disable_default_and_shard_modules() {
+        let start_info = test_start_info(
+            Vec::new(),
+            vec![
+                "-zram".to_string(),
+                "-gfxstream".to_string(),
+                "gfxstream".to_string(),
+                "ashmem".to_string(),
+                "-ashmem".to_string(),
+            ],
+        );
+
+        let (_features, modules) =
+            parse_features(&start_info, &[]).expect("parse_features should succeed");
+        assert!(modules.is_enabled("rtc"));
+        assert!(modules.is_enabled("loop"));
+        assert!(modules.is_enabled("power_residency"));
+        assert!(!modules.is_enabled("zram"));
+        assert_eq!(modules.args("zram"), None);
+        assert!(!modules.is_enabled("gfxstream"));
+        assert!(!modules.is_enabled("ashmem"));
+    }
+
+    #[fuchsia::test]
+    fn reject_invalid_disable_module_specifications() {
+        for invalid_spec in ["-", "--foo", "-zram --extra-arg", "-unknown_module"] {
+            let start_info = test_start_info(Vec::new(), vec![invalid_spec.to_string()]);
+            assert!(
+                parse_features(&start_info, &[]).is_err(),
+                "expected '{invalid_spec}' to be rejected"
+            );
+        }
+    }
+
+    #[fuchsia::test]
+    fn program_modules_override_legacy_feature_arguments() {
+        let start_info = test_start_info(
+            vec![
+                "boot_notifier".to_string(),
+                "boot_notifier_cpu_boost:45".to_string(),
+                "framebuffer".to_string(),
+                "aspect_ratio:16:9".to_string(),
+                "magma_supported_vendors:0x13B5".to_string(),
+                "perfetto:/dev/socket/old".to_string(),
+                "cooling:cpu".to_string(),
+            ],
+            vec![
+                "boot_notifier --cpu-boost-secs 120".to_string(),
+                "framebuffer --aspect-ratio=9:16".to_string(),
+                "magma --supported-vendors 0x8086".to_string(),
+                "perfetto --socket-path /dev/socket/new".to_string(),
+                "thermal --cooling fcc=8".to_string(),
+            ],
+        );
+
+        let (_features, modules) =
+            parse_features(&start_info, &[]).expect("parse_features should succeed");
+        assert_eq!(
+            modules.args("boot_notifier"),
+            Some(&["--cpu-boost-secs".to_string(), "120".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("framebuffer"),
+            Some(&["--aspect-ratio".to_string(), "9:16".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("magma"),
+            Some(&["--supported-vendors".to_string(), "0x8086".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("perfetto"),
+            Some(&["--socket-path".to_string(), "/dev/socket/new".to_string()][..])
+        );
+        assert_eq!(
+            modules.args("thermal"),
+            Some(&["--cooling".to_string(), "fcc=8".to_string()][..])
+        );
+
+        let disabled_boot_notifier = test_start_info(
+            vec!["boot_notifier".to_string(), "boot_notifier_cpu_boost:45".to_string()],
+            vec!["-boot_notifier".to_string()],
+        );
+        let (_features, modules) = parse_features(&disabled_boot_notifier, &[])
+            .expect("disabling legacy boot_notifier via program.modules should succeed");
+        assert!(!modules.is_enabled("boot_notifier"));
+    }
+
+    #[fuchsia::test]
+    fn reject_unknown_modules_and_invalid_module_arguments() {
+        for invalid_spec in [
+            "unknown_module",
+            "ashmem --unexpected",
+            "boot_notifier --cpu-boost-secs=-1",
+            "boot_notifier --unknown-flag",
+            "framebuffer --aspect-ratio=0:9",
+            "framebuffer --aspect-ratio=9:0",
+            "framebuffer --aspect-ratio=invalid",
+            "magma --supported-vendors=not_hex",
+            "perfetto --socket-path=",
+            "thermal --cooling=",
+        ] {
+            let start_info = test_start_info(Vec::new(), vec![invalid_spec.to_string()]);
+            assert!(
+                parse_features(&start_info, &[]).is_err(),
+                "expected '{invalid_spec}' to be rejected"
+            );
+        }
+    }
 }

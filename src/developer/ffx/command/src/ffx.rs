@@ -9,7 +9,7 @@ use camino::Utf8PathBuf;
 use ffx_command_error::{Error, FfxContext as _, Result, bug, return_user_error, user_error};
 use ffx_config::environment::ExecutableKind;
 use ffx_config::logging::LogDestination;
-use ffx_config::{AssertNoEnvError, EnvironmentContext, FfxConfigBacked};
+use ffx_config::{AssertNoEnvError, EnvironmentContext};
 use ffx_metrics::{enhanced_analytics, sanitize};
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -121,31 +121,65 @@ impl FfxCommandLine {
         args
     }
 
-    /// Creates a Vec<String> of the subcommand args ignoring flags and positionals.
+    /// Creates a Vec<String> of the subcommand args ignoring flags and positionals
+    /// using the static `ArgsInfo` of type `C`.
     /// e.g. if the user runs `ffx target list foo` this would return `["target", "list"]`
-    pub fn redact_subcmd_for_enhanced_analytics<C: ArgsInfo>(&self, _cmd: &C) -> Vec<String> {
+    pub fn redact_subcmd_from_args_info<C: ArgsInfo>(&self) -> Vec<String> {
         let main_info = C::get_args_info();
         let mut info_ref = &main_info;
         let mut ffx_subcmd_iter = self.subcmd_iter();
         let mut res = Vec::<String>::new();
-        // We can't use take_while because when the argument is equal to the one we're looking at,
-        // we consume that part of the iterator, and we want to include it.
-        for sc in ffx_subcmd_iter.by_ref() {
-            res.push(sc.to_owned());
-            if sc == info_ref.name {
-                break;
+        // When `C` is a subtool or nested `ffx_plugin` (rather than `FfxBuiltIn` where
+        // `name == "ffx"`), `C::get_args_info()` only describes the command tree starting at `C`.
+        // Advance `ffx_subcmd_iter` up to `C` (note: any `ffx_plugin` routers above `C` are
+        // generated dispatchers without flags).
+        if info_ref.name != "ffx" && !info_ref.name.is_empty() {
+            for sc in ffx_subcmd_iter.by_ref() {
+                if sc == info_ref.name
+                    || (*info_ref.short != '\0' && sc.len() == 1 && sc.starts_with(*info_ref.short))
+                {
+                    res.push(info_ref.name.to_owned());
+                    break;
+                }
+                res.push(sc.to_owned());
             }
         }
-        // For commands that are the root and contain subcommands, things are a little more
-        // involved.
-        //
-        // The args info struct contains a list of _possible_ subcommands, so we need
-        // to match until we've run out (as that means we're now dealing with positional
-        // arguments or flags that would need to be otherwise redacted).
-        for arg in ffx_subcmd_iter {
+        // Walk `C`'s subcommand tree until reaching a leaf command (`info_ref.commands.is_empty()`),
+        // stopping before leaf flags or positional arguments.
+        while !info_ref.commands.is_empty() {
+            let Some(arg) = ffx_subcmd_iter.next() else {
+                break;
+            };
+            if arg == "--" {
+                break;
+            }
+            if matches!(arg, "help" | "--help" | "-h") {
+                continue;
+            }
+            if arg.starts_with('-') {
+                // Skip known flags on the current command (1 token for Switch, 2 for Option)
+                // so we can reach the nested subcommand token that follows.
+                if let Some(flag) = info_ref.flags.iter().find(|f| {
+                    f.long == arg
+                        || (arg.len() == 2
+                            && !arg.starts_with("--")
+                            && f.short == arg.chars().nth(1))
+                }) {
+                    if matches!(flag.kind, argh::FlagInfoKind::Option { .. }) {
+                        let _ = ffx_subcmd_iter.next();
+                    }
+                    continue;
+                }
+                break;
+            }
             let subcmds = &info_ref.commands;
-            if let Some(item) = subcmds.iter().find(|s| s.name == arg) {
-                res.push(arg.to_owned());
+            if let Some(item) = subcmds.iter().find(|s| {
+                s.name == arg
+                    || (*s.command.short != '\0'
+                        && arg.len() == 1
+                        && arg.starts_with(*s.command.short))
+            }) {
+                res.push(item.name.to_owned());
                 info_ref = &item.command;
             } else {
                 return res;
@@ -194,6 +228,8 @@ impl FfxCommandLine {
             .into_iter()
             .chain(subcmd_name.map(|_| "<unknown-subtool>".to_owned()).into_iter())
             .collect();
+        let subcommand_chain: Vec<_> =
+            subcmd_name.map(|_| "<unknown-subtool>".to_owned()).into_iter().collect();
         let enhanced_args = match enhanced_analytics().await {
             // construct a 'sanitized' argument list that includes an indication of whether
             // it was just no arguments passed or an unknown subtool.
@@ -210,7 +246,15 @@ impl FfxCommandLine {
             }),
         };
 
-        metrics.command_finished(&error_res, &redacted_args, enhanced_args.as_deref()).await?;
+        metrics
+            .command_finished(
+                &error_res,
+                &redacted_args,
+                &subcommand_chain,
+                false,
+                enhanced_args.as_deref(),
+            )
+            .await?;
         Ok(help_err)
     }
 
@@ -329,7 +373,7 @@ impl FfxCommandLine {
     }
 }
 
-#[derive(ArgsInfo, Clone, Default, FfxConfigBacked, FromArgs, Debug, PartialEq)]
+#[derive(ArgsInfo, Clone, Default, FromArgs, Debug, PartialEq)]
 /// Fuchsia's developer tool
 pub struct Ffx {
     #[argh(option, short = 'c')]
@@ -358,17 +402,14 @@ pub struct Ffx {
     pub stamp: Option<String>,
 
     #[argh(option, short = 't')]
-    #[ffx_config_default("target.default")]
     /// apply operations to single or multiple targets.
     pub target: Option<String>,
 
     #[argh(option)]
-    #[ffx_config_default(key = "proxy.timeout_secs", default = "1.0")]
     /// override proxy timeout (default: 1s).
     pub timeout: Option<f64>,
 
     #[argh(option, short = 'l', long = "log-level")]
-    #[ffx_config_default(key = "log.level", default = "Info")]
     /// set log level: Info (default), Error, Warn, Trace.
     pub log_level: Option<String>,
 
@@ -394,10 +435,6 @@ pub struct Ffx {
     #[argh(switch)]
     /// strict mode: no daemon/discovery, direct connect, RO config.
     pub strict: bool,
-
-    #[argh(switch, long = "strict-equivalent")]
-    /// prints the strict equivalent of the command
-    pub strict_equivalent: bool,
 
     #[argh(switch, short = 'd', long = "direct")]
     /// connect directly to the target. Unnecessary, as this is now the default.
@@ -537,9 +574,29 @@ impl Ffx {
     ) -> Result<EnvironmentContext> {
         // Configuration initialization must happen before ANY calls to the config (or the cache won't
         // properly have the runtime parameters.
-        let overrides = self.runtime_config_overrides();
-        let mut runtime_args = ffx_config::runtime::populate_runtime(&*self.config, overrides)
+        let mut runtime_args = ffx_config::runtime::populate_runtime(&*self.config, None)
             .map_err(anyhow::Error::from)?;
+        if let Some(ref target) = self.target {
+            let mut target_map = serde_json::Map::new();
+            target_map.insert("default".into(), serde_json::Value::String(target.clone()));
+            let mut root = serde_json::Map::new();
+            root.insert("target".into(), serde_json::Value::Object(target_map));
+            ffx_config::api::value::merge_map(&mut runtime_args, &root);
+        }
+        if let Some(timeout) = self.timeout {
+            let mut proxy_map = serde_json::Map::new();
+            proxy_map.insert("timeout_secs".into(), serde_json::Value::String(timeout.to_string()));
+            let mut root = serde_json::Map::new();
+            root.insert("proxy".into(), serde_json::Value::Object(proxy_map));
+            ffx_config::api::value::merge_map(&mut runtime_args, &root);
+        }
+        if let Some(ref log_level) = self.log_level {
+            let mut log_map = serde_json::Map::new();
+            log_map.insert("level".into(), serde_json::Value::String(log_level.clone()));
+            let mut root = serde_json::Map::new();
+            root.insert("log".into(), serde_json::Value::Object(log_map));
+            ffx_config::api::value::merge_map(&mut runtime_args, &root);
+        }
         let is_agent = agents::is_invoked_by_agent(&env_vars);
         if self.direct || is_agent {
             if is_agent && !self.direct {
@@ -663,7 +720,6 @@ impl Ffx {
             log_destination: None,
             no_environment: false,
             strict: false,
-            strict_equivalent: false,
             direct: false,
         };
 
@@ -735,9 +791,6 @@ impl Ffx {
                 "--strict" => {
                     return_val.strict = true;
                 }
-                "--strict-equivalent" => {
-                    return_val.strict_equivalent = true;
-                }
                 "-d" | "--direct" => {
                     return_val.direct = true;
                 }
@@ -761,69 +814,6 @@ impl Ffx {
             _ => true,
         }
     }
-}
-
-pub fn build_strict_command(cmd: &FfxCommandLine, context: &EnvironmentContext) -> Option<String> {
-    if !context.get_direct_connection_mode() && !cmd.global.strict {
-        return None;
-    }
-
-    let mut args = cmd.command.clone();
-    args.push("--strict".to_string());
-
-    let mut configs = context.query_configs();
-
-    if let Some(target) = &cmd.global.target {
-        args.push("--target".to_string());
-        args.push(target.clone());
-        configs.remove("target.default");
-    } else if let Some(target) = configs.remove("target.default") {
-        if let serde_json::Value::String(s) = target {
-            args.push("--target".to_string());
-            args.push(s);
-        }
-    }
-
-    if let Some(machine) = &cmd.global.machine {
-        args.push("--machine".to_string());
-        let m = match machine {
-            crate::MachineFormat::Json => "json",
-            crate::MachineFormat::JsonPretty => "json-pretty",
-            crate::MachineFormat::Raw => "raw",
-        };
-        args.push(m.to_string());
-    } else {
-        args.push("--machine".to_string());
-        args.push("json".to_string());
-    }
-
-    if let Some(log_dest) = &cmd.global.log_destination {
-        args.push("--log-output".to_string());
-        args.push(log_dest.to_string());
-    } else if ffx_config::logging::is_enabled(context) {
-        args.push("--log-output".to_string());
-        args.push("stdout".to_string());
-    }
-
-    if let Some(log_level) = &cmd.global.log_level {
-        args.push("--log-level".to_string());
-        args.push(log_level.clone());
-    }
-
-    for (key, val) in configs {
-        let val_str = match val {
-            serde_json::Value::String(s) => s,
-            v => v.to_string(),
-        };
-        args.push("-c".to_string());
-        args.push(format!("{}={}", key, val_str));
-    }
-
-    for subcmd in &cmd.global.subcommand {
-        args.push(subcmd.clone());
-    }
-
-    Some(args.join(" "))
 }
 
 #[cfg(test)]
@@ -1092,7 +1082,7 @@ mod test {
 
     /// A subcommand
     #[derive(FromArgs, ArgsInfo, Default)]
-    #[argh(subcommand, name = "subcommand")]
+    #[argh(subcommand, name = "subcommand", short = 's')]
     #[allow(unused)]
     struct TestCmd {
         /// an argument
@@ -1155,10 +1145,7 @@ mod test {
             FfxCommandLine::new(None, &args).expect("Command line should parse correctly");
         assert_eq!(cmd_line.command, vec!["ffx"]);
         assert_eq!(cmd_line.ffx_args, vec!["-v", "--env", "boom"]);
-        assert_eq!(
-            cmd_line.redact_subcmd_for_enhanced_analytics(&TestCmd::default()),
-            vec!["subcommand"],
-        );
+        assert_eq!(cmd_line.redact_subcmd_from_args_info::<TestCmd>(), vec!["subcommand"]);
     }
 
     #[test]
@@ -1171,7 +1158,7 @@ mod test {
         assert_eq!(cmd_line.command, vec!["ffx"]);
         assert_eq!(cmd_line.ffx_args, vec!["-v", "--env", "boom"]);
         assert_eq!(
-            cmd_line.redact_subcmd_for_enhanced_analytics(&TestCmd::default()),
+            cmd_line.redact_subcmd_from_args_info::<TestCmd>(),
             vec!["pow", "pop", "blip", "subcommand"],
         );
     }
@@ -1191,9 +1178,7 @@ mod test {
         assert_eq!(cmd_line.ffx_args, vec!["-v", "--env", "boom"]);
         assert_eq!(cmd_line.global.subcommand, vec!["target", "middle", "subcommand", "--arg"]);
         assert_eq!(
-            cmd_line.redact_subcmd_for_enhanced_analytics(&TestCmdMiddle {
-                subcommand: TestCmdMiddleEnum::Middle(Default::default())
-            }),
+            cmd_line.redact_subcmd_from_args_info::<TestCmdMiddle>(),
             vec!["target", "middle", "subcommand"],
         );
     }
@@ -1211,11 +1196,7 @@ mod test {
             vec!["target", "root", "middle", "subcommand", "--arg"]
         );
         assert_eq!(
-            cmd_line.redact_subcmd_for_enhanced_analytics(&TestCmdRoot {
-                subcommand: TestCmdRootEnum::Root(TestCmdMiddle {
-                    subcommand: TestCmdMiddleEnum::Middle(Default::default())
-                })
-            }),
+            cmd_line.redact_subcmd_from_args_info::<TestCmdRoot>(),
             vec!["target", "root", "middle", "subcommand"],
         );
     }
@@ -1228,6 +1209,130 @@ mod test {
         assert_eq!(
             cmd_line.redact_subcmd(&TestCmd::default()),
             vec!["ffx", "--env", "-v", "subcommand", "--arg", "--stuff"]
+        );
+    }
+
+    /// A parent command with option and switch flags before a nested subcommand.
+    #[derive(FromArgs, ArgsInfo)]
+    #[argh(subcommand, name = "inspect")]
+    #[allow(unused)]
+    struct TestCmdWithParentFlags {
+        /// a switch flag on the parent command
+        #[argh(switch, short = 'q')]
+        quiet: bool,
+        /// an option flag on the parent command
+        #[argh(option, short = 's')]
+        select: Option<String>,
+        #[argh(subcommand)]
+        subcommand: TestCmdRootEnum,
+    }
+
+    #[derive(FromArgs, ArgsInfo)]
+    #[argh(subcommand)]
+    #[allow(unused)]
+    enum FakeFfxSubCommand {
+        Root(TestCmdRoot),
+    }
+
+    /// Simulacrum of `FfxBuiltIn` whose top-level `ArgsInfo.name` is `"ffx"`.
+    #[derive(FromArgs, ArgsInfo)]
+    #[argh(subcommand, name = "ffx")]
+    #[allow(unused)]
+    struct FakeFfxBuiltIn {
+        #[argh(subcommand)]
+        subcommand: Option<FakeFfxSubCommand>,
+    }
+
+    #[test]
+    fn redact_subcmd_from_args_info_parent_flags_and_help() {
+        // Parent option value ("middle") matches a subcommand name, followed by the real
+        // subcommand ("subcommand") and "--help".
+        let args = [
+            "ffx",
+            "target",
+            "inspect",
+            "-q",
+            "--select",
+            "middle",
+            "subcommand",
+            "--help",
+            "middle",
+        ];
+        let cmd_line = FfxCommandLine::new(None, &args).expect("Command line should parse");
+        assert_eq!(
+            cmd_line.redact_subcmd_from_args_info::<TestCmdWithParentFlags>(),
+            vec!["target", "inspect", "subcommand"],
+        );
+
+        // Same with short option `-s` and `help` keyword before the nested
+        // subcommands ("middle" -> "subcommand").
+        let args_short_opt =
+            ["ffx", "target", "inspect", "-s", "subcommand", "help", "middle", "subcommand"];
+        let cmd_line_short_opt =
+            FfxCommandLine::new(None, &args_short_opt).expect("Command line should parse");
+        assert_eq!(
+            cmd_line_short_opt.redact_subcmd_from_args_info::<TestCmdWithParentFlags>(),
+            vec!["target", "inspect", "middle", "subcommand"],
+        );
+    }
+
+    #[test]
+    fn redact_subcmd_from_args_info_builtin_ffx_root() {
+        let args = ["ffx", "root", "middle", "--help"];
+        let cmd_line = FfxCommandLine::new(None, &args).expect("Command line should parse");
+        assert_eq!(
+            cmd_line.redact_subcmd_from_args_info::<FakeFfxBuiltIn>(),
+            vec!["root", "middle"],
+        );
+    }
+
+    #[test]
+    fn redact_subcmd_from_args_info_double_dash() {
+        let args = ["ffx", "target", "inspect", "--", "subcommand"];
+        let cmd_line = FfxCommandLine::new(None, &args).expect("Command line should parse");
+        assert_eq!(
+            cmd_line.redact_subcmd_from_args_info::<TestCmdWithParentFlags>(),
+            vec!["target", "inspect"],
+        );
+    }
+
+    #[test]
+    fn redact_subcmd_from_args_info_unknown_flag() {
+        let args = ["ffx", "target", "inspect", "--unknown-flag", "subcommand"];
+        let cmd_line = FfxCommandLine::new(None, &args).expect("Command line should parse");
+        assert_eq!(
+            cmd_line.redact_subcmd_from_args_info::<TestCmdWithParentFlags>(),
+            vec!["target", "inspect"],
+        );
+    }
+
+    #[test]
+    fn redact_subcmd_from_args_info_short_subcmd_and_unknown_token() {
+        // Short alias in Loop 2 (nested subcommand under TestCmdMiddle)
+        let args_short = ["ffx", "target", "middle", "s", "--arg"];
+        let cmd_line_short =
+            FfxCommandLine::new(None, &args_short).expect("Command line should parse");
+        assert_eq!(
+            cmd_line_short.redact_subcmd_from_args_info::<TestCmdMiddle>(),
+            vec!["target", "middle", "subcommand"],
+        );
+
+        // Short alias in Loop 1 (when C itself is invoked via its short alias `s`),
+        // ensuring positional arguments and flags after `s` are not leaked.
+        let args_leaf_short = ["ffx", "pow", "s", "secret-positional", "--arg"];
+        let cmd_line_leaf_short =
+            FfxCommandLine::new(None, &args_leaf_short).expect("Command line should parse");
+        assert_eq!(
+            cmd_line_leaf_short.redact_subcmd_from_args_info::<TestCmd>(),
+            vec!["pow", "subcommand"],
+        );
+
+        let args_unknown = ["ffx", "target", "middle", "not-a-subcommand"];
+        let cmd_line_unknown =
+            FfxCommandLine::new(None, &args_unknown).expect("Command line should parse");
+        assert_eq!(
+            cmd_line_unknown.redact_subcmd_from_args_info::<TestCmdMiddle>(),
+            vec!["target", "middle"],
         );
     }
 
@@ -1561,29 +1666,34 @@ mod test {
     }
 
     #[fuchsia::test]
-    fn test_build_strict_command() {
-        let env_context = EnvironmentContext::default();
-        let cmd = FfxCommandLine::new(None, &["ffx", "target", "list"]).unwrap();
+    fn cli_overrides_update_runtime_config() {
+        let isolate_dir = tempdir().expect("isolate dir");
+        let args = [
+            "ffx",
+            "-t",
+            "id:1234,extra=val",
+            "--timeout",
+            "2.5",
+            "-l",
+            "Debug",
+            "-c",
+            "target.default=ignored",
+            "-c",
+            "proxy.timeout_secs=9.0",
+            "-c",
+            "log.level=Warn",
+        ]
+        .map(String::from);
+        let mut cmd_line =
+            FfxCommandLine::new(Some("ffx"), &args).expect("Command line should parse");
+        cmd_line.global.isolate_dir = Some(isolate_dir.path().to_owned());
+        let context = cmd_line.global.load_context(ExecutableKind::Test).expect("load_context");
 
-        let strict_cmd = build_strict_command(&cmd, &env_context).unwrap();
-        assert!(strict_cmd.starts_with("ffx --strict"));
-        assert!(strict_cmd.contains("--machine json"));
-        assert!(strict_cmd.contains("--log-output stdout"));
-        assert!(strict_cmd.ends_with("target list"));
-
-        // Disable direct mode
-        let disabled_cmd = FfxCommandLine::new(
-            None,
-            &["ffx", "--no-environment", "-c", "connectivity.direct=false", "target", "list"],
-        )
-        .unwrap();
-        let disabled_context = disabled_cmd
-            .global
-            .load_context_with_env(
-                ffx_config::environment::ExecutableKind::Test,
-                std::collections::HashMap::new(),
-            )
-            .unwrap();
-        assert_eq!(build_strict_command(&disabled_cmd, &disabled_context), None);
+        let target: String = context.get(ffx_config::keys::TARGET_DEFAULT_KEY).expect("target");
+        assert_eq!(target, "id:1234,extra=val");
+        let timeout: f64 = context.get(ffx_config::keys::PROXY_TIMEOUT).expect("timeout");
+        assert_eq!(timeout, 2.5);
+        let log_level: String = context.get(ffx_config::logging::LOG_LEVEL).expect("log.level");
+        assert_eq!(log_level, "Debug");
     }
 }

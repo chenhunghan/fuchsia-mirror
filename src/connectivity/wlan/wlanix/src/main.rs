@@ -6,8 +6,9 @@ use crate::nl80211::{Nl80211RateInfoAttr, Nl80211StaInfoAttr};
 use crate::security::Credential;
 use crate::security::wep::WepKeys;
 use anyhow::{Context, Error, bail, format_err};
-use fidl::endpoints::{ProtocolMarker, Proxy};
+use fidl::endpoints::{ControlHandle, ProtocolMarker, Proxy};
 use fidl_fuchsia_power_system as fsystem;
+use fidl_fuchsia_process_lifecycle as flifecycle;
 use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_device_service as fidl_device_service;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
@@ -26,13 +27,14 @@ use fuchsia_component::server::ServiceFs;
 use fuchsia_sync::Mutex;
 use fuchsia_trace_provider as trace_provider;
 use futures::channel::mpsc;
-use futures::{FutureExt, StreamExt, TryFutureExt, future};
+use futures::{FutureExt, StreamExt, TryFutureExt, future, select};
 use ieee80211::{Bssid, MacAddrBytes};
 use log::{debug, error, info, warn};
 use netlink_packet_core::{NetlinkDeserializable, NetlinkHeader, NetlinkSerializable};
 use netlink_packet_generic::GenlMessage;
 use netlink_packet_generic::message::EmptyDeserializeOptions;
 use std::convert::{TryFrom, TryInto};
+use std::pin::pin;
 use std::sync::Arc;
 use wlan_common::bss::BssDescription;
 use wlan_common::channel::{Bandwidth, Channel};
@@ -499,11 +501,7 @@ async fn handle_wifi_chip_request<I: IfaceManager, P: PowerManager>(
                 info!("Removing iface {}", ifaces[0]);
                 match iface_manager.destroy_iface(ifaces[0]).await {
                     Ok(()) => {
-                        {
-                            let mut state = state.lock();
-                            state.rssi_monitor_cmd_id = None;
-                            state.sta_iface_callback = None;
-                        }
+                        state.lock().on_sta_iface_removed();
                         telemetry_sender
                             .send(TelemetryEvent::ClientIfaceDestroyed { iface_id: ifaces[0] });
                         responder.send(Ok(())).context("send RemoveStaIface response")?;
@@ -894,6 +892,19 @@ struct WifiState {
     regulatory_multicast_proxies: RegulatoryMulticastProxySet,
 }
 
+impl WifiState {
+    fn on_sta_iface_removed(&mut self) {
+        self.sta_iface_callback = None;
+        self.rssi_monitor_cmd_id = None;
+    }
+
+    fn on_wifi_stopped(&mut self) {
+        self.on_sta_iface_removed();
+        self.started = false;
+        self.power_dependency_leases.clear();
+    }
+}
+
 async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
     req: fidl_wlanix::WifiRequest,
     state: Arc<Mutex<WifiState>>,
@@ -974,8 +985,8 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
 
             // Check that we were able to start all phys
             let mut state = state.lock();
-            state.started = all_phys_powered_up;
             if all_phys_powered_up {
+                state.started = true;
                 maybe_run_callback(
                     "WifiEventCallbackProxy::OnStart",
                     fidl_wlanix::WifiEventCallbackProxy::on_start,
@@ -987,7 +998,7 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                 // At least one phy failed to power up, return error and power them all down
                 result = Err(zx::sys::ZX_ERR_BAD_STATE);
                 telemetry_sender.send(TelemetryEvent::ChipPowerUpFailure);
-                state.power_dependency_leases.clear();
+                state.on_wifi_stopped();
             }
             responder.send(result).context("send Start response")?;
         }
@@ -1008,11 +1019,7 @@ async fn handle_wifi_request<I: IfaceManager, P: PowerManager>(
                 }
             }
             let mut state = state.lock();
-            state.started = false;
-            state.rssi_monitor_cmd_id = None;
-            state.sta_iface_callback = None;
-            // Release our power element leases
-            state.power_dependency_leases.clear();
+            state.on_wifi_stopped();
             // Inform the HAL and telemetry
             maybe_run_callback(
                 "WifiEventCallbackProxy::OnStop",
@@ -1753,6 +1760,7 @@ async fn handle_supplicant_sta_iface_request<I: IfaceManager, P: PowerManager>(
             }
         }
         fidl_wlanix::SupplicantStaIfaceRequest::Disconnect { responder } => {
+            let _wake_lease = power_manager.take_wake_lease("wlanix-supplicant-disconnect").await;
             let (iface, _) = get_iface_and_log(
                 "fidl_wlanix::SupplicantStaIfaceRequest::Disconnect",
                 iface_manager,
@@ -2172,11 +2180,13 @@ impl MessageResponder for Nl80211MessageResponder {
     }
 }
 
-async fn handle_nl80211_message<I: IfaceManager>(
+#[allow(clippy::too_many_arguments)]
+async fn handle_nl80211_message<I: IfaceManager, P: PowerManager>(
     netlink_message: fidl_wlanix::Nl80211Message,
     responder: WithDefaultDrop<impl MessageResponder + DefaultDrop + Send + 'static>,
     state: Arc<Mutex<WifiState>>,
     iface_manager: Arc<I>,
+    power_manager: Arc<P>,
     telemetry_sender: TelemetrySender,
     log_throttler: Arc<Mutex<ThrottledErrorLogger>>,
     scheduled_scan_controller: &Arc<ScheduledScanController>,
@@ -2340,6 +2350,7 @@ async fn handle_nl80211_message<I: IfaceManager>(
             info!("Nl80211Cmd::TriggerScan, attrs={:?}", message.payload.attrs);
             match get_client_iface_and_id(&message.payload.attrs[..], &iface_manager).await {
                 Ok((client_iface, iface_id)) => {
+                    let _wake_lease = power_manager.take_wake_lease("wlanix-trigger-scan").await;
                     responder
                         .take()
                         .send(Ok(vec![build_nl80211_ack()]))
@@ -2817,10 +2828,11 @@ async fn get_client_iface_and_id<I: IfaceManager>(
     }
 }
 
-async fn handle_nl80211_request<I: IfaceManager>(
+async fn handle_nl80211_request<I: IfaceManager, P: PowerManager>(
     req: fidl_wlanix::Nl80211Request,
     state: Arc<Mutex<WifiState>>,
     iface_manager: Arc<I>,
+    power_manager: Arc<P>,
     telemetry_sender: TelemetrySender,
     log_throttler: Arc<Mutex<ThrottledErrorLogger>>,
     scheduled_scan_controller: &Arc<ScheduledScanController>,
@@ -2832,6 +2844,7 @@ async fn handle_nl80211_request<I: IfaceManager>(
                 WithDefaultDrop::new(responder),
                 Arc::clone(&state),
                 Arc::clone(&iface_manager),
+                Arc::clone(&power_manager),
                 telemetry_sender.clone(),
                 Arc::clone(&log_throttler),
                 scheduled_scan_controller,
@@ -2847,6 +2860,7 @@ async fn handle_nl80211_request<I: IfaceManager>(
                 WithDefaultDrop::new(responder),
                 Arc::clone(&state),
                 Arc::clone(&iface_manager),
+                Arc::clone(&power_manager),
                 telemetry_sender.clone(),
                 Arc::clone(&log_throttler),
                 scheduled_scan_controller,
@@ -2876,10 +2890,11 @@ async fn handle_nl80211_request<I: IfaceManager>(
     }
 }
 
-async fn serve_nl80211<I: IfaceManager>(
+async fn serve_nl80211<I: IfaceManager, P: PowerManager>(
     reqs: fidl_wlanix::Nl80211RequestStream,
     state: Arc<Mutex<WifiState>>,
     iface_manager: Arc<I>,
+    power_manager: Arc<P>,
     telemetry_sender: TelemetrySender,
     log_throttler: Arc<Mutex<ThrottledErrorLogger>>,
     scheduled_scan_controller: Arc<ScheduledScanController>,
@@ -2890,6 +2905,7 @@ async fn serve_nl80211<I: IfaceManager>(
                 req,
                 Arc::clone(&state),
                 Arc::clone(&iface_manager),
+                Arc::clone(&power_manager),
                 telemetry_sender.clone(),
                 Arc::clone(&log_throttler),
                 &scheduled_scan_controller,
@@ -3157,6 +3173,7 @@ async fn handle_wlanix_request<I: IfaceManager, P: PowerManager>(
                     nl80211_stream,
                     Arc::clone(&state),
                     Arc::clone(&iface_manager),
+                    Arc::clone(&power_manager),
                     telemetry_sender,
                     Arc::clone(&log_throttler),
                     Arc::clone(&scheduled_scan_controller),
@@ -3359,7 +3376,7 @@ async fn handle_scheduled_scan_events(
     use scheduled_scans::ScheduledScanEvent;
     while let Some(event) = receiver.next().await {
         match event {
-            ScheduledScanEvent::ResultsAvailable { iface_id } => {
+            ScheduledScanEvent::ResultsAvailable { iface_id, _wake_lease } => {
                 state.lock().scan_multicast_proxies.send_sched_scan_results(iface_id);
             }
             ScheduledScanEvent::Stopped { iface_id } => {
@@ -3475,6 +3492,50 @@ async fn serve_suspend_blocker<P: PowerManager>(
     // Return an error to stop wlanix so it can be restarted to reconnect to power management.
     Err(anyhow::anyhow!("SuspendBlocker request stream terminated unexpectedly"))
 }
+
+async fn serve_lifecycle<I, F>(
+    mut requests: flifecycle::LifecycleRequestStream,
+    state: Arc<Mutex<WifiState>>,
+    iface_manager: Arc<I>,
+    main_fut: F,
+) -> Result<(), Error>
+where
+    I: IfaceManager,
+    F: std::future::Future<Output = Result<(), Error>>,
+{
+    let wait_for_stop = async {
+        match requests.next().await {
+            Some(Ok(flifecycle::LifecycleRequest::Stop { control_handle })) => control_handle,
+            Some(Err(e)) => {
+                warn!("Lifecycle request stream error: {}", e);
+                future::pending().await
+            }
+            None => {
+                warn!("Lifecycle request stream closed unexpectedly");
+                future::pending().await
+            }
+        }
+    };
+    let mut main_fut = Box::pin(main_fut.fuse());
+    let mut wait_for_stop = pin!(wait_for_stop.fuse());
+    let control_handle = select! {
+        res = main_fut => return res,
+        control_handle = wait_for_stop => control_handle,
+    };
+    drop(main_fut);
+    info!("Received stop request, destroying all interfaces");
+    for iface in iface_manager.list_ifaces() {
+        if let Err(e) = iface_manager.destroy_iface(iface).await {
+            warn!("Failed to destroy iface {} during shutdown: {}", iface, e);
+        } else {
+            info!("Successfully deleted iface {} during shutdown", iface);
+        }
+    }
+    state.lock().on_wifi_stopped();
+    control_handle.shutdown();
+    Ok(())
+}
+
 #[fuchsia::main(logging = false)]
 async fn main() {
     trace_provider::trace_provider_create_with_fdio();
@@ -3575,8 +3636,11 @@ async fn main() {
 
     let wifi_state = Arc::new(Mutex::new(WifiState::default()));
     let (event_sender, event_receiver) = mpsc::unbounded::<scheduled_scans::ScheduledScanEvent>();
-    let scheduled_scan_controller =
-        Arc::new(ScheduledScanController::new(telemetry_sender.clone(), event_sender));
+    let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
+        telemetry_sender.clone(),
+        event_sender,
+        Arc::clone(&power_manager) as Arc<dyn PowerManager>,
+    ));
 
     let suspend_blocker_fut: future::BoxFuture<'static, Result<(), Error>> =
         if let Some(requests) = suspend_blocker_requests {
@@ -3590,26 +3654,48 @@ async fn main() {
         };
 
     drop(suspend_blocker_lease);
-    let res = futures::try_join!(
-        serve_telemetry_fut,
-        report_battery_updates(
-            Arc::clone(&wifi_state),
-            telemetry_sender.clone(),
-            Arc::clone(&scheduled_scan_controller),
-        )
-        .map(Ok),
-        handle_scheduled_scan_events(Arc::clone(&wifi_state), event_receiver).map(|()| Ok(())),
-        suspend_blocker_fut,
-        serve_fidl(
-            Arc::clone(&wifi_state),
-            Arc::clone(&iface_manager),
-            Arc::clone(&power_manager),
-            telemetry_sender,
-            Arc::clone(&log_throttler),
-            Arc::clone(&scheduled_scan_controller),
-        ),
-        serve_phy_events(phy_events_proxy, wifi_state)
-    );
+    let main_fut = {
+        let wifi_state = Arc::clone(&wifi_state);
+        let iface_manager = Arc::clone(&iface_manager);
+        async move {
+            futures::try_join!(
+                serve_telemetry_fut,
+                report_battery_updates(
+                    Arc::clone(&wifi_state),
+                    telemetry_sender.clone(),
+                    Arc::clone(&scheduled_scan_controller),
+                )
+                .map(Ok),
+                handle_scheduled_scan_events(Arc::clone(&wifi_state), event_receiver)
+                    .map(|()| Ok(())),
+                suspend_blocker_fut,
+                serve_fidl(
+                    Arc::clone(&wifi_state),
+                    Arc::clone(&iface_manager),
+                    Arc::clone(&power_manager),
+                    telemetry_sender,
+                    Arc::clone(&log_throttler),
+                    Arc::clone(&scheduled_scan_controller),
+                ),
+                serve_phy_events(phy_events_proxy, wifi_state)
+            )
+            .map(|_| ())
+        }
+    };
+    let res =
+        match fuchsia_runtime::take_startup_handle(fuchsia_runtime::HandleType::Lifecycle.into()) {
+            Some(lifecycle_handle) => {
+                let requests = fidl::endpoints::ServerEnd::<flifecycle::LifecycleMarker>::from(
+                    lifecycle_handle,
+                )
+                .into_stream();
+                Box::pin(serve_lifecycle(requests, wifi_state, iface_manager, main_fut)).await
+            }
+            None => {
+                warn!("No lifecycle startup handle found");
+                main_fut.await
+            }
+        };
     match res {
         Ok(_) => info!("Wlanix exiting cleanly"),
         Err(e) => error!("Wlanix exiting with error: {}", e),
@@ -3636,7 +3722,7 @@ mod tests {
     use netlink_packet_utils::parsers::parse_u32;
     use scheduled_scans::ScheduledScanState;
     use std::collections::HashSet;
-    use std::pin::{Pin, pin};
+    use std::pin::Pin;
     use test_case::test_case;
     use wlan_common::security::wep::WepKey;
     use wlan_power_manager_testing::TestPowerManager;
@@ -3992,6 +4078,14 @@ mod tests {
         // One lease for create_sta_iface in setup.
         assert_eq!(test_helper.power_manager.calls.lock().len(), 1);
 
+        let (sta_cb_proxy, _sta_cb_stream) =
+            create_proxy_and_stream::<fidl_wlanix::WifiStaIfaceEventCallbackMarker>();
+        {
+            let mut state = test_helper.wifi_state.lock();
+            state.rssi_monitor_cmd_id = Some(42);
+            state.sta_iface_callback = Some(sta_cb_proxy);
+        }
+
         let start_fut = test_helper.wifi_proxy.start();
         let mut start_fut = pin!(start_fut);
         assert_matches!(test_helper.exec.run_until_stalled(&mut start_fut), Poll::Pending);
@@ -4009,6 +4103,10 @@ mod tests {
             Poll::Ready(Ok(response)) => response
         );
         assert_eq!(response.is_started, Some(false));
+        assert!(test_helper.wifi_state.lock().rssi_monitor_cmd_id.is_none());
+        assert!(test_helper.wifi_state.lock().sta_iface_callback.is_none());
+        assert!(test_helper.wifi_state.lock().power_dependency_leases.is_empty());
+        assert!(test_helper.power_manager.is_lease_dropped("wlanix-phy-1-dependency"));
 
         let power_manager_calls = test_helper.power_manager.calls.lock();
         assert!(power_manager_calls.contains(&"wlanix-power-down".to_string()));
@@ -4155,6 +4253,7 @@ mod tests {
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let test_fut = serve_wlanix(
             wlanix_stream,
@@ -4249,6 +4348,7 @@ mod tests {
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let test_fut = serve_wlanix(
             wlanix_stream,
@@ -4492,6 +4592,15 @@ mod tests {
 
         // One lease for create_sta_iface in setup.
         assert_eq!(test_helper.power_manager.calls.lock().len(), 1);
+        let (sta_cb_proxy, _sta_cb_stream) =
+            create_proxy_and_stream::<fidl_wlanix::WifiStaIfaceEventCallbackMarker>();
+        {
+            let mut state = test_helper.wifi_state.lock();
+            state.started = true;
+            state.power_dependency_leases.push((1, zx::Event::create(), zx::EventPair::create().0));
+            state.rssi_monitor_cmd_id = Some(42);
+            state.sta_iface_callback = Some(sta_cb_proxy);
+        }
 
         let remove_sta_iface_fut = test_helper.wifi_chip_proxy.remove_sta_iface(
             fidl_wlanix::WifiChipRemoveStaIfaceRequest {
@@ -4509,6 +4618,11 @@ mod tests {
             test_helper.exec.run_until_stalled(&mut remove_sta_iface_fut),
             Poll::Ready(Ok(Ok(())))
         );
+
+        assert!(test_helper.wifi_state.lock().started);
+        assert_eq!(test_helper.wifi_state.lock().power_dependency_leases.len(), 1);
+        assert!(test_helper.wifi_state.lock().rssi_monitor_cmd_id.is_none());
+        assert!(test_helper.wifi_state.lock().sta_iface_callback.is_none());
 
         let power_manager_calls = test_helper.power_manager.calls.lock();
         assert_eq!(power_manager_calls.len(), 2);
@@ -4744,6 +4858,7 @@ mod tests {
         wifi_proxy: fidl_wlanix::WifiProxy,
         wifi_chip_proxy: fidl_wlanix::WifiChipProxy,
         wifi_sta_iface_proxy: fidl_wlanix::WifiStaIfaceProxy,
+        wifi_state: Arc<Mutex<WifiState>>,
         telemetry_receiver: mpsc::Receiver<TelemetryEvent>,
         iface_manager: Arc<TestIfaceManager>,
         power_manager: Arc<TestPowerManager>,
@@ -4800,10 +4915,11 @@ mod tests {
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let test_fut = serve_wlanix(
             wlanix_stream,
-            wifi_state,
+            Arc::clone(&wifi_state),
             Arc::clone(&iface_manager),
             power_manager.clone(),
             telemetry_sender,
@@ -4829,6 +4945,7 @@ mod tests {
             wifi_proxy,
             wifi_chip_proxy,
             wifi_sta_iface_proxy,
+            wifi_state,
             telemetry_receiver,
             iface_manager,
             power_manager,
@@ -4867,6 +4984,11 @@ mod tests {
             test_helper.exec.run_until_stalled(&mut disconnect_fut),
             Poll::Ready(Ok(()))
         );
+
+        let power_manager_calls = test_helper.power_manager.calls.lock();
+        assert!(power_manager_calls.contains(&"wlanix-supplicant-disconnect".to_string()));
+        drop(power_manager_calls);
+        assert!(test_helper.power_manager.is_lease_dropped("wlanix-supplicant-disconnect"));
     }
 
     #[fuchsia::test]
@@ -5970,8 +6092,11 @@ mod tests {
         let (telemetry_sender_raw, telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
         let telemetry_sender = TelemetrySender::new(telemetry_sender_raw);
         let (event_sender, event_receiver) = mpsc::unbounded();
-        let scheduled_scan_controller =
-            Arc::new(ScheduledScanController::new(telemetry_sender.clone(), event_sender));
+        let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender.clone(),
+            event_sender,
+            power_manager.clone(),
+        ));
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
 
@@ -6054,6 +6179,7 @@ mod tests {
         telemetry_receiver: mpsc::Receiver<TelemetryEvent>,
         state: Arc<Mutex<WifiState>>,
         scheduled_scan_controller: Arc<ScheduledScanController>,
+        power_manager: Arc<TestPowerManager>,
     }
 
     fn setup_nl80211_test(exec: &mut fasync::TestExecutor) -> Nl80211TestValues {
@@ -6068,15 +6194,20 @@ mod tests {
         let state = Arc::new(Mutex::new(WifiState::default()));
         let (telemetry_sender, telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
         let telemetry_sender = TelemetrySender::new(telemetry_sender);
+        let power_manager = Arc::new(TestPowerManager::new());
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
         let (event_sender, event_receiver) = mpsc::unbounded();
-        let scheduled_scan_controller =
-            Arc::new(ScheduledScanController::new(telemetry_sender.clone(), event_sender));
+        let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender.clone(),
+            event_sender,
+            power_manager.clone(),
+        ));
         let nl80211_fut = serve_nl80211(
             stream,
             Arc::clone(&state),
             Arc::new(iface_manager),
+            power_manager.clone(),
             telemetry_sender,
             Arc::clone(&log_throttler),
             Arc::clone(&scheduled_scan_controller),
@@ -6096,6 +6227,7 @@ mod tests {
             telemetry_receiver,
             state,
             scheduled_scan_controller,
+            power_manager,
         }
     }
 
@@ -6109,16 +6241,18 @@ mod tests {
         let telemetry_sender = TelemetrySender::new(telemetry_sender_raw);
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
+        let power_manager = Arc::new(TestPowerManager::new());
         let (scheduled_scan_event_sender, _) = mpsc::unbounded();
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let wlanix_fut = serve_wlanix(
             stream,
             state,
             iface_manager,
-            Arc::new(TestPowerManager::new()),
+            power_manager,
             telemetry_sender,
             Arc::clone(&log_throttler),
             scheduled_scan_controller,
@@ -6423,6 +6557,36 @@ mod tests {
         let mcast_msg =
             assert_matches!(exec.run_until_stalled(&mut next_mcast), Poll::Ready(msg) => msg);
         assert_eq!(mcast_msg.payload.cmd, Nl80211Cmd::NewScanResults);
+
+        // Verify that wlanix-trigger-scan was acquired and has been released.
+        let power_manager_calls = test_values.power_manager.calls.lock();
+        assert!(power_manager_calls.contains(&"wlanix-trigger-scan".to_string()));
+        drop(power_manager_calls);
+        assert!(test_values.power_manager.is_lease_dropped("wlanix-trigger-scan"));
+    }
+
+    #[fuchsia::test]
+    fn test_handle_scheduled_scan_events_results_available() {
+        let mut exec = fasync::TestExecutor::new();
+        let state = Arc::new(Mutex::new(WifiState::default()));
+        let (sender, receiver) = mpsc::unbounded();
+        let power_manager = Arc::new(TestPowerManager::new());
+        let wake_lease = exec.run_singlethreaded(power_manager.take_wake_lease("test-lease"));
+
+        let mut events_fut = pin!(handle_scheduled_scan_events(Arc::clone(&state), receiver));
+        assert_matches!(exec.run_until_stalled(&mut events_fut), Poll::Pending);
+
+        sender
+            .unbounded_send(scheduled_scans::ScheduledScanEvent::ResultsAvailable {
+                iface_id: 1,
+                _wake_lease: wake_lease,
+            })
+            .expect("Failed to send scheduled scan event");
+
+        assert!(!power_manager.is_lease_dropped("test-lease"));
+        assert_matches!(exec.run_until_stalled(&mut events_fut), Poll::Pending);
+        // After handle_scheduled_scan_events processes the event, the wake lease is dropped.
+        assert!(power_manager.is_lease_dropped("test-lease"));
     }
 
     #[fuchsia::test]
@@ -6789,15 +6953,18 @@ mod tests {
 
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
+        let power_manager = Arc::new(TestPowerManager::new());
         let (scheduled_scan_event_sender, _) = mpsc::unbounded();
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let nl80211_fut = serve_nl80211(
             stream,
             Arc::clone(&state),
             Arc::clone(&iface_manager),
+            power_manager,
             telemetry_sender,
             Arc::clone(&log_throttler),
             Arc::clone(&scheduled_scan_controller),
@@ -6909,13 +7076,18 @@ mod tests {
 
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
+        let power_manager = Arc::new(TestPowerManager::new());
         let (event_sender, event_receiver) = mpsc::unbounded();
-        let scheduled_scan_controller =
-            Arc::new(ScheduledScanController::new(telemetry_sender.clone(), event_sender));
+        let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender.clone(),
+            event_sender,
+            power_manager.clone(),
+        ));
         let nl80211_fut = serve_nl80211(
             stream,
             Arc::clone(&state),
             Arc::clone(&iface_manager),
+            power_manager,
             telemetry_sender,
             Arc::clone(&log_throttler),
             Arc::clone(&scheduled_scan_controller),
@@ -7303,15 +7475,18 @@ mod tests {
         let telemetry_sender = TelemetrySender::new(telemetry_sender);
         let log_throttler =
             Arc::new(Mutex::new(ThrottledErrorLogger::new(MIN_MINUTES_BETWEEN_FREQUENT_ERRORS)));
+        let power_manager = Arc::new(TestPowerManager::new());
         let (scheduled_scan_event_sender, _) = mpsc::unbounded();
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager.clone(),
         ));
         let nl80211_fut = serve_nl80211(
             stream,
             state,
             iface_manager,
+            power_manager,
             telemetry_sender,
             Arc::clone(&log_throttler),
             scheduled_scan_controller,
@@ -8079,9 +8254,11 @@ mod tests {
         let wifi_state = Arc::new(Mutex::new(WifiState::default()));
         let iface_manager = Arc::new(TestIfaceManager::new());
         let (scheduled_scan_event_sender, _) = mpsc::unbounded();
+        let power_manager = Arc::new(TestPowerManager::new());
         let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
             telemetry_sender.clone(),
             scheduled_scan_event_sender,
+            power_manager,
         ));
         // Instantiate a mapped test client interface to catch StopSchedScan calls from the loop
         let _ = exec.run_singlethreaded(iface_manager.create_client_iface(0));
@@ -8399,5 +8576,135 @@ mod tests {
             exec.run_until_stalled(&mut stream2_fut),
             Poll::Ready(Some(Ok(fidl_wlanix::Nl80211MulticastRequest::Message { .. })))
         );
+    }
+
+    #[fuchsia::test]
+    fn test_serve_lifecycle_stop_destroys_ifaces_and_stops_wifi() {
+        let mut exec = fasync::TestExecutor::new();
+        let iface_manager = Arc::new(TestIfaceManager::new_with_client());
+        let (sta_cb_proxy, _sta_cb_stream) =
+            create_proxy_and_stream::<fidl_wlanix::WifiStaIfaceEventCallbackMarker>();
+        let wifi_state = Arc::new(Mutex::new(WifiState {
+            started: true,
+            rssi_monitor_cmd_id: Some(42),
+            sta_iface_callback: Some(sta_cb_proxy),
+            power_dependency_leases: vec![(1, zx::Event::create(), zx::EventPair::create().0)],
+            ..Default::default()
+        }));
+
+        let (main_tx, main_rx) = futures::channel::oneshot::channel::<Result<(), Error>>();
+        let main_fut =
+            async move { main_rx.await.unwrap_or_else(|_| Err(format_err!("canceled"))) };
+
+        let (lifecycle_proxy, lifecycle_stream) =
+            create_proxy_and_stream::<flifecycle::LifecycleMarker>();
+        let mut lifecycle_fut = pin!(serve_lifecycle(
+            lifecycle_stream,
+            Arc::clone(&wifi_state),
+            Arc::clone(&iface_manager),
+            main_fut,
+        ));
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Pending);
+        assert!(!main_tx.is_canceled());
+
+        lifecycle_proxy.stop().expect("failed to send stop request");
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Ready(Ok(())));
+
+        assert!(main_tx.is_canceled());
+        assert_eq!(
+            *iface_manager.calls.lock(),
+            vec![
+                ifaces::test_utils::IfaceManagerCall::ListIfaces,
+                ifaces::test_utils::IfaceManagerCall::DestroyIface(1),
+            ]
+        );
+        let state = wifi_state.lock();
+        assert!(!state.started);
+        assert!(state.rssi_monitor_cmd_id.is_none());
+        assert!(state.sta_iface_callback.is_none());
+        assert!(state.power_dependency_leases.is_empty());
+        assert!(lifecycle_proxy.is_closed());
+    }
+
+    #[fuchsia::test]
+    fn test_serve_lifecycle_stop_when_destroy_iface_fails() {
+        let mut exec = fasync::TestExecutor::new();
+        let iface_manager =
+            Arc::new(TestIfaceManager::new_with_client().mock_destroy_client_iface_failure());
+        let wifi_state = Arc::new(Mutex::new(WifiState {
+            started: true,
+            power_dependency_leases: vec![(1, zx::Event::create(), zx::EventPair::create().0)],
+            ..Default::default()
+        }));
+
+        let (lifecycle_proxy, lifecycle_stream) =
+            create_proxy_and_stream::<flifecycle::LifecycleMarker>();
+        let mut lifecycle_fut = pin!(serve_lifecycle(
+            lifecycle_stream,
+            Arc::clone(&wifi_state),
+            Arc::clone(&iface_manager),
+            future::pending(),
+        ));
+
+        lifecycle_proxy.stop().expect("failed to send stop request");
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Ready(Ok(())));
+
+        assert_eq!(
+            *iface_manager.calls.lock(),
+            vec![
+                ifaces::test_utils::IfaceManagerCall::ListIfaces,
+                ifaces::test_utils::IfaceManagerCall::DestroyIface(1),
+            ]
+        );
+        let state = wifi_state.lock();
+        assert!(!state.started);
+        assert!(state.power_dependency_leases.is_empty());
+        assert!(lifecycle_proxy.is_closed());
+    }
+
+    #[fuchsia::test]
+    fn test_serve_lifecycle_propagates_main_fut_error() {
+        let mut exec = fasync::TestExecutor::new();
+        let iface_manager = Arc::new(TestIfaceManager::new_with_client());
+        let wifi_state = Arc::new(Mutex::new(WifiState::default()));
+
+        let (_lifecycle_proxy, lifecycle_stream) =
+            create_proxy_and_stream::<flifecycle::LifecycleMarker>();
+        let mut lifecycle_fut = pin!(serve_lifecycle(
+            lifecycle_stream,
+            wifi_state,
+            Arc::clone(&iface_manager),
+            future::ready(Err(format_err!("main_fut failed"))),
+        ));
+
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Ready(Err(_)));
+        assert!(iface_manager.calls.lock().is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_serve_lifecycle_waits_indefinitely_when_stream_closes_without_stop() {
+        let mut exec = fasync::TestExecutor::new();
+        let iface_manager = Arc::new(TestIfaceManager::new_with_client());
+        let wifi_state = Arc::new(Mutex::new(WifiState { started: true, ..Default::default() }));
+
+        let (main_tx, main_rx) = futures::channel::oneshot::channel::<Result<(), Error>>();
+        let main_fut =
+            async move { main_rx.await.unwrap_or_else(|_| Err(format_err!("canceled"))) };
+        let (lifecycle_proxy, lifecycle_stream) =
+            create_proxy_and_stream::<flifecycle::LifecycleMarker>();
+        drop(lifecycle_proxy);
+
+        let mut lifecycle_fut = pin!(serve_lifecycle(
+            lifecycle_stream,
+            Arc::clone(&wifi_state),
+            Arc::clone(&iface_manager),
+            main_fut,
+        ));
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Pending);
+        assert!(iface_manager.calls.lock().is_empty());
+        assert!(wifi_state.lock().started);
+
+        main_tx.send(Err(format_err!("main_fut error"))).expect("failed to send main_fut result");
+        assert_matches!(exec.run_until_stalled(&mut lifecycle_fut), Poll::Ready(Err(_)));
     }
 }

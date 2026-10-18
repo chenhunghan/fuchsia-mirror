@@ -7,13 +7,11 @@
 
 use crate::fidl::{FidlServer, UpdateStateNotifier};
 use crate::install_manager::start_install_manager;
-use crate::update::{NamespaceEnvironmentConnector, RealUpdater, UpdateHistory};
+use crate::update::{RealUpdater, UpdateHistory};
 use anyhow::anyhow;
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
-use fuchsia_sync::Mutex;
 use log::{error, info};
-use std::sync::Arc;
 
 mod fidl;
 mod install_manager;
@@ -29,7 +27,7 @@ async fn main() {
         inspect_runtime::publish(&inspector, inspect_runtime::PublishOptions::default());
 
     let history_node = inspector.root().create_child("history");
-    let history = Arc::new(Mutex::new(UpdateHistory::load(history_node).await));
+    let history = UpdateHistory::load(history_node).await;
 
     let mut fs = ServiceFs::new_local();
     if let Err(e) = fs.take_and_serve_directory_handle() {
@@ -41,12 +39,8 @@ async fn main() {
     // listen for FIDL events, and notify monitors of update attempt progress.
     let updater = RealUpdater::new(history, structured_config);
     let attempt_node = inspector.root().create_child("install_manager");
-    let (install_manager_ch, install_manager_fut) = start_install_manager::<
-        UpdateStateNotifier,
-        RealUpdater,
-        NamespaceEnvironmentConnector,
-    >(updater, attempt_node)
-    .await;
+    let (install_manager_ch, install_manager_fut) =
+        start_install_manager::<UpdateStateNotifier, RealUpdater>(updater, attempt_node).await;
 
     // The FIDL server will forward requests to the install manager task via the control handle.
     let server_fut = FidlServer::new(install_manager_ch).run(fs);

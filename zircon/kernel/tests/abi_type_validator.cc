@@ -478,17 +478,6 @@ VALIDATE_FIELD_OFFSET_SIZE(zx_smc_parameters_t, arg6, 48, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_smc_parameters_t, client_id, 56, 2);
 VALIDATE_FIELD_OFFSET_SIZE(zx_smc_parameters_t, secure_os_id, 58, 2);
 
-VALIDATE_TYPE_SIZE_ALIGNMENT(zx_system_powerctl_arg_t, 12, 4);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, acpi_transition_s_state, 0, 3);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, acpi_transition_s_state.target_s_state, 0, 1);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, acpi_transition_s_state.sleep_type_a, 1, 1);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, acpi_transition_s_state.sleep_type_b, 2, 1);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, x86_power_limit, 0, 12);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, x86_power_limit.power_limit, 0, 4);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, x86_power_limit.time_window, 4, 4);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, x86_power_limit.clamp, 8, 1);
-VALIDATE_FIELD_OFFSET_SIZE(zx_system_powerctl_arg_t, x86_power_limit.enable, 9, 1);
-
 #if defined(__aarch64__)
 VALIDATE_TYPE_SIZE_ALIGNMENT(zx_thread_state_debug_regs_t, 528, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zx_thread_state_debug_regs_t, hw_bps, 0, 256);
@@ -606,7 +595,7 @@ VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, mmio_phys, 0, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, gicd_offset, 8, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, gicr_offset, 16, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, gicr_stride, 24, 8);
-VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, reserved0, 32, 8);
+VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, its_phys, 32, 8);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, ipi_base, 40, 4);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, optional, 44, 1);
 VALIDATE_FIELD_OFFSET_SIZE(zbi_dcfg_arm_gic_v3_driver_t, reserved1, 45, 3);

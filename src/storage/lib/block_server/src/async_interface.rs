@@ -109,11 +109,20 @@ pub trait Interface: Send + Sync + Unpin + 'static {
             delivery_queue,
         )?;
         Ok(async move {
+            // Hold an active guard on the session scope so cancelling it does not drop `scope`
+            // (which would abort in-flight reads bypassing their active guards) before
+            // `scope.cancel().await` and `on_detach_vmo` complete.
+            let Some(guard) = fasync::Scope::current().active_guard() else {
+                return Ok(());
+            };
             session_manager.interface.on_attach_vmo(&vmo).await?;
             scopeguard::defer! {
                 session_manager.interface.on_detach_vmo(&vmo);
             }
-            let res = session_fut.await;
+            let res = futures::select! {
+                res = session_fut.fuse() => res,
+                _ = guard.on_cancel().fuse() => Ok(()),
+            };
             scope.cancel().await;
             res
         })
@@ -908,6 +917,7 @@ pub struct AsyncBlockService<I: Interface + ?Sized> {
     interface: Arc<I>,
     allocator: Arc<BufferAllocator>,
     block_size: u32,
+    max_transfer_bytes: usize,
     scope: fasync::ScopeHandle,
 }
 
@@ -924,7 +934,7 @@ impl<I: Interface + ?Sized> AsyncBlockService<I> {
             std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
             source,
         ));
-        Ok(Self { interface, allocator, block_size, scope })
+        Ok(Self::new_with_allocator(interface, block_size, allocator, scope))
     }
 
     pub fn new_with_allocator(
@@ -933,7 +943,18 @@ impl<I: Interface + ?Sized> AsyncBlockService<I> {
         allocator: Arc<BufferAllocator>,
         scope: fasync::ScopeHandle,
     ) -> Self {
-        Self { interface, allocator, block_size, scope }
+        let max_transfer_bytes = interface
+            .get_info()
+            .max_transfer_blocks()
+            .map(|blocks| {
+                let bytes = (blocks.get() as usize).saturating_mul(block_size as usize);
+                std::cmp::max(
+                    bytes & !(mapping::BLOCK_SIZE as usize - 1),
+                    mapping::BLOCK_SIZE as usize,
+                )
+            })
+            .unwrap_or(MAX_READ_BUFFER_SIZE);
+        Self { interface, allocator, block_size, max_transfer_bytes, scope }
     }
 
     pub fn interface(&self) -> &Arc<I> {
@@ -947,10 +968,10 @@ impl<I: Interface + ?Sized> AsyncBlockService<I> {
 
 impl<I: Interface + ?Sized> BlockService for AsyncBlockService<I> {
     fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
-        let max_len = std::cmp::min(
-            std::cmp::min(max_len, MAX_READ_BUFFER_SIZE),
-            self.allocator.buffer_source().size(),
-        );
+        let max_len = max_len
+            .min(MAX_READ_BUFFER_SIZE)
+            .min(self.max_transfer_bytes)
+            .min(self.allocator.buffer_source().size());
         self.allocator.allocate_buffer_sync_owned(max_len)
     }
 
@@ -967,6 +988,7 @@ impl<I: Interface + ?Sized> BlockService for AsyncBlockService<I> {
         let vmo_offset = dest_buffer.range().start as u64;
         let vmo = self.allocator.buffer_source().vmo().clone();
         let interface = self.interface.clone();
+        let on_complete = OnComplete(Some(on_complete));
 
         self.scope.spawn(async move {
             let res = interface
@@ -980,12 +1002,33 @@ impl<I: Interface + ?Sized> BlockService for AsyncBlockService<I> {
                 )
                 .await;
             match res {
-                Ok(()) => on_complete(Ok(dest_buffer)),
-                Err(status) => on_complete(Err(anyhow::anyhow!("Read failed: {:?}", status))),
+                Ok(()) => on_complete.call(Ok(dest_buffer)),
+                Err(status) => on_complete.call(Err(Error::from(status).context("Read failed"))),
             }
         });
 
         Ok(())
+    }
+}
+
+// Invokes `on_complete` with `zx::Status::CANCELED` if the spawned read task is dropped before
+// completion (e.g. when the mapper session scope is cancelled before the underlying device starts
+// the request).
+struct OnComplete(Option<Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>>);
+
+impl OnComplete {
+    fn call(mut self, res: Result<OwnedBuffer, Error>) {
+        if let Some(on_complete) = self.0.take() {
+            on_complete(res);
+        }
+    }
+}
+
+impl Drop for OnComplete {
+    fn drop(&mut self) {
+        if let Some(on_complete) = self.0.take() {
+            on_complete(Err(zx::Status::CANCELED.into()));
+        }
     }
 }
 

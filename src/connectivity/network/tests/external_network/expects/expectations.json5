@@ -9,22 +9,5 @@
                 "*",
             ],
         },
-        {
-            type: "expect_failure",
-            matchers: [
-                "ExternalNetworkTest.ConnectToNonRoutableINET",
-                "ExternalNetworkTest.ConnectToNonRoutableINET6",
-            ],
-        },
-        {
-            type: "skip",
-            matchers: [
-                // Fails slowly (>60s)
-                "ExternalNetworkTest.ConnectToRoutableNonexistentINET",
-
-                // Flaky
-                "ExternalNetworkTest.IoctlGetInterfaceAddresses",
-            ],
-        },
     ],
 }

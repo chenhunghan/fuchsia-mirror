@@ -345,6 +345,24 @@ extern "C" {
 zx_status_t cpp_port_dispatcher_create(uint32_t options,
                                        ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
                                        zx_rights_t* rights_out);
+void cpp_port_dispatcher_packet_init(PortInterruptPacket* packet);
+void cpp_port_dispatcher_packet_destroy(PortInterruptPacket* packet);
+uint64_t cpp_port_dispatcher_packet_get_key(const PortInterruptPacket* packet);
+void cpp_port_dispatcher_packet_set_key(PortInterruptPacket* packet, uint64_t key);
+zx_instant_boot_t cpp_port_dispatcher_packet_get_timestamp(const PortInterruptPacket* packet);
+void cpp_port_dispatcher_packet_set_timestamp(PortInterruptPacket* packet,
+                                              zx_instant_boot_t timestamp);
+bool cpp_port_dispatcher_can_bind_to_interrupt(const PortDispatcher* port);
+bool cpp_port_dispatcher_queue_interrupt_packet(PortDispatcher* port, PortInterruptPacket* packet,
+                                                zx_instant_boot_t timestamp);
+bool cpp_port_dispatcher_remove_interrupt_packet(PortDispatcher* port, PortInterruptPacket* packet);
+zx_status_t cpp_port_dispatcher_queue_user(PortDispatcher* port, const zx_port_packet_t* packet);
+zx_status_t cpp_port_dispatcher_dequeue(PortDispatcher* port, const Deadline* deadline,
+                                        zx_port_packet_t* packet);
+bool cpp_port_dispatcher_cancel_queued(PortDispatcher* port, const void* handle, uint64_t key);
+zx_status_t cpp_port_dispatcher_cancel_key(PortDispatcher* port, uint64_t key);
+void cpp_port_packet_set_packet(PortPacket* port_packet, const zx_port_packet_t* packet);
+zx_status_t cpp_port_dispatcher_queue(PortDispatcher* port, PortPacket* packet);
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_PORT_DISPATCHER_H_

@@ -5,13 +5,15 @@
 // https://opensource.org/licenses/MIT
 
 use super::dispatcher_ffi::{
-    cpp_dispatcher_add_observer, cpp_dispatcher_cancel, cpp_dispatcher_clear_signals,
-    cpp_dispatcher_current_handle_count, cpp_dispatcher_get_name, cpp_dispatcher_get_ref_counted,
-    cpp_dispatcher_get_related_koid, cpp_dispatcher_get_type, cpp_dispatcher_is_waitable,
+    cpp_dispatcher_add_observer, cpp_dispatcher_cancel, cpp_dispatcher_cancel_by_key,
+    cpp_dispatcher_clear_signals, cpp_dispatcher_current_handle_count, cpp_dispatcher_get_name,
+    cpp_dispatcher_get_ref_counted, cpp_dispatcher_get_related_koid, cpp_dispatcher_get_type,
+    cpp_dispatcher_is_waitable, cpp_dispatcher_make_port_observer,
     cpp_dispatcher_notify_observers_locked, cpp_dispatcher_on_zero_handles,
     cpp_dispatcher_raise_signals_locked, cpp_dispatcher_recycle, cpp_dispatcher_remove_observer,
     cpp_dispatcher_set_name, cpp_dispatcher_signals_state_locked, cpp_dispatcher_update_state,
-    cpp_dispatcher_update_state_locked,
+    cpp_dispatcher_update_state_locked, cpp_dispatcher_user_signal_peer,
+    cpp_dispatcher_user_signal_self,
 };
 use super::handle::HandleRef;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
@@ -365,7 +367,12 @@ macro_rules! impl_peered_dispatcher_facade_with_state {
                 self.on_zero_handles_locked(guard.as_mut().token_mut());
 
                 if let Some(peer) = peer {
-                    *peer.state().peered.guard_mu_mut(guard.as_mut().token_mut()).peer_mut() = None;
+                    // SAFETY: `peer` is the paired endpoint sharing the same `PeerHolder` mutex
+                    // held by `guard`.
+                    unsafe {
+                        *peer.state().peered.guard_mu_mut(guard.as_mut().token_mut()).peer_mut() =
+                            None;
+                    }
                     peer.on_peer_zero_handles_locked(guard.as_mut().token_mut());
                 }
             }
@@ -524,6 +531,7 @@ impl Dispatcher {
 
     /// Safely downcasts a `&Dispatcher` reference to a specific facade reference `&T` if the
     /// dispatcher types match.
+    #[inline]
     pub fn downcast<T: DispatcherOps>(&self) -> Option<&T> {
         if T::TYPE == zx_types::ZX_OBJ_TYPE_NONE || self.get_type() == T::TYPE {
             // SAFETY: `T` implements `DispatcherOps` and its `TYPE` matches `self.get_type()`.
@@ -569,6 +577,66 @@ impl Dispatcher {
     pub fn cancel(&self, handle: HandleRef<'_>) {
         // SAFETY: self is a valid Dispatcher reference and handle is a valid HandleRef.
         unsafe { cpp_dispatcher_cancel(self, handle.as_ptr()) }
+    }
+
+    /// Like [`Self::cancel`], but issued via `zx_port_cancel()`.
+    ///
+    /// Returns `true` if an observer was canceled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.is_waitable()` is false.
+    #[inline]
+    pub fn cancel_by_key(
+        &self,
+        handle: HandleRef<'_>,
+        port: &super::port_dispatcher::PortDispatcher,
+        key: u64,
+    ) -> bool {
+        assert!(self.is_waitable());
+        // SAFETY: `self` is a valid `Dispatcher` reference, `handle` is a valid `HandleRef`, and
+        // `port` is a valid `PortDispatcher` reference.
+        unsafe { cpp_dispatcher_cancel_by_key(self, handle.as_ptr(), port, key) }
+    }
+
+    /// Signals this dispatcher directly from user space (`zx_object_signal`).
+    #[inline]
+    pub fn user_signal_self(&self, clear_mask: u32, set_mask: u32) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `Dispatcher` reference.
+        let status = unsafe { cpp_dispatcher_user_signal_self(self, clear_mask, set_mask) };
+        Status::ok(status)
+    }
+
+    /// Signals this dispatcher's peer from user space (`zx_object_signal_peer`).
+    #[inline]
+    pub fn user_signal_peer(&self, clear_mask: u32, set_mask: u32) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `Dispatcher` reference.
+        let status = unsafe { cpp_dispatcher_user_signal_peer(self, clear_mask, set_mask) };
+        Status::ok(status)
+    }
+
+    /// Makes a port observer which will be triggered when any `signals` are asserted or canceled
+    /// when `key` is canceled or `handle` is closed.
+    ///
+    /// `handle` must be borrowed while holding a read lock on the handle table containing it.
+    ///
+    /// If `options` does not contain `ZX_WAIT_ASYNC_EDGE`, the signal state is checked on entry
+    /// and the observer may be triggered immediately.
+    #[inline]
+    pub fn make_port_observer(
+        &self,
+        options: u32,
+        handle: HandleRef<'_>,
+        signals: zx_types::zx_signals_t,
+        key: u64,
+        port: &super::port_dispatcher::PortDispatcher,
+    ) -> Result<(), Status> {
+        // SAFETY: `self` is a valid `Dispatcher` reference, `handle` is a valid `HandleRef`
+        // protected by the handle table lock, and `port` is a valid `PortDispatcher` reference.
+        let status = unsafe {
+            cpp_dispatcher_make_port_observer(self, options, handle.as_ptr(), signals, key, port)
+        };
+        Status::ok(status)
     }
 
     /// Returns the basic handle information for this dispatcher.
@@ -669,6 +737,7 @@ impl<T: fbl::IsOpaqueRefCounted> PeeredState<T> {
         &self,
     ) -> impl pin_init::PinInit<PeeredStateMuGuard<'_, T, RawCriticalMutex>, core::convert::Infallible>
     {
-        self.lock_mu(&self.holder.mu)
+        // SAFETY: `self.holder` is the immutable `PeerHolder` whose `mu` synchronizes `self`.
+        unsafe { self.lock_mu(&self.holder.mu) }
     }
 }

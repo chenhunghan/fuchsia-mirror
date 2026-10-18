@@ -535,4 +535,60 @@ TEST_P(VmspliceUnmapBufferAfterVmsplicingRemappedBufferTest,
 INSTANTIATE_TEST_SUITE_P(VmspliceTest, VmspliceUnmapBufferAfterVmsplicingRemappedBufferTest,
                          testing::Values(true, false));
 
+TEST(VmspliceTest, TeeVmsplicedPayload) {
+  constexpr size_t kMmapSize = 4096;
+  constexpr size_t kTeeLen = 128;
+
+  fbl::unique_fd pipe_a[kNumPipeEndsCount];
+  fbl::unique_fd pipe_b[kNumPipeEndsCount];
+  ASSERT_NO_FATAL_FAILURE(MakePipe(pipe_a));
+  ASSERT_NO_FATAL_FAILURE(MakePipe(pipe_b));
+
+  char* write_buffer = reinterpret_cast<char*>(
+      mmap(nullptr, kMmapSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(write_buffer, MAP_FAILED) << strerror(errno);
+  auto unmap_write_buffer =
+      fit::defer([&]() { EXPECT_EQ(munmap(write_buffer, kMmapSize), 0) << strerror(errno); });
+  std::fill_n(write_buffer, kMmapSize, 'V');
+
+  iovec iov = {
+      .iov_base = write_buffer,
+      .iov_len = kMmapSize,
+  };
+  ASSERT_EQ(vmsplice(pipe_a[1].get(), &iov, 1, 0), static_cast<ssize_t>(kMmapSize))
+      << strerror(errno);
+
+  ASSERT_EQ(tee(pipe_a[0].get(), pipe_b[1].get(), kTeeLen, 0), static_cast<ssize_t>(kTeeLen))
+      << strerror(errno);
+
+  char read_b[kTeeLen] = {};
+  ASSERT_EQ(read(pipe_b[0].get(), read_b, sizeof(read_b)), static_cast<ssize_t>(sizeof(read_b)))
+      << strerror(errno);
+  EXPECT_THAT(read_b, testing::Each('V'));
+
+  char read_a[kMmapSize] = {};
+  ASSERT_EQ(read(pipe_a[0].get(), read_a, sizeof(read_a)), static_cast<ssize_t>(sizeof(read_a)))
+      << strerror(errno);
+  EXPECT_THAT(read_a, testing::Each('V'));
+}
+
+TEST(VmspliceTest, ZeroLengthVmsplice) {
+  int raw_fds[kNumPipeEndsCount] = {};
+  ASSERT_EQ(pipe2(raw_fds, O_NONBLOCK), 0) << strerror(errno);
+  fbl::unique_fd pipe_rd(raw_fds[0]);
+  fbl::unique_fd pipe_wr(raw_fds[1]);
+
+  iovec empty_iov = {
+      .iov_base = nullptr,
+      .iov_len = 0,
+  };
+
+  // Zero-length vmsplice from an empty pipe returns 0 without EAGAIN.
+  EXPECT_EQ(vmsplice(pipe_rd.get(), &empty_iov, 1, SPLICE_F_NONBLOCK), 0);
+
+  // Close the read end; zero-length vmsplice into a broken pipe returns 0 without EPIPE or SIGPIPE.
+  pipe_rd.reset();
+  EXPECT_EQ(vmsplice(pipe_wr.get(), &empty_iov, 1, SPLICE_F_NONBLOCK), 0);
+}
+
 }  // namespace

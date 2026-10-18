@@ -269,6 +269,7 @@ def _idk_cc_prebuilt_library_impl(
             hdrs = hdrs_for_bazel_library,
             includes = [import_include_path],
             shared_library = ":%s" % exported_target_name,
+            aspect_hints = kwargs.get("aspect_hints"),
             testonly = testonly,
             # In-tree code should depend on the imported shared library.
             visibility = visibility,
@@ -622,6 +623,12 @@ not have a stable ABI. Can be either "none" or "static".""",
         "inputs": attr.string_list(
             doc = "Unused in Bazel, for GN conversion only.",
             default = [],
+        ),
+        # Bazel's `inherit_attrs` skips undocumented built-in `BaseRuleClasses`
+        # attributes such as `aspect_hints`, so it must be declared explicitly
+        # on symbolic macros that accept `aspect_hints` from callers.
+        "aspect_hints": attr.label_list(
+            doc = "Hints for aspects.",
         ),
 
         # Require use of `runtime_deps` for atoms that are runtime dependencies. Do not inherit.

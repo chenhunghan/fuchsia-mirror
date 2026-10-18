@@ -4,11 +4,22 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+config("ubsan_cfg") {
+  visibility = [ ":*" ]
+  if (is_ubsan) {
+    rustflags = [ "--cfg=ubsan" ]
+  }
+}
+
 source_set("debugcommands") {
   sources = [
     "debugcommands.cc",
+    "debugcommands_ffi.h",
     "undefined-behavior.cc",
   ]
+  public_deps = [ ":debugcommands-rs" ]
   deps = [
     "//zircon/kernel/lib/boot-options:boot-options-cli",
     "//zircon/kernel/lib/console",
@@ -16,5 +27,22 @@ source_set("debugcommands") {
     "//zircon/kernel/lib/thread-stack",
     "//zircon/kernel/lib/unittest",
     "//zircon/system/ulib/zircon-internal",
+  ]
+}
+
+kernel_rust_mod("debugcommands-rs") {
+  sources = [
+    "debugcommands.rs",
+    "debugcommands_ffi.rs",
+    "undefined_behavior.rs",
+  ]
+  public_configs = [ ":ubsan_cfg" ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//src/lib/kprint",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/page",
   ]
 }

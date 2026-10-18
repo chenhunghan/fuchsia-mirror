@@ -43,9 +43,16 @@ DEFAULT_FORMATTABLE_EXTENSIONS: tuple[str, ...] = (
     ".ts",
 )
 
+# Linters that are skipped on every commit (both human and agent).
+# - `clang_tidy` takes ~10-20s per C++ file, does not emit auto-fixes in shac,
+#   and only emits non-blocking warnings.
+# - `python_format` takes ~1.1s per Python file and already runs during the
+#   preceding `fx format-code` (`shac fmt`) pass.
+ALWAYS_SKIPPED_LINTERS: tuple[str, ...] = ("clang_tidy", "python_format")
+
 # Linters that are prohibitively slow to run on every interactive commit.
 # `check_licenses` can take over a minute when it is triggered, so human
-# commits skip it and rely on CQ. Agents run the full set so that automated
+# commits skip it and rely on CQ. Agents still run it so that automated
 # changes are CQ-clean before upload.
 HUMAN_SKIPPED_LINTERS: tuple[str, ...] = ("check_licenses",)
 
@@ -77,28 +84,31 @@ class HookAction:
     remediation_cmd_fn: Callable[[Sequence[str]], Sequence[str]] | None = None
 
 
-def _resolve_fx_cmd(context: HookContext, purpose: str) -> str | None:
+def _resolve_fx_cmd(
+    context: HookContext, cmd: str, purpose: str
+) -> list[str] | None:
     """Resolves the `fx` executable, reporting to the console when missing.
 
-    Prefers the in-tree `scripts/fx` over any `fx` on `PATH` so hooks always
-    run the tooling belonging to the checkout being committed to.
+    Prefers the in-tree `tools/devshell/<cmd>` over any `fx` on `PATH` so hooks
+    always run the tooling belonging to the checkout being committed to.
 
     Args:
         context: HookContext with repo_root, is_agent, and reporter.
+        cmd: The `fx` subcommand name (e.g. "format-code" or "lint").
         purpose: Description of the skipped work, used in the warning message.
 
     Returns:
-        Path to the `fx` executable, or None if it could not be resolved.
+        Command prefix for `cmd`, or None if it could not be resolved.
     """
     try:
-        candidate = find_fuchsia_dir(context.repo_root) / "scripts" / "fx"
+        candidate = find_fuchsia_dir(context.repo_root) / "tools/devshell" / cmd
         if candidate.is_file():
-            return str(candidate)
+            return [str(candidate)]
     except RuntimeError:
         pass
 
     if shutil.which("fx"):
-        return "fx"
+        return ["fx", cmd]
 
     if context.is_agent:
         context.reporter.on_error(
@@ -151,11 +161,11 @@ def format_code_action(
     if not files:
         return True
 
-    fx_cmd = _resolve_fx_cmd(context, "code formatting")
+    fx_cmd = _resolve_fx_cmd(context, "format-code", "code formatting")
     if fx_cmd is None:
         return not context.is_agent
 
-    cmd = [fx_cmd, "format-code", f"--files={','.join(files)}"]
+    cmd = [*fx_cmd, f"--files={','.join(files)}"]
     if _run_reporting_errors(context, cmd) is None:
         return False
 
@@ -176,18 +186,14 @@ def lint_code_action(
 ) -> bool:
     """Executes fx lint on target files.
 
-    Outside of check-only runs the linters are first invoked with `--fix` so
-    auto-fixable findings are applied in place and re-staged by the pipeline.
-    That pass is advisory only: `fx lint --fix` delegates to `shac fix`, which
-    skips formatter checks and exits 0 even when it leaves findings behind. A
-    second check-mode pass is what actually gates the commit.
+    `fx format-code` (`shac fmt`) already formats staged files in the preceding
+    mutating pass, so `fx lint` runs as a single read-only check pass to gate
+    the commit on any remaining lint findings.
 
-    Partially staged files are linted in check-only mode under stash isolation
-    to avoid clobbering unstaged hunks.
-
-    Human commits skip the linters in `HUMAN_SKIPPED_LINTERS` to keep
-    interactive commit latency low. Agents run the full linter set so that
-    automated changes match what CQ enforces.
+    `ALWAYS_SKIPPED_LINTERS` (e.g. `clang_tidy`) are skipped on all commits.
+    Human commits additionally skip the linters in `HUMAN_SKIPPED_LINTERS` to
+    keep interactive commit latency low, while agents run all remaining linters
+    so automated changes match what CQ enforces.
 
     Args:
         context: HookContext with repo_root, check_only, is_agent, and reporter.
@@ -199,20 +205,17 @@ def lint_code_action(
     if not files:
         return True
 
-    fx_cmd = _resolve_fx_cmd(context, "lint checks")
+    fx_cmd = _resolve_fx_cmd(context, "lint", "lint checks")
     if fx_cmd is None:
         return not context.is_agent
 
-    base_cmd = [fx_cmd, "lint"]
-    if not context.is_agent:
-        base_cmd.append(f"--skip={','.join(HUMAN_SKIPPED_LINTERS)}")
+    skipped = (
+        ALWAYS_SKIPPED_LINTERS
+        if context.is_agent
+        else (*HUMAN_SKIPPED_LINTERS, *ALWAYS_SKIPPED_LINTERS)
+    )
+    base_cmd = [*fx_cmd, f"--skip={','.join(skipped)}"]
     files_arg = f"--files={','.join(files)}"
-
-    if not context.check_only:
-        # Advisory pass: apply whatever `shac fix` can repair. Its exit code is
-        # deliberately ignored because it reports success even when findings
-        # remain; the check pass below is the real gate.
-        run_cmd([*base_cmd, "--fix", files_arg], cwd=context.repo_root)
 
     return _run_reporting_errors(context, [*base_cmd, files_arg]) is not None
 
@@ -230,7 +233,7 @@ DEFAULT_PRE_COMMIT_ACTIONS: tuple[HookAction, ...] = (
     HookAction(
         name="fx_lint",
         action_fn=lint_code_action,
-        is_mutating=True,
+        is_mutating=False,
         extensions=DEFAULT_FORMATTABLE_EXTENSIONS,
         remediation_cmd_fn=lambda files: [f"fx lint --files={','.join(files)}"],
     ),

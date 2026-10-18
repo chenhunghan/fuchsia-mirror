@@ -3,14 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/go/go_library.gni")
-import("//build/go/go_test.gni")
-
-go_test("tests") {
-  embed = [ ":runtests" ]
-  output_name = "runtests_tests"
-
-  sources = [ "data_sinks_test.go" ]
-}
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
@@ -37,12 +29,6 @@ go_test("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 if (is_host) {
   go_library("runtests") {
     sources = [
@@ -63,15 +49,5 @@ if (is_host) {
       "//tools/net/sshutil",
       "//tools/net/tftp",
     ]
-  }
-}
-if (is_host) {
-  go_test("runtests_tests") {
-    sources = [
-      "data_sinks_test.go",
-      "runtests_test.go",
-    ]
-    embed = [ ":runtests" ]
-    visibility = [ "//*" ]
   }
 }

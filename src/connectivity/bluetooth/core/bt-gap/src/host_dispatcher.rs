@@ -224,6 +224,109 @@ impl Drop for DiscoverySession {
     }
 }
 
+pub enum SuppressConnectionsState {
+    NotSuppressed,
+    Pending {
+        // Additional client requests for connection suppression made while suppression is
+        // asynchronously starting.
+        session_receiver: Shared<oneshot::Receiver<Arc<SuppressConnectionsSession>>>,
+        session_sender: oneshot::Sender<Arc<SuppressConnectionsSession>>,
+        _start_suppression_task: fasync::Task<()>,
+    },
+    Suppressed {
+        session: Weak<SuppressConnectionsSession>,
+        host_id: HostId,
+    },
+}
+
+impl SuppressConnectionsState {
+    // Idempotently end the suppression session if no active references remain.
+    // Returns the HostId of the suppressed host if suppression was ended.
+    fn stop_suppression_session(&mut self) -> Option<HostId> {
+        if matches!(
+            self,
+            SuppressConnectionsState::Suppressed { session, .. } if session.strong_count() == 0
+        ) {
+            if let SuppressConnectionsState::Suppressed { host_id, .. } =
+                std::mem::replace(self, SuppressConnectionsState::NotSuppressed)
+            {
+                return Some(host_id);
+            }
+        }
+        None
+    }
+
+    fn set_suppressed(
+        &mut self,
+        host_id: HostId,
+        session: &Arc<SuppressConnectionsSession>,
+    ) -> Option<oneshot::Sender<Arc<SuppressConnectionsSession>>> {
+        if let SuppressConnectionsState::Pending { session_sender, .. } =
+            std::mem::replace(self, SuppressConnectionsState::NotSuppressed)
+        {
+            *self =
+                SuppressConnectionsState::Suppressed { session: Arc::downgrade(session), host_id };
+            Some(session_sender)
+        } else {
+            None
+        }
+    }
+
+    fn get_active_session_future(
+        &self,
+    ) -> Option<BoxFuture<'static, Result<Arc<SuppressConnectionsSession>, oneshot::Canceled>>>
+    {
+        match self {
+            SuppressConnectionsState::NotSuppressed => None,
+            SuppressConnectionsState::Pending { session_receiver, .. } => {
+                Some(session_receiver.clone().boxed())
+            }
+            SuppressConnectionsState::Suppressed { session, .. } => {
+                session.upgrade().map(|s| future::ready(Ok(s)).boxed())
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for SuppressConnectionsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SuppressConnectionsState::NotSuppressed => {
+                write!(f, "SuppressConnectionsState::NotSuppressed")
+            }
+            SuppressConnectionsState::Pending { .. } => {
+                write!(f, "SuppressConnectionsState::Pending")
+            }
+            SuppressConnectionsState::Suppressed { .. } => {
+                write!(f, "SuppressConnectionsState::Suppressed")
+            }
+        }
+    }
+}
+
+/// A dispatcher connection suppression session, which persists as long as at least one client
+/// holds an Arc<> to it.
+pub struct SuppressConnectionsSession {
+    dispatcher_state: Arc<RwLock<HostDispatcherState>>,
+}
+
+impl Drop for SuppressConnectionsSession {
+    fn drop(&mut self) {
+        let mut write = self.dispatcher_state.write();
+        if let Some(host_id) = write.suppress_connections.stop_suppression_session() {
+            if let Some(host) = write.host_devices.get(&host_id).cloned() {
+                let fut = host.set_connectable(true);
+                fasync::Task::spawn(async move {
+                    if let Err(e) = fut.await {
+                        warn!("Unexpected error response when enabling connectable: {:?}", e);
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+}
+
 static RECENTLY_REMOVED_PEERS_COUNT: usize = 15;
 static RECENT_DISCOVERY_SESSIONS_COUNT: usize = 5;
 
@@ -280,6 +383,7 @@ impl HostDispatcherInspect {
 /// routing commands to the appropriate HostAdapter
 struct HostDispatcherState {
     host_devices: HashMap<HostId, HostDevice>,
+    initializing_hosts: HashMap<HostId, Address>,
     active_id: Option<HostId>,
 
     // Component storage.
@@ -291,6 +395,7 @@ struct HostDispatcherState {
     appearance: Appearance,
     discovery: DiscoveryState,
     discoverable: Option<Weak<HostDiscoverableSession>>,
+    suppress_connections: SuppressConnectionsState,
     config_settings: build_config::Config,
     peers: HashMap<PeerId, Inspectable<Peer>>,
 
@@ -394,7 +499,26 @@ impl HostDispatcherState {
         }
     }
 
+    /// Reserves `id` and `address` for a host currently being initialized, rejecting
+    /// duplicate `HostId`s or colliding `Address`es before any sensitive identity/bonding data
+    /// is sent to the host.
+    fn try_reserve_host(&mut self, id: HostId, address: Address) -> Result<(), Error> {
+        if self.host_devices.contains_key(&id) || self.initializing_hosts.contains_key(&id) {
+            return Err(format_err!("Host with id {id} is already registered or initializing"));
+        }
+        if self.host_devices.values().any(|h| h.public_address() == address)
+            || self.initializing_hosts.values().any(|&a| a == address)
+        {
+            return Err(format_err!(
+                "Host address {address} collides with an already-registered or initializing host"
+            ));
+        }
+        let _ = self.initializing_hosts.insert(id, address);
+        Ok(())
+    }
+
     fn add_host(&mut self, id: HostId, host: HostDevice) {
+        let _ = self.initializing_hosts.remove(&id);
         if self.host_devices.insert(id, host).is_some() {
             warn!("Host replaced: {}", id)
         } else {
@@ -476,6 +600,7 @@ impl HostDispatcher {
         let hd = HostDispatcherState {
             active_id: None,
             host_devices: HashMap::new(),
+            initializing_hosts: HashMap::new(),
             name: None,
             appearance,
             config_settings: config,
@@ -484,6 +609,7 @@ impl HostDispatcher {
             stash,
             discovery: DiscoveryState::NotDiscovering,
             discoverable: None,
+            suppress_connections: SuppressConnectionsState::NotSuppressed,
             pairing_dispatcher: None,
             watch_peers_publisher,
             watch_peers_registrar,
@@ -722,14 +848,72 @@ impl HostDispatcher {
         }
     }
 
-    pub async fn set_connectable(&self, connectable: bool) -> types::Result<()> {
+    fn make_suppress_connections_task(
+        &self,
+        session: Arc<SuppressConnectionsSession>,
+    ) -> fasync::Task<()> {
+        let hd = self.clone();
+        fasync::Task::spawn(async move {
+            debug!("suppress_connections_task: waiting for suppress_connections_on_active_host");
+            let Ok(host) = hd.suppress_connections_on_active_host().await else {
+                // On failure (host init timeout), revert state to NotSuppressed and drop Pending
+                // state to notify Receivers.
+                hd.state.write().suppress_connections = SuppressConnectionsState::NotSuppressed;
+                return;
+            };
+            debug!("suppress_connections_task: suppressed connections on host successfully");
+
+            if let Some(sender) =
+                hd.state.write().suppress_connections.set_suppressed(host.id(), &session)
+            {
+                let _ = sender.send(session);
+            }
+            trace!("suppress_connections_task: completed");
+        })
+    }
+
+    async fn suppress_connections_on_active_host(&self) -> types::Result<HostDevice> {
         match self.active_host().await {
             Some(host) => {
-                host.set_connectable(connectable).await?;
-                Ok(())
+                host.set_connectable(false).await?;
+                Ok(host)
             }
             None => Err(types::Error::no_host()),
         }
+    }
+
+    pub async fn suppress_connections(&self) -> types::Result<Arc<SuppressConnectionsSession>> {
+        let session_fut = self.state.read().suppress_connections.get_active_session_future();
+        if let Some(session_fut) = session_fut {
+            debug!(
+                "suppress_connections: awaiting SuppressConnectionsSession (state: {:?})",
+                self.state.read().suppress_connections
+            );
+            return session_fut.await.map_err(|_| {
+                format_err!("Pending connection suppression client channel closed").into()
+            });
+        }
+
+        let session = Arc::new(SuppressConnectionsSession { dispatcher_state: self.state.clone() });
+        let (session_sender, session_receiver) = oneshot::channel();
+        let session_receiver = session_receiver.shared();
+        let start_suppression_task = self.make_suppress_connections_task(session);
+
+        // Immediately mark the state as pending to indicate to other requests to wait on
+        // this suppression session initialization
+        self.state.write().suppress_connections = SuppressConnectionsState::Pending {
+            session_receiver: session_receiver.clone(),
+            session_sender,
+            _start_suppression_task: start_suppression_task,
+        };
+
+        debug!(
+            "suppress_connections: awaiting SuppressConnectionsSession for first client (state: {:?})",
+            self.state.read().suppress_connections
+        );
+        session_receiver
+            .await
+            .map_err(|_| format_err!("Pending connection suppression client channel closed").into())
     }
 
     fn stash(&self) -> Stash {
@@ -965,11 +1149,25 @@ impl HostDispatcher {
     /// Finishes initializing a host device by setting host configs and services.
     async fn add_host_device(&self, host_device: &HostDevice) -> Result<(), Error> {
         let dbg_ids = host_device.debug_identifiers();
+        let id = host_device.id();
+        let address = host_device.public_address();
+
+        self.state.write().try_reserve_host(id, address).context(format!(
+            "{:?}: rejected duplicate or colliding bt-host registration",
+            dbg_ids
+        ))?;
+
+        struct ReservationGuard<'a>(&'a RwLock<HostDispatcherState>, HostId);
+        impl Drop for ReservationGuard<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.write().initializing_hosts.remove(&self.1);
+            }
+        }
+        let _reservation_guard = ReservationGuard(&self.state, id);
 
         // TODO(https://fxbug.dev/42145442): Make sure that the bt-host device is left in a well-known state if
         // any of these operations fails.
 
-        let address = host_device.public_address();
         assign_host_data(host_device.clone(), self.clone(), &address)
             .await
             .context(format!("{:?}: failed to assign identity to bt-host", dbg_ids))?;
@@ -1003,7 +1201,18 @@ impl HostDispatcher {
         // Ensure the current active pairing delegate (if it exists) handles this host
         self.handle_pairing_requests(host_device.clone());
 
-        self.state.write().add_host(host_device.id(), host_device.clone());
+        let became_active = {
+            let mut state = self.state.write();
+            let was_active = state.active_id.is_some();
+            state.add_host(id, host_device.clone());
+            !was_active && state.active_id.is_some()
+        };
+
+        if became_active {
+            if let Err(err) = self.configure_newly_active_adapter().await {
+                warn!("Failed to persist state on adapter add: {:?}", err);
+            }
+        }
 
         Ok(())
     }
@@ -1057,9 +1266,7 @@ impl HostDispatcher {
         self.notify_host_watchers();
     }
 
-    /// Configure a newly active adapter with the correct behavior for an active adapter.
-    async fn configure_newly_active_adapter(&self) -> types::Result<()> {
-        // Migrate discovery state to new host
+    async fn migrate_discovery_to_active_host(&self) {
         let old_state =
             std::mem::replace(&mut self.state.write().discovery, DiscoveryState::NotDiscovering);
         match old_state {
@@ -1097,8 +1304,12 @@ impl HostDispatcher {
                 drop(discovery_on_closed_task);
                 drop(discovery_proxy);
 
-                let session =
-                    session.upgrade().ok_or_else(|| format_err!("failed to upgrade session"))?;
+                let Some(session) = session.upgrade() else {
+                    warn!(
+                        "Failed to upgrade discovery session during migration; all clients dropped token"
+                    );
+                    return;
+                };
 
                 // Restart discovery.
                 let (session_sender, session_receiver) = oneshot::channel();
@@ -1111,10 +1322,9 @@ impl HostDispatcher {
                     discovery_stopped_sender,
                     start_discovery_task,
                 };
-                return session_receiver
-                    .await
-                    .map(|_| ())
-                    .map_err(|_| format_err!("Pending discovery client channel closed").into());
+                if let Err(e) = session_receiver.await {
+                    warn!("Pending discovery client channel closed during migration: {e:?}");
+                }
             }
             DiscoveryState::Stopping {
                 discovery_proxy,
@@ -1139,7 +1349,60 @@ impl HostDispatcher {
                 }
             }
         }
+    }
 
+    fn migrate_suppress_connections_to_active_host(&self) {
+        let mut write = self.state.write();
+        let old_state = std::mem::replace(
+            &mut write.suppress_connections,
+            SuppressConnectionsState::NotSuppressed,
+        );
+        match old_state {
+            SuppressConnectionsState::NotSuppressed => {}
+            SuppressConnectionsState::Pending {
+                session_receiver,
+                session_sender,
+                _start_suppression_task,
+            } => {
+                info!("migrating Pending connection suppression to new host");
+                // Stop the old suppression task, and restart suppression on the new host.
+                drop(_start_suppression_task);
+                let session =
+                    Arc::new(SuppressConnectionsSession { dispatcher_state: self.state.clone() });
+                let start_suppression_task = self.make_suppress_connections_task(session);
+                write.suppress_connections = SuppressConnectionsState::Pending {
+                    session_receiver,
+                    session_sender,
+                    _start_suppression_task: start_suppression_task,
+                };
+            }
+            SuppressConnectionsState::Suppressed { session, host_id } => {
+                if write.active_id == Some(host_id) {
+                    write.suppress_connections =
+                        SuppressConnectionsState::Suppressed { session, host_id };
+                    return;
+                }
+                info!("migrating Suppressed connection suppression to new host");
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+
+                let (session_sender, session_receiver) = oneshot::channel();
+                let session_receiver = session_receiver.shared();
+                let start_suppression_task = self.make_suppress_connections_task(session);
+                write.suppress_connections = SuppressConnectionsState::Pending {
+                    session_receiver,
+                    session_sender,
+                    _start_suppression_task: start_suppression_task,
+                };
+            }
+        }
+    }
+
+    /// Configure a newly active adapter with the correct behavior for an active adapter.
+    async fn configure_newly_active_adapter(&self) -> types::Result<()> {
+        self.migrate_discovery_to_active_host().await;
+        self.migrate_suppress_connections_to_active_host();
         Ok(())
     }
 

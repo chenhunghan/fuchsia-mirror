@@ -44,7 +44,15 @@ std::optional<fdf::MmioBuffer> TestDwI2c::mmio_;
 
 class FakeDwI2cController {
  public:
-  FakeDwI2cController() : mmio_(sizeof(uint32_t), 0x100) {
+  static constexpr size_t kRegCount = 0x100;
+
+  FakeDwI2cController() : mmio_(sizeof(uint32_t), kRegCount) {
+    for (size_t i = 0; i < kRegCount; ++i) {
+      size_t offset = i * sizeof(uint32_t);
+      mmio_[offset].SetReadCallback([this, i]() { return regs_[i]; });
+      mmio_[offset].SetWriteCallback(
+          [this, i](uint64_t val) { regs_[i] = static_cast<uint32_t>(val); });
+    }
     // Mock CompTypeReg (0xfc) to return kDwCompTypeNum (0x44570140)
     mmio_[0xfc].SetReadCallback([]() { return DwI2c::kDwCompTypeNum; });
     // Mock CompParam1Reg (0xf4) to return depths (8 for tx and rx)
@@ -53,7 +61,50 @@ class FakeDwI2cController {
 
   fdf::MmioBuffer GetMmioBuffer() { return mmio_.GetMmioBuffer(); }
 
+  uint32_t ReadReg(size_t offset) const { return regs_[offset / sizeof(uint32_t)]; }
+  void ResetWritableRegs() { regs_.fill(0); }
+  void set_powered(bool powered) {
+    mmio_[0xfc].SetReadCallback([powered]() { return powered ? DwI2c::kDwCompTypeNum : 0u; });
+  }
+
+  std::array<uint32_t, kRegCount> regs_{};
   ddk_fake::FakeMmioRegRegion mmio_;
+};
+
+class FakePinStates : public fidl::WireServer<fuchsia_hardware_pin::PinStates> {
+ public:
+  fuchsia_hardware_pin::PinStatesService::InstanceHandler CreateInstanceHandler(
+      async_dispatcher_t* dispatcher) {
+    return fuchsia_hardware_pin::PinStatesService::InstanceHandler({
+        .device = bindings_.CreateHandler(this, dispatcher, fidl::kIgnoreBindingClosure),
+    });
+  }
+
+  void set_on_select_state(fit::function<void(std::string_view)> callback) {
+    on_select_state_ = std::move(callback);
+  }
+
+  const std::optional<std::string>& last_state() const { return last_state_; }
+
+ private:
+  void SelectState(fuchsia_hardware_pin::wire::PinStatesSelectStateRequest* request,
+                   SelectStateCompleter::Sync& completer) override {
+    std::string state(request->name.get());
+    if (on_select_state_) {
+      on_select_state_(state);
+    }
+    last_state_ = std::move(state);
+    completer.ReplySuccess();
+  }
+
+  void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_hardware_pin::PinStates> metadata,
+                             fidl::UnknownMethodCompleter::Sync& completer) override {
+    completer.Close(ZX_ERR_NOT_SUPPORTED);
+  }
+
+  std::optional<std::string> last_state_;
+  fit::function<void(std::string_view)> on_select_state_;
+  fidl::ServerBindingGroup<fuchsia_hardware_pin::PinStates> bindings_;
 };
 
 class TestEnvironment : public fdf_testing::Environment {
@@ -72,6 +123,8 @@ class TestEnvironment : public fdf_testing::Environment {
         clock_bus_.CreateInstanceHandler(dispatcher), "bus"));
     EXPECT_OK(to_driver_vfs.AddService<fuchsia_hardware_clock::Service>(
         clock_regs_.CreateInstanceHandler(dispatcher), "registers"));
+    EXPECT_OK(to_driver_vfs.AddService<fuchsia_hardware_pin::PinStatesService>(
+        pin_states_.CreateInstanceHandler(dispatcher), "pin-states-0"));
     EXPECT_OK(to_driver_vfs.AddService<fuchsia_hardware_powerdomain::Service>(
         powerdomain_.CreateInstanceHandler(), "power-domain"));
     EXPECT_OK(to_driver_vfs.AddService<fuchsia_hardware_reset::Service>(
@@ -79,10 +132,17 @@ class TestEnvironment : public fdf_testing::Environment {
     return zx::ok();
   }
 
+  fdf_fake::FakeClock& clock_bus() { return clock_bus_; }
+  fdf_fake::FakeClock& clock_regs() { return clock_regs_; }
+  FakePinStates& pin_states() { return pin_states_; }
+  fdf_fake::FakePowerDomain& powerdomain() { return powerdomain_; }
+  fdf_fake::FakeReset& reset() { return reset_; }
+
  private:
   fdf_fake::FakePDev pdev_;
   fdf_fake::FakeClock clock_bus_;
   fdf_fake::FakeClock clock_regs_;
+  FakePinStates pin_states_;
   fdf_fake::FakePowerDomain powerdomain_;
   fdf_fake::FakeReset reset_;
 };
@@ -106,6 +166,149 @@ TEST(DwI2cTest, Lifecycle) {
 
   ASSERT_TRUE(driver_test.StartDriver().is_ok());
   ASSERT_TRUE(driver_test.StopDriver().is_ok());
+}
+
+TEST(DwI2cTest, SuspendAndResume) {
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_TRUE(env.powerdomain().is_enabled());
+    EXPECT_TRUE(env.clock_bus().enabled());
+    EXPECT_TRUE(env.clock_regs().enabled());
+    EXPECT_TRUE(env.reset().take_deasserted());
+  });
+  EXPECT_NE(controller.ReadReg(0x00), 0u);  // ControlReg
+  EXPECT_NE(controller.ReadReg(0x14), 0u);  // StandardSpeedSclHighCountReg
+  EXPECT_NE(controller.ReadReg(0x1c), 0u);  // FastSpeedSclHighCountReg
+  EXPECT_NE(controller.ReadReg(0x3c), 0u);  // TxFifoThresholdReg
+  EXPECT_NE(controller.ReadReg(0x7c), 0u);  // SdaHoldReg
+
+  zx::result<> suspend_result = zx::error(ZX_ERR_INTERNAL);
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemSuspend(
+        fdf::SuspendCompleter([&](zx::result<> result) { suspend_result = result; }));
+  });
+  ASSERT_OK(suspend_result);
+
+  driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_FALSE(env.powerdomain().is_enabled());
+    EXPECT_FALSE(env.clock_bus().enabled());
+    EXPECT_FALSE(env.clock_regs().enabled());
+  });
+
+  // Simulate register and pin state lost while power domain is disabled.
+  controller.ResetWritableRegs();
+  controller.set_powered(false);
+  driver_test.RunInEnvironmentTypeContext([&](TestEnvironment& env) {
+    env.pin_states().set_on_select_state([&](std::string_view state) {
+      if (state == "default") {
+        controller.set_powered(true);
+      }
+    });
+  });
+  EXPECT_EQ(controller.ReadReg(0x00), 0u);
+  EXPECT_EQ(controller.ReadReg(0x14), 0u);
+  EXPECT_EQ(controller.ReadReg(0x1c), 0u);
+  EXPECT_EQ(controller.ReadReg(0x3c), 0u);
+  EXPECT_EQ(controller.ReadReg(0x7c), 0u);
+
+  zx::result<> resume_result = zx::error(ZX_ERR_INTERNAL);
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  ASSERT_OK(resume_result);
+
+  driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_TRUE(env.powerdomain().is_enabled());
+    EXPECT_TRUE(env.clock_bus().enabled());
+    EXPECT_TRUE(env.clock_regs().enabled());
+    EXPECT_TRUE(env.reset().take_deasserted());
+    EXPECT_EQ(env.pin_states().last_state(), "default");
+  });
+  EXPECT_NE(controller.ReadReg(0x00), 0u);  // ControlReg
+  EXPECT_NE(controller.ReadReg(0x14), 0u);  // StandardSpeedSclHighCountReg
+  EXPECT_NE(controller.ReadReg(0x1c), 0u);  // FastSpeedSclHighCountReg
+  EXPECT_NE(controller.ReadReg(0x3c), 0u);  // TxFifoThresholdReg
+  EXPECT_NE(controller.ReadReg(0x7c), 0u);  // SdaHoldReg
+
+  ASSERT_OK(driver_test.StopDriver());
+}
+
+TEST(DwI2cTest, SuspendAndResumeRollbackOnError) {
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  // Make disabling clock_bus fail during SystemSuspend; clock_regs should be re-enabled.
+  driver_test.RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { env.clock_bus().set_disable_result(zx::error(ZX_ERR_IO)); });
+
+  zx::result<> suspend_result = zx::ok();
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemSuspend(
+        fdf::SuspendCompleter([&](zx::result<> result) { suspend_result = result; }));
+  });
+  EXPECT_STATUS(suspend_result, ZX_ERR_IO);
+
+  driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_TRUE(env.powerdomain().is_enabled());
+    EXPECT_TRUE(env.clock_bus().enabled());
+    EXPECT_TRUE(env.clock_regs().enabled());
+    env.clock_bus().set_disable_result(zx::ok());
+  });
+
+  // Now SystemSuspend should succeed.
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemSuspend(
+        fdf::SuspendCompleter([&](zx::result<> result) { suspend_result = result; }));
+  });
+  ASSERT_OK(suspend_result);
+
+  // Make enabling clock_regs fail during SystemResume; clock_bus and powerdomain should roll back.
+  driver_test.RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { env.clock_regs().set_enable_result(zx::error(ZX_ERR_IO)); });
+
+  zx::result<> resume_result = zx::ok();
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  EXPECT_STATUS(resume_result, ZX_ERR_IO);
+
+  driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
+    EXPECT_FALSE(env.powerdomain().is_enabled());
+    EXPECT_FALSE(env.clock_bus().enabled());
+    EXPECT_FALSE(env.clock_regs().enabled());
+    env.clock_regs().set_enable_result(zx::ok());
+  });
+
+  // Now SystemResume should succeed.
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  ASSERT_OK(resume_result);
+
+  ASSERT_OK(driver_test.StopDriver());
 }
 
 }  // namespace dw_i2c

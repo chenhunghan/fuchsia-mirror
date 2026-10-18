@@ -637,7 +637,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo),
-                    c"test",
+                    b"test",
                     0,
                     alloc_size,
                     0,
@@ -676,7 +676,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo.clone()),
-                    c"test",
+                    b"test",
                     0,
                     alloc_size,
                     0,
@@ -709,7 +709,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo),
-                    c"test",
+                    b"test",
                     0,
                     alloc_size,
                     0,
@@ -751,7 +751,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo.clone()),
-                    c"test0",
+                    b"test0",
                     0,
                     alloc_size,
                     0,
@@ -775,7 +775,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo.clone()),
-                    c"test1",
+                    b"test1",
                     0,
                     alloc_size,
                     0,
@@ -801,7 +801,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo),
-                    c"test2",
+                    b"test2",
                     alloc_offset as u64,
                     alloc_size - alloc_offset,
                     0,
@@ -896,7 +896,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo.clone()),
-                    c"test",
+                    b"test",
                     0,
                     alloc_size,
                     0,
@@ -1025,7 +1025,7 @@ mod vmo_rs {
                 unwrap_ok!(
                     ka.map_object_internal(
                         VmObjectPhysical::into_vm_object(vmo.clone()),
-                        c"test",
+                        b"test",
                         0,
                         PAGE_SIZE_USIZE,
                         0,
@@ -1054,7 +1054,7 @@ mod vmo_rs {
                 unwrap_ok!(
                     ka.map_object_internal(
                         VmObjectPhysical::into_vm_object(vmo),
-                        c"test",
+                        b"test",
                         0,
                         PAGE_SIZE_USIZE,
                         0,
@@ -1298,7 +1298,7 @@ mod vmo_rs {
             unwrap_ok!(
                 ka.map_object_internal(
                     VmObjectPaged::into_vm_object(vmo),
-                    c"test",
+                    b"test",
                     0,
                     alloc_size,
                     0,
@@ -3014,7 +3014,7 @@ mod vmo_rs {
             let ptr = unwrap_ok!(unsafe {
                 ka.map_object_internal(
                     vmo,
-                    c"test",
+                    b"test",
                     0,
                     alloc_size as usize,
                     0,
@@ -3074,6 +3074,40 @@ mod vmo_rs {
             let absent_expected = (offset < 5 * PAGE_SIZE) || (offset == alloc_size - PAGE_SIZE);
             assert_eq!(absent_expected, page_absent);
         }
+    }
+
+    /// Tests that a page request outliving a contiguous VMO does not touch freed VmCowPages.
+    #[test]
+    fn vmo_contiguous_page_request_outlives_vmo_test() {
+        // Regression test for https://fxbug.dev/565516649. A PageRequest holds a reference to the
+        // PageSource and therefore the PhysicalPageProvider; if it outlives the contiguous VMO the
+        // provider is destroyed after the VmCowPages and must not dereference it.
+        let _scanner_disable = AutoVmScannerDisable::new();
+        let _loaning_guard = ScopedLoaningEnabled::new(true);
+
+        let alloc_size = 4 * PAGE_SIZE;
+        // Declared outside the VMO's scope so that it is dropped after the VMO.
+        stack_pin_init!(let page_request = MultiPageRequest::new());
+        {
+            let vmo = unwrap_ok!(VmObjectPaged::create_contiguous(ALLOC_FLAG_ANY, alloc_size, 0));
+            // Decommit page 0 so that it is loaned and absent from the VMO.
+            assert_ok!(vmo.decommit_range(0, PAGE_SIZE));
+            // Fault the absent page. The PhysicalPageProvider always operates asynchronously, so
+            // this must return SHOULD_WAIT and leave page_request holding a reference to the
+            // PageSource.
+            // SAFETY: Test owns the VMO and the page request, meeting all underlying safety
+            // obligations.
+            let status =
+                unsafe { vmo.get_page(0, fault::flag::SW_FAULT, Some(page_request.as_mut())) };
+            assert_err!(status.map(|_| ()), Status::SHOULD_WAIT);
+            // Dropping the VMO runs the dead transition (detach + close of the page source) and
+            // frees the VmCowPages, while the PageSource/PhysicalPageProvider stay alive via
+            // page_request.
+            drop(vmo);
+        }
+        // Cancelling (and then dropping) page_request releases the last PageSource reference and
+        // runs ~PhysicalPageProvider after ~VmCowPages.
+        page_request.cancel_requests();
     }
 
     /// Tests eviction hints on a VMO.
@@ -3692,7 +3726,7 @@ mod vmo_rs {
             let ptr = unwrap_ok!(unsafe {
                 ka.map_object_internal(
                     vmo.clone(),
-                    c"test",
+                    b"test",
                     /*offset=*/ PAGE_SIZE,
                     /*size=*/ PAGE_SIZE_USIZE,
                     0,
@@ -4418,7 +4452,7 @@ mod vmo_rs {
         let ptr = unwrap_ok!(unsafe {
             ka.map_object_internal(
                 VmObjectPaged::into_vm_object(unidirectional_clone.clone()),
-                c"test",
+                b"test",
                 /*offset=*/ PAGE_SIZE,
                 /*size=*/ PAGE_SIZE as usize,
                 0,
@@ -4741,6 +4775,102 @@ mod vmo_rs {
         // The clone should now have ever_pinned_ = true since the hidden parent collapsed and
         // merged its pages into the clone.
         expect_eq!(PmmOptDelayReuse::Yes, c_cow.should_delay_reuse_on_free());
+    }
+
+    /// Tests that TakePages and SupplyPages handle a spurious parent content marker.
+    #[test]
+    fn vmo_take_pages_spurious_parent_content_test() {
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        let Some(compression) = pmm::node().get_page_compression() else {
+            return true;
+        };
+
+        macro_rules! make_vmo_with_spurious_parent_content {
+            () => {{
+                let child: RefPtr<VmObjectPaged>;
+                {
+                    let vmo = unwrap_ok!(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, 2 * PAGE_SIZE));
+
+                    // Commit two pages so we get a bidirectional clone with a hidden parent, then
+                    // write non-zero data to the second page.
+                    assert_ok!(vmo.commit_range(0, 2 * PAGE_SIZE));
+                    let val: u64 = 0xdeadbeef;
+                    assert_ok!(vmo.write(PAGE_SIZE, &val.to_le_bytes()));
+
+                    let clone = unwrap_ok!(vmo.create_clone(
+                        Resizability::NonResizable,
+                        SnapshotType::Full,
+                        0,
+                        2 * PAGE_SIZE,
+                        /*copy_name=*/ false,
+                    ));
+                    child = VmObject::downcast_paged(clone).expect("clone is a paged VMO");
+
+                    let hidden_parent = vmo
+                        .debug_get_cow_pages()
+                        .expect("paged VMO has backing cow pages")
+                        .debug_get_parent()
+                        .expect("bidirectional clone has a hidden parent");
+
+                    let page = hidden_parent
+                        .debug_get_page(0)
+                        .expect("hidden parent has a page at offset 0");
+
+                    stack_pin_init!(let compressor = compression.acquire_compressor());
+                    assert_ok!(compressor.as_mut().get().arm());
+
+                    // SAFETY: `page` is the page at offset 0 of `hidden_parent`.
+                    let result = unsafe {
+                        hidden_parent.reclaim_page(
+                            page,
+                            0,
+                            EvictionAction::IgnoreHint,
+                            Some(compressor.as_mut().get()),
+                        )
+                    };
+                    assert_true!(result.is_ok());
+                    expect_eq!(1u64, result.as_ref().unwrap().num_pages);
+                    expect_true!(hidden_parent.debug_is_empty(0));
+                    expect_true!(child.debug_get_cow_pages().unwrap().debug_is_parent_content(0));
+
+                    // Dropping `vmo` merges `hidden_parent` into `child`, leaving `child` with no
+                    // parent, a spurious parent content marker at offset 0, and a page at
+                    // `PAGE_SIZE`.
+                }
+
+                let child_cow = child.debug_get_cow_pages().expect("child has cow pages");
+                expect_true!(child_cow.debug_get_parent().is_none());
+                expect_true!(child_cow.debug_is_parent_content(0));
+                expect_true!(child_cow.debug_is_page(PAGE_SIZE));
+                child
+            }};
+        }
+
+        let src = make_vmo_with_spurious_parent_content!();
+        let src_cow = src.debug_get_cow_pages().expect("src has cow pages");
+
+        stack_pin_init!(let pages = VmPageSpliceList::new());
+        assert_ok!(src.take_pages(0, 2 * PAGE_SIZE, pages.as_mut()));
+        expect_true!(src_cow.debug_is_empty(0));
+        expect_true!(src_cow.debug_is_empty(PAGE_SIZE));
+
+        let dst = make_vmo_with_spurious_parent_content!();
+        assert_ok!(dst.supply_pages(0, 2 * PAGE_SIZE, pages.as_mut(), SupplyOptions::TransferData));
+
+        let mut buf = [MaybeUninit::<u8>::uninit(); 8];
+        let bytes = unwrap_ok!(dst.read(0, &mut buf));
+        expect_eq!(0u64, u64::from_le_bytes(bytes.try_into().unwrap()));
+        let bytes = unwrap_ok!(dst.read(PAGE_SIZE, &mut buf));
+        expect_eq!(0xdeadbeefu64, u64::from_le_bytes(bytes.try_into().unwrap()));
+
+        // Also test supplying a committed page directly over a spurious parent content marker.
+        let dst2 = make_vmo_with_spurious_parent_content!();
+        stack_pin_init!(let page1 = VmPageSpliceList::new());
+        assert_ok!(dst.take_pages(PAGE_SIZE, PAGE_SIZE, page1.as_mut()));
+        assert_ok!(dst2.supply_pages(0, PAGE_SIZE, page1.as_mut(), SupplyOptions::TransferData));
+        let bytes = unwrap_ok!(dst2.read(0, &mut buf));
+        expect_eq!(0xdeadbeefu64, u64::from_le_bytes(bytes.try_into().unwrap()));
     }
 
     /// Test stream functionality in kernel objects.

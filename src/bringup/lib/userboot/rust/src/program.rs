@@ -4,9 +4,12 @@
 
 use anyhow::{Error, anyhow, bail};
 use elf_parse::{Elf64Headers, SegmentType};
-use fidl_next::{Request, Responder, ServerEnd};
+use fidl_next::{Request, Responder, ServerDispatcher, ServerEnd};
+use fidl_next_fuchsia_boot::UserbootPostBootHandlesRequest;
 use fidl_next_fuchsia_ldsvc as fuchsia_ldsvc;
-use fuchsia_bootfs::BootfsParser;
+use fuchsia_bootfs::{
+    BootfsParser, ZeroCopyBootfsEntry, zbi_bootfs_is_aligned, zbi_bootfs_page_align,
+};
 use fuchsia_ldsvc::loader::{Clone, Config, LoadObject};
 use fuchsia_ldsvc::{Loader, LoaderLoadObjectResponse, LoaderServerHandler};
 use fuchsia_runtime::{HandleInfo, HandleType};
@@ -213,6 +216,33 @@ impl SystemHandles {
                 .collect::<Result<Vec<_>, Status>>()?,
         })
     }
+
+    /// Drains non-bootstrap resource and kernel file handles from `self.startup_handles`
+    /// and packages them with a duplicate of `self.zbi_vmo` for `fuchsia.boot.Userboot`.
+    pub fn take_boot_handles(&mut self) -> Result<UserbootPostBootHandlesRequest, Status> {
+        let mut out = UserbootPostBootHandlesRequest {
+            zbi_vmo: Some(self.zbi_vmo.duplicate_handle(Rights::SAME_RIGHTS)?),
+            ..Default::default()
+        };
+        let mut kernel_files = Vec::new();
+        let mut remaining = Vec::with_capacity(self.startup_handles.len());
+        for sh in self.startup_handles.drain(..) {
+            match sh.info.handle_type() {
+                HandleType::SystemResource => out.system_resource = Some(Resource::from(sh.handle)),
+                HandleType::MmioResource => out.mmio_resource = Some(Resource::from(sh.handle)),
+                HandleType::IrqResource => out.irq_resource = Some(Resource::from(sh.handle)),
+                HandleType::IoportResource => out.ioport_resource = Some(Resource::from(sh.handle)),
+                HandleType::SmcResource => out.smc_resource = Some(Resource::from(sh.handle)),
+                HandleType::KernelFileVmo => kernel_files.push(Vmo::from(sh.handle)),
+                _ => remaining.push(sh),
+            }
+        }
+        if !kernel_files.is_empty() {
+            out.kernel_files = Some(kernel_files);
+        }
+        self.startup_handles = remaining;
+        Ok(out)
+    }
 }
 
 /// Reserves the low half of the address space so initial process allocations
@@ -228,18 +258,82 @@ fn reserve_low_address_space(root_vmar: &Vmar) -> Result<Vmar, Error> {
     Ok(vmar)
 }
 
-/// Creates a child VMO representing a file entry within the BOOTFS image at the given
-/// `offset` and `size`, and marks it as executable using the VMEX resource.
+/// Creates a VMO representing a file entry within the BOOTFS image at the given `offset` and
+/// `size`, and marks it as executable using the VMEX resource.
+///
+/// When `bootfs_entries` is `Some`, the file's pages are transferred directly out of `bootfs_vmo`
+/// via `zx_vmo_transfer_data` (decommitting the source range in `bootfs_vmo`) and a handle to the
+/// resulting VMO is recorded in `bootfs_entries` (or reused if already transferred). When
+/// `bootfs_entries` is `None`, a read-only `SNAPSHOT_AT_LEAST_ON_WRITE` child VMO is created so
+/// `bootfs_vmo` remains intact for subsequent program launches.
 fn create_bootfs_file_vmo(
     bootfs_vmo: &Vmo,
     offset: u64,
     size: u64,
     vmex_resource: &Resource,
+    name: &Name,
+    bootfs_entries: Option<&mut Vec<(u32, Vmo)>>,
 ) -> Result<Vmo, Error> {
-    bootfs_vmo
-        .create_child(VmoChildOptions::SNAPSHOT_AT_LEAST_ON_WRITE, offset, size)?
-        .replace_as_executable(vmex_resource)
-        .map_err(Into::into)
+    if let Some(entries) = bootfs_entries {
+        let offset_u32 = u32::try_from(offset)?;
+        if !zbi_bootfs_is_aligned(offset_u32) {
+            bail!("BOOTFS entry at offset {:#x} is not page-aligned", offset_u32);
+        }
+        if let Some((_, existing_vmo)) = entries.iter().find(|(off, _)| *off == offset_u32) {
+            return Ok(existing_vmo.duplicate_handle(Rights::SAME_RIGHTS)?);
+        }
+        let aligned_size = u64::from(zbi_bootfs_page_align(u32::try_from(size)?));
+        let vmo = Vmo::create(size)?;
+        if aligned_size > 0 {
+            vmo.transfer_data(
+                zx::TransferDataOptions::empty(),
+                0,
+                aligned_size,
+                bootfs_vmo,
+                offset,
+            )?;
+        }
+        vmo.set_name(name)?;
+        let vmo = vmo
+            .replace_handle(Rights::VMO_DEFAULT - Rights::WRITE)?
+            .replace_as_executable(vmex_resource)?;
+        entries.push((offset_u32, vmo.duplicate_handle(Rights::SAME_RIGHTS)?));
+        Ok(vmo)
+    } else {
+        let vmo = bootfs_vmo
+            .create_child(
+                VmoChildOptions::SNAPSHOT_AT_LEAST_ON_WRITE | VmoChildOptions::NO_WRITE,
+                offset,
+                size,
+            )?
+            .replace_as_executable(vmex_resource)?;
+        vmo.set_name(name)?;
+        Ok(vmo)
+    }
+}
+
+/// Finds a BOOTFS entry whose path equals `parts` joined by `'/'` (or ends with `'/'` followed by
+/// `parts` joined by `'/'` when nested under a `userboot.root` prefix).
+fn find_bootfs_entry<'a>(
+    bootfs_parser: &'a BootfsParser,
+    parts: &[&str],
+) -> Option<ZeroCopyBootfsEntry<'a>> {
+    bootfs_parser.zero_copy_iter().filter_map(Result::ok).find(|e| {
+        let mut rest = e.name;
+        for (i, &part) in parts.iter().rev().enumerate() {
+            if i > 0 {
+                let Some(r) = rest.strip_suffix('/') else {
+                    return false;
+                };
+                rest = r;
+            }
+            let Some(r) = rest.strip_suffix(part) else {
+                return false;
+            };
+            rest = r;
+        }
+        rest.is_empty() || rest.ends_with('/')
+    })
 }
 
 /// Loads and executes the target binary (and its ELF interpreter if dynamically linked)
@@ -262,7 +356,7 @@ pub async fn launch_program(
         vmex_resource,
         power_resource: _,
         vdso_vmo,
-        zbi_vmo,
+        zbi_vmo: _,
         log: system_log,
         startup_handles,
     } = handles;
@@ -272,8 +366,7 @@ pub async fn launch_program(
     let reserved_vmar = reserve_low_address_space(&child_vmar)?;
     let child_thread = child_process.create_thread(program_name.as_bytes())?;
 
-    let bootfs_parser =
-        BootfsParser::create_from_vmo(bootfs_vmo.duplicate_handle(Rights::SAME_RIGHTS)?)?;
+    let bootfs_parser = BootfsParser::create_from_vmo(&bootfs_vmo)?;
 
     let entry = bootfs_parser
         .zero_copy_iter()
@@ -281,15 +374,14 @@ pub async fn launch_program(
         .find(|e| e.name == target_path)
         .ok_or_else(|| anyhow!("Program '{}' not found in bootfs", target_path))?;
 
-    let program_vmo =
-        create_bootfs_file_vmo(&bootfs_vmo, entry.offset, entry.size, &vmex_resource)?;
-    program_vmo.set_name(&Name::new_lossy(program_name))?;
-
-    if let Some(ref mut bootfs_entries) = bootfs_entries {
-        if let Ok(vmo_dup) = program_vmo.duplicate_handle(Rights::SAME_RIGHTS) {
-            bootfs_entries.push((entry.offset as u32, vmo_dup));
-        }
-    }
+    let program_vmo = create_bootfs_file_vmo(
+        &bootfs_vmo,
+        entry.offset,
+        entry.size,
+        &vmex_resource,
+        &Name::new_lossy(program_name),
+        bootfs_entries.as_deref_mut(),
+    )?;
 
     let headers = Elf64Headers::from_vmo(&program_vmo)?;
 
@@ -301,36 +393,21 @@ pub async fn launch_program(
     {
         let mut interp_bytes = vec![0u8; interp_hdr.filesz as usize];
         program_vmo.read(&mut interp_bytes, interp_hdr.offset as u64)?;
-        let interp_str = str::from_utf8(&interp_bytes)?.trim_end_matches('\0');
-        let interp_path = if interp_str.starts_with('/') {
-            interp_str.trim_start_matches('/')
-        } else if !interp_str.starts_with("lib/") {
-            &format!("lib/{}", interp_str)
-        } else {
-            interp_str
-        };
+        let interp_str =
+            str::from_utf8(&interp_bytes)?.trim_end_matches('\0').trim_start_matches('/');
+        let interp_name = interp_str.strip_prefix("lib/").unwrap_or(interp_str);
 
-        let interp_entry = bootfs_parser
-            .zero_copy_iter()
-            .filter_map(Result::ok)
-            .find(|e| e.name == interp_path || e.name.ends_with(&format!("/{}", interp_path)))
-            .ok_or_else(|| anyhow!("Interpreter '{}' not found in bootfs", interp_path))?;
+        let interp_entry = find_bootfs_entry(&bootfs_parser, &["lib", interp_name])
+            .ok_or_else(|| anyhow!("Interpreter 'lib/{interp_name}' not found in bootfs"))?;
 
         let interp_vmo = create_bootfs_file_vmo(
             &bootfs_vmo,
             interp_entry.offset,
             interp_entry.size,
             &vmex_resource,
+            &Name::new_lossy(interp_entry.name),
+            bootfs_entries.as_deref_mut(),
         )?;
-        interp_vmo.set_name(&Name::new_lossy(&interp_path))?;
-
-        if let Some(ref mut bootfs_entries) = bootfs_entries {
-            if let Ok(vmo_dup) = interp_vmo.duplicate_handle(Rights::SAME_RIGHTS) {
-                if !bootfs_entries.iter().any(|(off, _)| *off == interp_entry.offset as u32) {
-                    bootfs_entries.push((interp_entry.offset as u32, vmo_dup));
-                }
-            }
-        }
 
         let interp_headers = Elf64Headers::from_vmo(&interp_vmo)?;
         let loaded_interp = load_elf(&interp_vmo, &interp_headers, &child_vmar)?;
@@ -427,14 +504,6 @@ pub async fn launch_program(
             info: HandleInfo::new(HandleType::DefaultJob, 0),
         },
         StartupHandle {
-            handle: zbi_vmo.duplicate_handle(Rights::SAME_RIGHTS)?.into_handle().into(),
-            info: HandleInfo::new(HandleType::BootdataVmo, 0),
-        },
-        StartupHandle {
-            handle: bootfs_vmo.duplicate_handle(Rights::SAME_RIGHTS)?.into_handle().into(),
-            info: HandleInfo::new(HandleType::BootfsVmo, 0),
-        },
-        StartupHandle {
             handle: system_log.to_handle(Rights::SAME_RIGHTS)?,
             info: HandleInfo::new(HandleType::FileDescriptor, FDIO_FLAG_USE_FOR_STDIO),
         },
@@ -466,30 +535,23 @@ pub async fn launch_program(
 
     if let Some(ldsvc_server) = loader_server {
         writeln!(log, "Serving loader service for child process...")?;
-        let bootfs_parser =
-            BootfsParser::create_from_vmo(bootfs_vmo.duplicate_handle(Rights::SAME_RIGHTS)?)?;
         let server = UserbootLoaderServer::new(
             bootfs_parser,
             bootfs_vmo,
             vmex_resource,
-            bootfs_entries.is_some(),
+            bootfs_entries,
+            log,
         );
-        if let Ok(Ok(server)) =
-            ServerEnd::<Loader, Channel>::from_untyped(ldsvc_server).spawn(server).await
-        {
-            if let (Some(bootfs_entries), Some(mut server_entries)) =
-                (bootfs_entries, server.entries)
-            {
-                bootfs_entries.append(&mut server_entries);
-            }
-        }
+        let _ = ServerDispatcher::new(ServerEnd::<Loader, Channel>::from_untyped(ldsvc_server))
+            .run(server)
+            .await;
     }
 
     Ok(child_process)
 }
 
 /// Serves `fuchsia.ldsvc.Loader` for dynamic library loading during early boot.
-struct UserbootLoaderServer {
+struct UserbootLoaderServer<'a> {
     /// Bootfs parser used to locate dynamic libraries in the BOOTFS image.
     bootfs_parser: BootfsParser,
     /// VMO handle containing the BOOTFS filesystem image.
@@ -497,32 +559,36 @@ struct UserbootLoaderServer {
     /// System VMEX resource handle required to mark dynamic library VMOs as executable.
     vmex_resource: Resource,
     /// Optional vector for collected BOOTFS file VMO entries loaded via loader service.
-    entries: Option<Vec<(u32, Vmo)>>,
+    entries: Option<&'a mut Vec<(u32, Vmo)>>,
+    /// Log handle for reporting loader errors.
+    log: &'a mut Log,
     /// Configured subdirectory prefix for library resolution (e.g. "asan").
     subdir: String,
     /// Whether library lookup in fallback directory is excluded.
     exclusive: bool,
 }
 
-impl UserbootLoaderServer {
+impl<'a> UserbootLoaderServer<'a> {
     fn new(
         bootfs_parser: BootfsParser,
         bootfs_vmo: Vmo,
         vmex_resource: Resource,
-        collect_entries: bool,
+        entries: Option<&'a mut Vec<(u32, Vmo)>>,
+        log: &'a mut Log,
     ) -> Self {
         Self {
             bootfs_parser,
             bootfs_vmo,
             vmex_resource,
-            entries: collect_entries.then(Vec::new),
+            entries,
+            log,
             subdir: String::new(),
             exclusive: false,
         }
     }
 }
 
-impl LoaderServerHandler<Channel> for UserbootLoaderServer {
+impl LoaderServerHandler<Channel> for UserbootLoaderServer<'_> {
     /// Called when the loader client sends `Done`.
     async fn done(&mut self) {}
 
@@ -533,34 +599,30 @@ impl LoaderServerHandler<Channel> for UserbootLoaderServer {
         responder: Responder<LoadObject, Channel>,
     ) {
         let name = &request.payload().object_name;
-        let find_file = |path: &str| {
-            self.bootfs_parser
-                .zero_copy_iter()
-                .filter_map(Result::ok)
-                .find(|e| e.name == path || e.name.ends_with(&format!("/{path}")))
-        };
-
         let mut found = None;
         if !self.subdir.is_empty() {
-            found = find_file(&format!("lib/{}/{}", self.subdir, name));
+            found = find_bootfs_entry(&self.bootfs_parser, &["lib", &self.subdir, name]);
         }
         if found.is_none() && (!self.exclusive || self.subdir.is_empty()) {
-            found = find_file(&format!("lib/{name}"));
+            found = find_bootfs_entry(&self.bootfs_parser, &["lib", name]);
         }
 
         let lib_vmo = found.as_ref().and_then(|entry| {
-            create_bootfs_file_vmo(&self.bootfs_vmo, entry.offset, entry.size, &self.vmex_resource)
-                .ok()
-        });
-
-        if let (Some(entries), Some(entry), Some(vmo)) = (&mut self.entries, &found, &lib_vmo) {
-            let offset = entry.offset as u32;
-            if !entries.iter().any(|(off, _)| *off == offset) {
-                if let Ok(vmo_dup) = vmo.duplicate_handle(Rights::SAME_RIGHTS) {
-                    entries.push((offset, vmo_dup));
+            match create_bootfs_file_vmo(
+                &self.bootfs_vmo,
+                entry.offset,
+                entry.size,
+                &self.vmex_resource,
+                &Name::new_lossy(name),
+                self.entries.as_deref_mut(),
+            ) {
+                Ok(vmo) => Some(vmo),
+                Err(e) => {
+                    let _ = writeln!(self.log, "Failed to load object '{name}': {e:?}");
+                    None
                 }
             }
-        }
+        });
 
         let (rv, object) = lib_vmo.map_or((Err(Status::NOT_FOUND), None), |v| (Ok(()), Some(v)));
         let _ = responder.respond(LoaderLoadObjectResponse { rv, object }).await;
@@ -883,6 +945,7 @@ mod tests {
         let handles = create_test_system_handles().await;
         let elf_data = create_elf_bytes(None);
         let bootfs = create_bootfs_vmo(&[("bin/test_prog", &elf_data)]);
+        let bootfs_dup = bootfs.duplicate_handle(Rights::SAME_RIGHTS).unwrap();
         let mut log = Log::new();
 
         let mut bootfs_entries = Vec::new();
@@ -898,7 +961,16 @@ mod tests {
         .await;
 
         assert!(res.is_ok(), "expected launch_program to succeed, got: {:?}", res);
-        assert!(!bootfs_entries.is_empty());
+        assert_eq!(bootfs_entries.len(), 1);
+        let (offset, ref entry_vmo) = bootfs_entries[0];
+        let mut transferred_bytes = vec![0u8; elf_data.len()];
+        entry_vmo.read(&mut transferred_bytes, 0).unwrap();
+        assert_eq!(transferred_bytes, elf_data);
+
+        // Verify that the file range in the original BOOTFS VMO was decommitted by transfer_data.
+        let mut original_bytes = vec![0xffu8; elf_data.len()];
+        bootfs_dup.read(&mut original_bytes, offset as u64).unwrap();
+        assert!(original_bytes.iter().all(|&b| b == 0));
     }
 
     #[fuchsia::test]
@@ -975,5 +1047,37 @@ mod tests {
         assert_eq!(handles.vdso_vmo.get_name().unwrap(), "vdso/stable");
         assert_eq!(handles.zbi_vmo.get_name().unwrap(), "zbi");
         assert_eq!(handles.startup_handles.len(), 2);
+    }
+
+    #[fuchsia::test]
+    fn test_find_bootfs_entry() {
+        let bootfs = create_bootfs_vmo(&[
+            ("ld.so.1", b"root_file"),
+            ("lib/asan/libc.so", b"asan_libc"),
+            ("lib/ld.so.1", b"interp"),
+            ("my_lib/foo.so", b"wrong_prefix"),
+            ("zbi-test/lib/asan/libfoo.so", b"prefixed_asan"),
+            ("zbi-test/lib/libbar.so", b"prefixed_lib"),
+        ]);
+        let parser = BootfsParser::create_from_vmo(&bootfs).unwrap();
+
+        // Exact matches at root of bootfs.
+        let entry = find_bootfs_entry(&parser, &["lib", "ld.so.1"]).unwrap();
+        assert_eq!(entry.name, "lib/ld.so.1");
+
+        let entry = find_bootfs_entry(&parser, &["lib", "asan", "libc.so"]).unwrap();
+        assert_eq!(entry.name, "lib/asan/libc.so");
+
+        // Suffix matches under a prefix directory.
+        let entry = find_bootfs_entry(&parser, &["lib", "asan", "libfoo.so"]).unwrap();
+        assert_eq!(entry.name, "zbi-test/lib/asan/libfoo.so");
+
+        let entry = find_bootfs_entry(&parser, &["lib", "libbar.so"]).unwrap();
+        assert_eq!(entry.name, "zbi-test/lib/libbar.so");
+
+        // Non-matches: partial component prefix or missing directory component.
+        assert!(find_bootfs_entry(&parser, &["lib", "foo.so"]).is_none());
+        assert!(find_bootfs_entry(&parser, &["lib", "other", "libc.so"]).is_none());
+        assert!(find_bootfs_entry(&parser, &["other", "ld.so.1"]).is_none());
     }
 }

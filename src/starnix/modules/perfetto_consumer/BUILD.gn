@@ -15,7 +15,10 @@ rustc_library("perfetto_consumer") {
 
   sources = [
     "atrace.rs",
+    "blob_sink.rs",
     "lib.rs",
+    "packet_forwarder.rs",
+    "testing.rs",
   ]
 
   configs += [ "//src/starnix/build:kernel_library_config" ]
@@ -26,7 +29,10 @@ rustc_library("perfetto_consumer") {
     "hwasan",
   ]
 
+  visibility = [ "//src/starnix/modules/*" ]
+
   deps = [
+    "//sdk/rust/zx",
     "//src/lib/trace/rust:trace",
     "//src/lib/trace/rust:trace-observer",
     "//src/performance/lib/fxt/rust",
@@ -38,16 +44,21 @@ rustc_library("perfetto_consumer") {
     "//src/starnix/modules/perfetto_consumer/lib/perfetto:perfetto_trace_protos",
     "//src/starnix/modules/perfetto_consumer/lib/perfetto/trace_decoder",
     "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:argh",
     "//third_party/rust_crates:futures",
   ]
 
-  test_deps = [ "//src/lib/fuchsia" ]
+  test_deps = [
+    "//src/lib/fuchsia",
+    "//zircon/system/ulib/trace-test-utils",
+  ]
 }
 
 fuchsia_unittest_package("perfetto_consumer_tests") {
   package_name = "perfetto_consumer_tests"
   manifest = "meta/perfetto_consumer_tests.cml"
   deps = [ ":perfetto_consumer_test" ]
+  test_type = "starnix"
 }
 
 group("tests") {

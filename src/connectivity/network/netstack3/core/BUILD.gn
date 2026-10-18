@@ -131,8 +131,7 @@ rustc_library_with_features("netstack3-core") {
     },
 
     # A variant of the netstack3-core library that has additional
-    # instrumentation that is useful for debugging and testing, like recursive
-    # lock acquisition detection.
+    # instrumentation that is useful for debugging and testing.
     {
       target_name = "netstack3-core-instrumented"
       features = [ "instrumented" ]
@@ -273,6 +272,7 @@ fuchsia_unittest_package("netstack3-core-test-package") {
   deps = [ ":netstack3-core-instrumented_test" ]
 }
 
+# LINT.IfChange(loom)
 config("loom") {
   rustflags = [ "--cfg=loom" ]
 
@@ -282,9 +282,14 @@ config("loom") {
   configs = [ "//build/config:optimize_moderate" ]
 }
 
+# LINT.ThenChange(//src/connectivity/network/netstack3/core/BUILD.bazel:loom)
+
+# LINT.IfChange(benchmark)
 config("benchmark") {
   rustflags = [ "--cfg=benchmark" ]
 }
+
+# LINT.ThenChange(//src/connectivity/network/netstack3/core/BUILD.bazel:benchmark)
 
 config("no_lock_order") {
   rustflags = [ "--cfg=no_lock_order" ]

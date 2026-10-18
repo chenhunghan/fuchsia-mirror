@@ -90,6 +90,7 @@ impl Default for RawSpinlock {
 
 // SAFETY: RawSpinlock is safe to share and access across threads.
 unsafe impl Sync for RawSpinlock {}
+// SAFETY: RawSpinlock is safe to send across threads.
 unsafe impl Send for RawSpinlock {}
 
 zr::unsafe_pinned_drop_ffi!(RawSpinlock, cpp_spinlock_destroy);
@@ -124,13 +125,16 @@ impl Default for RawMonitoredSpinlock {
 
 // SAFETY: RawMonitoredSpinlock is safe to share and access across threads.
 unsafe impl Sync for RawMonitoredSpinlock {}
+// SAFETY: RawMonitoredSpinlock is safe to send across threads.
 unsafe impl Send for RawMonitoredSpinlock {}
 
 zr::unsafe_pinned_drop_ffi!(RawMonitoredSpinlock, cpp_monitored_spinlock_destroy);
 
 pub struct IrqSavePolicy;
 
-impl crate::LockPolicy<RawSpinlock> for IrqSavePolicy {
+// SAFETY: `cpp_spinlock_acquire_irqsave` and `cpp_spinlock_release_irqrestore` enforce mutual
+// exclusion on `RawSpinlock`.
+unsafe impl crate::LockPolicy<RawSpinlock> for IrqSavePolicy {
     type AcquireArgs = ();
     type GuardState = InterruptSavedState;
 
@@ -151,6 +155,7 @@ impl crate::LockPolicy<RawSpinlock> for IrqSavePolicy {
         entry: *mut LockEntryStorage,
         state: &mut Self::GuardState,
     ) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
         *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
@@ -166,7 +171,9 @@ impl crate::LockPolicy<RawSpinlock> for IrqSavePolicy {
 
 pub struct NoIrqSavePolicy;
 
-impl crate::LockPolicy<RawSpinlock> for NoIrqSavePolicy {
+// SAFETY: `cpp_spinlock_acquire_no_irqsave` and `cpp_spinlock_release_no_irqrestore` enforce
+// mutual exclusion on `RawSpinlock`.
+unsafe impl crate::LockPolicy<RawSpinlock> for NoIrqSavePolicy {
     type AcquireArgs = ();
     type GuardState = ();
 
@@ -187,6 +194,7 @@ impl crate::LockPolicy<RawSpinlock> for NoIrqSavePolicy {
         entry: *mut LockEntryStorage,
         state: &mut Self::GuardState,
     ) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
         *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
@@ -207,7 +215,9 @@ pub struct MonitoredSpinlockGuardState {
     pub tag: crate::SourceTag,
 }
 
-impl crate::LockPolicy<RawMonitoredSpinlock> for IrqSavePolicy {
+// SAFETY: `cpp_monitored_spinlock_acquire_irqsave` and `cpp_monitored_spinlock_release_irqrestore`
+// enforce mutual exclusion on `RawMonitoredSpinlock`.
+unsafe impl crate::LockPolicy<RawMonitoredSpinlock> for IrqSavePolicy {
     type AcquireArgs = crate::SourceTag;
     type GuardState = MonitoredSpinlockGuardState;
 
@@ -263,7 +273,10 @@ impl crate::LockPolicy<RawMonitoredSpinlock> for IrqSavePolicy {
     }
 }
 
-impl crate::LockPolicy<RawMonitoredSpinlock> for NoIrqSavePolicy {
+// SAFETY: `cpp_monitored_spinlock_acquire_no_irqsave` and
+// `cpp_monitored_spinlock_release_no_irqrestore` enforce mutual exclusion on
+// `RawMonitoredSpinlock`.
+unsafe impl crate::LockPolicy<RawMonitoredSpinlock> for NoIrqSavePolicy {
     type AcquireArgs = crate::SourceTag;
     type GuardState = crate::SourceTag;
 
@@ -315,7 +328,8 @@ impl crate::LockPolicy<RawMonitoredSpinlock> for NoIrqSavePolicy {
     }
 }
 
-impl crate::RawLock for RawSpinlock {
+// SAFETY: `RawSpinlock` is a physical kernel spinlock with a unique storage address.
+unsafe impl crate::RawLock for RawSpinlock {
     const LOCK_FLAGS: lockdep::LockFlags = lockdep::LOCK_FLAGS_IRQ_SAFE;
 
     type LockEntry = LockEntryStorage;
@@ -332,7 +346,8 @@ impl crate::RawLock for RawSpinlock {
     }
 }
 
-impl crate::RawLock for RawMonitoredSpinlock {
+// SAFETY: `RawMonitoredSpinlock` is a physical kernel spinlock with a unique storage address.
+unsafe impl crate::RawLock for RawMonitoredSpinlock {
     const LOCK_FLAGS: lockdep::LockFlags = lockdep::LOCK_FLAGS_IRQ_SAFE;
 
     type LockEntry = LockEntryStorage;

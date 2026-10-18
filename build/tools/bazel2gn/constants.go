@@ -68,24 +68,24 @@ var bazelRuleToGNTemplate = map[string]string{
 	"alias": "group",
 
 	// Go
-	"go_binary":    "go_binary",
-	"go_library":   "go_library",
-	"go_test":      "go_test",
-	"host_go_test": "go_test",
+	"go_binary":  "go_binary",
+	"go_library": "go_library",
+	"go_test":    "go_test",
 
 	// Python
 	"py_library": "python_library",
 	"py_binary":  "python_binary",
 
 	// Rust
-	"rust_binary":      "rustc_binary",
-	"rust_library":     "rustc_library",
-	"rustc_binary":     "rustc_binary",
-	"rustc_dylib":      "rustc_dylib",
-	"rustc_library":    "rustc_library",
-	"rustc_proc_macro": "rustc_macro",
-	"rustc_test":       "rustc_test",
-	"rust_proc_macro":  "rustc_macro",
+	"rust_binary":        "rustc_binary",
+	"rust_library":       "rustc_library",
+	"rustc_binary":       "rustc_binary",
+	"rustc_dylib":        "rustc_dylib",
+	"rustc_library":      "rustc_library",
+	"rustc_proc_macro":   "rustc_macro",
+	"rustc_test":         "rustc_test",
+	"rust_proc_macro":    "rustc_macro",
+	"rust_proto_library": "rust_proto_library",
 
 	// C++
 	"cc_library":            "static_library",
@@ -101,10 +101,12 @@ var bazelRuleToGNTemplate = map[string]string{
 
 	// FIDL
 	"fidl_library":        "fidl",
+	"measure_tape":        "measure_tape",
 	"zither_fidl_library": "fidl",
 
 	// Components
-	"expect_includes": "expect_includes",
+	"expect_includes":                    "expect_includes",
+	"fuchsia_structured_config_rust_lib": "fuchsia_structured_config_rust_lib",
 
 	// Host tools
 	"cc_binary_host_tool": "executable",
@@ -125,8 +127,10 @@ var bazelRuleToGNTemplate = map[string]string{
 	"idk_rustc_binary_host_tool": "sdk_rustc_binary_host_tool",
 
 	// Other
+	"compiled_action":     "compiled_action",
 	"fidlgentest_go_test": "fidlgentest_go_test",
 	"genrule":             "action",
+	"metrics_registry":    "metrics_registry",
 	"package":             "package",
 	"test_suite":          "group",
 	"stamp_group":         "group",
@@ -141,10 +145,24 @@ var bazelRuleToGNTemplate = map[string]string{
 	"fx_component_manifest": noGNEquivalent,
 	"fx_package":            noGNEquivalent,
 	"fx_packaged_binary":    noGNEquivalent,
+	"fx_runner_shard":       noGNEquivalent,
 	"fx_test":               noGNEquivalent,
 	"fx_test_component":     noGNEquivalent,
 	"fx_unittest_component": noGNEquivalent,
 	"fx_unittest_package":   noGNEquivalent,
+
+	// Bazel host test rules. Migrated host tests are only defined in Bazel and
+	// reach GN through `bazel_test_suite()`, so they should never get a GN twin.
+	"host_cc_test":    noGNEquivalent,
+	"host_go_test":    noGNEquivalent,
+	"host_py_test":    noGNEquivalent,
+	"host_rustc_test": noGNEquivalent,
+	"host_shac_test":  noGNEquivalent,
+	"host_test":       noGNEquivalent,
+
+	// Runtime data for Bazel host tests, so it's only consumed by the rules
+	// above.
+	"host_test_data_files": noGNEquivalent,
 }
 
 // attrsToOmitByRules stores a mapping from known Bazel rules to attributes to
@@ -186,19 +204,27 @@ var attrsToOmitByRules = map[string]map[string]bool{
 	"fx_cc_library":            {"includes": true},
 	"idk_cc_source_library":    {"includes": true},
 	"idk_cc_shared_library_zx": {"version_script": true},
+	// In Bazel, `include_deps` on `expect_includes` lists transitive
+	// `.shard.cml` file labels needed in the Bazel action sandbox. GN runs `cmc`
+	// outside a sandbox and does not accept file labels in `deps`.
+	"expect_includes": {"include_deps": true},
 	// We do not need to include the "stamp" destination in GN because it is implicitly created by
 	// the rule.
 	"stamp_group": {"stamp": true},
 	// The Bazel test target attribute `size` is not supported in GN.
-	"go_test":      {"size": true},
-	"host_go_test": {"size": true},
-	"rustc_test":   {"size": true},
+	"go_test":    {"size": true},
+	"rustc_test": {"size": true},
+	// `proto_deps` lists imported .proto files so the Bazel code generator can run
+	// sandboxed. The GN rust_proto_library() template discovers imports through a
+	// depfile instead.
+	"rust_proto_library": {"proto_deps": true},
 }
 
 // Common Bazel attributes that use different names in GN.
 var commonAttrMap = map[string]string{
-	"srcs": "sources",
-	"hdrs": "public",
+	"aspect_hints": "deps",
+	"srcs":         "sources",
+	"hdrs":         "public",
 }
 
 var aliasAttrMap = map[string]string{
@@ -258,7 +284,15 @@ var rustCommonAttrMap = map[string]string{
 // rustBinAttrMap maps from attribute name in Bazel Rust binary rules to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
 var rustBinAttrMap = mustMergeMaps(rustCommonAttrMap, map[string]string{
-	"crate_name": "output_name",
+	"binary_name": "output_name",
+	"crate_name":  "output_name",
+})
+
+// ffxPluginAttrMap maps from attribute names in Bazel `ffx_plugin()` to GN parameter names.
+// This map only includes attributes that have different names in Bazel and GN.
+var ffxPluginAttrMap = mustMergeMaps(rustCommonAttrMap, map[string]string{
+	"args_srcs":       "args_sources",
+	"args_crate_root": "args_source_root",
 })
 
 // fidlAttrMap maps from attribute names in Bazel FIDL rules to GN parameter names.
@@ -321,6 +355,16 @@ var genruleAttrMap = map[string]string{
 	"outs": "outputs",
 }
 
+// compiledActionAttrMap maps from attribute names in Bazel `compiled_action()`
+// to GN `compiled_action()` parameter names.
+//
+// `tool` and `args` keep their names, but `args` is converted by
+// `compiledActionArgsToGN()`, and `outs` are placed in `$target_gen_dir` by
+// `compiledActionOutsTransformer()`.
+var compiledActionAttrMap = map[string]string{
+	"outs": "outputs",
+}
+
 // idkCcAttrMap maps from attribute name in Bazel IDK C++ rules to GN parameter names.
 var idkCcAttrMap = mustMergeMaps(idkAttrMap, ccLibAttrMap)
 
@@ -332,6 +376,15 @@ var idkFIDLAttrMap = mustMergeMaps(idkAttrMap, fidlAttrMap)
 
 // idkRustBinAttrMap maps from attribute name in Bazel IDK Rust binary rules to GN parameter names.
 var idkRustBinAttrMap = mustMergeMaps(idkAttrMap, rustBinAttrMap)
+
+// structuredConfigRustLibAttrMap maps from attribute names in Bazel
+// `fuchsia_structured_config_rust_lib()` to GN parameter names.
+// This map only includes attributes that have different names in Bazel and GN.
+var structuredConfigRustLibAttrMap = map[string]string{
+	// `name` is the target name in Bazel, so the crate name uses a different
+	// attribute.
+	"crate_name": "name",
+}
 
 // pythonBinAttrMap maps from attribute name in Bazel Python binary rules to GN parameter names.
 var pythonBinAttrMap = map[string]string{
@@ -383,12 +436,20 @@ var attrMapsByRules = map[string]map[string]string{
 	"idk_go_binary_host_tool":    idkAttrMap,
 	"idk_rustc_binary_host_tool": idkRustBinAttrMap,
 
+	// Components
+	"fuchsia_structured_config_rust_lib": structuredConfigRustLibAttrMap,
+
 	// Tools
 	"ffx_tool":           rustBinAttrMap,
+	"ffx_plugin":         ffxPluginAttrMap,
 	"install_host_tools": installHostToolAttrMap,
 
 	// Others
-	"genrule": genruleAttrMap,
+	"compiled_action": compiledActionAttrMap,
+	"genrule":         genruleAttrMap,
+	"metrics_registry": {
+		"global_registry": "global",
+	},
 	"test_suite": {
 		"tests": "deps",
 	},
@@ -509,7 +570,6 @@ var goThirdPartyAggregateDeps = []string{
 	"//third_party/golibs:golang.org/x/crypto",
 	"//third_party/golibs:gonum.org/v1/gonum",
 	"//third_party/golibs:google.golang.org/protobuf",
-	"//third_party/golibs:gvisor.dev/gvisor",
 }
 
 // mustMergeMaps merges two input maps and return a new one with keys and values from

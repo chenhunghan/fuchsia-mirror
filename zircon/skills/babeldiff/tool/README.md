@@ -42,6 +42,13 @@ compiled in.
 babeldiff git HEAD
 babeldiff git origin/main..my-branch
 
+# A Fuchsia Gerrit change (CL number, patchset, fxr/ prefix, or review URL).
+# Downloads the patch from fuchsia-review.googlesource.com with full context.
+babeldiff cl 1885120
+babeldiff cl 1885120/5
+babeldiff cl fxr/1885120
+babeldiff --cl 1885120
+
 # A patch file (git format-patch, git show, or git diff output), or stdin.
 babeldiff patch change.patch
 git show HEAD | babeldiff patch
@@ -58,6 +65,7 @@ Useful options:
 
 | Option | Effect |
 | --- | --- |
+| `--cl <CL>`, `--review`, `--gerrit` | Download and compare a Fuchsia Gerrit change (e.g. `1885120`, `1885120/5`, `fxr/1885120`, or URL). |
 | `--format html -o report.html` | Write a self-contained HTML page for reviewing in a browser (see below). |
 | `--layout stacked` | Print each C++ unit above the Rust it aligns with, untruncated. Better for agents and narrow terminals. |
 | `--format json` | Machine-readable findings for agents (see below). |
@@ -192,7 +200,7 @@ no pairing, and they are listed at the end of the report, under
 | `unsafe-safety` | Every `unsafe` block and `unsafe impl` has a `// SAFETY:` comment, and every `unsafe fn` a `# Safety` doc section. Blocks are reported once per function. |
 | `shim-logic` | A `rust_*` shim or `cpp_*` helper only forwards. Branches, loops and `match` arms are reported unless they only convert a result, a status, or a null pointer or empty optional. |
 | `file-placement` | Each C++ file becomes one Rust file named after it (`foo.cc` to `foo.rs`, `dir_foo.rs` for a flattened directory, or a part named `foo_*.rs`). A C++ file split across several Rust files, and functions that landed in a file not named after their C++ file, are issues; a Rust file that collects three or more C++ files is a note. Test files and `_ffi` companions don't count. The report also maps each C++ file to the Rust files its functions went to, under `File placement`. |
-| `provenance-comment` | Comments that say where code was ported from ("Ported from foo.cc", "(`foo.cc:12-34`)", "Mirrors the C++ version"), reported once per file. |
+| `provenance-comment` | Comments that say where code was ported from ("Ported from foo.cc", "(`foo.cc:12-34`)", "Mirrors the C++ version"), reported once per file. Consecutive comment lines are matched as one comment, so wording wrapped across lines is found. `// SAFETY:` comments, keep-in-sync comments, and TODO or "must match" paragraphs are exempt. |
 | `invented-lifetime` | A reference made from a raw pointer that was taken from a place still in scope (`let p = buf.as_mut_ptr(); ... &mut *p`), or a `&mut *self.field.get()` borrow held across a `self.method()` call or another `self.field.get()` access and used again afterwards, whose lifetime the compiler can't check. |
 | `unsafe-density` | A note on a file whose changed functions have ten or more `unsafe` blocks between them. |
 

@@ -19,6 +19,7 @@ import unittest.mock as mock
 
 import agents.agents as agents_lib
 import async_utils.command as command
+import package_server
 from parameterized import parameterized
 
 import args
@@ -193,7 +194,6 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
 
         self._mock_has_active_device(True)
         self._mock_wait_for_repository_registration(True)
-        self._mock_uuid4()
 
         # Provide hard-coded predictable test-list.json content rather than
         # actually running the generate_test_list program.
@@ -280,13 +280,6 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         patch = mock.patch("main.AsyncMain._has_active_device", m)
         patch.start()
         self.addCleanup(patch.stop)
-
-    def _mock_uuid4(self, value: str = "test-uuid") -> mock.MagicMock:
-        m = mock.MagicMock(return_value=value)
-        patch = mock.patch("main.uuid.uuid4", m)
-        patch.start()
-        self.addCleanup(patch.stop)
-        return m
 
     def _mock_wait_for_repository_registration(self, value: bool) -> None:
         m = mock.AsyncMock(return_value=value)
@@ -625,7 +618,11 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                 (
                     event.TestSuiteStatus.ABORTED,
                     "Test suite aborted due to user interrupt.",
-                )
+                ),
+                (
+                    event.TestSuiteStatus.SKIPPED,
+                    "Skipping optional end to end test. Pass --e2e to execute this test.",
+                ),
             },
         )
 
@@ -843,6 +840,9 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         )
 
         if expect_to_serve:
+            expected_repo_name = package_server.ephemeral_repository_name(
+                "fxtest", self.out_dir
+            )
             self.assertIsSubset(
                 {
                     (
@@ -853,7 +853,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                         "-l",
                         "0",
                         "--name",
-                        "fxtest-temp-test-uuid",
+                        expected_repo_name,
                     ),
                     (
                         "fx",
@@ -864,7 +864,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                         "repository",
                         "deregister",
                         "-r",
-                        "fxtest-temp-test-uuid",
+                        expected_repo_name,
                     ),
                 },
                 call_prefixes,
@@ -875,6 +875,48 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(
                 ("fx", "--dir", self.out_dir, "serve"), call_prefixes
             )
+
+    async def test_needs_package_server_false_skips_package_server(
+        self,
+    ) -> None:
+        """Test that an E2E test with needs_package_server=False in tests.json
+        does not start a temporary package server and succeeds even with
+        --no-allow-temporary-package-server."""
+        tests_json_path = os.path.join(self.out_dir, "tests.json")
+        with open(tests_json_path) as f:
+            tests_data = json.load(f)
+
+        for entry in tests_data:
+            if "example_e2e_test" in entry["test"]["name"]:
+                entry["needs_package_server"] = False
+
+        with open(tests_json_path, "w") as f:
+            json.dump(tests_data, f)
+
+        command_mock = self._mock_run_command(0)
+        subprocess_mock = self._mock_subprocess_call(0)
+        self._mock_has_package_server_connected_to_device(False)
+        self._mock_has_tests_in_base([])
+
+        ret = await main.async_main_wrapper(
+            args.parse_args(
+                [
+                    "--simple",
+                    "--no-allow-temporary-package-server",
+                    "--only-e2e",
+                ]
+            )
+        )
+        self.assertEqual(ret, 0)
+
+        call_prefixes = self._make_call_args_prefix_set(
+            command_mock.call_args_list
+        )
+        call_prefixes.update(
+            self._make_call_args_prefix_set(subprocess_mock.call_args_list)
+        )
+
+        self.assertNotIn(("fx", "--dir", self.out_dir, "serve"), call_prefixes)
 
     async def test_missing_device_starts_emulator(self) -> None:
         """Test that an emulator is started and stopped when no device is connected."""
@@ -1394,7 +1436,9 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                     "-l",
                     "0",
                     "--name",
-                    "fxtest-temp-test-uuid",
+                    package_server.ephemeral_repository_name(
+                        "fxtest", self.out_dir
+                    ),
                 )
             },
             call_prefixes,
@@ -1441,7 +1485,9 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                     "-l",
                     "0",
                     "--name",
-                    "fxtest-temp-test-uuid",
+                    package_server.ephemeral_repository_name(
+                        "fxtest", self.out_dir
+                    ),
                 )
             },
             call_prefixes,
@@ -2262,13 +2308,13 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         self._mock_has_tests_in_base([])
 
         ret = await main.async_main_wrapper(
-            args.parse_args(["--simple", "--no-build", "--fail"])
+            args.parse_args(
+                ["--simple", "--no-build", "--fail", "--parallel", "2"]
+            )
         )
 
-        # bar_test and baz_test are not hermetic, so cannot run at the same time.
-        # One of them will run before the other, which means --fail
-        # prevents one of them from starting, and we expect to see
-        # only bar_test (since baz_test is defined later in the file)
+        # With --parallel=2, foo-test and bar_test run first while baz_test
+        # is queued behind them, so --fail prevents baz_test from starting.
         call_prefixes = self._make_call_args_prefix_set(
             command_mock.call_args_list
         )
@@ -2322,7 +2368,9 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
 
         recorder = event.EventRecorder()
         ret = await main.async_main_wrapper(
-            args.parse_args(["--simple", "--no-build", "--fail"]),
+            args.parse_args(
+                ["--simple", "--no-build", "--fail", "--parallel", "2"]
+            ),
             recorder=recorder,
         )
 
@@ -2539,8 +2587,8 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         if existing_package_server:
             self.assertEqual(command_mock.call_count, 2)
         else:
-            # has to run two extra commands: "fx serve" and "fx ffx target repository deregister"
-            self.assertEqual(command_mock.call_count, 4)
+            # has to run three extra commands: pre-start "deregister", "fx serve", and teardown "deregister"
+            self.assertEqual(command_mock.call_count, 5)
 
         events = [
             e.payload.enumerate_test_cases
@@ -2582,7 +2630,9 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
                         "-l",
                         "0",
                         "--name",
-                        "fxtest-temp-test-uuid",
+                        package_server.ephemeral_repository_name(
+                            "fxtest", self.out_dir
+                        ),
                     )
                 },
                 call_prefixes,
@@ -4256,6 +4306,156 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(json.JSONDecodeError):
             main._is_fuchsia_repo_registered("not json")
 
+        # Filtering by a specific repo_name
+        data_multiple = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {"name": "stale-repo", "aliases": ["fuchsia.com"]},
+                        {"name": "fxtest-abc123", "aliases": ["fuchsia.com"]},
+                    ]
+                }
+            }
+        )
+        self.assertTrue(
+            main._is_fuchsia_repo_registered(
+                data_multiple, repo_name="fxtest-abc123"
+            )
+        )
+        self.assertFalse(
+            main._is_fuchsia_repo_registered(
+                data_multiple, repo_name="fxtest-other"
+            )
+        )
+
+        # Filtering by repo_name when target presents fuchsia-pkg:// prefix
+        data_pkg_repo = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {
+                            "name": "fuchsia-pkg://fxtest-abc123",
+                            "aliases": ["fuchsia.com"],
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertTrue(
+            main._is_fuchsia_repo_registered(
+                data_pkg_repo, repo_name="fxtest-abc123"
+            )
+        )
+
+    async def test_wait_for_repository_registration_checks_expected_repo_name(
+        self,
+    ) -> None:
+        """_wait_for_repository_registration ignores stale repos and waits for the expected repo_name."""
+        app = main.AsyncMain.__new__(main.AsyncMain)
+        app._wait_for_repository_registration = TestMainIntegration.ORIGINAL_WAIT_FOR_REPOSITORY_REGISTRATION.__get__(
+            app, main.AsyncMain
+        )
+        app._recorder = mock.MagicMock()
+        exec_env = mock.MagicMock()
+        exec_env.out_dir = self.out_dir
+        exec_env.fx_cmd_line.side_effect = lambda *args: ["fx"] + list(args)
+        app._exec_env = exec_env
+
+        expected_repo = package_server.ephemeral_repository_name(
+            "fxtest", self.out_dir
+        )
+        stale_output = json.dumps(
+            {
+                "ok": {
+                    "data": [{"name": "stale-repo", "aliases": ["fuchsia.com"]}]
+                }
+            }
+        )
+        registered_output = json.dumps(
+            {
+                "ok": {
+                    "data": [
+                        {"name": "stale-repo", "aliases": ["fuchsia.com"]},
+                        {"name": expected_repo, "aliases": ["fuchsia.com"]},
+                    ]
+                }
+            }
+        )
+
+        with (
+            mock.patch("execution.run_command") as mock_run,
+            mock.patch("asyncio.sleep", new_callable=mock.AsyncMock),
+        ):
+            mock_run.side_effect = [
+                mock.MagicMock(return_code=0, stdout=stale_output),
+                mock.MagicMock(return_code=0, stdout=registered_output),
+            ]
+            self.assertTrue(await app._wait_for_repository_registration())
+            self.assertEqual(mock_run.call_count, 2)
+
+    async def test_start_package_server_deregisters_stale_repo_before_waiting(
+        self,
+    ) -> None:
+        """_start_package_server deregisters any stale registration before _wait_for_repository_registration polls."""
+        app = main.AsyncMain.__new__(main.AsyncMain)
+        app._wait_for_repository_registration = TestMainIntegration.ORIGINAL_WAIT_FOR_REPOSITORY_REGISTRATION.__get__(
+            app, main.AsyncMain
+        )
+        app._recorder = mock.MagicMock()
+        exec_env = mock.MagicMock()
+        exec_env.out_dir = self.out_dir
+        exec_env.fx_cmd_line.side_effect = lambda *args: ["fx"] + list(args)
+        app._exec_env = exec_env
+
+        expected_repo = package_server.ephemeral_repository_name(
+            "fxtest", self.out_dir
+        )
+        # Simulate a stale registration for expected_repo already on the target
+        # before _start_package_server runs.
+        repo_registered = True
+        events_order: list[str] = []
+
+        async def fake_run_command(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> mock.MagicMock:
+            nonlocal repo_registered
+            if "deregister" in args:
+                events_order.append("deregister")
+                repo_registered = False
+                return mock.MagicMock(return_code=0, stdout="")
+            if "serve" in args:
+                events_order.append("serve_start")
+                abort_signal = kwargs.get("abort_signal")
+                repo_registered = True
+                if abort_signal is not None:
+                    await abort_signal.wait()
+                return mock.MagicMock(return_code=0, stdout="")
+            if "repository" in args and "list" in args:
+                events_order.append("list")
+                data = (
+                    [{"name": expected_repo, "aliases": ["fuchsia.com"]}]
+                    if repo_registered
+                    else []
+                )
+                return mock.MagicMock(
+                    return_code=0, stdout=json.dumps({"ok": {"data": data}})
+                )
+            return mock.MagicMock(return_code=0, stdout="")
+
+        with (
+            mock.patch("execution.run_command", side_effect=fake_run_command),
+            mock.patch("asyncio.sleep", new_callable=mock.AsyncMock),
+        ):
+            task, cancel_event = app._start_package_server()
+            self.assertTrue(await app._wait_for_repository_registration())
+            cancel_event.set()
+            await task
+
+        self.assertEqual(
+            events_order,
+            ["deregister", "serve_start", "list", "deregister"],
+        )
+
     async def test_no_preflight_skips_device_discovery_and_binding(
         self,
     ) -> None:
@@ -4368,11 +4568,13 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_test_1 = mock.MagicMock(spec=test_list_file.Test)
         mock_test_1.info.is_hermetic.return_value = False
+        mock_test_1.is_host_test.return_value = False
         mock_test_1.needs_device.return_value = False
         mock_test_1.name.return_value = "non_hermetic_1"
 
         mock_test_2 = mock.MagicMock(spec=test_list_file.Test)
         mock_test_2.info.is_hermetic.return_value = False
+        mock_test_2.is_host_test.return_value = False
         mock_test_2.needs_device.return_value = False
         mock_test_2.name.return_value = "non_hermetic_2"
 
@@ -4501,6 +4703,7 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
 
         mock_test = mock.MagicMock(spec=test_list_file.Test)
         mock_test.info.is_hermetic.return_value = True
+        mock_test.is_host_test.return_value = False
         mock_test.needs_device.return_value = False
         mock_test.name.return_value = "duration_test"
 
@@ -4538,3 +4741,157 @@ class TestMainIntegration(unittest.IsolatedAsyncioTestCase):
         test_result = app._summary.tests[0]
         self.assertIsNotNone(test_result.duration_seconds)
         self.assertGreaterEqual(test_result.duration_seconds, 0.01)
+
+    @mock.patch("args.termout.is_valid", return_value=False)
+    async def test_termination_signal_does_not_block_on_arbitrary_sleep(
+        self,
+        _mock_termout: mock.Mock,
+    ) -> None:
+        """Test that an exit request before test execution terminates promptly without sleeping 3600s."""
+        flags = args.parse_args(["--no-build", "--simple"])
+        recorder = event.EventRecorder()
+        end_event = asyncio.Event()
+        term_event = asyncio.Event()
+        app = main.AsyncMain(
+            flags,
+            [],
+            recorder,
+            end_event,
+            term_event,
+        )
+        # Pre-set the end execution request to simulate racing with interrupt
+        end_event.set()
+
+        # Mock out prerequisites prior to the test execution check in _main_impl
+        app._init = mock.AsyncMock(return_value=mock.MagicMock())
+        app._do_build = mock.AsyncMock(return_value=True)
+        app._list_runtime_deps = mock.MagicMock()
+        app._test_selections = mock.AsyncMock(return_value=mock.MagicMock())
+        app._start_package_server = mock.Mock()
+        app._teardown_resources = mock.AsyncMock()
+
+        # If it blocks on asyncio.sleep(3600), wait_for will raise TimeoutError
+        ret = await asyncio.wait_for(app._main_impl(), timeout=0.5)
+        self.assertEqual(ret, 1)
+        self.assertTrue(term_event.is_set())
+
+    async def test_host_tests_emit_is_host_and_run_in_parallel(self) -> None:
+        """Test that host tests emit is_host=True in test_suite_started and can run in parallel."""
+        bar_started = asyncio.Event()
+        baz_started = asyncio.Event()
+
+        async def command_handler(
+            *args: typing.Any, **kwargs: typing.Any
+        ) -> mock.MagicMock:
+            command_str = " ".join(str(a) for a in args)
+            if "bar_test" in command_str:
+                bar_started.set()
+                await baz_started.wait()
+            elif "baz_test" in command_str:
+                baz_started.set()
+                await bar_started.wait()
+            return mock.MagicMock(
+                return_code=0,
+                stdout="",
+                stderr="",
+                was_timeout=False,
+            )
+
+        command_mock = self._mock_run_command(0)
+        command_mock.side_effect = command_handler
+        self._mock_has_package_server_connected_to_device(True)
+        self._mock_has_tests_in_base([])
+
+        recorder = event.EventRecorder()
+        ret = await main.async_main_wrapper(
+            args.parse_args(["--simple", "--no-build", "--host"]),
+            recorder=recorder,
+        )
+        self.assertEqual(ret, 0)
+
+        started_suites = {
+            payload_event.name: (payload_event.hermetic, payload_event.is_host)
+            async for e in recorder.iter()
+            if (payload := e.payload) is not None
+            and (payload_event := payload.test_suite_started) is not None
+        }
+        self.assertEqual(started_suites.get("host_x64/bar_test"), (False, True))
+        self.assertEqual(started_suites.get("host_x64/baz_test"), (False, True))
+
+    async def test_run_all_tests_emits_is_host_flag(
+        self,
+    ) -> None:
+        """Test that _run_all_tests passes is_host correctly to emit_test_suite_started."""
+        flags = args.parse_args(["--parallel", "1"])
+        recorder = event.EventRecorder()
+        recorder.emit_init()
+        app = main.AsyncMain(
+            flags,
+            [],
+            recorder,
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        mock_host_test = mock.MagicMock(spec=test_list_file.Test)
+        mock_host_test.info.is_hermetic.return_value = False
+        mock_host_test.is_host_test.return_value = True
+        mock_host_test.needs_device.return_value = False
+        mock_host_test.name.return_value = "host_x64/my_host_test"
+
+        mock_device_test = mock.MagicMock(spec=test_list_file.Test)
+        mock_device_test.info.is_hermetic.return_value = False
+        mock_device_test.is_host_test.return_value = False
+        mock_device_test.needs_device.return_value = True
+        mock_device_test.name.return_value = (
+            "fuchsia-pkg://fuchsia.com/pkg#meta/non_hermetic.cm"
+        )
+
+        test_selections = selection_types.TestSelections(
+            selected=[mock_host_test, mock_device_test],
+            selected_but_not_run=[],
+            best_score={},
+            group_matches=[],
+            fuzzy_distance_threshold=0,
+        )
+
+        exec_env = mock.MagicMock()
+
+        with (
+            mock.patch(
+                "execution.TestExecution.run",
+                new_callable=mock.AsyncMock,
+                return_value=mock.MagicMock(return_code=0),
+            ),
+            mock.patch.object(
+                execution.TestExecution,
+                "command_line",
+                return_value=["fake_cmd"],
+            ),
+        ):
+            app._exec_env = exec_env
+            success = await app._run_all_tests(test_selections)
+            recorder.emit_end()
+
+        self.assertTrue(success)
+        started_events = [
+            e.payload.test_suite_started
+            async for e in recorder.iter()
+            if e.payload is not None
+            and e.payload.test_suite_started is not None
+        ]
+        self.assertEqual(
+            started_events,
+            [
+                event.TestSuiteStartedPayload(
+                    name="fuchsia-pkg://fuchsia.com/pkg#meta/non_hermetic.cm",
+                    hermetic=False,
+                    is_host=False,
+                ),
+                event.TestSuiteStartedPayload(
+                    name="host_x64/my_host_test",
+                    hermetic=False,
+                    is_host=True,
+                ),
+            ],
+        )

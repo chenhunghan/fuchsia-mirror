@@ -4,7 +4,8 @@
 
 use crate::reader::{BlockService, read_aligned_range};
 use crate::{
-    ENCRYPTION_KEY_SIZE, Extents, MappingCommand, NullPageRequest, PageRequest, RawMappingCommand,
+    BLOCK_SIZE, ENCRYPTION_KEY_SIZE, Extents, MappingCommand, NullPageRequest, PageRequest,
+    RawMappingCommand,
 };
 use anyhow::{Error, anyhow, bail};
 use blob_metadata::{BlobFormat, BlobMetadata, MerkleLeaves};
@@ -18,14 +19,19 @@ use std::cmp::min;
 use std::collections::hash_map::{Entry, HashMap};
 use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
+use storage_profile::{FileMessage, Message as _};
 use vmo_fifo::Message;
 use zx::sys::zx_page_request_command_t::ZX_PAGER_VMO_READ;
 
-/// Target readahead and Merkle verification size (128 KiB), matching Fxfs.
+/// Target readahead size (128 KiB), matching Fxfs.
 ///
 /// Uncompressed and encrypted files always use this size. For compressed files, the effective size
 /// is adjusted so that each readahead window aligns to a whole number of compression chunks.
 pub const TARGET_READ_AHEAD_SIZE: u64 = 128 * 1024;
+
+/// Default Merkle verification alignment (32 KiB) for uncompressed blobs, matching standard
+/// compressed blob chunk sizes.
+pub const DEFAULT_VERIFICATION_ALIGNMENT: u64 = 32 * 1024;
 
 /// Calculates the readahead size for a given `compression_chunk_size`, rounding down
 /// `target_read_ahead_size` to a multiple of `compression_chunk_size`, or returning
@@ -133,8 +139,7 @@ impl File {
         }
     }
 
-    /// Returns the read-ahead window size in bytes for this file, which also serves as the
-    /// fixed read size for Merkle verification of blobs.
+    /// Returns the read-ahead window size in bytes for this file.
     pub fn read_ahead_size(&self) -> u64 {
         match &self.transform {
             Transform::Compressed(info) => {
@@ -144,11 +149,29 @@ impl File {
         }
     }
 
+    /// Returns the Merkle verification alignment in bytes for this file (`chunk_size` for
+    /// compressed files, or [`DEFAULT_VERIFICATION_ALIGNMENT`] for uncompressed/encrypted files).
+    pub fn verification_alignment(&self) -> u64 {
+        match &self.transform {
+            Transform::Compressed(info) => info.chunk_size(),
+            Transform::None | Transform::Encrypted(_) => DEFAULT_VERIFICATION_ALIGNMENT,
+        }
+    }
+
     /// Streams and decodes the uncompressed range requested by `page_request`, applying readahead.
     pub fn read_range(
         self: &Arc<Self>,
         service: &(impl BlockService + ?Sized),
+        page_request: impl PageRequest,
+    ) {
+        self.read_range_with_recording(service, page_request, |_| {});
+    }
+
+    fn read_range_with_recording(
+        self: &Arc<Self>,
+        service: &(impl BlockService + ?Sized),
         mut page_request: impl PageRequest,
+        record_offset: impl Fn(u64),
     ) {
         let page_size = zx::system_get_page_size() as u64;
         let original_range = page_request.range();
@@ -168,8 +191,13 @@ impl File {
                 original_range.end.next_multiple_of(read_ahead_size),
                 page_aligned_size,
             );
-        if page_request.prepare(read_range.clone(), read_ahead_size as usize).is_err() {
+        if page_request.prepare(read_range.clone(), self.verification_alignment() as usize).is_err()
+        {
             return;
+        }
+
+        for offset in (read_range.start..read_range.end).step_by(read_ahead_size as usize) {
+            record_offset(offset);
         }
 
         match &self.transform {
@@ -181,7 +209,9 @@ impl File {
                     let buffer = match res {
                         Ok(buffer) => buffer,
                         Err(error) => {
-                            log::error!(error:?; "Failed to read blocks for mapped file");
+                            if !is_cancelled(&error) {
+                                log::error!(error:?; "Failed to read blocks for mapped file");
+                            }
                             return ControlFlow::Break(());
                         }
                     };
@@ -214,10 +244,12 @@ impl File {
                     let buffer = match res {
                         Ok(buffer) => buffer,
                         Err(error) => {
-                            log::error!(
-                                error:?;
-                                "Failed to read blocks for compressed mapped file"
-                            );
+                            if !is_cancelled(&error) {
+                                log::error!(
+                                    error:?;
+                                    "Failed to read blocks for compressed mapped file"
+                                );
+                            }
                             return ControlFlow::Break(());
                         }
                     };
@@ -236,7 +268,12 @@ impl File {
                     let buffer = match res {
                         Ok(buffer) => buffer,
                         Err(error) => {
-                            log::error!(error:?; "Failed to read blocks for encrypted mapped file");
+                            if !is_cancelled(&error) {
+                                log::error!(
+                                    error:?;
+                                    "Failed to read blocks for encrypted mapped file"
+                                );
+                            }
                             return ControlFlow::Break(());
                         }
                     };
@@ -351,13 +388,69 @@ impl<S: ?Sized, D: DeliveryHandler> Drop for PagerThread<S, D> {
     }
 }
 
+// Upper bound on the profile VMO size to prevent unbounded memory growth if a recording runs for a
+// long time, since entries are appended without deduplication.
+const MAX_PROFILE_VMO_SIZE: u64 = 64 * 1024 * 1024;
+
+struct ProfileRecording {
+    vmo: zx::Vmo,
+    vmo_offset: u64,
+    buffer: Vec<u8>,
+}
+
+impl ProfileRecording {
+    fn new() -> Result<Self, zx::Status> {
+        let vmo = zx::Vmo::create_with_opts(zx::VmoOptions::RESIZABLE, 0)?;
+        Ok(Self { vmo, vmo_offset: 0, buffer: Vec::with_capacity(BLOCK_SIZE as usize) })
+    }
+
+    fn record(&mut self, key: u64, offset: u64) {
+        const MSG_SIZE: usize = std::mem::size_of::<FileMessage>();
+        // `FileMessage::decode_from_vmo` decodes in `BLOCK_SIZE` chunks and expects messages not
+        // to cross `BLOCK_SIZE` boundaries.
+        const { assert!((BLOCK_SIZE as usize).is_multiple_of(MSG_SIZE)) };
+
+        if self.vmo_offset >= MAX_PROFILE_VMO_SIZE {
+            return;
+        }
+        let mut buf = [0u8; MSG_SIZE];
+        FileMessage { id: key, offset }.encode_to((&mut buf[..]).into());
+        self.buffer.extend_from_slice(&buf);
+        if self.buffer.len() == BLOCK_SIZE as usize
+            && let Err(error) = self.flush()
+        {
+            log::warn!(error:?; "Failed to flush profile buffer to VMO");
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), zx::Status> {
+        let new_size = self.vmo_offset + BLOCK_SIZE;
+        let res = self.vmo.set_size(new_size).and_then(|()| {
+            self.vmo.write(&self.buffer, self.vmo_offset)?;
+            self.vmo_offset = new_size;
+            Ok(())
+        });
+        self.buffer.clear();
+        res
+    }
+
+    fn finish(mut self) -> Result<zx::Vmo, zx::Status> {
+        if !self.buffer.is_empty() {
+            self.flush()?;
+        }
+        Ok(self.vmo)
+    }
+}
+
 /// A thread-safe registry of active [`File`] instances indexed by their Zircon pager port key.
 pub struct Files<S: ?Sized, D: DeliveryHandler> {
     service: Arc<S>,
     delivery_handler: Arc<D>,
     port: zx::Port,
     map: Mutex<HashMap<u64, FileEntry<D::Request>>>,
-    deferred_page_requests: Mutex<Vec<(Arc<File>, D::Request)>>,
+    deferred_page_requests: Mutex<Vec<(u64, Arc<File>, D::Request)>>,
+    // Active profile recording, if one is in progress.
+    recording: Mutex<Option<ProfileRecording>>,
 }
 
 impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
@@ -369,7 +462,52 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
             port,
             map: Mutex::new(HashMap::new()),
             deferred_page_requests: Mutex::new(Vec::new()),
+            recording: Mutex::new(None),
         }
+    }
+
+    /// Starts recording a profile of page requests serviced by `self`.
+    ///
+    /// While active, each serviced page request records a [`FileMessage`] containing the file's
+    /// Zircon pager port `key` and the readahead-aligned uncompressed logical byte `offset` within
+    /// that file.
+    ///
+    /// Returns `Err(zx::Status::BAD_STATE)` if a recording is already active.
+    pub fn start_recording(&self) -> Result<(), zx::Status> {
+        let mut recording = self.recording.lock();
+        if recording.is_some() {
+            return Err(zx::Status::BAD_STATE);
+        }
+        *recording = Some(ProfileRecording::new()?);
+        Ok(())
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.lock().is_some()
+    }
+
+    /// Stops the active profile recording and returns a VMO containing the recorded
+    /// [`FileMessage`] items.
+    ///
+    /// Returns `Err(zx::Status::BAD_STATE)` if no recording is active.
+    pub fn stop_recording(&self) -> Result<zx::Vmo, zx::Status> {
+        let recording = self.recording.lock().take().ok_or(zx::Status::BAD_STATE)?;
+        recording.finish()
+    }
+
+    /// Aborts any active profile recording.
+    pub fn abort_recording(&self) {
+        *self.recording.lock() = None;
+    }
+
+    // Reads the range requested by `req` for `file`, recording readahead-aligned offsets if a
+    // profile recording is active.
+    fn read_file(&self, key: u64, file: &Arc<File>, req: D::Request) {
+        file.read_range_with_recording(self.service.as_ref(), req, |offset| {
+            if let Some(recording) = self.recording.lock().as_mut() {
+                recording.record(key, offset);
+            }
+        });
     }
 
     /// Spawns a background thread to service pager requests for `self`.
@@ -393,8 +531,8 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
                     PAGER_SHUTDOWN_KEY => break,
                     PAGER_WAKE_KEY => {
                         let requests = std::mem::take(&mut *self.deferred_page_requests.lock());
-                        for (file, req) in requests {
-                            file.read_range(self.service.as_ref(), req);
+                        for (key, file, req) in requests {
+                            self.read_file(key, &file, req);
                         }
                     }
                     _ => {}
@@ -438,7 +576,7 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
                 FileEntry::Loaded(file) => {
                     let file = Arc::clone(file);
                     drop(map);
-                    file.read_range(self.service.as_ref(), req);
+                    self.read_file(key, &file, req);
                 }
                 FileEntry::Loading(slot) => {
                     slot.requests.push(req);
@@ -491,7 +629,7 @@ impl<S: BlockService + ?Sized, D: DeliveryHandler> Files<S, D> {
             // Instead, hand `reqs` to `PagerThread` so the callback can return immediately.
             self.deferred_page_requests
                 .lock()
-                .extend(reqs.into_iter().map(|req| (file.clone(), req)));
+                .extend(reqs.into_iter().map(|req| (key, file.clone(), req)));
             let packet = zx::Packet::from_user_packet(
                 PAGER_WAKE_KEY,
                 0,
@@ -605,6 +743,12 @@ pub struct DecodedBlobMetadata {
     pub merkle_leaves: MerkleLeaves,
 }
 
+// Returns true if `error` was caused by `zx::Status::CANCELED` (e.g. when a mapper session is
+// closed while a read is pending).
+fn is_cancelled(error: &Error) -> bool {
+    error.root_cause().downcast_ref::<zx::Status>() == Some(&zx::Status::CANCELED)
+}
+
 /// Reads blob metadata asynchronously from `metadata_extents` using `service`.
 /// Once the metadata is retrieved, deserialized, and parsed, `callback` is invoked with
 /// [`DecodedBlobMetadata`].
@@ -632,9 +776,14 @@ pub fn read_blob_metadata(
     let mut callback = Some(callback);
     let mut metadata_bytes = Some(Vec::with_capacity(total_metadata_len as usize));
     read_aligned_range(metadata_extents, 0..total_metadata_len, service, move |res| {
-        let Ok(buffer) = res else {
-            log::error!(error:? = res.unwrap_err(); "Failed to read metadata blocks");
-            return ControlFlow::Break(());
+        let buffer = match res {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                if !is_cancelled(&error) {
+                    log::error!(error:?; "Failed to read metadata blocks");
+                }
+                return ControlFlow::Break(());
+            }
         };
         let bytes = metadata_bytes.as_mut().unwrap();
         let copy_len = min(buffer.len(), total_metadata_len as usize - bytes.len());
@@ -803,7 +952,7 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
                 if let Err(error) = files_clone.register_blob(
                     key,
                     &metadata.merkle_leaves,
-                    file.read_ahead_size() as usize,
+                    file.verification_alignment() as usize,
                 ) {
                     log::error!(error:?; "Failed to register blob {key}");
                     return;
@@ -1615,7 +1764,7 @@ mod tests {
             registered.lock().unwrap().take().expect("registered callback called");
         assert_eq!(reg_key, 42);
         assert_eq!(reg_leaves, vec![leaf1, leaf2]);
-        assert_eq!(reg_read_alignment, TARGET_READ_AHEAD_SIZE as usize);
+        assert_eq!(reg_read_alignment, DEFAULT_VERIFICATION_ALIGNMENT as usize);
     }
 
     #[fuchsia::test]
@@ -2454,5 +2603,155 @@ mod tests {
         } else {
             panic!("Expected pager packet");
         }
+    }
+
+    #[fuchsia::test]
+    fn test_files_record_profile() {
+        let total_size = TARGET_READ_AHEAD_SIZE * 2;
+        let uncompressed_data = vec![0x55u8; total_size as usize];
+
+        // Compress a 192 KiB file with 48 KiB chunks so its `read_ahead_size` is 96 KiB
+        // (`128 KiB / 48 KiB * 48 KiB = 96 KiB`), distinct from `TARGET_READ_AHEAD_SIZE` (128 KiB).
+        let compressed_uncompressed_size = 192 * 1024;
+        let chunk_size = 48 * 1024;
+        let options = ChunkedArchiveOptions::V2 {
+            minimum_chunk_size: chunk_size,
+            chunk_alignment: chunk_size,
+            compression_level: 1,
+        };
+        let archive = delivery_blob::compression::ChunkedArchive::new(
+            &uncompressed_data[..compressed_uncompressed_size],
+            options,
+        )
+        .expect("ChunkedArchive::new failed");
+        let mut compressed_offsets = vec![0];
+        let mut compressed_bytes = Vec::new();
+        for chunk in archive.chunks() {
+            compressed_bytes.extend_from_slice(&chunk.compressed_data);
+            compressed_offsets.push(compressed_bytes.len() as u64);
+        }
+        compressed_offsets.pop();
+        let compressed_stored_size = compressed_bytes.len() as u64;
+        let compressed_stored_aligned = compressed_stored_size.next_multiple_of(BLOCK_SIZE);
+
+        let mut device_data = vec![0x55u8; (total_size + compressed_stored_aligned) as usize];
+        device_data[total_size as usize..total_size as usize + compressed_bytes.len()]
+            .copy_from_slice(&compressed_bytes);
+        let service = Arc::new(FakeBlockService::new(device_data));
+
+        let files = Arc::new(Files::new(
+            service,
+            TestDeliveryHandler(|_key, range| TestVecBuffer::new_with_range(range).0),
+            zx::Port::create(),
+        ));
+
+        let extents1 = Extents::try_new([Extent::new(0..total_size, Some(0))], 0)
+            .expect("Extents::try_new failed");
+        let file1 = Arc::new(File::new(extents1, total_size, Transform::None));
+        files.insert(10, file1);
+
+        let extents2 =
+            Extents::try_new([Extent::new(0..compressed_stored_aligned, Some(total_size))], 0)
+                .expect("Extents::try_new failed");
+        let compression_info = CompressionInfo::new(
+            chunk_size as u64,
+            compressed_stored_size,
+            &compressed_offsets,
+            CompressionAlgorithm::Zstd,
+        )
+        .expect("CompressionInfo::new failed");
+        let file2 = Arc::new(File::new(
+            extents2,
+            compressed_uncompressed_size as u64,
+            compression_info.into(),
+        ));
+        let compressed_read_ahead = file2.read_ahead_size();
+        assert_eq!(compressed_read_ahead, 96 * 1024);
+        files.insert(20, file2);
+
+        // Stopping when no recording is active should return BAD_STATE.
+        assert_eq!(
+            files.stop_recording().expect_err("stop_recording succeeded without active recording"),
+            zx::Status::BAD_STATE
+        );
+
+        // Page requests before recording starts should not be recorded.
+        files.handle_page_request(10, 0..4096);
+
+        files.start_recording().expect("start_recording failed");
+        assert_eq!(
+            files.start_recording().expect_err("duplicate start_recording succeeded"),
+            zx::Status::BAD_STATE
+        );
+
+        // Fault in first readahead window of key 10 (offset 4096 -> window 0).
+        files.handle_page_request(10, 4096..8192);
+        // Fault in second 96 KiB readahead window of compressed key 20 (offset 100 KiB -> 96 KiB).
+        files.handle_page_request(20, 100 * 1024..104 * 1024);
+        // Fault spanning both 128 KiB readahead windows of key 10 (0..256 KiB -> 0 and 128 KiB).
+        files.handle_page_request(10, 0..total_size);
+
+        let vmo = files.stop_recording().expect("stop_recording failed");
+        let entries: Vec<_> = FileMessage::decode_from_vmo(vmo, BLOCK_SIZE as usize)
+            .expect("decode_from_vmo failed")
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                FileMessage { id: 10, offset: 0 },
+                FileMessage { id: 20, offset: compressed_read_ahead },
+                FileMessage { id: 10, offset: 0 },
+                FileMessage { id: 10, offset: TARGET_READ_AHEAD_SIZE },
+            ]
+        );
+
+        // Faults after stop_recording should not be recorded, and a subsequent recording starts
+        // clean.
+        files.handle_page_request(20, 0..4096);
+        files.start_recording().expect("second start_recording failed");
+        let empty_vmo = files.stop_recording().expect("second stop_recording failed");
+        assert_eq!(
+            FileMessage::decode_from_vmo(empty_vmo, BLOCK_SIZE as usize)
+                .expect("decode_from_vmo failed")
+                .collect::<Vec<_>>(),
+            Vec::<FileMessage>::new()
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_files_record_profile_deferred_loading() {
+        let total_size = TARGET_READ_AHEAD_SIZE;
+        let device_data = vec![0x77u8; total_size as usize];
+        let service = Arc::new(FakeBlockService::new(device_data));
+
+        let (page_request, rx) = TestVecBuffer::new_with_range(4096..8192);
+        let page_request = Mutex::new(Some(page_request));
+        let files = Arc::new(Files::new(
+            service,
+            TestDeliveryHandler(move |_key, _range| {
+                page_request.lock().take().expect("page_request already taken")
+            }),
+            zx::Port::create(),
+        ));
+        let _pager_thread = files.spawn_pager_thread();
+
+        files.start_recording().expect("start_recording failed");
+
+        // Queue a page request for key 55 before its mapping is inserted.
+        files.handle_page_request(55, 4096..8192);
+        assert!(files.has_queued_page_requests(55));
+
+        let extents = Extents::try_new([Extent::new(0..total_size, Some(0))], 0)
+            .expect("Extents::try_new failed");
+        let file = Arc::new(File::new(extents, total_size, Transform::None));
+        files.insert(55, file);
+
+        assert_eq!(rx.wait_for_commits(1), vec![(0, total_size as usize)]);
+
+        let vmo = files.stop_recording().expect("stop_recording failed");
+        let entries: Vec<_> = FileMessage::decode_from_vmo(vmo, BLOCK_SIZE as usize)
+            .expect("decode_from_vmo failed")
+            .collect();
+        assert_eq!(entries, vec![FileMessage { id: 55, offset: 0 }]);
     }
 }

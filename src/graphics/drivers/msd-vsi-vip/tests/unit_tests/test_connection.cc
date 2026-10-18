@@ -13,10 +13,11 @@
 
 class TestMsdVsiConnection : public ::testing::Test, public MsdVsiConnection::Owner {
  public:
-  Ringbuffer* GetRingbuffer() override { return nullptr; }
+  Ringbuffer* GetRingbuffer() override { return ringbuffer_.get(); }
 
   magma::Status SubmitBatch(std::unique_ptr<MappedBatch> batch, bool do_flush) override {
-    return MAGMA_STATUS_UNIMPLEMENTED;
+    submitted_batches_.emplace_back(std::move(batch));
+    return submit_batch_status_;
   }
 
   void SetUp() override {
@@ -24,7 +25,11 @@ class TestMsdVsiConnection : public ::testing::Test, public MsdVsiConnection::Ow
     address_space_ = AddressSpace::Create(&mock_address_space_owner_, kAddressSpaceIndex);
     EXPECT_NE(address_space_, nullptr);
 
-    connection_ = std::make_shared<MsdVsiConnection>(this, address_space_, 0 /* client_id */);
+    const uint32_t kRingbufferSize = magma::page_size();
+    ringbuffer_ = std::make_unique<Ringbuffer>(MsdVsiBuffer::Create(kRingbufferSize, "ringbuffer"));
+    EXPECT_NE(ringbuffer_, nullptr);
+
+    connection_ = MsdVsiConnection::Create(this, address_space_, 0 /* client_id */);
     EXPECT_NE(connection_, nullptr);
   }
 
@@ -56,6 +61,9 @@ class TestMsdVsiConnection : public ::testing::Test, public MsdVsiConnection::Ow
 
   MockAddressSpaceOwner mock_address_space_owner_;
   std::shared_ptr<AddressSpace> address_space_;
+  std::unique_ptr<Ringbuffer> ringbuffer_;
+  std::vector<std::unique_ptr<MappedBatch>> submitted_batches_;
+  magma::Status submit_batch_status_ = MAGMA_STATUS_UNIMPLEMENTED;
 
   uint32_t callback_count_ = 0;
 };
@@ -115,8 +123,9 @@ TEST_F(TestMsdVsiConnection, ReleaseMapping) {
 
   const std::vector<std::unique_ptr<magma::PlatformBusMapper::BusMapping>>& mappings2 =
       connection_->mappings_to_release();
-  // Still holds the first mapping.
-  EXPECT_EQ(1u, mappings2.size());
+  // With the fix for b/520581490, we now release the mapping and queue its bus mappings even when
+  // use_count > 1.
+  EXPECT_EQ(3u, mappings2.size());
 }
 
 TEST_F(TestMsdVsiConnection, ReleaseBuffer) {
@@ -141,7 +150,7 @@ TEST_F(TestMsdVsiConnection, ReleaseBuffer) {
 
   const std::vector<std::unique_ptr<magma::PlatformBusMapper::BusMapping>>& mappings =
       connection_->mappings_to_release();
-  EXPECT_EQ(1u, mappings.size());
+  EXPECT_EQ(2u, mappings.size());
 }
 
 TEST_F(TestMsdVsiConnection, ReleaseBufferWhileMapped) {
@@ -165,7 +174,9 @@ TEST_F(TestMsdVsiConnection, ReleaseBufferWhileMapped) {
 
   const std::vector<std::unique_ptr<magma::PlatformBusMapper::BusMapping>>& mappings =
       connection_->mappings_to_release();
-  EXPECT_EQ(0u, mappings.size());
+  // With the fix for b/520581490, we now release the mapping and queue its bus mappings even when
+  // use_count > 1.
+  EXPECT_EQ(2u, mappings.size());
 }
 
 TEST_F(TestMsdVsiConnection, AddressSpaceDirty) {
@@ -210,4 +221,32 @@ TEST_F(TestMsdVsiConnection, OnlyMapAllowedGpuAddresses) {
   gpu_addr = client_reserved_gpu_addr_end - magma::page_size();
   EXPECT_NE(MAGMA_STATUS_OK,
             connection_->MapBufferGpu(buffer, gpu_addr, 0, kBufferSizeInPages).get());
+}
+
+TEST_F(TestMsdVsiConnection, ReleaseMappingOnDestruction) {
+  submit_batch_status_ = MAGMA_STATUS_OK;
+  constexpr uint64_t kBufferSizeInPages = 1;
+  constexpr uint64_t kGpuAddr = 0x10000;
+
+  std::shared_ptr<MsdVsiBuffer> buffer =
+      MsdVsiBuffer::Create(kBufferSizeInPages * magma::page_size(), "test");
+  std::shared_ptr<GpuMapping> mapping;
+  EXPECT_TRUE(AddressSpace::MapBufferGpu(address_space_, buffer, kGpuAddr, 0, kBufferSizeInPages,
+                                         &mapping));
+  ASSERT_TRUE(mapping);
+  EXPECT_TRUE(address_space_->AddMapping(mapping));
+
+  mapping.reset();
+
+  connection_->ReleaseBuffer(buffer->platform_buffer());
+
+  // Should have 2 mappings queued for release (1 buffer, 1 page table page).
+  EXPECT_EQ(2u, connection_->mappings_to_release().size());
+
+  // Destroy the connection.
+  connection_.reset();
+
+  // The destructor should have submitted a MappingReleaseBatch.
+  EXPECT_EQ(1u, submitted_batches_.size());
+  EXPECT_FALSE(submitted_batches_[0]->IsCommandBuffer());
 }

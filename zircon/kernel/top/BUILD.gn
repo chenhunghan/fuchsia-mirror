@@ -15,7 +15,6 @@ group("top") {
     ":main",
     ":rust_panic",
     ":top_rust",
-    ":version",
     "//zircon/kernel/arch:arch-rs",
     "//zircon/kernel/arch:ffi",
     "//zircon/kernel/arch/$zircon_cpu",
@@ -48,9 +47,7 @@ source_set("handoff") {
     "//zircon/kernel/lib/init",
     "//zircon/kernel/lib/thread-stack",
     "//zircon/kernel/object",
-    "//zircon/kernel/phys:boot-constants",
-    "//zircon/kernel/phys:handoff",
-    "//zircon/kernel/phys:zircon-abi-spec",
+    "//zircon/kernel/phys/handoff",
     "//zircon/kernel/platform",
     "//zircon/kernel/vm",
     "//zircon/system/ulib/fbl",
@@ -73,9 +70,7 @@ source_set("main") {
     "//zircon/kernel/lib/lockup_detector",
     "//zircon/kernel/lib/thread_sampler",
     "//zircon/kernel/lib/userabi",
-    "//zircon/kernel/phys:boot-constants",
-    "//zircon/kernel/phys:handoff",
-    "//zircon/kernel/phys:zircon-abi-spec",
+    "//zircon/kernel/phys/handoff",
     "//zircon/kernel/platform",
     "//zircon/kernel/platform:platform-rs",
     "//zircon/kernel/vm",
@@ -94,16 +89,11 @@ kernel_rust_mod("top_rust") {
     "debug.rs",
     "init.rs",
     "mod.rs",
+    "version.rs",
+    "version_ffi.rs",
   ]
-  deps = [ "//zircon/kernel/lib/init:init_rust" ]
-}
-
-source_set("version") {
-  visibility = [ ":*" ]
-  sources = [ "version.cc" ]
   deps = [
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/init",
-    "//zircon/kernel/phys:boot-constants",
+    "//src/lib/kprint",
+    "//zircon/kernel/lib/init:init_rust",
   ]
 }

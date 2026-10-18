@@ -10,6 +10,7 @@ from unittest import mock
 
 import fuchsia_controller_py as fuchsia_controller
 from honeydew import errors
+from honeydew.affordances.ui.user_input import types as ui_types
 from honeydew.device_classes import android_device
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.adb import adb as adb_transport
@@ -52,6 +53,13 @@ _INPUT_ARGS: dict[str, Any] = {
         shared_data="/tmp/shared_data",
     ),
 }
+
+
+class TestAndroidDevice(android_device.AndroidDevice):
+    """Concrete test subclass with device-specific defaults configured."""
+
+    sysui_package = "com.test.sysui"
+    _default_screen_size = ui_types.Size(600, 800)
 
 
 class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
@@ -171,6 +179,89 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(errors.NotEnabledError):
                 _ = ad_obj.adb
 
+    def test_is_pontis_target_device_info_ip_port(self) -> None:
+        """Test case for _is_pontis_target() using device_info.ip_port."""
+        orig_device_info = self.ad_obj._device_info
+        try:
+            self.ad_obj._device_info = custom_types.DeviceInfo(
+                name=_INPUT_ARGS["device_name"],
+                serial_number="12345678",
+                ip_port=custom_types.IpPort(
+                    ip=ipaddress.IPv6Address(
+                        "fe80::bcd3:bbce:3ee9:4d87%pontis"
+                    ),
+                    port=8022,
+                ),
+                serial_socket=_INPUT_ARGS["device_serial_socket"],
+            )
+            self.assertTrue(self.ad_obj._is_pontis_target())
+
+            self.ad_obj._device_info = custom_types.DeviceInfo(
+                name=_INPUT_ARGS["device_name"],
+                serial_number="12345678",
+                ip_port=custom_types.IpPort(
+                    ip=ipaddress.IPv4Address("192.168.1.2"),
+                    port=8022,
+                ),
+                serial_socket=_INPUT_ARGS["device_serial_socket"],
+            )
+            self.assertFalse(self.ad_obj._is_pontis_target())
+        finally:
+            self.ad_obj._device_info = orig_device_info
+
+    def test_is_pontis_target_ffx_fallback(self) -> None:
+        """Test case for _is_pontis_target() falling back to FFX get_target_address."""
+        orig_device_info = self.ad_obj._device_info
+        self.ad_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=None,
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+        try:
+            with mock.patch.object(
+                ffx.FFX,
+                "get_target_address",
+                return_value=custom_types.IpPort(
+                    ip=ipaddress.IPv6Address(
+                        "fe80::bcd3:bbce:3ee9:4d87%pontis"
+                    ),
+                    port=None,
+                ),
+                autospec=True,
+            ):
+                self.assertTrue(self.ad_obj._is_pontis_target())
+
+            with mock.patch.object(
+                ffx.FFX,
+                "get_target_address",
+                side_effect=ffx_errors.FfxCommandError("FFX error"),
+                autospec=True,
+            ):
+                self.assertFalse(self.ad_obj._is_pontis_target())
+        finally:
+            self.ad_obj._device_info = orig_device_info
+
+    def test_adb_transport_disabled_on_pontis(self) -> None:
+        """Test case to make sure AndroidDevice raises NotEnabledError on Pontis targets."""
+        orig_device_info = self.ad_obj._device_info
+        self.ad_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=custom_types.IpPort(
+                ip=ipaddress.IPv6Address("fe80::bcd3:bbce:3ee9:4d87%pontis"),
+                port=8022,
+            ),
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+        self.ad_obj.__dict__.pop("adb", None)
+        try:
+            with self.assertRaises(errors.NotEnabledError):
+                _ = self.ad_obj.adb
+        finally:
+            self.ad_obj._device_info = orig_device_info
+            self.ad_obj.__dict__.pop("adb", None)
+
     @mock.patch.object(
         adb_transport.Adb,
         "check_connection",
@@ -193,6 +284,53 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         mock_verify_supported.assert_called_once()
         mock_check_connection.assert_called_once()
+        self.ad_obj.__dict__.pop("adb", None)
+
+    # TODO(b/564946370): Remove this test once 'adb root' is stable on USB.
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    async def test_adb_routes_root_methods_to_su_root(
+        self,
+        mock_verify_supported: mock.Mock,
+        mock_check_connection: mock.Mock,
+    ) -> None:
+        """Verifies AndroidDevice.adb routes root methods to su_root."""
+        mock_su_root = mock.Mock()
+        mock_su_unroot = mock.Mock()
+        mock_use_su_root = mock.MagicMock()
+
+        with (
+            mock.patch.object(adb_transport.Adb, "su_root", mock_su_root),
+            mock.patch.object(adb_transport.Adb, "su_unroot", mock_su_unroot),
+            mock.patch.object(
+                adb_transport.Adb, "use_su_root", mock_use_su_root
+            ),
+        ):
+            self.ad_obj.adb.root(timeout=5.0)
+            mock_su_root.assert_called_once_with(timeout=5.0)
+
+            self.ad_obj.adb.unroot(timeout=5.0)
+            mock_su_unroot.assert_called_once_with(timeout=5.0)
+
+            with self.ad_obj.adb.use_adb_root(timeout=5.0):
+                mock_use_su_root.assert_called_once_with(timeout=5.0)
+            mock_use_su_root.return_value.__enter__.assert_called_once()
+            mock_use_su_root.return_value.__exit__.assert_called_once()
+
+            mock_use_su_root.reset_mock()
+            async with self.ad_obj.adb.use_adb_root(timeout=5.0):
+                mock_use_su_root.assert_called_once_with(timeout=5.0)
+            mock_use_su_root.return_value.__enter__.assert_called_once()
+            mock_use_su_root.return_value.__exit__.assert_called_once()
+
         self.ad_obj.__dict__.pop("adb", None)
 
     @mock.patch.object(
@@ -396,6 +534,48 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    def test_health_check_adb_disabled_on_pontis(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_sl4f_check_connection: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.health_check() when target is connected via Pontis."""
+        orig_device_info = self.ad_obj._device_info
+        self.ad_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=custom_types.IpPort(
+                ip=ipaddress.IPv6Address("fe80::bcd3:bbce:3ee9:4d87%pontis"),
+                port=8022,
+            ),
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+        self.ad_obj.__dict__.pop("adb", None)
+        try:
+            self.ad_obj.health_check()
+
+            mock_ffx_check_connection.assert_called_once_with(self.ad_obj.ffx)
+            mock_fc_check_connection.assert_called_once_with(
+                self.ad_obj.fuchsia_controller
+            )
+            mock_sl4f_check_connection.assert_not_called()
+            self.assertNotIn("adb", self.ad_obj.__dict__)
+        finally:
+            self.ad_obj._device_info = orig_device_info
+            self.ad_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        sl4f_transport.SL4F,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
     def test_health_check_adb_disabled(
         self,
         mock_ffx_check_connection: mock.Mock,
@@ -523,6 +703,35 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "on_device_boot",
         autospec=True,
     )
+    async def test_on_device_boot_adb_disabled_on_pontis(
+        self,
+        mock_super_on_device_boot: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.on_device_boot() when target is connected via Pontis."""
+        orig_device_info = self.ad_obj._device_info
+        self.ad_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number="12345678",
+            ip_port=custom_types.IpPort(
+                ip=ipaddress.IPv6Address("fe80::bcd3:bbce:3ee9:4d87%pontis"),
+                port=8022,
+            ),
+            serial_socket=_INPUT_ARGS["device_serial_socket"],
+        )
+        self.ad_obj.__dict__.pop("adb", None)
+        try:
+            await self.ad_obj.on_device_boot()
+            mock_super_on_device_boot.assert_called_once_with(self.ad_obj)
+            self.assertNotIn("adb", self.ad_obj.__dict__)
+        finally:
+            self.ad_obj._device_info = orig_device_info
+            self.ad_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "on_device_boot",
+        autospec=True,
+    )
     async def test_on_device_boot_adb_disabled(
         self,
         mock_super_on_device_boot: mock.Mock,
@@ -543,6 +752,143 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.ad_obj._config = orig_config
             self.ad_obj.__dict__.pop("adb", None)
+
+
+class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for base AndroidDevice profile and geometry."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.dev_info = custom_types.DeviceInfo(
+            name="fuchsia-emulator",
+            serial_number=None,
+            ip_port=None,
+            serial_socket=None,
+        )
+        self.ffx_cfg = mock.MagicMock()
+        self.mock_ffx = mock.Mock()
+        self.mock_screenshot = mock.Mock()
+        self.mock_adb: Any = mock.MagicMock()
+        self.mock_adb.run.return_value = ""
+
+        for patcher in (
+            mock.patch.object(
+                fuchsia_device.FuchsiaDevice, "health_check", autospec=True
+            ),
+            mock.patch.object(
+                fuchsia_device.FuchsiaDevice,
+                "ffx",
+                new_callable=mock.PropertyMock,
+                return_value=self.mock_ffx,
+            ),
+            mock.patch.object(
+                fuchsia_device.FuchsiaDevice,
+                "screenshot",
+                new_callable=mock.PropertyMock,
+                return_value=self.mock_screenshot,
+            ),
+            mock.patch.object(
+                android_device.AndroidDevice,
+                "adb",
+                new_callable=mock.PropertyMock,
+                return_value=self.mock_adb,
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        self.device = TestAndroidDevice(
+            device_info=self.dev_info,
+            ffx_config_data=self.ffx_cfg,
+        )
+
+    def test_init_via_super_fuchsia_device(self) -> None:
+        """Verifies initializing AndroidDevice via FuchsiaDevice.__init__."""
+        self.assertEqual(self.device.device_name, "fuchsia-emulator")
+        self.assertIsNone(self.device._device_info.serial_number)
+        self.assertIsNone(self.device._screen_size_override)
+
+    def test_initialize_called_in_init_for_product_subclass(self) -> None:
+        """Verifies __init__ calls initialize() and _product_setup()."""
+        with mock.patch.object(
+            TestAndroidDevice, "_product_setup", autospec=True
+        ) as mock_prod_setup:
+            dev = TestAndroidDevice(
+                device_info=self.dev_info,
+                ffx_config_data=self.ffx_cfg,
+                config={"screen_size": "640x480"},
+            )
+            self.assertEqual(dev._screen_size_override, ui_types.Size(640, 480))
+            self.assertEqual(dev.screen_size(), ui_types.Size(640, 480))
+            mock_prod_setup.assert_called_once_with(dev)
+
+    def test_initialize_skips_without_product_profile(self) -> None:
+        """Verifies initialize() is a no-op when sysui_package is empty."""
+        with mock.patch.object(
+            android_device.AndroidDevice, "_product_setup", autospec=True
+        ) as mock_prod_setup:
+            bare_device = android_device.AndroidDevice(
+                device_info=self.dev_info,
+                ffx_config_data=self.ffx_cfg,
+            )
+            bare_device.initialize()
+            mock_prod_setup.assert_not_called()
+
+    def test_initialize_skips_when_adb_disabled(self) -> None:
+        """Verifies initialize() skips ADB calls when ADB is disabled."""
+        with (
+            mock.patch.object(
+                TestAndroidDevice,
+                "screen_size",
+                side_effect=errors.NotEnabledError("adb disabled"),
+            ),
+            mock.patch.object(
+                TestAndroidDevice, "_product_setup", autospec=True
+            ) as mock_prod_setup,
+        ):
+            dev = TestAndroidDevice(
+                device_info=self.dev_info,
+                ffx_config_data=self.ffx_cfg,
+            )
+            dev.initialize()
+            mock_prod_setup.assert_not_called()
+
+    def test_screen_size_default_and_config(self) -> None:
+        """Verifies screen_size() default and config parsing/validation."""
+        self.assertEqual(self.device.screen_size(), ui_types.Size(600, 800))
+        dev = TestAndroidDevice(
+            device_info=self.dev_info,
+            ffx_config_data=self.ffx_cfg,
+            config={"screen_size": "1234x5678"},
+        )
+        self.assertEqual(dev.screen_size(), ui_types.Size(1234, 5678))
+
+        with self.assertRaises(ValueError):
+            TestAndroidDevice(
+                device_info=self.dev_info,
+                ffx_config_data=self.ffx_cfg,
+                config={"screen_size": "invalid_geometry"},
+            )
+
+    def test_screen_size_query_and_precedence(self) -> None:
+        """Verifies wm size Physical/Override query and fallback."""
+        self.mock_adb.run.return_value = (
+            "Physical size: 500x1000\nOverride size: 400x800"
+        )
+        self.assertEqual(self.device.screen_size(), ui_types.Size(400, 800))
+        self.assertEqual(
+            self.device._screen_size_cache, ui_types.Size(400, 800)
+        )
+
+    def test_screen_size_error_fallback(self) -> None:
+        """Verifies screen_size falls back on ADB failure."""
+        self.mock_adb.run.side_effect = adb_errors.AdbCommandError(
+            "ADB query failure"
+        )
+        with self.assertLogs(level="WARNING") as log:
+            size = self.device.screen_size()
+        self.assertEqual(size, ui_types.Size(600, 800))
+        self.assertIn("Failed to query screen size via wm size", log.output[0])
 
 
 if __name__ == "__main__":

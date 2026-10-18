@@ -7,6 +7,7 @@
 # checkout:
 #   `jiri init -fetch-optional=antlion`
 
+import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 
 assert(is_host, "antlion only supported on the host toolchain")
@@ -21,10 +22,8 @@ group("e2e_tests") {
 # release testing.
 group("e2e_tests_manual") {
   testonly = true
-  public_deps = [
-    "tests/wlan/performance:wlan_wmm_test",
-    "//src/connectivity/wlan/tests/wlancfg:tests_for_release_testing",
-  ]
+  public_deps =
+      [ "//src/connectivity/wlan/tests/wlancfg:tests_for_release_testing" ]
 }
 
 # Tests to validate the netstack in under 15 minutes.
@@ -41,10 +40,18 @@ group("e2e_tests_netstack_quick") {
   ]
 }
 
+python_host_test("hostapd_test") {
+  main_source = "packages/antlion/unit_tests/controllers/ap_lib/hostapd_test.py"
+  libraries = [ ":antlion" ]
+}
+
 # Unit tests only
 group("unit_tests") {
   testonly = true
-  public_deps = [ "runner:tests" ]
+  public_deps = [
+    ":hostapd_test",
+    "runner:tests",
+  ]
 }
 
 python_library("antlion") {
@@ -57,14 +64,6 @@ python_library("antlion") {
     "capabilities/ssh.py",
     "context.py",
     "controllers/__init__.py",
-    "controllers/attenuator.py",
-    "controllers/attenuator_lib/__init__.py",
-    "controllers/attenuator_lib/_tnhelper.py",
-    "controllers/attenuator_lib/aeroflex/__init__.py",
-    "controllers/attenuator_lib/aeroflex/telnet.py",
-    "controllers/attenuator_lib/minicircuits/__init__.py",
-    "controllers/attenuator_lib/minicircuits/http.py",
-    "controllers/attenuator_lib/minicircuits/telnet.py",
     "controllers/fuchsia_device.py",
     "controllers/fuchsia_lib/__init__.py",
     "controllers/fuchsia_lib/lib_controllers/__init__.py",
@@ -74,16 +73,8 @@ python_library("antlion") {
     "controllers/packet_capture.py",
     "controllers/pdu.py",
     "controllers/pdu_lib/__init__.py",
-    "controllers/pdu_lib/digital_loggers/__init__.py",
-    "controllers/pdu_lib/digital_loggers/webpowerswitch.py",
     "controllers/pdu_lib/synaccess/__init__.py",
     "controllers/pdu_lib/synaccess/np02b.py",
-    "controllers/utils_lib/__init__.py",
-    "controllers/utils_lib/commands/__init__.py",
-    "controllers/utils_lib/commands/ip.py",
-    "controllers/utils_lib/commands/route.py",
-    "controllers/utils_lib/commands/shell.py",
-    "controllers/utils_lib/commands/tcpdump.py",
     "decorators.py",
     "error.py",
     "event/__init__.py",
@@ -114,6 +105,7 @@ python_library("antlion") {
     "//src/testing/end_to_end/libs",
     "//src/testing/end_to_end/mobly_base_tests/fuchsia_async_extension",
     "//src/testing/end_to_end/mobly_controller",
+    "//src/testing/end_to_end/mobly_controller/attenuator",
     "//src/testing/end_to_end/mobly_controller/iperf",
     "//src/testing/end_to_end/mobly_controller/legacy_access_point",
     "//src/testing/end_to_end/mobly_controller/openwrt_access_point",

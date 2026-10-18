@@ -27,12 +27,6 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 fidl("fuchsia.power.broker") {
   sources = [ "broker.fidl" ]
   sdk_area = "Power"
@@ -49,6 +43,8 @@ fidl("fuchsia.power.broker") {
     "//sdk/fidl/fuchsia.driver.development/*",
     "//sdk/fidl/fuchsia.driver.framework/*",
     "//sdk/fidl/fuchsia.hardware.hrtimer/*",
+    "//sdk/fidl/fuchsia.hardware.network.driver/*",
+    "//sdk/fidl/fuchsia.hardware.network/*",
     "//sdk/fidl/fuchsia.power.system/*",
     "//sdk/fidl/fuchsia.power.topology.test/*",
     "//sdk/fidl/fuchsia.session.power/*",

@@ -7,7 +7,7 @@
 use super::page::VmPagePtr;
 use super::page_source::PageSource;
 use super::stream_size_manager::StreamSizeManager;
-use super::vm_cow_pages::VmCowPages;
+use super::vm_cow_pages::{PriorityChanger, VmCowPages};
 use super::vm_object::{VmObject, VmObjectLockClass, VmObjectReadWriteOptions};
 use crate::user_copy::{UserInIovec, UserOutIovec};
 use core::marker::PhantomPinned;
@@ -15,6 +15,7 @@ use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use fbl::{IsOpaqueRefCounted, RefPtr};
 use ksync::LockToken;
+use pin_init::PinInit;
 use vm_object_paged_bindings as bindings;
 use zr::Opaque;
 use zx_status::Status;
@@ -143,6 +144,19 @@ impl VmObjectPaged {
     pub fn debug_get_cow_pages(&self) -> Option<RefPtr<VmCowPages>> {
         let raw = unsafe { bindings::cpp_vm_object_paged_debug_get_cow_pages(self.as_raw()) };
         unsafe { VmCowPages::from_raw(raw) }
+    }
+
+    pub(super) fn cow_pages(&self) -> &VmCowPages {
+        // SAFETY: `cow_pages_` is a `const` `RefPtr` owned by `self`, so the pointee outlives
+        // `self`.
+        unsafe {
+            VmCowPages::from_raw_ref(bindings::cpp_vm_object_paged_cow_pages(self.as_raw()).cast())
+        }
+    }
+
+    /// See the comments on `PriorityChanger` for how to use this object.
+    pub fn make_priority_changer(&self, delta: i64) -> impl PinInit<PriorityChanger<'_>> {
+        PriorityChanger::new(self.cow_pages(), delta)
     }
 
     /// Debug helper to fetch backing page pointer.
@@ -367,6 +381,35 @@ impl VmObjectPaged {
             bindings::cpp_vm_object_paged_user_stream_size_locked(self.as_raw(), &mut stream_size)
         };
         if has_value { Some(stream_size) } else { None }
+    }
+
+    pub fn size_locked(&self, _token: &LockToken<'_, VmObjectLockClass>) -> u64 {
+        // SAFETY: `self.as_raw()` is a valid `VmObjectPaged` pointer and the VMO lock is held.
+        unsafe { bindings::cpp_vm_object_paged_size_locked(self.as_raw()) }
+    }
+
+    pub fn lock_is_held(&self) -> bool {
+        // SAFETY: `self.as_raw()` is a valid `VmObjectPaged` pointer.
+        unsafe { bindings::cpp_vm_object_paged_lock_is_held(self.as_raw()) }
+    }
+
+    /// Calculates the minimum of the VMO size and the page-aligned user stream size.
+    pub fn saturating_stream_size_locked(
+        &self,
+        token: &LockToken<'_, VmObjectLockClass>,
+    ) -> Option<u64> {
+        let user_stream_size = self.user_stream_size_locked(token)?;
+
+        let vmo_size = self.size_locked(token);
+
+        // If user stream size is larger, trim to the VMO.
+        // TODO(https://fxbug.dev/380960681): remove check when stream size <= VMO size invariant is
+        // enforced.
+        if user_stream_size > vmo_size {
+            return Some(vmo_size);
+        }
+
+        Some(::page::round_up(user_stream_size as usize) as u64)
     }
 }
 

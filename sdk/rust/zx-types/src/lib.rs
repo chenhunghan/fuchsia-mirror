@@ -362,6 +362,11 @@ multiconst!(u64, [
     ZX_SYSTEM_SUSPEND_OPTION_DEEP        = 1 << 2;
 ]);
 
+multiconst!(u32, [
+    ZX_SYSTEM_WAKE_REPORT_ENTRY_FLAG_SIGNALED            = 1 << 0;
+    ZX_SYSTEM_WAKE_REPORT_ENTRY_FLAG_PREVIOUSLY_REPORTED = 1 << 1;
+]);
+
 // LINT.IfChange(zx_status_t)
 // matches ///zircon/system/public/zircon/errors.h
 multiconst!(zx_status_t, [
@@ -827,7 +832,7 @@ multiconst!(zx_rsrc_system_base_t, [
     ZX_RSRC_SYSTEM_INFO_BASE        = 3;
     ZX_RSRC_SYSTEM_CPU_BASE         = 4;
     ZX_RSRC_SYSTEM_POWER_BASE       = 5;
-    ZX_RSRC_SYSTEM_MEXEC_BASE       = 6;
+    // 6 was ZX_RSRC_SYSTEM_MEXEC_BASE, now retired.
     ZX_RSRC_SYSTEM_ENERGY_INFO_BASE = 7;
     ZX_RSRC_SYSTEM_IOMMU_BASE       = 8;
     ZX_RSRC_SYSTEM_FRAMEBUFFER_BASE = 9;
@@ -1519,7 +1524,7 @@ impl Debug for zx_riscv64_exc_data_t {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable, IntoBytes))]
 pub union zx_exception_header_arch_t {
     pub x86_64: zx_x86_64_exc_data_t,
     pub arm_64: zx_arm64_exc_data_t,
@@ -1596,7 +1601,7 @@ multiconst!(zx_excp_policy_code_t, [
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable, IntoBytes))]
 pub struct zx_exception_context_t {
     pub arch: zx_exception_header_arch_t,
     pub synth_code: zx_excp_policy_code_t,
@@ -1605,7 +1610,7 @@ pub struct zx_exception_context_t {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(KnownLayout, FromBytes, Immutable, IntoBytes))]
 pub struct zx_exception_report_t {
     pub header: zx_exception_header_t,
     pub context: zx_exception_context_t,
@@ -2317,7 +2322,7 @@ pub struct zx_info_iob_t {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_region_info_t {
     pub region: zx_iob_region_t,
     pub koid: zx_koid_t,
@@ -2334,6 +2339,13 @@ pub struct zx_info_vcpu_t {
 multiconst!(u32, [
     ZX_INFO_VCPU_FLAG_KICKED = 1 << 0;
 ]);
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_interrupt_t {
+    pub options: u32,
+}
 
 multiconst!(u32, [
     ZX_INFO_PROCESS_FLAG_STARTED = 1 << 0;
@@ -2587,10 +2599,14 @@ pub struct zx_info_vmo_v3_t {
 const_assert_eq!(core::mem::size_of::<zx_info_vmo_v3_t>(), 128);
 const_assert_eq!(core::mem::align_of::<zx_info_vmo_v3_t>(), 8);
 
+multiconst!(u32, [
+    ZX_INFO_CPU_STATS_FLAG_ONLINE = 1 << 0;
+]);
+
 struct_decl_macro! {
     #[repr(C)]
     #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_cpu_stats_t> {
         pub cpu_number: u32,
         pub flags: u32,
@@ -2616,10 +2632,66 @@ struct_decl_macro! {
 
 zx_info_cpu_stats_t!(zx_info_cpu_stats_t);
 
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_arm64_info_guest_stats_t {
+    pub cpu_number: u32,
+    pub flags: u32,
+    pub vm_entries: u64,
+    pub vm_exits: u64,
+    pub wfi_wfe_instructions: u64,
+    pub instruction_aborts: u64,
+    pub data_aborts: u64,
+    pub system_instructions: u64,
+    pub smc_instructions: u64,
+    pub interrupts: u64,
+}
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_x86_64_info_guest_stats_t {
+    pub cpu_number: u32,
+    pub flags: u32,
+    pub vm_entries: u64,
+    pub vm_exits: u64,
+    pub interrupts: u64,
+    pub interrupt_windows: u64,
+    pub cpuid_instructions: u64,
+    pub hlt_instructions: u64,
+    pub control_register_accesses: u64,
+    pub io_instructions: u64,
+    pub rdmsr_instructions: u64,
+    pub wrmsr_instructions: u64,
+    pub ept_violations: u64,
+    pub xsetbv_instructions: u64,
+    pub pause_instructions: u64,
+    pub vmcall_instructions: u64,
+}
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_riscv64_info_guest_stats_t {
+    pub cpu_number: u32,
+    pub flags: u32,
+    pub vm_entries: u64,
+    pub vm_exits: u64,
+    pub interrupts: u64,
+}
+
+#[cfg(target_arch = "aarch64")]
+pub type zx_info_guest_stats_t = zx_arm64_info_guest_stats_t;
+#[cfg(target_arch = "x86_64")]
+pub type zx_info_guest_stats_t = zx_x86_64_info_guest_stats_t;
+#[cfg(target_arch = "riscv64")]
+pub type zx_info_guest_stats_t = zx_riscv64_info_guest_stats_t;
+
 struct_decl_macro! {
     #[repr(C)]
     #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_kmem_stats_t> {
         pub total_bytes: u64,
         pub free_bytes: u64,
@@ -2648,7 +2720,7 @@ zx_info_kmem_stats_t!(zx_info_kmem_stats_t);
 struct_decl_macro! {
     #[repr(C)]
     #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_kmem_stats_v1_t> {
         pub total_bytes: u64,
         pub free_bytes: u64,
@@ -2669,7 +2741,7 @@ const_assert_eq!(core::mem::align_of::<zx_info_kmem_stats_v1_t>(), 8);
 struct_decl_macro! {
     #[repr(C)]
     #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_kmem_stats_extended_t> {
         pub total_bytes: u64,
         pub free_bytes: u64,
@@ -2694,7 +2766,7 @@ zx_info_kmem_stats_extended_t!(zx_info_kmem_stats_extended_t);
 struct_decl_macro! {
     #[repr(C)]
     #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_kmem_stats_compression_t> {
         pub uncompressed_storage_bytes: u64,
         pub compressed_storage_bytes: u64,
@@ -2914,26 +2986,114 @@ zx_info_maps_mapping_t!(zx_info_maps_mapping_t);
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, KnownLayout))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub union InfoMapsTypeUnion {
     pub mapping: zx_info_maps_mapping_t,
 }
 
+impl Default for InfoMapsTypeUnion {
+    fn default() -> Self {
+        Self { mapping: zx_info_maps_mapping_t::default() }
+    }
+}
+
 struct_decl_macro! {
     #[repr(C)]
-    #[derive(Copy, Clone)]
-    #[derive(zerocopy::FromBytes, zerocopy::Immutable)]
+    #[derive(Default, Copy, Clone)]
+    #[derive(zerocopy::FromBytes, zerocopy::Immutable, zerocopy::IntoBytes)]
     pub struct <zx_info_maps_t> {
         pub name: [u8; ZX_MAX_NAME_LEN],
         pub base: zx_vaddr_t,
         pub size: usize,
         pub depth: usize,
         pub r#type: zx_info_maps_type_t,
+        pub padding1: [PadByte; 4],
         pub u: InfoMapsTypeUnion,
     }
 }
 
 zx_info_maps_t!(zx_info_maps_t);
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_maps_mapping_v2_t {
+    pub mmu_flags: zx_vm_option_t,
+    pub padding1: [PadByte; 4],
+    pub vmo_koid: zx_koid_t,
+    pub vmo_offset: u64,
+    pub committed_pages: usize,
+    pub populated_pages: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub union InfoMapsTypeUnionV2 {
+    pub mapping: zx_info_maps_mapping_v2_t,
+}
+
+impl Default for InfoMapsTypeUnionV2 {
+    fn default() -> Self {
+        Self { mapping: zx_info_maps_mapping_v2_t::default() }
+    }
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_maps_v2_t {
+    pub name: [u8; ZX_MAX_NAME_LEN],
+    pub base: zx_vaddr_t,
+    pub size: usize,
+    pub depth: usize,
+    pub r#type: zx_info_maps_type_t,
+    pub padding1: [PadByte; 4],
+    pub u: InfoMapsTypeUnionV2,
+}
+
+const_assert_eq!(core::mem::size_of::<zx_info_maps_v2_t>(), 104);
+const_assert_eq!(core::mem::align_of::<zx_info_maps_v2_t>(), 8);
+
+#[repr(C)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_maps_mapping_v1_t {
+    pub mmu_flags: zx_vm_option_t,
+    pub padding1: [PadByte; 4],
+    pub vmo_koid: zx_koid_t,
+    pub vmo_offset: u64,
+    pub committed_pages: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub union InfoMapsTypeUnionV1 {
+    pub mapping: zx_info_maps_mapping_v1_t,
+}
+
+impl Default for InfoMapsTypeUnionV1 {
+    fn default() -> Self {
+        Self { mapping: zx_info_maps_mapping_v1_t::default() }
+    }
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
+pub struct zx_info_maps_v1_t {
+    pub name: [u8; ZX_MAX_NAME_LEN],
+    pub base: zx_vaddr_t,
+    pub size: usize,
+    pub depth: usize,
+    pub r#type: zx_info_maps_type_t,
+    pub padding1: [PadByte; 4],
+    pub u: InfoMapsTypeUnionV1,
+}
+
+const_assert_eq!(core::mem::size_of::<zx_info_maps_v1_t>(), 96);
+const_assert_eq!(core::mem::align_of::<zx_info_maps_v1_t>(), 8);
 
 struct_decl_macro! {
     #[repr(C)]
@@ -3036,54 +3196,12 @@ multiconst!(u32, [
 
 // source: zircon/system/public/zircon/syscalls/system.h
 multiconst!(zx_system_powerctl_cmd_t, [
-    ZX_SYSTEM_POWERCTL_ENABLE_ALL_CPUS               = 1;
-    ZX_SYSTEM_POWERCTL_DISABLE_ALL_CPUS_BUT_PRIMARY  = 2;
-    ZX_SYSTEM_POWERCTL_ACPI_TRANSITION_S_STATE       = 3;
-    ZX_SYSTEM_POWERCTL_X86_SET_PKG_PL1               = 4;
     ZX_SYSTEM_POWERCTL_REBOOT                        = 5;
     ZX_SYSTEM_POWERCTL_REBOOT_BOOTLOADER             = 6;
     ZX_SYSTEM_POWERCTL_REBOOT_RECOVERY               = 7;
     ZX_SYSTEM_POWERCTL_SHUTDOWN                      = 8;
     ZX_SYSTEM_POWERCTL_ACK_KERNEL_INITIATED_REBOOT   = 9;
 ]);
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
-pub struct zx_system_powerctl_arg_t {
-    // rust can't express anonymous unions at this time
-    // https://github.com/rust-lang/rust/issues/49804
-    pub powerctl_internal: zx_powerctl_union,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
-pub union zx_powerctl_union {
-    acpi_transition_s_state: acpi_transition_s_state,
-    x86_power_limit: x86_power_limit,
-}
-
-#[repr(C)]
-#[derive(Default, Debug, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
-pub struct acpi_transition_s_state {
-    target_s_state: u8, // Value between 1 and 5 indicating which S-state
-    sleep_type_a: u8,   // Value from ACPI VM (SLP_TYPa)
-    sleep_type_b: u8,   // Value from ACPI VM (SLP_TYPb)
-    padding1: [PadByte; 9],
-}
-
-#[repr(C)]
-#[derive(Default, Debug, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
-pub struct x86_power_limit {
-    power_limit: u32, // PL1 value in milliwatts
-    time_window: u32, // PL1 time window in microseconds
-    clamp: u8,        // PL1 clamping enable
-    enable: u8,       // PL1 enable
-    padding1: [PadByte; 2],
-}
 
 // source: zircon/system/public/zircon/syscalls/smc.h
 #[repr(C)]
@@ -3332,7 +3450,16 @@ multiconst!(u32, [
 
 // Options for zx_interrupt_create
 multiconst!(u32, [
+    ZX_INTERRUPT_REMAP_IRQ = 0x1;
+    ZX_INTERRUPT_MODE_DEFAULT = 0 << 1;
+    ZX_INTERRUPT_MODE_EDGE_LOW = 1 << 1;
+    ZX_INTERRUPT_MODE_EDGE_HIGH = 2 << 1;
+    ZX_INTERRUPT_MODE_LEVEL_LOW = 3 << 1;
+    ZX_INTERRUPT_MODE_LEVEL_HIGH = 4 << 1;
+    ZX_INTERRUPT_MODE_EDGE_BOTH = 5 << 1;
+    ZX_INTERRUPT_MODE_MASK = 0xe;
     ZX_INTERRUPT_VIRTUAL = 0x10;
+    ZX_INTERRUPT_WAKE_VECTOR = 0x20;
     ZX_INTERRUPT_TIMESTAMP_MONO = 1 << 6;
 ]);
 
@@ -3349,7 +3476,7 @@ multiconst!(u32, [
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_region_t {
     pub r#type: zx_iob_region_type_t,
     pub access: zx_iob_access_t,
@@ -3376,7 +3503,7 @@ multiconst!(zx_iob_access_t, [
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_discipline_t {
     pub r#type: zx_iob_discipline_type_t,
     pub extension: zx_iob_discipline_extension_t,
@@ -3384,7 +3511,7 @@ pub struct zx_iob_discipline_t {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub union zx_iob_discipline_extension_t {
     // This is in vdso-next.
     pub ring_buffer: zx_iob_discipline_mediated_write_ring_buffer_t,
@@ -3393,7 +3520,7 @@ pub union zx_iob_discipline_extension_t {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_discipline_mediated_write_ring_buffer_t {
     pub tag: u64,
     pub padding: [PadByte; 56],
@@ -3409,7 +3536,7 @@ pub const ZX_IOB_MAX_REGIONS: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_region_private_t {
     pub options: u32,
     pub padding: [PadByte; 28],
@@ -3417,7 +3544,7 @@ pub struct zx_iob_region_private_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub struct zx_iob_region_shared_t {
     pub options: u32,
     pub shared_region: zx_handle_t,
@@ -3426,7 +3553,7 @@ pub struct zx_iob_region_shared_t {
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable))]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, Immutable, IntoBytes, KnownLayout))]
 pub union zx_iob_region_extension_t {
     pub private_region: zx_iob_region_private_t,
     pub shared_region: zx_iob_region_shared_t,
@@ -3434,6 +3561,8 @@ pub union zx_iob_region_extension_t {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, IntoBytes, Immutable))]
 pub struct zx_wake_source_report_entry_t {
     pub koid: zx_koid_t,
     pub name: [u8; ZX_MAX_NAME_LEN],
@@ -3445,6 +3574,8 @@ pub struct zx_wake_source_report_entry_t {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "zerocopy", derive(FromBytes, IntoBytes, Immutable))]
 pub struct zx_wake_source_report_header_t {
     pub report_time: zx_instant_boot_t,
     pub suspend_start_time: zx_instant_boot_t,

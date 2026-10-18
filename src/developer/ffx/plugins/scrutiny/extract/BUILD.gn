@@ -8,7 +8,6 @@ ffx_plugin("ffx_scrutiny_extract") {
   sdk_category = "not-yet-specified"
   version = "0.1.0"
   edition = "2024"
-  with_unit_tests = true
   plugin_deps = [
     "blobfs:ffx_scrutiny_blobfs",
     "fvm:ffx_scrutiny_fvm",
@@ -16,8 +15,6 @@ ffx_plugin("ffx_scrutiny_extract") {
     "structured_config:ffx_scrutiny_structured_config",
     "zbi:ffx_scrutiny_zbi",
   ]
-  deps = [ "//src/security/lib/scrutiny/frontend" ]
-  non_rust_deps = [ "//src/lib/chunked-compression" ]
 
   args_sources = [ "src/args.rs" ]
   args_deps = [

@@ -3,10 +3,7 @@
 // found in the LICENSE file.
 {
     name: "dwc3",
-    include: [
-        "//sdk/lib/driver_component/power_managed_dispatchers.shard.cml",
-        "driver/platform-device.shard.cml",
-    ],
+    include: [ "driver/platform-device.shard.cml" ],
     program: {
         default_dispatcher_opts: [ "allow_sync_calls" ],
         service_connect_validation: "true",
@@ -17,7 +14,6 @@
         { service: "fuchsia.hardware.usb.dci.UsbDciService" },
         { service: "fuchsia.boot.metadata.MacAddressMetadata" },
         { service: "fuchsia.boot.metadata.SerialNumberMetadata" },
-        { service: "fuchsia.hardware.usb.phy.Metadata" },
         { service: "fuchsia.hardware.usb.policy.Service" },
     ],
     use: [
@@ -46,6 +42,14 @@
             availability: "optional",
             default: false,
         },
+        {
+            config: "fuchsia.usb.dwc3.BypassPlatformExtension",
+            key: "bypass_platform_extension",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+        { protocol: "fuchsia.power.system.ActivityGovernor" },
         { service: "fuchsia.hardware.clock.Service" },
         {
             name: "usb-ddr",
@@ -57,6 +61,10 @@
         },
         { service: "fuchsia.hardware.reset.Service" },
         { service: "fuchsia.hardware.usb.phy.ConnectionWatcherService" },
+        {
+            service: "fuchsia.hardware.usb.phy.Metadata",
+            availability: "optional",
+        },
         {
             name: "dwc3-phy",
             service: "fuchsia.hardware.usb.phy.Service",
@@ -82,14 +90,6 @@
             availability: "optional",
             bind: {
                 rules: { "fuchsia.NAME": "ddr-usb" },
-            },
-        },
-        {
-            name: "usb-interconnect",
-            service: "fuchsia.hardware.interconnect.PathService",
-            availability: "optional",
-            bind: {
-                rules: { "fuchsia.NAME": "usb-interconnect" },
             },
         },
         {
@@ -167,15 +167,8 @@
             from: "self",
         },
         {
-            service: "fuchsia.hardware.usb.phy.Metadata",
-            from: "self",
-        },
-        {
             service: "fuchsia.hardware.usb.policy.Service",
             from: "self",
         },
     ],
-    config: {
-        bypass_platform_extension: { type: "bool" },
-    },
 }

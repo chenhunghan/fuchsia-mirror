@@ -74,7 +74,23 @@ class Dwc3TestHelper {
     drv.ep0_.cur_speed = speed;
   }
   static uint64_t GetEp0SetupGeneration(const Dwc3& drv) { return drv.ep0_.setup_generation; }
-  static void ResetUserEndpoints(Dwc3& drv, bool force = false) { drv.ResetUserEndpoints(force); }
+  static void ResetUserEndpoints(Dwc3& drv) { drv.ResetUserEndpoints(); }
+  static void StopActiveTransfers(Dwc3& drv) { drv.StopActiveTransfers(); }
+  // Parks `callback` behind the user-endpoint idle barrier exactly like HandleResetEvent() /
+  // HandleConnectionDoneEvent() do, so a test can observe whether the barrier is released with
+  // idle == true (NotifyEndpointIdle) or aborted with idle == false
+  // (CancelAllEndpointIdleCallbacks).
+  static void WaitForAllUserEndpointsIdle(Dwc3& drv, fit::callback<void(bool)> callback) {
+    drv.WaitForAllUserEndpointsIdle(std::move(callback));
+  }
+  // Shortens the DCI disconnect drain watchdog so a test can observe a stalled drain without
+  // waiting for the production delay.
+  static void SetDciDisconnectDrainStallDelay(Dwc3& drv, zx::duration delay) {
+    drv.dci_disconnect_drain_stall_delay_ = delay;
+  }
+  static uint64_t GetDciDisconnectStallCount(const Dwc3& drv) {
+    return drv.metrics_.dci_disconnect_stall_count();
+  }
   static void EnableEp0(Dwc3& drv) {
     drv.EpEnable(drv.ep0_.out, true);
     drv.EpEnable(drv.ep0_.in, true);
@@ -169,8 +185,9 @@ class Dwc3TestHelper {
     return drv.EpSetStall(ep, stall);
   }
   static void UserEpQueueNext(Dwc3& drv, Dwc3::UserEndpoint& uep) { drv.UserEpQueueNext(uep); }
-  static void UserEpReset(Dwc3& drv, Dwc3::UserEndpoint& uep, bool force = false) {
-    drv.UserEpReset(uep, force);
+  static void UserEpReset(Dwc3& drv, Dwc3::UserEndpoint& uep) { drv.UserEpReset(uep); }
+  static void RemoveRequests(Dwc3& drv, Dwc3::UserEndpoint& uep, zx_status_t reason) {
+    uep.server->RemoveRequests(reason);
   }
   static void SetDeviceAddress(Dwc3& drv, uint32_t address) { drv.SetDeviceAddress(address); }
   static bool IsFifoEmpty(Dwc3& drv) { return drv.ep0_.shared_fifo.IsEmpty(); }
@@ -246,6 +263,14 @@ class Dwc3TestHelper {
     return uep ? uep->ep.enabled : false;
   }
 
+  static size_t GetEpQueuedTrbs(const Dwc3& drv, uint8_t ep_num) {
+    if (ep_num < 2) {
+      return ((ep_num == 0) ? drv.ep0_.out : drv.ep0_.in).queued_trbs;
+    }
+    const auto* uep = const_cast<Dwc3&>(drv).get_user_endpoint(ep_num);
+    return uep ? uep->ep.queued_trbs : 0;
+  }
+
   static Dwc3::UserEndpoint* GetUserEndpoint(Dwc3& drv, uint8_t ep_num) {
     return drv.get_user_endpoint(ep_num);
   }
@@ -305,17 +330,24 @@ class Dwc3TestHelper {
     drv.ep0_.out.max_packet_size = max_packet_size;
     drv.ep0_.in.max_packet_size = max_packet_size;
   }
+  static uint16_t GetEp0OutMaxPacketSize(const Dwc3& drv) { return drv.ep0_.out.max_packet_size; }
   static uint64_t GetEp0OutTotalBytes(const Dwc3& drv) { return drv.ep0_.out.total_bytes; }
   static uint64_t GetEp0InTotalBytes(const Dwc3& drv) { return drv.ep0_.in.total_bytes; }
   static dwc3_trb_t* GetCurrentReadTrb(Dwc3& drv) { return drv.ep0_.shared_fifo.current_read(); }
   static void PushTrbToSharedFifo(Dwc3& drv, const dwc3_trb_t& trb) {
+    drv.Ep0CancelTransfers();
     dwc3_trb_t* ptr = drv.ep0_.shared_fifo.AdvanceWrite();
     *ptr = trb;
     drv.ep0_.shared_fifo.Write(ptr);
+    ((drv.ep0_.state == Dwc3::Ep0::State::DataIn || drv.ep0_.state == Dwc3::Ep0::State::WaitZlpIn)
+         ? drv.ep0_.in
+         : drv.ep0_.out)
+        .queued_trbs++;
   }
   static void HandleResetEvent(Dwc3& drv) { drv.HandleResetEvent(); }
+  static uint8_t GetEp0TestMode(const Dwc3& drv) { return drv.ep0_.test_mode; }
+  static uint64_t GetConnectFailures(const Dwc3& drv) { return drv.metrics_.connect_failures(); }
 
-  static void ClearSharedFifo(Dwc3& drv) { drv.ep0_.shared_fifo.Clear(); }
   static bool IsSharedFifoEmpty(Dwc3& drv) { return drv.ep0_.shared_fifo.IsEmpty(); }
 
   static void BindDciInterface(Dwc3& drv,
@@ -415,9 +447,18 @@ class FakeUsbPhy : public fidl::Server<fphy::UsbPhy>, public fidl::Server<fphy::
 
   libsync::Completion* completion() { return &completion_; }
 
+  // Number of UsbPhy.ConnectStatusChanged reports received with connected == true / false.
+  size_t connected_reports() const { return connected_reports_; }
+  size_t disconnected_reports() const { return disconnected_reports_; }
+
  private:
   void ConnectStatusChanged(ConnectStatusChangedRequest& request,
                             ConnectStatusChangedCompleter::Sync& completer) override {
+    if (request.connected()) {
+      ++connected_reports_;
+    } else {
+      ++disconnected_reports_;
+    }
     completer.Reply(zx::ok());
   }
 
@@ -457,6 +498,8 @@ class FakeUsbPhy : public fidl::Server<fphy::UsbPhy>, public fidl::Server<fphy::
   bool expect_connection_status_observer_call_ = true;
   std::optional<WatchConnectStatusChangedCompleter::Async> completer_;
   libsync::Completion completion_;  // Signaled when the above completer_ is saved.
+  size_t connected_reports_ = 0;
+  size_t disconnected_reports_ = 0;
 };
 
 class FakePath final : public fidl::Server<fhi::Path> {
@@ -535,6 +578,10 @@ class Environment : public fdf_testing::Environment {
     SetDriverMetadata(std::nullopt, fladj, refclk_lpm_sel);
   }
 
+  void SetPhyMetadata(fuchsia_hardware_usb_phy::Metadata metadata) {
+    phy_metadata_ = std::move(metadata);
+  }
+
   zx::result<> Serve(fdf::OutgoingDirectory& directory) override {
     auto* dispatcher = fdf::Dispatcher::GetCurrent()->async_dispatcher();
 
@@ -554,10 +601,6 @@ class Environment : public fdf_testing::Environment {
         directory.AddService<fhi::PathService>(path_.GetInstanceHandler(dispatcher), "ddr-usb");
     EXPECT_TRUE(result.is_ok());
 
-    result = directory.AddService<fhi::PathService>(path_.GetInstanceHandler(dispatcher),
-                                                    "usb-interconnect");
-    EXPECT_TRUE(result.is_ok());
-
     result = directory.AddService<fphy::Service>(usb_phy_.GetUsbPhyInstanceHandler(dispatcher),
                                                  "dwc3-phy");
     EXPECT_TRUE(result.is_ok());
@@ -565,6 +608,11 @@ class Environment : public fdf_testing::Environment {
     result = directory.AddService<fphy::ConnectionWatcherService>(
         usb_phy_.GetConnectionWatcherInstanceHandler(dispatcher), "dwc3-phy");
     EXPECT_TRUE(result.is_ok());
+
+    if (phy_metadata_.has_value()) {
+      result = phy_metadata_server_.Serve(directory, dispatcher, *phy_metadata_);
+      EXPECT_TRUE(result.is_ok());
+    }
 
     result =
         directory.AddService<fclock::Service>(clock_xo_.CreateInstanceHandler(dispatcher), "xo");
@@ -611,6 +659,7 @@ class Environment : public fdf_testing::Environment {
       reg_region_[i * kRegSize].SetWriteCallback([](uint64_t value) {});
     }
     serve_platform_mocks_ = true;
+    phy_metadata_.reset();
   }
 
   ddk_fake::FakeMmioRegRegion& reg_region() { return reg_region_; }
@@ -633,6 +682,8 @@ class Environment : public fdf_testing::Environment {
 
  private:
   fdf_fake::FakePDev pdev_;
+  std::optional<fuchsia_hardware_usb_phy::Metadata> phy_metadata_;
+  fdf_metadata::MetadataServer<fuchsia_hardware_usb_phy::Metadata> phy_metadata_server_{"dwc3-phy"};
   ddk_fake::FakeMmioRegRegion reg_region_{kRegSize, kRegCount};
   FakePath path_;
   FakeUsbPhy usb_phy_;
@@ -659,6 +710,7 @@ template <bool manage_lifetime, typename gtest_base = testing::Test>
 class TestFixture : public gtest_base {
  public:
   using Endpoint = Dwc3::Endpoint;
+  using UserEndpoint = Dwc3::UserEndpoint;
   using TransferState = Dwc3::Endpoint::TransferState;
 
   static Dwc3::UserEndpoint& GetUserEndpoint(Dwc3& drv, uint8_t ep_num) {
@@ -675,15 +727,24 @@ class TestFixture : public gtest_base {
     drv.HandleEpTransferNotReadyEvent(ep_num, stage);
   }
 
-  static void TriggerEpTransferComplete(Dwc3& drv, uint8_t ep_num, uint32_t residual = 0) {
-    auto* uep = drv.get_user_endpoint(ep_num);
+  static void TriggerEpTransferComplete(Dwc3& drv, uint8_t ep_num, uint32_t residual = 0,
+                                        bool spr = false) {
+    Dwc3::UserEndpoint* uep = drv.get_user_endpoint(ep_num);
     ZX_ASSERT(uep != nullptr);
 
     if (uep->fifo.GetActiveCount() > 0) {
       dwc3_trb_t* trb = uep->fifo.read_;
-      trb->control &= ~TRB_HWO;
-      trb->status = TRB_BUFSIZ(residual);
-      uep->fifo.Write(trb, 1);
+      while (trb != uep->fifo.write_ && (trb->control & TRB_HWO) != 0) {
+        trb->control &= ~TRB_HWO;
+        if (residual > 0 || spr || (trb->control & TRB_CHN) == 0) {
+          trb->status = TRB_BUFSIZ(residual) | (spr ? TRB_SPR : 0);
+          uep->fifo.Write(trb, 1);
+          break;
+        }
+        trb->status = 0;
+        uep->fifo.Write(trb, 1);
+        uep->fifo.Advance(trb);
+      }
     }
 
     drv.HandleEpTransferCompleteEvent(ep_num);
@@ -696,15 +757,22 @@ class TestFixture : public gtest_base {
     uep->server->SendCompletions();
   }
 
-  static void TriggerEpTransferInProgress(Dwc3& drv, uint8_t ep_num, uint32_t residual = 0) {
-    auto* uep = drv.get_user_endpoint(ep_num);
+  static void TriggerEpTransferInProgress(Dwc3& drv, uint8_t ep_num, uint32_t residual = 0,
+                                          bool spr = false) {
+    Dwc3::UserEndpoint* uep = drv.get_user_endpoint(ep_num);
     ZX_ASSERT(uep != nullptr);
 
     if (uep->fifo.GetActiveCount() > 0) {
       dwc3_trb_t* trb = uep->fifo.read_;
-      trb->control &= ~TRB_HWO;
-      trb->status = TRB_BUFSIZ(residual);
-      uep->fifo.Write(trb, 1);
+      while (trb != uep->fifo.write_ && (trb->control & TRB_HWO) != 0) {
+        trb->status = TRB_BUFSIZ(residual) | (spr ? TRB_SPR : 0);
+        trb->control &= ~TRB_HWO;
+        uep->fifo.Write(trb, 1);
+        if (residual > 0 || spr || (trb->control & TRB_CHN) == 0) {
+          break;
+        }
+        uep->fifo.Advance(trb);
+      }
     }
 
     drv.HandleEpTransferInProgressEvent(ep_num);
@@ -775,6 +843,15 @@ class TestFixture : public gtest_base {
   // Returns an RAII guard that clears the DCTL callback on scope exit.
   [[nodiscard]] auto DeferClearDctlCallback() {
     return fit::defer([this]() { SetDctlCallback(nullptr); });
+  }
+
+  // Returns an RAII guard that restores the DSTS read callback to Read_DSTS() on scope exit.
+  [[nodiscard]] auto DeferClearDstsCallback() {
+    return fit::defer([this]() {
+      dut_.RunInEnvironmentTypeContext([this](Environment& env) {
+        env.reg_region()[DSTS::Get().addr()].SetReadCallback([this]() { return Read_DSTS(); });
+      });
+    });
   }
 
   std::vector<fuchsia_hardware_usb_request::Request> CreateVmoBuffer(
@@ -998,7 +1075,7 @@ class TestFixture : public gtest_base {
                      [&](Environment& env) { has_comp = env.usb_phy().has_completer(); });
                  return has_comp;
                },
-               zx::sec(5))
+               zx::duration::infinite())
                ? ZX_OK
                : ZX_ERR_TIMED_OUT;
   }
@@ -1187,7 +1264,7 @@ class UnmanagedTestFixture : public TestFixture<false> {
           });
           return powered;
         },
-        zx::sec(10)));
+        zx::duration::infinite()));
   }
 
   zx::result<> StartDriverWithoutPlatformExtension() {

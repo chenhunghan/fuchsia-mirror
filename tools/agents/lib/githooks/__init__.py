@@ -33,7 +33,6 @@ from .runner import (
     main,
     run_commit_msg_hook,
     run_pre_commit_hook,
-    run_pre_push_hook,
 )
 
 __all__ = [
@@ -55,7 +54,6 @@ __all__ = [
     "main",
     "run_commit_msg_hook",
     "run_pre_commit_hook",
-    "run_pre_push_hook",
     "uninstall_git_hook",
     "uninstall_git_hooks",
 ]

@@ -76,7 +76,6 @@ group("tests") {
 # test the bash fx scripts.
 test_scripts = [
   "tests/fx-internal/bash_test_framework_test",
-  "tests/fx-internal/cog_test",
   "tests/fx-internal/disktools_test",
   "tests/fx-internal/ffx_target_list_usage_test",
   "tests/fx-internal/fvm_test",
@@ -176,14 +175,29 @@ host_script_test_data("fx_bash_tests") {
         "//build/auth/select_auth_method.py",
         "//build/regenerator",
         "//build/scripts/main_build.py",
+        "//build/scripts/build_timeout.py",
+        "//build/scripts/managed_process.py",
+        "//build/scripts/properties.py",
+        "//build/scripts/pstree.py",
+        "//build/scripts/graceful_timeout.py",
         "//build/scripts/signal_utils.py",
         "//build/force_clean/force_clean_if_needed.py",
         "//build/scripts/top_build_wrap.sh",
         "//build/profile/profile_wrap.sh",
         "//build/profile/hardware_profiler.py",
+        "//build/profile/procfs.py",
+        "//build/rbe/casfs.py",
         "//build/rbe/fuchsia-reproxy-wrap.sh",
+        "//build/rbe/rbe_profile.py",
         "//build/rbe/rbe_settings.py",
+        "//build/resultstore/rs_profile.py",
         "//build/python/modules/serialization/serialization.py",
+
+        # TODO(b/567721959): Migrate devshell build tests to Python to avoid
+        # manual file dependency tracking.
+        "//build/scripts/service_profile.py",
+        "//build/rbe/profiles/default.json",
+        "//build/resultstore/profiles/default.json",
         "//build/resultstore/fuchsia-rsproxy-wrap.sh",
         "//build/tui/build-tui-wrap.sh",
       ]

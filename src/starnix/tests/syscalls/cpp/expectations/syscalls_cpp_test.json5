@@ -39,9 +39,6 @@
                 // TODO(https://fxbug.dev/418965139)
                 "ThreadGroupLifeCycleTest.EndMainThreadFirst",
 
-                // TODO(https://fxbug.dev/489159960): Deflake and re-enable.
-                "ProcessMemoryReleaseTest.SuccessfulRelease",
-
                 // TODO(https://fxbug.dev/489528448) re-enable after flake rate is reduced
                 "SignalHandling.SignalDeliveryWakesOnlyOneFutex",
 
@@ -60,13 +57,14 @@
         {
             type: "expect_failure",
             matchers: [
+                // TODO(https://fxbug.dev/567514429): Removing or replacing a loop device does not
+                // evict its cached sysfs dentry.
+                "LoopTest.SysfsDeviceDirectoryRemovalAndReplacement",
+
                 // TODO(https://fxbug.dev/567514429): `loop` sysfs attribute group is created on
                 // device creation rather than when a backing file is attached, and not removed on
                 // LOOP_CLR_FD.
                 "LoopTest.SysfsLoopDirectoryLifecycle",
-
-                // TODO(https://fxbug.dev/564489293): Target error does not deliver EPOLLERR.
-                "EpollTest.TargetErrorDeliversEpollErr",
 
                 // TODO(https://fxbug.dev/351037863)
                 "AshmemTest.SetNameOverflow",
@@ -87,21 +85,6 @@
                 // TODO(https://fxbug.dev/507976628): Write at most the requested size in the BPF_OBJ_GET_INFO_BY_FD command.
                 "BpfMapTest.ObjGetInfoByFdOnlyWritesRequestedSize",
 
-                // TODO(https://fxbug.dev/297438799)
-                "MmapTest.CanMprotectNonExecMmapToExecutable",
-
-                // TODO(https://fxbug.dev/297438799)
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_rwx",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_rwx",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_rw_",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rw__and_r_x",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r_x_and_rwx",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r___and_r_x",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_r_x",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/____and_rw_",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/rw__and_rwx",
-                "MMapAllProtectionsTest/MMapAllProtectionsTest.PrivateFileMappingAllowAllProtections/r_x_and_rw_",
-
                 // TODO(https://g-issues.fuchsia.dev/issues/318701791)
                 "MemfdFaultTest/FaultFileTest.ReadV/0",
                 "TmpfsFaultTest/FaultFileTest.ReadV/0",
@@ -116,9 +99,6 @@
                 "ProcSelfMemProts.CanWriteToPrivateAnonymousMappings/None",
                 "ProcSelfMemProts.CanWriteToPrivateAnonymousMappings/Read",
                 "ProcSelfMemProts.CanWriteToPrivateAnonymousMappings/ReadExecute",
-
-                // TODO(https://fxbug.dev/335701084)
-                "VmspliceTest.FileInPipe",
 
                 // TODO(https://fxbug.dev/333132302)
                 "Madvise.MadvRemoveZeroesMemory",
@@ -161,8 +141,6 @@
                 "SeccompTest.BpfUnknownCodeUpperBitsRejected",
 
                 // TODO(https://fxbug.dev/498681252)
-                "EpollTest.PipeReadFullTriggerEpollOutWithEpollET",
-                "EpollTest.PipeWritesNonemptyTriggerEpollInWithEpollET",
                 "PipeTest.PolloutFragmentation",
 
                 // TODO(https://fxbug.dev/369889180): Remount rw to ro should fail with open files.
@@ -188,6 +166,8 @@
                 "SysctlTest/SysctlNodeTest.RootCanWriteWithoutCapDacOverrideAndNetAdmin/kernel_overflowgid",
                 "SysctlTest/SysctlNodeTest.CapDacOverrideHasNoEffectOnRootWrite/kernel_overflowuid",
                 "SysctlTest/SysctlNodeTest.RootCanWriteWithoutCapDacOverrideAndNetAdmin/kernel_overflowuid",
+                "SysctlTest/SysctlNodeTest.CapDacOverrideHasNoEffectOnRootWrite/kernel_threads_max",
+                "SysctlTest/SysctlNodeTest.RootCanWriteWithoutCapDacOverrideAndNetAdmin/kernel_threads_max",
 
                 // modules_disabled is a StubBytesFile instead of a strict security toggle and therefore
                 // quietly succeeds on writes instead of issuing EINVAL.
@@ -198,10 +178,8 @@
                 // DirEntryHandle in InotifyState::watches.
                 "InotifyTest.UnlinkWatchedHardLinkFirstEmitsDeleteSelfOnLastUnlink",
 
-                // TODO(https://fxbug.dev/397371605): Align RLIMIT_* defaults with Linux.
-                "KernelDefaults/RLimitDefaultTest.CurAndMaxDefaults/NOFILE",
+                // TODO(https://fxbug.dev/322874791): Integrate RLIMIT_STACK with ResourceLimits.
                 "KernelDefaults/RLimitDefaultTest.CurAndMaxDefaults/STACK",
-                "RLimitScaledDefaultTest.NProcAndSigpending",
             ],
         },
     ],

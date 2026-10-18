@@ -19,7 +19,7 @@ import urllib.request
 import weakref
 from collections.abc import Iterator
 from types import TracebackType
-from typing import Any
+from typing import Any, Self
 
 import perfetto.trace_processor.api
 from perfetto.tools.download_trace import resolve_trace_url
@@ -452,7 +452,7 @@ class GsUriResolver(TraceUriResolver):
 
     @classmethod
     # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
-    def from_trace_uri(cls, uri: str) -> "GsUriResolver":
+    def from_trace_uri(cls, uri: str) -> Self:
         return cls(uri)
 
     # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
@@ -486,7 +486,7 @@ class HttpUriResolver(TraceUriResolver):
 
     @classmethod
     # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
-    def from_trace_uri(cls, uri: str) -> "HttpUriResolver":
+    def from_trace_uri(cls, uri: str) -> Self:
         return cls(uri)
 
     # TODO(https://fxbug.dev/571891548): decorate with typing.override when able.
@@ -580,7 +580,7 @@ class PerfettoTraceProcessor:
     tp_shell_path: str
     debug: bool
     _tp: PerfettoTP
-    _finalizer: weakref.finalize
+    _finalizer: weakref.finalize[Any, Any]
     _tp_shell_context: Any
 
     def __init__(
@@ -723,7 +723,7 @@ class PerfettoTraceProcessor:
         )
         return {row["name"] for row in rows}
 
-    def __enter__(self) -> "PerfettoTraceProcessor":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(

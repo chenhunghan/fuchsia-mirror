@@ -4,8 +4,15 @@
 
 """Macro and helper rule for defining a Fuchsia unit test component."""
 
-load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
-load("@rules_rust//rust:defs.bzl", "rust_common")
+load(
+    "//build/bazel/aspects:component_manifests.bzl",
+    "collect_component_manifests_aspect",
+)
+load("//build/bazel/aspects:runner.bzl", "FuchsiaRunnerShardInfo")
+load(
+    "//build/bazel/rules/components:expect_includes.bzl",
+    "FuchsiaExpectedIncludesInfo",
+)
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
@@ -15,38 +22,84 @@ load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary"
 
 _TEST_BINARY_INSTALL_ROOT = "bin/"
 
-_GTEST_REPO_NAMES = (
-    "com_google_googletest",
-    "googletest",
-    "googletest+",
-)
+def _fx_unittest_runner_shard_impl(ctx):
+    binary = ctx.attr.binary
+    shards = (
+        binary[FuchsiaRunnerShardInfo].shards.to_list() if FuchsiaRunnerShardInfo in binary else []
+    )
+    if not shards:
+        runner_shard_file = ctx.file._default_runner_shard
+    elif len(shards) > 1:
+        fail(
+            "Multiple conflicting runner shards found in dependencies of {}: {}".format(
+                binary.label,
+                ", ".join(sorted(["//" + s.short_path for s in shards])),
+            ),
+        )
+    else:
+        runner_shard_file = shards[0]
 
-def _infer_runner_shard(binary):
-    if rust_common.crate_info in binary:
-        return "//src/sys/test_runners/rust/default.shard.cml"
-
-    if CcInfo in binary:
-        for linker_input in binary[CcInfo].linking_context.linker_inputs.to_list():
-            owner = linker_input.owner
-            if owner.repo_name in _GTEST_REPO_NAMES or owner.package == "third_party/googletest":
-                return "//src/sys/test_runners/gtest/default.shard.cml"
-            if owner.package == "zircon/system/ulib/zxtest":
-                return "//src/sys/test_runners/gtest/zxtest.shard.cml"
-        return "//sdk/lib/sys/testing/elf_test_runner.shard.cml"
-
-    fail(
-        "Unsupported test binary target {} for fx_unittest_component: ".format(binary.label) +
-        "expected a Rust or C++ executable target.",
+    expected_includes = (
+        binary[FuchsiaExpectedIncludesInfo] if FuchsiaExpectedIncludesInfo in binary else None
+    )
+    auto_include_shards = depset(
+        [runner_shard_file],
+        transitive = [expected_includes.auto_include_shards] if expected_includes else [],
+    )
+    transitive_shards = depset(
+        [runner_shard_file],
+        transitive = [expected_includes.transitive_shards] if expected_includes else [],
     )
 
-def _fx_unittest_manifest_impl(ctx):
-    runner_shard = _infer_runner_shard(ctx.attr.binary)
+    return [
+        DefaultInfo(files = transitive_shards),
+        FuchsiaExpectedIncludesInfo(
+            enforced_shards = expected_includes.enforced_shards if expected_includes else depset(),
+            auto_include_shards = auto_include_shards,
+            transitive_shards = transitive_shards,
+        ),
+    ]
 
-    # TODO(https://fxbug.dev/563978780): Collect shards from `expect_includes`
-    # dependencies once `expect_includes` is implemented in Bazel.
+_fx_unittest_runner_shard = rule(
+    doc = """Resolves the runner shard and expected include shards for a unit test binary.
+
+    This rule applies `collect_component_manifests_aspect` to `binary` to gather
+    any `FuchsiaRunnerShardInfo` and `FuchsiaExpectedIncludesInfo` providers
+    from its transitive dependencies. If no runner shard is found, it falls back
+    to `_default_runner_shard` (the ELF test runner). If multiple conflicting
+    runner shards are found, analysis fails with an error.
+
+    The selected runner shard and all transitive expected include shards (including
+    their `deps`) are returned in `DefaultInfo.files` for compilation sandboxing,
+    while `FuchsiaExpectedIncludesInfo.auto_include_shards` provides the shards to
+    list directly in the generated `.cml` manifest's `include` array.
+    """,
+    implementation = _fx_unittest_runner_shard_impl,
+    attrs = {
+        "binary": attr.label(
+            doc = "The unit test executable target.",
+            mandatory = True,
+            executable = True,
+            cfg = "target",
+            aspects = [collect_component_manifests_aspect],
+        ),
+        "_default_runner_shard": attr.label(
+            default = "//sdk/lib/sys/testing:elf_test_runner",
+            allow_single_file = [".shard.cml"],
+        ),
+    },
+)
+
+def _fx_unittest_manifest_impl(ctx):
+    direct_shards = depset(
+        transitive = [
+            target[FuchsiaExpectedIncludesInfo].auto_include_shards if FuchsiaExpectedIncludesInfo in target else target[DefaultInfo].files
+            for target in ctx.attr.shards
+        ],
+    )
     includes = [
-        runner_shard,
-        "syslog/use.shard.cml",
+        "//" + shard.short_path
+        for shard in direct_shards.to_list()
     ]
 
     cml_content = json.encode_indent(
@@ -70,18 +123,23 @@ def _fx_unittest_manifest_impl(ctx):
     ]
 
 _fx_unittest_manifest = rule(
-    doc = "Generates a component manifest (.cml) for a unit test binary.",
+    doc = """Generates a component manifest (.cml) for a unit test binary.
+
+    Writes a JSON `.cml` file setting `program.binary` to `binary_path` and
+    populating `include` with the workspace-relative paths of all `.shard.cml`
+    files provided in `shards`. The resulting `.cml` file is returned in
+    `DefaultInfo.files` to be compiled by `fx_component_manifest()`.
+    """,
     implementation = _fx_unittest_manifest_impl,
     attrs = {
-        "binary": attr.label(
-            doc = "The unit test executable target.",
-            mandatory = True,
-            executable = True,
-            cfg = "target",
-        ),
         "binary_path": attr.string(
             doc = "The packaged path of the binary relative to the package root.",
             mandatory = True,
+        ),
+        "shards": attr.label_list(
+            doc = "The manifest shard (.shard.cml or .cml) files or targets to include in the generated manifest.",
+            mandatory = True,
+            allow_files = [".cml"],
         ),
     },
 )
@@ -110,12 +168,25 @@ def _fx_unittest_component_impl(
         tags = tags + ["manual"],
     )
 
+    runner_shard_name = name + ".runner_shard"
+    _fx_unittest_runner_shard(
+        name = runner_shard_name,
+        testonly = True,
+        binary = binary,
+        tags = tags + ["manual"],
+    )
+
+    shards = [
+        ":" + runner_shard_name,
+        "//sdk/lib/syslog:use.shard.cml",
+    ]
+
     generated_manifest_name = name + ".generated_manifest"
     _fx_unittest_manifest(
         name = generated_manifest_name,
         testonly = True,
-        binary = binary,
         binary_path = _TEST_BINARY_INSTALL_ROOT + binary_name,
+        shards = shards,
         tags = tags + ["manual"],
     )
 
@@ -124,19 +195,7 @@ def _fx_unittest_component_impl(
         name = manifest_name,
         testonly = True,
         component_name = component_name,
-        includes = [
-            "//sdk/lib/syslog:use.shard.cml",
-            # The test runner shard is inferred from the binary target's
-            # providers during the analysis phase of `_fx_unittest_manifest`,
-            # whereas `fx_component_manifest` resolves its `includes` labels at
-            # macro expansion time. Since `cmc compile` runs in a sandbox where
-            # only declared `includes` are staged as inputs, we must list all
-            # possible runner shards that `_fx_unittest_manifest` might emit.
-            "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
-            "//src/sys/test_runners/gtest:default.shard.cml",
-            "//src/sys/test_runners/gtest:zxtest.shard.cml",
-            "//src/sys/test_runners/rust:default.shard.cml",
-        ],
+        includes = shards,
         manifest = ":" + generated_manifest_name,
         tags = tags + ["manual"],
     )

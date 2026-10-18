@@ -83,8 +83,7 @@ void Dwc3::HandleEpEvent(uint32_t event) {
                  (event & DEPEVT_XFER_NOT_READY_REASON) ? "XferActive" : "XferNotActive");
       if (ep_num == 0 && (event & DEPEVT_XFER_NOT_READY_REASON)) {
         // The host has abandoned the transfer, stall and reset.
-        ep0_.shared_fifo.Clear();
-        EpSetStall(ep0_.out, true);
+        Ep0EndAndStall(ep0_.out);
         Ep0QueueSetup();
         break;
       }
@@ -204,11 +203,12 @@ void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_sta
                      const zx_packet_interrupt_t* interrupt) {
   TRACE_DURATION("dwc3", "Dwc3::HandleIrq", "status", status);
 
-  if (!controller_started_ || !power_on_) {
-    // Ack but otherwise ignore interrupts that arrive while client has stopped us or the core is
-    // powered down. If the core is still powered on, ensure event interrupts are masked to
-    // prevent level-triggered interrupts from continuously re-triggering. If power_on_ is false,
-    // MMIO cannot be safely accessed because the core's power domain/clocks may be disabled.
+  if (!controller_started_ || !power_on_ || disconnect_in_flight_) {
+    // Ack but otherwise ignore interrupts that arrive while client has stopped us, while a
+    // disconnect drain is in flight, or while the core is powered down. If the core is still
+    // powered on, ensure event interrupts are masked to prevent level-triggered interrupts from
+    // continuously re-triggering. If power_on_ is false, MMIO cannot be safely accessed because
+    // the core's power domain/clocks may be disabled.
     if (power_on_) {
       auto* mmio = get_mmio();
       GEVNTSIZ::Get(0).ReadFrom(mmio).set_EVNTINTRPTMASK(1).WriteTo(mmio);
@@ -257,6 +257,11 @@ void Dwc3::StartEvents() {
   TRACE_DURATION("dwc3", "Dwc3::StartEvents");
   ep0_.out.stale_starts_to_end = 0;
   ep0_.in.stale_starts_to_end = 0;
+  if (ep0_.shared_fifo.TotalSlots() > 0) {
+    ep0_.shared_fifo.SkipTrbs(ep0_.out.queued_trbs + ep0_.in.queued_trbs);
+    ep0_.out.queued_trbs = 0;
+    ep0_.in.queued_trbs = 0;
+  }
   for (UserEndpoint& uep : user_endpoints_) {
     uep.ep.stale_starts_to_end = 0;
     uep.ep.stale_cancels_to_ignore = 0;
@@ -304,15 +309,17 @@ void Dwc3::StopEvents() {
   uint32_t event_bytes;
   while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) > 0) {
     uint32_t event_count = event_bytes / sizeof(uint32_t);
-    for (uint32_t event : event_fifo_.Read(event_count)) {
-      if (!(event & DEPEVT_NON_EP) && DEPEVT_TYPE(event) == DEPEVT_CMD_CMPLT &&
-          DEPEVT_CMD_CMPLT_CMD_TYPE(event) == DEPCMD::DEPSTRTXFER && DEPEVT_STATUS(event) == 0) {
-        Endpoint stale_ep(DEPEVT_PHYS_EP(event));
-        stale_ep.rsrc_id = DEPEVT_CMD_CMPLT_RSRC_ID(event);
-        CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+    if (event_fifo_.TotalSlots() > 0) {
+      for (uint32_t event : event_fifo_.Read(event_count)) {
+        if (link_connected_ && !(event & DEPEVT_NON_EP) && DEPEVT_TYPE(event) == DEPEVT_CMD_CMPLT &&
+            DEPEVT_CMD_CMPLT_CMD_TYPE(event) == DEPCMD::DEPSTRTXFER && DEPEVT_STATUS(event) == 0) {
+          Endpoint stale_ep(DEPEVT_PHYS_EP(event));
+          stale_ep.rsrc_id = DEPEVT_CMD_CMPLT_RSRC_ID(event);
+          CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+        }
       }
+      event_fifo_.Advance(event_count);
     }
-    event_fifo_.Advance(event_count);
     GEVNTCOUNT::Get(0)
         .FromValue(0)
         .set_EVNT_HANDLER_BUSY(1)
@@ -320,6 +327,11 @@ void Dwc3::StopEvents() {
         .WriteTo(mmio);
   }
 
+  if (ep0_.out.stale_starts_to_end > 0 || ep0_.in.stale_starts_to_end > 0) {
+    ep0_.shared_fifo.SkipTrbs(ep0_.out.queued_trbs + ep0_.in.queued_trbs);
+    ep0_.out.queued_trbs = 0;
+    ep0_.in.queued_trbs = 0;
+  }
   for (Endpoint* ep : {&ep0_.out, &ep0_.in}) {
     const bool had_stale = ep->stale_starts_to_end > 0;
     ep->stale_starts_to_end = 0;

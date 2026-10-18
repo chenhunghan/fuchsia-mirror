@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import asyncio
 import json
 import os
 import tempfile
@@ -243,6 +244,7 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(test.is_hermetic())
+        self.assertFalse(test.is_host_test())
         self.assertIsNone(test.environment())
         self.assertTrue(test.should_symbolize())
 
@@ -333,6 +335,7 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(test.is_hermetic())
+        self.assertFalse(test.is_host_test())
         self.assertIsNone(test.environment())
         self.assertTrue(test.should_symbolize())
 
@@ -410,6 +413,7 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(test.is_hermetic())
+        self.assertFalse(test.is_host_test())
         self.assertIsNone(test.environment())
         self.assertTrue(test.should_symbolize())
 
@@ -620,6 +624,7 @@ class TestExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(test._test.is_e2e_test())
         self.assertFalse(test.is_hermetic())
+        self.assertFalse(test.is_host_test())
         env = test.environment()
         assert env is not None
         self.assertDictEqual(env, {"CWD": "/out/fuchsia"})
@@ -1451,3 +1456,58 @@ class TestExecutionUtils(unittest.IsolatedAsyncioTestCase):
         """Test _parse_device_address rejects malformed addresses and invalid ports."""
         with self.assertRaises(execution.DeviceConfigError):
             execution._parse_device_address(target_line)
+
+    @mock.patch("async_utils.command.AsyncCommand.create")
+    async def test_command_abort_waits_for_process_exit_without_sleeping_full_timeout(
+        self, mock_create: mock.AsyncMock
+    ) -> None:
+        """Test that abort_signal waits on process runner task rather than sleeping 5s."""
+        mock_cmd = mock.MagicMock()
+        runner_future = asyncio.get_running_loop().create_future()
+
+        def terminate_side_effect() -> None:
+            if not runner_future.done():
+                runner_future.set_result(None)
+
+        mock_cmd.terminate.side_effect = terminate_side_effect
+        mock_cmd._runner_task = runner_future
+        mock_cmd.run_to_completion = mock.AsyncMock(
+            return_value=mock.MagicMock(return_code=-15)
+        )
+        mock_create.return_value = mock_cmd
+
+        recorder = mock.MagicMock()
+        abort_signal = asyncio.Event()
+
+        task = asyncio.create_task(
+            execution.run_command(
+                "my_cmd",
+                recorder=recorder,
+                abort_signal=abort_signal,
+            )
+        )
+        await asyncio.sleep(0.01)
+        abort_signal.set()
+        await task
+
+        mock_cmd.kill.assert_not_called()
+        for call in recorder.emit_warning_message.call_args_list:
+            self.assertNotIn("did not terminate in time", call[0][0])
+
+    def test_is_host_test(self) -> None:
+        """Test that TestExecution.is_host_test returns True for a pure host test."""
+        exec_env = _make_exec_env("/fuchsia", "/out/fuchsia")
+        test = execution.TestExecution(
+            test_list_file.Test(
+                tests_json_file.TestEntry(
+                    tests_json_file.TestSection(
+                        "foo", "//foo", "linux", path="host_x64/foo"
+                    )
+                ),
+                test_list_file.TestListEntry("foo", [], execution=None),
+            ),
+            exec_env,
+            args.parse_args([]),
+        )
+        self.assertTrue(test.is_host_test())
+        self.assertFalse(test.is_hermetic())

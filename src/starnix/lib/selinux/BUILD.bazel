@@ -2,15 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load(
-    "//build/bazel/rules/components:fx_component.bzl",
-    "fx_component_manifest",
-    "fx_test_component",
-)
-load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
-load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
-load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -27,38 +20,34 @@ rustc_library(
         "src/kernel/mod.rs",
         "src/kernel/permissions.rs",
         "src/lib.rs",
-        "src/new_policy/access_vector.rs",
-        "src/new_policy/bitmap.rs",
-        "src/new_policy/booleans.rs",
-        "src/new_policy/classes.rs",
-        "src/new_policy/common_symbols.rs",
-        "src/new_policy/compute.rs",
-        "src/new_policy/constraints.rs",
-        "src/new_policy/context.rs",
-        "src/new_policy/error.rs",
-        "src/new_policy/filename_transitions.rs",
-        "src/new_policy/id_type.rs",
-        "src/new_policy/indexed.rs",
-        "src/new_policy/initial_sids.rs",
-        "src/new_policy/metadata.rs",
-        "src/new_policy/mls.rs",
-        "src/new_policy/mod.rs",
-        "src/new_policy/object_contexts.rs",
-        "src/new_policy/parser.rs",
-        "src/new_policy/permissions.rs",
-        "src/new_policy/policy_cap.rs",
-        "src/new_policy/roles.rs",
-        "src/new_policy/rules.rs",
-        "src/new_policy/security_context.rs",
-        "src/new_policy/traits.rs",
-        "src/new_policy/types.rs",
-        "src/new_policy/u24_index.rs",
-        "src/new_policy/users.rs",
         "src/permission_check.rs",
+        "src/policy/access_vector.rs",
+        "src/policy/bitmap.rs",
+        "src/policy/booleans.rs",
+        "src/policy/classes.rs",
+        "src/policy/common_symbols.rs",
+        "src/policy/compute.rs",
+        "src/policy/constraints.rs",
         "src/policy/error.rs",
+        "src/policy/filename_transitions.rs",
+        "src/policy/id_type.rs",
+        "src/policy/indexed.rs",
+        "src/policy/initial_sids.rs",
+        "src/policy/metadata.rs",
+        "src/policy/mls.rs",
         "src/policy/mod.rs",
-        "src/policy/parsed_policy.rs",
+        "src/policy/object_contexts.rs",
         "src/policy/parser.rs",
+        "src/policy/permissions.rs",
+        "src/policy/policy_cap.rs",
+        "src/policy/roles.rs",
+        "src/policy/rules.rs",
+        "src/policy/security_context.rs",
+        "src/policy/tests.rs",
+        "src/policy/traits.rs",
+        "src/policy/types.rs",
+        "src/policy/u24_index.rs",
+        "src/policy/users.rs",
         "src/security_server.rs",
         "src/sid_table.rs",
         "src/sync.rs",
@@ -114,7 +103,7 @@ rustc_library(
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
     proc_macro_deps = [
-        "//src/starnix/lib/selinux/src/new_policy/derive_macros",
+        "//src/starnix/lib/selinux/src/policy/derive_macros",
         "//third_party/rust_crates/vendor:paste",
         "//third_party/rust_crates/vendor:strum_macros",
     ],
@@ -125,6 +114,7 @@ rustc_library(
     ],
     deps = [
         "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-rcu-collections",
         "//src/lib/trace/rust:trace",
         "//src/starnix/lib/starnix_logging",
         "//src/starnix/lib/starnix_uapi",
@@ -163,42 +153,8 @@ rustc_test(
 )
 
 # @bazel2gn:skip
-fx_packaged_binary(
-    name = "selinux_test_packaged_bin",
-    testonly = True,
-    binary = ":selinux_lib_test",
-    binary_name = "selinux_lib_test",
-)
-
-# @bazel2gn:skip
-fx_component_manifest(
-    name = "starnix-selinux-unit-tests-manifest",
-    testonly = True,
-    component_name = "starnix-selinux-unit-tests",
-    includes = [
-        "//sdk/lib/syslog:use.shard.cml",
-        "//src/sys/test_runners/rust:default.shard.cml",
-    ],
-    manifest = "meta/starnix_selinux_unit_tests.cml",
-)
-
-# @bazel2gn:skip
-fx_test_component(
-    name = "starnix-selinux-unit-tests-component",
-    compiled_manifest = ":starnix-selinux-unit-tests-manifest",
-    component_name = "starnix-selinux-unit-tests",
-    deps = [":selinux_test_packaged_bin"],
-)
-
-# @bazel2gn:skip
-fx_package(
-    name = "starnix-selinux-unit-tests-package",
-    package_name = "starnix-selinux-unit-tests",
-    test_components = [":starnix-selinux-unit-tests-component"],
-)
-
-# @bazel2gn:skip
-fx_test(
+fx_unittest_package(
     name = "starnix-selinux-unit-tests",
-    package = ":starnix-selinux-unit-tests-package",
+    unit_tests = [":selinux_lib_test"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )

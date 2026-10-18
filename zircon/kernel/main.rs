@@ -14,7 +14,7 @@
 #![allow(clippy::new_without_default)]
 #![feature(atomic_volatile)]
 #![feature(cfg_sanitize)]
-#![cfg_attr(target_arch = "x86_64", feature(sanitize))]
+#![feature(sanitize)]
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -37,8 +37,14 @@ pub mod pdev_watchdog;
 #[path = "dev/pdev/power/power.rs"]
 pub mod pdev_power;
 
+#[path = "hypervisor/mod.rs"]
+pub mod hypervisor;
+
 #[path = "kernel/mod.rs"]
 pub mod kernel;
+
+#[path = "lib/backtrace/backtrace.rs"]
+pub mod backtrace;
 
 #[path = "lib/cbuf/src/mod.rs"]
 pub mod cbuf;
@@ -56,6 +62,12 @@ pub mod counters;
 #[path = "lib/debuglog/debuglog.rs"]
 pub mod debuglog_rs;
 
+#[path = "lib/instrumentation/mod.rs"]
+pub mod instrumentation;
+
+#[path = "lib/kconcurrent/src/mod.rs"]
+pub mod kconcurrent;
+
 #[path = "lib/ktrace/src/mod.rs"]
 pub mod ktrace_rs;
 
@@ -64,6 +76,9 @@ pub mod mmu_rcu;
 
 #[path = "lib/page_cache/page_cache.rs"]
 pub mod page_cache;
+
+#[path = "lib/percpu_writer/allocator.rs"]
+pub mod percpu_writer;
 
 #[path = "lib/persistent-debuglog/persistent_debuglog.rs"]
 pub mod persistent_debuglog_rs;
@@ -85,6 +100,12 @@ pub mod user_copy;
 
 #[path = "lib/userabi/userabi.rs"]
 pub mod userabi;
+
+#[path = "lib/virtual_alloc/virtual_alloc.rs"]
+pub mod virtual_alloc;
+
+#[path = "lib/wake-vector/wake_vector.rs"]
+pub mod wake_vector;
 
 #[path = "object/object.rs"]
 pub mod object;
@@ -116,16 +137,20 @@ pub mod generic_riscv64;
 pub mod pdev_interrupt;
 
 #[cfg(target_arch = "aarch64")]
+#[path = "dev/hw_rng/amlogic_rng/amlogic_rng.rs"]
+pub mod amlogic_rng;
+
+#[cfg(target_arch = "x86_64")]
+#[path = "dev/hw_rng/intel_rng/intel_rng.rs"]
+pub mod intel_rng;
+
+#[cfg(target_arch = "aarch64")]
 #[path = "dev/hw_watchdog/generic32/generic32.rs"]
 pub mod generic32;
 
 #[cfg(target_arch = "riscv64")]
 #[path = "dev/interrupt/plic/plic.rs"]
 pub mod plic;
-
-#[cfg(target_arch = "riscv64")]
-#[path = "dev/pdev/timer/timer.rs"]
-pub mod pdev_timer;
 
 #[cfg(target_arch = "aarch64")]
 #[path = "dev/pdev/clocks_and_pmic/clocks_and_pmic.rs"]
@@ -156,6 +181,10 @@ pub mod console_tests_rust;
 #[cfg(ktest)]
 #[path = "lib/pow2_range_allocator/tests/kernel.rs"]
 pub mod pow2_range_allocator_tests;
+
+#[cfg(all(console_enabled, ktest))]
+#[path = "debugcommands/debugcommands.rs"]
+pub mod debugcommands;
 
 #[cfg(all(console_enabled, ktest))]
 #[path = "lib/unittest/console.rs"]

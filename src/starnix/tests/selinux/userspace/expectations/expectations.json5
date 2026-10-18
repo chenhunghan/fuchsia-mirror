@@ -12,11 +12,6 @@
         {
             type: "expect_failure",
             matchers: [
-                // TODO: https://fxbug.dev/422968534 - Make (SE)Starnix match the (SE)Linux behavior
-                // regarding opening binder.
-                "BinderTest/CallPermission.DoCall/0",
-                "BinderTest/CallPermission.DoCall/1",
-
                 // TODO(https://fxbug.dev/521343708) - Support SELinux context= and rootcontext=
                 // mount options on cgroupfs v2.
                 "CgroupFs/CgroupFsTest.SecondMountWithDifferentOptionsChangesLabels/Context",
@@ -46,12 +41,6 @@
                 // TODO: https://fxbug.dev/334094811 - Reject SELinux mount options before a
                 // policy is loaded.
                 "MountTests/MountOptionValidationTest.RejectedBeforePolicyLoad/*",
-
-                // TODO: https://fxbug.dev/409256444 - Make (SE)Starnix match the (SE)Linux behavior
-                // demonstrated in this test.
-                "MProtectExecmod/MProtectExecmod.ExecMod/ExecmodYes_PrivateMapping_Modification_MprotectSuccess",
-                "MProtectExecmod/MProtectExecmod.ExecMod/ExecmodNo_SharedMapping_Modification_MprotectSuccess",
-                "MProtectExecmod/MProtectExecmod.ExecMod/ExecmodNo_PrivateMapping_NoModification_MprotectSuccess",
 
                 // TODO: https://fxbug.dev/501038871 - Make (SE)Starnix match the (SE)Linux behavior
                 // regarding perf_event_open with invalid tracepoint ID.

@@ -840,8 +840,8 @@ mod test {
     use crate::api::*;
     use crate::conformance::test::parse_asm;
     use crate::{
-        CallingContext, FieldDescriptor, FieldMapping, FieldType, NullVerifierLogger,
-        ProgramArgument, StructDescriptor, Type, verify_program,
+        CallingContext, FieldDescriptor, FieldType, NullVerifierLogger, PointerOrigin,
+        ProgramArgument, StructDescriptor, Type, VerifierError, VerifierErrorKind, verify_program,
     };
     use std::mem::offset_of;
     use std::sync::{Arc, LazyLock};
@@ -970,7 +970,7 @@ mod test {
         Type::PtrToStruct { id: TEST_ARG_32_BIT_MEMORY_ID.clone(), offset: 0.into(), descriptor }
     });
 
-    impl ProgramArgument for &'_ TestArgument32BitMapped {
+    impl ProgramArgument for &'_ mut TestArgument32BitMapped {
         fn get_type() -> &'static Type {
             &*TEST_ARG_32_BIT_TYPE
         }
@@ -1028,7 +1028,7 @@ mod test {
         type RunContext<'a> = ();
 
         type Packet<'a> = ();
-        type Arg1<'a> = &'a TestArgument32BitMapped;
+        type Arg1<'a> = &'a mut TestArgument32BitMapped;
         type Arg2<'a> = ();
         type Arg3<'a> = ();
         type Arg4<'a> = ();
@@ -1076,7 +1076,7 @@ mod test {
         let program = r#"
         mov %r0, 0
         ldxdw %r2, [%r1+16]
-        ldxdw %r1, [%r1+6]
+        ldxdw %r1, [%r1+8]
         # ensure data contains at least 4 bytes
         mov %r3, %r1
         add %r3, 0x4
@@ -1085,7 +1085,14 @@ mod test {
         ldxdw %r0, [%r1]
         exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::OutOfBoundsMemoryAccess,
+                pc: Some(6),
+            })
+        );
     }
 
     #[test]
@@ -1207,8 +1214,18 @@ mod test {
         exit
         "#;
         let args = vec![
-            Type::PtrToMemory { id: MemoryId::new(), offset: 0.into(), buffer_size: 16 },
-            Type::PtrToMemory { id: MemoryId::new(), offset: 0.into(), buffer_size: 16 },
+            Type::PtrToMemory {
+                id: MemoryId::new(),
+                offset: 0.into(),
+                buffer_size: 16,
+                origin: PointerOrigin::KernelReadOnly,
+            },
+            Type::PtrToMemory {
+                id: MemoryId::new(),
+                offset: 0.into(),
+                buffer_size: 16,
+                origin: PointerOrigin::KernelReadOnly,
+            },
         ];
         let verify_result = verify_program(
             parse_asm(program),
@@ -1218,7 +1235,7 @@ mod test {
 
         assert_eq!(
             verify_result.expect_err("validation should fail"),
-            EbpfError::ProgramVerifyError("at PC 2: R6 is not a packet".to_string())
+            VerifierError { kind: VerifierErrorKind::RegisterNotPacket(6), pc: Some(2) }
         );
     }
 
@@ -1229,7 +1246,14 @@ mod test {
           ldxdw %r0, [%r1]
           exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::InvalidStructFieldAccess,
+                pc: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -1239,7 +1263,14 @@ mod test {
           ldxw %r0, [%r1 + 4]
           exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::InvalidStructFieldAccess,
+                pc: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -1249,7 +1280,14 @@ mod test {
           ldxw %r0, [%r1 + 8]
           exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::InvalidStructFieldAccess,
+                pc: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -1259,7 +1297,14 @@ mod test {
           stw [%r1], 0x42
           exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::WriteToReadOnlyField,
+                pc: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -1278,6 +1323,21 @@ mod test {
     }
 
     #[test]
+    fn test_mapping_store_mutable_field() {
+        // Store to a remapped mutable field is rewritten at the store instruction's PC.
+        let program = r#"
+          stw [%r1 + 12], 0x42
+          mov %r0, 1
+          exit
+        "#;
+        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
+
+        let mut data = TestArgument32BitMapped(TestArgument::default());
+        assert_eq!(program.run_with_1_argument(&mut (), &mut data), 1);
+        assert_eq!(data.0.mutable_field, 0x42);
+    }
+
+    #[test]
     fn test_fake_array_bounds_check() {
         // Verify that negative offsets in memory ptrs are handled properly and cannot be used to
         // bypass array bounds checks.
@@ -1293,6 +1353,13 @@ mod test {
         ldxdw %r0, [%r1]
         exit
         "#;
-        initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        let err = initialize_test_program(parse_asm(program)).expect_err("incorrect program");
+        assert_eq!(
+            err,
+            EbpfError::ProgramVerifyError(VerifierError {
+                kind: VerifierErrorKind::PointerOffsetOverflow,
+                pc: Some(4),
+            })
+        );
     }
 }

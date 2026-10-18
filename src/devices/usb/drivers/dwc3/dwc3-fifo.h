@@ -27,25 +27,7 @@ class Fifo {
   virtual zx::result<> Init(zx::bti& bti, bool cached) {
     return zx::make_result(InitBuffer(bti, cached).status_value());
   }
-  // WARNING: DO NOT CALL THIS FUNCTION DURING NORMAL DRIVER OPERATION!
-  //
-  // Unilaterally resetting the FIFO pointers (`read_ = write_`) without
-  // coordinating with the hardware controller causes hardware/software
-  // desynchronization. Hardware DMA may still own pending TRBs (with the HWO
-  // bit set) or have cached descriptor addresses. Overwriting or clearing TRBs
-  // without gracefully canceling transfers leads to DMA corruption, missing
-  // completion callbacks for USB function drivers, and hardware lockups.
-  //
-  // In normal operation, transfers must be gracefully canceled so that hardware
-  // and software remain in lockstep and completion callbacks are properly
-  // retired.
-  //
-  // This function MUST ONLY be called during extreme hardware recovery cases,
-  // such as after a full controller soft reset (DCTL.CSFTRST), core quiesce /
-  // power-off, or a complete USB bus reset where hardware endpoint state has
-  // been completely reset by the controller.
-  void Clear() { read_ = write_; }
-  void Release() {
+  virtual void Release() {
     first_ = write_ = read_ = last_ = nullptr;
     buffer_.reset();
   }
@@ -151,6 +133,20 @@ class Fifo {
 
       first_ = static_cast<T*>(buffer_->virt());
       last_ = first_ + (kBufferSize / sizeof(T));
+    }
+
+    if (cached) {
+      // Clean and invalidate the entire FIFO buffer before handing its physical address to
+      // non-coherent DMA hardware (such as the DWC3 event ring GEVNTADR), preventing dirty CPU
+      // cache lines (e.g. from kernel page zeroing at VMO allocation) from evicting over and
+      // zeroing out hardware-written DMA events.
+      if (auto status = buffer_->CacheFlushInvalidate(0, kBufferSize); status.is_error()) {
+        fdf::error("CacheFlushInvalidate failed: {}", status);
+        if (allocated) {
+          Release();
+        }
+        return status.take_error();
+      }
     }
 
     write_ = first_;

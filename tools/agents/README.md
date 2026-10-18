@@ -105,15 +105,14 @@ Rules are stored in plain text files under `.agents/config/permissions/`:
 `fx agents setup` automatically manages Git hooks across all checkout repositories discovered in the
 Fuchsia source tree (including `//` and `//vendor/*`).
 
-Hooks are installed into `.git/hooks/<hook_name>.d/10-fuchsia-agent.sh`, integrating cleanly with
+Hooks are installed into `.git/hooks/<hook_name>.d/20-fuchsia-agent.sh`, integrating cleanly with
 the Jiri universal hook dispatcher without overwriting custom developer or team hooks.
 
 ### What the Hooks Do
 
 - **`pre-commit` (Safe Formatting, Staging Isolation & Static Analysis)**:
-  - **Fully Staged Files**: Automatically formatted using `fx format-code` and linted using
-    `fx lint --fix`, then re-staged (`git add`). Findings the linters cannot auto-fix block the
-    commit.
+  - **Fully Staged Files**: Automatically formatted using `fx format-code`, re-staged
+    (`git add`), and verified with `fx lint`. Lint findings block the commit.
   - **Partially Staged Files**: Checked in read-only mode under stash isolation. If formatting or
     lint issues exist, the commit is blocked with instructions on how to fix them so unstaged edits
     aren't overwritten.
@@ -125,38 +124,39 @@ the Jiri universal hook dispatcher without overwriting custom developer or team 
 
 ### Human vs. AI Agent Commit Behavior
 
-The hooks check whether a commit is invoked by an AI coding agent (via environment variables
-`ANTIGRAVITY_AGENT`, `GEMINI_CLI`, or `ANTIGRAVITY_EDITOR_APP_ROOT`) to avoid adding latency to
-interactive human workflows:
+Formatting and linting run for everyone. The hooks check whether a commit is run by a human or an
+AI agent (via environment variables) to decide how strict commit message validation is and which
+linters to run:
 
-| Commit Invocation                        | Pre-Commit Hook (Formatting & Linting)                                                   | Commit-Msg Hook (Subject & Footer Format)                                         |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **Human Developer** (Interactive)        | **Skipped** (0s overhead). Can be forced via `FUCHSIA_FORCE_HOOKS=1`.                    | **Advisory Warnings**: Non-blocking warnings for style/length; commits succeed.    |
-| **AI Coding Agent** (`GEMINI_CLI`, etc.) | **Enforced**: Staged files auto-formatted (`fx format-code`) and lint-checked (`fx lint`). | **Strict Rejection**: Non-compliant commit messages fail (`--strict`).             |
+| Commit Invocation                        | Commit Message Style                                                            | Formatting & Linting Behavior                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Human Developer** (Interactive)        | **Advisory Warnings**: Non-blocking warnings for style/length; commits succeed. | Fully staged files auto-formatted, re-staged, and checked by `fx lint`. Slow linters (`check_licenses`, `clang_tidy`, `python_format`) are skipped. |
+| **AI Coding Agent** (`GEMINI_CLI`, etc.) | **Strict Rejection**: Non-compliant commit messages fail (`--strict`).          | Same, but only `clang_tidy` and `python_format` are skipped so automated changes run `check_licenses` and are CQ-clean before upload.      |
 
 ### Opt-Outs & Bypasses
 
-1. **Forcing Hooks for Humans**:
+1. **Manage or Disable Hooks via Setup**:
    ```bash
-   # Run pre-commit formatting and linting on human commits:
-   FUCHSIA_FORCE_HOOKS=1 git commit ...
-   ```
-2. **Skip Hooks During Setup**:
-   ```bash
-   # Configure permissions without installing Git hooks:
+   # Configure permissions and uninstall existing agent Git hooks across checkout repos:
    fx agents setup --no-git-hooks
+
+   # Re-enable and install agent Git hooks (default):
+   fx agents setup --git-hooks
+
+   # Inspect active configuration and Git hook status:
+   fx agents setup --status
 
    # Reset permissions while leaving Git hooks installed:
    fx agents setup --reset --no-git-hooks
    ```
-3. **Per-Commit Bypass**:
+2. **Per-Commit Bypass**:
    ```bash
    # Standard Git flag (skips pre-commit and commit-msg natively):
    git commit -n
    # or
    git commit --no-verify
    ```
-4. **Environment Variable Bypass (Scripts / CI)**:
+3. **Environment Variable Bypass (Scripts / CI)**:
    ```bash
    FUCHSIA_SKIP_HOOKS=1 git commit ...
    ```

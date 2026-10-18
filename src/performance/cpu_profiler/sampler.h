@@ -23,6 +23,7 @@
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <src/lib/unwinder/cfi_unwinder.h>
@@ -79,6 +80,7 @@ class Sampler : public fxl::RefCountedThreadSafe<Sampler> {
   virtual ~Sampler() = default;
 
  protected:
+  zx::result<> WatchTargets();
   zx::result<> WatchTarget(const JobTarget& target);
   virtual void AddThread(std::vector<zx_koid_t> job_path, zx_koid_t pid, zx_koid_t tid,
                          zx::thread t);
@@ -86,6 +88,26 @@ class Sampler : public fxl::RefCountedThreadSafe<Sampler> {
 
   void CollectSamples(async_dispatcher_t* dispatcher, async::TaskBase* task, zx_status_t status);
   void CacheModules(const ProcessTarget& p);
+
+  // Cache the modules of process `pid` from a separate dispatcher task.
+  //
+  // Thread start exceptions keep the new thread paused until they are handled, and reading a
+  // process's modules can be slow (e.g. for Starnix processes with large address spaces). Calling
+  // this from a thread start handler instead of CacheModules lets the new thread, and any other
+  // thread start/exit queued behind it, proceed without waiting on the module scan.
+  void ScheduleCacheModules(std::vector<zx_koid_t> job_path, zx_koid_t pid);
+
+  // The target tree is populated when the session is configured, which can take a long time for
+  // large targets (e.g. the whole system), and processes and threads keep starting in the meantime.
+  // These add the ones that started since then, so that they aren't silently left out of the
+  // session.
+  //
+  // Call AddProcessesStartedSinceConfigure after watching the target jobs, and
+  // AddThreadsStartedSinceConfigure after watching `process`, so that anything starting later is
+  // reported by the watchers instead.
+  void AddProcessesStartedSinceConfigure();
+  void AddThreadsStartedSinceConfigure(std::span<const zx_koid_t> job_path,
+                                       const ProcessTarget& process);
 
   async_dispatcher_t* dispatcher_;
   TargetTree targets_;
@@ -97,6 +119,8 @@ class Sampler : public fxl::RefCountedThreadSafe<Sampler> {
   std::unordered_map<zx_koid_t, std::unique_ptr<ProcessWatcher>> process_watchers_;
   std::unordered_map<zx_koid_t, std::unique_ptr<JobWatcher>> job_watchers_;
   std::map<zx_koid_t, std::map<std::vector<std::byte>, profiler::Module>> contexts_;
+  // Processes with a ScheduleCacheModules task in flight.
+  std::unordered_set<zx_koid_t> pending_module_caches_;
 
  private:
   elf_search::Searcher searcher_;

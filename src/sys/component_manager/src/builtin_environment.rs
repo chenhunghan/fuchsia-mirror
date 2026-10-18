@@ -58,7 +58,6 @@ use builtins::iommu_resource::IommuResource;
 use builtins::irq_resource::IrqResource;
 use builtins::items::Items;
 use builtins::kernel_stats::KernelStats;
-use builtins::mexec_resource::MexecResource;
 use builtins::mmio_resource::MmioResource;
 use builtins::msi_resource::MsiResource;
 use builtins::power_resource::PowerResource;
@@ -113,13 +112,64 @@ pub static SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 // LINT.IfChange
 /// Set the size of the inspect VMO to be 350 KiB.
 pub const INSPECTOR_SIZE: usize = 350 * 1024;
-// LINT.ThenChange(/src/tests/diagnostics/meta/component_manager_status_tests.cml)
+// LINT.ThenChange(/src/tests/end_to_end/diagnostics/diagnostics_test.py)
+
+#[derive(Default)]
+pub struct UserbootPayload {
+    pub svc_stash_provider: Option<Arc<SvcStashCapability>>,
+    pub bootfs_vmo: Option<zx::Vmo>,
+    pub bootfs_entries: Vec<fboot::BootfsFileVmo>,
+    pub boot_handles: fboot::UserbootPostBootHandlesRequest,
+}
+
+/// Drains messages from `fuchsia.boot.Userboot` if `PA_USER0` was provided to this process.
+pub async fn drain_userboot() -> Result<UserbootPayload, Error> {
+    let userboot = take_startup_handle(HandleInfo::new(HandleType::User0, 0))
+        .map(zx::Channel::from)
+        .map(fasync::Channel::from_channel)
+        .map(fboot::UserbootRequestStream::from_channel);
+
+    let mut payload = UserbootPayload::default();
+    if let Some(mut userboot) = userboot {
+        while let Some(request) = userboot.try_next().await.inspect_err(|err| {
+            error!("Error extracting 'fuchsia.boot.Userboot' messages: {}", err);
+        })? {
+            match request {
+                UserbootRequest::PostStashSvc { stash_svc_endpoint, control_handle: _ } => {
+                    if payload.svc_stash_provider.is_some() {
+                        warn!(
+                            "Expected at most a single SvcStash, but more were found. Last entry will be preserved."
+                        );
+                    }
+                    payload.svc_stash_provider =
+                        Some(SvcStashCapability::new(stash_svc_endpoint.into_channel()));
+                }
+                UserbootRequest::PostBootfsVmo { bootfs, control_handle: _ } => {
+                    if payload.bootfs_vmo.is_some() {
+                        warn!(
+                            "Expected at most a single BootfsVmo, but more were found. Last entry will be preserved."
+                        );
+                    }
+                    payload.bootfs_vmo = Some(bootfs);
+                }
+                UserbootRequest::PostBootfsFiles { files, control_handle: _ } => {
+                    payload.bootfs_entries.extend(files);
+                }
+                UserbootRequest::PostBootHandles { payload: handles, control_handle: _ } => {
+                    payload.boot_handles = handles;
+                }
+            }
+        }
+    }
+    Ok(payload)
+}
 
 pub struct BuiltinEnvironmentBuilder {
     // TODO(60804): Make component manager's namespace injectable here.
     runtime_config: Option<RuntimeConfig>,
     top_instance: Option<Arc<ComponentManagerInstance>>,
     bootfs_svc: Option<BootfsSvc>,
+    userboot_payload: UserbootPayload,
     builtin_runners: Vec<BuiltinRunnerData>,
     resolvers: Vec<(String, Arc<dyn Resolver + Send + Sync + 'static>)>,
     utc_clock: Option<Arc<UtcClock>>,
@@ -145,6 +195,7 @@ impl Default for BuiltinEnvironmentBuilder {
             runtime_config: None,
             top_instance: None,
             bootfs_svc: None,
+            userboot_payload: UserbootPayload::default(),
             builtin_runners: vec![],
             resolvers: vec![],
             utc_clock: None,
@@ -177,6 +228,11 @@ impl BuiltinEnvironmentBuilder {
 
     pub fn set_bootfs_svc(mut self, bootfs_svc: BootfsSvc) -> Self {
         self.bootfs_svc = Some(bootfs_svc);
+        self
+    }
+
+    pub fn set_userboot_payload(mut self, userboot_payload: UserbootPayload) -> Self {
+        self.userboot_payload = userboot_payload;
         self
     }
 
@@ -285,44 +341,13 @@ impl BuiltinEnvironmentBuilder {
             .runtime_config
             .ok_or_else(|| format_err!("Runtime config is required for BuiltinEnvironment."))?;
 
-        // Drain messages from `fuchsia.boot.Userboot`, and expose appropriate capabilities.
-        let userboot = take_startup_handle(HandleInfo::new(HandleType::User0, 0))
-            .map(zx::Channel::from)
-            .map(fasync::Channel::from_channel)
-            .map(fboot::UserbootRequestStream::from_channel);
-
-        let mut svc_stash_provider = None;
-        let mut bootfs_entries = Vec::new();
-        if let Some(userboot) = userboot {
-            let messages = userboot.try_collect::<Vec<UserbootRequest>>().await;
-            let mut messages = messages.inspect_err(|err| {
-                error!("Error extracting 'fuchsia.boot.Userboot' messages: {}", err);
-            })?;
-            while let Some(request) = messages.pop() {
-                match request {
-                    UserbootRequest::PostStashSvc { stash_svc_endpoint, control_handle: _ } => {
-                        if svc_stash_provider.is_some() {
-                            warn!(
-                                "Expected at most a single SvcStash, but more were found. Last entry will be preserved."
-                            );
-                        }
-                        svc_stash_provider =
-                            Some(SvcStashCapability::new(stash_svc_endpoint.into_channel()));
-                    }
-                    UserbootRequest::PostBootfsFiles { files, control_handle: _ } => {
-                        bootfs_entries.extend(files);
-                    }
-                }
-            }
-        }
-
-        let system_resource_handle =
-            take_startup_handle(HandleType::SystemResource.into()).map(zx::Resource::from);
+        let system_resource_handle = self.userboot_payload.boot_handles.system_resource.take();
         if let Some(bootfs_svc) = self.bootfs_svc {
+            let bootfs_entries = std::mem::take(&mut self.userboot_payload.bootfs_entries);
             // Set up the Rust bootfs VFS, and bind to the '/boot' namespace. This should
             // happen as early as possible when building the component manager as other objects
             // may require reading from '/boot' for configuration, etc.
-            let bootfs_svc = match runtime_config.vmex_source {
+            let mut bootfs_svc = match runtime_config.vmex_source {
                 VmexSource::SystemResource => bootfs_svc
                     .ingest_bootfs_vmo_with_system_resource(
                         &system_resource_handle,
@@ -331,8 +356,7 @@ impl BuiltinEnvironmentBuilder {
                     .publish_kernel_vmo(get_stable_vdso_vmo()?)?
                     .publish_kernel_vmo(get_next_vdso_vmo()?)?
                     .publish_kernel_vmo(get_vdso_vmo(&zx::Name::new_lossy("vdso/test1"))?)?
-                    .publish_kernel_vmo(get_vdso_vmo(&zx::Name::new_lossy("vdso/test2"))?)?
-                    .publish_kernel_vmos(HandleType::KernelFileVmo, 0)?,
+                    .publish_kernel_vmo(get_vdso_vmo(&zx::Name::new_lossy("vdso/test2"))?)?,
                 VmexSource::Namespace => {
                     let mut bootfs_svc =
                         bootfs_svc.ingest_bootfs_vmo_with_namespace_vmex(bootfs_entries).await?;
@@ -348,9 +372,14 @@ impl BuiltinEnvironmentBuilder {
                     {
                         bootfs_svc = bootfs_svc.publish_kernel_vmo(kernel_vmo)?;
                     }
-                    bootfs_svc.publish_kernel_vmos(HandleType::KernelFileVmo, 0)?
+                    bootfs_svc
                 }
             };
+            for kernel_vmo in
+                self.userboot_payload.boot_handles.kernel_files.take().into_iter().flatten()
+            {
+                bootfs_svc = bootfs_svc.publish_kernel_vmo(kernel_vmo)?;
+            }
             bootfs_svc.create_and_bind_vfs()?;
         }
 
@@ -431,7 +460,7 @@ impl BuiltinEnvironmentBuilder {
             self.utc_clock,
             self.crash_records,
             capability_passthrough,
-            svc_stash_provider,
+            self.userboot_payload,
             self.global_scope,
         )
         .await?)
@@ -486,7 +515,7 @@ impl BuiltinEnvironment {
         utc_clock: Option<Arc<UtcClock>>,
         crash_records: CrashRecords,
         capability_passthrough: bool,
-        svc_stash_provider: Option<Arc<SvcStashCapability>>,
+        userboot_payload: UserbootPayload,
         scope: ExecutionScope,
     ) -> Result<BuiltinEnvironment, Error> {
         let debug = runtime_config.debug;
@@ -542,7 +571,7 @@ impl BuiltinEnvironment {
         }
 
         // Extracted from userboot protocol in environment builder.
-        if let Some(svc_stash_provider) = svc_stash_provider {
+        if let Some(svc_stash_provider) = userboot_payload.svc_stash_provider {
             root_input_builder.add_builtin_protocol_if_enabled::<fboot::SvcStashProviderMarker>(
                 move |stream| svc_stash_provider.clone().serve(stream).boxed(),
             );
@@ -578,14 +607,11 @@ impl BuiltinEnvironment {
             },
         );
 
-        let mmio_resource_handle =
-            take_startup_handle(HandleType::MmioResource.into()).map(zx::Resource::from);
+        let mmio_resource_handle = userboot_payload.boot_handles.mmio_resource;
 
-        let irq_resource_handle =
-            take_startup_handle(HandleType::IrqResource.into()).map(zx::Resource::from);
+        let irq_resource_handle = userboot_payload.boot_handles.irq_resource;
 
-        let mut zbi_parser =
-            parse_zbi(take_startup_handle(HandleType::BootdataVmo.into()).map(zx::Vmo::from))?;
+        let mut zbi_parser = parse_zbi(userboot_payload.boot_handles.zbi_vmo)?;
 
         // Set up BootArguments service.
         let boot_args = BootArguments::new(&mut zbi_parser).await?;
@@ -620,8 +646,8 @@ impl BuiltinEnvironment {
         }
 
         #[cfg(target_arch = "x86_64")]
-        if let Some(handle) = take_startup_handle(HandleType::IoportResource.into()) {
-            let ioport_resource = IoportResource::new(handle.into());
+        if let Some(handle) = userboot_payload.boot_handles.ioport_resource {
+            let ioport_resource = IoportResource::new(handle);
             root_input_builder.add_builtin_protocol_if_enabled::<fkernel::IoportResourceMarker>(
                 move |stream| ioport_resource.clone().serve(stream).boxed(),
             );
@@ -637,8 +663,8 @@ impl BuiltinEnvironment {
 
         // Set up the SMC resource.
         #[cfg(target_arch = "aarch64")]
-        if let Some(handle) = take_startup_handle(HandleType::SmcResource.into()) {
-            let smc_resource = SmcResource::new(handle.into());
+        if let Some(handle) = userboot_payload.boot_handles.smc_resource {
+            let smc_resource = SmcResource::new(handle);
             root_input_builder.add_builtin_protocol_if_enabled::<fkernel::SmcResourceMarker>(
                 move |stream| smc_resource.clone().serve(stream).boxed(),
             );
@@ -1246,28 +1272,6 @@ fn setup_kernel_resources(
     if let Some(iommu_resource) = iommu_resource {
         root_input_builder.add_builtin_protocol_if_enabled::<fkernel::IommuResourceMarker>(
             move |stream| iommu_resource.clone().serve(stream).boxed(),
-        );
-    }
-
-    // Set up the MexecResource service.
-    let mexec_resource = system_resource_handle
-        .as_ref()
-        .and_then(|handle| {
-            handle
-                .create_child(
-                    zx::ResourceKind::SYSTEM,
-                    None,
-                    zx::sys::ZX_RSRC_SYSTEM_MEXEC_BASE,
-                    1,
-                    b"mexec",
-                )
-                .ok()
-        })
-        .map(MexecResource::new)
-        .and_then(Result::ok);
-    if let Some(mexec_resource) = mexec_resource {
-        root_input_builder.add_builtin_protocol_if_enabled::<fkernel::MexecResourceMarker>(
-            move |stream| mexec_resource.clone().serve(stream).boxed(),
         );
     }
 

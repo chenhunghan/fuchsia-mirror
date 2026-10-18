@@ -334,7 +334,7 @@
             to: "#console-launcher",
         },
         {
-            service: "fuchsia.hardware.pci.BusService",
+            service: "fuchsia.hardware.pci.DebugService",
             from: "#boot-drivers",
             to: "#console-launcher",
             availability: "optional",
@@ -361,7 +361,7 @@
             to: "#console-launcher",
         },
         {
-            service: "fuchsia.hardware.pci.BusService",
+            service: "fuchsia.hardware.pci.DebugService",
             from: "#boot-drivers",
             to: "#console-launcher",
         },
@@ -371,12 +371,13 @@
             to: "#console-launcher",
         },
         {
-            service: "fuchsia.power.battery.InfoService",
-            from: "#boot-drivers",
-            to: "#console-launcher",
-        },
-        {
-            service: "fuchsia.power.battery.ChargerService",
+            service: [
+                "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.charger.DebugService",
+                "fuchsia.hardware.power.charger.Service",
+                "fuchsia.power.battery.ChargerService",
+                "fuchsia.power.battery.InfoService",
+            ],
             from: "#boot-drivers",
             to: "#console-launcher",
         },

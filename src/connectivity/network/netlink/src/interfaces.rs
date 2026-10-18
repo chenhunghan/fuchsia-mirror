@@ -126,6 +126,8 @@ pub(crate) struct NewAddressArgs {
     /// Indicates whether or not an on-link route should be added for the
     /// address's subnet.
     pub add_subnet_route: bool,
+    /// Indicates whether or not an existing address should be replaced.
+    pub replace: bool,
 }
 
 /// Arguments for an RTM_DELADDR [`Request`].
@@ -261,7 +263,10 @@ pub(crate) struct InterfacesWorkerState<H, S: Sender<<NetlinkRoute as ProtocolFa
     /// interfaces watcher.
     pub(crate) interface_properties: BTreeMap<
         u64,
-        fnet_interfaces_ext::PropertiesAndState<InterfaceState, fnet_interfaces_ext::AllInterest>,
+        fnet_interfaces_ext::PropertiesAndState<
+            InterfaceState,
+            fnet_interfaces_ext::DefaultInterest,
+        >,
     >,
     /// Corresponds to the `/proc/sys/net/ipv6/conf/default/accept_ra_rt_table`.
     /// It is the default sysctl value for the interfaces to be added.
@@ -504,7 +509,7 @@ impl<H: InterfacesHandler, S: Sender<<NetlinkRoute as ProtocolFamily>::Response>
         Self,
         impl futures::Stream<
             Item = Result<
-                fnet_interfaces_ext::EventWithInterest<fnet_interfaces_ext::AllInterest>,
+                fnet_interfaces_ext::EventWithInterest<fnet_interfaces_ext::DefaultInterest>,
                 fidl::Error,
             >,
         > + 'static,
@@ -568,7 +573,7 @@ impl<H: InterfacesHandler, S: Sender<<NetlinkRoute as ProtocolFamily>::Response>
     /// should use this to process stashed routes for this new table.
     pub(crate) async fn handle_interface_watcher_event(
         &mut self,
-        event: fnet_interfaces_ext::EventWithInterest<fnet_interfaces_ext::AllInterest>,
+        event: fnet_interfaces_ext::EventWithInterest<fnet_interfaces_ext::DefaultInterest>,
         route_table_maps: Option<(&mut RouteTableMap<Ipv4>, &mut RouteTableMap<Ipv6>)>,
     ) -> Option<NetlinkRouteTableIndex> {
         let update = self
@@ -812,7 +817,10 @@ impl<H: InterfacesHandler, S: Sender<<NetlinkRoute as ProtocolFamily>::Response>
         &self,
         specifier: LinkSpecifier,
     ) -> Option<
-        &fnet_interfaces_ext::PropertiesAndState<InterfaceState, fnet_interfaces_ext::AllInterest>,
+        &fnet_interfaces_ext::PropertiesAndState<
+            InterfaceState,
+            fnet_interfaces_ext::DefaultInterest,
+        >,
     > {
         match specifier {
             LinkSpecifier::Index(id) => self.interface_properties.get(&id.get().into()),
@@ -928,6 +936,7 @@ impl<H: InterfacesHandler, S: Sender<<NetlinkRoute as ProtocolFamily>::Response>
             address_and_interface_id:
                 address_and_interface_id @ AddressAndInterfaceArgs { address, interface_id },
             add_subnet_route,
+            replace,
         }: NewAddressArgs,
     ) -> Result<Option<AddressAndInterfaceArgs>, RequestError> {
         let control = self
@@ -973,6 +982,24 @@ impl<H: InterfacesHandler, S: Sender<<NetlinkRoute as ProtocolFamily>::Response>
             Ok(()) => {
                 log_debug!("{} added on interface ({})", address, interface_id);
                 Ok(Some(address_and_interface_id))
+            }
+            // Note: In Linux (`inet_rtm_newaddr` / `inet6_rtm_newaddr`),
+            // `RTM_NEWADDR` always adds the address if it is absent (ignoring
+            // whether `NLM_F_CREATE` or `NLM_F_REPLACE` is set), and only
+            // checks `NLM_F_REPLACE` (and `!NLM_F_EXCL`) when the address is
+            // already assigned.
+            Err(AddressStateProviderError::AddressRemoved(
+                AddressRemovalReason::AlreadyAssigned,
+            )) if replace => {
+                // TODO(https://fxbug.dev/573643839): Retain `AddressStateProvider`
+                // and call `UpdateAddressProperties` to update address lifetimes
+                // when replacing an existing address.
+                log_debug!(
+                    "ignoring AlreadyAssigned for {} on interface ({}) with replace flag",
+                    address,
+                    interface_id,
+                );
+                Ok(None)
             }
             Err(e) => {
                 log_warn!(
@@ -1215,7 +1242,7 @@ pub(crate) struct NetlinkLinkMessage(LinkMessage);
 
 impl NetlinkLinkMessage {
     fn optionally_from(
-        properties: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest>,
+        properties: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest>,
         link_address: &Option<Vec<u8>>,
     ) -> Option<Self> {
         match interface_properties_to_link_message(properties, link_address) {
@@ -1324,7 +1351,7 @@ fn interface_properties_to_link_message(
         has_default_ipv4_route: _,
         has_default_ipv6_route: _,
         port_identity_koid: _,
-    }: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest>,
+    }: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest>,
     link_address: &Option<Vec<u8>>,
 ) -> Result<NetlinkLinkMessage, NetlinkLinkMessageConversionError> {
     let online = *online;
@@ -1444,7 +1471,7 @@ enum NetlinkAddressMessageConversionError {
 }
 
 fn addresses_optionally_from_interface_properties(
-    properties: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest>,
+    properties: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest>,
 ) -> Option<BTreeMap<fnet::IpAddress, NetlinkAddressMessage>> {
     match interface_properties_to_address_messages(properties) {
         Ok(o) => Some(o),
@@ -1467,7 +1494,7 @@ fn interface_properties_to_address_messages(
         has_default_ipv4_route: _,
         has_default_ipv6_route: _,
         port_identity_koid: _,
-    }: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest>,
+    }: &fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest>,
 ) -> Result<BTreeMap<fnet::IpAddress, NetlinkAddressMessage>, NetlinkAddressMessageConversionError>
 {
     // We expect interface ids to safely fit in the range of the u32 values.
@@ -1846,11 +1873,10 @@ pub(crate) mod testutil {
         addr: fnet::Subnet,
         assignment_state: fnet_interfaces::AddressAssignmentState,
     ) -> fnet_interfaces::Address {
-        fnet_interfaces_ext::Address::<fnet_interfaces_ext::AllInterest> {
+        fnet_interfaces_ext::Address::<fnet_interfaces_ext::DefaultInterest> {
             addr,
-            valid_until: fnet_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
-            preferred_lifetime_info: fnet_interfaces_ext::PreferredLifetimeInfo::preferred_forever(
-            ),
+            valid_until: fnet_interfaces_ext::NoInterest,
+            preferred_lifetime_info: fnet_interfaces_ext::NoInterest,
             assignment_state,
         }
         .into()
@@ -1890,8 +1916,8 @@ mod tests {
         name: String,
         port_class: fnet_interfaces_ext::PortClass,
         online: bool,
-        addresses: Vec<fnet_interfaces_ext::Address<fnet_interfaces_ext::AllInterest>>,
-    ) -> fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest> {
+        addresses: Vec<fnet_interfaces_ext::Address<fnet_interfaces_ext::DefaultInterest>>,
+    ) -> fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest> {
         fnet_interfaces_ext::Properties {
             id: NonZeroU64::new(id).unwrap(),
             name,
@@ -1909,21 +1935,19 @@ mod tests {
         name: String,
         port_class: fnet_interfaces_ext::PortClass,
         online: bool,
-    ) -> fnet_interfaces_ext::Properties<fnet_interfaces_ext::AllInterest> {
+    ) -> fnet_interfaces_ext::Properties<fnet_interfaces_ext::DefaultInterest> {
         let addresses = vec![
             fnet_interfaces_ext::Address {
                 addr: TEST_V4_ADDR,
-                valid_until: fnet_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                valid_until: fnet_interfaces_ext::NoInterest,
                 assignment_state: AddressAssignmentState::Assigned,
-                preferred_lifetime_info:
-                    fnet_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                preferred_lifetime_info: fnet_interfaces_ext::NoInterest,
             },
             fnet_interfaces_ext::Address {
                 addr: TEST_V6_ADDR,
-                valid_until: fnet_interfaces_ext::PositiveMonotonicInstant::INFINITE_FUTURE,
+                valid_until: fnet_interfaces_ext::NoInterest,
                 assignment_state: AddressAssignmentState::Assigned,
-                preferred_lifetime_info:
-                    fnet_interfaces_ext::PreferredLifetimeInfo::preferred_forever(),
+                preferred_lifetime_info: fnet_interfaces_ext::NoInterest,
             },
         ];
         create_interface(id, name, port_class, online, addresses)
@@ -2990,6 +3014,7 @@ mod tests {
                     RequestArgs::Address(AddressRequestArgs::New(NewAddressArgs {
                         address_and_interface_id,
                         add_subnet_route: false,
+                        replace: false,
                     }))
                 } else {
                     RequestArgs::Address(AddressRequestArgs::Del(DelAddressArgs {
@@ -3033,7 +3058,7 @@ mod tests {
     }
 
     enum AddressRequestKind {
-        New { add_subnet_route: bool },
+        New { add_subnet_route: bool, replace: bool },
         Del,
     }
 
@@ -3041,10 +3066,10 @@ mod tests {
     /// fails with an unrecognized interface error.
     #[test_case(
         add_test_addr_subnet_v4(),
-        AddressRequestKind::New { add_subnet_route: false }; "v4_new")]
+        AddressRequestKind::New { add_subnet_route: false, replace: false }; "v4_new")]
     #[test_case(
         add_test_addr_subnet_v6(),
-        AddressRequestKind::New { add_subnet_route: false }; "v6_new")]
+        AddressRequestKind::New { add_subnet_route: false, replace: false }; "v6_new")]
     #[test_case(add_test_addr_subnet_v4(), AddressRequestKind::Del; "v4_del")]
     #[test_case(add_test_addr_subnet_v6(), AddressRequestKind::Del; "v6_del")]
     #[fuchsia::test(logging = false)]
@@ -3054,10 +3079,11 @@ mod tests {
         pretty_assertions::assert_eq!(
             test_request(
                 [match kind {
-                    AddressRequestKind::New { add_subnet_route } => {
+                    AddressRequestKind::New { add_subnet_route, replace } => {
                         RequestArgs::Address(AddressRequestArgs::New(NewAddressArgs {
                             address_and_interface_id,
                             add_subnet_route,
+                            replace,
                         }))
                     }
                     AddressRequestKind::Del => {
@@ -3087,10 +3113,11 @@ mod tests {
             let Self { address, kind, control_request_handler } = self;
             let address_and_interface_id = AddressAndInterfaceArgs { address, interface_id };
             let args = match kind {
-                AddressRequestKind::New { add_subnet_route } => {
+                AddressRequestKind::New { add_subnet_route, replace } => {
                     RequestArgs::Address(AddressRequestArgs::New(NewAddressArgs {
                         address_and_interface_id,
                         add_subnet_route,
+                        replace,
                     }))
                 }
                 AddressRequestKind::Del => {
@@ -3180,17 +3207,19 @@ mod tests {
 
     /// An RTM_NEWADDR test helper that calls the callback with a stream of ASP
     /// requests.
-    async fn test_new_addr_asp_helper<
-        St: Stream<Item = fnet_interfaces::Event>,
-        F: Fn(fnet_interfaces_admin::AddressStateProviderRequestStream) -> St,
-    >(
+    async fn test_new_addr_asp_helper<St, F>(
         address: AddrSubnetEither,
         add_subnet_route: bool,
+        replace: bool,
         asp_handler: F,
-    ) -> TestRequestResult {
+    ) -> TestRequestResult
+    where
+        St: Stream<Item = fnet_interfaces::Event>,
+        F: Fn(fnet_interfaces_admin::AddressStateProviderRequestStream) -> St,
+    {
         test_interface_request(TestInterfaceRequestCase {
             address,
-            kind: AddressRequestKind::New { add_subnet_route },
+            kind: AddressRequestKind::New { add_subnet_route, replace },
             control_request_handler: |req| match req {
                 fnet_interfaces_admin::ControlRequest::AddAddress {
                     address: got_address,
@@ -3221,7 +3250,7 @@ mod tests {
     #[fuchsia::test(logging = false)]
     async fn test_new_addr_drop_asp_immediately(address: AddrSubnetEither) {
         pretty_assertions::assert_eq!(
-            test_new_addr_asp_helper(address, false, |_asp_request_stream| {
+            test_new_addr_asp_helper(address, false, false, |_asp_request_stream| {
                 futures::stream::empty()
             })
             .await,
@@ -3238,7 +3267,7 @@ mod tests {
         address: AddrSubnetEither,
         reason: AddressRemovalReason,
     ) -> TestRequestResult {
-        test_new_addr_asp_helper(address, true, |asp_request_stream| {
+        test_new_addr_asp_helper(address, true, false, |asp_request_stream| {
             asp_request_stream.control_handle().send_on_address_removed(reason).unwrap();
             futures::stream::empty()
         })
@@ -3303,6 +3332,29 @@ mod tests {
         )
     }
 
+    /// Tests RTM_NEWADDR when replace is true and address is already assigned.
+    #[test_case(test_addr_subnet_v4(); "v4")]
+    #[test_case(test_addr_subnet_v6(); "v6")]
+    #[fuchsia::test(logging = false)]
+    async fn test_new_addr_replace_already_assigned(address: AddrSubnetEither) {
+        pretty_assertions::assert_eq!(
+            test_new_addr_asp_helper(
+                address,
+                /* add_subnet_route */ true,
+                /* replace */ true,
+                |asp_request_stream| {
+                    asp_request_stream
+                        .control_handle()
+                        .send_on_address_removed(AddressRemovalReason::AlreadyAssigned)
+                        .unwrap();
+                    futures::stream::empty()
+                },
+            )
+            .await,
+            TestRequestResult { messages: Vec::new(), waiter_results: vec![Ok(())] },
+        )
+    }
+
     /// An RTM_NEWADDR test helper that calls the callback with a stream of ASP
     /// requests after the Detach request is handled.
     async fn test_new_addr_asp_detach_handled_helper<
@@ -3313,7 +3365,7 @@ mod tests {
         add_subnet_route: bool,
         asp_handler: F,
     ) -> TestRequestResult {
-        test_new_addr_asp_helper(address, add_subnet_route, |asp_request_stream| {
+        test_new_addr_asp_helper(address, add_subnet_route, false, |asp_request_stream| {
             asp_request_stream
                 .into_future()
                 .map(|(asp_request, asp_request_stream)| {

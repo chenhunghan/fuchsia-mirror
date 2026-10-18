@@ -66,7 +66,7 @@ FETCH_TTL_SECS = 600
 
 findings = []
 
-DEVICE_TEST_RULES = {"fx_test"}
+DEVICE_TEST_RULES = {"fx_test", "fx_unittest_package"}
 HOST_TEST_RULES = {"host_rustc_test", "host_go_test", "host_py_test", "host_test", "wrap_host_rust_test"}
 # Tests move to Bazel and bazel2gn does not translate them (migration_sanity enforces the
 # `# @bazel2gn:skip`), so no Bazel host test has a GN twin that runs it instead.
@@ -198,18 +198,42 @@ def bazel_test_suites_for(pkg):
     return result
 
 
+def refs_local(code, d, name):
+    prefix = f"(?://{re.escape(d)})?:" if d else ":"
+    return bool(re.search(r'"' + prefix + re.escape(name) + r'(?:\([^"]*\))?"', code))
+
+
+def refs_from_parent(parent_code, d, name):
+    if not parent_code or not d:
+        return False
+    base = os.path.basename(d)
+    pat = r'"(?://' + re.escape(d) + r"|" + re.escape(base) + r"):" + re.escape(name) + r'(?:\([^"]*\))?"'
+    return bool(re.search(pat, parent_code))
+
+
 def suite_is_wired(gn_rel, suite):
-    """Whether `group("tests")` next to the suite, or the parent BUILD.gn, references it."""
+    """Whether `group("tests")` next to the suite (directly or via intermediate groups), or the parent BUILD.gn, references it."""
     if suite == "tests":
         return True
     d = os.path.dirname(gn_rel)
-    refs = (f'":{suite}"', f'"//{d}:{suite}"')
-    if any(r in gn_block(read_gn(gn_rel), "group", "tests") for r in refs):
+    code = read_gn(gn_rel)
+    parent_code = read_gn(os.path.join(os.path.dirname(d), "BUILD.gn")) if d else ""
+    if refs_from_parent(parent_code, d, suite):
         return True
-    parent = os.path.join(os.path.dirname(d), "BUILD.gn") if d else ""
-    return bool(parent) and any(
-        r in read_gn(parent) for r in (f'"//{d}:{suite}"', f'"{os.path.basename(d)}:{suite}"')
-    )
+    groups = {}
+    for m in re.finditer(r'\bgroup\(\s*"([^"]+)"\s*\)\s*\{', code):
+        groups[m.group(1)] = groups.get(m.group(1), "") + "\n" + code[m.end() : closing(code, m.end() - 1)]
+    queue = [g for g in groups if g == "tests" or refs_from_parent(parent_code, d, g)]
+    seen = set(queue)
+    while queue:
+        body = groups[queue.pop(0)]
+        if refs_local(body, d, suite):
+            return True
+        for g in groups:
+            if g not in seen and refs_local(body, d, g):
+                seen.add(g)
+                queue.append(g)
+    return False
 
 
 def list_strings(node):
@@ -430,7 +454,7 @@ for rel_p in sorted(changed_files):
 if origin_main and head_sha and head_sha != origin_main:
     merge_base = git_out(["merge-base", origin_main, head_sha])
     if merge_base and merge_base != origin_main:
-        dirty_tracked = git_lines(["status", "--porcelain", "--untracked-files=no"])
+        dirty_tracked = git_lines(["diff", "--name-only", "--ignore-submodules=all", "HEAD"])
         untracked_td = []
         for td in target_dirs:
             if os.path.isdir(os.path.join(workdir, td)):
@@ -450,10 +474,11 @@ if origin_main and head_sha and head_sha != origin_main:
                     else:
                         os.unlink(tmp_idx)
                     env = dict(os.environ, GIT_INDEX_FILE=tmp_idx)
-                    subprocess.run(
-                        ["git", "-C", workdir, "add", "-u"],
-                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-                    )
+                    if dirty_tracked:
+                        subprocess.run(
+                            ["git", "-C", workdir, "add", "-A", "--"] + dirty_tracked,
+                            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                        )
                     for td in target_dirs:
                         if os.path.exists(os.path.join(workdir, td)):
                             subprocess.run(
@@ -639,9 +664,13 @@ for td in target_dirs:
             all_tests.append(t_name + "_test")
         if rule_name == "rustc_test" or (rule_name in RUST_TEST_OWNERS and "fuchsia" in unit_test_envs(kws)):
             device_bin = t_name if rule_name == "rustc_test" else t_name + "_test"
-            if FX_TEST_AVAILABLE and not re.search(
+            packaged_in_bin = re.search(
                 r'\bbinary\s*=\s*"(?://' + re.escape(td) + r')?:' + re.escape(device_bin) + r'"', bazel_src
-            ):
+            )
+            packaged_in_unit_tests = re.search(
+                r'\bunit_tests\s*=\s*\[[^\]]*"(?://' + re.escape(td) + r')?:' + re.escape(device_bin) + r'"', bazel_src
+            )
+            if FX_TEST_AVAILABLE and not (packaged_in_bin or packaged_in_unit_tests):
                 findings.append({
                     "source": "cq_reachability",
                     "category": "unpackaged_rust_device_test",
@@ -650,12 +679,13 @@ for td in target_dirs:
                     "line": lineno,
                     "message": (
                         f"Rust device test binary ':{device_bin}' ({rule_name}) in '{bazel_rel}' is not packaged by any "
-                        "`fx_packaged_binary`, so no `fx_test` runs it and it is missing from tests.json."
+                        "`fx_packaged_binary` or `fx_unittest_package`, so no `fx_test` runs it and it is missing from tests.json."
                     ),
                     "remediation": (
-                        f"Add `fx_packaged_binary(testonly = True, binary = \":{device_bin}\", binary_name = ...)` "
+                        f"Add `fx_unittest_package(name = ..., unit_tests = [\":{device_bin}\"])` or "
+                        f"`fx_packaged_binary(testonly = True, binary = \":{device_bin}\", binary_name = ...)` "
                         "(GN's output name, e.g. `<crate>_lib_test`), a `meta/<component>.cml` including "
-                        "`//src/sys/test_runners/rust/default.shard.cml` and `syslog/use.shard.cml` with "
+                        "`//src/sys/test_runners/rust/default.shard.cml` and `syslog/client.shard.cml` with "
                         "`program.binary` = `bin/<binary_name>`, `fx_component_manifest`, `fx_test_component`, "
                         "`fx_package(test_components = ...)` and `fx_test`, exported by a GN `bazel_test_suite` "
                         "(see \"Migrating Tests\" in the coder instructions). If the tests only ran on host in GN, "

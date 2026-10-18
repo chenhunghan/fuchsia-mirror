@@ -27,12 +27,6 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 fidl("fuchsia.system.state") {
   sources = [ "system-state-transition.fidl" ]
   sdk_area = "Drivers"
@@ -41,5 +35,4 @@ fidl("fuchsia.system.state") {
   enable_rust_next = true
   stable = false
   visibility = [ "*" ]
-  public_deps = [ "//zircon/vdso/zx" ]
 }

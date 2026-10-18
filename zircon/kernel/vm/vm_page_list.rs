@@ -4,9 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::pmm::node as pmm_node;
+use super::pmm::{self, node as pmm_node};
 use crate::kernel::types::PAddr;
-use core::mem::MaybeUninit;
 use core::ops::Deref;
 use core::pin::Pin;
 use debug::{ltracef, ltracef_level};
@@ -18,7 +17,7 @@ use vm_constants_rs::{
     kVmPageListTypeBits, kVmPageListZeroMarkerType,
 };
 use vm_page_list_bindings as bindings;
-use zr::{Opaque, pin_init_ffi, unsafe_pinned_drop_ffi};
+use zr::Opaque;
 use zx_status::Status;
 
 use crate::vm::page::{VmPageDoublyLinkedList, VmPagePtr};
@@ -64,11 +63,6 @@ pub struct VmPageOrMarker {
     raw: u32,
 }
 
-// `VmPageSpliceList::pop` has C++ move-construct a `VmPageOrMarker` directly into Rust-owned
-// storage, so the two representations must agree on size and alignment.
-zr::static_assert!(core::mem::size_of::<VmPageOrMarker>() == 4);
-zr::static_assert!(core::mem::align_of::<VmPageOrMarker>() == 4);
-
 /// The types of sparse page interval types that are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -103,6 +97,18 @@ pub enum ZeroRangeDirtyState {
     Clean,
     /// Range is dirty.
     Dirty,
+}
+
+impl ZeroRangeDirtyState {
+    /// Decodes a raw discriminant, panicking if it is out of range.
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => Self::Untracked,
+            1 => Self::Clean,
+            2 => Self::Dirty,
+            _ => panic!("invalid dirty state"),
+        }
+    }
 }
 
 /// The remaining bits of an interval type store any information specific to the type of interval
@@ -151,12 +157,7 @@ impl ZeroRange {
     /// Returns the `ZeroRangeDirtyState`.
     fn dirty_state(&self) -> ZeroRangeDirtyState {
         let state_bits = (self.value & Self::DIRTY_STATE_MASK) >> Self::DIRTY_STATE_SHIFT;
-        match state_bits {
-            0 => ZeroRangeDirtyState::Untracked,
-            1 => ZeroRangeDirtyState::Clean,
-            2 => ZeroRangeDirtyState::Dirty,
-            _ => panic!("invalid dirty state"),
-        }
+        ZeroRangeDirtyState::from_raw(state_bits)
     }
 
     /// Sets the `ZeroRangeDirtyState`.
@@ -313,7 +314,7 @@ impl VmPageOrMarker {
     /// Creates a zero interval `VmPageOrMarker`.
     ///
     /// Only support creation of zero interval type for now.
-    /// Private in C++ (friended with VmPageList) so callers cannot arbitrarily create sentinels.
+    /// Private so that an external caller cannot arbitrarily create interval sentinels.
     fn zero_interval(sentinel: SentinelType, state: ZeroRangeDirtyState) -> Self {
         let sentinel_bits = (sentinel as u32) << Self::INTERVAL_SENTINEL_SHIFT;
         let type_bits = (IntervalType::Zero as u32) << Self::INTERVAL_TYPE_SHIFT;
@@ -398,7 +399,9 @@ impl VmPageOrMarker {
 
     /// Sets the interval sentinel type.
     fn set_interval_sentinel(&mut self, sentinel: SentinelType) {
+        // Clear the old sentinel type.
         self.raw &= !(Self::INTERVAL_SENTINEL_MASK << Self::INTERVAL_SENTINEL_SHIFT);
+        // Set the new sentinel type.
         self.raw |= (sentinel as u32) << Self::INTERVAL_SENTINEL_SHIFT;
     }
 
@@ -483,7 +486,8 @@ impl VmPageOrMarker {
     /// Change the interval sentinel type for an existing interval, while preserving the rest of the
     /// original state. Only valid to call on an existing interval type. The only permissible
     /// transitions are from Slot to Start/End and vice versa, as these are the only valid
-    /// transitions when extending or clipping intervals.
+    /// transitions when extending or clipping intervals. Private so that an external caller cannot
+    /// arbitrarily manipulate interval sentinels.
     fn change_interval_sentinel(&mut self, new_sentinel: SentinelType) {
         if cfg!(debug_assertions) {
             debug_assert!(self.is_interval());
@@ -708,7 +712,28 @@ impl VmPageListNode {
         &mut self.pages[index]
     }
 
+    /// Returns a raw pointer to the slot at `index`, derived from the raw node pointer without
+    /// creating a reference to the node.
+    ///
+    /// `VmPageList` callers hold raw slot pointers into a node across calls that look up other
+    /// slots in the same node. Minting a `&mut VmPageListNode` on those paths would invalidate the
+    /// held pointers under the aliasing model, so slot access there must go through this helper
+    /// (or an equivalent raw-pointer projection) rather than `lookup_mut`.
+    ///
+    /// # Safety
+    ///
+    /// `node` must be non-null and point to a live `VmPageListNode`.
+    #[inline]
+    unsafe fn slot_ptr(node: *mut Self, index: usize) -> *mut VmPageOrMarker {
+        debug_assert!(index < Self::PAGE_FAN_OUT);
+        // SAFETY: The caller guarantees `node` points to a live node, so the `pages` projection is
+        // in bounds, and `addr_of_mut!` does not create a reference. `index < PAGE_FAN_OUT` keeps
+        // the resulting pointer within the `pages` array.
+        unsafe { core::ptr::addr_of_mut!((*node).pages).cast::<VmPageOrMarker>().add(index) }
+    }
+
     /// A node is empty if it contains no pages, page interval sentinels, references, or markers.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         for p in &self.pages {
             if !p.is_empty() {
@@ -945,6 +970,89 @@ zr::static_assert!(core::mem::align_of::<VmPageListNode>() == 4);
 zr::static_assert!(
     core::mem::size_of::<VmPageList>() == core::mem::size_of::<bindings::VmPageListBtree>()
 );
+zr::static_assert!(
+    core::mem::align_of::<VmPageList>() == core::mem::align_of::<bindings::VmPageListBtree>()
+);
+
+#[derive(Copy, Clone)]
+struct VmPageListBtreeNodeEntry {
+    offset: u64,
+    node: *mut core::ffi::c_void,
+}
+
+// The B-Tree FFI functions below return the node pointer directly and write the offset through an
+// out-pointer rather than returning a `{ u64, *mut c_void }` struct by value. On x86_64, Clang and
+// rustc lower a `{ u64, *mut c_void }` return type to different LLVM IR types (`{ i64, ptr }` vs.
+// `{ i64, i64 }`), which prevents ThinLTO from inlining the C++ wrappers.
+
+/// # Safety
+///
+/// `tree` must point to an initialized `VmPageListBtree`, and `out_cursor` must be null or point to
+/// valid storage for a `VmPageListBtreeCursor`.
+#[inline]
+unsafe fn btree_lower_bound(
+    tree: *mut bindings::VmPageListBtree,
+    node_offset: u64,
+    out_cursor: *mut bindings::VmPageListBtreeCursor,
+) -> VmPageListBtreeNodeEntry {
+    let mut offset = 0;
+    // SAFETY: Guaranteed by caller.
+    let node = unsafe {
+        bindings::cpp_vm_page_list_btree_lower_bound(tree, node_offset, out_cursor, &mut offset)
+    };
+    VmPageListBtreeNodeEntry { offset, node }
+}
+
+/// # Safety
+///
+/// `cursor` must point to an initialized `VmPageListBtreeCursor`.
+#[inline]
+unsafe fn btree_cursor_get(
+    cursor: *const bindings::VmPageListBtreeCursor,
+) -> VmPageListBtreeNodeEntry {
+    let mut offset = 0;
+    // SAFETY: Guaranteed by caller.
+    let node = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor, &mut offset) };
+    VmPageListBtreeNodeEntry { offset, node }
+}
+
+/// # Safety
+///
+/// `cursor` must point to an initialized `VmPageListBtreeCursor`.
+#[inline]
+unsafe fn btree_cursor_next(
+    cursor: *mut bindings::VmPageListBtreeCursor,
+) -> VmPageListBtreeNodeEntry {
+    let mut offset = 0;
+    // SAFETY: Guaranteed by caller.
+    let node = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor, &mut offset) };
+    VmPageListBtreeNodeEntry { offset, node }
+}
+
+/// # Safety
+///
+/// `cursor` must point to an initialized `VmPageListBtreeCursor`.
+#[inline]
+unsafe fn btree_cursor_prev(
+    cursor: *mut bindings::VmPageListBtreeCursor,
+) -> VmPageListBtreeNodeEntry {
+    let mut offset = 0;
+    // SAFETY: Guaranteed by caller.
+    let node = unsafe { bindings::cpp_vm_page_list_btree_cursor_prev(cursor, &mut offset) };
+    VmPageListBtreeNodeEntry { offset, node }
+}
+
+/// # Safety
+///
+/// `cursor` must point to an initialized `VmPageListBtreeConstCursor`.
+#[inline]
+unsafe fn btree_const_cursor_next(
+    cursor: *mut bindings::VmPageListBtreeConstCursor,
+) -> *const core::ffi::c_void {
+    let mut offset = 0;
+    // SAFETY: Guaranteed by caller.
+    unsafe { bindings::cpp_vm_page_list_btree_const_cursor_next(cursor, &mut offset) }
+}
 
 struct NodeIter<'a> {
     cursor: Opaque<bindings::VmPageListBtreeConstCursor>,
@@ -956,13 +1064,12 @@ impl<'a> Iterator for NodeIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
-        let entry =
-            unsafe { bindings::cpp_vm_page_list_btree_const_cursor_next(self.cursor.get()) };
-        if entry.node.is_null() {
+        let node = unsafe { btree_const_cursor_next(self.cursor.get()) };
+        if node.is_null() {
             None
         } else {
-            // SAFETY: `entry.node` is verified non-null and valid for lifetime `'a`.
-            Some(unsafe { entry.node.cast::<VmPageListNode>().as_ref_unchecked() })
+            // SAFETY: `node` is verified non-null and valid for lifetime `'a`.
+            Some(unsafe { node.cast::<VmPageListNode>().as_ref_unchecked() })
         }
     }
 }
@@ -977,7 +1084,7 @@ impl<'a> Iterator for NodeIterMut<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
-        let entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(self.cursor.get()) };
+        let entry = unsafe { btree_cursor_next(self.cursor.get()) };
         if entry.node.is_null() {
             None
         } else {
@@ -1111,9 +1218,9 @@ impl<'a> VmPageListCursor<'a> {
         debug_assert_eq!(self.index, VmPageListNode::PAGE_FAN_OUT);
         // `cursor_next` returns the entry that the iterator was pointing at prior to advancing it.
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
-        let prev = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(self.cursor.get()) };
+        let prev = unsafe { btree_cursor_next(self.cursor.get()) };
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
-        let entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(self.cursor.get()) };
+        let entry = unsafe { btree_cursor_get(self.cursor.get()) };
         // A null node means that the iterator has moved past the last node. Otherwise `entry`
         // follows `prev` in key order and both offsets are multiples of `NODE_SPAN_BYTES`, so the
         // sum is at most `entry.offset` and cannot overflow.
@@ -1135,9 +1242,9 @@ impl<'a> VmPageListCursor<'a> {
 
     /// Returns the entry that the underlying iterator points at. This must only be called while the
     /// cursor is `valid()`, which guarantees that the iterator points at a node.
-    fn get(&self) -> bindings::VmPageListBtreeNodeEntry {
+    fn get(&self) -> VmPageListBtreeNodeEntry {
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
-        let entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(self.cursor.get()) };
+        let entry = unsafe { btree_cursor_get(self.cursor.get()) };
         debug_assert!(!entry.node.is_null());
         entry
     }
@@ -1146,15 +1253,28 @@ impl<'a> VmPageListCursor<'a> {
 /// Helper object for performing repeated `lookup_or_allocate` operations that are likely to be
 /// close to each other. While using this object other (modifying) methods on this `VmPageList` must
 /// not be performed, if they are the `reset` method needs to be used before continuing.
+///
+/// This is `#[repr(C)]` with the same two members, in the same order, as the C++
+/// `VmPageList::BatchInserter`, so that the C++ `this` pointer can be reinterpreted as a
+/// `BatchInserter` by `rust_vm_page_list_batch_inserter_lookup_or_allocate`. The layout is asserted
+/// on both sides. The C++ member is a `VmPageListBtree&`, i.e. the address of `VmPageList::list_`;
+/// it reads as a valid `&mut VmPageList` here because `list` is the sole, first member of the
+/// `#[repr(C)]` `VmPageList`.
+#[repr(C)]
 pub struct BatchInserter<'a> {
     list: &'a mut VmPageList,
     node: Opaque<bindings::VmPageListBtreeCursor>,
 }
 
-const _: () = {
-    assert!(core::mem::size_of::<BatchInserter<'_>>() == 24);
-    assert!(core::mem::align_of::<BatchInserter<'_>>() == 8);
-};
+zr::static_assert!(core::mem::offset_of!(VmPageList, list) == 0);
+zr::static_assert!(
+    core::mem::size_of::<BatchInserter<'_>>()
+        == core::mem::size_of::<*mut VmPageList>()
+            + core::mem::size_of::<bindings::VmPageListBtreeCursor>()
+);
+zr::static_assert!(
+    core::mem::align_of::<BatchInserter<'_>>() == core::mem::align_of::<*mut VmPageList>()
+);
 
 impl<'a> BatchInserter<'a> {
     /// Construct a `BatchInserter` for the specified `VmPageList`. The list must be kept alive for
@@ -1179,30 +1299,33 @@ impl<'a> BatchInserter<'a> {
 
         // First check if the currently saved iterator is valid and for the correct node.
         // SAFETY: `self.node.get()` is a valid pointer.
-        let mut entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(self.node.get()) };
+        let mut entry = unsafe { btree_cursor_get(self.node.get()) };
         if !entry.node.is_null() {
             if entry.offset == target_offset {
-                // SAFETY: `entry.node` is verified non-null and valid.
-                let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
-                return Some(node.lookup_mut(index));
+                let node_ptr = entry.node.cast::<VmPageListNode>();
+                // SAFETY: `node_ptr` is non-null and points to a live node owned by `self.list`.
+                // The slot is derived from the raw node pointer rather than through a
+                // `&mut VmPageListNode` so that no reference is minted over slots the caller may
+                // still hold pointers to from earlier calls.
+                return Some(unsafe { &mut *VmPageListNode::slot_ptr(node_ptr, index) });
             }
             // Under the assumption of contiguous insertion, check if incrementing the iterator
             // helps.
             if entry.offset < target_offset {
                 // Advance the cursor to the next node.
                 // SAFETY: `self.node.get()` is a valid pointer.
-                let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(self.node.get()) };
+                let _ = unsafe { btree_cursor_next(self.node.get()) };
                 // Peek at the new node.
                 // SAFETY: `self.node.get()` is a valid pointer.
-                entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(self.node.get()) };
+                entry = unsafe { btree_cursor_get(self.node.get()) };
                 if entry.node.is_null() {
                     // If we hit the end then we know a new node is needed, so skip the search and
                     // go straight to new node creation.
                     search = false;
                 } else if entry.offset == target_offset {
-                    // SAFETY: `entry.node` is verified non-null and valid.
-                    let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
-                    return Some(node.lookup_mut(index));
+                    let node_ptr = entry.node.cast::<VmPageListNode>();
+                    // SAFETY: As above.
+                    return Some(unsafe { &mut *VmPageListNode::slot_ptr(node_ptr, index) });
                 }
             }
         }
@@ -1214,16 +1337,12 @@ impl<'a> BatchInserter<'a> {
             // insertion later.
             // SAFETY: `self.list.list.get()` and `self.node.get()` are valid pointers.
             entry = unsafe {
-                bindings::cpp_vm_page_list_btree_lower_bound(
-                    self.list.list.get(),
-                    target_offset,
-                    self.node.get(),
-                )
+                btree_lower_bound(self.list.list.get(), target_offset, self.node.get())
             };
             if !entry.node.is_null() && entry.offset == target_offset {
-                // SAFETY: `entry.node` is verified non-null and valid.
-                let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
-                return Some(node.lookup_mut(index));
+                let node_ptr = entry.node.cast::<VmPageListNode>();
+                // SAFETY: As above.
+                return Some(unsafe { &mut *VmPageListNode::slot_ptr(node_ptr, index) });
             }
         }
 
@@ -1238,9 +1357,10 @@ impl<'a> BatchInserter<'a> {
         if node_ptr.is_null() {
             return None;
         }
-        // SAFETY: `node_ptr` was allocated by `VmPageListNode::Create()` and inserted into BTree.
-        let node = unsafe { node_ptr.cast::<VmPageListNode>().as_mut_unchecked() };
-        Some(node.lookup_mut(index))
+        let node_ptr = node_ptr.cast::<VmPageListNode>();
+        // SAFETY: `node_ptr` was allocated by `VmPageListNode::Create()` and inserted into the
+        // B-tree. See above for why the slot is derived from the raw node pointer.
+        Some(unsafe { &mut *VmPageListNode::slot_ptr(node_ptr, index) })
     }
 
     /// Reset the batch inserter. This makes it safe to use again if other `VmPageList` operations
@@ -1286,6 +1406,14 @@ const fn round_down(val: u64, align: u64) -> u64 {
 enum PageOrGap<'a> {
     /// A page/ref/marker or interval sentinel, and its offset.
     Page(&'a VmPageOrMarker, u64),
+    /// A gap (unpopulated range), as `(gap_start, gap_end)`.
+    Gap(u64, u64),
+}
+
+/// An entry visited by `VmPageList::for_every_page_and_gap_in_range_internal_mut`.
+enum PageOrGapMut<'a> {
+    /// A page/ref/marker or interval sentinel, and its offset.
+    Page(&'a mut VmPageOrMarker, u64),
     /// A gap (unpopulated range), as `(gap_start, gap_end)`.
     Gap(u64, u64),
 }
@@ -1424,9 +1552,7 @@ impl VmPageList {
         let node_offset = VmPageListNode::node_offset(offset);
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
-        let entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(self.list.get(), node_offset, cursor.get())
-        };
+        let entry = unsafe { btree_lower_bound(self.list.get(), node_offset, cursor.get()) };
         if entry.node.is_null() {
             return VmPageListCursor::default();
         }
@@ -1468,7 +1594,12 @@ impl VmPageList {
         interval_handling: IntervalHandling,
     ) -> (Option<&mut VmPageOrMarker>, bool) {
         match interval_handling {
-            IntervalHandling::NoIntervals => (self.lookup_or_allocate_internal(offset), false),
+            IntervalHandling::NoIntervals => {
+                let slot = self.lookup_or_allocate_internal(offset);
+                // SAFETY: `lookup_or_allocate_internal` returns either null or a pointer to a live
+                // slot in `self.list`, valid for the lifetime of `&mut self`.
+                (unsafe { slot.as_mut() }, false)
+            }
             IntervalHandling::CheckForInterval => {
                 self.lookup_or_allocate_check_for_interval(offset, false)
             }
@@ -1479,9 +1610,17 @@ impl VmPageList {
     }
 
     /// Internal helper for `lookup_or_allocate`.
-    fn lookup_or_allocate_internal(&mut self, offset: u64) -> Option<&mut VmPageOrMarker> {
+    ///
+    /// Returns a raw pointer rather than `Option<&mut VmPageOrMarker>` so callers that look up
+    /// multiple slots across calls (e.g. `add_zero_interval_internal`, `overwrite_zero_interval`)
+    /// can hold the first slot pointer across a second call without minting an intermediate `&mut`.
+    fn lookup_or_allocate_internal(&mut self, offset: u64) -> *mut VmPageOrMarker {
         let node_offset = VmPageListNode::node_offset(offset);
         let index = VmPageListNode::node_index(offset);
+
+        if node_offset >= Self::MAX_SIZE {
+            return core::ptr::null_mut();
+        }
 
         ltracef_level!(
             2,
@@ -1492,21 +1631,18 @@ impl VmPageList {
             index
         );
 
-        if node_offset >= Self::MAX_SIZE {
-            return None;
-        }
-
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
         // lookup the tree node that holds this page. Use lower_bound instead of find to optimize
         // later insertion in case of failed lookup.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
-        let entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(self.list.get(), node_offset, cursor.get())
-        };
+        let entry = unsafe { btree_lower_bound(self.list.get(), node_offset, cursor.get()) };
         if !entry.node.is_null() && entry.offset == node_offset {
-            // SAFETY: `entry.node` is verified non-null and points to a valid `VmPageListNode`.
-            let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
-            return Some(node.lookup_mut(index));
+            let node_ptr = entry.node.cast::<VmPageListNode>();
+            // SAFETY: `node_ptr` is non-null and points to a live node owned by `self.list`. The
+            // slot is derived from the raw node pointer rather than through a
+            // `&mut VmPageListNode` so that no reference is minted over slots the caller may still
+            // hold pointers to from earlier calls.
+            return unsafe { VmPageListNode::slot_ptr(node_ptr, index) };
         }
 
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
@@ -1514,12 +1650,14 @@ impl VmPageList {
             bindings::cpp_vm_page_list_btree_insert(self.list.get(), node_offset, cursor.get())
         };
         if node_ptr.is_null() {
-            return None;
+            return core::ptr::null_mut();
         }
-        // SAFETY: `node_ptr` was allocated by `VmPageListNode::Create()` and inserted into BTree.
-        let node_ref: &mut VmPageListNode =
-            unsafe { node_ptr.cast::<VmPageListNode>().as_mut_unchecked() };
-        Some(node_ref.lookup_mut(index))
+        ltracef!("allocating new inner node {:p}\n", node_ptr);
+
+        let node_ptr = node_ptr.cast::<VmPageListNode>();
+        // SAFETY: `node_ptr` was allocated by `VmPageListNode::Create()` and inserted into the
+        // B-tree. See above for why the slot is derived from the raw node pointer.
+        unsafe { VmPageListNode::slot_ptr(node_ptr, index) }
     }
 
     /// Similar to `lookup_or_allocate_internal` but also checks if `offset` falls in a sparse page
@@ -1567,16 +1705,16 @@ impl VmPageList {
         // can exit the traversal as soon as possible or avoid it entirely.
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
-        let entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(self.list.get(), node_offset, cursor.get())
-        };
+        let entry = unsafe { btree_lower_bound(self.list.get(), node_offset, cursor.get()) };
 
         // The slot that will eventually hold offset.
         let mut slot: *mut VmPageOrMarker = core::ptr::null_mut();
 
         // If offset falls in an interval, this will hold the dirty state of the interval that
         // offset is found in. It will be used to mint new sentinel values if we were also asked to
-        // split the interval.
+        // split the interval. Only zero intervals are supported, so the dirty state is all that is
+        // needed to mint a sentinel and it is preserved across the split; if other interval types
+        // are added in the future, this will need to carry the full interval type as well.
         let mut found_interval_dirty_state = ZeroRangeDirtyState::Untracked;
         let mut is_in_interval = false;
 
@@ -1587,9 +1725,8 @@ impl VmPageList {
             let node_ptr = entry.node.cast::<VmPageListNode>();
             if entry.offset == node_offset {
                 // We found the node containing offset. Get the slot.
-                let pages_ptr =
-                    unsafe { core::ptr::addr_of_mut!((*node_ptr).pages).cast::<VmPageOrMarker>() };
-                slot = unsafe { pages_ptr.add(node_index) };
+                // SAFETY: `node_ptr` is non-null and points to a live node owned by `self.list`.
+                slot = unsafe { VmPageListNode::slot_ptr(node_ptr, node_index) };
                 // Short circuit the is_offset_in_interval_helper call below if the slot itself is
                 // an interval sentinel. This is purely an optimization, and it would be okay to
                 // call is_offset_in_interval_helper for this case too.
@@ -1607,6 +1744,7 @@ impl VmPageList {
                     Self::is_offset_in_interval_helper(offset, entry.offset, node)
                 {
                     is_in_interval = true;
+                    // If we found an interval, we should have found a valid interval sentinel too.
                     debug_assert!(interval.is_interval());
                     found_interval_dirty_state = interval.zero_interval_dirty_state();
                 }
@@ -1631,9 +1769,8 @@ impl VmPageList {
                 return (None, is_in_interval);
             }
             let node_ptr = node_ptr.cast::<VmPageListNode>();
-            let pages_ptr =
-                unsafe { core::ptr::addr_of_mut!((*node_ptr).pages).cast::<VmPageOrMarker>() };
-            slot = unsafe { pages_ptr.add(node_index) };
+            // SAFETY: `node_ptr` was just returned non-null by `cpp_vm_page_list_btree_insert`.
+            slot = unsafe { VmPageListNode::slot_ptr(node_ptr, node_index) };
         }
 
         // If offset does not lie in an interval, or if the slot is already a single page interval,
@@ -1659,7 +1796,8 @@ impl VmPageList {
         //    end but not both.
         let mut need_new_end = true;
         let mut need_new_start = true;
-        // SAFETY: `slot` is non-null and valid.
+        // SAFETY (both reads of `slot` below): `slot` was set non-null above and points into a live
+        // node owned by `self.list`.
         if unsafe { (*slot).is_interval_start() } {
             // We can move the interval start to the right, and replace the old start with a slot.
             // Don't need a new end.
@@ -1690,8 +1828,7 @@ impl VmPageList {
                 // previous node we're looking for.
                 let prev_node_offset = node_offset - VmPageListNode::NODE_SPAN_BYTES;
                 // SAFETY: `cursor.get()` is a valid pointer pointing to current node.
-                let prev_entry =
-                    unsafe { bindings::cpp_vm_page_list_btree_cursor_prev(cursor.get()) };
+                let prev_entry = unsafe { btree_cursor_prev(cursor.get()) };
                 // We are here because slot was either an empty slot inside an interval or it was an
                 // interval end. Additionally, the slot was the left-most slot in its node, which
                 // means we are guaranteed to find a node to the left which holds the start of the
@@ -1699,11 +1836,11 @@ impl VmPageList {
                 debug_assert!(!prev_entry.node.is_null());
                 if prev_entry.offset == prev_node_offset {
                     let prev_node = prev_entry.node.cast::<VmPageListNode>();
-                    // SAFETY: `prev_node` is non-null.
-                    let pages_ptr = unsafe {
-                        core::ptr::addr_of_mut!((*prev_node).pages).cast::<VmPageOrMarker>()
+                    // SAFETY: `prev_node` is non-null and points to a live node owned by
+                    // `self.list`.
+                    new_end = unsafe {
+                        VmPageListNode::slot_ptr(prev_node, VmPageListNode::PAGE_FAN_OUT - 1)
                     };
-                    new_end = unsafe { pages_ptr.add(VmPageListNode::PAGE_FAN_OUT - 1) };
                 } else {
                     debug_assert!(prev_entry.offset < prev_node_offset);
                     // SAFETY: `self.list.get()` is a valid pointer. Passing null cursor inserts
@@ -1723,11 +1860,11 @@ impl VmPageList {
                         return (None, true);
                     }
                     let node_ptr = node_ptr.cast::<VmPageListNode>();
-                    // SAFETY: `node_ptr` is non-null.
-                    let pages_ptr = unsafe {
-                        core::ptr::addr_of_mut!((*node_ptr).pages).cast::<VmPageOrMarker>()
+                    // SAFETY: `node_ptr` was just returned non-null by
+                    // `cpp_vm_page_list_btree_insert`.
+                    new_end = unsafe {
+                        VmPageListNode::slot_ptr(node_ptr, VmPageListNode::PAGE_FAN_OUT - 1)
                     };
-                    new_end = unsafe { pages_ptr.add(VmPageListNode::PAGE_FAN_OUT - 1) };
                 }
             }
             debug_assert!(!new_end.is_null());
@@ -1746,19 +1883,17 @@ impl VmPageList {
                 // node we're looking for.
                 let next_node_offset = node_offset + VmPageListNode::NODE_SPAN_BYTES;
                 // SAFETY: `cursor.get()` is a valid pointer pointing to current node.
-                let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
-                let next_entry =
-                    unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor.get()) };
+                let _ = unsafe { btree_cursor_next(cursor.get()) };
+                let next_entry = unsafe { btree_cursor_get(cursor.get()) };
                 // We are here because slot was either empty or it was an interval start.
                 // Additionally, the slot was the right-most slot in its node, which means we are
                 // guaranteed to find a node to the right which holds the end of the interval.
                 debug_assert!(!next_entry.node.is_null());
                 if next_entry.offset == next_node_offset {
                     let next_node = next_entry.node.cast::<VmPageListNode>();
-                    // SAFETY: `next_node` is non-null.
-                    new_start = unsafe {
-                        core::ptr::addr_of_mut!((*next_node).pages).cast::<VmPageOrMarker>()
-                    };
+                    // SAFETY: `next_node` is non-null and points to a live node owned by
+                    // `self.list`.
+                    new_start = unsafe { VmPageListNode::slot_ptr(next_node, 0) };
                 } else {
                     debug_assert!(next_entry.offset > next_node_offset);
                     // SAFETY: `self.list.get()` is a valid pointer. Passing null cursor inserts
@@ -1778,10 +1913,9 @@ impl VmPageList {
                         return (None, true);
                     }
                     let node_ptr = node_ptr.cast::<VmPageListNode>();
-                    // SAFETY: `node_ptr` is non-null.
-                    new_start = unsafe {
-                        core::ptr::addr_of_mut!((*node_ptr).pages).cast::<VmPageOrMarker>()
-                    };
+                    // SAFETY: `node_ptr` was just returned non-null by
+                    // `cpp_vm_page_list_btree_insert`.
+                    new_start = unsafe { VmPageListNode::slot_ptr(node_ptr, 0) };
                 }
             }
             debug_assert!(!new_start.is_null());
@@ -1881,12 +2015,13 @@ impl VmPageList {
         };
         debug_assert!(!node_ptr.is_null());
 
-        // SAFETY: `node_ptr` is verified non-null by debug_assert and function contract.
-        let node_ref: &mut VmPageListNode =
-            unsafe { node_ptr.cast::<VmPageListNode>().as_mut_unchecked() };
+        let node_ptr = node_ptr.cast::<VmPageListNode>();
+        // SAFETY: `node_ptr` is verified non-null by debug_assert and function contract. Only
+        // slot-local and shared references to the node are created, so slot pointers the caller
+        // holds into this node remain valid across this call.
         // check that the slot was empty
-        debug_assert!(node_ref.lookup(index).is_empty());
-        if node_ref.is_empty() {
+        debug_assert!(unsafe { (*VmPageListNode::slot_ptr(node_ptr, index)).is_empty() });
+        if unsafe { (*node_ptr).is_empty() } {
             // node is empty, erase it.
             // SAFETY: `self.list.get()` is valid and `cursor` was initialized by `btree_find`.
             unsafe {
@@ -1921,12 +2056,14 @@ impl VmPageList {
             return VmPageOrMarker::empty();
         }
 
-        // SAFETY: `node_ptr` is verified non-null and points to a valid `VmPageListNode`.
-        let node_ref: &mut VmPageListNode =
-            unsafe { node_ptr.cast::<VmPageListNode>().as_mut_unchecked() };
+        let node_ptr = node_ptr.cast::<VmPageListNode>();
+        // SAFETY: `node_ptr` is verified non-null and points to a valid `VmPageListNode`. Only
+        // slot-local and shared references to the node are created, so slot pointers the caller
+        // holds into this node remain valid across this call.
         // free this page
-        let page = node_ref.lookup_mut(index).swap(VmPageOrMarker::empty());
-        if !page.is_empty() && node_ref.is_empty() {
+        let page = unsafe { &mut *VmPageListNode::slot_ptr(node_ptr, index) }
+            .swap(VmPageOrMarker::empty());
+        if !page.is_empty() && unsafe { (*node_ptr).is_empty() } {
             // if it was the last item in the node, remove the node from the tree
             ltracef_level!(2, "{:p} freeing the list node\n", core::ptr::from_ref(self));
             // SAFETY: `self.list.get()` is valid and `cursor` was initialized by `btree_find`.
@@ -1962,9 +2099,7 @@ impl VmPageList {
         // If the node containing offset is populated, the lower bound will return that node. If not
         // populated, it will return the next populated node.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
-        let entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(self.list.get(), node_offset, cursor.get())
-        };
+        let entry = unsafe { btree_lower_bound(self.list.get(), node_offset, cursor.get()) };
         // Could not find a valid node >= node_offset. So offset cannot be part of an interval, an
         // interval would have an end slot.
         if entry.node.is_null() {
@@ -2019,7 +2154,7 @@ impl VmPageList {
 
         // We could not find the start in the same node. Check the previous one.
         // SAFETY: `cursor.get()` is initialized.
-        let prev_entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_prev(cursor.get()) };
+        let prev_entry = unsafe { btree_cursor_prev(cursor.get()) };
         debug_assert!(!prev_entry.node.is_null());
         // SAFETY: `prev_entry.node` is non-null and points to a valid `VmPageListNode`.
         let prev_node = unsafe { prev_entry.node.cast::<VmPageListNode>().as_ref_unchecked() };
@@ -2064,8 +2199,8 @@ impl VmPageList {
 
         // We could not find the end in the same node. Check the next one.
         // SAFETY: `cursor.get()` is initialized. Advance past current node and get next entry.
-        let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
-        let next_entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor.get()) };
+        let _ = unsafe { btree_cursor_next(cursor.get()) };
+        let next_entry = unsafe { btree_cursor_get(cursor.get()) };
         debug_assert!(!next_entry.node.is_null());
         // SAFETY: `next_entry.node` is non-null and points to a valid `VmPageListNode`.
         let next_node = unsafe { next_entry.node.cast::<VmPageListNode>().as_ref_unchecked() };
@@ -2111,12 +2246,9 @@ impl VmPageList {
         if node_ptr.is_null() {
             core::ptr::null_mut()
         } else {
-            debug_assert!(index < VmPageListNode::PAGE_FAN_OUT);
-            // SAFETY: `node_ptr` is verified non-null and points to a valid `VmPageListNode`.
             let node_ptr = node_ptr.cast::<VmPageListNode>();
-            let pages_ptr =
-                unsafe { core::ptr::addr_of_mut!((*node_ptr).pages).cast::<VmPageOrMarker>() };
-            unsafe { pages_ptr.add(index) }
+            // SAFETY: `node_ptr` is verified non-null and points to a valid `VmPageListNode`.
+            unsafe { VmPageListNode::slot_ptr(node_ptr, index) }
         }
     }
 
@@ -2210,32 +2342,28 @@ impl VmPageList {
         // If we could not merge with an interval to the left, we're going to need a new start
         // sentinel.
         if !merge_with_prev {
-            new_start = match self.lookup_or_allocate_internal(interval_start) {
-                Some(slot) => slot as *mut VmPageOrMarker,
-                None => {
-                    debug_assert!(!replace_existing_slot);
-                    return Err(Status::NO_MEMORY);
-                }
-            };
+            new_start = self.lookup_or_allocate_internal(interval_start);
+            if new_start.is_null() {
+                debug_assert!(!replace_existing_slot);
+                return Err(Status::NO_MEMORY);
+            }
             // SAFETY: `new_start` is non-null.
             debug_assert!(unsafe { (*new_start).is_empty() });
         }
         // If we could not merge with an interval to the right, we're going to need a new end
         // sentinel.
         if !merge_with_next {
-            new_end = match self.lookup_or_allocate_internal(interval_end) {
-                Some(slot) => slot as *mut VmPageOrMarker,
-                None => {
-                    debug_assert!(!replace_existing_slot);
-                    // Clean up any slot we allocated for new_start before returning.
-                    if !new_start.is_null() {
-                        // SAFETY: `new_start` is non-null and empty.
-                        debug_assert!(unsafe { (*new_start).is_empty() });
-                        self.return_empty_slot(interval_start);
-                    }
-                    return Err(Status::NO_MEMORY);
+            new_end = self.lookup_or_allocate_internal(interval_end);
+            if new_end.is_null() {
+                debug_assert!(!replace_existing_slot);
+                // Clean up any slot we allocated for new_start before returning.
+                if !new_start.is_null() {
+                    // SAFETY: `new_start` is non-null and empty.
+                    debug_assert!(unsafe { (*new_start).is_empty() });
+                    self.return_empty_slot(interval_start);
                 }
-            };
+                return Err(Status::NO_MEMORY);
+            }
             // SAFETY: `new_end` is non-null.
             debug_assert!(unsafe { (*new_end).is_empty() });
         }
@@ -2489,21 +2617,23 @@ impl VmPageList {
                     while cleanup_off < node_off {
                         let cleanup_cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
                         // SAFETY: `self.list.get()` and `cleanup_cursor.get()` are valid pointers.
-                        let cleanup_ptr = unsafe {
+                        let found = unsafe {
                             bindings::cpp_vm_page_list_btree_find(
                                 self.list.get(),
                                 cleanup_off,
                                 cleanup_cursor.get(),
                             )
                         };
-                        if !cleanup_ptr.is_null() {
-                            // SAFETY: `self.list.get()` and `cleanup_cursor.get()` are valid.
-                            unsafe {
-                                bindings::cpp_vm_page_list_btree_erase_at(
-                                    self.list.get(),
-                                    cleanup_cursor.get(),
-                                );
-                            }
+                        // Every node from first_unpopulated up to the one that failed was inserted
+                        // above, so the find cannot fail.
+                        debug_assert!(!found.is_null());
+                        // SAFETY: `self.list.get()` is valid, and `cleanup_cursor` was initialized
+                        // by the successful `btree_find` above.
+                        unsafe {
+                            bindings::cpp_vm_page_list_btree_erase_at(
+                                self.list.get(),
+                                cleanup_cursor.get(),
+                            );
                         }
                         cleanup_off += VmPageListNode::NODE_SPAN_BYTES;
                     }
@@ -2543,7 +2673,7 @@ impl VmPageList {
 
         while node_offset <= last_node_offset {
             // SAFETY: `cursor.get()` is a valid pointer.
-            let entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor.get()) };
+            let entry = unsafe { btree_cursor_get(cursor.get()) };
             debug_assert!(!entry.node.is_null());
             debug_assert_eq!(entry.offset, node_offset);
             // SAFETY: `entry.node` is non-null and valid.
@@ -2564,15 +2694,15 @@ impl VmPageList {
             }
             // Advance cursor to next node.
             // SAFETY: `cursor.get()` is a valid pointer.
-            let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
+            let _ = unsafe { btree_cursor_next(cursor.get()) };
             node_offset += VmPageListNode::NODE_SPAN_BYTES;
         }
 
         if awaiting_clean_len > 0 {
             // Set awaiting_clean_length for the last populated slot too.
-            if let Some(mut end_ref) = self.lookup_mut(end_offset) {
-                end_ref.set_zero_interval_awaiting_clean_length(page_size);
-            }
+            self.lookup_mut(end_offset)
+                .expect("end_offset was populated above")
+                .set_zero_interval_awaiting_clean_length(page_size);
             awaiting_clean_len -= page_size;
             // If there is still a remaining awaiting_clean_length, carry it over to the interval
             // next to the last slot, if there is one.
@@ -2610,8 +2740,10 @@ impl VmPageList {
     pub fn return_interval_slot(&mut self, offset: u64) {
         // We should be able to lookup a pre-existing interval slot.
         let slot = self.lookup_or_allocate_internal(offset);
-        debug_assert!(slot.is_some());
-        let slot = slot.unwrap();
+        debug_assert!(!slot.is_null());
+        // SAFETY: `slot` is non-null and points to a valid slot in `self.list`; `slot` is not used
+        // after `add_zero_interval_internal` below.
+        let slot = unsafe { &mut *slot };
         debug_assert!(slot.is_interval_slot());
 
         // We only support zero intervals for now. If more interval types are added in the future,
@@ -2631,7 +2763,7 @@ impl VmPageList {
             awaiting_clean_len,
             true,
         );
-        // We are reusing an existing slot, so we cannot fail with NO_MEMORY.
+        // We are reusing an existing slot, so we cannot fail with Status::NO_MEMORY.
         debug_assert!(status.is_ok());
     }
 
@@ -2670,7 +2802,11 @@ impl VmPageList {
             debug_assert!(status.is_ok());
         }
 
-        let Some(new_start) = self.lookup_or_allocate_internal(new_interval_start) else {
+        // SAFETY: `lookup_or_allocate_internal` returns either null or a valid slot in `self.list`;
+        // `new_start` is not used after `remove_content` below.
+        let Some(new_start) =
+            (unsafe { self.lookup_or_allocate_internal(new_interval_start).as_mut() })
+        else {
             return Err(Status::NO_MEMORY);
         };
 
@@ -2684,7 +2820,7 @@ impl VmPageList {
             *new_start = VmPageOrMarker::zero_interval(SentinelType::Start, old_dirty_state);
         }
 
-        // Now that the new start has been created, carry over any remaining awaiting clean length
+        // Now that the new start has been created, carry over any remaining awaiting_clean_length
         // from the old start.
         if old_awaiting_clean_len > len {
             new_start.set_zero_interval_awaiting_clean_length(old_awaiting_clean_len - len);
@@ -2728,7 +2864,11 @@ impl VmPageList {
             debug_assert!(status.is_ok());
         }
 
-        let Some(new_end) = self.lookup_or_allocate_internal(new_interval_end) else {
+        // SAFETY: `lookup_or_allocate_internal` returns either null or a valid slot in `self.list`;
+        // `new_end` is not used after `remove_content` below.
+        let Some(new_end) =
+            (unsafe { self.lookup_or_allocate_internal(new_interval_end).as_mut() })
+        else {
             return Err(Status::NO_MEMORY);
         };
 
@@ -2756,8 +2896,10 @@ impl VmPageList {
     ) -> VmPagePtr {
         // We are guaranteed to find the slot as we're replacing an existing page.
         let slot = self.lookup_or_allocate_internal(offset);
-        debug_assert!(slot.is_some());
-        let slot = slot.unwrap();
+        debug_assert!(!slot.is_null());
+        // SAFETY: `slot` is non-null and points to a valid slot in `self.list`; `slot` is not used
+        // after `add_zero_interval_internal` below.
+        let slot = unsafe { &mut *slot };
         // Release the page at the offset, but hold on to the empty slot so it can be reused by
         // `add_zero_interval_internal`.
         let page = slot.release_page();
@@ -2768,9 +2910,9 @@ impl VmPageList {
             0,
             true,
         );
-        // The only error `add_zero_interval_internal` can encounter is NO_MEMORY, but we know that
-        // cannot happen because we are reusing an existing slot, so we don't need to allocate a new
-        // node.
+        // The only error `add_zero_interval_internal` can encounter is Status::NO_MEMORY, but we
+        // know that cannot happen because we are reusing an existing slot, so we don't need to
+        // allocate a new node.
         debug_assert!(status.is_ok());
         // Return the page we released.
         page
@@ -2876,21 +3018,22 @@ impl VmPageList {
                 (*old_start).zero_interval_dirty_state()
             };
 
-            new_end = match self.lookup_or_allocate_internal(new_end_offset) {
-                Some(slot) => slot,
-                None => return Err(Status::NO_MEMORY),
-            };
+            new_end = self.lookup_or_allocate_internal(new_end_offset);
+            if new_end.is_null() {
+                return Err(Status::NO_MEMORY);
+            }
             // SAFETY: `new_end` is non-null.
             debug_assert!(new_start_offset == new_end_offset || unsafe { (*new_end).is_empty() });
 
-            let clipped_start = match self.lookup_or_allocate_internal(new_end_offset + page_size) {
-                Some(slot) => slot,
-                None => {
-                    if new_start_offset != new_end_offset {
-                        self.return_empty_slot(new_end_offset);
-                    }
-                    return Err(Status::NO_MEMORY);
+            // SAFETY: `lookup_or_allocate_internal` returns either null or a valid slot at
+            // `new_end_offset + page_size`, which is distinct from `old_start` and `new_end`.
+            let Some(clipped_start) =
+                (unsafe { self.lookup_or_allocate_internal(new_end_offset + page_size).as_mut() })
+            else {
+                if new_start_offset != new_end_offset {
+                    self.return_empty_slot(new_end_offset);
                 }
+                return Err(Status::NO_MEMORY);
             };
             if clipped_start.is_interval_end() {
                 clipped_start.change_interval_sentinel(SentinelType::Slot);
@@ -2900,8 +3043,8 @@ impl VmPageList {
                     VmPageOrMarker::zero_interval(SentinelType::Start, old_dirty_state);
             }
 
-            // Now that the clipped start has been created, carry over any remaining awaiting clean
-            // length from the old start.
+            // Now that the clipped start has been created, carry over any remaining
+            // awaiting_clean_length from the old start.
             // SAFETY: `old_start` is non-null in this branch.
             let old_len = unsafe { (*old_start).zero_interval_awaiting_clean_length() };
             // `old_start` is only non-null if `old_start_offset` was provided.
@@ -2924,21 +3067,22 @@ impl VmPageList {
                 (*old_end).zero_interval_dirty_state()
             };
 
-            new_start = match self.lookup_or_allocate_internal(new_start_offset) {
-                Some(slot) => slot,
-                None => return Err(Status::NO_MEMORY),
-            };
+            new_start = self.lookup_or_allocate_internal(new_start_offset);
+            if new_start.is_null() {
+                return Err(Status::NO_MEMORY);
+            }
             // SAFETY: `new_start` is non-null.
             debug_assert!(new_start_offset == new_end_offset || unsafe { (*new_start).is_empty() });
 
-            let clipped_end = match self.lookup_or_allocate_internal(new_start_offset - page_size) {
-                Some(slot) => slot,
-                None => {
-                    if new_start_offset != new_end_offset {
-                        self.return_empty_slot(new_start_offset);
-                    }
-                    return Err(Status::NO_MEMORY);
+            // SAFETY: `lookup_or_allocate_internal` returns either null or a valid slot at
+            // `new_start_offset - page_size`, which is distinct from `old_end` and `new_start`.
+            let Some(clipped_end) =
+                (unsafe { self.lookup_or_allocate_internal(new_start_offset - page_size).as_mut() })
+            else {
+                if new_start_offset != new_end_offset {
+                    self.return_empty_slot(new_start_offset);
                 }
+                return Err(Status::NO_MEMORY);
             };
             if clipped_end.is_interval_start() {
                 clipped_end.change_interval_sentinel(SentinelType::Slot);
@@ -3078,7 +3222,7 @@ impl VmPageList {
 
         loop {
             // SAFETY: `cursor.get()` is a valid pointer.
-            let entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
+            let entry = unsafe { btree_cursor_next(cursor.get()) };
             if entry.node.is_null() || entry.offset >= end_offset {
                 break;
             }
@@ -3110,7 +3254,7 @@ impl VmPageList {
         // Position cursor at lower bound.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
         unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(
+            let _ = btree_lower_bound(
                 self.list.get(),
                 VmPageListNode::node_offset(start_offset),
                 cursor.get(),
@@ -3199,7 +3343,7 @@ impl VmPageList {
         // Position cursor at lower bound.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
         let first_entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(
+            btree_lower_bound(
                 self.list.get(),
                 VmPageListNode::node_offset(start_offset),
                 cursor.get(),
@@ -3297,35 +3441,37 @@ impl VmPageList {
         start_offset: u64,
         end_offset: u64,
         mut per_page_func: PageFunc,
-        per_gap_func: GapFunc,
+        mut per_gap_func: GapFunc,
     ) -> Result<(), Status>
     where
         PageFunc: FnMut(VmPageOrMarkerRef<'_>, u64) -> Status,
         GapFunc: FnMut(u64, u64) -> Status,
     {
-        self.for_every_page_and_gap_in_range_internal_mut::<SkipNodeCheck, _, _>(
+        self.for_every_page_and_gap_in_range_internal_mut::<SkipNodeCheck, _>(
             start_offset,
             end_offset,
-            |slot, off| per_page_func(VmPageOrMarkerRef::new(slot), off),
-            per_gap_func,
+            |e| match e {
+                PageOrGapMut::Page(slot, off) => per_page_func(VmPageOrMarkerRef::new(slot), off),
+                PageOrGapMut::Gap(gap_start, gap_end) => per_gap_func(gap_start, gap_end),
+            },
         )
     }
 
-    /// Mutable version of `for_every_page_and_gap_in_range`, which calls `per_page_func` with a
-    /// `&mut VmPageOrMarker`.
+    /// Mutable version of `for_every_page_and_gap_in_range_internal`, which calls `func` with a
+    /// `PageOrGapMut::Page(&mut VmPageOrMarker, offset)` for every page and
+    /// `PageOrGapMut::Gap(gap_start, gap_end)` for every gap. A single closure allows a caller to
+    /// track state across both pages and gaps.
     ///
-    /// If `N::CLEANUP_EMPTY` is true, then it is assumed the `per_page_func` may remove pages and
-    /// page nodes will be checked to see if they are empty and can be cleaned up.
-    fn for_every_page_and_gap_in_range_internal_mut<N: NodeCheck, PageFunc, GapFunc>(
+    /// If `N::CLEANUP_EMPTY` is true, then it is assumed `func` may remove pages and page nodes
+    /// will be checked to see if they are empty and can be cleaned up.
+    fn for_every_page_and_gap_in_range_internal_mut<N: NodeCheck, F>(
         &mut self,
         start_offset: u64,
         end_offset: u64,
-        mut per_page_func: PageFunc,
-        mut per_gap_func: GapFunc,
+        mut func: F,
     ) -> Result<(), Status>
     where
-        PageFunc: FnMut(&mut VmPageOrMarker, u64) -> Status,
-        GapFunc: FnMut(u64, u64) -> Status,
+        F: FnMut(PageOrGapMut<'_>) -> Status,
     {
         let page_size = page::SIZE as u64;
         let mut expected_next_off = start_offset;
@@ -3361,13 +3507,13 @@ impl VmPageList {
                 let mut status = Status::NEXT;
                 // We can move ahead of expected_next_off in the case of an interval too, which
                 // represents a run of pages. Make sure this is not an interval before calling the
-                // per_gap_func.
+                // gap callback.
                 if expected_next_off != off && !p.is_interval_end() {
-                    status = per_gap_func(expected_next_off, off);
+                    status = func(PageOrGapMut::Gap(expected_next_off, off));
                 }
                 expected_next_off = off + page_size;
                 if status == Status::NEXT {
-                    status = per_page_func(p, off);
+                    status = func(PageOrGapMut::Page(p, off));
                 }
                 status
             },
@@ -3401,7 +3547,7 @@ impl VmPageList {
             let ended_in_interval = in_interval
                 || (expected_next_off == start_offset && self.is_offset_in_interval(start_offset));
             if !ended_in_interval {
-                let status = per_gap_func(expected_next_off, end_offset);
+                let status = func(PageOrGapMut::Gap(expected_next_off, end_offset));
                 if status != Status::NEXT && status != Status::STOP {
                     return Err(status);
                 }
@@ -3771,7 +3917,7 @@ impl VmPageList {
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
         let mut entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(
+            btree_lower_bound(
                 self.list.get(),
                 VmPageListNode::node_offset(start_offset),
                 cursor.get(),
@@ -3798,18 +3944,18 @@ impl VmPageList {
                     }
                 } else {
                     // SAFETY: `cursor.get()` is a valid pointer.
-                    let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
+                    let _ = unsafe { btree_cursor_next(cursor.get()) };
                 }
             } else {
                 // SAFETY: `cursor.get()` is a valid pointer.
-                let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
+                let _ = unsafe { btree_cursor_next(cursor.get()) };
             }
             if status != Status::NEXT {
                 return status;
             }
             // Peek at the new node after step or erase.
             // SAFETY: `cursor.get()` is a valid pointer.
-            entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor.get()) };
+            entry = unsafe { btree_cursor_get(cursor.get()) };
         }
         Status::NEXT
     }
@@ -3850,18 +3996,36 @@ impl VmPageList {
         &mut self,
         start_offset: u64,
         end_offset: u64,
-        per_page_fn: PageFunc,
-        per_gap_fn: GapFunc,
+        mut per_page_fn: PageFunc,
+        mut per_gap_fn: GapFunc,
     ) -> Result<(), Status>
     where
         PageFunc: FnMut(&mut VmPageOrMarker, u64) -> Status,
         GapFunc: FnMut(u64, u64) -> Status,
     {
-        self.for_every_page_and_gap_in_range_internal_mut::<CleanupEmptyNodeCheck, _, _>(
+        self.remove_pages_and_iterate_gaps_internal(start_offset, end_offset, |e| match e {
+            PageOrGapMut::Page(slot, off) => per_page_fn(slot, off),
+            PageOrGapMut::Gap(gap_start, gap_end) => per_gap_fn(gap_start, gap_end),
+        })
+    }
+
+    /// Internal version of `remove_pages_and_iterate_gaps` that calls a single `func` for both
+    /// pages and gaps, in the same order that `remove_pages_and_iterate_gaps` calls `per_page_fn`
+    /// and `per_gap_fn`. This allows a caller to track state across both pages and gaps in a single
+    /// closure.
+    fn remove_pages_and_iterate_gaps_internal<F>(
+        &mut self,
+        start_offset: u64,
+        end_offset: u64,
+        func: F,
+    ) -> Result<(), Status>
+    where
+        F: FnMut(PageOrGapMut<'_>) -> Status,
+    {
+        self.for_every_page_and_gap_in_range_internal_mut::<CleanupEmptyNodeCheck, _>(
             start_offset,
             end_offset,
-            per_page_fn,
-            per_gap_fn,
+            func,
         )
     }
 
@@ -3890,11 +4054,7 @@ impl VmPageList {
         // Iterate the range in `self` we are merging.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
         let mut entry = unsafe {
-            bindings::cpp_vm_page_list_btree_lower_bound(
-                self.list.get(),
-                VmPageListNode::node_offset(offset),
-                cursor.get(),
-            )
+            btree_lower_bound(self.list.get(), VmPageListNode::node_offset(offset), cursor.get())
         };
         while !entry.node.is_null() && entry.offset < end_offset {
             let node_obj_offset = entry.offset;
@@ -3920,11 +4080,7 @@ impl VmPageList {
                 let other_cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
                 // SAFETY: `other.list.get()` and `other_cursor.get()` are valid pointers.
                 let other_entry = unsafe {
-                    bindings::cpp_vm_page_list_btree_lower_bound(
-                        other.list.get(),
-                        other_obj_offset,
-                        other_cursor.get(),
-                    )
+                    btree_lower_bound(other.list.get(), other_obj_offset, other_cursor.get())
                 };
 
                 // Allocate a new node if none was found.
@@ -3999,11 +4155,11 @@ impl VmPageList {
                 }
             } else {
                 // SAFETY: `cursor.get()` is a valid pointer.
-                let _ = unsafe { bindings::cpp_vm_page_list_btree_cursor_next(cursor.get()) };
+                let _ = unsafe { btree_cursor_next(cursor.get()) };
             }
             // Peek at the new node after the step or erase.
             // SAFETY: `cursor.get()` is a valid pointer.
-            entry = unsafe { bindings::cpp_vm_page_list_btree_cursor_get(cursor.get()) };
+            entry = unsafe { btree_cursor_get(cursor.get()) };
         }
         true
     }
@@ -4098,86 +4254,574 @@ impl core::fmt::Debug for VmPageList {
     }
 }
 
-/// Class which holds the list of vm_page structs removed from a VmPageList
-/// by AddPagesFrom. The list include information about uncommitted pages and markers.
-/// Every splice list is expected to go through the following series of states:
+/// States used to represent the life cycle of the `VmPageSpliceList`, as per the comment at the
+/// declaration.
+///
+/// The discriminants match the C++ `VmPageSpliceList::State` enum (asserted below), since both
+/// languages operate on the same object. C++ only ever stores these four values, so reading `state`
+/// from an instance that C++ has mutated is sound.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum State {
+    Constructed = 0,
+    Initialized = 1,
+    Finalized = 2,
+    Processed = 3,
+}
+
+zr::static_assert!(
+    core::mem::size_of::<State>() == core::mem::size_of::<bindings::VmPageSpliceList_State>()
+);
+zr::static_assert!(State::Constructed as u8 == bindings::VmPageSpliceList_State_Constructed);
+zr::static_assert!(State::Initialized as u8 == bindings::VmPageSpliceList_State_Initialized);
+zr::static_assert!(State::Finalized as u8 == bindings::VmPageSpliceList_State_Finalized);
+zr::static_assert!(State::Processed as u8 == bindings::VmPageSpliceList_State_Processed);
+
+/// Class which holds the list of vm_page structs removed from a VmPageList by `add_pages_from`. The
+/// list includes information about uncommitted pages and markers. Every splice list is expected to
+/// go through the following series of states:
 /// 1. The splice list is created.
 /// 2. List is Initialized with the desired range.
 /// 3. Pages are added to the splice list.
-/// 4. The list is `Finalize`d, meaning that it can no longer be modified by `Append`.
-/// 5. Pages are then `Pop`d from the list. Once all the pages are popped, the list is considered
+/// 4. The list is `finalize`d, meaning that it can no longer be modified by `insert`.
+/// 5. Pages are then `pop`ped from the list. Once all the pages are popped, the list is considered
 ///    "processed".
 /// 6. The list is then considered `Processed` and can be destroyed.
+///
+/// The field layout must match the C++ `VmPageSpliceList` exactly: the C++ non-template members
+/// forward to this implementation, and C++ operates on instances created here through the pointer
+/// handed out by `as_raw`.
 #[pin_data(PinnedDrop)]
+#[repr(C)]
 pub struct VmPageSpliceList {
+    length: u64,
+    pos: u64,
+    state: State,
+    page_list: VmPageList,
     #[pin]
-    opaque: Opaque<bindings::VmPageSpliceList>,
+    _pinned: core::marker::PhantomPinned,
 }
 
-unsafe_pinned_drop_ffi!(VmPageSpliceList, bindings::cpp_vm_page_splice_list_destroy);
+zr::static_assert!(
+    core::mem::size_of::<VmPageSpliceList>() == core::mem::size_of::<bindings::VmPageSpliceList>()
+);
+zr::static_assert!(
+    core::mem::align_of::<VmPageSpliceList>()
+        == core::mem::align_of::<bindings::VmPageSpliceList>()
+);
 
 impl VmPageSpliceList {
     /// Returns an in-place initializer for stack-pinning a `VmPageSpliceList`.
     pub fn new() -> impl pin_init::PinInit<Self> {
-        unsafe fn init_shim(ptr: *mut core::ffi::c_void) {
-            let list_ptr: *mut bindings::VmPageSpliceList = ptr.cast();
-            // SAFETY: `ptr` is guaranteed by `pin_init_ffi!` to point to valid `VmPageSpliceList`
-            // storage.
-            unsafe { bindings::cpp_vm_page_splice_list_construct(list_ptr) }
-        }
-        pin_init_ffi!(init_shim)
+        pin_init::pin_init!(Self {
+            length: 0,
+            pos: 0,
+            state: State::Constructed,
+            page_list: VmPageList::new(),
+            _pinned: core::marker::PhantomPinned,
+        })
     }
 
-    /// Returns true after the whole collection has been processed by Pop.
-    pub fn is_processed(&self) -> bool {
-        // SAFETY: `self.opaque` holds a valid `VmPageSpliceList`.
-        unsafe { bindings::cpp_vm_page_splice_list_is_processed(self.opaque.get()) }
+    /// Convenience initializer equivalent to `new` followed by `initialize(length)`.
+    pub fn with_length(length: u64) -> impl pin_init::PinInit<Self> {
+        pin_init::pin_init!(Self {
+            length,
+            pos: 0,
+            state: State::Initialized,
+            page_list: VmPageList::new(),
+            _pinned: core::marker::PhantomPinned,
+        })
     }
 
-    /// Creates a splice list from `pages`, returning it already finalized.
-    ///
-    /// The pages are moved out of `pages`, which is left empty on success. May return
-    /// `ZX_ERR_NO_MEMORY`, in which case an unspecified number of pages will have been moved into
-    /// this splice list.
-    pub fn create_from_page_list(
-        self: Pin<&mut Self>,
-        length: u64,
-        pages: Pin<&mut VmPageDoublyLinkedList>,
-    ) -> Result<(), Status> {
-        // SAFETY: `DoublyLinkedList` is `repr(C)` and mirrors `VmPageDoublyLinkedList` -- a bare
-        // head pointer with the same sentinel encoding -- so C++ can drain it in place. Neither
-        // `pages` nor `self` is moved by taking a raw pointer to them.
-        let status = unsafe {
-            bindings::cpp_vm_page_splice_list_create_from_page_list(
-                length,
-                (pages.get_unchecked_mut() as *mut VmPageDoublyLinkedList).cast(),
-                self.as_raw(),
-            )
-        };
-        Status::ok(status)
+    /// Initialize the list with the given range. Can only be done once, and must be done before
+    /// providing pages.
+    pub fn initialize(self: Pin<&mut Self>, length: u64) {
+        debug_assert!(self.is_empty() && self.state == State::Constructed);
+        let this = self.project();
+        *this.length = length;
+        *this.state = State::Initialized;
     }
 
     /// Pops the next page off of the splice list. It is invalid to pop a page from a non-finalized
     /// splice list.
     pub fn pop(self: Pin<&mut Self>) -> VmPageOrMarker {
-        let mut content = MaybeUninit::<VmPageOrMarker>::uninit();
-        // SAFETY: `as_raw` yields a valid `VmPageSpliceList`, and `content` is properly aligned,
-        // writable storage of exactly the size of a `VmPageOrMarker` (asserted above), which C++
-        // move-constructs the popped content into. Ownership of any contained page or reference
-        // transfers to the returned `VmPageOrMarker`.
-        unsafe {
-            bindings::cpp_vm_page_splice_list_pop(self.as_raw(), content.as_mut_ptr().cast());
-            content.assume_init()
+        if !self.is_finalized() {
+            debug_assert!(false, "attempted to Pop from a non-finalized splice list");
+            return VmPageOrMarker::empty();
+        }
+
+        let this = self.project();
+        let res = this.page_list.remove_content(*this.pos);
+        *this.pos += page::SIZE as u64;
+        if *this.pos >= *this.length {
+            *this.state = State::Processed;
+        }
+        res
+    }
+
+    /// Takes the content out of `source` and places them in this splice list, which must have
+    /// already been initialized but still be empty. The range to be taken is determined by the
+    /// provided `offset` and the length of this splice list. May return `Status::NO_MEMORY`, in
+    /// which case an unspecified number of pages will have been moved into this splice list.
+    ///
+    /// Takes a function with the signature
+    /// `fn(src: &mut VmPageOrMarker, dst: &mut VmPageOrMarker, offset: u64)`, which is expected to
+    /// move content from `src` to `dst`.
+    pub fn add_pages_from<F>(
+        mut self: Pin<&mut Self>,
+        merge_func: F,
+        source: &mut VmPageList,
+        offset: u64,
+    ) -> Result<(), Status>
+    where
+        F: FnMut(&mut VmPageOrMarker, &mut VmPageOrMarker, u64),
+    {
+        let this = self.as_mut().project();
+        let end = offset + *this.length;
+        let result = source.merge_range_onto(merge_func, this.page_list, offset, end);
+        self.finalize();
+        if result { Ok(()) } else { Err(Status::NO_MEMORY) }
+    }
+
+    /// Iterates all pages in this splice list without taking ownership. Pages are not considered
+    /// processed and can not be removed using this iterator. The callback is expected to have the
+    /// signature: `fn page_func(slot: VmPageOrMarkerRef<'_>, offset: u64) -> Status`.
+    /// The iterator will start at `start_offset` and iterate until the end of the
+    /// `VmPageSpliceList`. `start_offset` must be page aligned and less than the length of the
+    /// list.
+    pub fn mutate_pages<F>(
+        self: Pin<&mut Self>,
+        page_func: F,
+        start_offset: u64,
+    ) -> Result<(), Status>
+    where
+        F: FnMut(VmPageOrMarkerRef<'_>, u64) -> Status,
+    {
+        debug_assert!(self.is_finalized());
+        debug_assert!(start_offset < self.length);
+        debug_assert!(start_offset.is_multiple_of(page::SIZE as u64));
+        let this = self.project();
+        this.page_list.for_every_page_in_range_ref(start_offset, *this.length, page_func)
+    }
+
+    /// Iterates all the pages and gaps in this splice list. `page_func` is given ownership of each
+    /// page. It is invalid to process a non-finalized splice list. The two callbacks are expected
+    /// to have the signatures:
+    /// `fn page_func(slot: VmPageOrMarker, splice_offset: u64) -> Status`
+    /// `fn gap_func(gap_start: u64, gap_end: u64) -> Status`
+    ///
+    /// Because `page_func` always takes ownership of the content, if it returns any kind of error,
+    /// either a graceful request to stop iteration via `Status::STOP` or an explicit error, then
+    /// that offset is considered processed and will not be repeated in future calls. In contrast,
+    /// if iteration is stopped during `gap_func`, that gap will not be considered processed and can
+    /// be returned in future calls.
+    pub fn remove_pages_and_iterate_gaps<PageFunc, GapFunc>(
+        self: Pin<&mut Self>,
+        mut page_func: PageFunc,
+        mut gap_func: GapFunc,
+    ) -> Result<(), Status>
+    where
+        PageFunc: FnMut(VmPageOrMarker, u64) -> Status,
+        GapFunc: FnMut(u64, u64) -> Status,
+    {
+        debug_assert!(self.is_finalized());
+        let this = self.project();
+        let length = *this.length;
+        // Assume we will successfully process the whole range. This will get trimmed should any of
+        // the callbacks terminate early.
+        let mut processed = length;
+        let status =
+            this.page_list.remove_pages_and_iterate_gaps_internal(*this.pos, length, |e| match e {
+                PageOrGapMut::Page(slot, src_offset) => {
+                    // Move the content out of the slot before passing it to `page_func` to ensure
+                    // it *must* deal with it and it cannot be left in the slot.
+                    let content = slot.swap(VmPageOrMarker::empty());
+                    let status = page_func(content, src_offset);
+                    if status != Status::NEXT {
+                        processed = src_offset + page::SIZE as u64;
+                    }
+                    status
+                }
+                PageOrGapMut::Gap(gap_start, gap_end) => {
+                    let status = gap_func(gap_start, gap_end);
+                    if status != Status::NEXT {
+                        processed = gap_start;
+                    }
+                    status
+                }
+            });
+        *this.pos = processed;
+        if *this.pos == length {
+            debug_assert!(this.page_list.is_empty());
+            *this.state = State::Processed;
+        }
+        status
+    }
+
+    /// Inserts `content` into the splice list at the specified `offset`. The splice list takes
+    /// ownership of `content` after this call. It is invalid to append to a finalized splice list.
+    pub fn insert(
+        self: Pin<&mut Self>,
+        offset: u64,
+        mut content: VmPageOrMarker,
+    ) -> Result<(), Status> {
+        assert!(offset < self.length);
+        assert!(self.is_initialized());
+        assert!(!content.is_interval());
+
+        let this = self.project();
+        let (slot, _) = this.page_list.lookup_or_allocate(offset, IntervalHandling::NoIntervals);
+        let Some(slot) = slot else {
+            // If the allocation failed, we need to free content.
+            Self::free_content(&mut content);
+            return Err(Status::NO_MEMORY);
+        };
+        *slot = content;
+        Ok(())
+    }
+
+    /// Returns true after the whole collection has been processed by Pop.
+    pub fn is_processed(&self) -> bool {
+        self.state == State::Processed
+    }
+
+    /// Returns true if the collection has been Initialized.
+    pub fn is_initialized(&self) -> bool {
+        self.state == State::Initialized
+    }
+
+    /// Returns true if this list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.page_list.is_empty()
+    }
+
+    /// Marks the list as finalized.
+    ///
+    /// See the comment at `VmPageSpliceList`'s declaration for more info on what this means and
+    /// when to call it. Note that it is invalid to call `finalize` twice on the same list.
+    pub fn finalize(self: Pin<&mut Self>) {
+        debug_assert!(self.is_initialized());
+        *self.project().state = State::Finalized;
+    }
+
+    /// Returns true if the splice list is finalized.
+    ///
+    /// See the comment at [`VmPageSpliceList`]'s declaration for more info on what this means.
+    pub fn is_finalized(&self) -> bool {
+        self.state == State::Finalized
+    }
+
+    /// Returns the current position in the list.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// For use by PhysicalPageProvider. The user-pager path doesn't use this. This returns a
+    /// finalized list.
+    pub fn create_from_page_list(
+        length: u64,
+        mut pages: Pin<&mut VmPageDoublyLinkedList>,
+        mut splice: Pin<&mut Self>,
+    ) -> Result<(), Status> {
+        // TODO(https://fxbug.dev/42170136): This method needs coverage in vmpl_unittests.
+        debug_assert!(pages.iter().count() as u64 == length / page::SIZE as u64);
+        splice.as_mut().initialize(length);
+        let mut offset = 0;
+        while let Some(page) = pages.as_mut().pop_front() {
+            splice.as_mut().insert(offset, VmPageOrMarker::from_page(VmPagePtr::new(page)))?;
+            offset += page::SIZE as u64;
+        }
+        splice.finalize();
+        Ok(())
+    }
+
+    /// Frees the page or reference held by `content`, leaving it empty.
+    fn free_content(content: &mut VmPageOrMarker) {
+        if content.is_page() {
+            let page = content.release_page();
+            // SAFETY: The splice list owns this page, so nothing else can be concurrently linking
+            // it into or out of a list.
+            debug_assert!(!unsafe { (*page.as_ref().queue_node.get()).in_container() });
+            // SAFETY: The splice list owns this page and is giving up ownership of it.
+            unsafe { pmm::free_page(page) };
+        } else if content.is_reference() {
+            let compression = pmm_node()
+                .get_page_compression()
+                .expect("a reference cannot exist without a compression instance");
+            // SAFETY: The reference was produced by the global compression instance, the splice
+            // list owns it and is relinquishing ownership, and it is not a temporary reference so
+            // no VMO lock is required.
+            unsafe { compression.free(content.release_reference()) };
         }
     }
 
-    /// Returns a raw pointer to the underlying C++ `VmPageSpliceList`.
+    /// Frees every page and reference still owned by the splice list.
+    fn free_all_pages(self: Pin<&mut Self>) {
+        let this = self.project();
+        // Free any pages owned by the splice list.
+        this.page_list.remove_all_content(|mut content| Self::free_content(&mut content));
+        *this.state = State::Processed;
+    }
+
+    /// Returns a raw pointer to the underlying `VmPageSpliceList`.
     ///
     /// Callers must not use the returned raw pointer to move the object in memory.
     pub fn as_raw(self: Pin<&mut Self>) -> *mut bindings::VmPageSpliceList {
-        // SAFETY: Obtaining a raw pointer to `opaque` does not move the pinned object.
-        unsafe { self.get_unchecked_mut().opaque.get() }
+        // SAFETY: Obtaining a raw pointer does not move the pinned object. The layout of this type
+        // matches the C++ `VmPageSpliceList`, as asserted above.
+        unsafe { core::ptr::from_mut(self.get_unchecked_mut()).cast() }
     }
+
+    /// Frees any pages still owned by the list, as appropriate for its current state.
+    ///
+    /// This is the body of the destructor, shared between the Rust `PinnedDrop` and the C++
+    /// `~VmPageSpliceList()`. It deliberately does not drop `page_list`: for a Rust-owned list the
+    /// field drop glue runs after `PinnedDrop`, and for a C++-owned list the C++ member destructor
+    /// runs after the trampoline returns.
+    fn destroy(mut self: Pin<&mut Self>) {
+        match self.state {
+            State::Constructed => {}
+            State::Initialized => {
+                // Finalize the list so any remaining pages can be freed, then fall through to
+                // freeing them.
+                *self.as_mut().project().state = State::Finalized;
+                self.free_all_pages();
+            }
+            State::Finalized => self.free_all_pages(),
+            State::Processed => {}
+        }
+    }
+}
+
+#[pin_init::pinned_drop]
+impl PinnedDrop for VmPageSpliceList {
+    fn drop(self: Pin<&mut Self>) {
+        self.destroy();
+    }
+}
+
+// FFI trampolines for C++ calling into the Rust `VmPageSpliceList`.
+//
+// The C++ `VmPageSpliceList` has the same layout as this one, so C++ passes its `this` pointer
+// straight through. C++ owns the object and does not move it for the duration of the call, so it is
+// pinned here.
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_splice_list_destroy(list: &mut VmPageSpliceList) {
+    // SAFETY: C++ owns `list` and does not move it.
+    unsafe { Pin::new_unchecked(list) }.destroy();
+}
+
+/// `out` must refer to an empty `VmPageOrMarker` that is not part of the list; the popped content
+/// is moved into it.
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_splice_list_pop(list: &mut VmPageSpliceList, out: &mut VmPageOrMarker) {
+    // SAFETY: C++ owns `list` and does not move it.
+    *out = unsafe { Pin::new_unchecked(list) }.pop();
+}
+
+/// `content` is C++'s by-value parameter; ownership of its contents is taken and it is left empty
+/// for the C++ destructor.
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_splice_list_insert(
+    list: &mut VmPageSpliceList,
+    offset: u64,
+    content: &mut VmPageOrMarker,
+) -> Result<(), Status> {
+    let content = content.swap(VmPageOrMarker::empty());
+    // SAFETY: C++ owns `list` and does not move it.
+    unsafe { Pin::new_unchecked(list) }.insert(offset, content)
+}
+
+// FFI trampolines for C++ calling into the Rust `VmPageList`.
+//
+// The C++ `VmPageList` has the same layout as this one, so C++ passes its `this` pointer straight
+// through and it is reinterpreted here. The trampolines take it as a reference rather than a raw
+// pointer: C++ only ever passes a non-null pointer to an initialized list and does not otherwise
+// touch the list or its nodes for the duration of the call, so the reference's validity and
+// aliasing requirements are upheld by the caller. The slot pointers returned to C++ derive from the
+// node allocations rather than from the reference, so they stay valid after the reference is gone.
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_has_no_page_or_ref(list: &VmPageList) -> bool {
+    list.has_no_page_or_ref()
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_has_no_page_ref_or_marker(list: &VmPageList) -> bool {
+    list.has_no_page_ref_or_marker()
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_return_empty_slot(list: &mut VmPageList, offset: u64) {
+    list.return_empty_slot(offset)
+}
+
+/// `out` must refer to an empty `VmPageOrMarker` that is not part of the list; the removed content
+/// is moved into it.
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_remove_content(
+    list: &mut VmPageList,
+    offset: u64,
+    out: &mut VmPageOrMarker,
+) {
+    *out = list.remove_content(offset);
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_is_offset_in_zero_interval(list: &VmPageList, offset: u64) -> bool {
+    list.is_offset_in_zero_interval(offset)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_is_offset_in_interval(list: &VmPageList, offset: u64) -> bool {
+    list.is_offset_in_interval(offset)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_return_interval_slot(list: &mut VmPageList, offset: u64) {
+    list.return_interval_slot(offset)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_populate_slots_in_interval(
+    list: &mut VmPageList,
+    start_offset: u64,
+    end_offset: u64,
+) -> Result<(), Status> {
+    list.populate_slots_in_interval(start_offset, end_offset)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_clip_interval_start(
+    list: &mut VmPageList,
+    interval_start: u64,
+    len: u64,
+) -> Result<(), Status> {
+    list.clip_interval_start(interval_start, len)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_clip_interval_end(
+    list: &mut VmPageList,
+    interval_end: u64,
+    len: u64,
+) -> Result<(), Status> {
+    list.clip_interval_end(interval_end, len)
+}
+
+#[repr(C)]
+struct VmPageOrMarkerSlotAndBool {
+    slot: *mut VmPageOrMarker,
+    is_interval: bool,
+}
+
+#[repr(C)]
+struct VmPageOrMarkerConstSlotAndOffset {
+    slot: *const VmPageOrMarker,
+    offset: u64,
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_lookup_or_allocate_internal(
+    list: &mut VmPageList,
+    offset: u64,
+) -> *mut VmPageOrMarker {
+    list.lookup_or_allocate_internal(offset)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_lookup_or_allocate_check_for_interval(
+    list: &mut VmPageList,
+    offset: u64,
+    split_interval: bool,
+) -> VmPageOrMarkerSlotAndBool {
+    let (slot, is_interval) = list.lookup_or_allocate_check_for_interval(offset, split_interval);
+    VmPageOrMarkerSlotAndBool {
+        slot: slot.map_or(core::ptr::null_mut(), core::ptr::from_mut),
+        is_interval,
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_find_interval_start_for_end(
+    list: &VmPageList,
+    end_offset: u64,
+) -> VmPageOrMarkerConstSlotAndOffset {
+    let (slot, offset) = list.find_interval_start_for_end(end_offset);
+    VmPageOrMarkerConstSlotAndOffset { slot: core::ptr::from_ref(slot), offset }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_find_interval_end_for_start(
+    list: &VmPageList,
+    start_offset: u64,
+) -> VmPageOrMarkerConstSlotAndOffset {
+    let (slot, offset) = list.find_interval_end_for_start(start_offset);
+    VmPageOrMarkerConstSlotAndOffset { slot: core::ptr::from_ref(slot), offset }
+}
+
+// The three trampolines below take the dirty state as a plain `u32` rather than as a
+// `ZeroRangeDirtyState`, so that an out of range discriminant from C++ is a panic rather than
+// undefined behavior.
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_add_zero_interval_internal(
+    list: &mut VmPageList,
+    start_offset: u64,
+    end_offset: u64,
+    dirty_state: u32,
+    awaiting_clean_len: u64,
+    replace_existing_slot: bool,
+) -> Result<(), Status> {
+    list.add_zero_interval_internal(
+        start_offset,
+        end_offset,
+        ZeroRangeDirtyState::from_raw(dirty_state),
+        awaiting_clean_len,
+        replace_existing_slot,
+    )
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_replace_page_with_zero_interval(
+    list: &mut VmPageList,
+    offset: u64,
+    dirty_state: u32,
+) -> VmPagePtr {
+    list.replace_page_with_zero_interval(offset, ZeroRangeDirtyState::from_raw(dirty_state))
+}
+
+/// `old_start_offset` and `old_end_offset` use the C++ `UINT64_MAX` sentinel to mean "not
+/// specified"; it is translated to `None` here.
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_overwrite_zero_interval(
+    list: &mut VmPageList,
+    old_start_offset: u64,
+    old_end_offset: u64,
+    new_start_offset: u64,
+    new_end_offset: u64,
+    new_dirty_state: u32,
+) -> Result<(), Status> {
+    let old_start = (old_start_offset != u64::MAX).then_some(old_start_offset);
+    let old_end = (old_end_offset != u64::MAX).then_some(old_end_offset);
+    list.overwrite_zero_interval(
+        old_start,
+        old_end,
+        new_start_offset,
+        new_end_offset,
+        ZeroRangeDirtyState::from_raw(new_dirty_state),
+    )
+}
+
+/// The C++ `VmPageList::BatchInserter` has the same layout as the Rust `BatchInserter`, so, as for
+/// `VmPageList` above, C++ passes its `this` pointer straight through.
+#[unsafe(no_mangle)]
+extern "C" fn rust_vm_page_list_batch_inserter_lookup_or_allocate(
+    inserter: &mut BatchInserter<'_>,
+    offset: u64,
+) -> *mut VmPageOrMarker {
+    inserter.lookup_or_allocate(offset).map_or(core::ptr::null_mut(), core::ptr::from_mut)
 }
 
 #[cfg(ktest)]

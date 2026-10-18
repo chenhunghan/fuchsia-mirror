@@ -57,12 +57,10 @@ fn test_affected_by_b_401318909(test_name: String) -> bool {
         "wlan_phy_compliance_",
         "wlan_policy_initiated_roam_test",
         "wlan_reboot_",
-        "wlan_rvr_test_",
         "wlan_scan_test",
         "wlan_security_compliance_",
         "wlan_target_security_test",
         "wlan_wireless_network_management_test",
-        "wlan_wmm_test",
     ];
 
     for test in test_substrings_affected_by_b_401318909 {

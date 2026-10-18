@@ -171,9 +171,6 @@
                 "Cgroup.AllControllersExplicit",
                 "Cgroup.AllControllersImplicit",
                 "Cgroup.CantRenameControlFile",
-
-                // TODO(https://fxbug.dev/556077553): Bind mounting detached cgroup mount.
-                "Cgroup.DetachedMountBindFails",
                 "Cgroup.CgroupsCannotMountTwice",
                 "Cgroup.ControllersMustBeInUniqueHierarchy",
                 "Cgroup.Create",
@@ -395,14 +392,20 @@
                 // iptables_test
                 "IPTablesBasic.GetRevision",
                 "IPTablesBasic.CTTargetGetRevision",
-                "IPTablesBasic.GetInfoErrorPrecedence",
                 "IPTablesBasic.OriginalDstErrors",
-                "IPTablesBasic.GetEntriesErrorPrecedence",
+
+                // TODO(https://fxbug.dev/572922779): Allow netfilter getsockopt on non-raw sockets and return ENOENT for nonexistent tables.
+                "IPTablesBasic.GetInfoShortBuffer",
+                "IPTablesBasic.GetEntriesShortBuffer",
+                "IPTablesTest.GetInfoNonexistentTable",
+                "IPTablesTest.GetEntriesNonexistentTable",
 
                 // ip6tables_test
                 "IP6TablesBasic.GetRevision",
-                "IP6TablesBasic.GetEntriesErrorPrecedence",
-                "IP6TablesBasic.GetInfoErrorPrecedence",
+
+                // TODO(https://fxbug.dev/572922779): Allow netfilter getsockopt on non-raw sockets.
+                "IP6TablesBasic.GetEntriesShortBuffer",
+                "IP6TablesBasic.GetInfoShortBuffer",
 
                 // socket_ipv4_datagram_based_socket_unbound_loopback_test
                 // Multicast support is not implemented for ICMP sockets.
@@ -478,7 +481,6 @@
                 "MountTest.BindSlaveToShared",
                 "MountTest.BindSlaveToSlave",
                 "MountTest.ChangeMountFlagsOfLockedMount",
-                "MountTest.DetachedMountBindFails",
                 "MountTest.LargeTreePropagationEvent",
                 "MountTest.LockedMountFlagsAreInheritedByBind",
                 "MountTest.LockedMountStopsNonRecBind",
@@ -589,6 +591,10 @@
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6Multicast",
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastInterfaceLocalAllNodes",
 
+                // TODO(https://fxbug.dev/572921953): Check ping payload size limit before faulting user buffer.
+                "IP/PingSocketPayloadTest.PayloadTooLarge/0",
+                "IP/PingSocketPayloadTest.PayloadTooLarge/1",
+
                 // pivot_root_test
                 "PivotRootTest.LockedNewRootFails",
                 "PivotRootTest.OldRootUnlocked",
@@ -612,6 +618,13 @@
                 "ProcPidFile.SubprocessRunning",
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
+
+                // TODO(https://fxbug.dev/572923325): Report PF_EXITING in /proc/[pid]/stat flags for zombie tasks.
+                "ProcPidStatTest.ZombieIsExiting",
+
+                // TODO(https://fxbug.dev/572922747): Implement /proc/sys/fs/file-nr and /proc/sys/fs/file-max.
+                "ProcSysFsFileNr.TracksOpenFiles",
+                "ProcSysFsFileNr.MaxMatchesFileMax",
 
                 // TODO(https://fxbug.dev/564605906)
                 "ProcSelfAuxv.EntryPresence",
@@ -708,14 +721,6 @@
                 // ptrace tests
                 "PtraceTest.ChangeRegSetInOptSyscall",
                 "PtraceTest.Sysemu_PokeUser",
-
-                // pty_test
-                // TODO(https://fxbug.dev/564607149)
-                "JobControlTest.GetSessionId",
-                "JobControlTest.GetSessionIdAfterRelease",
-                "JobControlTest.GetSessionIdMasterOutsideSession",
-                "JobControlTest.GetSessionIdNonControlling",
-                "JobControlTest.GetSessionIdNonLeader",
 
                 // rlimits_test
                 "RlimitTest.RlimitNProc",
@@ -847,10 +852,6 @@
                 "NetlinkRouteTest.ListMembershipsSizeProbe",
                 "NetlinkRouteTest.ListMembershipsLargeBuffer",
                 "NetlinkRouteTest.ListMembershipsTruncated",
-
-                // TODO(https://issuetracker.google.com/290605547): support
-                // replacing addresses.
-                "NetlinkRouteTest.AddAndRemoveAddr",
                 "NetlinkRouteTest.SpliceFromPipe",
                 "NetlinkRouteTest.GetLinkByIndex",
                 "NetlinkRouteTest.GetLinkByName",
@@ -875,6 +876,18 @@
                 "NetlinkRouteTest.LinkMulticastGroupNamespaced",
                 "NetlinkRouteTest.LinkedToNetns",
                 "NetlinkRouteTest.VethAddShortPeerIfInfoMsg",
+                "NetlinkRouteTest.DeleteRouteRemovesFirstMatchOnly",
+                "NetlinkRouteTest.NewRouteFamilyMismatch",
+                "NetlinkRouteTest.NewRouteUnsupportedFamily",
+                "NetlinkRouteTest.NewRouteGatewayNotOnLink",
+                "NetlinkRouteTest.NewRouteGatewayOnLink",
+                "NetlinkRouteTest.NewRouteGatewayOnOtherLink",
+                "NetlinkRouteTest.NewRouteLinkLocalGateway",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewDefaultRouteWithoutGateway/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.DeleteDefaultRouteWithoutGateway/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteWithoutOif/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteViaAddress/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteLowestIndex/*",
                 "NetworkNamespaceTest.CloneNewNetWithCloneNewUserDoesNotNeedCapSysAdmin",
 
                 // socket_netlink_uevent
@@ -1012,10 +1025,6 @@
                 // partial usercopy
                 "WriteTest.PartialWriteSIGSEGV",
                 "WriteTest.PartialWriteSIGBUS",
-
-                // chown_test
-                // TODO(https://fxbug.dev/511265190): Fix and re-enable.
-                "ChownTest.ChownRemovesSecurityCapability",
 
                 // raw_socket_test
                 "RawSocketNoCapTest.CreationFailsWithEPERM",
@@ -1203,6 +1212,7 @@
                 "ProcPidCmdline.SubprocessForkSameCmdline",
 
                 // TODO(https://fxbug.dev/570221669): Fix intermittent crash and re-enable.
+                "ProcPidStatTest.ReapedTaskNeverReportsPIDZero",
                 "ProcTask.VerifyTaskChildrenNeverReportsZeroTID",
                 "ProcTask.ProcRootNeverListsZeroTID",
                 "SigaltstackTest.SetCurrentStack",

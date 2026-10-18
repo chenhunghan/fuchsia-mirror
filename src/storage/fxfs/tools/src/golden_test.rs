@@ -315,9 +315,12 @@ async fn check_data_volume(
         fio::PERM_READABLE | fio::PERM_WRITABLE,
     )
     .await?;
-    let (status, handle) = some_dir_rw.get_token().await.context("FIDL get_token for link")?;
-    Status::ok(status).context("get_token status")?;
-    let token = zx::Event::from(handle.unwrap());
+    let token = some_dir_rw
+        .get_token()
+        .await
+        .context("FIDL get_token for link")?
+        .map_err(Status::err_from_raw)
+        .context("get_token status")?;
     let status = some_dir_rw
         .link("test_file.txt", token.into(), "linked_test_file.txt")
         .await
@@ -328,11 +331,14 @@ async fn check_data_volume(
         "Linked file contents"
     );
 
-    let (status, handle) = some_dir_rw.get_token().await.context("FIDL get_token for rename")?;
-    Status::ok(status).context("get_token status")?;
-    let token = zx::Event::from(handle.unwrap());
+    let token = some_dir_rw
+        .get_token()
+        .await
+        .context("FIDL get_token for rename")?
+        .map_err(Status::err_from_raw)
+        .context("get_token status")?;
     let res = some_dir_rw
-        .rename("linked_test_file.txt", token.into(), "renamed_test_file.txt")
+        .rename("linked_test_file.txt", token, "renamed_test_file.txt")
         .await
         .context("FIDL rename")?;
     res.map_err(Status::err_from_raw).context("rename on directory")?;
@@ -416,12 +422,8 @@ async fn check_image(path: &Path) -> Result<(), Error> {
             let vol_and_dir = volumes_dir
                 .mount_volume(vol_name, vol_crypt.as_ref().map(|c| c.clone()), is_blob)
                 .await?;
-            fsck::fsck_volume(
-                &vol_and_dir.volume().store().filesystem(),
-                vol_and_dir.volume().store().store_object_id(),
-                vol_crypt,
-            )
-            .await?;
+            fsck::fsck_volume(&fs, vol_and_dir.volume().store().store_object_id(), vol_crypt)
+                .await?;
 
             if is_blob {
                 ensure!(
@@ -474,12 +476,8 @@ async fn check_image(path: &Path) -> Result<(), Error> {
             let vol_and_dir = volumes_dir
                 .mount_volume(vol_name, vol_crypt.as_ref().map(|c| c.clone()), is_blob)
                 .await?;
-            fsck::fsck_volume(
-                &vol_and_dir.volume().store().filesystem(),
-                vol_and_dir.volume().store().store_object_id(),
-                vol_crypt,
-            )
-            .await?;
+            fsck::fsck_volume(&fs, vol_and_dir.volume().store().store_object_id(), vol_crypt)
+                .await?;
             if !is_blob {
                 let (dir, server_end) = create_proxy::<fio::DirectoryMarker>();
                 vol_and_dir

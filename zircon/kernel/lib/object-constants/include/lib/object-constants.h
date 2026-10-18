@@ -94,6 +94,13 @@ constexpr size_t kIommuDispatcherStateSize = 48 + kLockClassIdSize;
 constexpr size_t kIommuDispatcherStateAlign = 8;
 constexpr size_t kIommuDispatcherStateOffset = 48;
 
+// Size, alignment, and offset for MemoryStallEventDispatcherState. Unlike the others this state
+// sits inside a subclass, after the EventDispatcher state its base class holds.
+constexpr size_t kMemoryStallEventDispatcherStateSize = 8;
+constexpr size_t kMemoryStallEventDispatcherStateAlign = 4;
+constexpr size_t kMemoryStallEventDispatcherStateOffset =
+    kEventDispatcherStateOffset + kEventDispatcherStateSize;
+
 // Size, alignment, and offset for MsiDispatcherState.
 constexpr size_t kMsiDispatcherStateSize = 64;
 constexpr size_t kMsiDispatcherStateAlign = 8;
@@ -174,29 +181,6 @@ constexpr size_t kWaitSignalObserverStorageSize = 32;
 constexpr size_t kWaitSignalObserverStorageAlign = 8;
 constexpr size_t kWaitSignalObserverStorageOffset = 40;
 
-// Size and alignment for ChainLock.
-//
-// A ChainLock is a simple pair of atomics (the lock token and the contention
-// state bitmask).  It is the sole member of ChainLockable, which in turn is the
-// first base of every chain lockable type in the kernel, so these constants also
-// describe the leading bytes of Thread, WaitQueueBase, WaitQueue, and
-// OwnedWaitQueue.
-constexpr size_t kChainLockSize = 16;
-constexpr size_t kChainLockAlign = 8;
-
-// Size and alignment for WaitQueueCollection.
-constexpr size_t kWaitQueueCollectionSize = 32;
-constexpr size_t kWaitQueueCollectionAlign = 8;
-
-// Size and alignment for WaitQueue (and its WaitQueueBase base class, which has
-// the same layout; WaitQueue declares no members of its own).
-constexpr size_t kWaitQueueSize = 56;
-constexpr size_t kWaitQueueAlign = 8;
-
-// Size and alignment for OwnedWaitQueue.
-constexpr size_t kOwnedWaitQueueSize = 88;
-constexpr size_t kOwnedWaitQueueAlign = 8;
-
 // Size, alignment, and offset for ResourceDispatcherState.
 constexpr size_t kResourceDispatcherStateSize = 128 + kLockClassIdSize;
 constexpr size_t kResourceDispatcherStateAlign = 8;
@@ -215,5 +199,37 @@ constexpr size_t kMemoryWatchdogStateAlign = 8;
 constexpr size_t kVmObjectDispatcherStateSize = 64 + kLockClassIdSize;
 constexpr size_t kVmObjectDispatcherStateAlign = 8;
 constexpr size_t kVmObjectDispatcherStateOffset = 56;
+
+// Size, alignment, and offset for InterruptDispatcherState.
+constexpr size_t kInterruptDispatcherStateSize = 296 + (2 * kLockClassIdSize);
+constexpr size_t kInterruptDispatcherStateAlign = 8;
+constexpr size_t kInterruptDispatcherStateOffset = 56;
+
+// Size and alignment for PortInterruptPacket.
+constexpr size_t kPortInterruptPacketSize = 32;
+constexpr size_t kPortInterruptPacketAlign = 8;
+
+// Size and alignment for FutexContext (Rust state).
+constexpr size_t kFutexContextStorageSize = 56;
+constexpr size_t kFutexContextStorageAlign = 8;
+
+// Size, alignment, and offset for ThreadDispatcherState.
+//
+// The offset is large because most of ThreadDispatcher's fields are still C++ and precede
+// opaque_storage_; it shrinks as those fields migrate into the Rust state.
+//
+// It is also configuration dependent, unlike every other dispatcher here, whose state sits
+// immediately after the Dispatcher base. Three lockdep-instrumented locks live in the C++
+// fields that precede opaque_storage_ - runtime_stats_'s SeqLock, exceptionate_'s mutex, and
+// core_thread_lock_ - and each grows by one lock class id when lockdep is enabled, moving
+// opaque_storage_ later by 3 * kLockClassIdSize bytes. The base offset is taken from the
+// compiler, not computed by hand.
+constexpr size_t kThreadDispatcherStateSize = 64;
+constexpr size_t kThreadDispatcherStateAlign = 8;
+constexpr size_t kThreadDispatcherStateOffset = 416 + (3 * kLockClassIdSize);
+
+// Size and alignment for Backtrace.
+constexpr size_t kBacktraceSize = 272;
+constexpr size_t kBacktraceAlign = 8;
 
 #endif  // ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_

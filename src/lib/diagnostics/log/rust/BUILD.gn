@@ -54,12 +54,6 @@ fuchsia_unittest_package("diagnostics-log-tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 LIB_SRCS = [
   "src/fuchsia/filter.rs",
   "src/fuchsia/mod.rs",
@@ -86,7 +80,7 @@ not_needed([ "LIB_PROC_MACRO_DEPS" ])
 
 LIB_DEPS = []
 LIB_DEPS += [
-  "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+  "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust_common",
   "//src/lib/diagnostics/log/types",
   "//src/lib/fuchsia-sync",
   "//third_party/rust_crates:log",
@@ -111,35 +105,35 @@ if (is_fuchsia) {
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "LIB_DEPS" ])
 
-LIB_LINK_DEPS = []
+LIB_ASPECT_HINTS = []
 if (is_fuchsia) {
-  LIB_LINK_DEPS += [ "//sdk/lib/syslog:client_includes" ]
+  LIB_ASPECT_HINTS += [ "//sdk/lib/syslog:client_includes" ]
 }
 
 # To avoid "Assignment had no effect" from GN.
 # It's possible this variable is only used in if conditions (e.g. is_host).
-not_needed([ "LIB_LINK_DEPS" ])
+not_needed([ "LIB_ASPECT_HINTS" ])
 
 rustc_library("rust") {
   sources = LIB_SRCS
   crate_name = "diagnostics_log"
   edition = "2024"
-  link_deps = LIB_LINK_DEPS
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   proc_macro_deps = LIB_PROC_MACRO_DEPS
   visibility = [ "//*" ]
   deps = LIB_DEPS
+  deps += LIB_ASPECT_HINTS
 }
 rustc_library("no_startup_handle") {
   sources = LIB_SRCS
   features = [ "no_startup_handle" ]
   crate_name = "driver_diagnostics_log"
   edition = "2024"
-  link_deps = LIB_LINK_DEPS
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   proc_macro_deps = LIB_PROC_MACRO_DEPS
   visibility = [ "//*" ]
   deps = LIB_DEPS
+  deps += LIB_ASPECT_HINTS
 }
 rustc_test("diagnostics_log_lib_test") {
   sources = LIB_SRCS
@@ -149,7 +143,6 @@ rustc_test("diagnostics_log_lib_test") {
     args = [ "--test-threads=1" ]
   }
   edition = "2024"
-  link_deps = LIB_LINK_DEPS
   proc_macro_deps = LIB_PROC_MACRO_DEPS
   deps = []
   deps += LIB_DEPS
@@ -167,4 +160,5 @@ rustc_test("diagnostics_log_lib_test") {
   } else {
     deps += [ "//third_party/rust_crates:regex" ]
   }
+  deps += LIB_ASPECT_HINTS
 }

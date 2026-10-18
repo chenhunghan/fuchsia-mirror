@@ -4,18 +4,16 @@
 
 use crate::exceptions_config::ExceptionsConfig;
 use crate::kernel::{
-    AccessVectorCache, AccessVectorComputer, CacheStats, FsUseLabelAndType, KernelAccessDecision,
-    KernelXpermsAccessDecision, Query,
+    AccessVectorCache, AccessVectorComputer, CacheStats, KernelAccessDecision,
+    KernelXpermsAccessDecision, PolicyIndex, Query,
 };
-use crate::new_policy::traits::{HasName, HasPolicyId};
-use crate::new_policy::{HandleUnknown, NewPolicy};
 use crate::permission_check::{PerThreadCache, PermissionCheck};
-use crate::policy::parser::PolicyData;
 use crate::policy::{
-    AccessDecision, AccessVector, ClassId, FsUseType, PermissionId, Policy,
-    SELINUX_AVD_FLAGS_PERMISSIVE, SecurityContext, XpermsBitmap, XpermsKind, parse_policy_by_value,
+    AccessDecision, AccessVector, ClassId, FsUseLabelAndType, FsUseType, HandleUnknown,
+    HasName as _, HasPolicyId as _, PermissionId, Policy, PolicyData, SELINUX_AVD_FLAGS_PERMISSIVE,
+    SecurityContext, XpermsBitmap, XpermsKind,
 };
-use crate::sid_table::SidTable;
+use crate::sid_table::{PortableSidTable, SidTable};
 use crate::sync::{LockDepRwLock, SeLinuxSecurityServerStateLock};
 use crate::{
     ClassPermission, FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions,
@@ -23,6 +21,7 @@ use crate::{
     PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
 };
 use anyhow::Context as _;
+use fuchsia_rcu::RcuReadScope;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -32,7 +31,7 @@ const ROOT_PATH: &'static str = "/";
 
 struct ActivePolicy {
     /// Parsed policy structure.
-    parsed: Arc<Policy>,
+    parsed: PolicyIndex,
 
     /// Allocates and maintains the mapping between `SecurityId`s (SIDs) and Security Contexts.
     sid_table: SidTable,
@@ -75,9 +74,13 @@ impl SeLinuxBooleans {
     }
 }
 
+#[derive(Default)]
 struct SecurityServerState {
     /// Describes the currently active policy.
     active_policy: Option<ActivePolicy>,
+
+    /// Canonical strings for all dynamic SIDs allocated across policy loads.
+    portable_sids: PortableSidTable,
 
     /// Holds active and pending states for each boolean defined by policy.
     booleans: SeLinuxBooleans,
@@ -102,10 +105,6 @@ impl SecurityServerState {
         &self.active_policy.as_ref().expect("policy should be loaded")
     }
 
-    fn expect_active_policy_mut(&mut self) -> &mut ActivePolicy {
-        self.active_policy.as_mut().expect("policy should be loaded")
-    }
-
     fn compute_access_decision_raw(
         &self,
         source_sid: SecurityId,
@@ -117,12 +116,13 @@ impl SecurityServerState {
             return AccessDecision::allow(AccessVector::ALL);
         };
 
-        let source_context = active_policy.sid_table.sid_to_security_context(source_sid);
-        let target_context = active_policy.sid_table.sid_to_security_context(target_sid);
+        let scope = RcuReadScope::new();
+        let (source_context, target_context) =
+            active_policy.sid_table.sids_to_security_contexts(&scope, source_sid, target_sid);
 
         let mut decision = active_policy.parsed.compute_access_decision(
-            &source_context,
-            &target_context,
+            source_context,
+            target_context,
             target_class,
         );
 
@@ -194,11 +194,7 @@ impl SecurityServer {
         }
 
         let backend = Arc::new(SecurityServerBackend {
-            state: LockDepRwLock::new(SecurityServerState {
-                active_policy: None,
-                booleans: SeLinuxBooleans::default(),
-                status_publisher: None,
-            }),
+            state: LockDepRwLock::new(SecurityServerState::default()),
             is_enforcing: AtomicBool::new(false),
             policy_change_count: AtomicU32::new(0),
         });
@@ -241,7 +237,8 @@ impl SecurityServer {
     pub fn sid_to_security_context(&self, sid: SecurityId) -> Option<Vec<u8>> {
         let locked_state = self.backend.state.read();
         let active_policy = locked_state.active_policy.as_ref()?;
-        let context = active_policy.sid_table.sid_to_security_context(sid);
+        let scope = RcuReadScope::new();
+        let context = active_policy.sid_table.sid_to_security_context(&scope, sid);
         Some(active_policy.parsed.serialize_security_context(context))
     }
 
@@ -257,22 +254,19 @@ impl SecurityServer {
     pub fn load_policy(&self, binary_policy: Vec<u8>) -> Result<(), anyhow::Error> {
         // Parse the supplied policy, and reject the load operation if it is
         // malformed or invalid.
-        let unvalidated_policy = parse_policy_by_value(binary_policy)?;
-        let parsed = Arc::new(unvalidated_policy.validate()?);
+        let policy = Policy::parse(&binary_policy)?;
+        policy.validate()?;
         if !self.allow_unimplemented {
-            validate_no_unsupported_policy_features_used(&parsed)?;
+            validate_no_unsupported_policy_features_used(&policy)?;
         }
 
         let exceptions = self.exceptions.iter().map(String::as_str).collect::<Vec<&str>>();
-        let exceptions = ExceptionsConfig::new(&parsed, &exceptions)?;
+        let exceptions = ExceptionsConfig::new(&policy, &exceptions)?;
+        let parsed = PolicyIndex::new(policy)?;
 
         // Replace any existing policy and push update to `state.status_publisher`.
         self.with_mut_state_and_update_status(|state| {
-            let sid_table = if let Some(previous_active_policy) = &state.active_policy {
-                SidTable::new_from_previous(parsed.clone(), &previous_active_policy.sid_table)
-            } else {
-                SidTable::new(parsed.clone())
-            };
+            let sid_table = SidTable::new(&parsed, &state.portable_sids);
 
             // TODO(b/324265752): Determine whether SELinux booleans need to be retained across
             // policy (re)loads.
@@ -281,7 +275,9 @@ impl SecurityServer {
                     .conditional_booleans()
                     .iter()
                     // TODO(b/324392507): Relax the UTF8 requirement on policy strings.
-                    .map(|(name, value)| (String::from_utf8((*name).to_vec()).unwrap(), *value))
+                    .map(|boolean| {
+                        (String::from_utf8(boolean.name().to_vec()).unwrap(), boolean.active())
+                    })
                     .collect(),
             );
 
@@ -301,7 +297,12 @@ impl SecurityServer {
     pub fn get_binary_policy(&self) -> Option<PolicyData> {
         let state = self.backend.state.read();
         let active_policy = state.active_policy.as_ref()?;
-        Some(active_policy.parsed.serialize())
+        let mut bytes = Vec::new();
+        active_policy
+            .parsed
+            .serialize(&mut bytes)
+            .expect("Serializing an ActivePolicy should not fail.");
+        Some(Arc::from(bytes))
     }
 
     /// Set to enforcing mode if `enforce` is true, permissive mode otherwise.
@@ -416,13 +417,35 @@ impl SecurityServer {
         mount_options: &FileSystemMountOptions,
     ) -> Result<FileSystemLabel, anyhow::Error> {
         let mut locked_state = self.backend.state.write();
-        let active_policy = locked_state.expect_active_policy_mut();
+        let SecurityServerState { active_policy, portable_sids, .. } = &mut *locked_state;
+        let active_policy = active_policy.as_mut().expect("policy should be loaded");
+        let scope = RcuReadScope::new();
 
         let mount_sids = FileSystemMountSids {
-            context: sid_from_mount_option(active_policy, &mount_options.context)?,
-            fs_context: sid_from_mount_option(active_policy, &mount_options.fs_context)?,
-            def_context: sid_from_mount_option(active_policy, &mount_options.def_context)?,
-            root_context: sid_from_mount_option(active_policy, &mount_options.root_context)?,
+            context: sid_from_mount_option(
+                &scope,
+                active_policy,
+                portable_sids,
+                &mount_options.context,
+            )?,
+            fs_context: sid_from_mount_option(
+                &scope,
+                active_policy,
+                portable_sids,
+                &mount_options.fs_context,
+            )?,
+            def_context: sid_from_mount_option(
+                &scope,
+                active_policy,
+                portable_sids,
+                &mount_options.def_context,
+            )?,
+            root_context: sid_from_mount_option(
+                &scope,
+                active_policy,
+                portable_sids,
+                &mount_options.root_context,
+            )?,
         };
         let label = if let Some(mountpoint_sid) = mount_sids.context {
             // `mount_options` has `context` set, so the file-system and the nodes it contains are
@@ -437,8 +460,13 @@ impl SecurityServer {
             active_policy.parsed.fs_use_label_and_type(fs_type)
         {
             // There is an `fs_use` statement for this file-system type in the policy.
-            let fs_sid_from_policy =
-                active_policy.sid_table.security_context_to_sid(&context).unwrap();
+            // SAFETY: `self.backend.state` is write-locked, ensuring exclusive writer access.
+            let fs_sid_from_policy = unsafe {
+                active_policy
+                    .sid_table
+                    .security_context_to_sid(&scope, &active_policy.parsed, portable_sids, &context)
+                    .unwrap()
+            };
             let fs_sid = mount_sids.fs_context.unwrap_or(fs_sid_from_policy);
             FileSystemLabel {
                 sid: fs_sid,
@@ -452,7 +480,13 @@ impl SecurityServer {
             active_policy.parsed.genfscon_label_for_fs_and_path(fs_type, ROOT_PATH.into(), None)
         {
             // There is a `genfscon` statement for this file-system type in the policy.
-            let genfscon_sid = active_policy.sid_table.security_context_to_sid(&context).unwrap();
+            // SAFETY: `self.backend.state` is write-locked, ensuring exclusive writer access.
+            let genfscon_sid = unsafe {
+                active_policy
+                    .sid_table
+                    .security_context_to_sid(&scope, &active_policy.parsed, portable_sids, &context)
+                    .unwrap()
+            };
             let fs_sid = mount_sids.fs_context.unwrap_or(genfscon_sid);
 
             // For relabeling to make sense with `genfscon` labeling they must ensure to persist the
@@ -517,9 +551,10 @@ impl SecurityServer {
     pub fn is_bounded_by(&self, bounded_sid: SecurityId, parent_sid: SecurityId) -> bool {
         let locked_state = self.backend.state.read();
         let active_policy = locked_state.expect_active_policy();
-        let bounded_type = active_policy.sid_table.sid_to_security_context(bounded_sid).type_();
-        let parent_type = active_policy.sid_table.sid_to_security_context(parent_sid).type_();
-        active_policy.parsed.is_bounded_by(bounded_type, parent_type)
+        let scope = RcuReadScope::new();
+        let (bounded_context, parent_context) =
+            active_policy.sid_table.sids_to_security_contexts(&scope, bounded_sid, parent_sid);
+        active_policy.parsed.is_bounded_by(bounded_context.type_(), parent_context.type_())
     }
 
     /// Assign a [`SeLinuxStatusPublisher`] to be used for pushing updates to the security server's
@@ -592,8 +627,9 @@ impl SecurityServerBackend {
         name: &[u8],
     ) -> Result<SecurityId, anyhow::Error> {
         self.compute_sid(|active_policy| {
-            let source_context = active_policy.sid_table.sid_to_security_context(source_sid);
-            let target_context = active_policy.sid_table.sid_to_security_context(target_sid);
+            let scope = RcuReadScope::new();
+            let (source_context, target_context) =
+                active_policy.sid_table.sids_to_security_contexts(&scope, source_sid, target_sid);
 
             Ok(active_policy.parsed.compute_create_context(
                 source_context,
@@ -612,6 +648,7 @@ impl SecurityServerBackend {
     ) -> Result<SecurityId, anyhow::Error> {
         // Initially assume that the computed context will most likely already have a SID assigned,
         // so that the operation can be completed without any modification of the SID table.
+        let scope = RcuReadScope::new();
         let readable_state = self.state.read();
         let policy_change_count = self.policy_change_count.load(Ordering::Relaxed);
         let policy_state = readable_state
@@ -619,7 +656,8 @@ impl SecurityServerBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no policy loaded"))?;
         let context = compute_context(policy_state)?;
-        if let Some(sid) = policy_state.sid_table.security_context_to_existing_sid(&context) {
+        if let Some(sid) = policy_state.sid_table.security_context_to_existing_sid(&scope, &context)
+        {
             return Ok(sid);
         }
         std::mem::drop(readable_state);
@@ -631,9 +669,16 @@ impl SecurityServerBackend {
         let mut writable_state = self.state.write();
         let needs_recompute =
             policy_change_count != self.policy_change_count.load(Ordering::Relaxed);
-        let policy_state = writable_state.active_policy.as_mut().unwrap();
+        let SecurityServerState { active_policy, portable_sids, .. } = &mut *writable_state;
+        let policy_state = active_policy.as_mut().unwrap();
         let context = if needs_recompute { compute_context(policy_state)? } else { context };
-        policy_state.sid_table.security_context_to_sid(&context).map_err(anyhow::Error::from)
+        // SAFETY: `self.state` is write-locked, ensuring exclusive writer access to `sid_table`.
+        unsafe {
+            policy_state
+                .sid_table
+                .security_context_to_sid(&scope, &policy_state.parsed, portable_sids, &context)
+                .map_err(anyhow::Error::from)
+        }
     }
 
     fn compute_access_decision_raw(
@@ -709,12 +754,13 @@ impl Query for SecurityServerBackend {
         let base_audit = base_decision.audit & permission_access_vector == permission_access_vector;
 
         // Look up the extended permission decision.
-        let source_context = active_policy.sid_table.sid_to_security_context(source_sid);
-        let target_context = active_policy.sid_table.sid_to_security_context(target_sid);
+        let scope = RcuReadScope::new();
+        let (source_context, target_context) =
+            active_policy.sid_table.sids_to_security_contexts(&scope, source_sid, target_sid);
         let xperms_decision = active_policy.parsed.compute_xperms_access_decision(
             xperms_kind,
-            &source_context,
-            &target_context,
+            source_context,
+            target_context,
             permission.class(),
             xperms_prefix,
         );
@@ -766,14 +812,24 @@ impl AccessVectorComputer for SecurityServerState {
 /// Computes a [`SecurityId`] given a non-[`None`] value for one of the four
 /// "context" mount options (https://man7.org/linux/man-pages/man8/mount.8.html).
 fn sid_from_mount_option(
+    scope: &RcuReadScope,
     active_policy: &mut ActivePolicy,
+    portable_sids: &mut PortableSidTable,
     mount_option: &Option<Vec<u8>>,
 ) -> Result<Option<SecurityId>, anyhow::Error> {
     let Some(label) = mount_option else {
         return Ok(None);
     };
     let context = active_policy.parsed.parse_security_context(label.into())?;
-    let sid = active_policy.sid_table.security_context_to_sid(&context)?;
+    // SAFETY: Caller holds exclusive writer access to `active_policy.sid_table`.
+    let sid = unsafe {
+        active_policy.sid_table.security_context_to_sid(
+            scope,
+            &active_policy.parsed,
+            portable_sids,
+            &context,
+        )?
+    };
     Ok(Some(sid))
 }
 
@@ -784,7 +840,7 @@ fn check_policy_feature_is_empty<T>(name: &'static str, items: &[T]) -> Result<(
     Ok(())
 }
 
-fn validate_no_unsupported_policy_features_used(policy: &NewPolicy) -> Result<(), anyhow::Error> {
+fn validate_no_unsupported_policy_features_used(policy: &Policy) -> Result<(), anyhow::Error> {
     let ocontexts = policy.object_contexts();
     check_policy_feature_is_empty("ports", ocontexts.ports())?;
     check_policy_feature_is_empty("network_interfaces", ocontexts.network_interfaces())?;

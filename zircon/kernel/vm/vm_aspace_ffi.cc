@@ -39,6 +39,12 @@ FFI_ALWAYS_INLINE VmAddressRegion* cpp_vm_aspace_root_vmar(VmAspace* aspace) {
   return fbl::ExportToRawPtr(&vmar);
 }
 
+FFI_ALWAYS_INLINE VmAddressRegion* cpp_vm_aspace_root_vmar_locked(VmAspace* aspace)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  fbl::RefPtr<VmAddressRegion> vmar = aspace->RootVmarLocked();
+  return fbl::ExportToRawPtr(&vmar);
+}
+
 FFI_ALWAYS_INLINE vaddr_t cpp_vm_aspace_base(VmAspace* aspace) { return aspace->base(); }
 
 FFI_ALWAYS_INLINE size_t cpp_vm_aspace_size(VmAspace* aspace) { return aspace->size(); }
@@ -164,5 +170,9 @@ FFI_ALWAYS_INLINE VmMapping* cpp_vm_aspace_find_mapping(VmAspace* aspace, zx_vad
 FFI_ALWAYS_INLINE void* cpp_vm_aspace_lock(const VmAspace* aspace) { return aspace->lock(); }
 FFI_ALWAYS_INLINE void* cpp_vm_aspace_region_lock(const VmAspace* aspace) {
   return aspace->region_lock();
+}
+FFI_ALWAYS_INLINE void cpp_vm_aspace_change_high_priority_count_locked(
+    VmAspace* aspace, int64_t delta) TA_NO_THREAD_SAFETY_ANALYSIS {
+  aspace->ChangeHighPriorityCountLocked(delta);
 }
 }

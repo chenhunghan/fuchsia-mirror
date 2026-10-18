@@ -16,7 +16,9 @@
 #include <lib/fpromise/promise.h>
 #include <lib/trace/event.h>
 #include <lib/zx/bti.h>
+#include <lib/zx/clock.h>
 #include <lib/zx/interrupt.h>
+#include <lib/zx/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,7 +155,7 @@ fpromise::promise<void, zx_status_t> UsbXhci::DisableSlotCommand(DeviceState& st
     return fpromise::make_error_promise<zx_status_t>(ZX_ERR_BAD_STATE);
   }
   if (!connected_to_hub) {
-    port_state_[port - 1].slot_id = 0;
+    GetPortState(port).slot_id = 0;
   }
 
   return SubmitCommand(cmd, std::move(context))
@@ -326,8 +328,10 @@ zx_status_t UsbXhci::DeviceOnline(uint32_t slot, uint16_t port, usb_speed_t spee
       });
       return ZX_OK;
     }
-    is_usb_3 = GetPortState()[port].is_USB3;
+    is_usb_3 = GetPortState(port).is_USB3;
   }
+  fdf::info("xhci: DeviceOnline slot={} port={} speed={} is_usb_3={} -> calling bus.AddDevice",
+            slot, port, speed, is_usb_3);
   PostCallback([=, this](const ddk::UsbBusInterfaceProtocolClient& bus) {
     bus.AddDevice(slot - 1,
                   static_cast<uint32_t>(is_usb_3 ? UsbHciGetMaxDeviceCount() - 1
@@ -373,6 +377,10 @@ fpromise::promise<void, zx_status_t> UsbXhci::DeviceOffline(uint32_t slot) {
     }
     for (auto& trb : trbs) {
       std::get<Request>(*trb.request).Complete(ZX_ERR_IO_NOT_PRESENT, 0);
+    }
+    if (!running_ || !bus.is_valid()) {
+      cb.complete_ok();
+      return ZX_OK;
     }
     zx_status_t status = bus.RemoveDevice(slot - 1);
     if (status != ZX_OK) {
@@ -544,18 +552,87 @@ fpromise::promise<void, zx_status_t> UsbXhci::ConfigureHubAsync(uint32_t device_
       .box();
 }
 
+void UsbXhci::Stop(fdf::StopCompleter completer) {
+  fdf::info("xhci: Stop() entered, signaling bringup_ and stopping interrupters");
+  running_ = false;
+  sync_completion_signal(&bringup_);
+  if (device_state_ && mmio_.has_value()) {
+    // Clear USBCMD.ENABLE (RS), USBCMD.INTE, and USBCMD.HSEE and mask IMAN(0).IE before
+    // tearing down interrupters so no further hardware interrupts fire during teardown.
+    USBCMD::Get(cap_length_)
+        .ReadFrom(&mmio_.value())
+        .set_ENABLE(0)
+        .set_INTE(0)
+        .set_HSEE(0)
+        .WriteTo(&mmio_.value());
+    IMAN::Get(runtime_offset_, 0).ReadFrom(&mmio_.value()).set_IE(0).WriteTo(&mmio_.value());
+    constexpr zx::duration kStopTimeout = zx::msec(50);
+    constexpr zx::duration kPollInterval = zx::usec(250);
+    const zx::time deadline = zx::deadline_after(kStopTimeout);
+    while (!USBSTS::Get(cap_length_).ReadFrom(&mmio_.value()).HCHalted()) {
+      if (zx::clock::get_monotonic() >= deadline) {
+        fdf::warn("Timed out waiting for xHCI controller to halt during Stop");
+        break;
+      }
+      zx::nanosleep(zx::deadline_after(kPollInterval));
+    }
+  }
+  for (auto& it : interrupters_) {
+    it.Stop();
+  }
+  for (auto& it : interrupters_) {
+    it.ring().ClearPendingPortStatusChanges();
+  }
+  if (ddk_interaction_dispatcher_.get()) {
+    ddk_interaction_dispatcher_.ShutdownAsync();
+    ddk_interaction_shutdown_.Wait();
+    ddk_interaction_dispatcher_ = fdf::SynchronizedDispatcher{};
+  }
+  AbortPendingCommands();
+  fdf::info("xhci: Stop() completed cleanly");
+  completer(zx::ok());
+}
+
+void UsbXhci::AbortPendingCommands() {
+  auto trbs = command_ring_.TakePendingTRBs();
+  for (auto& trb : trbs) {
+    if (trb.completer.has_value()) {
+      trb.completer.value().complete_error(ZX_ERR_IO_NOT_PRESENT);
+    }
+  }
+}
+
 UsbXhci::~UsbXhci() {
   running_ = false;
-  if (!mmio_.has_value()) {
+  sync_completion_signal(&bringup_);
+  if (!mmio_.has_value() || !device_state_) {
     return;
   }
 
-  USBCMD::Get(cap_length_).ReadFrom(&mmio_.value()).set_ENABLE(0).WriteTo(&mmio_.value());
-  while (!USBSTS::Get(cap_length_).ReadFrom(&mmio_.value()).HCHalted()) {
+  if (USBCMD::Get(cap_length_).ReadFrom(&mmio_.value()).ENABLE()) {
+    USBCMD::Get(cap_length_)
+        .ReadFrom(&mmio_.value())
+        .set_ENABLE(0)
+        .set_INTE(0)
+        .set_HSEE(0)
+        .WriteTo(&mmio_.value());
+    constexpr zx::duration kStopTimeout = zx::msec(50);
+    constexpr zx::duration kPollInterval = zx::usec(250);
+    const zx::time deadline = zx::deadline_after(kStopTimeout);
+    while (!USBSTS::Get(cap_length_).ReadFrom(&mmio_.value()).HCHalted()) {
+      if (zx::clock::get_monotonic() >= deadline) {
+        fdf::warn("Timed out waiting for xHCI controller to halt during destruction");
+        break;
+      }
+      zx::nanosleep(zx::deadline_after(kPollInterval));
+    }
   }
   // Disable all interrupters
   for (auto& it : interrupters_) {
     it.Stop();
+  }
+  for (auto& it : interrupters_) {
+    it.ring().ClearPendingPortStatusChanges();
   }
   // Should now be safe to terminate everything on the command ring
   bool pending;
@@ -664,11 +741,15 @@ void UsbXhci::UsbHciSetBusInterface(const usb_bus_interface_protocol_t* bus_intf
   // that the system is halted for any longer
   static const zx::duration kAbnormalHaltedDuration = zx::sec(12);
 
+  if (bus_intf == nullptr || bus_intf->ops == nullptr) {
+    fdf::info("xhci: UsbHciSetBusInterface clearing bus_ interface on unbind");
+    bus_.clear();
+    return;
+  }
+
   // We must be unbinding if the bus is currently valid.
   if (bus_.is_valid()) {
-    // Assert that we've started unbinding and are no longer accepting
-    // any requests to prevent a use-after-free situation.
-    ZX_ASSERT(!running_);
+    bus_.clear();
     return;
   }
   ZX_ASSERT(bus_intf != nullptr);
@@ -693,6 +774,7 @@ void UsbXhci::UsbHciSetBusInterface(const usb_bus_interface_protocol_t* bus_intf
   }
 
   sync_completion_signal(&bringup_);
+  fdf::info("xhci: UsbHciSetBusInterface completed, signaled bringup_");
 }
 size_t UsbXhci::UsbHciGetMaxDeviceCount() {
   // Last two slots represent the virtual hubs (USB 2.0 and 3.0 respectively)
@@ -965,7 +1047,7 @@ zx_status_t UsbXhci::UsbHciHubDeviceAdded(uint32_t device_id, uint32_t port, usb
 
 zx_status_t UsbXhci::UsbHciHubDeviceRemoved(uint32_t hub_id, uint32_t port) {
   if (!running_) {
-    return ZX_ERR_IO_NOT_PRESENT;
+    return ZX_OK;
   }
   auto hub_state = device_state_[hub_id];
   if (!hub_state) {
@@ -1014,9 +1096,9 @@ zx_status_t UsbXhci::UsbHciHubDeviceRemoved(uint32_t hub_id, uint32_t port) {
     std::get<Request>(*trb.request).Complete(ZX_ERR_IO_NOT_PRESENT, 0);
   }
   RunUntilIdle();
-  // Bus should always be valid since we're getting a callback from a hub
-  // that is a child of the bus.
-  ZX_ASSERT(bus_.is_valid());
+  if (!running_ || !bus_.is_valid()) {
+    return ZX_OK;
+  }
   zx_status_t status = bus_.RemoveDevice(device_state->GetSlot() - 1);
   if (status != ZX_OK) {
     return status;
@@ -1338,6 +1420,12 @@ zx_status_t UsbXhci::InitMmio() {
   }
   mmio_ = std::move(*mmio);
   irq_count_ = static_cast<uint16_t>(HCSPARAMS1::Get().ReadFrom(&mmio_.value()).MaxIntrs());
+  if (zx::result<fdf::PDev::DeviceInfo> dev_info = pdev_.GetDeviceInfo(); dev_info.is_ok()) {
+    irq_count_ =
+        std::max<uint16_t>(1, std::min(irq_count_, static_cast<uint16_t>(dev_info->irq_count)));
+  } else {
+    irq_count_ = 1;
+  }
   fbl::AllocChecker ac;
   interrupters_ = fbl::MakeArray<Interrupter>(&ac, irq_count_);
   if (!ac.check()) {
@@ -1371,9 +1459,10 @@ void UsbXhci::ParseSupportedProtocol() {
         auto word0 = CapabilityRegWord0::Get(current).ReadFrom(&mmio_.value());
         auto word2 = CapabilityRegWord2::Get(current).ReadFrom(&mmio_.value());
 
-        fdf::debug("Supported protocol info: Revision:{}:{} USB{} port offset {} port count {}",
-                   word0.MAJOR_REVISION(), word0.MINOR_REVISION(), word0.MAJOR_REVISION(),
-                   word2.PortOffset(), word2.PortCount());
+        fdf::info(
+            "xhci: Supported protocol info: Revision={}.{} USB{} port_offset={} port_count={}",
+            word0.MAJOR_REVISION(), word0.MINOR_REVISION(), word0.MAJOR_REVISION(),
+            word2.PortOffset(), word2.PortCount());
       }
       if (!current.NEXT()) {
         break;
@@ -1688,6 +1777,13 @@ void UsbXhci::ConnectToEndpoint(ConnectToEndpointRequest& request,
 }
 
 TRBPromise UsbXhci::SubmitCommand(const TRB& command, std::unique_ptr<TRBContext> trb_context) {
+  if (!running_ || !mmio_.has_value() ||
+      !USBCMD::Get(cap_length_).ReadFrom(&mmio_.value()).ENABLE() ||
+      USBSTS::Get(cap_length_).ReadFrom(&mmio_.value()).HCHalted()) {
+    return fpromise::make_result_promise(
+               fpromise::result<TRB*, zx_status_t>(fpromise::error(ZX_ERR_IO_NOT_PRESENT)))
+        .box();
+  }
   fpromise::bridge<TRB*, zx_status_t> bridge;
   trb_context->completer = std::move(bridge.completer);
   zx_status_t status = command_ring_.AddTRB(command, std::move(trb_context));
@@ -1719,7 +1815,21 @@ zx::result<> UsbXhci::Start(fdf::DriverContext context) {
   inspector_ = context.CreateInspector(this);
   config_ = context.take_config<xhci_config::Config>();
   incoming_ = context.take_incoming();
-  ddk_interaction_executor_.emplace(dispatcher());
+  // Run PostCallback tasks on a dedicated synchronized dispatcher with kAllowSyncCalls because
+  // bus_.AddDevice() synchronously initializes the new UsbDevice and binds child interface drivers,
+  // which in turn make synchronous FIDL calls (e.g. UsbHci::ConnectToEndpoint) serviced on this
+  // driver's default dispatcher(). Running PostCallback on dispatcher() would deadlock when
+  // usb-bus and xhci are colocated.
+  auto ddk_dispatcher_result = fdf::SynchronizedDispatcher::Create(
+      fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "xhci-ddk-interaction",
+      [this](fdf_dispatcher_t*) { ddk_interaction_shutdown_.Signal(); });
+  if (ddk_dispatcher_result.is_ok()) {
+    ddk_interaction_dispatcher_ = std::move(*ddk_dispatcher_result);
+    ddk_interaction_executor_.emplace(ddk_interaction_dispatcher_.async_dispatcher());
+  } else {
+    fdf::error("Failed to create xhci-ddk-interaction dispatcher: {}", ddk_dispatcher_result);
+    ddk_interaction_executor_.emplace(dispatcher());
+  }
 
   zx::result pdev_result =
       incoming_->Connect<fuchsia_hardware_platform_device::Service::Device>("pdev");

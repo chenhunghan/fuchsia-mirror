@@ -27,17 +27,20 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
 if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
+  go_library("color") {
+    sources = [ "color.go" ]
+    visibility = [
+      ":*",
+      "//build/tools/*",
+      "//src/firmware/*",
+      "//src/sys/*",
+      "//src/testing/host-target-testing/omaha_tool:*",
+      "//third_party/network-conformance/*",
+      "//tools/*",
+      "//vendor/google/*",
+      "//zircon/tools/*",
+    ]
+    deps = [ "//tools/lib/isatty" ]
   }
-}
-
-go_library("color") {
-  sources = [ "color.go" ]
-  deps = [ "//tools/lib/isatty" ]
-}
-go_test("color_tests") {
-  sources = [ "color_test.go" ]
-  embed = [ ":color" ]
 }

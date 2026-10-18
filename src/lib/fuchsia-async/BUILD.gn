@@ -13,7 +13,7 @@ fuchsia_unittest_package("fuchsia-async-tests") {
   manifest = "meta/fuchsia_async_lib_test.cml"
   deps = [
     ":fuchsia-async_test",
-    "//src/connectivity/network:netstack-for-tests",
+    "//src/connectivity/network/netstack3:component-for-tests",
   ]
   test_specs = {
     environments = [ emu_env ]
@@ -62,12 +62,6 @@ group("tests") {
 # rerun bazel2gn.
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
-
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
 
 rustc_library("fuchsia-async") {
   sources = []

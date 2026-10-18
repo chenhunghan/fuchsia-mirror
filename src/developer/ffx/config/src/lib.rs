@@ -30,7 +30,6 @@ mod storage;
 pub use aliases::{is_analytics_disabled, is_mdns_discovery_disabled, is_usb_discovery_disabled};
 pub use api::ConfigError;
 pub use api::query::{ConfigQuery, ConfigQueryBuilder, SelectMode};
-pub use config_macros::FfxConfigBacked;
 
 pub use environment::{Environment, EnvironmentContext, TestEnv, test_env, test_init};
 pub use paths::get_state_base as get_state_base_path;
@@ -328,8 +327,6 @@ pub async fn show_metrics_status<W: Write>(mut writer: W) -> Result<(), LibError
 #[cfg(test)]
 mod test {
     use super::*;
-    // This is to get the FfxConfigBacked derive to compile, as it
-    // creates a token stream referencing `ffx_config` on the inside.
     use crate::{self as ffx_config};
     use api::value::TryConvert;
     use serde_json::{Value, json};
@@ -494,52 +491,6 @@ mod test {
         let val = ConfigValue::from(Some(json!("true")));
         let res = <bool>::try_convert(val).unwrap();
         assert_eq!(res, true);
-    }
-
-    #[derive(FfxConfigBacked, Default)]
-    struct TestConfigBackedStruct {
-        #[ffx_config_default(key = "test.test.thing", default = "thing")]
-        value: Option<String>,
-
-        #[ffx_config_default(default = "what", key = "oops")]
-        reverse_value: Option<String>,
-
-        #[ffx_config_default(key = "other.test.thing")]
-        other_value: Option<f64>,
-    }
-
-    #[derive(FfxConfigBacked, Default)] // This should just compile despite having no config.
-    struct TestEmptyBackedStruct {}
-
-    #[fuchsia::test]
-    fn test_config_backed_attribute_default() {
-        let env = ffx_config::test_env().build().expect("create test config");
-        let empty_config_struct = TestConfigBackedStruct::default();
-        assert!(empty_config_struct.value.is_none());
-        assert_eq!(empty_config_struct.value(&env.context).unwrap(), "thing");
-        assert!(empty_config_struct.reverse_value.is_none());
-        assert_eq!(empty_config_struct.reverse_value(&env.context).unwrap(), "what");
-    }
-
-    #[fuchsia::test]
-    fn test_config_backed_attribute_override() {
-        let env = ffx_config::test_env()
-            .user_config("test.test.thing", "config_value_thingy")
-            .user_config("other.test.thing", 2.0)
-            .build()
-            .expect("create test config");
-
-        let mut empty_config_struct = TestConfigBackedStruct::default();
-
-        // If this is set, this should pop up before the config values.
-        empty_config_struct.value = Some("wat".to_owned());
-        assert_eq!(empty_config_struct.value(&env.context).unwrap(), "wat");
-        empty_config_struct.value = None;
-        assert_eq!(empty_config_struct.value(&env.context).unwrap(), "config_value_thingy");
-        assert_eq!(empty_config_struct.other_value(&env.context).unwrap().unwrap(), 2f64);
-
-        // This should just compile and drop without panicking is all.
-        let _ignore = TestEmptyBackedStruct {};
     }
 
     /// Writes the file to $root, with the path $path, from the source tree prefix $prefix
@@ -855,6 +806,69 @@ mod test {
         // Setting sdk.overrides.allow-build-host-tools in build_config itself must be ignored
         let result = get_host_tool(&env.context, "a_host_tool").expect("a_host_tool");
         assert_eq!(result, expected_sdk_tool);
+    }
+
+    #[fuchsia::test]
+    fn test_get_sdk_root_in_tree_uses_host_tools_when_not_in_full_sdk() {
+        let mut builder = ffx_config::test_env();
+        let build_dir = builder.isolate_root().join("build");
+        let host_arch = match std::env::consts::ARCH {
+            "x86_64" => "host_x64",
+            "aarch64" => "host_arm64",
+            _ => "host_x64",
+        };
+        let in_tree_host_tools = build_dir.join(host_arch);
+        fs::create_dir_all(&in_tree_host_tools).expect("host arch dir created");
+        let host_tools_bin_dir = build_dir.join("host-tools");
+        fs::create_dir_all(&host_tools_bin_dir).expect("host-tools dir created");
+        let in_tree_ffx = host_tools_bin_dir.join("ffx");
+        fs::write(&in_tree_ffx, "").expect("in tree ffx created");
+
+        let env = builder
+            .in_tree(&build_dir)
+            .self_path(&in_tree_ffx)
+            .build()
+            .expect("create test config");
+
+        match env.context.get_sdk_root().expect("get_sdk_root") {
+            sdk::SdkRoot::HostTools { root } => assert_eq!(root, in_tree_host_tools),
+            other => panic!("Expected SdkRoot::HostTools, got {other:?}"),
+        }
+        let loaded_sdk = env.context.get_sdk().expect("get_sdk");
+        assert_eq!(loaded_sdk.get_version(), &sdk::SdkVersion::InTree);
+    }
+
+    #[fuchsia::test]
+    fn test_get_sdk_root_in_tree_prefers_full_sdk_from_exe_path() {
+        let mut builder = ffx_config::test_env();
+        let build_dir = builder.isolate_root().join("build");
+        let host_arch = match std::env::consts::ARCH {
+            "x86_64" => "host_x64",
+            "aarch64" => "host_arm64",
+            _ => "host_x64",
+        };
+        let in_tree_host_tools = build_dir.join(host_arch);
+        fs::create_dir_all(&in_tree_host_tools).expect("host arch dir created");
+
+        let staged_sdk_root = build_dir.join("staging/sdks/test_sdk");
+        put_file!(staged_sdk_root, "../test_data/sdk", "meta/manifest.json");
+        let staged_ffx = staged_sdk_root.join("tools/x64/ffx");
+        fs::create_dir_all(staged_ffx.parent().unwrap()).expect("staged ffx dir created");
+        fs::write(&staged_ffx, "").expect("staged ffx created");
+
+        let env =
+            builder.in_tree(&build_dir).self_path(&staged_ffx).build().expect("create test config");
+
+        let canonical_staged_sdk_root =
+            std::fs::canonicalize(&staged_sdk_root).expect("canonical staged sdk root");
+        match env.context.get_sdk_root().expect("get_sdk_root") {
+            sdk::SdkRoot::Full { root, manifest: None } => {
+                assert_eq!(std::fs::canonicalize(root).unwrap(), canonical_staged_sdk_root);
+            }
+            other => panic!("Expected SdkRoot::Full, got {other:?}"),
+        }
+        let loaded_sdk = env.context.get_sdk().expect("get_sdk");
+        assert_eq!(loaded_sdk.get_version(), &sdk::SdkVersion::Version("0.20201005.4.1".into()));
     }
 
     #[fuchsia::test]

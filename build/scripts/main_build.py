@@ -35,15 +35,15 @@ import uuid
 from collections.abc import Iterable, Sequence
 from typing import Any, TextIO
 
-import signal_utils
-
 # Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
 _FUCHSIA_ROOT = pathlib.Path(__file__).parent.parent.parent
 if str(_FUCHSIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_ROOT))
 
 from build.auth import gcloud
-from build.rbe import build_summary, rbe_settings
+from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
+from build.resultstore import rs_profile
+from build.scripts import properties, signal_utils
 
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
@@ -123,15 +123,14 @@ def _extract_project_id_from_instance(instance_val: str) -> str | None:
 
 GLOBAL_RESULTSTORE_CONFIG = pathlib.Path(".fx/config/resultstore")
 LOCAL_RESULTSTORE_CONFIG = pathlib.Path(".resultstore")
-DEFAULT_RBE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
-DEFAULT_RESULTSTORE_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
-DEFAULT_CAS_INSTANCE = "projects/rbe-fuchsia-prod/instances/default"
 # LINT.IfChange(ninja_build_trace_filename)
 NINJA_BUILD_TRACE_GZ = "ninja_build_trace.json.gz"
 # LINT.ThenChange(/tools/integration/fint/fint_build.py:ninja_build_trace_filename)
 NINJA_LOGS_DIR = "ninja_logs"
 NINJA_ACTION_METRICS_JSON = "ninja_action_metrics.json"
 NINJA_ERRORS_JSON = "ninja_errors.json"
+TIMEOUT_LOGS_DIR = pathlib.Path("timeout_logs")
+BUILD_TIMEOUT_SCRIPT = pathlib.Path("build/scripts/build_timeout.py")
 FINT_BUILD_PY_RELATIVE_PATH = pathlib.Path(
     "tools/integration/fint/fint_build.py"
 )
@@ -157,6 +156,7 @@ class FuchsiaBuildConfig(object):
 
     Fields:
       rbe: if True, build uses RBE
+      rbe_casfs: if True, virtualize RBE outputs on casfs instead of downloading them
       resultstore: "all", "none", "ninja", or "bazel"
       profile: if True, collect system profile during build
       tui: if True, enable terminal UI for monitoring build
@@ -193,15 +193,24 @@ class FuchsiaBuildConfig(object):
     cas_instance: str | None = None
     rbe_instance: str | None = None
     log_dir: pathlib.Path | None = None
+    timeout: str | None = None
+    timeout_grace_period: str | None = None
+    rbe_casfs: bool = False
 
     @staticmethod
     def from_args(
-        args: argparse.Namespace, default_resultstore: str | None = None
+        args: argparse.Namespace,
+        default_resultstore: str | None = None,
+        default_rbe_casfs: bool = False,
     ) -> "FuchsiaBuildConfig":
         resultstore_val = args.resultstore or default_resultstore or "none"
+        rbe_casfs_val = (
+            args.rbe_casfs if args.rbe_casfs is not None else default_rbe_casfs
+        )
 
         return FuchsiaBuildConfig(
             rbe=args.rbe,
+            rbe_casfs=rbe_casfs_val,
             resultstore=resultstore_val,
             profile=args.profile,
             tui=args.tui,
@@ -219,6 +228,8 @@ class FuchsiaBuildConfig(object):
             cas_instance=args.cas_instance,
             rbe_instance=args.rbe_instance,
             log_dir=args.log_dir,
+            timeout=args.timeout,
+            timeout_grace_period=args.timeout_grace_period,
         )
 
 
@@ -385,6 +396,20 @@ def _collect_bazel_metadata(log_dir: pathlib.Path) -> JSONObject:
     }
 
 
+def _collect_timeout_metadata(log_dir: pathlib.Path) -> JSONObject:
+    """Discovers diagnostic snapshots generated during build timeout."""
+    timeout_dir = log_dir / TIMEOUT_LOGS_DIR
+    if not timeout_dir.exists():
+        return {}
+    snapshots = sorted(f.name for f in timeout_dir.iterdir() if f.is_file())
+    if not snapshots:
+        return {}
+    return {
+        "log_dir": str(timeout_dir.resolve()),
+        "snapshots": snapshots,
+    }
+
+
 def exists(path: pathlib.Path) -> bool:
     """Checks if a path exists."""
     return path.exists()
@@ -482,40 +507,9 @@ def normalize_resultstore_value(val: Any) -> str:
     return "none"
 
 
-def parse_properties(content: str) -> dict[str, str]:
-    """Parses a simple KEY=VALUE properties string, supporting export syntax."""
-    props: dict[str, str] = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("//"):
-            continue
-        k, sep, v = line.partition("=")
-        if sep:
-            key = k.strip().removeprefix("export ").strip()
-            if key:
-                try:
-                    tokens = shlex.split(v.strip(), comments=True)
-                except ValueError:
-                    continue
-                if tokens:
-                    props[key] = tokens[0]
-    return props
-
-
-def load_properties(path: pathlib.Path) -> dict[str, str]:
-    """Reads a simple KEY=VALUE properties file safely, supporting export syntax."""
-    if not exists(path):
-        return {}
-    try:
-        content = path.read_text()
-    except OSError:
-        return {}
-    return parse_properties(content)
-
-
 def load_user_preference(path: pathlib.Path) -> str | None:
     """Loads resultstore preference, supporting both new and legacy formats."""
-    props = load_properties(path)
+    props = properties.load_properties(path)
     if "resultstore" in props:
         return normalize_resultstore_value(props["resultstore"])
     elif "RESULTSTORE_ENABLED" in props:
@@ -546,16 +540,6 @@ def gcp_instance_name(value: str) -> str:
             "Expected format: 'projects/<project-id>/instances/<instance-name>'"
         )
     return value
-
-
-def str_to_bool(value: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value.lower() in ("true", "1", "yes"):
-        return True
-    elif value.lower() in ("false", "0", "no"):
-        return False
-    raise argparse.ArgumentTypeError(f"Boolean value expected, got {value}")
 
 
 class BuildLock:
@@ -851,16 +835,13 @@ class FuchsiaBuildContext(object):
         #   //build/bazel_sdk/tests/scripts/run_tests.py:bazel_socket_env_vars
         # )
 
-        # Forward ResultStore/CAS instance names unconditionally.
-        # These RS_ variables directly drive/influence the rsproxy daemon.
-        if self.resultstore_instance:
-            env["RS_rs_instance"] = self.resultstore_instance
-        if self.cas_instance:
-            env["RS_cas_instance"] = self.cas_instance
+        # Export instance configurations from active profiles (or CLI overrides),
+        # which directly drive/influence the reproxy and rsproxy daemons.
+        if self.config.resultstore != "none":
+            env.update(self.resultstore_profile.to_env_dict())
 
-        # Forward RBE instance name unconditionally.
-        if self.rbe_instance:
-            env["RBE_instance"] = self.rbe_instance
+        if self.rbe_enabled:
+            env.update(self.rbe_profile.to_env_dict())
 
         return env
 
@@ -888,40 +869,43 @@ class FuchsiaBuildContext(object):
         if local_pref:
             resultstore_pref = local_pref
 
+        rbe_casfs_pref = casfs.load(source_dir, environ).virtualize
+
         return FuchsiaBuildContext(
             source_dir=source_dir,
             out_dir=out_dir,
             build_dir=args.build_dir,
             env=environ,
             config=FuchsiaBuildConfig.from_args(
-                args, default_resultstore=resultstore_pref
+                args,
+                default_resultstore=resultstore_pref,
+                default_rbe_casfs=rbe_casfs_pref,
             ),
         )
 
     @functools.cached_property
-    def resolved_rbe_instance(self) -> str:
-        """Finds the default RBE instance configured on disk."""
-        config_path = self.source_dir / "build/rbe/fuchsia-reproxy.cfg"
-        cfg = _parse_cfg_file(config_path)
-        return cfg.get("instance", DEFAULT_RBE_INSTANCE)
+    def rbe_profile(self) -> rbe_profile.RbeProfile:
+        try:
+            prof = rbe_profile.load(self.source_dir, self.env)
+            # Apply user CLI overrides if present
+            if self.config.rbe_instance:
+                prof.rbe_instance = self.config.rbe_instance
+            return prof
+        except (ValueError, FileNotFoundError) as e:
+            raise BuildConfigurationError(str(e))
 
     @functools.cached_property
-    def resolved_resultstore_instance(self) -> str:
-        """Finds the default ResultStore instance configured on disk."""
-        config_path = (
-            self.source_dir / "build/resultstore/fuchsia-resultstore.cfg"
-        )
-        cfg = _parse_cfg_file(config_path)
-        return cfg.get("rs_instance", DEFAULT_RESULTSTORE_INSTANCE)
-
-    @functools.cached_property
-    def resolved_cas_instance(self) -> str:
-        """Finds the default CAS instance configured on disk."""
-        config_path = (
-            self.source_dir / "build/resultstore/fuchsia-resultstore.cfg"
-        )
-        cfg = _parse_cfg_file(config_path)
-        return cfg.get("cas_instance", DEFAULT_CAS_INSTANCE)
+    def resultstore_profile(self) -> rs_profile.RsProfile:
+        try:
+            prof = rs_profile.load(self.source_dir, self.env)
+            # Apply user CLI overrides if present
+            if self.config.resultstore_instance:
+                prof.rs_instance = self.config.resultstore_instance
+            if self.config.cas_instance:
+                prof.cas_instance = self.config.cas_instance
+            return prof
+        except (ValueError, FileNotFoundError) as e:
+            raise BuildConfigurationError(str(e))
 
     @property
     def rbe_settings_file(self) -> pathlib.Path:
@@ -1068,6 +1052,11 @@ class FuchsiaBuildContext(object):
         return self.source_dir / "build/scripts/top_build_wrap.sh"
 
     @property
+    def build_timeout_script(self) -> pathlib.Path:
+        """Path to build_timeout.py wrapper script."""
+        return self.source_dir / BUILD_TIMEOUT_SCRIPT
+
+    @property
     def args_gn(self) -> pathlib.Path:
         return self.build_dir / "args.gn"
 
@@ -1141,10 +1130,16 @@ class FuchsiaBuildContext(object):
 
     @property
     def needs_auth(self) -> bool:
-        if self.config.resultstore != "none":
+        if (
+            self.config.resultstore != "none"
+            and self.resultstore_profile.auth_type != "none"
+        ):
             return True
 
-        return self._rbe_settings.needs_auth
+        if self.rbe_enabled and self.rbe_profile.auth_type != "none":
+            return self._rbe_settings.needs_auth
+
+        return False
 
     @property
     def concurrency(self) -> int:
@@ -1268,11 +1263,20 @@ class BuildInvocation(object):
         if bazel_metadata:
             metadata["bazel"] = bazel_metadata
 
+        timeout_metadata = _collect_timeout_metadata(log_dir)
+        if timeout_metadata:
+            metadata["timeout"] = timeout_metadata
+
         try:
             mkdir(output_path.parent)
             output_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        except (OSError, TypeError, ValueError) as e:
+            msg(
+                f"Failed to serialize or write metadata JSON: {e}",
+                file=sys.stderr,
+            )
         except Exception as e:
-            msg(f"Failed to write metadata JSON: {e}", file=sys.stderr)
+            msg(f"Unexpected error writing metadata JSON: {e}", file=sys.stderr)
 
     @functools.cached_property
     def build_uuid(self) -> str:
@@ -1337,6 +1341,11 @@ class BuildInvocation(object):
         """The path where Ninja action metrics are recorded."""
         return self.log_dir / NINJA_LOGS_DIR / NINJA_ACTION_METRICS_JSON
 
+    @property
+    def timeout_log_dir(self) -> pathlib.Path:
+        """The directory where timeout diagnostics and process snapshots are recorded."""
+        return self.log_dir / TIMEOUT_LOGS_DIR
+
     def top_build_command_prefix(self) -> Iterable[str]:
         """Construct the prefix command for the top-level wrapper."""
         context = self.context
@@ -1380,6 +1389,32 @@ class BuildInvocation(object):
 
         if context.config.verbose:
             yield "--verbose"
+
+    def timeout_command_prefix(self) -> Iterable[str]:
+        """Constructs the build_timeout wrapper prefix.
+
+        Returns command tokens up to and including '--':
+            [python3, build_timeout.py, --timeout, <duration>, --log-dir, <log_dir>, --]
+        """
+        context = self.context
+        if not context.config.timeout:
+            return
+
+        yield sys.executable
+        yield str(context.build_timeout_script)
+        yield "--timeout"
+        yield context.config.timeout
+        yield "--log-dir"
+        yield str(self.timeout_log_dir)
+        if context.config.timeout_grace_period:
+            yield "--grace-period"
+            yield context.config.timeout_grace_period
+        if context.config.verbose:
+            yield "--verbose"
+        if context.config.tui:
+            yield "--no-separate-pgrp"
+
+        yield "--"
 
     def get_build_env(self) -> dict[str, str]:
         """Curate a build environment for this invocation."""
@@ -1471,6 +1506,10 @@ class BuildInvocation(object):
         build_env["FX_INTERNAL_RESULTSTORE_BAZEL"] = resultstore_bazel
         # LINT.ThenChange(//build/bazel/wrapper.bazel.sh:resultstore_bazel_env_vars)
 
+        build_env[casfs.ENV_CASFS_VIRTUALIZE] = (
+            "1" if self.context.config.rbe_casfs else "0"
+        )
+
         build_env.update(self.context.build_service_env)
 
         return build_env
@@ -1535,6 +1574,10 @@ class BuildInvocation(object):
             build_command = fint_cmd + list(build_command)
 
         full_cmd = top_cmd + ["--"] + list(build_command)
+
+        if is_build and context.config.timeout:
+            mkdir(self.timeout_log_dir)
+            full_cmd = list(self.timeout_command_prefix()) + full_cmd
 
         return BuildCommandExecution(
             full_command=full_cmd,
@@ -1888,8 +1931,26 @@ def _main_arg_parser() -> argparse.ArgumentParser:
     )
 
     # Custom handling for boolean flags to support --flag=true/false
-    parser.add_argument("--rbe", type=str_to_bool, nargs="?", const=True)
+    parser.add_argument(
+        "--rbe", type=properties.str_to_bool, nargs="?", const=True
+    )
     parser.add_argument("--no-rbe", action="store_false", dest="rbe")
+
+    parser.add_argument(
+        "--rbe-casfs",
+        type=properties.str_to_bool,
+        nargs="?",
+        const=True,
+        default=None,
+        help="Virtualize RBE build artifacts on casfs instead of downloading them "
+        f"(can also be set via {casfs.ENV_CASFS_VIRTUALIZE}).",
+    )
+    parser.add_argument(
+        "--no-rbe-casfs",
+        action="store_false",
+        dest="rbe_casfs",
+        help="Disable RBE artifact virtualization on casfs.",
+    )
 
     parser.add_argument(
         "--resultstore",
@@ -1907,10 +1968,14 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         help="Disable uploading build events to ResultStore.",
     )
 
-    parser.add_argument("--profile", type=str_to_bool, nargs="?", const=True)
+    parser.add_argument(
+        "--profile", type=properties.str_to_bool, nargs="?", const=True
+    )
     parser.add_argument("--no-profile", action="store_false", dest="profile")
 
-    parser.add_argument("--tui", type=str_to_bool, nargs="?", const=True)
+    parser.add_argument(
+        "--tui", type=properties.str_to_bool, nargs="?", const=True
+    )
     parser.add_argument("--no-tui", action="store_false", dest="tui")
 
     parser.add_argument(
@@ -1930,6 +1995,20 @@ def _main_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-status", action="store_false", dest="status")
+    parser.add_argument(
+        "--timeout",
+        type=str,
+        default=None,
+        help="Specify an overall build timeout (e.g. '90m', '5400s'). "
+        "Wraps execution in build_timeout.py with progressive signaling and diagnostic snapshots.",
+    )
+    parser.add_argument(
+        "--timeout-grace-period",
+        type=str,
+        default=None,
+        help="Specify an explicit in-tree shutdown grace period (e.g. '60s'). "
+        "Intermediate escalation steps in build_timeout.py are scaled to fit within this duration.",
+    )
 
     parser.add_argument(
         "--fint-params-path",

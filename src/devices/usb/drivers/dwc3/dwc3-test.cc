@@ -1008,28 +1008,25 @@ typedef struct {
 
   // True if the driver is expected to start.
   bool should_start;
-
-  // True if the driver is expected to poll CmdAct on EndTransfer commands.
-  bool poll_end_xfer;
 } Param;
 
 // clang-format off
 const auto kCases = testing::Values(
-    Param{0x00000000, false, false},
-    Param{0xffffffff, false, false},
-    Param{0x5500101a, false, false},
-    Param{0x5532101a, false, false},
-    Param{0x5533101a, true, false},
-    Param{0x5533101a, true, false},
-    Param{0x5533308a, true, false},
-    Param{0x5533309a, true, false},
-    Param{0x5533309b, true, false},
-    Param{0x5533310a, true, true},  // Driver polls in version 3.10a+
-    Param{0x5533310b, true, true},
-    Param{0x5533311a, true, true},
-    Param{0x55333110, true, true},
-    Param{0x5533401a, true, true},
-    Param{0x5534101a, false, false});  // 5534 is invalid core id.
+    Param{0x00000000, false},
+    Param{0xffffffff, false},
+    Param{0x5500101a, false},
+    Param{0x5532101a, false},
+    Param{0x5533101a, true},
+    Param{0x5533101a, true},
+    Param{0x5533308a, true},
+    Param{0x5533309a, true},
+    Param{0x5533309b, true},
+    Param{0x5533310a, true},
+    Param{0x5533310b, true},
+    Param{0x5533311a, true},
+    Param{0x55333110, true},
+    Param{0x5533401a, true},
+    Param{0x5534101a, false});  // 5534 is invalid core id.
 // clang-format on
 
 using Parameterized = TestFixture<false, testing::TestWithParam<Param>>;
@@ -1056,7 +1053,6 @@ TEST_P(Parameterized, TestHwVersion) {
   EXPECT_EQ(WaitForPhy(), ZX_OK);
 
   if (p.should_start) {
-    dut_.RunInDriverContext([&](Dwc3& drv) { EXPECT_EQ(drv.poll_end_xfer(), p.poll_end_xfer); });
     EXPECT_EQ(dut_.StopDriver().status_value(), ZX_OK);
   }
 }
@@ -1368,159 +1364,9 @@ TEST_F(UnmanagedTestFixture, FrameLengthAdjustmentNoMetadata) {
   EXPECT_OK(dut_.StopDriver().status_value());
 }
 
-TEST_F(UnmanagedTestFixture, IrisExtensionCreatedWhenInterconnectAvailable) {
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    env.set_serve_platform_mocks(false);
-    env.usb_phy().set_initial_connected(true);
-  });
-
-  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
-    dwc3_config::Config cfg;
-    cfg.enable_suspend() = false;
-    cfg.bypass_platform_extension() = false;
-    args.config(cfg.ToVmo());
-  });
-  ASSERT_OK(res);
-  ASSERT_OK(WaitForPhy());
-
-  dut_.RunInDriverContext(
-      [this](Dwc3& drv) { EXPECT_NE(this->GetPlatformExtension(drv), nullptr); });
-
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u);
-    EXPECT_GT(env.path().set_bandwidth_count(), 0u);
-  });
-
-  EXPECT_OK(dut_.StopDriver().status_value());
-}
-
-TEST_F(UnmanagedTestFixture, IrisExtensionHotplugMaintainsBandwidthAndResets) {
-  auto reset_count = std::make_shared<std::atomic<uint32_t>>(0);
-  dut_.RunInEnvironmentTypeContext([this, reset_count](Environment& env) {
-    env.set_serve_platform_mocks(false);
-    auto& dctl_reg = env.reg_region()[DCTL::Get().addr()];
-    dctl_reg.SetWriteCallback([this, reset_count](uint64_t val) {
-      if (DCTL::Get().FromValue(static_cast<uint32_t>(val)).CSFTRST() == 1) {
-        (*reset_count)++;
-      }
-      Write_DCTL(static_cast<uint32_t>(val));
-    });
-  });
-
-  zx::result start = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
-    dwc3_config::Config cfg;
-    cfg.enable_suspend() = false;
-    cfg.bypass_platform_extension() = false;
-    args.config(cfg.ToVmo());
-  });
-  ASSERT_OK(start);
-  ASSERT_OK(WaitForPhy());
-
-  dut_.runtime().RunUntilIdle();
-
-  // Reset count should include Init() reset and initial disconnected event reset.
-  EXPECT_EQ(2u, reset_count->load());
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u);
-    EXPECT_EQ(env.path().set_bandwidth_count(), 1u);
-  });
-
-  // Connect: votes default HS (40 MB/s) and executes ResetHw().
-  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
-  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerConnection(true); });
-  dut_.runtime().RunUntilIdle();
-  EXPECT_EQ(ZX_OK, WaitForPhy());
-  EXPECT_EQ(3u, reset_count->load());
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
-
-  // Disconnect: votes 0 bps and executes ResetHw().
-  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { env.usb_phy().TriggerConnection(false); });
-  dut_.runtime().RunUntilIdle();
-  EXPECT_EQ(ZX_OK, WaitForPhy());
-  EXPECT_EQ(4u, reset_count->load());
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  EXPECT_OK(dut_.StopDriver().status_value());
-}
-
-TEST_F(UnmanagedTestFixture, IrisExtensionDynamicSpeedBandwidthVotes) {
-  dut_.RunInEnvironmentTypeContext([](Environment& env) {
-    env.set_serve_platform_mocks(false);
-    env.usb_phy().set_initial_connected(true);
-  });
-
-  zx::result res = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
-    dwc3_config::Config cfg;
-    cfg.enable_suspend() = false;
-    cfg.bypass_platform_extension() = false;
-    args.config(cfg.ToVmo());
-  });
-  ASSERT_OK(res);
-  ASSERT_OK(WaitForPhy());
-
-  // Provisional speed upon connection is High-Speed: 40 MB/s.
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 40'000'000u); });
-
-  // SuperSpeed -> 400 MB/s.
-  dut_.RunInDriverContext([this](Dwc3& drv) {
-    PlatformExtension* ext = this->GetPlatformExtension(drv);
-    ASSERT_NE(ext, nullptr);
-    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kSuper));
-  });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 400'000'000u); });
-
-  // SuperSpeed Plus (Enhanced SuperSpeed) -> 1000 MB/s.
-  dut_.RunInDriverContext([this](Dwc3& drv) {
-    PlatformExtension* ext = this->GetPlatformExtension(drv);
-    ASSERT_NE(ext, nullptr);
-    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kEnhancedSuper));
-  });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 1'000'000'000u); });
-
-  // Full Speed -> 2 MB/s.
-  dut_.RunInDriverContext([this](Dwc3& drv) {
-    PlatformExtension* ext = this->GetPlatformExtension(drv);
-    ASSERT_NE(ext, nullptr);
-    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kFull));
-  });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 2'000'000u); });
-
-  // Low Speed -> 2 MB/s.
-  dut_.RunInDriverContext([this](Dwc3& drv) {
-    PlatformExtension* ext = this->GetPlatformExtension(drv);
-    ASSERT_NE(ext, nullptr);
-    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kLow));
-  });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 2'000'000u); });
-
-  // Undefined -> 0 MB/s.
-  dut_.RunInDriverContext([this](Dwc3& drv) {
-    PlatformExtension* ext = this->GetPlatformExtension(drv);
-    ASSERT_NE(ext, nullptr);
-    EXPECT_OK(ext->SetConnectionSpeed(fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined));
-  });
-  dut_.RunInEnvironmentTypeContext(
-      [](Environment& env) { EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u); });
-
-  EXPECT_OK(dut_.StopDriver().status_value());
-}
-
 class UnmanagedWakeLeaseTestFixture : public UnmanagedTestFixture {
  protected:
-  void VerifyDisconnectHoldsWakeLease(bool bypass_platform_extension, bool serve_platform_mocks) {
-    dut_.RunInEnvironmentTypeContext([serve_platform_mocks](Environment& env) {
-      env.set_serve_platform_mocks(serve_platform_mocks);
-    });
-
+  void VerifyDisconnectHoldsWakeLease(bool bypass_platform_extension) {
     zx::result start = dut_.StartDriverWithCustomStartArgs(
         [bypass_platform_extension](fdf::DriverStartArgs& args) {
           dwc3_config::Config cfg;
@@ -1532,13 +1378,13 @@ class UnmanagedWakeLeaseTestFixture : public UnmanagedTestFixture {
     dut_.runtime().RunUntilIdle();
     ASSERT_OK(WaitForPhy());
 
-    dut_.RunInDriverContext([this, bypass_platform_extension, serve_platform_mocks](Dwc3& drv) {
+    dut_.RunInDriverContext([this, bypass_platform_extension](Dwc3& drv) {
       PlatformExtension* ext = this->GetPlatformExtension(drv);
       if (bypass_platform_extension) {
         EXPECT_EQ(ext, nullptr);
       } else {
         ASSERT_NE(ext, nullptr);
-        EXPECT_EQ(ext->PowersDownCoreOnDisconnect(), serve_platform_mocks);
+        EXPECT_TRUE(ext->PowersDownCoreOnDisconnect());
       }
     });
 
@@ -1552,6 +1398,11 @@ class UnmanagedWakeLeaseTestFixture : public UnmanagedTestFixture {
     });
     auto binding = BindDciInterface(&fake_dci);
 
+    auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+    ASSERT_OK(dci_service.status_value());
+    fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
+    ASSERT_OK(dci->StartController().status());
+
     // Connect and supply a wake lease via the PHY connection watcher.
     zx::eventpair lease_client, lease_peer;
     ASSERT_OK(zx::eventpair::create(0, &lease_client, &lease_peer));
@@ -1562,67 +1413,183 @@ class UnmanagedWakeLeaseTestFixture : public UnmanagedTestFixture {
     dut_.runtime().RunUntilIdle();
     ASSERT_OK(WaitForPhy());
 
-    dut_.RunInDriverContext(
-        [](Dwc3& drv) { EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv)); });
+    dut_.RunInDriverContext([](Dwc3& drv) {
+      EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv));
+      EXPECT_TRUE(Dwc3TestHelper::IsActive(drv));
+    });
     zx_signals_t observed = 0;
     EXPECT_EQ(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed),
               ZX_ERR_TIMED_OUT);
+
+    // The initial (disconnected) watcher status already produced one drained report at start-up;
+    // measure the disconnect below relative to the counts after the connect.
+    size_t disconnected_reports_after_connect = 0;
+    dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+      EXPECT_EQ(env.usb_phy().connected_reports(), 1u);
+      disconnected_reports_after_connect = env.usb_phy().disconnected_reports();
+    });
 
     // Trigger disconnect while fake_dci holds the SetConnected(false) completer.
     dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
     dut_.RunInEnvironmentTypeContext(
         [](Environment& env) { env.usb_phy().TriggerConnection(false); });
     dut_.runtime().RunUntilIdle();
-    ASSERT_OK(WaitForPhy());
-    set_connected_false_received.Wait();
+    ASSERT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
+        [&]() { return set_connected_false_received.signaled(); }, zx::duration::infinite()));
+    dut_.runtime().RunUntilIdle();
 
     ASSERT_TRUE(fake_dci.has_deferred_set_connected());
 
-    if (!bypass_platform_extension) {
-      dut_.RunInEnvironmentTypeContext([serve_platform_mocks](Environment& env) {
-        if (serve_platform_mocks) {
-          EXPECT_FALSE(env.vreg().enabled());
-          EXPECT_FALSE(env.clock_core().enabled());
-        } else {
-          EXPECT_EQ(env.path().last_average_bandwidth_bps(), 0u);
-        }
-      });
-    }
+    // While SetConnected(false) is still in flight, the core clocks/vreg and connection wake lease
+    // must remain active so usb-peripheral and bound functions can safely disable endpoints, while
+    // is_active() is false and new ConfigureEndpoint / SetStall / ClearStall calls are rejected.
+    // The PHY must not yet have been told the core is disconnected, nor may the connection watcher
+    // have been re-armed: the PHY takes either as permission to remove the core's clocks, resets
+    // and power.
+    dut_.RunInDriverContext([](Dwc3& drv) {
+      EXPECT_TRUE(Dwc3TestHelper::GetPowerOn(drv));
+      EXPECT_FALSE(Dwc3TestHelper::IsActive(drv));
+      EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv));
+    });
+    {
+      auto disable_res = dci->DisableEndpoint(0x81);
+      ASSERT_OK(disable_res.status());
+      EXPECT_TRUE(disable_res->is_ok());
 
-    // While SetConnected(false) is still in flight, the connection wake lease must remain held so
-    // the system does not suspend before usb-peripheral and bound functions finish unconfiguring.
-    dut_.RunInDriverContext(
-        [](Dwc3& drv) { EXPECT_TRUE(Dwc3TestHelper::HasConnectionLease(drv)); });
+      fdescriptor::wire::UsbEndpointDescriptor ep_desc{
+          .b_length = sizeof(fdescriptor::wire::UsbEndpointDescriptor),
+          .b_descriptor_type = fidl::ToUnderlying(fdescriptor::DescriptorType::kEndpoint),
+          .b_endpoint_address = 0x81,
+          .bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk),
+          .w_max_packet_size = 512,
+      };
+      auto config_res = dci->ConfigureEndpoint(ep_desc, {});
+      ASSERT_OK(config_res.status());
+      ASSERT_TRUE(config_res->is_error());
+      EXPECT_STATUS(config_res->error_value(), ZX_ERR_IO_NOT_PRESENT);
+
+      auto stall_res = dci->EndpointSetStall(0x81);
+      ASSERT_OK(stall_res.status());
+      ASSERT_TRUE(stall_res->is_error());
+      EXPECT_STATUS(stall_res->error_value(), ZX_ERR_IO_NOT_PRESENT);
+
+      auto clear_stall_res = dci->EndpointClearStall(0x81);
+      ASSERT_OK(clear_stall_res.status());
+      ASSERT_TRUE(clear_stall_res->is_error());
+      EXPECT_STATUS(clear_stall_res->error_value(), ZX_ERR_IO_NOT_PRESENT);
+    }
+    dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+      EXPECT_EQ(env.usb_phy().disconnected_reports(), disconnected_reports_after_connect);
+      EXPECT_FALSE(env.usb_phy().has_completer());
+    });
     observed = 0;
     EXPECT_EQ(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed),
               ZX_ERR_TIMED_OUT);
 
-    // Once SetConnected(false) completes, the connection wake lease must be released.
+    // Once SetConnected(false) completes, DWC3 powers down the core, releases the connection wake
+    // lease, and only then notifies the PHY that disconnect teardown has drained and re-arms the
+    // connection watcher.
     dut_.RunInDriverContext([&](Dwc3& drv) { fake_dci.CompleteDeferredSetConnected(ZX_OK); });
+    dut_.runtime().RunUntilIdle();
+    ASSERT_OK(WaitForPhy());
+
     observed = 0;
     EXPECT_OK(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
     EXPECT_NE(observed & ZX_EVENTPAIR_PEER_CLOSED, 0u);
+    // The drained report travels on the UsbPhy channel and may be processed by the fake PHY after
+    // the re-armed watcher; poll for exactly one more report than before the disconnect.
+    EXPECT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
+        [&]() {
+          size_t reports = 0;
+          dut_.RunInEnvironmentTypeContext(
+              [&](Environment& env) { reports = env.usb_phy().disconnected_reports(); });
+          return reports == disconnected_reports_after_connect + 1;
+        },
+        zx::duration::infinite()));
 
-    dut_.RunInDriverContext(
-        [](Dwc3& drv) { EXPECT_FALSE(Dwc3TestHelper::HasConnectionLease(drv)); });
+    if (!bypass_platform_extension) {
+      dut_.RunInEnvironmentTypeContext([](Environment& env) {
+        EXPECT_FALSE(env.vreg().enabled());
+        EXPECT_FALSE(env.clock_core().enabled());
+      });
+    }
+
+    dut_.RunInDriverContext([](Dwc3& drv) {
+      EXPECT_FALSE(Dwc3TestHelper::GetPowerOn(drv));
+      EXPECT_FALSE(Dwc3TestHelper::HasConnectionLease(drv));
+    });
 
     EXPECT_OK(dut_.StopDriver().status_value());
   }
 };
 
 TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseNoPlatformExtension) {
-  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/true,
-                                 /*serve_platform_mocks=*/true);
+  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/true);
 }
 
 TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseQualcommPlatformExtension) {
-  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false,
-                                 /*serve_platform_mocks=*/true);
+  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false);
 }
 
-TEST_F(UnmanagedWakeLeaseTestFixture, DisconnectHoldsWakeLeaseIrisPlatformExtension) {
-  VerifyDisconnectHoldsWakeLease(/*bypass_platform_extension=*/false,
-                                 /*serve_platform_mocks=*/false);
+TEST_F(UnmanagedWakeLeaseTestFixture, StopDriverWhileDisconnectInFlightPowersDownCore) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.set_serve_platform_mocks(true); });
+
+  zx::result start = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = false;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(start);
+  dut_.runtime().RunUntilIdle();
+  ASSERT_OK(WaitForPhy());
+
+  FakeUsbDciInterface fake_dci;
+  fake_dci.SetDeferSetConnectedFalse(true);
+  libsync::Completion set_connected_false_received;
+  fake_dci.SetSetConnectedCallback([&](bool connected) {
+    if (!connected) {
+      set_connected_false_received.Signal();
+    }
+  });
+  auto binding = BindDciInterface(&fake_dci);
+
+  zx::eventpair lease_client, lease_peer;
+  ASSERT_OK(zx::eventpair::create(0, &lease_client, &lease_peer));
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+  dut_.RunInEnvironmentTypeContext(
+      [&](Environment& env) { env.usb_phy().TriggerConnection(true, std::move(lease_client)); });
+  dut_.runtime().RunUntilIdle();
+  ASSERT_OK(WaitForPhy());
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().completion()->Reset(); });
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { env.usb_phy().TriggerConnection(false); });
+  dut_.runtime().RunUntilIdle();
+  ASSERT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
+      [&]() { return set_connected_false_received.signaled(); }, zx::duration::infinite()));
+  dut_.runtime().RunUntilIdle();
+
+  ASSERT_TRUE(fake_dci.has_deferred_set_connected());
+
+  // Stopping the driver while SetConnected(false) is still in flight drops the pending FIDL call
+  // and synchronously completes the deferred PowerDownCore() before Stop() finishes. The connection
+  // watcher is never re-armed after that (the driver is gone), so the fake PHY must not expect a
+  // pending hanging get at the end of the test.
+  dut_.RunInEnvironmentTypeContext(
+      [](Environment& env) { env.usb_phy().set_expect_connection_status_observer_call(false); });
+  EXPECT_OK(dut_.StopDriver().status_value());
+
+  zx_signals_t observed = 0;
+  EXPECT_OK(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
+  EXPECT_NE(observed & ZX_EVENTPAIR_PEER_CLOSED, 0u);
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    EXPECT_FALSE(env.vreg().enabled());
+    EXPECT_FALSE(env.clock_core().enabled());
+    EXPECT_FALSE(env.usb_phy().has_completer());
+  });
 }
 
 TEST_F(UnmanagedTestFixture, SetConfigurationPreservesEp0AndIgnoresStaleCompletionAcrossBusReset) {
@@ -1815,13 +1782,158 @@ TEST_F(UnmanagedTestFixture, StartPeripheralModeRestoresCoreRegistersAfterExtern
   ASSERT_TRUE(start_res.value().is_ok());
 
   EXPECT_EQ(gsbuscfg0_val->load(), 0xabcd0002u);
-  EXPECT_EQ(GUCTL2::Get().FromValue(guctl2_val->load()).Rst_actbitlater(), 1u);
+  EXPECT_EQ(GUCTL2::Get().FromValue(guctl2_val->load()).Rst_actbitlater(), 0u);
   auto gfladj = GFLADJ::Get().FromValue(gfladj_val->load());
   EXPECT_EQ(gfladj.GFLADJ_30MHZ(), 0x20u);
   EXPECT_EQ(gfladj.GFLADJ_30MHZ_SDBND_SEL(), 1u);
   EXPECT_EQ(gfladj.GFLADJ_REFCLK_LPM_SEL(), 1u);
 
   TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, ResetHwRestoresPrtcapdirDevice) {
+  auto gctl_val = std::make_shared<std::atomic<uint32_t>>(0);
+
+  auto cleanup_callbacks = fit::defer([&]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[GCTL::Get().addr()].SetReadCallback([]() -> uint64_t { return 0; });
+      env.reg_region()[GCTL::Get().addr()].SetWriteCallback([](uint64_t) {});
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([gctl_val](Environment& env) {
+    // Simulate register state where GCTL.PRTCAPDIR is 0 (hardware default after CSFTRST).
+    auto& gctl_reg = env.reg_region()[GCTL::Get().addr()];
+    gctl_reg.SetReadCallback([gctl_val]() -> uint64_t { return gctl_val->load(); });
+    gctl_reg.SetWriteCallback(
+        [gctl_val](uint64_t val) { gctl_val->store(static_cast<uint32_t>(val)); });
+    gctl_val->store(GCTL::Get().FromValue(0).reg_value());
+  });
+
+  zx::result start = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = true;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_TRUE(start.is_ok());
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    auto gctl =
+        GCTL::Get().FromValue(static_cast<uint32_t>(env.reg_region()[GCTL::Get().addr()].Read()));
+    EXPECT_EQ(gctl.PRTCAPDIR(), GCTL::PRTCAPDIR_DEVICE);
+  });
+
+  EXPECT_EQ(ZX_OK, dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, Usb2OnlyModeConfiguredFromPhyMetadata) {
+  auto guctl1_val = std::make_shared<std::atomic<uint32_t>>(0);
+  auto dcfg_val = std::make_shared<std::atomic<uint32_t>>(0);
+
+  dut_.RunInEnvironmentTypeContext([guctl1_val, dcfg_val](Environment& env) {
+    fphy::Metadata metadata;
+    std::vector<fphy::UsbPhyMode> modes;
+    modes.push_back(fphy::UsbPhyMode{{
+        .protocol = fphy::ProtocolVersion::kUsb20,
+        .dr_mode = fphy::Mode::kPeripheral,
+        .is_otg_capable = false,
+    }});
+    metadata.usb_phy_modes() = std::move(modes);
+    env.SetPhyMetadata(std::move(metadata));
+
+    env.reg_region()[GUCTL1::Get().addr()].SetWriteCallback(
+        [guctl1_val](uint64_t val) { guctl1_val->store(static_cast<uint32_t>(val)); });
+    env.reg_region()[DCFG::Get().addr()].SetWriteCallback(
+        [dcfg_val](uint64_t val) { dcfg_val->store(static_cast<uint32_t>(val)); });
+  });
+
+  zx::result start = dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+    dwc3_config::Config cfg;
+    cfg.enable_suspend() = false;
+    cfg.bypass_platform_extension() = true;
+    args.config(cfg.ToVmo());
+  });
+  ASSERT_OK(start);
+  dut_.runtime().RunUntilIdle();
+  ASSERT_OK(WaitForPhy());
+
+  dut_.RunInDriverContext(
+      [](Dwc3& drv) { EXPECT_EQ(drv.max_speed(), fdescriptor::UsbSpeed::kHigh); });
+
+  auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_OK(dci_service.status_value());
+  fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
+  ASSERT_OK(dci->StartController().status());
+
+  TriggerConnectionPlugIn(fdescriptor::UsbSpeed::kHigh);
+
+  dut_.runtime().RunUntil([&]() {
+    return dut_.RunInDriverContext<bool>(
+        [](Dwc3& drv) { return Dwc3TestHelper::GetPowerOn(drv) && Dwc3TestHelper::IsActive(drv); });
+  });
+
+  EXPECT_EQ(GUCTL1::Get().FromValue(guctl1_val->load()).DEV_FORCE_20_CLK_FOR_30_CLK(), 1u);
+  EXPECT_EQ(DCFG::Get().FromValue(dcfg_val->load()).DEVSPD(), DCFG::DEVSPD_HIGH);
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, FailedConnectPowersDownNotifiesPhyAndRearmsWatcher) {
+  ASSERT_OK(dut_.StartDriverWithCustomStartArgs([](fdf::DriverStartArgs& args) {
+                  dwc3_config::Config cfg;
+                  cfg.enable_suspend() = false;
+                  cfg.bypass_platform_extension() = true;
+                  args.config(cfg.ToVmo());
+                })
+                .status_value());
+  ASSERT_OK(WaitForPhy());
+
+  zx::eventpair lease_client, lease_peer;
+  ASSERT_OK(zx::eventpair::create(0, &lease_client, &lease_peer));
+
+  size_t disconnected_reports_before = 0;
+  dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+    disconnected_reports_before = env.usb_phy().disconnected_reports();
+    env.usb_phy().completion()->Reset();
+  });
+
+  // Force DCTL.CSFTRST to stay asserted so ResetHw() times out on connect.
+  stuck_reset_test_.store(true);
+  auto clear_stuck_reset = fit::defer([this]() { stuck_reset_test_.store(false); });
+
+  dut_.RunInEnvironmentTypeContext(
+      [&](Environment& env) { env.usb_phy().TriggerConnection(true, std::move(lease_client)); });
+  dut_.runtime().RunUntilIdle();
+
+  // Watcher must re-arm and PHY must receive ConnectStatusChanged(false) with core off.
+  ASSERT_OK(WaitForPhy());
+  EXPECT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        size_t reports = 0;
+        dut_.RunInEnvironmentTypeContext(
+            [&](Environment& env) { reports = env.usb_phy().disconnected_reports(); });
+        return reports == disconnected_reports_before + 1;
+      },
+      zx::duration::infinite()));
+
+  dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+    EXPECT_EQ(env.usb_phy().connected_reports(), 0u);
+    EXPECT_EQ(env.usb_phy().disconnected_reports(), disconnected_reports_before + 1);
+  });
+
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    EXPECT_FALSE(Dwc3TestHelper::GetPowerOn(drv));
+    EXPECT_FALSE(Dwc3TestHelper::HasConnectionLease(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetConnectFailures(drv), 1u);
+  });
+
+  zx_signals_t observed = 0;
+  EXPECT_OK(lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
+  EXPECT_NE(observed & ZX_EVENTPAIR_PEER_CLOSED, 0u);
+
+  stuck_reset_test_.store(false);
+  EXPECT_OK(dut_.StopDriver().status_value());
 }
 
 }  // namespace dwc3

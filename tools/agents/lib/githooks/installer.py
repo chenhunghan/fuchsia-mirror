@@ -17,6 +17,7 @@ __all__ = [
     "DEFAULT_HOOK_NAMES",
     "HookOperationResult",
     "HookStatusResult",
+    "LEGACY_FRAGMENT_NAMES",
     "LEGACY_HOOK_NAMES",
     "get_git_hooks_status",
     "install_git_hook",
@@ -52,29 +53,17 @@ class HookStatusResult:
     configured_repos: int
 
 
-AGENT_FRAGMENT_NAME = "10-fuchsia-agent.sh"
-DEFAULT_HOOK_NAMES: tuple[str, ...] = ("pre-push", "commit-msg")
-LEGACY_HOOK_NAMES: tuple[str, ...] = ("pre-commit",)
+AGENT_FRAGMENT_NAME = "20-fuchsia-agent.sh"
+LEGACY_FRAGMENT_NAMES: tuple[str, ...] = ("10-fuchsia-agent.sh",)
+DEFAULT_HOOK_NAMES: tuple[str, ...] = ("pre-commit", "commit-msg")
+LEGACY_HOOK_NAMES: tuple[str, ...] = ("pre-push",)
 
 AGENT_FRAGMENT_TEMPLATE = """#!/bin/sh
 # ==============================================================================
 # @managed-by: fx agents
 # ==============================================================================
 
-case "$FUCHSIA_SKIP_HOOKS" in
-  1|true|yes|on) exit 0 ;;
-esac
-
-if [ "{hook_name}" = "pre-commit" ]; then
-  case "$FUCHSIA_FORCE_HOOKS" in
-    1|true|yes|on) ;;
-    *)
-      if [ -z "$ANTIGRAVITY_AGENT" ] && [ -z "$GEMINI_CLI" ] && [ -z "$ANTIGRAVITY_EDITOR_APP_ROOT" ]; then
-        exit 0
-      fi
-      ;;
-  esac
-fi
+[ "$FUCHSIA_SKIP_HOOKS" = "1" ] && exit 0
 
 find_fuchsia_root() {{
   DIR="$1"
@@ -138,6 +127,8 @@ def install_git_hook(
         return agent_fragment
 
     hook_d.mkdir(parents=True, exist_ok=True)
+    for legacy_name in LEGACY_FRAGMENT_NAMES:
+        (hook_d / legacy_name).unlink(missing_ok=True)
 
     args_str = (
         f" {' '.join(shlex.quote(a) for a in script_args)}"
@@ -145,7 +136,7 @@ def install_git_hook(
         else ""
     )
     final_fragment_content = AGENT_FRAGMENT_TEMPLATE.format(
-        script_path=script_path, args_str=args_str, hook_name=hook_name
+        script_path=script_path, args_str=args_str
     )
 
     agent_fragment.write_text(final_fragment_content, encoding="utf-8")
@@ -173,14 +164,23 @@ def uninstall_git_hook(
     """
     if hooks_dir is None:
         hooks_dir = get_hooks_dir(repo_dir)
-    agent_fragment = hooks_dir / f"{hook_name}.d" / AGENT_FRAGMENT_NAME
+    hook_d = hooks_dir / f"{hook_name}.d"
+    agent_fragment = hook_d / AGENT_FRAGMENT_NAME
+    has_agent_fragment = agent_fragment.is_file()
+    legacy_fragments = [
+        hook_d / name
+        for name in LEGACY_FRAGMENT_NAMES
+        if (hook_d / name).is_file()
+    ]
 
-    if not agent_fragment.is_file():
+    if not has_agent_fragment and not legacy_fragments:
         return None
 
     if not dry_run:
-        agent_fragment.unlink()
-    return agent_fragment
+        agent_fragment.unlink(missing_ok=True)
+        for legacy_fragment in legacy_fragments:
+            legacy_fragment.unlink(missing_ok=True)
+    return agent_fragment if has_agent_fragment else legacy_fragments[0]
 
 
 def install_git_hooks(
@@ -192,7 +192,7 @@ def install_git_hooks(
 
     Args:
         fuchsia_dir: Root directory of the Fuchsia checkout.
-        hook_names: Base hook names to install (defaults to 'pre-push' and 'commit-msg').
+        hook_names: Base hook names to install (defaults to 'pre-commit' and 'commit-msg').
         dry_run: If True, do not modify files on disk.
 
     Returns:
@@ -210,7 +210,7 @@ def install_git_hooks(
             failed.append((repo, str(e)))
             continue
 
-        # Actively clean up legacy pre-commit hook fragment if not being installed
+        # Actively clean up legacy pre-push hook fragment if not being installed
         for legacy_hook in LEGACY_HOOK_NAMES:
             if legacy_hook not in hook_names:
                 try:
@@ -249,7 +249,7 @@ def uninstall_git_hooks(
 
     Args:
         fuchsia_dir: Root directory of the Fuchsia checkout.
-        hook_names: Base hook names to uninstall (defaults to 'pre-push' and 'commit-msg').
+        hook_names: Base hook names to uninstall (defaults to 'pre-commit' and 'commit-msg').
         dry_run: If True, do not modify files on disk.
 
     Returns:
@@ -295,7 +295,7 @@ def get_git_hooks_status(
 
     Args:
         fuchsia_dir: Root directory of the Fuchsia checkout.
-        hook_names: Base hook names to check (defaults to 'pre-push' and 'commit-msg').
+        hook_names: Base hook names to check (defaults to 'pre-commit' and 'commit-msg').
 
     Returns:
         HookStatusResult with total and configured repository counts.

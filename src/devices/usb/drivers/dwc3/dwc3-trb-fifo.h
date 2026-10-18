@@ -5,6 +5,9 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_DWC3_DWC3_TRB_FIFO_H_
 #define SRC_DEVICES_USB_DRIVERS_DWC3_DWC3_TRB_FIFO_H_
 
+#include <cstdint>
+#include <memory>
+
 #include "src/devices/usb/drivers/dwc3/dwc3-fifo.h"
 #include "src/devices/usb/drivers/dwc3/dwc3-types.h"
 
@@ -39,9 +42,27 @@ class TrbFifo : public Fifo<dwc3_trb_t> {
         return status.take_error();
       }
     } else {
-      Reset();
+      const size_t len = (last_ - first_) * sizeof(dwc3_trb_t);
+      if (auto status = buffer_->ExecuteWriteOps(
+              0, len,
+              [&](uint8_t* ptr) {
+                auto trbs = reinterpret_cast<dwc3_trb_t*>(ptr);
+                for (size_t i = 0; i < static_cast<size_t>(last_ - first_); i++) {
+                  trbs[i].control = 0;
+                }
+              });
+          status.is_error()) {
+        fdf::error("ExecuteWriteOps failed: {}", status);
+        return status.take_error();
+      }
     }
+    trb_sizes_ = std::make_unique<uint32_t[]>(TotalSlots());
     return zx::ok();
+  }
+
+  void Release() override {
+    trb_sizes_.reset();
+    Fifo::Release();
   }
 
   zx::result<dwc3_trb_t> ReadOne() {
@@ -56,7 +77,20 @@ class TrbFifo : public Fifo<dwc3_trb_t> {
 
   dwc3_trb_t* current_read() { return read_; }
 
-  dwc3_trb_t* AdvanceWrite() { return Fifo::Advance(write_); }
+  // Returns the requested transfer size recorded for the TRB at |read_|.
+  uint32_t current_read_size() const {
+    ZX_DEBUG_ASSERT(trb_sizes_ != nullptr);
+    return trb_sizes_[read_ - first_];
+  }
+
+  // Advances the write pointer, recording |trb_size| for the allocated TRB
+  // slot so completed bytes can be computed after hardware overwrites the TRB
+  // status field with the residual byte count.
+  dwc3_trb_t* AdvanceWrite(uint32_t trb_size = 0) {
+    ZX_DEBUG_ASSERT(trb_sizes_ != nullptr);
+    trb_sizes_[write_ - first_] = trb_size;
+    return Fifo::Advance(write_);
+  }
   void AdvanceRead() {
     if (read_ == write_) {
       fdf::error("Advancing read_ past write_. Invalid!");
@@ -65,25 +99,23 @@ class TrbFifo : public Fifo<dwc3_trb_t> {
     Fifo::Advance(read_);
   }
 
-  void Reset() {
-    if (!buffer_) {
-      return;
+  // Retires `count` active TRBs from the ring after hardware DMA on those descriptors has ended,
+  // clearing TRB_HWO, flushing the descriptor write to memory, and advancing `read_`.
+  void SkipTrbs(size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      ZX_ASSERT_MSG(!IsEmpty(), "Skipping more TRBs than queued in FIFO (%zu/%zu)", i, count);
+      dwc3_trb_t* trb = current_read();
+      trb->control &= ~TRB_HWO;
+      Write(trb);
+      AdvanceRead();
     }
-    const size_t len = (last_ - first_) * sizeof(dwc3_trb_t);
-    if (auto status = buffer_->ExecuteWriteOps(
-            0, len,
-            [&](uint8_t* ptr) {
-              auto trbs = reinterpret_cast<dwc3_trb_t*>(ptr);
-              for (size_t i = 0; i < static_cast<size_t>(last_ - first_); i++) {
-                trbs[i].control = 0;
-              }
-            });
-        status.is_error()) {
-      fdf::error("ExecuteWriteOps failed: {}", status);
-    }
-    write_ = first_;
-    read_ = write_;
   }
+
+  size_t MaxAvailableSlots() const { return TotalSlots() - 1; }
+
+ private:
+  // Stores the requested transfer size for each TRB slot in the FIFO.
+  std::unique_ptr<uint32_t[]> trb_sizes_;
 };
 
 }  // namespace dwc3

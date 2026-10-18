@@ -85,25 +85,34 @@ void MsdVsiConnection::QueueReleasedMappings(std::vector<std::shared_ptr<GpuMapp
   bool killed = false;
   for (const auto& mapping : mappings) {
     size_t use_count = mapping.use_count();
-    if (use_count == 1) {
-      // Bus mappings are held in the connection and passed through the command stream to
-      // ensure the memory isn't released until the tlbs are invalidated, which happens
-      // when the MappingReleaseBatch completes.
-      std::vector<std::unique_ptr<magma::PlatformBusMapper::BusMapping>> bus_mappings;
-      mapping->Release(&bus_mappings);
-      for (uint32_t i = 0; i < bus_mappings.size(); i++) {
-        mappings_to_release_.emplace_back(std::move(bus_mappings[i]));
-      }
-    } else {
+    if (use_count > 1) {
       // It's an error to release a buffer while it has inflight mappings, as that
-      // can fault the gpu.
+      // can fault the gpu.  Shutdown the connection and also hold the mappings (below).
+      // The inflight commands will run to completion, but the connection destructor ensures
+      // that a MappingReleaseBatch runs afterward to flush the TLBs before the memory is freed.
       MAGMA_LOG(WARNING, "buffer %lu mapping use_count %zd", mapping->BufferId(), use_count);
       if (!killed) {
         SendContextKilled();
         killed = true;
       }
     }
+
+    // Bus mappings are held in the connection and passed through the command stream to
+    // ensure the memory isn't released until the tlbs are invalidated, which happens
+    // when the MappingReleaseBatch completes.
+    std::vector<std::unique_ptr<magma::PlatformBusMapper::BusMapping>> bus_mappings;
+    mapping->Release(&bus_mappings);
+    for (uint32_t i = 0; i < bus_mappings.size(); i++) {
+      mappings_to_release_.emplace_back(std::move(bus_mappings[i]));
+    }
   }
+
+  auto address_space_mappings = address_space_->ExtractPendingReleaseMappings();
+  for (auto& mapping : address_space_mappings) {
+    mappings_to_release_.emplace_back(std::move(mapping));
+  }
+
+  address_space_dirty_ = true;
 }
 
 bool MsdVsiConnection::ReleaseMapping(magma::PlatformBuffer* buffer, uint64_t gpu_va) {
@@ -114,7 +123,6 @@ bool MsdVsiConnection::ReleaseMapping(magma::PlatformBuffer* buffer, uint64_t gp
   }
   std::vector<std::shared_ptr<GpuMapping>> mappings = {std::move(mapping)};
   QueueReleasedMappings(std::move(mappings));
-  address_space_dirty_ = true;
 
   return true;
 }
@@ -126,15 +134,35 @@ void MsdVsiConnection::ReleaseBuffer(magma::PlatformBuffer* buffer) {
 }
 
 bool MsdVsiConnection::SubmitPendingReleaseMappings(std::shared_ptr<MsdVsiContext> context) {
-  if (!mappings_to_release_.empty()) {
-    magma::Status status =
-        SubmitBatch(std::make_unique<MappingReleaseBatch>(context, std::move(mappings_to_release_)),
-                    true /* do_flush */);
-    mappings_to_release_.clear();
-    if (!status.ok()) {
-      MAGMA_LOG(ERROR, "Failed to submit mapping release batch: %d", status.get());
-      return false;
-    }
+  if (mappings_to_release_.empty()) {
+    return true;
   }
+
+  DASSERT(context);
+  magma::Status status =
+      SubmitBatch(std::make_unique<MappingReleaseBatch>(context, std::move(mappings_to_release_)),
+                  true /* do_flush */);
+  mappings_to_release_.clear();
+  if (!status.ok()) {
+    MAGMA_LOG(ERROR, "Failed to submit mapping release batch: %d", status.get());
+    return false;
+  }
+
   return true;
 }
+
+// static
+std::shared_ptr<MsdVsiConnection> MsdVsiConnection::Create(
+    Owner* owner, std::shared_ptr<AddressSpace> address_space, msd::msd_client_id_t client_id) {
+  auto connection = std::shared_ptr<MsdVsiConnection>(
+      new MsdVsiConnection(owner, std::move(address_space), client_id));
+  connection->internal_context_ =
+      MsdVsiContext::Create(connection, connection->address_space(), connection->GetRingbuffer());
+  if (!connection->internal_context_) {
+    MAGMA_LOG(ERROR, "Failed to create internal context");
+    return nullptr;
+  }
+  return connection;
+}
+
+MsdVsiConnection::~MsdVsiConnection() { SubmitPendingReleaseMappings(internal_context_); }

@@ -10,9 +10,10 @@
 //! time that CPU spent running stalling and progressing threads. `StallAggregator` periodically
 //! flushes them and turns them into the system-wide stats reported by `ZX_INFO_MEMORY_STALL`.
 
-use crate::arch_rs::InterruptDisableGuard;
+use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
 use crate::kernel::percpu::PerCpu;
-use crate::kernel::thread;
+use crate::kernel::thread::{self, Thread, ThreadStallState};
+use crate::kernel::types::{INVALID_CPU, cpu_num_t};
 use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time};
 use core::convert::Infallible;
 use core::ffi::c_void;
@@ -22,12 +23,6 @@ use core::ptr::NonNull;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, UniquePtr};
 use pin_init::{InPlaceWrite as _, PinInit, pin_data, pin_init};
 use zx_status::Status;
-use zx_types::{zx_duration_mono_t, zx_status_t};
-
-unsafe extern "C" {
-    fn cpp_stall_observer_event_receiver_on_above_threshold(this: *mut c_void);
-    fn cpp_stall_observer_event_receiver_on_below_threshold(this: *mut c_void);
-}
 
 /// The interval at which the sampling thread aggregates the per-CPU accumulators, i.e. the
 /// duration that one sample covers.
@@ -172,6 +167,136 @@ impl StallAccumulator {
     }
 }
 
+/// The stall states of the two threads involved in a context switch, after
+/// [`apply_context_switch_states`] has accounted for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContextSwitchStallStates {
+    /// The outgoing thread's stall state.
+    current_thread: ThreadStallState,
+
+    /// The incoming thread's stall state.
+    next_thread: ThreadStallState,
+}
+
+/// Works out how a context switch moves the two threads' stall contributions.
+///
+/// `next_thread_last_cpu` is the incoming thread's `SchedulerState::last_cpu()`, and
+/// `current_cpu` is the CPU the switch is happening on. This is the part of
+/// [`apply_context_switch`] that does not touch the threads themselves, so that it can be tested
+/// without any.
+#[inline]
+fn apply_context_switch_states(
+    current_thread_state: ThreadStallState,
+    next_thread_state: ThreadStallState,
+    next_thread_last_cpu: cpu_num_t,
+    current_cpu: cpu_num_t,
+) -> ContextSwitchStallStates {
+    let mut local_op_progressing = 0;
+    let mut local_op_stalling = 0;
+
+    let mut updated = ContextSwitchStallStates {
+        current_thread: current_thread_state,
+        next_thread: next_thread_state,
+    };
+
+    // If the current thread is not stalling, remove it from the number of progressing threads.
+    if current_thread_state == ThreadStallState::Progressing {
+        updated.current_thread = ThreadStallState::Inactive;
+        local_op_progressing -= 1;
+    }
+
+    // If the next thread has been migrated while stalling, move its stall to the current CPU.
+    if next_thread_state == ThreadStallState::Stalling && next_thread_last_cpu != current_cpu {
+        // Unmark the thread as stalling on its last CPU.
+        debug_assert!(
+            next_thread_last_cpu != INVALID_CPU,
+            "Stalling threads must have run at least once"
+        );
+        let last_accumulator = &PerCpu::get(next_thread_last_cpu).memory_stall_accumulator;
+        last_accumulator.update_with_irq_disabled(0, -1);
+
+        // We now have new a stalling thread tied to the current_cpu.
+        local_op_stalling += 1;
+    }
+
+    // If the next thread is not stalling, add it to the local counter.
+    if next_thread_state == ThreadStallState::Inactive {
+        updated.next_thread = ThreadStallState::Progressing;
+        local_op_progressing += 1;
+    }
+
+    // Propagate changes (we can skip this to be faster if there are no changes).
+    if local_op_progressing != 0 || local_op_stalling != 0 {
+        let local_accumulator = &PerCpu::get(current_cpu).memory_stall_accumulator;
+        local_accumulator.update_with_irq_disabled(local_op_progressing, local_op_stalling);
+    }
+
+    updated
+}
+
+/// Moves the stall contributions of the outgoing and incoming threads across a context switch.
+///
+/// Internally called by the scheduler at every context switch.
+///
+/// # Safety
+///
+/// - `current_thread` and `next_thread` must point to valid, initialized, distinct `Thread`
+///   instances that remain alive for the duration of the call, and the caller must hold both of
+///   their locks (matching `StallAccumulator::ApplyContextSwitch`'s `TA_REQ`).
+/// - Interrupts (and thus preemption) must be disabled on the calling CPU, with exclusive access
+///   to both threads' `memory_stall_state_`.
+/// - `next_thread` must be the thread being switched to on the calling CPU.
+#[inline]
+pub unsafe fn apply_context_switch(current_thread: *mut Thread, next_thread: *mut Thread) {
+    let current_cpu = curr_cpu_num();
+
+    // SAFETY: The caller guarantees `current_thread` and `next_thread` are valid, live `Thread`s,
+    // holds both of their locks, and has interrupts/preemption disabled with no concurrent writes
+    // to `memory_stall_state_`.
+    let (current_thread_state, next_thread_state, next_thread_last_cpu) = unsafe {
+        let next_state = thread::scheduler_state(next_thread);
+        debug_assert_eq!(next_state.curr_cpu(), current_cpu);
+        (
+            thread::memory_stall_state(current_thread),
+            thread::memory_stall_state(next_thread),
+            next_state.last_cpu(),
+        )
+    };
+
+    let updated = apply_context_switch_states(
+        current_thread_state,
+        next_thread_state,
+        next_thread_last_cpu,
+        current_cpu,
+    );
+
+    // SAFETY: The caller guarantees `current_thread` and `next_thread` are valid, live, distinct
+    // `Thread`s and has interrupts/preemption disabled with exclusive access to both threads'
+    // `memory_stall_state_`.
+    unsafe {
+        if updated.current_thread != current_thread_state {
+            thread::set_memory_stall_state(current_thread, updated.current_thread);
+        }
+        if updated.next_thread != next_thread_state {
+            thread::set_memory_stall_state(next_thread, updated.next_thread);
+        }
+    }
+}
+
+/// Accounts for a context switch between two threads. See [`apply_context_switch`].
+///
+/// # Safety
+///
+/// See [`apply_context_switch`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_stall_apply_context_switch(
+    current_thread: *mut Thread,
+    next_thread: *mut Thread,
+) {
+    // SAFETY: The caller guarantees all safety preconditions of `apply_context_switch`.
+    unsafe { apply_context_switch(current_thread, next_thread) };
+}
+
 /// Initializes the `StallAccumulator` held by a `struct percpu`.
 ///
 /// # Safety
@@ -198,48 +323,13 @@ pub extern "C" fn rust_stall_accumulator_update(
     accumulator.update(op_contributors_progressing, op_contributors_stalling);
 }
 
-/// Alters the accumulator's contributor counts by the given amount, assuming interrupts are
-/// already disabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_stall_accumulator_update_no_irq(
-    accumulator: &StallAccumulator,
-    op_contributors_progressing: i32,
-    op_contributors_stalling: i32,
-) {
-    accumulator.update_with_irq_disabled(op_contributors_progressing, op_contributors_stalling);
-}
-
-/// Reads the accumulator's current stats into `out_stats` and resets them to zero.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_stall_accumulator_flush(
-    accumulator: &StallAccumulator,
-    out_stats: &mut AccumulatorStats,
-) {
-    *out_stats = accumulator.flush();
-}
-
 /// Receives notifications when a [`StallObserver`] crosses its configured threshold.
-pub trait EventReceiver {
+pub trait EventReceiver: Sync {
     /// Called when the sum of the stored samples reached or exceeded the threshold.
     fn on_above_threshold(&self);
 
     /// Called when the sum of the stored samples fell below the threshold.
     fn on_below_threshold(&self);
-}
-
-pub struct CppEventReceiver;
-
-impl EventReceiver for CppEventReceiver {
-    fn on_above_threshold(&self) {
-        unsafe {
-            cpp_stall_observer_event_receiver_on_above_threshold(self as *const Self as *mut c_void)
-        }
-    }
-    fn on_below_threshold(&self) {
-        unsafe {
-            cpp_stall_observer_event_receiver_on_below_threshold(self as *const Self as *mut c_void)
-        }
-    }
 }
 
 /// A stall observer that keeps a circular queue with the last N samples (where N corresponds to
@@ -252,11 +342,17 @@ impl EventReceiver for CppEventReceiver {
 /// This type doesn't need to be thread safe because all its usages are protected by the
 /// [`StallAggregator`]'s `observers_lock`.
 #[derive(DoublyLinkedListContainable, fbl::Recyclable)]
+#[pin_data]
 pub struct StallObserver {
+    #[pin]
     #[dll_node]
     node: DoublyLinkedListNode<StallObserver>,
 
     threshold: DurationMono,
+    // Safety invariant: `event_receiver` points to a valid, initialized `EventReceiver` instance
+    // that outlives `self`, does not move while `self` is registered in a `StallAggregator`, and
+    // satisfies shared-reference (`&dyn EventReceiver`) aliasing rules whenever `push_sample` is
+    // called.
     event_receiver: NonNull<dyn EventReceiver>,
 
     /// Circular queue of samples.
@@ -271,7 +367,10 @@ impl StallObserver {
     ///
     /// # Safety
     ///
-    /// `event_receiver` must outlive the returned observer.
+    /// The caller must ensure that `event_receiver` is properly aligned and points to a valid,
+    /// initialized `EventReceiver` that outlives the returned observer, does not move while the
+    /// observer is registered in a [`StallAggregator`], and can be borrowed as
+    /// `&dyn EventReceiver` whenever [`Self::push_sample`] is called.
     pub unsafe fn create(
         threshold: DurationMono,
         window: DurationMono,
@@ -296,20 +395,28 @@ impl StallObserver {
         .map_err(|_| Status::NO_MEMORY)
     }
 
+    /// Returns whether this observer notifies the receiver living at `receiver`.
+    fn notifies(&self, receiver: *const ()) -> bool {
+        core::ptr::eq(self.event_receiver.as_ptr() as *const (), receiver)
+    }
+
     /// Stores `sample`, evicting the oldest one, and notifies the event receiver.
-    pub fn push_sample(&mut self, sample: DurationMono) {
-        self.samples_sum = self.samples_sum + (sample - self.samples[self.samples_pos]);
-        self.samples[self.samples_pos] = sample;
-        self.samples_pos += 1;
-        if self.samples_pos == self.samples.len() {
-            self.samples_pos = 0;
+    pub fn push_sample(self: Pin<&mut Self>, sample: DurationMono) {
+        let this = self.project();
+        *this.samples_sum = *this.samples_sum + (sample - this.samples[*this.samples_pos]);
+        this.samples[*this.samples_pos] = sample;
+        *this.samples_pos += 1;
+        if *this.samples_pos == this.samples.len() {
+            *this.samples_pos = 0;
         }
 
-        // SAFETY: the observer's creator guarantees that the receiver outlives it, and removing
-        // an observer from the aggregator before dropping it is what keeps the sampling thread
-        // from being inside this call when that happens.
-        let event_receiver = unsafe { self.event_receiver.as_ref() };
-        if self.samples_sum >= self.threshold {
+        // SAFETY: By the safety invariant on `self.event_receiver`, the pointee is a valid,
+        // initialized `EventReceiver` that outlives `self` and satisfies shared-reference aliasing
+        // while `self` is alive; removing an observer from the aggregator under `observers_lock`
+        // before dropping the receiver ensures the sampling thread is not inside this call when
+        // the receiver is destroyed.
+        let event_receiver = unsafe { this.event_receiver.as_ref() };
+        if *this.samples_sum >= *this.threshold {
             event_receiver.on_above_threshold();
         } else {
             event_receiver.on_below_threshold();
@@ -330,16 +437,16 @@ pub struct AggregatorStats {
 
 /// The two observer lists, which the aggregator's `observers_lock` guards together.
 ///
-/// The lists are non-owning: an observer is owned by whoever created it and must be removed from
-/// here before being destroyed. `sample_once` holds `observers_lock` for the whole notification
-/// loop, so removal under that lock is also what guarantees the sampling thread is not part way
-/// through a callback when the observer dies.
+/// The lists own their observers: registering one hands it over, and unregistering destroys it.
+/// That is what keeps the sampling thread from being part way through an observer's callback
+/// when it goes away, because `sample_once` holds `observers_lock` for the whole notification
+/// loop.
 #[pin_data]
 struct Observers {
     #[pin]
-    some: DoublyLinkedList<*mut StallObserver>,
+    some: DoublyLinkedList<UniquePtr<StallObserver>>,
     #[pin]
-    full: DoublyLinkedList<*mut StallObserver>,
+    full: DoublyLinkedList<UniquePtr<StallObserver>>,
 }
 
 /// Maintains system-wide stall stats by periodically aggregating measurements from per-CPU
@@ -359,16 +466,10 @@ pub struct StallAggregator {
     observers: Observers,
 }
 
-// SAFETY: The observer pointers held by `Observers`' lists are only ever reachable with the
-// aggregator's `observers_lock` held, and the observers themselves are owned by whoever registered
-// them. Ownership of the lists can therefore be moved between threads, which is what the C++
-// implementation does by placing a `StallAggregator` in shared storage and serializing all access
-// on its `DECLARE_CRITICAL_MUTEX`.
-//
-// Note that this makes the sampling thread call `push_sample`, and through it the observer's
-// `EventReceiverRef` callbacks, on a thread other than the one that registered the observer. The
-// only production receiver is `MemoryStallEventDispatcher`, whose `UpdateState` takes the
-// dispatcher's lock, so that is sound.
+// SAFETY: The observers held by `Observers`' lists are only ever reachable with the aggregator's
+// `observers_lock` held, and `EventReceiver: Sync` guarantees that invoking the receiver's
+// callbacks from the sampling thread is sound. Ownership of the lists can therefore be moved
+// between threads.
 unsafe impl Send for Observers {}
 
 /// The singleton instance, constructed by `init_stall_aggregator` during boot.
@@ -408,57 +509,61 @@ impl StallAggregator {
     }
 
     /// Runs `func` on the observer lists with `observers_lock` held.
-    fn with_observers<R>(&self, func: impl FnOnce(&mut Observers) -> R) -> R {
+    fn with_observers<R>(&self, func: impl FnOnce(Pin<&mut Observers>) -> R) -> R {
         ksync::lock!(let mut guard = self.lock_observers_lock());
-        // SAFETY: `observers` is structurally pinned inside the pinned aggregator; taking a `&mut`
-        // reference to it never moves it.
-        func(unsafe { guard.as_mut().observers_mut().get_unchecked_mut() })
+        func(guard.as_mut().observers_mut())
     }
 
-    /// Registers `observer` to be notified of the "some" stall time.
-    ///
-    /// # Safety
-    ///
-    /// `observer` must point at a live observer that is not in any list, and it must be passed to
-    /// [`Self::remove_observer_some`] before it is destroyed.
-    pub unsafe fn add_observer_some(&self, observer: NonNull<StallObserver>) {
-        // SAFETY: Guaranteed by this function's contract.
-        self.with_observers(|observers| unsafe { observers.some.push_back_raw(observer.as_ptr()) });
+    /// Registers `observer` to be notified of the "some" stall time, taking ownership of it.
+    pub fn add_observer_some(&self, observer: UniquePtr<StallObserver>) {
+        self.with_observers(|observers| observers.project().some.push_back(observer));
     }
 
-    /// Unregisters an observer previously passed to [`Self::add_observer_some`].
+    /// Destroys the "some" observer that notifies `receiver`, if there is one.
     ///
-    /// # Safety
+    /// Returns whether one was found. A receiver calls this to unregister itself; because
+    /// registering handed the observer over, unregistering is also what destroys it.
     ///
-    /// `observer` must currently be registered in the "some" list. Passing one that is registered
-    /// in the "full" list instead would unlink it through its own neighbours and leave that list's
-    /// head dangling.
-    pub unsafe fn remove_observer_some(&self, observer: &StallObserver) {
-        // SAFETY: Guaranteed by this function's contract.
-        self.with_observers(|observers| unsafe { observers.some.erase(observer) });
+    /// # Safety-usable invariant
+    ///
+    /// Acquires `observers_lock` (waiting for any in-flight `sample_once` notification loop to
+    /// complete) and unlinks and drops the first observer in the "some" list whose
+    /// `event_receiver` address equals `receiver as *const R as *const ()`. If at most one
+    /// observer for `receiver` was registered in this list and `receiver` has not moved since
+    /// [`StallObserver::create`], that observer is destroyed and will never notify `receiver`
+    /// again after this call returns.
+    pub fn remove_observer_some<R: EventReceiver>(&self, receiver: &R) -> bool {
+        let receiver = receiver as *const R as *const ();
+        let removed = self.with_observers(|observers| {
+            observers.project().some.erase_if(|o| o.notifies(receiver))
+        });
+        removed.is_some()
     }
 
-    /// Registers `observer` to be notified of the "full" stall time.
-    ///
-    /// # Safety
-    ///
-    /// `observer` must point at a live observer that is not in any list, and it must be passed to
-    /// [`Self::remove_observer_full`] before it is destroyed.
-    pub unsafe fn add_observer_full(&self, observer: NonNull<StallObserver>) {
-        // SAFETY: Guaranteed by this function's contract.
-        self.with_observers(|observers| unsafe { observers.full.push_back_raw(observer.as_ptr()) });
+    /// Registers `observer` to be notified of the "full" stall time, taking ownership of it.
+    pub fn add_observer_full(&self, observer: UniquePtr<StallObserver>) {
+        self.with_observers(|observers| observers.project().full.push_back(observer));
     }
 
-    /// Unregisters an observer previously passed to [`Self::add_observer_full`].
+    /// Destroys the "full" observer that notifies `receiver`, if there is one.
     ///
-    /// # Safety
+    /// Returns whether one was found. A receiver calls this to unregister itself; because
+    /// registering handed the observer over, unregistering is also what destroys it.
     ///
-    /// `observer` must currently be registered in the "full" list. Passing one that is registered
-    /// in the "some" list instead would unlink it through its own neighbours and leave that list's
-    /// head dangling.
-    pub unsafe fn remove_observer_full(&self, observer: &StallObserver) {
-        // SAFETY: Guaranteed by this function's contract.
-        self.with_observers(|observers| unsafe { observers.full.erase(observer) });
+    /// # Safety-usable invariant
+    ///
+    /// Acquires `observers_lock` (waiting for any in-flight `sample_once` notification loop to
+    /// complete) and unlinks and drops the first observer in the "full" list whose
+    /// `event_receiver` address equals `receiver as *const R as *const ()`. If at most one
+    /// observer for `receiver` was registered in this list and `receiver` has not moved since
+    /// [`StallObserver::create`], that observer is destroyed and will never notify `receiver`
+    /// again after this call returns.
+    pub fn remove_observer_full<R: EventReceiver>(&self, receiver: &R) -> bool {
+        let receiver = receiver as *const R as *const ();
+        let removed = self.with_observers(|observers| {
+            observers.project().full.erase_if(|o| o.notifies(receiver))
+        });
+        removed.is_some()
     }
 
     /// Aggregates a new set of per-CPU samples. Called periodically by the sampling thread.
@@ -516,6 +621,7 @@ impl StallAggregator {
 
         // Notify observers.
         self.with_observers(|observers| {
+            let observers = observers.project();
             for observer in observers.some.iter_mut() {
                 observer.push_sample(delta_some);
             }
@@ -574,109 +680,19 @@ fn start_sampling_thread(_level: init::LkInitLevel) {
 
 init::lk_init_hook!(stall, start_sampling_thread, init::LK_INIT_LEVEL_USER);
 
-/// Creates a stall observer for a C++ `StallObserver::EventReceiver`.
-///
-/// # Safety
-///
-/// `event_receiver` must outlive the returned observer. On success `*out_observer` receives an
-/// observer that the caller owns and must eventually pass to [`rust_stall_observer_destroy`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_observer_create(
-    threshold: zx_duration_mono_t,
-    window: zx_duration_mono_t,
-    event_receiver: NonNull<CppEventReceiver>,
-    out_observer: &mut *mut StallObserver,
-) -> zx_status_t {
-    // SAFETY: Caller asserts that event_Receiver lives long enough.
-    match unsafe {
-        StallObserver::create(
-            DurationMono::from_nanos(threshold),
-            DurationMono::from_nanos(window),
-            event_receiver,
-        )
-    } {
-        Ok(observer) => {
-            *out_observer = UniquePtr::into_raw(observer);
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// Destroys an observer created by [`rust_stall_observer_create`].
-///
-/// # Safety
-///
-/// `observer` must have come from [`rust_stall_observer_create`], must not have been destroyed
-/// already, and must have been unregistered from the aggregator first.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_observer_destroy(observer: *mut StallObserver) {
-    // SAFETY: Guaranteed by this function's contract.
-    drop(unsafe { UniquePtr::from_raw(observer) });
-}
-
-/// Reads the aggregated stall stats into `out_stats`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_stall_aggregator_read_stats(out_stats: &mut AggregatorStats) {
-    *out_stats = StallAggregator::get().read_stats();
-}
-
-/// Registers `observer` to be notified of the "some" stall time.
-///
-/// # Safety
-///
-/// See [`StallAggregator::add_observer_some`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_aggregator_add_observer_some(observer: NonNull<StallObserver>) {
-    // SAFETY: Guaranteed by this function's contract.
-    unsafe { StallAggregator::get().add_observer_some(observer) };
-}
-
-/// Unregisters an observer from the "some" list.
-///
-/// # Safety
-///
-/// See [`StallAggregator::remove_observer_some`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_aggregator_remove_observer_some(observer: &StallObserver) {
-    // SAFETY: Guaranteed by this function's contract.
-    unsafe { StallAggregator::get().remove_observer_some(observer) };
-}
-
-/// Registers `observer` to be notified of the "full" stall time.
-///
-/// # Safety
-///
-/// See [`StallAggregator::add_observer_full`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_aggregator_add_observer_full(observer: NonNull<StallObserver>) {
-    // SAFETY: Guaranteed by this function's contract.
-    unsafe { StallAggregator::get().add_observer_full(observer) };
-}
-
-/// Unregisters an observer from the "full" list.
-///
-/// # Safety
-///
-/// See [`StallAggregator::remove_observer_full`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_aggregator_remove_observer_full(observer: &StallObserver) {
-    // SAFETY: Guaranteed by this function's contract.
-    unsafe { StallAggregator::get().remove_observer_full(observer) };
-}
-
 /// Tests for memory pressure stall accounting.
 #[cfg(ktest)]
 #[unittest::suite(name = "stall")]
 mod stall_tests {
     use super::{
         AccumulatorStats, EventReceiver, STALL_SAMPLE_INTERVAL, StallAccumulator, StallAggregator,
-        StallObserver,
+        StallObserver, apply_context_switch_states,
     };
+    use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
+    use crate::kernel::thread::ThreadStallState;
     use crate::platform_rs::timer::DurationMono;
     use crate::top::debug::spin_usecs;
-    use core::cell::Cell;
-    use core::ptr::NonNull;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use pin_init::stack_pin_init;
     use unittest::{assert_ge, expect_eq, expect_false, expect_ge, expect_le, expect_true};
 
@@ -753,26 +769,26 @@ mod stall_tests {
     /// An implementation of the `EventReceiver` trait that simply remembers the last state it
     /// received.
     struct StallObserverTestEventReceiver {
-        is_above_threshold: Cell<bool>,
+        is_above_threshold: AtomicBool,
     }
 
     impl StallObserverTestEventReceiver {
         fn new() -> Self {
-            Self { is_above_threshold: Cell::new(false) }
+            Self { is_above_threshold: AtomicBool::new(false) }
         }
 
         fn is_above_threshold(&self) -> bool {
-            self.is_above_threshold.get()
+            self.is_above_threshold.load(Ordering::Relaxed)
         }
     }
 
     impl EventReceiver for StallObserverTestEventReceiver {
         fn on_above_threshold(&self) {
-            self.is_above_threshold.set(true);
+            self.is_above_threshold.store(true, Ordering::Relaxed);
         }
 
         fn on_below_threshold(&self) {
-            self.is_above_threshold.set(false);
+            self.is_above_threshold.store(false, Ordering::Relaxed);
         }
     }
 
@@ -780,14 +796,17 @@ mod stall_tests {
     ///
     /// # Safety
     ///
-    /// `event_receiver` must outlive the returned observer, which every caller here arranges by
+    /// The caller must ensure that `event_receiver` outlives the returned observer and does not
+    /// move while registered in a [`StallAggregator`], which every caller here arranges by
     /// unregistering the observer before the receiver goes out of scope.
     unsafe fn create_stall_observer_for_test(
         threshold: DurationMono,
         window: DurationMono,
         event_receiver: &StallObserverTestEventReceiver,
     ) -> UniquePtr<StallObserver> {
-        // SAFETY: Guaranteed by this function's contract.
+        // SAFETY: `NonNull::from_ref(event_receiver)` is non-null, aligned, and points to a valid
+        // `StallObserverTestEventReceiver`, and the caller guarantees that `event_receiver` does
+        // not move and outlives the returned observer.
         unsafe { StallObserver::create(threshold, window, NonNull::from_ref(event_receiver)) }
             .expect("failed to create the test stall observer")
     }
@@ -888,28 +907,22 @@ mod stall_tests {
         let sample_quarter = DurationMono::from_nanos(STALL_SAMPLE_INTERVAL.into_nanos() / 4);
         // SAFETY: `cleanup` unregisters the observer, destroying it, before `receiver` goes out
         // of scope.
-        let mut observer = unsafe {
+        let observer = unsafe {
             create_stall_observer_for_test(sample_half, STALL_SAMPLE_INTERVAL * 4, &receiver)
         };
-        let observer_ptr = NonNull::from(&mut *observer);
 
         // Register it either as observing "some" or "full", depending on the `test_variant` we are
         // executing.
-        //
-        // SAFETY: `observer` is alive, is in no list yet, and `cleanup` unregisters it before it
-        // is dropped at the end of the test.
-        unsafe {
-            match test_variant {
-                ObserverThresholdTestSelector::Some => aggregator.add_observer_some(observer_ptr),
-                ObserverThresholdTestSelector::Full => aggregator.add_observer_full(observer_ptr),
-            }
+        match test_variant {
+            ObserverThresholdTestSelector::Some => aggregator.add_observer_some(observer),
+            ObserverThresholdTestSelector::Full => aggregator.add_observer_full(observer),
         }
-        // SAFETY: `observer` was just registered in exactly the list we remove it from.
-        let cleanup = zr::defer(|| unsafe {
-            match test_variant {
-                ObserverThresholdTestSelector::Some => aggregator.remove_observer_some(&observer),
-                ObserverThresholdTestSelector::Full => aggregator.remove_observer_full(&observer),
-            }
+        let cleanup = zr::defer(|| {
+            let removed = match test_variant {
+                ObserverThresholdTestSelector::Some => aggregator.remove_observer_some(&receiver),
+                ObserverThresholdTestSelector::Full => aggregator.remove_observer_full(&receiver),
+            };
+            assert!(removed, "the observer was not registered");
         });
 
         // Prepare two kinds of samples: one reporting no stalls and another one reporting a 25%
@@ -1004,43 +1017,25 @@ mod stall_tests {
         let receiver3 = StallObserverTestEventReceiver::new();
         let receiver4 = StallObserverTestEventReceiver::new();
         let min_threshold = DurationMono::from_nanos(1);
-        // SAFETY: `cleanup` unregisters the observer, destroying it, before `receiver` goes out
-        // of scope.
-        let mut observer1 = unsafe {
-            create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver1)
+        // SAFETY: `cleanup` unregisters every observer, destroying it, before the receivers go
+        // out of scope.
+        let (observer1, observer2, observer3, observer4) = unsafe {
+            (
+                create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver1),
+                create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver2),
+                create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver3),
+                create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver4),
+            )
         };
-        // SAFETY: `cleanup` unregisters the observer, destroying it, before `receiver` goes out
-        // of scope.
-        let mut observer2 = unsafe {
-            create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver2)
-        };
-        // SAFETY: `cleanup` unregisters the observer, destroying it, before `receiver` goes out
-        // of scope.
-        let mut observer3 = unsafe {
-            create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver3)
-        };
-        // SAFETY: `cleanup` unregisters the observer, destroying it, before `receiver` goes out
-        // of scope.
-        let mut observer4 = unsafe {
-            create_stall_observer_for_test(min_threshold, STALL_SAMPLE_INTERVAL, &receiver4)
-        };
-
-        // Register them.
-        //
-        // SAFETY: all four are alive, are in no list yet, and `cleanup` unregisters them before
-        // they are dropped at the end of the test.
-        unsafe {
-            aggregator.add_observer_some(NonNull::from(&mut *observer1));
-            aggregator.add_observer_some(NonNull::from(&mut *observer2));
-            aggregator.add_observer_full(NonNull::from(&mut *observer3));
-            aggregator.add_observer_full(NonNull::from(&mut *observer4));
-        }
-        // SAFETY: each observer was just registered in exactly the list we remove it from.
-        let cleanup = zr::defer(|| unsafe {
-            aggregator.remove_observer_some(&observer1);
-            aggregator.remove_observer_some(&observer2);
-            aggregator.remove_observer_full(&observer3);
-            aggregator.remove_observer_full(&observer4);
+        aggregator.add_observer_some(observer1);
+        aggregator.add_observer_some(observer2);
+        aggregator.add_observer_full(observer3);
+        aggregator.add_observer_full(observer4);
+        let cleanup = zr::defer(|| {
+            assert!(aggregator.remove_observer_some(&receiver1), "observer 1 was not registered");
+            assert!(aggregator.remove_observer_some(&receiver2), "observer 2 was not registered");
+            assert!(aggregator.remove_observer_full(&receiver3), "observer 3 was not registered");
+            assert!(aggregator.remove_observer_full(&receiver4), "observer 4 was not registered");
         });
 
         // Verify that the observers are initially not signaled.
@@ -1063,5 +1058,47 @@ mod stall_tests {
         expect_true!(receiver4.is_above_threshold());
 
         drop(cleanup);
+    }
+
+    /// Verifies the stall states a context switch assigns to the outgoing and incoming threads.
+    #[test]
+    fn context_switch_states() {
+        // Every case below leaves the current CPU's accumulator exactly as it was found, so this
+        // does not perturb the system's real stall accounting. Interrupts stay disabled for the
+        // same reason the scheduler has them disabled: this takes the per-CPU
+        // accumulator's spinlock with the no-IRQ-save policy.
+        let _irqd = InterruptDisableGuard::new();
+        let cpu = curr_cpu_num();
+
+        // Two kernel-only threads contribute nothing, so nothing changes.
+        let updated = apply_context_switch_states(
+            ThreadStallState::IgnoredKernelOnly,
+            ThreadStallState::IgnoredKernelOnly,
+            cpu,
+            cpu,
+        );
+        expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.current_thread as i32);
+        expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.next_thread as i32);
+
+        // A progressing thread stops contributing and an inactive one starts, which cancels out
+        // to no net change in the accumulator.
+        let updated = apply_context_switch_states(
+            ThreadStallState::Progressing,
+            ThreadStallState::Inactive,
+            cpu,
+            cpu,
+        );
+        expect_eq!(ThreadStallState::Inactive as i32, updated.current_thread as i32);
+        expect_eq!(ThreadStallState::Progressing as i32, updated.next_thread as i32);
+
+        // A stalling thread that last ran on this CPU keeps both its state and its contribution.
+        let updated = apply_context_switch_states(
+            ThreadStallState::IgnoredKernelOnly,
+            ThreadStallState::Stalling,
+            cpu,
+            cpu,
+        );
+        expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.current_thread as i32);
+        expect_eq!(ThreadStallState::Stalling as i32, updated.next_thread as i32);
     }
 }

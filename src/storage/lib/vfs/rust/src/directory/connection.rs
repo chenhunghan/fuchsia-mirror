@@ -274,6 +274,15 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
             fio::DirectoryRequest::Unlink { name: _, options: _, responder } => {
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
             }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::DirectoryRequest::DeprecatedGetToken { responder } => {
+                responder.send(Status::NOT_SUPPORTED.into_raw(), None)?;
+            }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::DirectoryRequest::GetToken { responder } => {
+                responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
+            }
+            #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
             fio::DirectoryRequest::GetToken { responder } => {
                 responder.send(Status::NOT_SUPPORTED.into_raw(), None)?;
             }
@@ -520,6 +529,8 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
         if !target_rights.contains(fio::Rights::MODIFY_DIRECTORY) {
             return Err(Status::BAD_HANDLE);
         }
+
+        let target_parent = target_parent.into_mutable_directory().ok_or(Status::INVALID_ARGS)?;
 
         target_parent.link(target_name, self.directory.clone().into_any(), source_name).await
     }

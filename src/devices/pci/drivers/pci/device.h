@@ -35,8 +35,8 @@
 #include "src/devices/pci/drivers/pci/capabilities/msix.h"
 #include "src/devices/pci/drivers/pci/capabilities/pci_express.h"
 #include "src/devices/pci/drivers/pci/capabilities/power_management.h"
-#include "src/devices/pci/drivers/pci/config.h"
 #include "src/devices/pci/drivers/pci/ref_counted.h"
+#include "src/devices/pci/lib/cpp/config.h"
 
 namespace pci {
 
@@ -60,15 +60,11 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   struct Irqs {
     fuchsia_hardware_pci::InterruptMode mode;  // The mode currently configured.
     zx::interrupt legacy;                      // Virtual interrupt for legacy signaling.
-    uint32_t legacy_vector;             // Vector for the legacy interrupt, mirrors kInterruptLine
-                                        // in Config.
-    uint8_t legacy_pin;                 // Pin for the legacy interrupt, mirrors kInterruptPin.
-    zx_time_t legacy_irq_period_start;  // Timestamp of the current second we're monitoring for
-                                        // IRQ floods.
-    bool legacy_disabled{false};        // Whether the legacy vector has been disabled
-    zx::msi msi_allocation;             // The MSI allocation object for MSI & MSI-X
-    uint64_t irqs_in_period;  // Current count of interrupts per fpci::InterruptMode::kLegacyNoack
-                              // period.
+    uint32_t legacy_vector;       // Vector for the legacy interrupt, mirrors kInterruptLine
+                                  // in Config.
+    uint8_t legacy_pin;           // Pin for the legacy interrupt, mirrors kInterruptPin.
+    bool legacy_disabled{false};  // Whether the legacy vector has been disabled
+    zx::msi msi_allocation;       // The MSI allocation object for MSI & MSI-X
   };
 
   struct Capabilities {
@@ -319,9 +315,13 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   zx::result<std::unique_ptr<PciAllocation>> AllocateFromUpstream(const Bar& bar,
                                                                   std::optional<zx_paddr_t> base)
       __TA_REQUIRES(dev_lock_);
+  void WriteBar(uint8_t bar_id, uint32_t low, std::optional<uint32_t> high = std::nullopt)
+      __TA_REQUIRES(dev_lock_);
   zx_status_t WriteBarInformation(const Bar& bar) __TA_REQUIRES(dev_lock_);
   // Allocates address space for a BAR if it does not already exist.
   zx::result<> AllocateBar(uint8_t bar_id) __TA_REQUIRES(dev_lock_);
+  void AllocatePreassignedBarsLocked() __TA_REQUIRES(dev_lock_);
+  void AllocatePreassignedBars() __TA_EXCLUDES(dev_lock_);
   // Called a device to configure (probe/allocate) its BARs
   zx::result<> AllocateBarsLocked() __TA_REQUIRES(dev_lock_);
   // Called by an UpstreamNode to configure the BARs of a device downstream.

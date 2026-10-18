@@ -280,8 +280,8 @@ fn asan_unpoison_page(page: &VmPage) {
 }
 
 fn return_pages_to_free_list(
-    target_list: &mut VmPageDoublyLinkedList,
-    to_free: &mut VmPageDoublyLinkedList,
+    target_list: Pin<&mut VmPageDoublyLinkedList>,
+    to_free: Pin<&mut VmPageDoublyLinkedList>,
     delay_reuse: PmmOptDelayReuse,
 ) {
     if delay_reuse == PmmOptDelayReuse::Yes || cfg!(sanitize = "address") {
@@ -404,10 +404,7 @@ pub struct PmmNode {
     /// again. Once this value is set the action and armed state in checker may no longer be
     /// changed, and it becomes safe to call AssertPattern even without the lock held.
     #[guarded_by(lock, loaned_list_lock)]
-    // TODO(https://fxbug.dev/562635905): guarded_by currently does not support multiple locks and
-    // so fails to event generate the wrapping UnsafeCell around this method. For now manually put
-    // the UnsafeCell in and require callers to manually manage the locking.
-    all_free_pages_filled: UnsafeCell<bool>,
+    all_free_pages_filled: bool,
     #[pin]
     checker: UnsafeCell<PmmChecker>,
 
@@ -590,8 +587,8 @@ impl PmmNode {
             evictor <- UnsafeCell::pin_init(Evictor::init()),
             compression_lock <- KMutex::init(),
             page_compression: None.into(),
-            free_fill_enabled: AtomicBool::new(false),
-            all_free_pages_filled: UnsafeCell::new(false),
+            free_fill_enabled: AtomicBool::new(false).into(),
+            all_free_pages_filled: false.into(),
             checker <- UnsafeCell::pin_init(PmmChecker::init()),
             random_should_wait_seed: 0.into(),
             used_arena_count: 0.into(),
@@ -711,9 +708,9 @@ impl PmmNode {
         {
             let _preempt_disable = AutoPreemptDisabler::new();
             ksync::lock!(let mut guard = self.lock.lock());
+            free_list_had_fill_pattern =
+                *self.guard_lock_from_guard(&guard).all_free_pages_filled();
             let token = guard.as_mut().token_mut();
-            // SAFETY: lock is held.
-            free_list_had_fill_pattern = unsafe { *self.all_free_pages_filled.get() };
 
             if (alloc_flags & ALLOC_FLAG_CAN_WAIT) != 0
                 && self.should_delay_allocation_locked(token)
@@ -722,8 +719,9 @@ impl PmmNode {
                 return Err(Status::SHOULD_WAIT);
             }
 
-            // SAFETY: token proves lock is held.
-            let free_list = unsafe { self.free_list.get_mut(token) };
+            // SAFETY: token proves the lock guarding this list is held, and the list is a
+            // structurally pinned field of the pinned `PmmNode`.
+            let free_list = unsafe { self.free_list.get_pinned_mut_locked(token) };
             let Some(p) = free_list.pop_front() else {
                 // Allocation failures from the regular free list are likely to become user-visible.
                 self.report_alloc_failure_locked(
@@ -765,9 +763,9 @@ impl PmmNode {
             return Ok(());
         } else if count == 1 {
             let page = self.alloc_page(alloc_flags)?;
-            // SAFETY: list is pinned.
+            // SAFETY: `page` was just allocated, so it is valid and in no list.
             unsafe {
-                list.as_mut().get_unchecked_mut().push_back_raw(page.as_non_null());
+                list.as_mut().push_back_raw(page.as_non_null());
             }
             return Ok(());
         }
@@ -780,9 +778,9 @@ impl PmmNode {
         {
             let _preempt_disable = AutoPreemptDisabler::new();
             ksync::lock!(let mut guard = self.lock.lock());
+            free_list_had_fill_pattern =
+                *self.guard_lock_from_guard(&guard).all_free_pages_filled();
             let token = guard.as_mut().token_mut();
-            // SAFETY: lock is held.
-            free_list_had_fill_pattern = unsafe { *self.all_free_pages_filled.get() };
 
             // SAFETY: token proves lock is held.
             let free_count = unsafe { self.free_count.get(token) }.load(Ordering::Relaxed);
@@ -813,8 +811,9 @@ impl PmmNode {
                 return Err(Status::SHOULD_WAIT);
             }
 
-            // SAFETY: token proves lock is held.
-            let free_list = unsafe { self.free_list.get_mut(token) };
+            // SAFETY: token proves the lock guarding this list is held, and the list is a
+            // structurally pinned field of the pinned `PmmNode`.
+            let free_list = unsafe { self.free_list.get_pinned_mut_locked(token) };
             let mut cursor = free_list.cursor_front_mut();
             for _ in 0..count {
                 let page = cursor.get().expect("free_count was checked");
@@ -825,9 +824,7 @@ impl PmmNode {
                 }
                 cursor.move_next();
             }
-            // SAFETY: alloc_list is pinned.
-            let mut alloc_cursor =
-                unsafe { alloc_list.as_mut().get_unchecked_mut().cursor_back_mut() };
+            let mut alloc_cursor = alloc_list.as_mut().cursor_back_mut();
             cursor.split_before(&mut alloc_cursor);
         }
 
@@ -846,10 +843,7 @@ impl PmmNode {
         }
 
         // Append the checked list onto the user provided list.
-        // SAFETY: Splicing into list.
-        unsafe {
-            list.as_mut().get_unchecked_mut().splice(alloc_list.as_mut().get_unchecked_mut());
-        }
+        list.as_mut().splice(alloc_list.as_mut());
         Ok(())
     }
 
@@ -877,9 +871,9 @@ impl PmmNode {
         {
             let _preempt_disable = AutoPreemptDisabler::new();
             ksync::lock!(let mut guard = self.lock.lock());
+            free_list_had_fill_pattern =
+                *self.guard_lock_from_guard(&guard).all_free_pages_filled();
             let token = guard.as_mut().token_mut();
-            // SAFETY: lock is held.
-            free_list_had_fill_pattern = unsafe { *self.all_free_pages_filled.get() };
 
             // SAFETY: token proves lock is held.
             let num_arenas = unsafe { *self.used_arena_count.get(token) };
@@ -921,11 +915,11 @@ impl PmmNode {
                     // SAFETY: Reading container linkage while holding PmmNode lock.
                     debug_assert!(unsafe { (*page.queue_node.get()).in_container() });
 
-                    // SAFETY: page is in free_list and list is pinned.
+                    // SAFETY: page is in free_list.
                     unsafe {
-                        self.free_list.get_mut(token).erase(page);
+                        self.free_list.get_pinned_mut_locked(token).erase(page);
                         self.alloc_page_helper_locked(page_ptr);
-                        list.as_mut().get_unchecked_mut().push_back_raw(page_ptr);
+                        list.as_mut().push_back_raw(page_ptr);
                     }
                     allocated += 1;
                     address = PAddr(address.0 + page::SIZE);
@@ -1028,7 +1022,7 @@ impl PmmNode {
 
                     // Atomically (that is, in a single lock acquisition) remove this page from both
                     // the free list and FREE state, ensuring it is owned by us.
-                    self.free_list.get_mut(token).erase(page);
+                    self.free_list.get_pinned_mut_locked(token).erase(page);
                     page.set_state(VmPageState(page_bindings::vm_page_state::ALLOC));
                     (*page.state_union.get()).alloc.owner = core::ptr::null_mut();
 
@@ -1037,7 +1031,7 @@ impl PmmNode {
                     let vmp = VmPagePtr::new(curr_p);
                     self.checker().assert_pattern(vmp);
 
-                    list.as_mut().get_unchecked_mut().push_back_raw(curr_p);
+                    list.as_mut().push_back_raw(curr_p);
                 }
                 curr_pa = PAddr(curr_pa.0 + page::SIZE);
             }
@@ -1079,9 +1073,9 @@ impl PmmNode {
             self.increment_free_count_locked(token, 1);
 
             if delay_reuse == PmmOptDelayReuse::Yes || cfg!(sanitize = "address") {
-                self.free_list.get_mut(token).push_back_raw(page_ptr);
+                self.free_list.get_pinned_mut_locked(token).push_back_raw(page_ptr);
             } else {
-                self.free_list.get_mut(token).push_front_raw(page_ptr);
+                self.free_list.get_pinned_mut_locked(token).push_front_raw(page_ptr);
             }
         }
     }
@@ -1167,8 +1161,8 @@ impl PmmNode {
     pub fn enable_free_page_filling(&self, fill_size: usize, action: CheckFailAction) -> bool {
         // Require both locks so we can manipulate free_fill_enabled.
         ksync::lock!(let _loaned_guard = self.loaned_list_lock.lock());
-        ksync::lock!(let _free_guard = self.lock.lock());
-        if self.free_fill_enabled.load(Ordering::SeqCst) {
+        ksync::lock!(let free_guard = self.lock_lock());
+        if free_guard.free_fill_enabled().load(Ordering::SeqCst) {
             // Checker is already enabled.
             return false;
         }
@@ -1180,7 +1174,7 @@ impl PmmNode {
         // As free_fill_enabled may be examined outside of the lock, ensure the manipulations to
         // checker complete first by performing a release. See is_free_fill_enabled_racy for where
         // the acquire is performed.
-        self.free_fill_enabled.store(true, Ordering::Release);
+        free_guard.free_fill_enabled().store(true, Ordering::Release);
         true
     }
 
@@ -1192,15 +1186,14 @@ impl PmmNode {
         // Require both locks so we can process both of the free lists and modify
         // all_free_pages_filled.
         ksync::lock!(let mut loaned_guard = self.loaned_list_lock.lock());
-        let loaned_token = loaned_guard.as_mut().token_mut();
         ksync::lock!(let mut free_guard = self.lock.lock());
-        let free_token = free_guard.as_mut().token_mut();
 
-        if !self.free_fill_enabled.load(Ordering::SeqCst) {
+        if !self.guard_lock_from_guard(&free_guard).free_fill_enabled().load(Ordering::SeqCst) {
             return;
         }
 
         // SAFETY: free_token proves lock is held.
+        let free_token = free_guard.as_mut().token_mut();
         let free_list = unsafe { self.free_list.get_mut(free_token) };
         for page in free_list.iter() {
             let vmp = VmPagePtr::new(NonNull::from(page));
@@ -1210,6 +1203,7 @@ impl PmmNode {
             }
         }
         // SAFETY: loaned_token proves lock is held.
+        let loaned_token = loaned_guard.as_mut().token_mut();
         let free_loaned_list = unsafe { self.free_loaned_list.get_mut(loaned_token) };
         for page in free_loaned_list.iter() {
             let vmp = VmPagePtr::new(NonNull::from(page));
@@ -1224,8 +1218,10 @@ impl PmmNode {
         let checker = unsafe { &mut *self.checker.get() };
         // Now that every page has been filled, we can arm the checker.
         checker.arm();
-        // SAFETY: Both loaned_list_lock and lock are held.
-        unsafe { *self.all_free_pages_filled.get() = true };
+        let mut loaned_tg = self.guard_loaned_list_lock_mut_from_guard(loaned_guard.as_mut());
+        *self
+            .guard_lock_mut_from_guard(free_guard.as_mut())
+            .all_free_pages_filled_mut(&mut loaned_tg) = true;
         checker.print_status_stdout();
     }
 
@@ -1455,16 +1451,7 @@ impl PmmNode {
         // Callers of begin_loan() generally won't want the pages loaned to them; the intent is to
         // loan to the rest of the system, so go ahead and free also.  Some callers will basically
         // choose between pmm_begin_loan() and pmm_free().
-        // SAFETY: Modifying list under lock.
-        unsafe {
-            self.free_loaned_list_locked(
-                token,
-                list.get_unchecked_mut(),
-                fill,
-                delay_reuse,
-                |_| {},
-            );
-        }
+        self.free_loaned_list_locked(token, list, fill, delay_reuse, |_| {});
     }
 
     /// Marks a page that had been previously provided to BeginLoan as cancelled. This page may be
@@ -1501,7 +1488,7 @@ impl PmmNode {
                 // Currently in free_loaned_list.
                 debug_assert!((*page_ref.queue_node.get()).in_container());
                 // Remove from free_loaned_list to prevent any new use until after end_loan.
-                self.free_loaned_list.get_mut(loaned_token).erase(page_ref);
+                self.free_loaned_list.get_pinned_mut_locked(loaned_token).erase(page_ref);
                 self.decrement_free_loaned_count_locked(loaned_token, 1);
             }
         }
@@ -1523,11 +1510,11 @@ impl PmmNode {
             let _preempt_disable = AutoPreemptDisabler::new();
             // Require both locks in order to manipulate loaned pages and the regular free list.
             ksync::lock!(let mut loaned_guard = self.loaned_list_lock.lock());
-            let loaned_token = loaned_guard.as_mut().token_mut();
             ksync::lock!(let _free_guard = self.lock.lock());
 
-            // SAFETY: loaned_list_lock and lock are held.
-            free_list_had_fill_pattern = unsafe { *self.all_free_pages_filled.get() };
+            free_list_had_fill_pattern =
+                *self.guard_loaned_list_lock_from_guard(&loaned_guard).all_free_pages_filled();
+            let loaned_token = loaned_guard.as_mut().token_mut();
 
             // SAFETY: page is a valid VmPagePtr.
             unsafe {
@@ -1583,12 +1570,13 @@ impl PmmNode {
 
         {
             ksync::lock!(let mut guard = self.loaned_list_lock.lock());
+            free_list_had_fill_pattern =
+                *self.guard_loaned_list_lock_from_guard(&guard).all_free_pages_filled();
             let token = guard.as_mut().token_mut();
-            // SAFETY: loaned_list_lock is held.
-            free_list_had_fill_pattern = unsafe { *self.all_free_pages_filled.get() };
 
-            // SAFETY: token proves lock is held.
-            let free_loaned_list = unsafe { self.free_loaned_list.get_mut(token) };
+            // SAFETY: token proves the lock guarding this list is held, and the list is a
+            // structurally pinned field of the pinned `PmmNode`.
+            let free_loaned_list = unsafe { self.free_loaned_list.get_pinned_mut_locked(token) };
             let Some(p) = free_loaned_list.pop_front() else {
                 // Does not count as out of memory, so do not report an allocation failure, just
                 // tell the caller we are out of resources.
@@ -1668,7 +1656,7 @@ impl PmmNode {
             p.set_state(VmPageState(page_bindings::vm_page_state::ALLOC));
             (*p.state_union.get()).alloc.owner =
                 (flph.as_mut().get_unchecked_mut() as *mut FreeLoanedPagesHolder).cast();
-            flph.as_mut().get_unchecked_mut().pages.push_front_raw(page_ptr);
+            flph.as_mut().project().pages.push_front_raw(page_ptr);
         }
     }
 
@@ -1694,10 +1682,12 @@ impl PmmNode {
         let _preempt_disable = AutoPreemptDisabler::new();
         ksync::lock!(let mut guard = self.loaned_list_lock.lock());
         let token = guard.as_mut().token_mut();
-        // SAFETY: Modifying flph under lock.
-        let flph_mut = unsafe { flph.as_mut().get_unchecked_mut() };
-        debug_assert!(!flph_mut.used);
-        flph_mut.used = true;
+        // SAFETY: Only used to derive the owner pointer; `flph` is not moved.
+        let expected_owner =
+            (unsafe { flph.as_mut().get_unchecked_mut() } as *mut FreeLoanedPagesHolder).cast();
+        let flph = flph.project();
+        debug_assert!(!*flph.used);
+        *flph.used = true;
 
         // Why default and not "yes"?  The primary reason to delay reuse is to mitigate "bad DMA"
         // involving previously pinned pages.  Because the pages we're about to free had been on
@@ -1705,8 +1695,7 @@ impl PmmNode {
         // |VmCowPages::ReplacePagesWithNonLoanedLocked|) we have no reason to delay their reuse.
         let delay_reuse = PmmOptDelayReuse::Default;
 
-        let expected_owner = (flph_mut as *mut FreeLoanedPagesHolder).cast();
-        self.free_loaned_list_locked(token, &mut flph_mut.pages, fill, delay_reuse, |page| {
+        self.free_loaned_list_locked(token, flph.pages, fill, delay_reuse, |page| {
             debug_assert!(page.state() == VmPageState(page_bindings::vm_page_state::ALLOC));
             // SAFETY: page is in ALLOC state with owner.
             unsafe {
@@ -1717,7 +1706,7 @@ impl PmmNode {
 
         // With the pager owners all cleared, no more waiters can come along so we can wake all the
         // existing ones up.
-        while let Some(waiter_ptr) = flph_mut.waiters.pop_front() {
+        while let Some(waiter_ptr) = flph.waiters.pop_front() {
             // SAFETY: waiter_ptr is a valid FreeLoanedPagesHolderWaiter on waiter thread stack.
             unsafe {
                 (*waiter_ptr).event.signal();
@@ -1737,14 +1726,13 @@ impl PmmNode {
         let mut token = unsafe { LockToken::new() };
 
         let mut free_count = 0u64;
-        // SAFETY: pop_front does not move data outside the list.
-        while let Some(page) = unsafe { list.as_mut().get_unchecked_mut().pop_front() } {
+        while let Some(page) = list.as_mut().pop_front() {
             // SAFETY: `page` comes from valid VmPage array.
             unsafe {
                 debug_assert!(!page.as_ref().is_loaned());
                 debug_assert!(!page.as_ref().is_loan_cancelled());
                 debug_assert!(page.as_ref().is_free());
-                self.free_list.get_mut(&mut token).push_back_raw(page);
+                self.free_list.get_pinned_mut_locked(&mut token).push_back_raw(page);
             }
             free_count += 1;
         }
@@ -1784,11 +1772,12 @@ impl PmmNode {
             count += 1;
         }
 
-        // SAFETY: token proves lock is held.
+        // SAFETY: token proves the lock guarding this list is held, and the list is a
+        // structurally pinned field of the pinned `PmmNode`.
         unsafe {
             return_pages_to_free_list(
-                self.free_list.get_mut(token),
-                list.get_unchecked_mut(),
+                self.free_list.get_pinned_mut_locked(token),
+                list,
                 delay_reuse,
             );
         }
@@ -1896,8 +1885,7 @@ impl PmmNode {
 
         // Validate that the callback populated the free list correctly.
         let mut expected = 0usize;
-        // SAFETY: free_list is pinned on stack and exclusively accessed.
-        for p in unsafe { free_list.as_mut().get_unchecked_mut().iter() } {
+        for p in free_list.iter() {
             // SAFETY: p is in ALLOC state and we hold loaned_list_lock.
             unsafe {
                 p.set_state(VmPageState(page_bindings::vm_page_state::ALLOC));
@@ -1909,26 +1897,19 @@ impl PmmNode {
         }
         debug_assert_eq!(expected, pages.len());
 
-        // SAFETY: Splicing into flph.pages.
-        unsafe {
-            flph.as_mut()
-                .get_unchecked_mut()
-                .pages
-                .cursor_front_mut()
-                .splice(free_list.as_mut().get_unchecked_mut());
-        }
+        flph.project().pages.cursor_front_mut().splice(free_list.as_mut());
     }
 
     fn free_loaned_list_locked<F: FnMut(&VmPage)>(
         &self,
         token: &mut LockToken<'_, PmmNodeLoanedListLockClass>,
-        list: &mut VmPageDoublyLinkedList,
+        mut list: Pin<&mut VmPageDoublyLinkedList>,
         already_filled: bool,
         delay_reuse: PmmOptDelayReuse,
         mut validator: F,
     ) {
         let mut count = 0u64;
-        let mut cursor = list.cursor_front_mut();
+        let mut cursor = list.as_mut().cursor_front_mut();
         while let Some(page) = cursor.get() {
             let page_ptr = NonNull::from(page);
             validator(page);
@@ -1946,9 +1927,14 @@ impl PmmNode {
             }
         }
 
-        // SAFETY: token proves lock is held.
+        // SAFETY: token proves the lock guarding this list is held, and the list is a
+        // structurally pinned field of the pinned `PmmNode`.
         unsafe {
-            return_pages_to_free_list(self.free_loaned_list.get_mut(token), list, delay_reuse);
+            return_pages_to_free_list(
+                self.free_loaned_list.get_pinned_mut_locked(token),
+                list,
+                delay_reuse,
+            );
         }
 
         self.increment_free_loaned_count_locked(token, count);
@@ -1963,7 +1949,7 @@ impl PmmNode {
             let page_ref = &*page.as_raw();
             assert_eq!(page_ref.state(), VmPageState(page_bindings::vm_page_state::WIRED));
             if (*page_ref.queue_node.get()).in_container() {
-                self.phys_handoff_vmo_list.get_mut(token).erase(page_ref);
+                self.phys_handoff_vmo_list.get_pinned_mut_locked(token).erase(page_ref);
             }
             page_ref.set_state(VmPageState(page_bindings::vm_page_state::ALLOC));
         }
@@ -2202,7 +2188,10 @@ impl PmmNode {
         // Read with acquire semantics to ensure that any modifications to checker_ are visible
         // before changes to free_fill_enabled_. See EnableFreePageFilling for where the
         // release is performed.
-        self.free_fill_enabled.load(Ordering::Acquire)
+        // SAFETY: `free_fill_enabled` is an `AtomicBool` specifically intended to be read racily
+        // outside the lock with Acquire ordering.
+        let token = unsafe { LockToken::<PmmNodeLockClass>::new() };
+        unsafe { self.free_fill_enabled.get(&token) }.load(Ordering::Acquire)
     }
 
     fn should_delay_allocation_locked(&self, token: &mut LockToken<'_, PmmNodeLockClass>) -> bool {
@@ -2425,7 +2414,7 @@ impl PmmNode {
 
     unsafe fn free_page_helper_locked(
         &self,
-        _token: &mut LockToken<'_, PmmNodeLockClass>,
+        token: &mut LockToken<'_, PmmNodeLockClass>,
         page: NonNull<VmPage>,
         already_filled: bool,
     ) {
@@ -2453,7 +2442,8 @@ impl PmmNode {
             // pattern, however if it raced with enabling of free filling we may still need to fill
             // the pattern. This should be unlikely, and since free filling can never be turned back
             // off there is no race in the other direction.
-            if self.free_fill_enabled.load(Ordering::SeqCst) && !already_filled {
+            if self.guard_lock(token).free_fill_enabled().load(Ordering::SeqCst) && !already_filled
+            {
                 let vmp = VmPagePtr::new(page);
                 self.checker().fill_pattern(vmp);
             }
@@ -2463,7 +2453,7 @@ impl PmmNode {
 
     unsafe fn free_loaned_page_helper_locked(
         &self,
-        _token: &mut LockToken<'_, PmmNodeLoanedListLockClass>,
+        token: &mut LockToken<'_, PmmNodeLoanedListLockClass>,
         page: NonNull<VmPage>,
         already_filled: bool,
     ) {
@@ -2495,7 +2485,9 @@ impl PmmNode {
             // the pattern. This should be unlikely, and since free filling can never be turned back
             //off there is no race in the other direction. As we hold lock we can safely perform a
             // relaxed read.
-            if !already_filled && self.free_fill_enabled.load(Ordering::SeqCst) {
+            if !already_filled
+                && self.guard_loaned_list_lock(token).free_fill_enabled().load(Ordering::SeqCst)
+            {
                 let vmp = VmPagePtr::new(page);
                 self.checker().fill_pattern(vmp);
             }
@@ -3362,8 +3354,8 @@ mod pmm_node_rust {
             expect_false!(unsafe { page.is_loaned() });
             // SAFETY: page is a valid page pointer.
             expect_false!(unsafe { page.is_loan_cancelled() });
-            // SAFETY: list is pinned on stack, push_back_raw does not move list.
-            unsafe { list.as_mut().get_unchecked_mut().push_back_raw(page.as_non_null()) };
+            // SAFETY: `page` was just allocated, so it is valid and in no list.
+            unsafe { list.as_mut().push_back_raw(page.as_non_null()) };
         }
 
         // SAFETY: list contains unloaned allocated pages.
@@ -3441,8 +3433,8 @@ mod pmm_node_rust {
 
         for _i in 1..ManagedPmmNode::DEFAULT_MEM_EVENT_ALLOC {
             let page = unwrap_ok!(node.node().alloc_page(0));
-            // SAFETY: mutating pinned list without moving it.
-            unsafe { list.as_mut().get_unchecked_mut().push_back_raw(page.as_non_null()) };
+            // SAFETY: `page` was just allocated, so it is valid and in no list.
+            unsafe { list.as_mut().push_back_raw(page.as_non_null()) };
         }
         // Should not have triggered the event yet.
         expect_false!(node.is_event_signaled());
@@ -3450,24 +3442,23 @@ mod pmm_node_rust {
         // Allocate the last page, this should put us over the limit and set the event.
         {
             let page = unwrap_ok!(node.node().alloc_page(0));
-            // SAFETY: mutating pinned list without moving it.
-            unsafe { list.as_mut().get_unchecked_mut().push_back_raw(page.as_non_null()) };
+            // SAFETY: `page` was just allocated, so it is valid and in no list.
+            unsafe { list.as_mut().push_back_raw(page.as_non_null()) };
         }
         expect_true!(node.is_event_signaled());
         node.unsignal_event();
 
         // Events are one-shot, and so putting a page back and allocating it again should not
         // re-trigger the event.
-        // SAFETY: popping from pinned list without moving list.
-        let pop_page = unsafe { list.as_mut().get_unchecked_mut().pop_front().unwrap() };
+        let pop_page = list.as_mut().pop_front().unwrap();
         // SAFETY: pop_page is a valid pointer.
         unsafe {
             node.node().free_page(VmPagePtr::new(pop_page), PmmOptDelayReuse::Default);
         }
         {
             let page = unwrap_ok!(node.node().alloc_page(0));
-            // SAFETY: mutating pinned list without moving it.
-            unsafe { list.as_mut().get_unchecked_mut().push_back_raw(page.as_non_null()) };
+            // SAFETY: `page` was just allocated, so it is valid and in no list.
+            unsafe { list.as_mut().push_back_raw(page.as_non_null()) };
         }
         expect_false!(node.is_event_signaled());
 
@@ -3475,8 +3466,7 @@ mod pmm_node_rust {
         expect_true!(node.set_free_memory_signal(0, (ManagedPmmNode::NUM_PAGES - 1) as u64, 0));
 
         // Take one page off the list as our final page.
-        // SAFETY: popping from pinned list without moving list.
-        let page_raw = unsafe { list.as_mut().get_unchecked_mut().pop_front().unwrap() };
+        let page_raw = list.as_mut().pop_front().unwrap();
         let page = VmPagePtr::new(page_raw);
 
         // Return the rest of the list.

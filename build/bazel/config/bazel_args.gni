@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/bazel/config/logging.gni")
+import("//build/bazel/config/toolchain_tags/toolchain_tags.gni")
 import("//build/bazel/remote_services.gni")
 import("//build/config/clang/clang.gni")
 import("//build/config/compiler.gni")
@@ -10,6 +11,13 @@ import("//build/config/fuchsia_cxx_version.gni")
 
 # Compute the list of `bazel build` arguments corresponding to the current
 # GN build configuration.
+#
+# NOTE: This file is evaluated in the context of
+# `fuchsia_default_variant_toolchain` and `host_default_variant_toolchain` (via
+# `//build/bazel:bazel_args_json`), rather than `default_toolchain` or the base
+# `host_toolchain`. As a result, `toolchain_variant.tags` (and other
+# toolchain-specific variables) reflect the active variant toolchain used to
+# build Fuchsia or host binaries.
 #
 # _common_args are the arguments used by all commands, including `query`
 # which does not accept configuration-related options.
@@ -30,6 +38,8 @@ if (bazel_execution_logs) {
   _common_args += [ "--config=exec_log" ]
 }
 
+# LINT.IfChange(valid_optimize_values)
+
 _optimize_to_dbg = [ "debug" ]
 _optimize_to_fastbuild = [
   "none",
@@ -38,25 +48,26 @@ _optimize_to_fastbuild = [
   "sanitizer",
   "profile",
 ]
-_optimize_to_opt = []
-foreach(mode,
-        [
-          "moderate",
-          "speed",
-          "size",
-        ]) {
-  foreach(suffix,
-          [
-            "",
-            "_lto",
-            "_thinlto",
-          ]) {
-    _optimize_to_opt += [ mode + suffix ]
-  }
-}
+_optimize_to_opt = [
+  "moderate",
+  "moderate_lto",
+  "moderate_thinlto",
+  "size",
+  "size_lto",
+  "size_thinlto",
+  "speed",
+  "speed_lto",
+  "speed_thinlto",
 
-# TODO(https://fxbug.dev/517626589): remove this when default is changed
-_optimize_to_opt += [ "size_thinlto_clang" ]
+  # TODO(https://fxbug.dev/517626589): remove this when default is changed
+  "size_thinlto_clang",
+]
+
+# LINT.ThenChange(
+#   //build/bazel/config/select/optimize/BUILD.bazel:valid_optimize_values,
+#   //build/bazel/config/variables/BUILD.bazel:valid_optimize_values,
+#   //build/config/compilation_modes.gni:valid_optimize_values,
+# )
 
 _is_compilation_mode_dbg =
     _optimize_to_dbg + [ optimize ] - [ optimize ] != _optimize_to_dbg
@@ -65,13 +76,11 @@ _is_compilation_mode_fastbuild = _optimize_to_fastbuild + [ optimize ] -
 _is_compilation_mode_opt =
     _optimize_to_opt + [ optimize ] - [ optimize ] != _optimize_to_opt
 
-# Forward GN sanitizer configuration to Bazel
-
-if (!is_host) {
-  _tags = fuchsia_toolchain_tags
-} else {
-  _tags = host_toolchain_tags
-}
+# Forward GN sanitizer configuration to Bazel.
+# Because this file is evaluated in {fuchsia,host}_default_variant_toolchain,
+# toolchain_variant.tags holds the active variant tags (equivalent to
+# fuchsia_toolchain_tags on Fuchsia and host_toolchain_tags on host).
+_tags = toolchain_variant.tags
 
 _has_asan = _tags + [ "asan" ] - [ "asan" ] != _tags
 _has_hwasan = _tags + [ "hwasan" ] - [ "hwasan" ] != _tags
@@ -82,8 +91,7 @@ _has_msan = _tags + [ "msan" ] - [ "msan" ] != _tags
 
 _has_coverage_clang =
     _tags + [ "coverage_clang" ] - [ "coverage_clang" ] != _tags
-_has_host_coverage_rust =
-    is_host && _tags + [ "coverage_rust" ] - [ "coverage_rust" ] != _tags
+_has_coverage_rust = _tags + [ "coverage_rust" ] - [ "coverage_rust" ] != _tags
 
 # The hwasan variants also set the 'asan' and 'lsan' tags, but using
 # both features result in Clang errors, which doesn't support both
@@ -116,8 +124,18 @@ if (_has_ubsan) {
 if (_has_coverage_clang) {
   _build_args += [ "--features=coverage" ]
 }
-if (_has_host_coverage_rust) {
-  _common_args += [ "--config=host_rust_coverage" ]
+if (_has_coverage_rust) {
+  if (is_host) {
+    _common_args += [ "--config=host_rust_coverage" ]
+  } else {
+    _common_args += [ "--config=fuchsia_rust_coverage" ]
+  }
+}
+
+if (is_coverage) {
+  _build_args += [ "--//build/bazel/config/variables:is_coverage=True" ]
+} else {
+  _build_args += [ "--//build/bazel/config/variables:is_coverage=False" ]
 }
 
 if (is_profile) {
@@ -140,6 +158,9 @@ _build_args += [
 # LINT.ThenChange(//build/config/compiler.gni:compress_debuginfo)
 
 # Forward GN C/C++ compiler optimization configuration to Bazel
+
+_build_args += [ "--//build/bazel/config/variables:optimize=${optimize}" ]
+
 if (_is_compilation_mode_dbg) {
   _build_args += [ "--compilation_mode=dbg" ]
 } else if (_is_compilation_mode_fastbuild) {
@@ -153,19 +174,15 @@ if (_is_compilation_mode_dbg) {
   assert(false, "Unsupported mode optimize = $optimize")
 }
 
+_build_args += toolchain_tags_bazel_args
+
 # Forward GN C/C++ compiler optimization configuration to Bazel
-# If the c++ version is 20, we overwrite the copts to use
-# c++20 in Bazel too.
+# TODO(https://fxbug.dev/565437401): Remove this once
+# //build/config:default_warnings is ported to Bazel.
 if (fuchsia_cxx_version == 20) {
-  _build_args += [
-    "--cxxopt=-std=c++20",
-    "--cxxopt=-Wno-deprecated-this-capture",
-  ]
+  _build_args += [ "--cxxopt=-Wno-deprecated-this-capture" ]
 } else if (fuchsia_cxx_version == 23) {
-  _build_args += [
-    "--cxxopt=-std=c++23",
-    "--cxxopt=-Wno-deprecated-this-capture",
-  ]
+  _build_args += [ "--cxxopt=-Wno-deprecated-this-capture" ]
 }
 
 # LINT.IfChange(bazel_args_json_schema)

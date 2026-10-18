@@ -192,6 +192,16 @@ impl DefineSubsystemConfiguration<PowerConfig> for PowerManagementSubsystem {
         )?;
 
         builder.set_config_capability(
+            "fuchsia.power.DeepSuspendEnabled",
+            Config::new(
+                ConfigValueType::Bool,
+                (config.deep_suspend_enabled
+                    && context.board_config.provides_feature(BoardFeature::DeepSuspend))
+                .into(),
+            ),
+        )?;
+
+        builder.set_config_capability(
             "fuchsia.power.GpuPowerManagementEnabled",
             Config::new(ConfigValueType::Bool, config.gpu_power_management_enabled.into()),
         )?;
@@ -262,5 +272,66 @@ impl DefineSubsystemConfiguration<PowerConfig> for PowerManagementSubsystem {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::ConfigurationBuilderImpl;
+    use assembly_config_schema::BoardConfig;
+
+    /// Asserts that `fuchsia.power.DeepSuspendEnabled` is set to `expected` for a board providing
+    /// `provided_features` and the given product `power_config`.
+    fn assert_deep_suspend_capability(
+        provided_features: Vec<String>,
+        power_config: &PowerConfig,
+        expected: bool,
+    ) {
+        let board_config = BoardConfig { provided_features, ..Default::default() };
+        let context = ConfigurationContext {
+            board_config: &board_config,
+            ..ConfigurationContext::default_for_tests()
+        };
+        let mut builder = ConfigurationBuilderImpl::default();
+        PowerManagementSubsystem::define_configuration(&context, power_config, &mut builder)
+            .unwrap();
+        let config = builder.build();
+        assert_eq!(
+            config.configuration_capabilities.get("fuchsia.power.DeepSuspendEnabled"),
+            Some(&Config::new_bool(expected))
+        );
+    }
+
+    #[test]
+    fn test_deep_suspend_disabled_without_board_feature() {
+        assert_deep_suspend_capability(vec![], &PowerConfig::default(), false);
+    }
+
+    #[test]
+    fn test_deep_suspend_enabled_by_board_feature() {
+        assert_deep_suspend_capability(
+            vec![BoardFeature::DeepSuspend.as_ref().to_string()],
+            &PowerConfig::default(),
+            true,
+        );
+    }
+
+    #[test]
+    fn test_deep_suspend_disabled_by_product_despite_board_feature() {
+        assert_deep_suspend_capability(
+            vec![BoardFeature::DeepSuspend.as_ref().to_string()],
+            &PowerConfig { deep_suspend_enabled: false, ..Default::default() },
+            false,
+        );
+    }
+
+    #[test]
+    fn test_deep_suspend_disabled_by_product_without_board_feature() {
+        assert_deep_suspend_capability(
+            vec![],
+            &PowerConfig { deep_suspend_enabled: false, ..Default::default() },
+            false,
+        );
     }
 }

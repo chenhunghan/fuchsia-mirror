@@ -123,8 +123,19 @@ zx::result<> QemuRiscv64::PcirootInit() {
   zx::unowned_resource mmio_resource(get_mmio_resource(parent()));
 
   pci_root_host_.mcfgs().push_back(kVirtPcieMcfg);
-  pci_root_host_.Io().AddRegion(kVirtPciePio);
-  pci_root_host_.Mmio64().AddRegion(kVirtPcieMmio);
+
+  if (zx_status_t status = pci_root_host_.Io().AddRegion(kVirtPciePio); status != ZX_OK) {
+    zxlogf(ERROR, "Failed to add IO region { %#lx - %#lx } to the PCI root allocator: %s",
+           kVirtPciePio.base, kVirtPciePio.base + kVirtPciePio.size, zx_status_get_string(status));
+    return zx::error(status);
+  }
+
+  if (zx::result<> result = pci_root_host_.AddMmioRange(kVirtPcieMmio.base, kVirtPcieMmio.size);
+      result.is_error()) {
+    zxlogf(ERROR, "Failed to add MMIO region { %#lx - %#lx } to PCI root allocator: %s",
+           kVirtPcieMmio.base, kVirtPcieMmio.base + kVirtPcieMmio.size, result.status_string());
+    return result.take_error();
+  }
 
   QemuRiscv64Pciroot::Context context{};
   const size_t vmo_size = fbl::round_up<size_t>(kVirtPcieEcam.size, zx_system_get_page_size());
@@ -156,17 +167,17 @@ zx::result<> QemuRiscv64Pciroot::CreateInterrupts() {
         .interrupt = interrupt.release(),
         .vector = kVirtPcieIrqBase + vector_offset,
     });
+  }
 
-    // All QEMU devices are plugged into the root port and use a pre-defined pin swizzle.
-    for (uint8_t device_id = 0; device_id < DEVICES_PER_BUS; device_id++) {
-      pci_irq_routing_entry_t entry = {.port_device_id = PCI_IRQ_ROUTING_NO_PARENT,
-                                       .port_function_id = PCI_IRQ_ROUTING_NO_PARENT,
-                                       .device_id = device_id};
-      for (uint32_t pin = 0; pin < PINS_PER_FUNCTION; pin++) {
-        entry.pins[pin] = kVirtPcieIrqBase + ((pin + device_id) % PINS_PER_FUNCTION);
-      }
-      irq_routing_entries_.push_back(entry);
+  // All QEMU devices are plugged into the root port and use a pre-defined pin swizzle.
+  for (uint8_t device_id = 0; device_id < DEVICES_PER_BUS; device_id++) {
+    pci_irq_routing_entry_t entry = {.port_device_id = PCI_IRQ_ROUTING_NO_PARENT,
+                                     .port_function_id = PCI_IRQ_ROUTING_NO_PARENT,
+                                     .device_id = device_id};
+    for (uint32_t pin = 0; pin < PINS_PER_FUNCTION; pin++) {
+      entry.pins[pin] = kVirtPcieIrqBase + ((pin + device_id) % PINS_PER_FUNCTION);
     }
+    irq_routing_entries_.push_back(entry);
   }
 
   return zx::ok();

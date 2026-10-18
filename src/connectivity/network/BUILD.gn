@@ -5,15 +5,6 @@
 import("//build/components.gni")
 import("//src/connectivity/network/unified_binary/network_unified_binary.gni")
 
-declare_args() {
-  enable_netstack2_tracing = false
-}
-
-_netstack2_component = "netstack:component"
-if (enable_netstack2_tracing) {
-  _netstack2_component = "netstack:component-with-tracing-dropin"
-}
-
 fuchsia_component("component") {
   component_name = "network"
   manifest = "meta/network-default.cml"
@@ -28,24 +19,6 @@ fuchsia_component("component-basic") {
   manifest = "meta/network-basic.cml"
 }
 
-# Some tests depend on Netstack, but don't exercise its functionality and
-# don't care between Netstack 2 and 3. We give them Netstack3.
-# TODO(https://fxbug.dev/42083163): Define a package here instead of a group, then
-# use it as a subpackage within the tests that need it.
-group("netstack-for-tests") {
-  testonly = true
-  deps = [ "netstack3:component-dropin" ]
-}
-
-fuchsia_package("netstack2") {
-  package_name = "netstack"
-  deps = [ _netstack2_component ]
-  visibility = [
-    ":*",
-    "//src/connectivity/network/tests/benchmarks/socket-loopback:*",
-  ]
-}
-
 network_unified_binary_regular_and_gub_packages("netstack3") {
   package_name = "netstack3"
   gub_deps = [
@@ -55,9 +28,6 @@ network_unified_binary_regular_and_gub_packages("netstack3") {
     "dhcpv4/client/bindings:component",
     "netstack3:component",
   ]
-
-  # Handled by assembly.
-  validate_structured_config = false
 
   visibility = [
     ":*",

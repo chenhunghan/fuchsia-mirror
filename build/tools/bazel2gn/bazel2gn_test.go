@@ -231,6 +231,34 @@ python_binary("generate_version_history_bin") {
 }`,
 		},
 		{
+			name: "fuchsia_structured_config_rust_lib",
+			bazel: `load("//build/bazel/rules/components:structured_config.bzl", "fuchsia_structured_config_rust_lib")
+
+fuchsia_structured_config_rust_lib(
+	name = "my_component_config",
+	cm_label = ":manifest",
+)
+
+fuchsia_structured_config_rust_lib(
+	name = "my_test_config",
+	testonly = True,
+	cm_label = ":test_manifest",
+	crate_name = "my_crate",
+	visibility = ["//visibility:public"],
+)`,
+			wantGN: `fuchsia_structured_config_rust_lib("my_component_config") {
+	cm_label = ":manifest"
+}
+fuchsia_structured_config_rust_lib("my_test_config") {
+	testonly = true
+	cm_label = ":test_manifest"
+	name = "my_crate"
+	visibility = [
+		"*",
+	]
+}`,
+		},
+		{
 			name: "Bazel-only rules with no GN equivalent",
 			bazel: `exports_files(["meta/foo.cml"])
 
@@ -287,6 +315,148 @@ fx_unittest_package(
 	unit_tests = [":foo_bin"],
 )`,
 			wantGN: "",
+		},
+		{
+			name: "Bazel host test rules",
+			bazel: `host_go_test(
+	name = "foo_go_test",
+	srcs = ["foo_test.go"],
+	embed = [":foo"],
+)
+
+host_rustc_test(
+	name = "foo_rust_test",
+	srcs = ["src/lib.rs"],
+)
+
+host_cc_test(
+	name = "foo_cc_test",
+	srcs = ["foo_test.cc"],
+)
+
+host_py_test(
+	name = "foo_py_test",
+	main = "foo_test.py",
+)
+
+host_shac_test(
+	name = "foo_shac_test",
+	srcs = ["foo_test.star"],
+)
+
+host_test(
+	name = "foo_test",
+	binary = ":foo_bin",
+)
+
+host_test_data_files(
+	name = "foo_test_data",
+	srcs = ["testdata/foo.json"],
+)`,
+			wantGN: "",
+		},
+		{
+			name: "Rust proto library",
+			bazel: `load("//tools/protobuf:rust_proto_library.bzl", "rust_proto_library")
+
+rust_proto_library(
+	name = "simple_proto",
+	srcs = ["src/simple.proto"],
+	packages = ["fuchsia.simple"],
+	visibility = [":__pkg__"],
+)
+
+rust_proto_library(
+	name = "foo_proto",
+	srcs = [
+		"//third_party/foo/protos:a.proto",
+		"//third_party/foo/protos:b.proto",
+	],
+	packages = [
+		"foo.protos",
+		"google.protobuf",
+	],
+	include_dirs = ["//third_party/foo"],
+	proto_deps = ["//third_party/foo/protos:imported_protos"],
+	deps = ["//third_party/rust_crates/vendor:bytes"],
+)`,
+			wantGN: `rust_proto_library("simple_proto") {
+	sources = [
+		"src/simple.proto",
+	]
+	packages = [
+		"fuchsia.simple",
+	]
+	visibility = [
+		":*",
+	]
+}
+rust_proto_library("foo_proto") {
+	sources = [
+		"//third_party/foo/protos/a.proto",
+		"//third_party/foo/protos/b.proto",
+	]
+	packages = [
+		"foo.protos",
+		"google.protobuf",
+	]
+	include_dirs = [
+		"//third_party/foo",
+	]
+	deps = [
+		"//third_party/rust_crates:bytes",
+	]
+}`,
+		},
+		{
+			name: "Measure tapes",
+			bazel: `load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
+
+measure_tape(
+	name = "hlcpp_measure_tape_for_foo",
+	fidls = [
+		":fuchsia.foo",
+		"//sdk/fidl/fuchsia.math",
+	],
+	target_binding = "hlcpp",
+	target_types = [
+		"fuchsia.foo/Foo",
+		"fuchsia.foo/Bar",
+	],
+)
+
+measure_tape(
+	name = "rust_measure_tape_for_foo",
+	fidls = ["//sdk/fidl/fuchsia.foo"],
+	target_binding = "rust",
+	target_types = ["fuchsia.foo/Foo"],
+	testonly = True,
+	visibility = ["//visibility:public"],
+)`,
+			wantGN: `measure_tape("hlcpp_measure_tape_for_foo") {
+	fidls = [
+		":fuchsia.foo",
+		"//sdk/fidl/fuchsia.math",
+	]
+	target_binding = "hlcpp"
+	target_types = [
+		"fuchsia.foo/Foo",
+		"fuchsia.foo/Bar",
+	]
+}
+measure_tape("rust_measure_tape_for_foo") {
+	fidls = [
+		"//sdk/fidl/fuchsia.foo",
+	]
+	target_binding = "rust"
+	target_types = [
+		"fuchsia.foo/Foo",
+	]
+	testonly = true
+	visibility = [
+		"*",
+	]
+}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,6 +837,162 @@ rustc_dylib(
 			"//third_party/rust_crates:anyhow",
 		]
 	}
+}`,
+		}, {
+			name: "rustc_disable_clippy",
+			bazel: `
+rustc_library(
+	name = "foo_lib",
+	srcs = ["src/lib.rs"],
+	disable_clippy = True,
+)
+
+rustc_binary(
+	name = "foo_bin",
+	srcs = ["src/main.rs"],
+	disable_clippy = True,
+)
+
+rustc_dylib(
+	name = "foo_dylib",
+	srcs = ["src/lib.rs"],
+	disable_clippy = True,
+)
+
+rustc_proc_macro(
+	name = "foo_macro",
+	srcs = ["src/lib.rs"],
+	disable_clippy = True,
+)
+
+rustc_test(
+	name = "foo_test",
+	srcs = ["src/main.rs"],
+	disable_clippy = True,
+)`,
+			wantGN: `rustc_library("foo_lib") {
+	sources = [
+		"src/lib.rs",
+	]
+	disable_clippy = true
+}
+rustc_binary("foo_bin") {
+	sources = [
+		"src/main.rs",
+	]
+	disable_clippy = true
+}
+rustc_dylib("foo_dylib") {
+	sources = [
+		"src/lib.rs",
+	]
+	disable_clippy = true
+}
+rustc_macro("foo_macro") {
+	sources = [
+		"src/lib.rs",
+	]
+	disable_clippy = true
+}
+rustc_test("foo_test") {
+	sources = [
+		"src/main.rs",
+	]
+	disable_clippy = true
+}`,
+		}, {
+			name: "ffx_plugin",
+			bazel: `
+ffx_plugin(
+	name = "ffx_foo",
+	args_crate_root = "src/foo_args.rs",
+	args_deps = ["//third_party/rust_crates/vendor:argh"],
+	args_srcs = ["src/foo_args.rs"],
+	compile_data = ["data/foo.txt"],
+	config_data = ["data/config.json"],
+	crate_features = ["bar"],
+	data = ["//src/foo:data"],
+	disable_clippy = True,
+	edition = "2024",
+	lint_config = "//build/config/rust/lints:deny_unused_results",
+	link_deps = ["//sdk/lib/fdio"],
+	plugin_deps = ["//src/developer/ffx/plugins/foo/bar:ffx_foo_bar"],
+	proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+	sdk_category = "partner",
+	srcs = ["src/lib.rs"],
+	version = "0.1.0",
+	deps = ["//third_party/rust_crates/vendor:anyhow"],
+)
+
+ffx_tool(
+	name = "ffx_foo_tool",
+	srcs = ["src/main.rs"],
+	binary_name = "ffx-foo",
+	disable_instrumentation = True,
+	edition = "2024",
+	sdk_area = "Developer",
+	sdk_category = "partner",
+	sdk_deps = ["//sdk/lib/fdio"],
+	sdk_target_name = "sdk",
+	deps = [":ffx_foo"],
+)`,
+			wantGN: `ffx_plugin("ffx_foo") {
+	args_source_root = "src/foo_args.rs"
+	args_deps = [
+		"//third_party/rust_crates:argh",
+	]
+	args_sources = [
+		"src/foo_args.rs",
+	]
+	inputs = [
+		"data/foo.txt",
+	]
+	config_data = [
+		"data/config.json",
+	]
+	features = [
+		"bar",
+	]
+	non_rust_deps = [
+		"//src/foo:data",
+	]
+	disable_clippy = true
+	edition = "2024"
+	lint_config = "//build/config/rust/lints:deny_unused_results"
+	link_deps = [
+		"//sdk/lib/fdio",
+	]
+	plugin_deps = [
+		"//src/developer/ffx/plugins/foo/bar:ffx_foo_bar",
+	]
+	proc_macro_deps = [
+		"//third_party/rust_crates:async-trait",
+	]
+	sdk_category = "partner"
+	sources = [
+		"src/lib.rs",
+	]
+	version = "0.1.0"
+	deps = [
+		"//third_party/rust_crates:anyhow",
+	]
+}
+ffx_tool("ffx_foo_tool") {
+	sources = [
+		"src/main.rs",
+	]
+	output_name = "ffx-foo"
+	exclude_toolchain_tags = [ "instrumented" ]
+	edition = "2024"
+	sdk_area = "Developer"
+	sdk_category = "partner"
+	sdk_deps = [
+		"//sdk/lib/fdio",
+	]
+	sdk_target_name = "sdk"
+	deps = [
+		":ffx_foo",
+	]
 }`,
 		}, {
 			name: "rustc_library link_deps",
@@ -2173,6 +2499,161 @@ func TestInvalidAnnotations(t *testing.T) {
 	visibility = [
 		":*",
 		"//path/to/baz:*",
+	]
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := toSyntaxFile(t, tc.bazel)
+			gotGN, err := bazelToGN(f)
+			if err != nil {
+				t.Fatalf("Unexpected failure converting Bazel build targets: %v", err)
+			}
+			if diff := cmp.Diff(gotGN, tc.wantGN); diff != "" {
+				t.Errorf("Diff found after GN conversion (-got +want):\n%s\nBazel source:\n%s", diff, tc.bazel)
+			}
+		})
+	}
+}
+
+func TestAspectHintsAndExpectIncludes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bazel  string
+		wantGN string
+	}{
+		{
+			name: "expect_includes omits include_deps and preserves deps",
+			bazel: `expect_includes(
+	name = "client_includes",
+	includes = ["client.shard.cml"],
+	deps = [":base_includes"],
+	include_deps = [
+		"offer.shard.cml",
+		"use.shard.cml",
+	],
+)`,
+			wantGN: `expect_includes("client_includes") {
+	includes = [
+		"client.shard.cml",
+	]
+	deps = [
+		":base_includes",
+	]
+}`,
+		},
+		{
+			name: "aspect_hints as only attribute mapping to deps",
+			bazel: `fx_cc_library(
+	name = "foo",
+	srcs = ["foo.cc"],
+	aspect_hints = ["//sdk/lib/syslog:client_includes"],
+	deps = ["//zircon/system/ulib/zx"],
+)`,
+			wantGN: `static_library("foo") {
+	sources = [
+		"foo.cc",
+	]
+	deps = [
+		"//sdk/lib/syslog:client_includes",
+	]
+	public_deps = [
+		"//zircon/system/ulib/zx",
+	]
+}`,
+		},
+		{
+			name: "aspect_hints combined with implementation_deps on fx_cc_library",
+			bazel: `fx_cc_library(
+	name = "foo",
+	srcs = ["foo.cc"],
+	aspect_hints = ["//sdk/lib/syslog:client_includes"],
+	implementation_deps = ["//sdk/lib/fdio"],
+	deps = ["//zircon/system/ulib/zx"],
+)`,
+			wantGN: `static_library("foo") {
+	sources = [
+		"foo.cc",
+	]
+	deps = [
+		"//sdk/lib/fdio",
+	]
+	deps += [
+		"//sdk/lib/syslog:client_includes",
+	]
+	public_deps = [
+		"//zircon/system/ulib/zx",
+	]
+}`,
+		},
+		{
+			name: "aspect_hints combined with deps on rustc_library",
+			bazel: `rustc_library(
+	name = "foo",
+	srcs = ["src/lib.rs"],
+	aspect_hints = select({
+		"@platforms//os:fuchsia": ["//sdk/lib/syslog:client_includes"],
+		"//conditions:default": [],
+	}),
+	deps = ["//third_party/rust_crates/vendor:anyhow"],
+)`,
+			wantGN: `rustc_library("foo") {
+	sources = [
+		"src/lib.rs",
+	]
+	deps = [
+		"//third_party/rust_crates:anyhow",
+	]
+	if (is_fuchsia) {
+		deps += [
+			"//sdk/lib/syslog:client_includes",
+		]
+	}
+}`,
+		},
+		{
+			name: "aspect_hints combined with conditional fuchsia_implementation_deps",
+			bazel: `idk_cc_source_library(
+	name = "foo",
+	aspect_hints = ["//sdk/lib/syslog:client_includes"],
+	fuchsia_implementation_deps = [
+		"//zircon/system/ulib/zx_impl",
+	],
+)`,
+			wantGN: `sdk_source_set("foo") {
+	deps = []
+	if (is_fuchsia) {
+		deps += [
+			"//zircon/system/ulib/zx_impl",
+		]
+	}
+	deps += [
+		"//sdk/lib/syslog:client_includes",
+	]
+}`,
+		},
+		{
+			name: "aspect_hints combined with select deps without default",
+			bazel: `rustc_library(
+	name = "foo",
+	srcs = ["src/lib.rs"],
+	aspect_hints = ["//sdk/lib/syslog:client_includes"],
+	deps = select({
+		"@platforms//os:fuchsia": ["//third_party/rust_crates/vendor:anyhow"],
+	}),
+)`,
+			wantGN: `rustc_library("foo") {
+	deps = []
+	sources = [
+		"src/lib.rs",
+	]
+	if (is_fuchsia) {
+		deps = [
+			"//third_party/rust_crates:anyhow",
+		]
+	}
+	deps += [
+		"//sdk/lib/syslog:client_includes",
 	]
 }`,
 		},

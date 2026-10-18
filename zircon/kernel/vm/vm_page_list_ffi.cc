@@ -17,48 +17,23 @@
 static_assert(sizeof(VmPageListNode) == 64);
 static_assert(alignof(VmPageListNode) == 4);
 
-// `cpp_vm_page_splice_list_pop` move-constructs a VmPageOrMarker into storage owned by Rust, so
-// the two representations must agree on size and alignment.
-static_assert(sizeof(VmPageOrMarker) == 4);
-static_assert(alignof(VmPageOrMarker) == 4);
-
 namespace {
 
-template <typename EntryType, typename Iterator>
-inline EntryType unwrap_entry(const Iterator& iter) {
+template <typename NodePtr, typename Iterator>
+inline NodePtr unwrap_entry(const Iterator& iter, uint64_t* out_offset) {
   if (!iter.IsValid()) {
-    return {0, nullptr};
+    *out_offset = 0;
+    return nullptr;
   }
   auto [offset, node] = *iter;
-  return {offset, node};
+  *out_offset = offset;
+  return node;
 }
 
 }  // namespace
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" {
-
-FFI_ALWAYS_INLINE void cpp_vm_page_splice_list_construct(VmPageSpliceList* list) {
-  ktl::construct_at(list);
-}
-
-FFI_ALWAYS_INLINE void cpp_vm_page_splice_list_destroy(VmPageSpliceList* list) {
-  ktl::destroy_at(list);
-}
-
-FFI_ALWAYS_INLINE bool cpp_vm_page_splice_list_is_processed(const VmPageSpliceList* list) {
-  return list->IsProcessed();
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_page_splice_list_create_from_page_list(
-    uint64_t length, VmPageDoublyLinkedList* pages, VmPageSpliceList* splice_list) {
-  return VmPageSpliceList::CreateFromPageList(length, pages, splice_list);
-}
-
-FFI_ALWAYS_INLINE void cpp_vm_page_splice_list_pop(
-    VmPageSpliceList* splice_list, ffi::Uninitialized<VmPageOrMarker>* out_content) {
-  out_content->Initialize(splice_list->Pop());
-}
 
 FFI_ALWAYS_INLINE void cpp_vm_page_list_btree_init(ffi::Uninitialized<VmPageListBtree>* tree) {
   tree->Initialize();
@@ -95,18 +70,20 @@ FFI_ALWAYS_INLINE const void* cpp_vm_page_list_btree_find_const(const VmPageList
   return (*pln).second;
 }
 
-FFI_ALWAYS_INLINE VmPageListBtreeNodeEntry cpp_vm_page_list_btree_lower_bound(
-    VmPageListBtree* tree, uint64_t node_offset, VmPageListBtreeCursor* out_cursor) {
+FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_lower_bound(VmPageListBtree* tree,
+                                                           uint64_t node_offset,
+                                                           VmPageListBtreeCursor* out_cursor,
+                                                           uint64_t* out_offset) {
   auto iter = tree->lower_bound(node_offset);
   if (out_cursor) {
     out_cursor->iter = iter;
   }
-  return unwrap_entry<VmPageListBtreeNodeEntry>(iter);
+  return unwrap_entry<void*>(iter, out_offset);
 }
 
-FFI_ALWAYS_INLINE VmPageListBtreeNodeEntry
-cpp_vm_page_list_btree_cursor_get(const VmPageListBtreeCursor* cursor) {
-  return unwrap_entry<VmPageListBtreeNodeEntry>(cursor->iter);
+FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_cursor_get(const VmPageListBtreeCursor* cursor,
+                                                          uint64_t* out_offset) {
+  return unwrap_entry<void*>(cursor->iter, out_offset);
 }
 
 FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_insert(VmPageListBtree* tree, uint64_t node_offset,
@@ -142,19 +119,19 @@ FFI_ALWAYS_INLINE void cpp_vm_page_list_btree_cursor_init(VmPageListBtreeCursor*
   cursor->iter = tree->begin();
 }
 
-FFI_ALWAYS_INLINE VmPageListBtreeNodeEntry
-cpp_vm_page_list_btree_cursor_next(VmPageListBtreeCursor* cursor) {
-  auto entry = unwrap_entry<VmPageListBtreeNodeEntry>(cursor->iter);
-  if (entry.node) {
+FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_cursor_next(VmPageListBtreeCursor* cursor,
+                                                           uint64_t* out_offset) {
+  void* node = unwrap_entry<void*>(cursor->iter, out_offset);
+  if (node) {
     ++cursor->iter;
   }
-  return entry;
+  return node;
 }
 
-FFI_ALWAYS_INLINE VmPageListBtreeNodeEntry
-cpp_vm_page_list_btree_cursor_prev(VmPageListBtreeCursor* cursor) {
+FFI_ALWAYS_INLINE void* cpp_vm_page_list_btree_cursor_prev(VmPageListBtreeCursor* cursor,
+                                                           uint64_t* out_offset) {
   --cursor->iter;
-  return unwrap_entry<VmPageListBtreeNodeEntry>(cursor->iter);
+  return unwrap_entry<void*>(cursor->iter, out_offset);
 }
 
 FFI_ALWAYS_INLINE void cpp_vm_page_list_btree_const_cursor_init(VmPageListBtreeConstCursor* cursor,
@@ -162,13 +139,13 @@ FFI_ALWAYS_INLINE void cpp_vm_page_list_btree_const_cursor_init(VmPageListBtreeC
   cursor->iter = tree->begin();
 }
 
-FFI_ALWAYS_INLINE VmPageListBtreeConstNodeEntry
-cpp_vm_page_list_btree_const_cursor_next(VmPageListBtreeConstCursor* cursor) {
-  auto entry = unwrap_entry<VmPageListBtreeConstNodeEntry>(cursor->iter);
-  if (entry.node) {
+FFI_ALWAYS_INLINE const void* cpp_vm_page_list_btree_const_cursor_next(
+    VmPageListBtreeConstCursor* cursor, uint64_t* out_offset) {
+  const void* node = unwrap_entry<const void*>(cursor->iter, out_offset);
+  if (node) {
     ++cursor->iter;
   }
-  return entry;
+  return node;
 }
 
 FFI_ALWAYS_INLINE VmPageListBtreeUtilization

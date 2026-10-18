@@ -11,6 +11,7 @@
 #include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -296,13 +297,150 @@ TEST(MmapTest, CannotMprotectNoexecAsExecutable) {
 
   std::string file_path = temp_dir.path() + "/executable_file";
   close(SAFE_SYSCALL(creat(file_path.c_str(), 0755)));
-  fbl::unique_fd fd(open(file_path.c_str(), O_RDONLY));
+  int raw_fd = open(file_path.c_str(), O_RDONLY);
+  ASSERT_THAT(raw_fd, SyscallSucceeds());
+  fbl::unique_fd fd(raw_fd);
 
-  void* res = mmap(nullptr, page_size, PROT_READ, MAP_SHARED, fd.get(), 0);
-  ASSERT_NE(res, MAP_FAILED);
+  for (int flags : {MAP_SHARED, MAP_PRIVATE}) {
+    SCOPED_TRACE(flags);
+    auto mapping =
+        test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ, flags, fd.get(), /*offset=*/0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    EXPECT_THAT(mprotect(mapping->mapping(), page_size, PROT_READ | PROT_EXEC),
+                SyscallFailsWithErrno(EACCES));
+  }
+}
 
-  EXPECT_THAT(mprotect(res, page_size, PROT_READ | PROT_EXEC), SyscallFailsWithErrno(EACCES));
-  munmap(res, page_size);
+// Returns whether the filesystem of `path` is mounted with `noexec`.
+bool IsOnNoexecMount(const std::string& path) {
+  struct statvfs buf = {};
+  return statvfs(path.c_str(), &buf) == 0 && (buf.f_flag & ST_NOEXEC) != 0;
+}
+
+// Creates an executable file at `path`, filled with `size` bytes of `value`.
+void CreateExecutableFile(const std::string& path, size_t size, uint8_t value) {
+  int raw_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0755);
+  ASSERT_THAT(raw_fd, SyscallSucceeds());
+  fbl::unique_fd fd(raw_fd);
+  std::vector<uint8_t> contents(size, value);
+  ASSERT_EQ(write(fd.get(), contents.data(), contents.size()),
+            static_cast<ssize_t>(contents.size()));
+}
+
+TEST(MmapTest, MprotectExecPreservesWrittenPrivateFileMapping) {
+  // A private file mapping created without PROT_EXEC can later be made executable. Data written
+  // to the mapping before that must be preserved, and must not be carried through to the file.
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  test_helper::ScopedTempDir tmp_dir;
+  if (IsOnNoexecMount(tmp_dir.path())) {
+    GTEST_SKIP() << "The temporary directory is on a noexec mount";
+  }
+  std::string path = tmp_dir.path() + "/private_mprotect_exec_file";
+  ASSERT_NO_FATAL_FAILURE(CreateExecutableFile(path, page_size, 0xAA));
+  int raw_fd = open(path.c_str(), O_RDONLY);
+  ASSERT_THAT(raw_fd, SyscallSucceeds());
+  fbl::unique_fd fd(raw_fd);
+
+  auto mapping = test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                               MAP_PRIVATE, fd.get(), /*offset=*/0);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+  volatile uint8_t* bytes = static_cast<volatile uint8_t*>(mapping->mapping());
+  bytes[0] = 0xBB;
+
+  ASSERT_THAT(mprotect(mapping->mapping(), page_size, PROT_READ | PROT_EXEC), SyscallSucceeds());
+  EXPECT_EQ(bytes[0], 0xBB);
+  EXPECT_EQ(bytes[1], 0xAA);
+
+  uint8_t file_byte = 0;
+  ASSERT_EQ(pread(fd.get(), &file_byte, 1, /*offset=*/0), 1);
+  EXPECT_EQ(file_byte, 0xAA);
+}
+
+TEST(MmapTest, MprotectExecOfPartialSharedFileMappingStaysCoherent) {
+  // Making part of a shared file mapping executable must keep it backed by the file's memory at
+  // the same offset: writes through the mapping reach the file, and writes to the file are
+  // visible through the mapping.
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  test_helper::ScopedTempDir tmp_dir;
+  if (IsOnNoexecMount(tmp_dir.path())) {
+    GTEST_SKIP() << "The temporary directory is on a noexec mount";
+  }
+  std::string path = tmp_dir.path() + "/shared_mprotect_exec_file";
+  ASSERT_NO_FATAL_FAILURE(CreateExecutableFile(path, page_size * 3, 0));
+  int raw_fd = open(path.c_str(), O_RDWR);
+  ASSERT_THAT(raw_fd, SyscallSucceeds());
+  fbl::unique_fd fd(raw_fd);
+
+  auto mapping = test_helper::ScopedMMap::MMap(nullptr, page_size * 3, PROT_READ | PROT_WRITE,
+                                               MAP_SHARED, fd.get(), /*offset=*/0);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+  volatile uint8_t* bytes = static_cast<volatile uint8_t*>(mapping->mapping());
+  bytes[0] = 0x11;
+  bytes[page_size] = 0x22;
+  bytes[page_size * 2] = 0x33;
+
+  // Only make the middle page executable.
+  ASSERT_THAT(mprotect(static_cast<uint8_t*>(mapping->mapping()) + page_size, page_size,
+                       PROT_READ | PROT_WRITE | PROT_EXEC),
+              SyscallSucceeds());
+  EXPECT_EQ(bytes[0], 0x11);
+  EXPECT_EQ(bytes[page_size], 0x22);
+  EXPECT_EQ(bytes[page_size * 2], 0x33);
+
+  // Writes through the executable page reach the file.
+  bytes[page_size + 1] = 0x44;
+  uint8_t file_byte = 0;
+  ASSERT_EQ(pread(fd.get(), &file_byte, 1, page_size + 1), 1);
+  EXPECT_EQ(file_byte, 0x44);
+
+  // Writes to the file are visible through the executable page.
+  const uint8_t file_value = 0x55;
+  ASSERT_EQ(pwrite(fd.get(), &file_value, 1, page_size + 2), 1);
+  EXPECT_EQ(bytes[page_size + 2], 0x55);
+}
+
+TEST(MmapTest, ForkAfterMprotectExecOfPartialPrivateFileMapping) {
+  // After making only part of a private file mapping executable, a forked child must be able to
+  // use both parts and see the parent's modifications.
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  test_helper::ScopedTempDir tmp_dir;
+  if (IsOnNoexecMount(tmp_dir.path())) {
+    GTEST_SKIP() << "The temporary directory is on a noexec mount";
+  }
+  std::string path = tmp_dir.path() + "/fork_mprotect_exec_file";
+  ASSERT_NO_FATAL_FAILURE(CreateExecutableFile(path, page_size * 2, 0xAA));
+  int raw_fd = open(path.c_str(), O_RDONLY);
+  ASSERT_THAT(raw_fd, SyscallSucceeds());
+  fbl::unique_fd fd(raw_fd);
+
+  for (int prot : {PROT_READ, PROT_READ | PROT_WRITE}) {
+    SCOPED_TRACE(prot);
+    auto mapping = test_helper::ScopedMMap::MMap(nullptr, page_size * 2, prot, MAP_PRIVATE,
+                                                 fd.get(), /*offset=*/0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uint8_t* bytes = static_cast<uint8_t*>(mapping->mapping());
+    ASSERT_THAT(mprotect(bytes + page_size, page_size, prot | PROT_EXEC), SyscallSucceeds());
+
+    uint8_t expected_first = 0xAA;
+    uint8_t expected_second = 0xAA;
+    if ((prot & PROT_WRITE) != 0) {
+      expected_first = 0xBB;
+      expected_second = 0xCC;
+      bytes[0] = expected_first;
+      bytes[page_size] = expected_second;
+    }
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      volatile uint8_t* child_bytes = bytes;
+      EXPECT_EQ(child_bytes[0], expected_first);
+      EXPECT_EQ(child_bytes[page_size], expected_second);
+    });
+    ASSERT_TRUE(helper.WaitForChildren());
+  }
 }
 
 class MMapProcTest : public ProcTestBase {
@@ -1052,6 +1190,67 @@ TEST_F(MapGrowsdownTest, Grow) {
   SAFE_SYSCALL(munmap(constraint_mapping, gap_to_next_mapping));
 }
 
+std::optional<size_t> ReadVmStkKb() {
+  std::string status;
+  if (!files::ReadFileToString("/proc/self/status", &status)) {
+    return std::nullopt;
+  }
+  for (const auto& line :
+       fxl::SplitString(status, "\n", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty)) {
+    if (cpp20::starts_with(line, "VmStk:")) {
+      size_t value = 0;
+      if (sscanf(line.data(), "VmStk: %zu kB", &value) == 1) {
+        return value;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t> ReadMainStackVmaSizeKb() {
+  std::string maps;
+  if (!files::ReadFileToString("/proc/self/maps", &maps)) {
+    return std::nullopt;
+  }
+  auto info = test_helper::find_memory_mapping(
+      [](const test_helper::MemoryMapping& mapping) { return mapping.pathname == "[stack]"; },
+      maps);
+  if (!info.has_value()) {
+    return std::nullopt;
+  }
+  return (info->end - info->start) / 1024;
+}
+
+TEST_F(MapGrowsdownTest, VmStkUpdatesOnGrowAndUnmap) {
+  const size_t page_size_kb = page_size() / 1024;
+
+  const std::optional<size_t> main_stack_kb = ReadMainStackVmaSizeKb();
+  ASSERT_TRUE(main_stack_kb.has_value());
+  EXPECT_GT(*main_stack_kb, 0u);
+
+  const std::optional<size_t> initial_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(initial_vm_stk_kb.has_value());
+  // Initial VmStk includes the main thread's [stack] VMA plus the 2-page MAP_GROWSDOWN mapping
+  // created in MapGrowsdownTest::SetUp().
+  EXPECT_EQ(*initial_vm_stk_kb, *main_stack_kb + 2 * page_size_kb);
+
+  // Touch 4 pages below the initial 2-page MAP_GROWSDOWN mapping to grow it by 4 pages.
+  intptr_t grow_offset = initial_grows_down_low_offset() - 4 * page_size();
+  WriteAtOffset(grow_offset);
+  ASSERT_EQ(ReadAtOffset(grow_offset), '\0');
+
+  const std::optional<size_t> grown_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(grown_vm_stk_kb.has_value());
+  EXPECT_EQ(*grown_vm_stk_kb, *initial_vm_stk_kb + 4 * page_size_kb);
+
+  // Unmap the entire 6-page MAP_GROWSDOWN region (2 initial + 4 grown pages).
+  ASSERT_THAT(munmap(OffsetToAddress(grow_offset), 6 * page_size()), SyscallSucceeds());
+
+  const std::optional<size_t> after_unmap_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(after_unmap_vm_stk_kb.has_value());
+  EXPECT_EQ(*after_unmap_vm_stk_kb, *main_stack_kb);
+}
+
 TEST_F(MapGrowsdownTest, TouchPageAbove) {
   // The page immediately above the MAP_GROWSDOWN region is unmapped so issuing a read should SEGV.
   ASSERT_TRUE(TestThatReadSegfaults(grows_down_high_offset()));
@@ -1086,6 +1285,23 @@ TEST_F(MapGrowsdownTest, TouchHighestGuardRegionPage) {
   ASSERT_EQ(test_mapping, MAP_FAILED);
   ASSERT_EQ(errno, EEXIST);
 }
+
+#if defined(__aarch64__)
+TEST_F(MapGrowsdownTest, GrowWithTaggedAddress) {
+  intptr_t test_offset = initial_grows_down_low_offset() - page_size();
+  uintptr_t untagged_addr = reinterpret_cast<uintptr_t>(OffsetToAddress(test_offset));
+  // Set a non-zero Top Byte Ignore (TBI) tag in bits [63:56].
+  uintptr_t tagged_addr = untagged_addr | (uintptr_t{0xb4} << 56);
+
+  volatile char* tagged_ptr = reinterpret_cast<volatile char*>(tagged_addr);
+  *tagged_ptr = 't';
+  EXPECT_EQ(*tagged_ptr, 't');
+  EXPECT_EQ(ReadAtOffset(test_offset), 't');
+
+  // Also test a tagged read fault on an unmapped page further down.
+  EXPECT_EQ(*(tagged_ptr - page_size()), '\0');
+}
+#endif
 
 TEST_F(MapGrowsdownTest, MapNoreplaceInGuardRegion) {
   // Make a MAP_GROWSDOWN mapping slightly below the top of the playground area.
@@ -1715,6 +1931,103 @@ TEST_F(MMapProcTest, PrivateFileMappingCanBeWritableAndExecutable) {
   uint8_t file_byte = 0;
   ASSERT_EQ(pread(fd.get(), &file_byte, 1, 0), 1);
   EXPECT_EQ(file_byte, 0xAA);
+}
+
+TEST_F(MMapProcTest, PrivateFileMappingMprotectMergesMappings) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  test_helper::ScopedTempDir tmp_dir;
+  std::string path = tmp_dir.path() + "/private_merge_file";
+  fbl::unique_fd fd(open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+  SAFE_SYSCALL(ftruncate(fd.get(), page_size * 3));
+
+  auto expect_single_mapping = [&](uintptr_t addr, size_t length, const char* expected_perms) {
+    std::string maps;
+    ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/maps", &maps));
+    auto report = test_helper::find_memory_mapping(addr, maps);
+    ASSERT_NE(report, std::nullopt);
+    EXPECT_EQ(report->start, addr);
+    EXPECT_EQ(report->end, addr + length);
+    EXPECT_EQ(report->perms, expected_perms);
+  };
+
+  auto set_prot = [&](uintptr_t addr, size_t page, int prot) {
+    SAFE_SYSCALL(mprotect(reinterpret_cast<void*>(addr + page * page_size), page_size, prot));
+  };
+
+  {
+    auto mapping =
+        test_helper::ScopedMMap::MMap(nullptr, page_size * 2, PROT_READ, MAP_PRIVATE, fd.get(), 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+    expect_single_mapping(addr, page_size * 2, "r--p");
+
+    // mprotect(PROT_WRITE) on two consecutive pages should merge into one mapping in
+    // /proc/self/maps.
+    set_prot(addr, 0, PROT_READ | PROT_WRITE);
+    set_prot(addr, 1, PROT_READ | PROT_WRITE);
+    expect_single_mapping(addr, page_size * 2, "rw-p");
+  }
+
+  {
+    // Splitting a read-only private file mapping first (with PROT_NONE) and then promoting
+    // consecutive pages to PROT_WRITE should also merge them into one mapping.
+    auto mapping =
+        test_helper::ScopedMMap::MMap(nullptr, page_size * 2, PROT_READ, MAP_PRIVATE, fd.get(), 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+
+    set_prot(addr, 0, PROT_NONE);
+    set_prot(addr, 0, PROT_READ | PROT_WRITE);
+    set_prot(addr, 1, PROT_READ | PROT_WRITE);
+    expect_single_mapping(addr, page_size * 2, "rw-p");
+  }
+
+  {
+    // Split a 3-page mapping into 3 pieces, then promote the last piece first so that the pieces
+    // preceding it must be promoted along with it.
+    auto mapping =
+        test_helper::ScopedMMap::MMap(nullptr, page_size * 3, PROT_READ, MAP_PRIVATE, fd.get(), 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+
+    set_prot(addr, 1, PROT_NONE);
+    set_prot(addr, 2, PROT_READ | PROT_WRITE);
+    set_prot(addr, 1, PROT_READ | PROT_WRITE);
+    set_prot(addr, 0, PROT_READ | PROT_WRITE);
+    expect_single_mapping(addr, page_size * 3, "rw-p");
+
+    volatile uint8_t* bytes = reinterpret_cast<volatile uint8_t*>(addr);
+    bytes[0] = 0xBB;
+    EXPECT_EQ(bytes[0], 0xBB);
+
+    uint8_t file_byte = 0xFF;
+    ASSERT_EQ(pread(fd.get(), &file_byte, 1, 0), 1);
+    EXPECT_EQ(file_byte, 0);
+  }
+
+  {
+    // Split a 3-page mapping into 3 pieces before forking. In the child, promote the middle piece
+    // first and then promote the pieces on either side: they should merge into a single mapping.
+    // Note that on Linux, `mprotect(PROT_WRITE)` permanently sets `VM_ACCOUNT` on a private VMA,
+    // so the pieces only merge once all of them have been made writable.
+    auto mapping =
+        test_helper::ScopedMMap::MMap(nullptr, page_size * 3, PROT_READ, MAP_PRIVATE, fd.get(), 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+    uintptr_t addr = reinterpret_cast<uintptr_t>(mapping->mapping());
+
+    set_prot(addr, 1, PROT_NONE);
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      set_prot(addr, 1, PROT_READ | PROT_WRITE);
+      set_prot(addr, 0, PROT_READ | PROT_WRITE);
+      set_prot(addr, 2, PROT_READ | PROT_WRITE);
+      expect_single_mapping(addr, page_size * 3, "rw-p");
+    });
+    EXPECT_TRUE(helper.WaitForChildren());
+  }
 }
 
 class MMapAllProtectionsTest : public testing::TestWithParam<std::tuple<int, int>> {};

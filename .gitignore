@@ -71,9 +71,6 @@ tables_generator_tests_*.txt
 .fx-ssh-path
 .fx-sync-from-stem.cache
 
-### Checkout generated files
-/build/cipd.gni
-
 ### Infra files
 # These files may exist in a checkout on an Infra VM but not locally
 /.GUARD_FILE
@@ -304,9 +301,6 @@ lcov.info
 
 # gemini-cli logs
 .gemini/logs.json
-
-# COG workspace create a symlink for integration repo
-/integration
 
 # Jetski CLI workspace directory
 /.jetskicli/

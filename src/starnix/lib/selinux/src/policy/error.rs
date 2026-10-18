@@ -1,64 +1,109 @@
-// Copyright 2023 The Fuchsia Authors. All rights reserved.
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-
-use crate::new_policy::{ClassDefault, ClassDefaultRange, FsUseType};
 
 use bstr::BString;
 use thiserror::Error;
 
-/// Structured errors that may be encountered parsing a binary policy.
+use super::bitmap::MAP_NODE_BITS;
+use super::metadata::{
+    CONFIG_MLS_FLAG, POLICYDB_SIGNATURE, POLICYDB_STRING_MAX_LENGTH, POLICYDB_VERSION_MAX,
+    POLICYDB_VERSION_MIN, SELINUX_MAGIC,
+};
+use super::rules::{RuleKey, RuleKind};
+use crate::InitialSid;
+
+/// Errors that may be encountered parsing a binary policy.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum ParseError {
-    #[error("expected end of policy, but found {num_bytes} additional bytes")]
-    TrailingBytes { num_bytes: usize },
-    #[error("expected data item of type {type_name} ({type_size} bytes), but found {num_bytes}")]
-    MissingData { type_name: &'static str, type_size: usize, num_bytes: usize },
+    #[error("expected MLS-enabled flag ({CONFIG_MLS_FLAG:#032b}), but found {found_config:#032b}")]
+    ConfigMissingMlsFlag { found_config: u32 },
+    #[error("invalid configuration flags: {flags:#032b}")]
+    InvalidConfigFlags { flags: u32 },
+    #[error("invalid constraint operand type: {value:#x}")]
+    InvalidConstraintOperandType { value: u32 },
+    #[error("invalid constraint term type: {value}")]
+    InvalidConstraintTermType { value: u32 },
+    #[error("invalid enum value for {enum_name}: {value}")]
+    InvalidEnumValue { enum_name: &'static str, value: u64 },
+    #[error("expected extensible bitmap high bit to be {expected}, but found {found}")]
+    InvalidExtensibleBitmapHighBit { expected: u32, found: u32 },
     #[error(
-        "policy is of {observed} bytes, but this implementation only supports policies of up to {limit} bytes"
+        "expected extensible bitmap item size to be exactly {MAP_NODE_BITS}, but found {found_size}"
     )]
-    UnsupportedlyLarge { observed: usize, limit: usize },
+    InvalidExtensibleBitmapItemSize { found_size: u32 },
     #[error("invalid ID value: {value}")]
     InvalidId { value: u32 },
+    #[error("expected data item of type {type_name} ({type_size} bytes), but found {num_bytes}")]
+    MissingData { type_name: &'static str, type_size: usize, num_bytes: usize },
+    #[error("expected end of policy, but found {num_bytes} additional bytes")]
+    TrailingBytes { num_bytes: usize },
+    #[error("unexpected non-empty type set in constraint")]
+    UnexpectedConstraintTypeSet,
+    #[error("duplicate rule for key {key:?}, kind: {kind:?}")]
+    DuplicateAccessVectorRule { key: RuleKey, kind: RuleKind },
+    #[error(
+        "duplicate filename transition for target_type {target_type:?}, target_class {target_class:?}, filename {filename:?}"
+    )]
+    DuplicateFilenameTransition {
+        target_type: super::TypeId,
+        target_class: super::ClassId,
+        filename: BString,
+    },
+    #[error("duplicate ID: {id}")]
+    DuplicateId { id: u32 },
+    #[error("duplicate name: {name:?}")]
+    DuplicateName { name: BString },
+    #[error("index out of range: {index} (maximum supported is {max})")]
+    IndexOutOfRange { index: usize, max: usize },
+    #[error("observed size {observed} exceeds limit {limit}")]
+    UnsupportedlyLarge { observed: usize, limit: usize },
 }
 
-/// Structured errors that may be encountered validating a binary policy.
-#[derive(Debug, Error, PartialEq)]
+/// Errors that may be encountered validating a binary policy.
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum ValidateError {
+    #[error("invalid sequence of terms in constraint expression")]
+    InvalidConstraintTermSequence,
+    #[error("invalid extended permissions type: {value}")]
+    InvalidExtendedPermissionsType { value: u8 },
+    #[error("expected extensible bitmap items to have at least one bit set")]
+    InvalidExtensibleBitmapItem,
+    #[error("invalid ID index {index} in IdSet")]
+    InvalidIdSetIndex { index: u32 },
+    #[error("expected selinux magic value {SELINUX_MAGIC:#x}, but found {found_magic:#x}")]
+    InvalidMagic { found_magic: u32 },
+    #[error("invalid MLS range: high level does not dominate low level")]
+    InvalidMlsRange,
     #[error(
-        "expected class default binary value to be one of {}, {}, or {}, but found {value}",
-        ClassDefault::Unspecified as u32,
-        ClassDefault::Source as u32,
-        ClassDefault::Target as u32
+        "expected policy version in range [{POLICYDB_VERSION_MIN}, {POLICYDB_VERSION_MAX}], but found {found_policy_version}"
     )]
-    InvalidClassDefault { value: u32 },
+    InvalidPolicyVersion { found_policy_version: u32 },
+    #[error("expected primary names count <= {expected_at_most}, but found {found}")]
+    InvalidPrimaryNamesCount { expected_at_most: u32, found: u32 },
+    #[error("expected signature {POLICYDB_SIGNATURE:?}, but found {found_signature:?}")]
+    InvalidSignature { found_signature: BString },
     #[error(
-        "expected class default binary value to be one of {:?}, but found {value}",
-        [ClassDefaultRange::Unspecified as u32,
-        ClassDefaultRange::SourceLow as u32,
-        ClassDefaultRange::SourceHigh as u32,
-        ClassDefaultRange::SourceLowHigh as u32,
-        ClassDefaultRange::TargetLow as u32,
-        ClassDefaultRange::TargetHigh as u32,
-        ClassDefaultRange::TargetLowHigh as u32,
-        ClassDefaultRange::Glblub as u32]
+        "expected signature length in range [0, {POLICYDB_STRING_MAX_LENGTH}], but found {found_length}"
     )]
-    InvalidClassDefaultRange { value: u32 },
-    #[error("paths not ordered lexicographicaly")]
-    InvalidGenFsPathOrdering,
+    InvalidSignatureLength { found_length: u32 },
+    #[error(
+        "expected extensible bitmap item start bit to be multiple of item size {found_size}, but found {found_start_bit}"
+    )]
+    MisalignedExtensibleBitmapItemStartBit { found_start_bit: u32, found_size: u32 },
     #[error("missing initial SID {initial_sid:?}")]
-    MissingInitialSid { initial_sid: crate::InitialSid },
+    MissingInitialSid { initial_sid: InitialSid },
+    #[error("missing mandatory 'object_r' role")]
+    MissingObjectRRole,
     #[error(
-        "invalid SELinux fs_use type; expected one of {:?}, but found {value}",
-        [FsUseType::Xattr as u32,
-        FsUseType::Trans as u32,
-        FsUseType::Task as u32]
+        "expected extensible bitmap items to be in sorted order, but found item starting at {found_start_bit} after item that ends at {min_start}"
     )]
-    InvalidFsUseType { value: u32 },
-    #[error("non-optional Id field is zero")]
-    NonOptionalIdIsZero,
+    OutOfOrderExtensibleBitmapItems { found_start_bit: u32, min_start: u32 },
+    #[error("referenced common symbol {name:?} is not defined")]
+    UndefinedCommonSymbol { name: BString },
     #[error("undefined {kind} Id value {id}")]
-    UnknownId { kind: &'static str, id: String },
-    #[error("invalid MLS range: {low}-{high}")]
-    InvalidMlsRange { low: BString, high: BString },
+    UnknownId { kind: &'static str, id: u32 },
 }
+
+/// Errors that may be encountered serializing a binary policy.
+pub type SerializeError = std::convert::Infallible;

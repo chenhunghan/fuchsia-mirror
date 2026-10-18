@@ -304,6 +304,22 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 pub struct GeneralPacketDescriptor { ... }
 ```
 
+### Ordering Descriptor Writes Before Notifying Hardware
+`MmioRegion` stores do not include a barrier, and Rust atomics do not order
+accesses by a device. Explicitly order a descriptor write before the store that
+tells the device about it (for example, with `write_barrier()`), and comment
+which two accesses are ordered. Cache maintenance for non-coherent buffers is a
+separate step; see
+`docs/development/drivers/concepts/driver_development/dma.md`.
+
+### Pinning DMA Memory
+`Pmt::unpin()` is `unsafe`: unpinning memory the device can still reach can
+corrupt memory.
+* Do not unpin in `Drop`; unpin from a method the driver calls explicitly.
+* Unpin after the transfer completes, or on error, cancel, or shutdown once the
+  device has stopped; if you cannot confirm that, leave it pinned.
+* In the `// SAFETY:` comment, say why the device can no longer reach the pages.
+
 ### Using Macros for MMIO
 Never perform manual bitwise operations (e.g., `val |= 1 << 5;`) on raw integers
 when accessing MMIO registers. Instead, use the `mmio::register!` and
@@ -322,6 +338,20 @@ These macros generate safe accessors for registers and fields. Update fields via
 `regs.ctrl_mut().update(|r| { r.set_enable(true); });`. If using generated
 register blocks, you may need to wrap `VmoMapping` in `MmioRegion<VmoMemory>` to
 satisfy trait bounds.
+
+### Validating External Values
+`register!` setters silently mask values to the field width. For values from
+outside the driver (FIDL, bus host, metadata, firmware):
+* Return `zx::Status::INVALID_ARGS` when a conversion fails, so bad input cannot
+  panic the driver; keep `try_from(...).unwrap()` for values the driver computes
+  itself.
+* Compute bounds with `checked_add` or `checked_sub` and compare against the
+  buffer size.
+* Check every field before writing any of them.
+
+```rust
+let value = u8::try_from(setup.w_value).map_err(|_| zx::Status::INVALID_ARGS)?;
+```
 
 ### Platform Device and MMIO Access
 When using the platform device protocol to access MMIO:

@@ -38,8 +38,6 @@
 class JobDispatcher;
 class ProcessDispatcher;
 class ThreadDispatcher;
-class VmarMapsInfoWriter;
-class VmoInfoWriter;
 class VmAddressRegionDispatcher;
 
 extern "C" {
@@ -71,12 +69,20 @@ zx_status_t cpp_process_dispatcher_make_and_add_handle_from_ref(ProcessDispatche
                                                                 zx_rights_t rights,
                                                                 zx_handle_t* out_handle);
 const HandleTable* cpp_process_dispatcher_handle_table(const ProcessDispatcher* process);
+const ShareableProcessState* cpp_process_dispatcher_shareable_state(
+    const ProcessDispatcher* process);
+const VmAspace* cpp_shareable_process_state_aspace(const ShareableProcessState* state);
 zx_status_t cpp_process_dispatcher_enforce_basic_policy(ProcessDispatcher* process,
                                                         uint32_t policy);
 int64_t cpp_process_dispatcher_get_timer_slack_policy_amount(const ProcessDispatcher* process);
 void cpp_process_dispatcher_get_timer_slack_policy(const ProcessDispatcher* process,
                                                    TimerSlack* out_slack);
 zx_info_process_t cpp_process_dispatcher_get_info(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_get_stats(const ProcessDispatcher* process,
+                                             zx_info_task_stats_t* out_stats);
+zx_info_task_runtime_t cpp_process_dispatcher_get_runtime_stats(const ProcessDispatcher* process);
+zx_status_t cpp_process_dispatcher_get_threads(const ProcessDispatcher* process,
+                                               zx_koid_t** out_threads, size_t* out_count);
 zx_status_t cpp_process_dispatcher_set_critical_to_job(ProcessDispatcher* process,
                                                        JobDispatcher* job, bool retcode_nonzero);
 [[noreturn]] void cpp_process_dispatcher_exit_current(int64_t retcode);
@@ -94,8 +100,7 @@ uintptr_t cpp_process_dispatcher_vdso_base_address(const ProcessDispatcher* proc
 #if ARCH_X86
 uintptr_t cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* process);
 #endif
-zx_status_t cpp_process_futex_grow_pool(ProcessDispatcher* process);
-zx_status_t cpp_process_futex_shrink_pool(ProcessDispatcher* process);
+void* cpp_process_dispatcher_futex_context(const ProcessDispatcher* process);
 zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatcher* process, Thread* core_thread);
 zx_koid_t cpp_process_get_job_koid(const ProcessDispatcher* process);
 zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process, ThreadDispatcher* thread,
@@ -104,6 +109,8 @@ zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process, Threa
 void cpp_process_remove_thread(ProcessDispatcher* process, ThreadDispatcher* thread);
 Exceptionate* cpp_process_dispatcher_exceptionate(ProcessDispatcher* process);
 Exceptionate* cpp_process_dispatcher_debug_exceptionate(ProcessDispatcher* process);
+ThreadDispatcher* cpp_process_dispatcher_lookup_thread_by_id(ProcessDispatcher* process,
+                                                             zx_koid_t koid);
 
 }  // extern "C"
 
@@ -162,12 +169,14 @@ class ProcessDispatcher final
   ~ProcessDispatcher() final;
 
   // state of the process
-  enum class State {
-    INITIAL,  // initial state, no thread present in process
-    RUNNING,  // first thread has started and is running
-    DYING,    // process has delivered kill signal to all threads
-    DEAD,     // all threads have entered DEAD state and potentially dropped refs on process
+  // LINT.IfChange(ProcessState)
+  enum class State : uint32_t {  // NOLINT(performance-enum-size)
+    INITIAL = 0,                 // initial state, no thread present in process
+    RUNNING = 1,                 // first thread has started and is running
+    DYING = 2,                   // process has delivered kill signal to all threads
+    DEAD = 3,  // all threads have entered DEAD state and potentially dropped refs on process
   };
+  // LINT.ThenChange(//zircon/kernel/object/process_dispatcher.rs:ProcessState)
 
   // The type of address space used to initialize a ProcessDispatcher for a shared process.
   enum class SharedAspaceType {
@@ -270,9 +279,6 @@ class ProcessDispatcher final
   TaskRuntimeStats GetTaskRuntimeStats() const TA_EXCL(get_lock());
   zx_info_task_runtime_t GetRuntimeStats() const { return GetTaskRuntimeStats(); }
 
-  zx_status_t GetAspaceMaps(VmarMapsInfoWriter& maps, size_t max, size_t* actual,
-                            size_t* available) const;
-  zx_status_t GetVmos(VmoInfoWriter& vmos, size_t max, size_t* actual, size_t* available);
   zx_status_t GetThreads(fbl::Array<zx_koid_t>* threads) const;
   zx_status_t SetCriticalToJob(fbl::RefPtr<JobDispatcher> critical_to_job, bool retcode_nonzero);
 
@@ -350,7 +356,7 @@ class ProcessDispatcher final
   // The restricted address space spans the bottom half of the process' total address space, and is
   // private to the process. Threads executing in restricted mode are restricted to this address
   // space.
-  VmAspace* restricted_aspace() { return restricted_aspace_.get(); }
+  VmAspace* restricted_aspace() const { return restricted_aspace_.get(); }
 
   // Returns the normal address space for this process.
   //
@@ -410,6 +416,8 @@ class ProcessDispatcher final
                                                         bool ensure_initial_thread,
                                                         const UserEntryState* entry);
   friend void cpp_process_remove_thread(ProcessDispatcher* process, ThreadDispatcher* thread);
+  friend const ShareableProcessState* cpp_process_dispatcher_shareable_state(
+      const ProcessDispatcher* process);
   // Takes the given ThreadDispatcher and transitions it from the INITIALIZED state to a runnable
   // state (RUNNING or SUSPENDED depending on whether this process is suspended) by calling
   // ThreadDispatcher::MakeRunnable. The thread is then added to the thread_list_ for this process
@@ -500,5 +508,7 @@ class ProcessDispatcher final
 };
 
 const char* StateToString(ProcessDispatcher::State state);
+
+extern "C" ProcessDispatcher::State cpp_process_dispatcher_state(const ProcessDispatcher* process);
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_PROCESS_DISPATCHER_H_

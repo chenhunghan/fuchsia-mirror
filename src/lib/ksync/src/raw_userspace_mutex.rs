@@ -70,7 +70,8 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
 pub struct RawMutexPolicy;
 
-impl super::LockPolicy<RawMutex> for RawMutexPolicy {
+// SAFETY: `RawMutex::lock` and `RawMutex::unlock` enforce mutual exclusion on `RawMutex`.
+unsafe impl super::LockPolicy<RawMutex> for RawMutexPolicy {
     type AcquireArgs = ();
     type GuardState = ();
 
@@ -81,6 +82,7 @@ impl super::LockPolicy<RawMutex> for RawMutexPolicy {
 
     #[inline]
     unsafe fn reacquire(lock: &RawMutex, entry: *mut (), state: &mut Self::GuardState) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
         *state = unsafe { Self::acquire(lock, entry, ()) };
     }
 
@@ -93,7 +95,8 @@ impl super::LockPolicy<RawMutex> for RawMutexPolicy {
     }
 }
 
-impl RawLock for RawMutex {
+// SAFETY: `RawMutex` is a physical userspace mutex with a unique storage address.
+unsafe impl RawLock for RawMutex {
     type LockEntry = ();
     type DefaultPolicy = RawMutexPolicy;
 
@@ -101,6 +104,7 @@ impl RawLock for RawMutex {
     unsafe fn init(
         class_id: *const core::ffi::c_void,
     ) -> impl PinInit<Self, core::convert::Infallible> {
+        // SAFETY: Closure initializes `slot` in place before returning `Ok(())`.
         unsafe {
             pin_init_from_closure(move |slot| {
                 core::ptr::write(slot, Self::const_init(class_id));

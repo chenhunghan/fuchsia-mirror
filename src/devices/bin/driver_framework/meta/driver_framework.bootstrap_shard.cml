@@ -110,6 +110,7 @@
                 "fuchsia.driver.devicetree.EnabledNodes",
                 "fuchsia.driver.ExposeDebugCapabilities",
                 "fuchsia.driver.UseHardwareIommu",
+                "fuchsia.power.DeepSuspendEnabled",
                 "fuchsia.power.GpuPowerManagementEnabled",
                 "fuchsia.power.PowerFrameworkEnabledForWlanDriver",
                 "fuchsia.power.RuntimeProcessorPowerManagementEnabled",
@@ -137,6 +138,12 @@
             ],
             from: "parent",
             to: "#boot-drivers",
+        },
+        {
+            config: "fuchsia.usb.dwc3.BypassPlatformExtension",
+            from: "void",
+            to: "#boot-drivers",
+            availability: "optional",
         },
         {
             protocol: "fuchsia.tracing.provider.Registry",
@@ -205,7 +212,6 @@
             protocol: [
                 "fuchsia.boot.Items",
                 "fuchsia.boot.WriteOnlyLog",
-                "fuchsia.kernel.MexecResource",
                 "fuchsia.kernel.PowerResource",
             ],
             from: "parent",
@@ -506,8 +512,9 @@
                 "fuchsia.hardware.cpu.ctrl.Service",
                 "fuchsia.hardware.display.Service",
                 "fuchsia.hardware.nfc.Service",
-                "fuchsia.hardware.pci.BusService",
+                "fuchsia.hardware.pci.DebugService",
                 "fuchsia.hardware.power.battery.Service",
+                "fuchsia.hardware.power.charger.DebugService",
                 "fuchsia.hardware.power.charger.Service",
                 "fuchsia.hardware.power.source.Service",
                 "fuchsia.hardware.power.suspend.SuspendService",
@@ -527,6 +534,16 @@
         },
         {
             config: "fuchsia.driver.usb.peripheral",
+            from: "#kernel-args-forwarder/boot_args",
+            to: "#boot-drivers",
+            availability: "optional",
+            source_availability: "unknown",
+        },
+        {
+            // The kernel's `kernel.serial` argument forwarded as a boolean (false when "none",
+            // true otherwise), so that a driver for the kernel's debug UART can tell whether
+            // the kernel owns that UART.
+            config: "fuchsia.kernel.serial",
             from: "#kernel-args-forwarder/boot_args",
             to: "#boot-drivers",
             availability: "optional",
@@ -567,7 +584,7 @@
                 "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.haptics.Service",
                 "fuchsia.hardware.nfc.Service",
-                "fuchsia.hardware.pci.BusService",
+                "fuchsia.hardware.pci.DebugService",
                 "fuchsia.hardware.power.suspend.SuspendService",
                 "fuchsia.hardware.power.usb.DebugService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",

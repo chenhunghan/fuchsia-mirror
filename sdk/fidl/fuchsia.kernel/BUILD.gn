@@ -27,12 +27,6 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 fidl("fuchsia.kernel") {
   sources = [
     "cpu-resource.fidl",
@@ -47,7 +41,6 @@ fidl("fuchsia.kernel") {
     "kernel-counter.fidl",
     "kernel-debug.fidl",
     "kernel-stats.fidl",
-    "mexec-resource.fidl",
     "mmio-resource.fidl",
     "msi-resource.fidl",
     "overview.fidl",

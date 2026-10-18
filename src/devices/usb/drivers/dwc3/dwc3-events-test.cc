@@ -67,10 +67,15 @@ TEST_F(Dwc3EventsTest, HandleDisconnectEvent) {
     if (!uep) {
       return;
     }
+    ASSERT_OK(Dwc3TestHelper::InitFifo(drv, 2, false));
+    auto* trb = uep->fifo.AdvanceWrite();
+    trb->control = TRB_HWO;
     auto& ep = uep->ep;
     ep.transfer_state = Endpoint::TransferState::kActiveOngoing;
     Dwc3TestHelper::SetControllerStarted(drv, true);
     ep.rsrc_id = 1;
+    // One TRB was handed to the (fake) controller above.
+    ep.queued_trbs = 1;
     uep->server->active_reqs.push(decltype(uep->server->active_reqs)::value_type{
         .request = usb::FidlRequest(
             std::move(fuchsia_hardware_usb_request::Request().defer_completion(false))),
@@ -174,11 +179,7 @@ TEST_F(Dwc3EventsTest, HandleConnectionDoneEvent) {
 
   // Use RAII guard to guarantee register callback cleanup on scope exit regardless of assertions.
   auto cleanup_depcmd = DeferClearDepcmdCallbacks(0);
-  auto cleanup_dsts = fit::defer([this]() {
-    dut_.RunInEnvironmentTypeContext([](Environment& env) {
-      env.reg_region()[DSTS::Get().addr()].SetReadCallback([]() -> uint32_t { return 0; });
-    });
-  });
+  auto cleanup_dsts = DeferClearDstsCallback();
 
   dut_.RunInEnvironmentTypeContext([depcmd_written, depcmd_val](Environment& env) {
     auto& dsts = env.reg_region()[DSTS::Get().addr()];

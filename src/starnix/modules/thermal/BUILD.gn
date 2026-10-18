@@ -34,6 +34,8 @@ rustc_library("thermal") {
 
   configs += [ "//src/starnix/build:kernel_library_config" ]
 
+  visibility = [ "//src/starnix/modules/*" ]
+
   deps = [
     ":thermal-netlink",
     "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
@@ -41,7 +43,6 @@ rustc_library("thermal") {
     "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_rust",
     "//sdk/rust/zx",
     "//src/connectivity/network/netlink",
-    "//src/lib/fdio/rust:fdio",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
@@ -55,6 +56,7 @@ rustc_library("thermal") {
     "//src/starnix/lib/third_party/rust_netlink/netlink_packet_generic",
     "//src/starnix/lib/third_party/rust_netlink/netlink_packet_utils",
     "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:argh",
     "//third_party/rust_crates:async-trait",
     "//third_party/rust_crates:futures",
   ]

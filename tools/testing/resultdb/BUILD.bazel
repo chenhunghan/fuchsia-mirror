@@ -14,6 +14,7 @@ go_library(
     name = "lib",
     srcs = [
         "client.go",
+        "fixture.go",
         "lib.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/testing/resultdb",
@@ -54,7 +55,16 @@ go_binary_host_tool(
 
 host_test_data_files(
     name = "resultdb_testdata",
-    srcs = glob(["testdata/**"]),
+    srcs = [
+        "testdata/lucictx.json",
+        "testdata/serial_log.txt",
+        "testdata/summary.json",
+        "testdata/summary2.json",
+        "testdata/summary_exonerated.json",
+        "testdata/summary_long_name.json",
+        "testdata/syslog.txt",
+        "testdata/test_output.txt",
+    ],
     dest_dir = "testdata",
 )
 
@@ -62,6 +72,7 @@ host_go_test(
     name = "resultdb_lib_tests",
     srcs = [
         "client_test.go",
+        "fixture_test.go",
         "lib_test.go",
     ],
     embed = [":lib"],

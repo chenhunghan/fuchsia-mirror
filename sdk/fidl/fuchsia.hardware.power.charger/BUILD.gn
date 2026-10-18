@@ -27,12 +27,6 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 fidl("fuchsia.hardware.power.charger") {
   sources = [ "charger.fidl" ]
   sdk_area = "Power"
@@ -40,5 +34,8 @@ fidl("fuchsia.hardware.power.charger") {
   enable_rust_next = true
   stable = false
   visibility = [ "*" ]
-  public_deps = [ "//sdk/fidl/fuchsia.power.system" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.power.system",
+    "//zircon/vdso/zx",
+  ]
 }

@@ -30,7 +30,7 @@ use starnix_types::arch::ArchWidth;
 use starnix_types::stats::TaskTimeStats;
 use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials, FsCred};
 use starnix_uapi::errors::Errno;
-use starnix_uapi::signals::{SIGCHLD, SigSet, Signal, sigaltstack_contains_pointer};
+use starnix_uapi::signals::{SIGCHLD, SIGKILL, SigSet, Signal, sigaltstack_contains_pointer};
 use starnix_uapi::user_address::{
     ArchSpecific, MappingMultiArchUserRef, UserAddress, UserCString, UserRef,
 };
@@ -141,7 +141,7 @@ pub struct TaskMutableState {
     signals: SignalState,
 
     /// The current run state of the task.
-    pub run_state: RunState,
+    run_state: RunState,
 
     /// Internal signals that have a higher priority than a regular signal.
     ///
@@ -155,7 +155,8 @@ pub struct TaskMutableState {
     /// The exit status that this task exited with.
     exit_status: Option<ExitStatus>,
 
-    /// Desired scheduler state for the task.
+    /// Desired scheduler state for the task. This may not reflect the actual committed Zircon
+    /// priority, which can be confirmed via SchedulerState::applied_role_name.
     pub scheduler_state: SchedulerState,
 
     /// The UTS namespace assigned to this thread.
@@ -204,9 +205,6 @@ pub struct TaskMutableState {
 
     /// Information that a tracer needs to inspect this process.
     pub captured_thread_state: Option<Box<CapturedThreadState>>,
-
-    /// The last applied scheduler role name.
-    last_applied_role: Option<String>,
 
     /// The cpuset cgroup path of this task.
     pub cpuset_path: String,
@@ -327,13 +325,26 @@ impl TaskMutableState {
         self.run_state.is_blocked()
     }
 
-    /// Sets the task's `RunState` to `run_state`.
-    pub fn set_run_state(&mut self, run_state: RunState) {
-        self.run_state = run_state;
+    /// Sets the task's `RunState` to `run_state` and returns the previous `RunState`.
+    ///
+    /// # Safety
+    /// If `run_state` is `RunState::Event(event_ref)`, the caller must guarantee that `event_ref`
+    /// points to a live `InterruptibleEvent` until `run_state` is reset to `RunState::Running`
+    /// under `Task::write()`.
+    pub(super) unsafe fn set_run_state(&mut self, run_state: RunState) -> RunState {
+        std::mem::replace(&mut self.run_state, run_state)
     }
 
     pub fn run_state(&self) -> RunState {
         self.run_state.clone()
+    }
+
+    /// Unblocks the task by interrupting whatever wait it is currently blocked upon.
+    pub fn wake(&self) {
+        // SAFETY: Holding `&self` (the task's state lock guard) ensures that if `self.run_state` is
+        // `RunState::Event`, the blocked thread has not yet cleared `run_state` in
+        // `CurrentTask::run_in_state_internal`, so the `InterruptibleEvent` outlives this call.
+        unsafe { self.run_state.wake() };
     }
 
     pub fn on_signal_stack(&self, stack_pointer_register: u64) -> bool {
@@ -374,13 +385,13 @@ impl TaskMutableState {
 
     /// Thaw the task if has been frozen
     pub fn thaw(&mut self) {
-        if let RunState::Frozen(waiter) = self.run_state() {
+        if let RunState::Frozen(waiter) = &self.run_state {
             waiter.notify();
         }
     }
 
     pub fn is_frozen(&self) -> bool {
-        matches!(self.run_state(), RunState::Frozen(_))
+        matches!(self.run_state, RunState::Frozen(_))
     }
 
     #[cfg(test)]
@@ -570,6 +581,19 @@ impl TaskMutableState<Base = Task> {
         self.exit_status.get_or_insert(status);
     }
 
+    /// Transitions the task out of any stop state, notifies signal waiters, and thaws it so it can
+    /// wind down after being marked [`TaskFlags::EXITED`].
+    pub(crate) fn force_wake_for_exit(&mut self) {
+        self.set_stopped(
+            StopState::ForceWaking,
+            /* siginfo = */ None,
+            /* current_task = */ None,
+            /* event = */ None,
+        );
+        self.notify_signal_waiters(&SIGKILL);
+        self.thaw();
+    }
+
     /// The set of pending signals for the task, including the signals pending for the thread
     /// group.
     pub fn pending_signals(&self) -> SigSet {
@@ -594,6 +618,13 @@ impl TaskMutableState<Base = Task> {
         let mask = self.signal_mask();
         self.signals.is_any_pending()
             || self.base.thread_group().is_any_signal_allowed_by_mask(mask)
+    }
+
+    /// Returns whether a deliverable signal or a task/thread-group stop is pending for this task.
+    pub fn is_interrupt_pending(&self) -> bool {
+        self.is_any_signal_pending()
+            || self.base.load_stopped().is_stopping_or_stopped()
+            || self.base.thread_group().load_stopped().is_stopping_or_stopped()
     }
 
     /// Returns the next pending signal that passes `predicate`.
@@ -1003,8 +1034,9 @@ impl Task {
             if let Some(tracer_tg) = tracer_tg {
                 drop(state);
                 let mut tracer_state = tracer_tg.write();
-                if !tracer_state.is_running() {
-                    // An exiting or exited tracer cannot accept new zombies.
+                if tracer_state.is_exited() {
+                    // An exited tracer has already detached its ptracees and cannot accept new
+                    // zombies.
                     return;
                 }
 
@@ -1131,7 +1163,6 @@ impl Task {
                     default_timerslack_ns: timerslack_ns,
                     ptrace: None,
                     captured_thread_state: None,
-                    last_applied_role: None,
                     cpuset_path: "/".to_string(),
                 }
                 .into(),
@@ -1262,13 +1293,6 @@ impl Task {
         })
     }
 
-    /// Overwrite the existing scheduler state with a new one and update the task's thread's role.
-    pub fn set_scheduler_state(&self, scheduler_state: SchedulerState) -> Result<(), Errno> {
-        self.update_scheduler_state_then_role(|task_scheduler_state| {
-            *task_scheduler_state = scheduler_state
-        })
-    }
-
     /// Update the task's thread's role based on its current scheduler state without making any
     /// changes to the state.
     ///
@@ -1284,10 +1308,10 @@ impl Task {
         let process_name = self.thread_group().read().leader_command();
         let thread_name = self.command();
 
-        let (new_scheduler_state, cpuset_path, last_applied_role) = {
+        let (new_scheduler_state, cpuset_path) = {
             let mut state = self.write();
             updater(&mut state.scheduler_state);
-            (state.scheduler_state, state.cpuset_path.clone(), state.last_applied_role.clone())
+            (state.scheduler_state.clone(), state.cpuset_path.clone())
         };
 
         let scheduler = &self.thread_group().kernel.scheduler;
@@ -1295,17 +1319,17 @@ impl Task {
             &process_name,
             &thread_name,
             &cpuset_path,
-            new_scheduler_state,
+            &new_scheduler_state,
         );
-        if last_applied_role.as_deref() == Some(role_name) {
+        if new_scheduler_state.applied_role_name.as_deref() == Some(role_name) {
             return Ok(());
         }
         scheduler.set_thread_role(self, role_name)?;
-        // Note: Re-acquiring the lock here to update `last_applied_role` has a minor race if
+        // Note: Re-acquiring the lock here to update `applied_role_name` has a minor race if
         // concurrent state updates execute `set_thread_role` out of order relative to cache writes.
         // Dropping the lock across `set_thread_role` avoids holding `Task` write lock over FIDL RPCs,
         // and any cache mismatch will self-correct on the next scheduler state or cgroup change.
-        self.write().last_applied_role = Some(role_name.to_string());
+        self.write().scheduler_state.applied_role_name = Some(role_name.to_string());
         Ok(())
     }
 
@@ -1343,7 +1367,7 @@ impl Task {
         if !user_tid.is_null() {
             let zero: tid_t = 0;
             self.write_object(user_tid, &zero)?;
-            self.kernel().shared_futexes.wake(
+            self.kernel().shared_futexes.wake::<crate::mm::SharedFutexKey>(
                 self,
                 user_tid.addr(),
                 usize::MAX,
@@ -1433,7 +1457,7 @@ impl Task {
             return;
         };
 
-        self.read().run_state.wake();
+        self.read().wake();
         if let Some(thread) = running_state.thread.get() {
             #[allow(
                 clippy::undocumented_unsafe_blocks,

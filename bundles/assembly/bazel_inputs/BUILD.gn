@@ -352,6 +352,12 @@ group("xhci_driver") {
       [ "//bundles/assembly/bazel_inputs/src/devices/usb/drivers/xhci:package" ]
 }
 
+group("usb_bus_driver") {
+  deps = [
+    "//bundles/assembly/bazel_inputs/src/devices/usb/drivers/usb-bus:package",
+  ]
+}
+
 group("fake_battery_driver") {
   deps = [ "//bundles/assembly/bazel_inputs/src/power/testing/fake-battery:fake_battery" ]
 }
@@ -1062,7 +1068,6 @@ group("testing_support") {
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:gtest-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:zxtest-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gunit:gunit-runner",
-    "//bundles/assembly/bazel_inputs/src/sys/test_runners/inspect:inspect-test-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/lib_loader_cache:lib_loader_runner_cache",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/rust:rust-test-create-raw-processes-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/rust:rust-test-next-vdso-runner",
@@ -1326,11 +1331,7 @@ group("wlan_development") {
   deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/wlan/tools/wlantool:wlan-dev" ]
 }
 
-group("wlan_legacy_privacy_support") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlandevicemonitor:wlandevicemonitor-legacy-privacy" ]
-}
-
-group("wlan_contemporary_privacy_only_support") {
+group("wlan_core") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlandevicemonitor",
   ]

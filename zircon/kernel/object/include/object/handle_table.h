@@ -15,6 +15,7 @@
 #include <fbl/ref_ptr.h>
 #include <kernel/brwlock.h>
 #include <kernel/event.h>
+#include <kernel/ffi.h>
 #include <kernel/mutex.h>
 #include <kernel/task_runtime_stats.h>
 #include <kernel/thread.h>
@@ -57,10 +58,16 @@ class HandleTable : public fbl::RefCounted<HandleTable> {
     return GetHandleLocked(&caller, handle_value);
   }
 
+  // Same as |GetHandleLocked| overload above, except process can be null.
+  //
+  // When |caller| is null, no policy enforcement happens.
+  Handle* GetHandleLocked(ProcessDispatcher* caller, zx_handle_t handle_value) TA_REQ_SHARED(lock_);
+
   zx_koid_t get_koid() const { return koid_; }
 
   // Returns the number of outstanding handles in this handle table.
   uint32_t HandleCount() const;
+  uint32_t HandleCountLocked() const TA_REQ_SHARED(lock_) { return count_; }
 
   // Adds |handle| to this handle table.
   void AddHandle(HandleOwner handle);
@@ -172,8 +179,6 @@ class HandleTable : public fbl::RefCounted<HandleTable> {
   template <typename Func>
   zx_status_t ForEachHandleBatched(Func&& func);
 
-  zx_status_t GetHandleInfo(fbl::Array<zx_info_handle_extended_t>* handles) const;
-
   // Called when all the containing ProcessDispatchers have transitioned to the Dead state.
   void Clean();
 
@@ -230,11 +235,6 @@ class HandleTable : public fbl::RefCounted<HandleTable> {
     HandleTable* const handle_table_;
     HandleTable::HandleList::iterator iter_ TA_GUARDED(&lock_);
   };
-
-  // Same as public |GetHandleLocked| overload, except process can be null.
-  //
-  // When |caller| is null, no policy enforcement happens.
-  Handle* GetHandleLocked(ProcessDispatcher* caller, zx_handle_t handle_value) TA_REQ_SHARED(lock_);
 
   // Get the dispatcher corresponding to this handle value, after
   // checking that this handle has the desired rights.
@@ -363,6 +363,15 @@ Handle* cpp_handle_table_get_handle_locked(HandleTable* handle_table, ProcessDis
                                            zx_handle_t handle_value);
 void cpp_handle_table_add_handle_locked(HandleTable* handle_table, Handle* handle);
 Handle* cpp_handle_table_remove_handle_locked(HandleTable* handle_table, Handle* handle);
+uint32_t cpp_handle_table_handle_count(const HandleTable* handle_table);
+uint32_t cpp_handle_table_handle_count_locked(const HandleTable* handle_table);
+typedef zx_status_t (*cpp_handle_table_for_each_handle_fn)(void* ctx, zx_handle_t handle,
+                                                           zx_rights_t rights,
+                                                           const Dispatcher* disp);
+zx_status_t cpp_handle_table_for_each_handle_locked(const HandleTable* handle_table, void* ctx,
+                                                    cpp_handle_table_for_each_handle_fn func);
+zx_status_t cpp_handle_table_for_each_handle_batched(HandleTable* handle_table, void* ctx,
+                                                     cpp_handle_table_for_each_handle_fn func);
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_HANDLE_TABLE_H_

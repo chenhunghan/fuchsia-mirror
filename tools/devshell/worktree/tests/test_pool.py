@@ -40,8 +40,77 @@ class TestWorktreePool(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def _write_jiri_config(self, checkout: Path, body: str) -> None:
+        (checkout / ".jiri_root").mkdir(parents=True, exist_ok=True)
+        (checkout / ".jiri_root" / "config").write_text(
+            f"<config>{body}</config>"
+        )
+
     def test_empty(self) -> None:
         self.assertEqual(self.pool.get_worktrees(), [])
+        self.assertEqual(
+            self.pool.worktrees_dir, (self.jiri_root / "worktrees").resolve()
+        )
+
+    def test_configured_relative_worktrees_dir(self) -> None:
+        main = self.fuchsia_dir / "fuchsia"
+        self._write_jiri_config(
+            main, "<worktrees_dir>../fuchsia-worktrees</worktrees_dir>"
+        )
+        pool = WorktreePool(fuchsia_dir=str(main))
+        self.assertEqual(
+            pool.worktrees_dir,
+            (self.fuchsia_dir / "fuchsia-worktrees").resolve(),
+        )
+
+    def test_configured_absolute_worktrees_dir(self) -> None:
+        pool_dir = self.fuchsia_dir / "elsewhere" / "pool"
+        self._write_jiri_config(
+            self.fuchsia_dir, f"<worktrees_dir>{pool_dir}</worktrees_dir>"
+        )
+        pool = WorktreePool(fuchsia_dir=str(self.fuchsia_dir))
+        self.assertEqual(pool.worktrees_dir, pool_dir.resolve())
+
+    def test_resolves_main_checkout_from_inside_worktree(self) -> None:
+        main = self.fuchsia_dir / "fuchsia"
+        self._write_jiri_config(
+            main, "<worktrees_dir>../fuchsia-worktrees</worktrees_dir>"
+        )
+        wt_path = self.fuchsia_dir / "fuchsia-worktrees" / "wt1"
+        # A worktree's config starts as a copy of the main checkout's, so its
+        # own worktrees_dir may be stale; the main checkout's one wins.
+        self._write_jiri_config(
+            wt_path,
+            f"<worktree><parent_root>{main}</parent_root></worktree>"
+            "<worktrees_dir>stale</worktrees_dir>",
+        )
+        pool = WorktreePool(fuchsia_dir=str(wt_path))
+        self.assertEqual(pool.fuchsia_dir, main.resolve())
+        self.assertEqual(pool.worktrees_dir, wt_path.parent.resolve())
+
+    def test_parent_root_cycle_terminates(self) -> None:
+        a = self.fuchsia_dir / "a"
+        b = self.fuchsia_dir / "b"
+        self._write_jiri_config(
+            a, f"<worktree><parent_root>{b}</parent_root></worktree>"
+        )
+        self._write_jiri_config(
+            b, f"<worktree><parent_root>{a}</parent_root></worktree>"
+        )
+        pool = WorktreePool(fuchsia_dir=str(a))
+        self.assertEqual(pool.fuchsia_dir, a.resolve())
+
+    def test_get_worktrees_ignores_entries_outside_pool(self) -> None:
+        wt_path = self.jiri_root / "worktrees" / "wt1"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        external_path = self.fuchsia_dir / "external-wt"
+        external_path.mkdir(parents=True, exist_ok=True)
+        with open(self.pool.registry_file, "w") as f:
+            f.write(f"{wt_path}\n{external_path}\n")
+
+        self.assertEqual(
+            [wt.path for wt in self.pool.get_worktrees()], [wt_path]
+        )
 
     def test_invalid_state_transitions(self) -> None:
         wt_path = self.jiri_root / "worktrees" / "wt1"
@@ -89,6 +158,54 @@ class TestWorktreePool(unittest.TestCase):
             wt.path, ["checkout", "--detach"], quiet=True, check=True
         )
 
+    @patch("worktree.run_jj")
+    @patch("worktree.run_git")
+    def test_release_renames_jj_workspaces(
+        self,
+        mock_run_git: MagicMock,
+        mock_run_jj: MagicMock,
+    ) -> None:
+        wt_path = self.jiri_root / "worktrees" / "wt1"
+        # The root and the vendor/google sub-project are jj workspaces; the
+        # integration sub-project is a plain git worktree.
+        for rel in (".", "vendor/google"):
+            (wt_path / rel / ".jj").mkdir(parents=True, exist_ok=True)
+            (wt_path / rel / ".jj" / "repo").write_text("../../../.jj/repo\n")
+        (wt_path / "integration").mkdir(parents=True, exist_ok=True)
+        snapshot = self.jiri_root / "update_history" / "latest"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.write_text(
+            "<manifest><projects>"
+            '<project name="fuchsia" path="."/>'
+            '<project name="vendor/google" path="vendor/google"/>'
+            '<project name="integration" path="integration"/>'
+            "</projects></manifest>"
+        )
+        with open(self.pool.registry_file, "w") as f:
+            f.write(f"{wt_path}\n")
+        wt = self.pool.get_worktrees()[0]
+        self.assertTrue(wt.is_jj_workspace())
+        self.assertEqual(
+            wt.jj_workspace_paths(),
+            [wt_path.resolve(), (wt_path / "vendor" / "google").resolve()],
+        )
+
+        wt.acquire_lease("my-task")
+        mock_run_jj.assert_not_called()
+        wt.release_lease()
+        self.assertEqual(
+            [c.args for c in mock_run_jj.call_args_list],
+            [
+                (wt_path.resolve(), ["workspace", "rename", "wt1"]),
+                (
+                    (wt_path / "vendor" / "google").resolve(),
+                    ["workspace", "rename", "wt1"],
+                ),
+            ],
+        )
+        # jj keeps HEAD detached, so git isn't needed.
+        mock_run_git.assert_not_called()
+
     def test_generate_random_pool_name(self) -> None:
         name = self.pool._generate_random_pool_name()
         self.assertIn("-", name)
@@ -125,8 +242,36 @@ class TestAddSubcommand(unittest.TestCase):
         self.assertEqual(lease.task_id, "my-feat")
         mock_run_jiri.assert_called_once_with(
             self.jiri_root,
-            ["worktree", "sync", str(wt_path)],
+            [
+                "worktree",
+                "sync",
+                "--force",
+                str(wt_path),
+            ],
             check=True,
+        )
+
+    @patch("subcommands.add.run_jiri")
+    def test_add_with_configured_worktrees_dir(
+        self, mock_run_jiri: MagicMock
+    ) -> None:
+        main = self.fuchsia_dir / "fuchsia"
+        (main / ".jiri_root").mkdir(parents=True, exist_ok=True)
+        (main / ".jiri_root" / "config").write_text(
+            "<config><worktrees_dir>../fuchsia-worktrees</worktrees_dir></config>"
+        )
+        pool = WorktreePool(fuchsia_dir=str(main))
+        wt_path = pool.worktrees_dir / "wt1"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        pool.registry_file.write_text(f"{wt_path}\n")
+
+        args = argparse.Namespace(name="my-feat", pool_name=None, json=False)
+        with patch("sys.stdout", new_callable=StringIO) as mock_out:
+            add_cmd.run(args, pool)
+            self.assertIn("'../fuchsia-worktrees/my-feat'", mock_out.getvalue())
+        self.assertEqual(
+            (self.fuchsia_dir / "fuchsia-worktrees" / "my-feat").readlink(),
+            Path("wt1"),
         )
 
     @patch("worktree.run_git")
@@ -195,7 +340,12 @@ class TestAddSubcommand(unittest.TestCase):
         self.assertEqual(lease.task_id, "my-feat")
         mock_run_jiri_add.assert_called_once_with(
             self.jiri_root,
-            ["worktree", "sync", str(wt.path)],
+            [
+                "worktree",
+                "sync",
+                "--force",
+                str(wt.path),
+            ],
             check=True,
         )
 

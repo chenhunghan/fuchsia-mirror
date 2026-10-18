@@ -278,10 +278,25 @@ open protocol Binder {
     /// Set the VMO to used as a share resource between the driver and the
     /// client. `mapped_address` is the address where the vmo is mapped in the
     /// client address space.
+    ///
+    /// The driver handles the other requests of the client concurrently, so it
+    /// can handle an ioctl before the VMO is mapped. Clients should use
+    /// `MapVmo` instead.
     flexible SetVmo(resource struct {
         vmo zx.Handle:VMO;
         mapped_address uint64;
     });
+    /// Maps the VMO used as a shared resource between the driver and the
+    /// client. `mapped_address` is the address where the VMO is mapped in the
+    /// client address space.
+    ///
+    /// Responds once the VMO is mapped. The driver handles the other requests
+    /// of the client concurrently, so the client must wait for the response
+    /// before sending any ioctl that needs the VMO.
+    flexible MapVmo(resource struct {
+        vmo zx.Handle:VMO;
+        mapped_address uint64;
+    }) -> () error fuchsia.posix.Errno;
     /// Processes a Binder ioctl. This message returns writes for the calling thread
     /// that must be processed to correctly handle the ioctl.
     flexible Ioctl(resource struct {
@@ -296,6 +311,30 @@ open protocol Binder {
         /// The reads gathered for the ioctl.
         ioctl_reads vector<IoctlReadWrite>:MAX_IOCTL_READ_COUNT;
         /// The files being transfered by the ioctl.
+        files vector<FileHandle>:MAX_FILE_COUNT;
+    }) -> (struct {
+        ioctl_writes vector<IoctlReadWrite>:MAX_IOCTL_WRITE_COUNT;
+    }) error fuchsia.posix.Errno;
+
+    /// Registers a dedicated 1:1 channel for synchronous Binder transactions.
+    flexible RegisterThreadChannel(resource struct {
+        server_end server_end:BinderThread;
+    }) -> () error fuchsia.posix.Errno;
+};
+
+/// Dedicated per-thread Binder channel for synchronous 1:1 IPC.
+open protocol BinderThread {
+    /// Processes a Binder ioctl on a dedicated worker thread.
+    flexible Ioctl(resource struct {
+        /// The ioctl being called.
+        request uint32;
+        /// Optional argument for the ioctl.
+        arg uint64;
+        /// The VMO to return writes for this ioctl through.
+        vmo zx.Handle:VMO;
+        /// The reads gathered for the ioctl.
+        ioctl_reads vector<IoctlReadWrite>:MAX_IOCTL_READ_COUNT;
+        /// The files being transferred by the ioctl.
         files vector<FileHandle>:MAX_FILE_COUNT;
     }) -> (struct {
         ioctl_writes vector<IoctlReadWrite>:MAX_IOCTL_WRITE_COUNT;

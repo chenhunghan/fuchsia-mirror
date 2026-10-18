@@ -265,10 +265,6 @@ zx::result<> Driver::Start(fdf::DriverContext context) {
     return zx::error(status);
   }
   adapter->irq_mode = fuchsia_hardware_pci::InterruptMode(irq_mode);
-  if (adapter->irq_mode.IsUnknown()) {
-    fdf::error("unknown interrupt mode: {}", irq_mode);
-    return zx::error(ZX_ERR_INTERNAL);
-  }
 
   if (zx_status_t status = e1000_pci_map_interrupt(pci, 0, adapter->irq.reset_and_get_address());
       status != ZX_OK) {
@@ -1370,6 +1366,12 @@ void Device<RxDescriptor>::GetMac(fdf::Arena& arena, GetMacCompleter::Sync& comp
 template <typename RxDescriptor>
 void Device<RxDescriptor>::Removed(fdf::Arena& arena, RemovedCompleter::Sync& completer) {
   // The driver never explicitly removes the port, nothing to do here.
+}
+
+template <typename RxDescriptor>
+void Device<RxDescriptor>::GetPowerDependencyToken(
+    fdf::Arena& arena, GetPowerDependencyTokenCompleter::Sync& completer) {
+  completer.buffer(arena).Reply(zx::event{});
 }
 
 // MacAddr protocol:

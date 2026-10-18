@@ -21,11 +21,11 @@ import textwrap
 import time
 import typing
 from typing import List
-import uuid
 
 import agents.agents as agents_lib
 import async_utils.command as command
 import async_utils.signals as signals
+import package_server
 import statusinfo
 import termout
 
@@ -524,6 +524,7 @@ class AsyncMain:
 
         self._package_server_task: asyncio.Task[typing.Any] | None = None
         self._package_server_event: asyncio.Event | None = None
+        self._package_server_started_event: asyncio.Event | None = None
         self._summary_val = summary.RunSummary()
         self._agent_log_dir: str | None = None
         if flags.agent_output:
@@ -551,6 +552,7 @@ class AsyncMain:
                 self._package_server_task.cancel()
             self._package_server_event = None
             self._package_server_task = None
+            self._package_server_started_event = None
         if self._emu_instance_dir is not None:
             await self._teardown_emulator()
 
@@ -920,7 +922,7 @@ class AsyncMain:
                     pass
                 case self._PackageServerBehavior.START:
                     self._start_package_server()
-                    if selections.has_device_test():
+                    if selections.needs_package_server():
                         recorder.emit_info_message(
                             "Waiting for repository registration..."
                         )
@@ -979,7 +981,8 @@ class AsyncMain:
             # We raced with an exit request.
             # Request termination and await exit.
             self._termination_callback_event.set()
-            await asyncio.sleep(3600)
+            await end_execution("Execution terminated by user")
+            return 1
 
         # Finally, run all selected tests.
         if not await self._run_all_tests(selections):
@@ -1424,6 +1427,10 @@ class AsyncMain:
                 "E2E test selected, building updates package"
             )
         elif tests.has_device_test():
+            # Note: We're intentionally not checking `tests.needs_package_server()` here, because
+            # tests that manage their own repository server, like the OTA tests, may still need up
+            # to date packages.
+
             missing_packages: list[str] = []
             try:
                 package_repo = package_repository.PackageRepository.from_env(
@@ -1478,8 +1485,6 @@ class AsyncMain:
         recorder.emit_instruction_message("Use --no-build to skip building")
 
         recorder.emit_info_message("\nExecuting build.")
-
-        await asyncio.sleep(0.1)
 
         logs_dir = self._get_logs_dir()
         build_log_path = (
@@ -1558,6 +1563,10 @@ class AsyncMain:
                 )
 
         if tests.has_device_test():
+            # Note: We're intentionally not checking `tests.needs_package_server()` here, because
+            # tests that manage their own repository server, like the OTA tests, may still need up
+            # to date packages.
+
             try:
                 await self._publish_packages(build_id)
             except self._PublishException as e:
@@ -1869,7 +1878,7 @@ class AsyncMain:
         flags = self._flags
         recorder = self._recorder
         if (
-            tests.has_device_test()
+            tests.needs_package_server()
             and not await has_package_server_connected_to_device(
                 exec_env,
                 recorder,
@@ -1958,11 +1967,13 @@ class AsyncMain:
         @dataclass
         class RunState:
             total_running: int = 0
-            non_hermetic_running: int = 0
-            hermetic_test_queue: asyncio.Queue[ExecEntry] = field(
+            # Number of currently running tests that must execute serially
+            # (one at a time, not referring to a serial connection).
+            serial_running: int = 0
+            parallel_test_queue: asyncio.Queue[ExecEntry] = field(
                 default_factory=lambda: asyncio.Queue()
             )
-            non_hermetic_test_queue: asyncio.Queue[ExecEntry] = field(
+            serial_test_queue: asyncio.Queue[ExecEntry] = field(
                 default_factory=lambda: asyncio.Queue()
             )
 
@@ -1995,12 +2006,19 @@ class AsyncMain:
                     # other runs to keep going.
 
                     abort_group = asyncio.Event()
-                if exec.is_hermetic():
-                    run_state.hermetic_test_queue.put_nowait(
+                # Hermetic device tests and pure host tests (excluding E2E/Lacewing
+                # tests that interact with a target device, which are filtered out
+                # by is_host_test()) are placed in the parallel execution queue.
+                # Note that unlike infra runs, fx test executes host binaries
+                # locally without nsjail or filesystem isolation, so they are not
+                # strictly hermetic on the host even though they do not contend
+                # for shared target device state.
+                if exec.is_hermetic() or exec.is_host_test():
+                    run_state.parallel_test_queue.put_nowait(
                         ExecEntry(exec, abort_group)
                     )
                 else:
-                    run_state.non_hermetic_test_queue.put_nowait(
+                    run_state.serial_test_queue.put_nowait(
                         ExecEntry(exec, abort_group)
                     )
 
@@ -2051,7 +2069,9 @@ class AsyncMain:
         async def test_executor() -> None:
             nonlocal test_failure_observed
             to_run: ExecEntry
-            was_non_hermetic: bool = False
+            # Whether the current test was dequeued from serial_test_queue to
+            # run serially (one at a time, not referring to a serial connection).
+            was_serial: bool = False
 
             while True:
                 async with run_condition:
@@ -2064,18 +2084,18 @@ class AsyncMain:
                         return
 
                     if (
-                        run_state.non_hermetic_running == 0
-                        and not run_state.non_hermetic_test_queue.empty()
+                        run_state.serial_running == 0
+                        and not run_state.serial_test_queue.empty()
                     ):
-                        to_run = run_state.non_hermetic_test_queue.get_nowait()
-                        run_state.non_hermetic_running += 1
-                        was_non_hermetic = True
-                    elif not run_state.hermetic_test_queue.empty():
-                        to_run = run_state.hermetic_test_queue.get_nowait()
-                        was_non_hermetic = False
+                        to_run = run_state.serial_test_queue.get_nowait()
+                        run_state.serial_running += 1
+                        was_serial = True
+                    elif not run_state.parallel_test_queue.empty():
+                        to_run = run_state.parallel_test_queue.get_nowait()
+                        was_serial = False
                     elif (
-                        run_state.hermetic_test_queue.empty()
-                        and run_state.non_hermetic_test_queue.empty()
+                        run_state.parallel_test_queue.empty()
+                        and run_state.serial_test_queue.empty()
                     ):
                         run_condition.notify_all()
                         return
@@ -2085,7 +2105,10 @@ class AsyncMain:
                     run_state.total_running += 1
 
                 test_suite_id = recorder.emit_test_suite_started(
-                    to_run.exec.name(), not was_non_hermetic, parent=test_group
+                    to_run.exec.name(),
+                    not was_serial and not to_run.exec.is_host_test(),
+                    parent=test_group,
+                    is_host=to_run.exec.is_host_test(),
                 )
                 status: event.TestSuiteStatus = (
                     event.TestSuiteStatus.FAILED_TO_START
@@ -2231,8 +2254,8 @@ class AsyncMain:
 
                 async with run_condition:
                     run_state.total_running -= 1
-                    if was_non_hermetic:
-                        run_state.non_hermetic_running -= 1
+                    if was_serial:
+                        run_state.serial_running -= 1
                     run_condition.notify_all()
 
         # Wait for the debugger to signal that it is ready.
@@ -2252,7 +2275,7 @@ class AsyncMain:
 
             # This is a synchronous wait and we don't want to block the event loop, so run it in the
             # default thread executor.
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, maybe_debugger.wait)
 
         recorder.emit_end(id=test_group)
@@ -2392,6 +2415,7 @@ class AsyncMain:
         assert exec_env is not None
 
         cancel_event = asyncio.Event()
+        started_event = asyncio.Event()
 
         # Aborting the `fx serve` task stops the repository server but does not remove the
         # corresponding repository config or rewrite rule from the device. The repository config is
@@ -2399,22 +2423,47 @@ class AsyncMain:
         # cancelling the server task to avoid the pkg-resolver's AutoClient logging that the server
         # has gone away.
         async def impl() -> None:
-            repo_name = f"fxtest-temp-{uuid.uuid4()}"
-            repo_deregistered_event = asyncio.Event()
-            serve_task = asyncio.create_task(
-                execution.run_command(
-                    *exec_env.fx_cmd_line(
-                        "serve",
-                        "-l",
-                        "0",
-                        "--name",
-                        repo_name,
-                    ),
-                    recorder=recorder,
-                    abort_signal=repo_deregistered_event,
-                    quiet_mode=True,
-                )
+            repo_name = package_server.ephemeral_repository_name(
+                "fxtest", exec_env.out_dir
             )
+            repo_deregistered_event = asyncio.Event()
+            try:
+                # Deregister any stale registration left on the device by an
+                # interrupted prior run so `_wait_for_repository_registration`
+                # waits for the newly started server instance to register its port.
+                try:
+                    await execution.run_command(
+                        *exec_env.fx_cmd_line(
+                            "ffx",
+                            "target",
+                            "repository",
+                            "deregister",
+                            "-r",
+                            repo_name,
+                        ),
+                        recorder=recorder,
+                        quiet_mode=True,
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
+
+                serve_task = asyncio.create_task(
+                    execution.run_command(
+                        *exec_env.fx_cmd_line(
+                            "serve",
+                            "-l",
+                            "0",
+                            "--name",
+                            repo_name,
+                        ),
+                        recorder=recorder,
+                        abort_signal=repo_deregistered_event,
+                        quiet_mode=True,
+                    )
+                )
+            finally:
+                started_event.set()
             try:
                 await cancel_event.wait()
             finally:
@@ -2456,6 +2505,7 @@ class AsyncMain:
         task = asyncio.create_task(impl())
         self._package_server_task = task
         self._package_server_event = cancel_event
+        self._package_server_started_event = started_event
         return (task, cancel_event)
 
     async def _get_active_devices(self) -> list[dict[str, typing.Any]]:
@@ -2546,15 +2596,33 @@ class AsyncMain:
         active_devices = await self._get_active_devices()
         return len(active_devices) > 0
 
-    async def _wait_for_repository_registration(self) -> bool:
-        """Wait for repository to be registered."""
+    async def _wait_for_repository_registration(
+        self, repo_name: str | None = None
+    ) -> bool:
+        """Wait for the expected package repository to be registered on the device.
+
+        Args:
+            repo_name (str | None): Repository name to wait for. If omitted,
+                defaults to this build directory's `fxtest` ephemeral repository
+                name so unrelated stale `fuchsia.com` registrations do not match.
+
+        Returns:
+            bool: True if the repository is registered within the timeout.
+        """
         recorder = self._recorder
         exec_env = self._exec_env
         assert exec_env is not None
+        if repo_name is None:
+            repo_name = package_server.ephemeral_repository_name(
+                "fxtest", exec_env.out_dir
+            )
+        started_event = getattr(self, "_package_server_started_event", None)
+        if started_event is not None:
+            await started_event.wait()
         for _ in range(30):
             try:
                 if await is_fuchsia_repo_registered_on_device(
-                    exec_env, recorder
+                    exec_env, recorder, repo_name=repo_name
                 ):
                     return True
             except Exception:
@@ -2847,8 +2915,21 @@ async def is_fuchsia_repo_registered_on_device(
     recorder: event.EventRecorder,
     parent: event.Id | None = None,
     timeout: float = _PACKAGE_SERVER_PROBE_TIMEOUT_SECONDS,
+    repo_name: str | None = None,
 ) -> bool:
-    """Check whether fuchsia.com repository is registered on the device."""
+    """Check whether a `fuchsia.com` repository is registered on the device.
+
+    Args:
+        exec_env (environment.ExecutionEnvironment): Execution environment.
+        recorder (event.EventRecorder): Recorder for events.
+        parent (event.Id | None): Parent task ID. Defaults to None.
+        timeout (float): Subprocess timeout in seconds.
+        repo_name (str | None): Optional repository name to require when
+            matching `fuchsia.com` registrations.
+
+    Returns:
+        bool: True if a matching `fuchsia.com` repository is registered.
+    """
     repo_output = await execution.run_command(
         *exec_env.fx_cmd_line(
             "ffx",
@@ -2866,12 +2947,23 @@ async def is_fuchsia_repo_registered_on_device(
     return (
         repo_output is not None
         and repo_output.return_code == 0
-        and _is_fuchsia_repo_registered(repo_output.stdout)
+        and _is_fuchsia_repo_registered(repo_output.stdout, repo_name=repo_name)
     )
 
 
-def _is_fuchsia_repo_registered(output: str) -> bool:
-    """Check whether fuchsia.com repository is registered in ffx output."""
+def _is_fuchsia_repo_registered(
+    output: str, repo_name: str | None = None
+) -> bool:
+    """Check whether a `fuchsia.com` repository is registered in `ffx` output.
+
+    Args:
+        output (str): JSON stdout from `ffx --machine json target repository list`.
+        repo_name (str | None): Optional repository name to require when
+            matching `fuchsia.com` registrations.
+
+    Returns:
+        bool: True if a matching `fuchsia.com` repository entry is present.
+    """
     parsed = json.loads(output)
     # Expected format from ffx --machine json: {"ok": {"data": [...]}}
     entries = []
@@ -2884,6 +2976,11 @@ def _is_fuchsia_repo_registered(output: str) -> bool:
     for entry in entries:
         if isinstance(entry, dict):
             name = entry.get("name", "")
+            if repo_name is not None and name not in (
+                repo_name,
+                f"fuchsia-pkg://{repo_name}",
+            ):
+                continue
             aliases = entry.get("aliases", [])
             if (
                 name == "fuchsia.com"

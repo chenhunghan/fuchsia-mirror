@@ -14,17 +14,16 @@ use crate::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileS
 use crate::vfs::pseudo::simple_file::SimpleFileNode;
 use crate::vfs::socket::{SocketAddress, SocketHandle, UnixSocket};
 use crate::vfs::{
-    AccessCheck, DirEntry, DirEntryHandle, FileHandle, FileObject, FileOps, FileSystem,
-    FileSystemHandle, FileSystemOptions, FileWriteGuardMode, FsContext, FsNode, FsNodeHandle,
-    FsNodeOps, FsStr, FsString, OpenAccessCheck, PathBuilder, RenameFlags, SymlinkTarget,
-    UnlinkKind, fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek,
+    AccessCheck, CreationStatus, DirEntry, DirEntryHandle, FileHandle, FileObject, FileOps,
+    FileSystem, FileSystemHandle, FileSystemOptions, FileWriteGuardMode, FsContext, FsNode,
+    FsNodeHandle, FsNodeOps, FsStr, FsString, OpenAccessCheck, PathBuilder, RenameFlags,
+    SymlinkTarget, UnlinkKind, fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek,
     fileops_impl_nonseekable, fileops_impl_noop_sync, fs_node_impl_not_dir,
 };
-use fuchsia_rcu::{RcuArc, RcuBox, RcuReadScope};
+use fuchsia_rcu::{RcuArc, RcuBox, RcuDroppable, RcuReadScope};
 use fuchsia_rcu_collections::rcu_raw_hash_map::RcuRawHashMap;
 use starnix_logging::log_warn;
-use starnix_rcu::RcuHashMap;
-use starnix_sync::{LockDepMutex, MountSubmountsLock, NamespaceFlagsLock};
+use starnix_sync::{LockDepMutex, MountSubmountsLock, Mutex, NamespaceFlagsLock};
 use starnix_uapi::arc_key::{ArcKey, PtrKey, WeakKey};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
@@ -92,6 +91,9 @@ impl Namespace {
         new_ns: &Namespace,
         mounts_guard: &MountsWriteToken,
     ) -> Option<NamespaceNode> {
+        if node.mount.as_ref().is_some_and(|m| m.is_detached(mounts_guard)) {
+            return Some(node);
+        }
         let mut node = mounts_guard.defer_drop(node);
         // Collect the list of mountpoints that leads to this node's mount
         let mut mountpoints = vec![];
@@ -134,10 +136,6 @@ impl Namespace {
         let current_root_mount = current_root.mount.as_ref().ok_or_else(|| errno!(EINVAL))?;
         let put_old_mount = put_old.mount.as_ref().ok_or_else(|| errno!(EINVAL))?;
 
-        let current_root_mountpoint =
-            current_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?;
-        let new_root_mountpoint = new_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?;
-
         if Arc::ptr_eq(new_root_mount, current_root_mount)
             || Arc::ptr_eq(put_old_mount, current_root_mount)
         {
@@ -156,6 +154,17 @@ impl Namespace {
 
         let kernel = self.kernel();
         let mounts_guard = kernel.mounts_lock();
+
+        // Prevent a detached mount from being modified via chroot or lingering file descriptors.
+        // (`current_root_mount` and `new_root_mount` are checked via `mountpoint()` below.)
+        if put_old_mount.is_detached(&mounts_guard) {
+            return error!(EINVAL);
+        }
+
+        let current_root_mountpoint =
+            mounts_guard.defer_drop(current_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?);
+        let new_root_mountpoint =
+            mounts_guard.defer_drop(new_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?);
 
         // Retain mounts and mountpoint entries so that any drops triggered by
         // unlinking or reparenting under `mounts_guard` are deferred until after
@@ -196,12 +205,10 @@ impl Namespace {
         // 1. Detach new_root_mount from its parent.
         new_root_parent
             .remove_submount_internal(&mounts_guard, &new_root_mountpoint.mount_hash_key())?;
-        new_root_mount.relations.set_mountpoint(&mounts_guard, None);
 
         // 2. Place new_root_mount where current_root_mount was.
         current_root_parent
             .remove_submount_internal(&mounts_guard, &current_root_mountpoint.mount_hash_key())?;
-        current_root_mount.relations.set_mountpoint(&mounts_guard, None);
         current_root_parent.create_submount(
             &mounts_guard,
             &current_root_mountpoint.entry,
@@ -355,10 +362,22 @@ impl Into<MountInfo> for Option<MountHandle> {
     }
 }
 
+/// Attachment state of a [`Mount`] within a [`Namespace`]'s mount tree.
+#[derive(Clone, Debug, Default, RcuDroppable)]
+enum MountpointState {
+    /// Root [`Mount`] of a [`Namespace`], or a newly constructed [`Mount`] prior to attachment.
+    #[default]
+    Root,
+    /// Submount attached to a `parent` [`Mount`] at a mountpoint `entry`.
+    Attached { parent: Weak<Mount>, entry: Weak<DirEntry> },
+    /// Submount that has been unmounted and disconnected from the mount table.
+    Detached,
+}
+
 #[derive(Default)]
 struct MountRelations {
-    /// The parent mount and the directory entry in the parent where this mount is mounted.
-    mountpoint: RcuBox<Option<(Weak<Mount>, Weak<DirEntry>)>>,
+    /// Attachment state of this [`Mount`] relative to its parent [`Mount`] in the [`Namespace`].
+    mountpoint: RcuBox<MountpointState>,
     /// The active submounts, keyed by the directory entry in this mount where they are mounted.
     submounts: LockDepMutex<HashMap<PtrKey<DirEntry>, Submount>, MountSubmountsLock>,
     /// A lock-free RCU friendly view of [submounts].
@@ -397,12 +416,34 @@ impl MountRelations {
         &self,
         guard: &MountsWriteToken,
         key: &PtrKey<DirEntry>,
-    ) -> Result<(), Errno> {
+    ) -> Result<Submount, Errno> {
         // SAFETY: The MountsWriteToken proves we have exclusive write access.
         let _ = unsafe { self.submount_lookup.remove(key) };
-        let submount = self.submounts.lock().remove(key);
-        let submount = guard.defer_drop(submount);
-        if submount.is_some() { Ok(()) } else { error!(EINVAL) }
+        let submount = self.submounts.lock().remove(key).ok_or_else(|| errno!(EINVAL))?;
+        submount.mount.relations.detach_mountpoint(guard);
+        Ok(submount)
+    }
+
+    /// Recursively disconnects all submounts of this [`Mount`] from each other and from the mount
+    /// table.
+    ///
+    /// Per `umount2(2)`, `MNT_DETACH` must "immediately disconnect the filesystem and all
+    /// filesystems mounted below it from each other and from the mount table".
+    fn detach_submounts_recursive(&self, guard: &MountsWriteToken) {
+        let submounts: Vec<_> =
+            self.submounts.lock().drain().map(|(_, submount)| submount).collect();
+        if submounts.is_empty() {
+            return;
+        }
+        for submount in &submounts {
+            let key = PtrKey::from(&submount.dir);
+            // SAFETY: The MountsWriteToken proves we have exclusive write access.
+            let _ = unsafe { self.submount_lookup.remove(&key) };
+            submount.mount.relations.detach_mountpoint(guard);
+            submount.mount.make_private(guard);
+            submount.mount.relations.detach_submounts_recursive(guard);
+        }
+        guard.defer_drop(submounts);
     }
 
     fn iter_submounts<'a>(
@@ -426,16 +467,18 @@ impl MountRelations {
     fn set_mountpoint(
         &self,
         _guard: &MountsWriteToken,
-        mountpoint: Option<(Weak<Mount>, Weak<DirEntry>)>,
+        parent: Weak<Mount>,
+        entry: Weak<DirEntry>,
     ) {
-        self.mountpoint.update(mountpoint);
+        self.mountpoint.update(MountpointState::Attached { parent, entry });
     }
 
-    fn mountpoint<'a>(
-        &'a self,
-        scope: &'a starnix_rcu::RcuReadScope,
-    ) -> Option<&'a (Weak<Mount>, Weak<DirEntry>)> {
-        self.mountpoint.as_ref(scope).as_ref()
+    fn detach_mountpoint(&self, _guard: &MountsWriteToken) {
+        self.mountpoint.update(MountpointState::Detached);
+    }
+
+    fn mountpoint<'a>(&'a self, scope: &'a starnix_rcu::RcuReadScope) -> &'a MountpointState {
+        self.mountpoint.as_ref(scope)
     }
 
     fn take_peer_group(&self, _guard: &MountsWriteToken) -> Option<Arc<PeerGroup>> {
@@ -488,6 +531,10 @@ impl Mount {
                 // A target node may not have a mount point if it's an anonymous node. Modern Linux (6.15+)
                 // returns ENOENT in this case, rather than the more intuitive EINVAL.
                 let mount = node.mount.as_ref().ok_or_else(|| errno!(ENOENT))?;
+                // Prevent a detached mount from being cloned via lingering file descriptors.
+                if mount.is_detached(mounts_guard) {
+                    return error!(EINVAL);
+                }
                 Ok(mount.clone_mount(mounts_guard, &node.entry, flags.into()))
             }
         }
@@ -578,11 +625,16 @@ impl Mount {
                 if submount.relations.submounts_len() != 0 {
                     continue;
                 }
+                submount.make_private(mounts_guard);
             }
             let _ = peer.remove_submount_internal(mounts_guard, mount_hash_key);
         }
 
-        self.remove_submount_internal(mounts_guard, mount_hash_key)
+        let submount = self.relations.remove_submount(mounts_guard, mount_hash_key)?;
+        submount.mount.make_private(mounts_guard);
+        submount.mount.relations.detach_submounts_recursive(mounts_guard);
+        mounts_guard.defer_drop(submount);
+        Ok(())
     }
 
     pub fn move_mount(
@@ -592,6 +644,10 @@ impl Mount {
     ) -> Result<(), Errno> {
         let kernel = target_mount.kernel();
         let mounts_guard = kernel.mounts_lock();
+        // Prevent a detached mount from being modified via any lingering file descriptors to it.
+        if source_mount.is_detached(&mounts_guard) || target_mount.is_detached(&mounts_guard) {
+            return error!(EINVAL);
+        }
 
         let source_mountpoint = source_mount.mountpoint().ok_or_else(|| errno!(EIO))?;
         let source_mountpoint = mounts_guard.defer_drop(source_mountpoint);
@@ -609,7 +665,6 @@ impl Mount {
             }
             source_parent
                 .remove_submount_internal(&mounts_guard, &source_mountpoint.mount_hash_key())?;
-            source_mount.relations.set_mountpoint(&mounts_guard, None);
         }
 
         target_mount.create_submount(
@@ -638,13 +693,21 @@ impl Mount {
                 let scope = RcuReadScope::new();
                 self.relations
                     .iter_submounts(&scope)
-                    .filter_map(|(dir, submount)| Some((dir.0.upgrade()?, submount.upgrade()?)))
+                    .filter_map(|(dir, submount)| {
+                        let dir = dir.0.upgrade()?;
+                        if !dir.is_descendant_of(new_root) {
+                            return None;
+                        }
+                        Some((dir, submount.upgrade()?))
+                    })
                     .collect()
             };
-            let submounts = mounts_guard.defer_drop(submounts);
-            for (dir, submount) in &*submounts {
-                let submount = submount.clone_mount_recursive(mounts_guard);
-                clone.add_submount_internal(mounts_guard, dir, submount);
+            if !submounts.is_empty() {
+                let submounts = mounts_guard.defer_drop(submounts);
+                for (dir, submount) in &*submounts {
+                    let submount = submount.clone_mount_recursive(mounts_guard);
+                    clone.add_submount_internal_unchecked(mounts_guard, dir, submount);
+                }
             }
         }
 
@@ -736,6 +799,11 @@ impl Mount {
         mounts_guard: &MountsWriteToken,
         flags: UnmountFlags,
     ) -> Result<(), Errno> {
+        // Prevent a detached mount from being unmounted again via lingering file descriptors
+        // (returning `EINVAL` rather than `EBUSY` even when open files keep it active).
+        if self.is_detached(mounts_guard) {
+            return error!(EINVAL);
+        }
         if !flags.contains(UnmountFlags::DETACH) {
             if self.active_clients() > 0 || self.relations.submounts_len() != 0 {
                 return error!(EBUSY);
@@ -774,11 +842,26 @@ impl Mount {
         self.relations.get_submount(&scope, &PtrKey::from(dir_entry)).is_some()
     }
 
-    /// The NamespaceNode on which this Mount is mounted.
+    /// Whether this [`Mount`] has been unmounted from the mount table.
+    pub(super) fn is_detached(&self, _mounts_guard: &MountsWriteToken) -> bool {
+        // Distinguishes an unmounted submount (`MountpointState::Detached`) from a `Namespace`'s
+        // `root_mount` (`MountpointState::Root`). Because
+        // `MountRelations::detach_submounts_recursive` transitions all submounts beneath a lazily
+        // unmounted (`MNT_DETACH`) mount to `MountpointState::Detached`, checking this `Mount`'s
+        // own `MountpointState` is sufficient.
+        let scope = RcuReadScope::new();
+        matches!(self.relations.mountpoint(&scope), MountpointState::Detached)
+    }
+
+    /// [`NamespaceNode`] on which this [`Mount`] is mounted.
     pub fn mountpoint(&self) -> Option<NamespaceNode> {
         let scope = RcuReadScope::new();
-        let (mount, entry) = self.relations.mountpoint(&scope)?;
-        Some(NamespaceNode::new(mount.upgrade()?, entry.upgrade()?))
+        match self.relations.mountpoint(&scope) {
+            MountpointState::Attached { parent, entry } => {
+                Some(NamespaceNode::new(parent.upgrade()?, entry.upgrade()?))
+            }
+            MountpointState::Root | MountpointState::Detached => None,
+        }
     }
 
     /// Add a child mount *without propagating it to the peer group*. For internal use only.
@@ -788,19 +871,36 @@ impl Mount {
         dir: &DirEntryHandle,
         mount: MountHandle,
     ) {
-        let mount = guard.defer_drop(mount);
         if !dir.is_descendant_of(&self.root) {
+            guard.defer_drop(mount);
             return;
         }
+        self.add_submount_internal_unchecked(guard, dir, mount);
+    }
+
+    /// Caller must ensure `dir.is_descendant_of(&self.root)` holds.
+    fn add_submount_internal_unchecked(
+        self: &MountHandle,
+        guard: &MountsWriteToken,
+        dir: &DirEntryHandle,
+        mount: MountHandle,
+    ) {
+        debug_assert!(dir.is_descendant_of(&self.root));
+        let mount = guard.defer_drop(mount);
 
         let submount = mount.kernel().mounts.register_mount(dir, Arc::clone(&mount));
 
-        let old_mountpoint = {
-            let scope = RcuReadScope::new();
-            mount.relations.mountpoint(&scope).map(|x| x.clone())
-        };
-        mount.relations.set_mountpoint(guard, Some((Arc::downgrade(self), Arc::downgrade(dir))));
-        assert!(old_mountpoint.is_none(), "add_submount can only take a newly created mount");
+        // Accepts both newly constructed mounts (`MountpointState::Root`) and mounts transiently
+        // disconnected from their previous parent during `move_mount` or `pivot_root`
+        // (`MountpointState::Detached`).
+        assert!(
+            !matches!(
+                mount.relations.mountpoint(&RcuReadScope::new()),
+                MountpointState::Attached { .. }
+            ),
+            "add_submount can only take an unattached mount"
+        );
+        mount.relations.set_mountpoint(guard, Arc::downgrade(self), Arc::downgrade(dir));
 
         let old_mount = self.relations.insert_submount(
             guard,
@@ -808,13 +908,13 @@ impl Mount {
             Arc::downgrade(&mount),
             submount,
         );
-        let old_mount = guard.defer_drop(old_mount);
-
-        if let Some(old_mount) = &*old_mount {
-            old_mount
-                .mount
-                .relations
-                .set_mountpoint(guard, Some((Arc::downgrade(&mount), Arc::downgrade(&mount.root))));
+        if let Some(old_mount) = old_mount {
+            let old_mount = guard.defer_drop(old_mount);
+            old_mount.mount.relations.set_mountpoint(
+                guard,
+                Arc::downgrade(&mount),
+                Arc::downgrade(&mount.root),
+            );
             let new_old_submount =
                 mount.kernel().mounts.register_mount(&mount.root, old_mount.mount.clone());
             let replaced = mount.relations.insert_submount(
@@ -834,7 +934,9 @@ impl Mount {
         guard: &MountsWriteToken,
         mount_hash_key: &PtrKey<DirEntry>,
     ) -> Result<(), Errno> {
-        self.relations.remove_submount(guard, mount_hash_key)
+        let submount = self.relations.remove_submount(guard, mount_hash_key)?;
+        guard.defer_drop(submount);
+        Ok(())
     }
 
     /// Return this mount's current peer group.
@@ -1404,26 +1506,25 @@ impl NamespaceNode {
     ///
     /// Works for any type of node other than a symlink.
     ///
-    /// Will return an existing node unless `flags` contains `OpenFlags::EXCL`.
+    /// Returns the existing node if there is one, and whether the node was created. The existence
+    /// check and the creation happen atomically with respect to other VFS operations on this
+    /// directory.
     pub fn open_create_node(
         &self,
         current_task: &CurrentTask,
         name: &FsStr,
         mode: FileMode,
         dev: DeviceId,
-        flags: OpenFlags,
-    ) -> Result<NamespaceNode, Errno> {
+    ) -> Result<(NamespaceNode, CreationStatus), Errno> {
         let owner = current_task.current_fscred();
         let mode = current_task.fs().apply_umask(mode);
-        let create_fn = |dir: &FsNodeHandle, mount: &MountInfo, name: &_| {
-            dir.create_node(current_task, mount, name, mode, dev, owner)
-        };
-        let entry = if flags.contains(OpenFlags::EXCL) {
-            self.entry.create_entry(current_task, &self.mount, name, create_fn)
-        } else {
-            self.entry.get_or_create_entry(current_task, &self.mount, name, create_fn)
-        }?;
-        Ok(self.with_new_entry(entry))
+        let (entry, status) = self.entry.get_or_create_entry(
+            current_task,
+            &self.mount,
+            name,
+            |dir, mount, name| dir.create_node(current_task, mount, name, mode, dev, owner),
+        )?;
+        Ok((self.with_new_entry(entry), status))
     }
 
     pub fn into_active(self) -> ActiveNamespaceNode {
@@ -1503,6 +1604,8 @@ impl NamespaceNode {
         Ok(self.with_new_entry(dir_entry))
     }
 
+    /// Creates a socket node `name` bound to `socket`. The socket holds a strong reference to the
+    /// node until `Socket::close()`, so callers must close it to avoid leaking both.
     pub fn bind_socket(
         &self,
         current_task: &CurrentTask,
@@ -1615,6 +1718,27 @@ impl NamespaceNode {
         self.lookup_children(current_task, context, &[basename])
     }
 
+    /// Traverse down to `child`, a child of this node that was already looked up, e.g. with
+    /// `DirEntry::component_lookup` or `open_create_node`.
+    ///
+    /// Follows a symlink and enters mounts as requested by `context`, and enforces
+    /// `ResolveFlags::NO_XDEV` and `DirectoryMode::MustBeDirectory`.
+    pub fn resolve_child(
+        &self,
+        current_task: &CurrentTask,
+        context: &mut LookupContext,
+        child: NamespaceNode,
+    ) -> Result<NamespaceNode, Errno> {
+        let child = child.resolve(current_task, context)?;
+        if context.resolve_flags.contains(ResolveFlags::NO_XDEV) && child.mount != self.mount {
+            return error!(EXDEV);
+        }
+        if context.directory_mode == DirectoryMode::MustBeDirectory && !child.entry.node.is_dir() {
+            return error!(ENOTDIR);
+        }
+        Ok(child)
+    }
+
     /// Traverse down a parent-to-child link in the namespace.
     pub fn lookup_children(
         &self,
@@ -1683,28 +1807,15 @@ impl NamespaceNode {
             if basenames.len() == 1
                 || !current_namespace_node.entry.node.ops().has_lookup_pipelined()
             {
-                current_namespace_node = current_namespace_node.with_new_entry(
+                let child = current_namespace_node.with_new_entry(
                     current_namespace_node.entry.component_lookup(
                         current_task,
                         &current_namespace_node.mount,
                         basename,
                     )?,
                 );
-
-                current_namespace_node = current_namespace_node.resolve(current_task, context)?;
-
-                if context.resolve_flags.contains(ResolveFlags::NO_XDEV)
-                    && current_namespace_node.mount != self.mount
-                {
-                    return error!(EXDEV);
-                }
-
-                if context.directory_mode == DirectoryMode::MustBeDirectory
-                    && !current_namespace_node.entry.node.is_dir()
-                {
-                    return error!(ENOTDIR);
-                }
-
+                current_namespace_node =
+                    current_namespace_node.resolve_child(current_task, context, child)?;
                 basenames = &basenames[1..];
                 continue;
             }
@@ -1724,21 +1835,8 @@ impl NamespaceNode {
             for entry in precomputed_entries {
                 basenames = &basenames[1..];
                 let child = current_namespace_node.with_new_entry(entry?);
-
-                current_namespace_node = child.clone().resolve(current_task, context)?;
-
-                if context.resolve_flags.contains(ResolveFlags::NO_XDEV)
-                    && current_namespace_node.mount != self.mount
-                {
-                    return error!(EXDEV);
-                }
-
-                if context.directory_mode == DirectoryMode::MustBeDirectory
-                    && !current_namespace_node.entry.node.is_dir()
-                {
-                    return error!(ENOTDIR);
-                }
-
+                current_namespace_node =
+                    current_namespace_node.resolve_child(current_task, context, child.clone())?;
                 if current_namespace_node != child {
                     break;
                 }
@@ -1960,6 +2058,10 @@ impl NamespaceNode {
         let mountpoint = mounts_guard.defer_drop(mountpoint);
 
         let mount = mountpoint.mount.as_ref().ok_or_else(|| errno!(ENOENT))?;
+        // Prevent a detached mount from being modified via any lingering file descriptors to it.
+        if mount.is_detached(&mounts_guard) {
+            return error!(EINVAL);
+        }
         let writeable_mount = mounts_guard.retain(mount);
         let writeable_entry = mounts_guard.retain(&mountpoint.entry);
         writeable_mount.create_submount(
@@ -2191,40 +2293,41 @@ impl Drop for FileMapping {
 
 /// Tracks all mounts, keyed by mount point.
 pub struct Mounts {
-    mounts: RcuHashMap<WeakKey<DirEntry>, Vec<WeakKey<Mount>>>,
+    mounts: Mutex<HashMap<PtrKey<DirEntry>, Vec<Weak<Mount>>>>,
 }
 
 impl Mounts {
     pub fn new() -> Self {
-        Mounts { mounts: RcuHashMap::default() }
+        Mounts { mounts: Mutex::default() }
     }
 
     /// Registers the mount in the global mounts map.
     fn register_mount(&self, dir_entry: &DirEntryHandle, mount: MountHandle) -> Submount {
         let mut mounts = self.mounts.lock();
-        let key = WeakKey::from(dir_entry);
-        let mut vec = mounts.get(&key).unwrap_or_else(|| {
+        if let Some(vec) = mounts.get_mut(&PtrKey::from(dir_entry)) {
+            vec.push(Arc::downgrade(&mount));
+        } else {
             dir_entry.set_has_mounts(true);
-            Vec::new()
-        });
-        vec.push(WeakKey::from(&mount));
-        mounts.insert(key, vec);
+            mounts.insert(PtrKey::from(dir_entry), vec![Arc::downgrade(&mount)]);
+        }
         Submount { dir: dir_entry.clone(), mount }
     }
 
     /// Unregisters the mount. This is called by `Submount::drop`.
     fn unregister_mount(&self, dir_entry: &DirEntryHandle, mount: &MountHandle) {
         let mut mounts = self.mounts.lock();
-        let key = WeakKey::from(dir_entry);
-        if let Some(mut vec) = mounts.get(&key) {
-            let index = vec.iter().position(|e| e == &WeakKey::from(mount)).unwrap();
-            if vec.len() == 1 {
-                mounts.remove(&key);
-                dir_entry.set_has_mounts(false);
-            } else {
-                vec.swap_remove(index);
-                mounts.insert(key, vec);
-            }
+        let key = PtrKey::from(dir_entry);
+        let mount_ptr = Arc::as_ptr(mount);
+        let remove_entry = if let Some(vec) = mounts.get_mut(&key) {
+            let index = vec.iter().position(|e| e.as_ptr() == mount_ptr).unwrap();
+            vec.swap_remove(index);
+            vec.is_empty()
+        } else {
+            false
+        };
+        if remove_entry {
+            mounts.remove(&key);
+            dir_entry.set_has_mounts(false);
         }
     }
 
@@ -2232,16 +2335,17 @@ impl Mounts {
     /// unlinked (which would normally result in EBUSY, but not if it isn't mounted in the local
     /// namespace).
     pub fn unmount(&self, dir_entry: &DirEntry) {
+        let Some(kernel) = dir_entry.node.fs().kernel.upgrade() else {
+            return;
+        };
+        let mounts_guard = kernel.mounts_lock();
         let mounts = self.mounts.lock().remove(&PtrKey::from(dir_entry));
         if let Some(mounts) = mounts {
-            let upgraded: Vec<_> = mounts.iter().filter_map(|m| m.0.upgrade()).collect();
-            if let Some(kernel) = upgraded.first().map(|m| m.kernel()) {
-                let mounts_guard = kernel.mounts_lock();
-                let mounts = mounts_guard.defer_drop(upgraded);
-                for mount in &*mounts {
-                    // Ignore errors.
-                    let _ = mount.unmount(&mounts_guard, UnmountFlags::DETACH);
-                }
+            let upgraded: Vec<_> = mounts.iter().filter_map(Weak::upgrade).collect();
+            let mounts = mounts_guard.defer_drop(upgraded);
+            for mount in &*mounts {
+                // Ignore errors.
+                let _ = mount.unmount(&mounts_guard, UnmountFlags::DETACH);
             }
         }
     }
@@ -2250,9 +2354,10 @@ impl Mounts {
     // TODO(https://fxbug.dev/295073633): Graceful shutdown should try to first unmount the mounts
     // and only force a FileSystem unmount on failure.
     pub fn clear(&self) {
-        for (_dir_entry, mounts) in self.mounts.lock().drain() {
+        let drained = std::mem::take(&mut *self.mounts.lock());
+        for (_dir_entry, mounts) in drained {
             for mount in mounts {
-                if let Some(mount) = mount.0.upgrade() {
+                if let Some(mount) = mount.upgrade() {
                     mount.fs.force_unmount_ops();
                 }
             }
@@ -2264,13 +2369,11 @@ impl Mounts {
     fn unique_filesystems(&self) -> HashSet<ArcKey<FileSystem>> {
         let mut filesystems = HashSet::new();
         let mut queue = Vec::new();
-        let scope = RcuReadScope::new();
-        for (_dir_entry, m_list) in self.mounts.iter(&scope) {
-            for m in m_list {
-                if let Some(mount) = m.0.upgrade() {
-                    if filesystems.insert(ArcKey(mount.fs.clone())) {
-                        queue.push(mount.fs.clone());
-                    }
+        let mounts: Vec<Weak<Mount>> = self.mounts.lock().values().flatten().cloned().collect();
+        for m in mounts {
+            if let Some(mount) = m.upgrade() {
+                if filesystems.insert(ArcKey(mount.fs.clone())) {
+                    queue.push(mount.fs.clone());
                 }
             }
         }
@@ -2368,7 +2471,9 @@ mod test {
         CallbackSymlinkNode, DirectoryMode, FsNodeInfo, LookupContext, MountInfo, Namespace,
         NamespaceNode, RenameFlags, SymlinkMode, SymlinkTarget, UnlinkKind, WhatToMount,
     };
+    use starnix_uapi::arc_key::PtrKey;
     use starnix_uapi::mount_flags::MountpointFlags;
+    use starnix_uapi::unmount_flags::UnmountFlags;
     use starnix_uapi::{errno, mode};
     use std::sync::Arc;
 
@@ -2752,6 +2857,84 @@ mod test {
 
             // The lookup resolution should have correctly followed the symlinks to the real_file node.
             assert!(node_symlink_resolution.entry.node.ino == real_file_node.entry.node.ino);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mounts_registration_and_unmount_updates_has_mounts() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let root_fs = TmpFs::new_fs(&kernel);
+            let ns1 = Namespace::new(root_fs.clone());
+            let _foo_node = root_fs.root().create_dir(&current_task, "foo".into()).unwrap();
+            let mut context = LookupContext::default();
+            let foo_dir =
+                ns1.root().lookup_child(&current_task, &mut context, "foo".into()).unwrap();
+            let mountpoint_entry = Arc::clone(&foo_dir.entry);
+            assert!(!mountpoint_entry.has_mounts());
+
+            let foofs = TmpFs::new_fs(&kernel);
+            foo_dir.mount(WhatToMount::Fs(foofs), MountpointFlags::empty()).unwrap();
+            assert!(mountpoint_entry.has_mounts());
+
+            // Cloning the namespace registers a second Submount on the same DirEntry.
+            let ns1_clone = ns1.clone_namespace(&kernel.mounts_lock());
+            assert!(mountpoint_entry.has_mounts());
+
+            // Dropping the cloned namespace unregisters its Submount, leaving ns1's Submount active.
+            drop(ns1_clone);
+            assert!(mountpoint_entry.has_mounts());
+
+            // Unmounting the remaining mount in ns1 calls `unregister_mount` for the last entry
+            // and clears `has_mounts` without destroying the DirEntry.
+            let mounted_foo = ns1
+                .root()
+                .lookup_child(&current_task, &mut LookupContext::default(), "foo".into())
+                .unwrap();
+            mounted_foo.unmount(UnmountFlags::empty()).unwrap();
+            assert!(!mountpoint_entry.has_mounts());
+
+            // Also verify recursive (`REC`) bind mount of a subdirectory skips sibling mounts
+            // outside the new root while cloning submounts under the subdirectory.
+            let _sub_node = root_fs.root().create_dir(&current_task, "sub".into()).unwrap();
+            let _dst_node = root_fs.root().create_dir(&current_task, "dst".into()).unwrap();
+            let sub_dir = ns1
+                .root()
+                .lookup_child(&current_task, &mut LookupContext::default(), "sub".into())
+                .unwrap();
+            let _inner_node = sub_dir.entry.create_dir(&current_task, "inner".into()).unwrap();
+            let inner_dir = sub_dir
+                .lookup_child(&current_task, &mut LookupContext::default(), "inner".into())
+                .unwrap();
+            let inner_fs = TmpFs::new_fs(&kernel);
+            let _inner_marker = inner_fs.root().create_dir(&current_task, "marker".into()).unwrap();
+            inner_dir.mount(WhatToMount::Fs(inner_fs), MountpointFlags::empty()).unwrap();
+
+            let sibling_fs = TmpFs::new_fs(&kernel);
+            foo_dir.mount(WhatToMount::Fs(sibling_fs), MountpointFlags::empty()).unwrap();
+
+            let dst_dir = ns1
+                .root()
+                .lookup_child(&current_task, &mut LookupContext::default(), "dst".into())
+                .unwrap();
+            dst_dir.mount(WhatToMount::Bind(sub_dir), MountpointFlags::REC).unwrap();
+
+            let dst_inner = ns1
+                .root()
+                .lookup_child(&current_task, &mut LookupContext::default(), "dst".into())
+                .unwrap()
+                .lookup_child(&current_task, &mut LookupContext::default(), "inner".into())
+                .unwrap();
+            assert!(
+                dst_inner
+                    .lookup_child(&current_task, &mut LookupContext::default(), "marker".into())
+                    .is_ok()
+            );
+            assert_eq!(
+                kernel.mounts.mounts.lock().get(&PtrKey::from(&foo_dir.entry)).unwrap().len(),
+                1
+            );
         })
         .await;
     }

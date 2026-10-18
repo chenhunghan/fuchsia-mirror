@@ -19,10 +19,7 @@ source_set("platform") {
     "efi.cc",
     "efi_bootbyte.cc",
     "efi_crashlog.cc",
-    "halt_helper.cc",
     "mapped_crashlog.cc",
-    "mexec.cc",
-    "power.cc",
     "power_ffi.cc",
     "timer_ffi.cc",
   ]
@@ -46,8 +43,8 @@ source_set("platform") {
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/persistent-debuglog",
     "//zircon/kernel/lib/root_resource_filter",
-    "//zircon/kernel/phys:boot-constants",
-    "//zircon/kernel/phys:handoff",
+    "//zircon/kernel/lib/uart-gate:headers",
+    "//zircon/kernel/phys/handoff",
     "//zircon/kernel/phys/lib/memalloc",
     "//zircon/system/ulib/affine:headers",
     "//zircon/system/ulib/fbl",
@@ -57,21 +54,21 @@ source_set("platform") {
 }
 
 library_headers("headers") {
-  headers = [
-    "platform/uart.h",
-    "platform/mexec.h",
-  ]
+  headers = [ "platform/uart.h" ]
 }
 
 source_set("tests") {
   testonly = true
   sources = [
+    "debug_tests.cc",
     "efi_test.cc",
-    "suspend_cpu_tests.cc",
+    "suspend_tests.cc",
   ]
   deps = [
     ":platform",
+    "//zircon/kernel/lib/debuglog",
     "//zircon/kernel/lib/efi",
+    "//zircon/kernel/lib/io",
     "//zircon/kernel/lib/unittest",
   ]
 }
@@ -125,6 +122,7 @@ kernel_rust_mod("platform-rs") {
   source_root = "platform.rs"
   sources = [
     "debug.rs",
+    "halt_helper.rs",
     "halt_token.rs",
     "platform.rs",
     "power.rs",
@@ -134,7 +132,12 @@ kernel_rust_mod("platform-rs") {
   deps = [
     ":halt-token-bindings",
     "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
     "//src/lib/zr",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/debug",
     "//zircon/system/ulib/affine/rust:affine",
   ]
 }

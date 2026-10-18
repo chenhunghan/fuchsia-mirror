@@ -43,36 +43,28 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
     This driver is responsible for USB in the peripheral role, that is,
     acting as a USB device to a USB host.
     It serves as the central point of coordination for the peripheral role.
-    It is configured via the fuchsia.hardware.usb.peripheral FIDL interface.
-    Based on this configuration, it creates one or more devmgr devices with protocol
-    ZX_PROTOCOL_USB_FUNCTION. These devices are bind points for USB function drivers,
-    which implement USB interfaces for particular functions (like USB ethernet or mass storage).
-    This driver also binds to a device with protocol ZX_PROTOCOL_USB_DCI
-    (Device Controller Interface) which is implemented by a driver for the actual
-    USB controller hardware for the peripheral role.
+    It is configured via the fuchsia.hardware.usb.peripheral.Device FIDL protocol
+    (or via structured configuration in Start()). Based on this configuration,
+    it creates child nodes that serve fuchsia.hardware.usb.function.UsbFunction.
+    These child nodes are bind points for USB function drivers, which implement
+    USB interfaces for particular functions (such as USB ethernet, ADB, or VSOCK).
 
-    The FIDL interface SetConfiguration() is used to initialize and start USB in the
-    peripheral role. Internally this consists of several steps.
-    The first step is setting up the USB device descriptor to be presented to the host
-    during enumeration.
-    Next, the descriptors for the USB functions are added to the configuration.
-    Finally after all the functions have been added, the configuration is complete and
-    it is now possible to build the configuration descriptor.
-    Once we get to this point, UsbPeripheral.functions_bound_ is set to true.
+    This driver binds to a parent Device Controller Interface (DCI) driver via the
+    fuchsia.hardware.usb.dci.UsbDci FIDL service and registers a
+    fuchsia.hardware.usb.dci.UsbDciInterface server (hosted on a dedicated
+    synchronized dispatcher by UsbDciInterfaceServer) to receive host connection,
+    speed, and control transfer events.
 
-    If the role is set to UsbMode::kPeripheral and functions_bound_ is true,
-    then we are ready to start USB in peripheral role.
-    At this point, we create DDK devices for our list of functions.
-    When the function drivers bind to these functions, they register an interface of type
-    usb_function_interface_protocol_t with this driver via the usb_function_register() API.
-    Once all of the function drivers have registered themselves this way,
-    UsbPeripheral.functions_registered_ is set to true.
-
-    if the usb mode is set to UsbMode::kPeripheral and functions_registered_ is true,
-    we are now finally ready to operate in the peripheral role.
-
-    Teardown of the peripheral role:
-    The FIDL ClearFunctions() message will reset this device's list of USB functions.
+    Lifecycle and state coordination are governed by two explicit state machines:
+    - UsbPeripheral::DeviceState tracks the controller and configuration lifecycle
+      (from kNoConfiguration and kWaitForFunctionBind through kStarting,
+      kPeripheralReady, and kHostConnected, as well as the teardown states
+      kUnregisteringFunction, kClearingFunctions, and kStoppingDriver).
+    - UsbFunction::FunctionState tracks each function's binding and
+      UsbFunctionInterface::SetConfigured RPC state, coalescing concurrent
+      unconfiguration requests across host disconnects, function unregistrations,
+      and configuration teardowns before stopping the DCI controller or removing
+      child nodes.
 */
 
 namespace usb_peripheral {
@@ -396,7 +388,8 @@ class UsbPeripheral : public fdf::DriverBase2,
   }
 
   // Returns the index of the function that was added.
-  zx::result<size_t> AddFunction(UsbConfiguration& config, FunctionDescriptor desc);
+  zx::result<size_t> AddFunction(UsbConfiguration& config, FunctionDescriptor desc)
+      __TA_REQUIRES(lock_);
   // Begins the process of clearing the functions. If provided, `callback` is invoked once all
   // function child nodes have been removed and `functions_` is empty. If `stopping_driver` is true,
   // transitions to `kStoppingDriver` atomically under `lock_`.
@@ -481,7 +474,7 @@ class UsbPeripheral : public fdf::DriverBase2,
   // bound as a FIDL server which requires that the instance always be at the
   // same memory address and so we can generate weak pointers for lambda
   // captures for the function FIDL client.
-  std::vector<std::shared_ptr<UsbFunction>> functions_;
+  std::vector<std::shared_ptr<UsbFunction>> functions_ __TA_GUARDED(lock_);
 
   fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci_;
   struct DciSupportedEndpointInfo {
@@ -493,8 +486,8 @@ class UsbPeripheral : public fdf::DriverBase2,
     uint8_t ep_address = 0;
     std::vector<DciSupportedEndpointInfo> supported_types;
   };
-  bool supports_dynamic_ep_sizing_ = false;
-  std::vector<DciEndpointInfo> dci_endpoints_;
+  bool supports_dynamic_ep_sizing_ __TA_GUARDED(lock_) = false;
+  std::vector<DciEndpointInfo> dci_endpoints_ __TA_GUARDED(lock_);
   bool has_dci_hardware_info_ = false;
   // USB device descriptor set via SetConfiguration()
   usb_device_descriptor_t device_desc_ = {};
@@ -503,7 +496,7 @@ class UsbPeripheral : public fdf::DriverBase2,
   // Strings for USB string descriptors.
   std::vector<StringDescriptor> strings_ __TA_GUARDED(lock_);
   // List of usb_function_t.
-  std::vector<UsbConfiguration> configurations_;
+  std::vector<UsbConfiguration> configurations_ __TA_GUARDED(lock_);
   // mutex for protecting our state
   // mutable to allow locking in const methods (e.g. state())
   mutable fbl::Mutex lock_;
@@ -511,11 +504,7 @@ class UsbPeripheral : public fdf::DriverBase2,
   fdescriptor::UsbMode cur_usb_mode_ __TA_GUARDED(lock_) = fdescriptor::UsbMode::kNone;
   // Our parent's USB mode. Should not change after being set.
   fdescriptor::UsbMode parent_usb_mode_ __TA_GUARDED(lock_) = fdescriptor::UsbMode::kNone;
-  // True if we have added child devices for our functions.
-  bool function_devs_added_ __TA_GUARDED(lock_) = false;
-  // True if fuchsia_hardware_usb_dci::SetInterface performed in Init().
-  bool set_interface_in_init_ __TA_GUARDED(lock_) = false;
-  // True if we are connected to a host,
+  // True if we are connected to a host.
   bool connected_ __TA_GUARDED(lock_) = false;
   // Current configuration number selected via StandardRequest::SET_CONFIGURATION
   // (will be 0 or 1 since we currently do not support multiple configurations).
@@ -529,9 +518,6 @@ class UsbPeripheral : public fdf::DriverBase2,
   fidl::WireSharedClient<fuchsia_hardware_usb_peripheral::Events> listener_;
 
   DeviceState state_ __TA_GUARDED(lock_) = DeviceState::kNoConfiguration;
-
-  bool cache_enabled_ = true;
-  bool cache_report_enabled_ = true;
 
   UsbMonitor usb_monitor_;
 
@@ -579,6 +565,8 @@ class UsbPeripheral : public fdf::DriverBase2,
   // `on_complete` (which replies to the held `SetConnected(false)` FIDL completer).
   void OnDisconnectUnconfigureComplete(fit::callback<void()> on_complete) __TA_EXCLUDES(lock_);
 
+  void InitInspect();
+
   std::vector<UnlockedCallback> on_all_functions_cleared_ __TA_GUARDED(lock_);
   std::set<uint8_t> stalled_eps_ __TA_GUARDED(lock_);
 
@@ -588,18 +576,10 @@ class UsbPeripheral : public fdf::DriverBase2,
   fdf::OwnedChildNode child_;
   std::shared_ptr<fdf::Namespace> incoming_;
 
-  struct InspectEndpoint {
-    inspect::Node node;
-    inspect::UintProperty max_packet_size_limit;
-    inspect::StringProperty supported_types;
-  };
-
-  std::optional<inspect::ComponentInspector> inspector_;
-  inspect::Node usb_peripheral_node_;
-  usb_inspect::DciInspect dci_inspect_;
-  inspect::Node hardware_info_node_;
-  inspect::BoolProperty supports_dynamic_ep_sizing_property_;
-  std::vector<InspectEndpoint> inspect_endpoints_;
+  uint64_t unconfigure_all_count_ __TA_GUARDED(lock_) = 0;
+  uint64_t unconfigure_all_error_count_ __TA_GUARDED(lock_) = 0;
+  int64_t last_unconfigure_all_duration_ns_ __TA_GUARDED(lock_) = 0;
+  int64_t max_unconfigure_all_duration_ns_ __TA_GUARDED(lock_) = 0;
 
   size_t active_functions_count_ __TA_GUARDED(lock_) = 0;
   uint64_t config_generation_ __TA_GUARDED(lock_) = 0;
@@ -623,6 +603,15 @@ class UsbPeripheral : public fdf::DriverBase2,
   };
   std::optional<PendingSetConfiguration> pending_set_configuration_ __TA_GUARDED(lock_);
   bool clear_in_progress_ __TA_GUARDED(lock_) = false;
+
+  // Declare Inspect members after all driver state fields so lazy callbacks unregister during
+  // destruction before any state member or mutex is destroyed.
+  std::optional<inspect::ComponentInspector> inspector_;
+  inspect::Node usb_peripheral_node_;
+  usb_inspect::DciInspect dci_inspect_;
+  inspect::LazyNode hardware_info_node_;
+  inspect::LazyNode peripheral_state_node_;
+  inspect::LazyNode functions_node_;
 
   // Must be declared last so that `scope_` and `executor_` are destroyed first, abandoning any
   // in-flight promises (and their `fit::defer` cleanups) while all other members remain valid.

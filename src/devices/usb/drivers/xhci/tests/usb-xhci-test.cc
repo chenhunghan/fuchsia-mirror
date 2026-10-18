@@ -257,6 +257,10 @@ class FakeUsbBus : public ddk::UsbBusInterfaceProtocol<FakeUsbBus> {
 
   void wait() { sync_completion_wait(&completion_, ZX_TIME_INFINITE); }
 
+  void reset_remove() { sync_completion_reset(&remove_completion_); }
+
+  void wait_for_remove() { sync_completion_wait(&remove_completion_, ZX_TIME_INFINITE); }
+
   usb_bus_interface_protocol_t* proto() {
     proto_.ctx = this;
     proto_.ops = &usb_bus_interface_protocol_ops_;
@@ -276,6 +280,7 @@ class FakeUsbBus : public ddk::UsbBusInterfaceProtocol<FakeUsbBus> {
 
   zx_status_t UsbBusInterfaceRemoveDevice(uint32_t device_id) {
     devices_.erase(device_id);
+    sync_completion_signal(&remove_completion_);
     return ZX_OK;
   }
 
@@ -289,6 +294,7 @@ class FakeUsbBus : public ddk::UsbBusInterfaceProtocol<FakeUsbBus> {
  private:
   std::map<uint32_t, FakeUsbDevice> devices_;
   sync_completion_t completion_;
+  sync_completion_t remove_completion_;
   usb_bus_interface_protocol_t proto_;
 };
 
@@ -403,9 +409,9 @@ class XhciHarness : public ::testing::Test {
   FakeUsbDevice ConnectDevice(uint8_t port, usb_speed_t speed) {
     std::optional<HubInfo> hub;
     uint8_t slot = AllocateSlot();
-    driver_test().driver()->GetPortState()[port - 1].is_connected = true;
-    driver_test().driver()->GetPortState()[port - 1].link_active = true;
-    driver_test().driver()->GetPortState()[port - 1].slot_id = slot;
+    driver_test().driver()->GetPortState(port).is_connected = true;
+    driver_test().driver()->GetPortState(port).link_active = true;
+    driver_test().driver()->GetPortState(port).slot_id = slot;
     driver_test().driver()->SetDeviceInformation(slot, slot, hub);
     driver_test().driver()->AddressDeviceCommand(slot, port, hub, true);
     bus_.reset();
@@ -488,6 +494,8 @@ void EventRing::ScheduleTask(fpromise::promise<void, zx_status_t> promise) {
 }
 
 void EventRing::RunUntilIdle() { executor_.run_until_idle(); }
+
+void EventRing::ClearPendingPortStatusChanges() { executor_.run_until_idle(); }
 
 zx_status_t TransferRing::AllocateTRB(TRB** trb, State* state) {
   fbl::AutoLock _(&mutex_);
@@ -1059,5 +1067,148 @@ TEST_F(XhciMmioHarness, CancelAllStopEndpointFails) {
 }
 
 TEST_F(XhciMmioHarness, GetMaxDeviceCount) { ASSERT_EQ(GetMaxDeviceCount(), 34UL); }
+
+namespace {
+
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
+TEST_F(XhciMmioHarness, StopWithHCHaltedTimeout) {
+  constexpr auto kUsbSts = 8 * sizeof(uint32_t);
+  constexpr uint8_t kCapLength = 0x1c;
+  auto poll_count = std::make_shared<std::atomic<size_t>>(0);
+  driver_test().RunInEnvironmentTypeContext([&](XhciTestEnvironment& env) {
+    env.fake_device().region()[kUsbSts].SetReadCallback([=] {
+      poll_count->fetch_add(1, std::memory_order_relaxed);
+      // Simulate MMIO unmapping or unhalted controller where HCHalted remains 0.
+      auto sts = USBSTS::Get(kCapLength).FromValue(0);
+      sts.set_HCHalted(0);
+      return sts.reg_value();
+    });
+  });
+
+  libsync::Completion stop_done;
+  driver_test().driver()->Stop(fdf::StopCompleter([&](zx::result<> result) {
+    EXPECT_OK(result);
+    stop_done.Signal();
+  }));
+  stop_done.Wait();
+  EXPECT_GT(poll_count->load(std::memory_order_relaxed), 1u);
+}
+
+TEST_F(XhciMmioHarness, RunSynchronouslyDoesNotAbortPendingCommandsWhenRunning) {
+  // Queue a command TRB on the command ring via ConnectDevice.
+  ConnectDevice(1, USB_SPEED_HIGH);
+  auto cr = crcr_next();
+  ASSERT_NE(cr, nullptr);
+  EXPECT_EQ(Control::FromTRB(cr).Type(), Control::AddressDeviceCommand);
+
+  // Schedule a promise via RunSynchronously that takes 300ms to resolve while the controller is
+  // healthy and running (!IsHaltedOrStopping()).
+  fpromise::bridge<void, zx_status_t> slow_bridge;
+  std::thread completer_thread([completer = std::move(slow_bridge.completer)] mutable {
+    zx::nanosleep(zx::deadline_after(zx::msec(300)));
+    completer.complete_ok();
+  });
+
+  zx_status_t sync_status =
+      driver_test().driver()->RunSynchronously(0, slow_bridge.consumer.promise().box());
+  completer_thread.join();
+
+  // RunSynchronously must wait for the promise to complete with ZX_OK and must NOT abort pending
+  // commands on the command ring after 250ms while the controller is still running.
+  EXPECT_OK(sync_status);
+
+  CommandCompletionEvent event;
+  event.set_CompletionCode(CommandCompletionEvent::Success);
+  EXPECT_OK(CompleteCommand(cr, &event));
+
+  // Also verify that if the controller halts while RunSynchronously is waiting on a non-command
+  // promise, early return does not cause stack-use-after-return when the promise later resolves.
+  constexpr auto kUsbSts = 8 * sizeof(uint32_t);
+  constexpr uint8_t kCapLength = 0x1c;
+  driver_test().RunInEnvironmentTypeContext([&](XhciTestEnvironment& env) {
+    env.fake_device().region()[kUsbSts].SetReadCallback([=] {
+      auto sts = USBSTS::Get(kCapLength).FromValue(0);
+      sts.set_HCHalted(1);
+      return sts.reg_value();
+    });
+  });
+
+  fpromise::bridge<void, zx_status_t> halted_bridge;
+  EXPECT_EQ(driver_test().driver()->RunSynchronously(0, halted_bridge.consumer.promise().box()),
+            ZX_ERR_IO_NOT_PRESENT);
+  // Resolving the promise after RunSynchronously has returned must safely update heap-shared state
+  // without touching a popped stack frame.
+  halted_bridge.completer.complete_ok();
+  driver_test().driver()->RunUntilIdle(0);
+}
+
+TEST_F(XhciMmioHarness, DeviceOnlineUsesOneBasedPortIndex) {
+  // GetPortState() uses 1-based port indexing matching the xHCI specification.
+  std::optional<HubInfo> hub;
+  driver_test().driver()->SetDeviceInformation(1, 1, hub);
+  driver_test().driver()->GetPortState(1).is_USB3 = true;
+  driver_test().driver()->GetPortState(2).is_USB3 = false;
+
+  bus_.reset();
+  EXPECT_OK(driver_test().driver()->DeviceOnline(1, 1, USB_SPEED_SUPER));
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this]() { bus_.wait(); }));
+  ASSERT_EQ(bus_.devices().count(0), 1u);
+  EXPECT_EQ(bus_.devices().at(0).hub_id, GetMaxDeviceCount() - 1);
+
+  // Also verify port 2 (USB 2.0) routes to the USB 2.0 root hub (GetMaxDeviceCount()).
+  driver_test().driver()->SetDeviceInformation(2, 2, hub);
+  bus_.reset();
+  EXPECT_OK(driver_test().driver()->DeviceOnline(2, 2, USB_SPEED_HIGH));
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this]() { bus_.wait(); }));
+  ASSERT_EQ(bus_.devices().count(1), 1u);
+  EXPECT_EQ(bus_.devices().at(1).hub_id, GetMaxDeviceCount() - 2);
+}
+
+TEST_F(XhciMmioHarness, GetPortStateUsesOneBasedPortIndex) {
+  driver_test().driver()->GetPortState(1).slot_id = 42;
+  driver_test().driver()->GetPortState(2).slot_id = 84;
+
+  EXPECT_EQ(driver_test().driver()->GetPortState(1).slot_id, 42);
+  EXPECT_EQ(driver_test().driver()->GetPortState(2).slot_id, 84);
+}
+
+TEST_F(XhciMmioHarness, HubDeviceRemovedWhenBusInvalidDoesNotAssert) {
+  // 1. Connect a simulated USB hub on root hub port 1.
+  FakeUsbDevice hub_dev = ConnectDevice(1, USB_SPEED_HIGH);
+  const uint32_t hub_id = hub_dev.device_id;
+  auto hub_state = driver_test().driver()->GetDeviceState()[hub_id];
+  ASSERT_TRUE(hub_state);
+
+  // 2. Connect a child device on root hub port 2 (to allocate device state and slot).
+  FakeUsbDevice child_dev = ConnectDevice(2, USB_SPEED_FULL);
+  const uint32_t child_device_id = child_dev.device_id;
+  auto child_state = driver_test().driver()->GetDeviceState()[child_device_id];
+  ASSERT_TRUE(child_state);
+
+  // 3. Configure the hub state so child_device_id is attached downstream of hub port 1.
+  HubInfo hub_info = {};
+  hub_info.port_to_device[0] = static_cast<uint8_t>(child_device_id);
+  {
+    fbl::AutoLock _(&hub_state->transaction_lock());
+    hub_state->GetHubLocked() = hub_info;
+  }
+
+  // 4. Simulate bus unbind prior to xhci shutdown, clearing the bus interface
+  // (matching DFv2 bottom-up unbind where usb-bus clears the bus interface).
+  driver_test().driver()->UsbHciSetBusInterface(nullptr);
+
+  // 5. Invoke UsbHciHubDeviceRemoved for the child device on hub port 1.
+  // Without the fix, ZX_ASSERT(bus_.is_valid()) fails fatally because bus_ was cleared.
+  // With the fix, UsbHciHubDeviceRemoved returns ZX_OK safely.
+  EXPECT_OK(driver_test().driver()->UsbHciHubDeviceRemoved(hub_id, 1));
+}
+
+TEST_F(XhciMmioHarness, IrqCountClampedToPDevDeviceInfo) {
+  // Verify that UsbXhci clamps irq_count_ to the PDev IRQ count instead of allocating
+  // excess interrupters beyond what the platform device provides.
+  EXPECT_EQ(driver_test().driver()->irq_count(), 1u);
+}
+
+}  // namespace
 
 }  // namespace usb_xhci

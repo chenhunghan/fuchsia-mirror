@@ -254,8 +254,16 @@ pub trait TargetResolver {
 
     /// Resolves a target specifier to a single `Resolution`.
     ///
-    /// This method tries to look up the query in the cache. If it is not
-    /// available there, it calls "discover_matching_targets()"
+    /// Note: Explicit address specifiers (`-t <addr>`) are short-circuited in
+    /// `resolve_target_address()` before this method is called.
+    ///
+    /// In strict mode, symbolic queries (`id:<serial>` or `<nodename>`) resolve from the
+    /// registered targets file (`target.registered_targets`, defaulting to
+    /// `$SHARED_DATA/targets.json`) without consulting the interactive cache or performing
+    /// active discovery.
+    ///
+    /// In non-strict mode, it tries the discovery cache (when `use_cache` is true) and falls
+    /// back to active discovery (`discover_matching_targets()`).
     fn resolve_single_target(
         &self,
         target_spec: &TargetInfoQuery,
@@ -264,24 +272,67 @@ pub trait TargetResolver {
         source: Option<TargetSource>,
     ) -> impl Future<Output = Result<Resolution, FfxTargetError>> {
         async move {
+            // In strict mode, explicit `-t <addr>` queries have already returned in
+            // `resolve_target_address()`, so reaching here means `-t` is a symbolic query
+            // (`id:<serial>` or `<nodename>`). Resolve it from the registered targets file
+            // (`target.registered_targets`, defaulting to `$SHARED_DATA/targets.json`),
+            // including on reconnection (`use_cache == false`).
+            //
+            // TODO(b/571246542): Once `botanist` (`force_ffx_usb`) is updated
+            // to populate `$SHARED_DATA/targets.json` via `ffx target list --register` before
+            // invoking `ffx --strict -t id:<serial>`, remove the fallback to
+            // `discover_matching_targets()` below and return `TargetNotFound` whenever
+            // `targets.json` is missing.
+            if env_context.is_strict() {
+                match crate::cache::targets_file_path(env_context)
+                    .and_then(|path| crate::cache::load_registered_targets(&path))
+                {
+                    Ok(targets) => {
+                        let matched = match_target_infos_to_resolutions(targets, target_spec);
+                        return expect_single_target(target_spec, matched, source)
+                            .or_else_maybe_analytics(|e| {
+                                target_error_to_analytics(e).map(Into::into)
+                            })
+                            .await;
+                    }
+                    Err(crate::cache::CacheError::OpenFile { err, .. })
+                        if err.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        log::debug!(
+                            "Registered targets file not found in strict mode; temporarily falling back to discovery (b/571246542)"
+                        );
+                    }
+                    Err(crate::cache::CacheError::SharedData(_)) => {
+                        log::debug!(
+                            "Shared data path not configured in strict mode; temporarily falling back to discovery (b/571246542)"
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Loading registered targets failed: {e:?}");
+                        return expect_single_target(target_spec, Vec::<Resolution>::new(), source)
+                            .or_else_maybe_analytics(|e| {
+                                target_error_to_analytics(e).map(Into::into)
+                            })
+                            .await;
+                    }
+                }
+
+                let resolutions = self
+                    .discover_matching_targets(target_spec, env_context, source.clone())
+                    .await?;
+                return expect_single_target(target_spec, resolutions, source)
+                    .or_else_maybe_analytics(|e| target_error_to_analytics(e).map(Into::into))
+                    .await;
+            }
+
             let query_tag = target_spec.to_analytics_tag();
             let mut resolutions: Option<Vec<Resolution>> = None;
             if use_cache {
                 if let Some(cache_file) = crate::cache::get_discovery_cache_file(env_context) {
                     match crate::cache::Cache::load(&cache_file) {
                         Ok(cache) => {
-                            // Given a TargetInfo from the cache, we don't have much information -- just the target we've resolved
-                            // it to
-                            let matched: Vec<Resolution> = cache
-                                .targets
-                                .into_iter()
-                                .filter(|ti| ti.match_query(target_spec))
-                                .map(|ti| {
-                                    ResolutionTarget::from_target_info(&ti)
-                                        .map(Resolution::from_target)
-                                })
-                                .flatten()
-                                .collect();
+                            let matched =
+                                match_target_infos_to_resolutions(cache.targets, target_spec);
                             if matched.is_empty() {
                                 // If the cache has no matches, leave `resolutions` as `None`
                                 // so that target resolution falls back to active discovery.
@@ -323,6 +374,18 @@ pub trait TargetResolver {
                 .await
         }
     }
+}
+
+// Filters a list of TargetInfo entries against a TargetInfoQuery and converts matches to Resolutions.
+fn match_target_infos_to_resolutions(
+    targets: Vec<TargetInfo>,
+    target_spec: &TargetInfoQuery,
+) -> Vec<Resolution> {
+    targets
+        .into_iter()
+        .filter(|ti| ti.match_query(target_spec))
+        .filter_map(|ti| ResolutionTarget::from_target_info(&ti).map(Resolution::from_target))
+        .collect()
 }
 
 #[cfg(test)]
@@ -871,13 +934,18 @@ impl Resolution {
             return Ok(conn.clone());
         }
 
+        // Transition to `Failed` before awaiting `connect_new` so that if this future is
+        // cancelled by a caller's timeout while `connect_new` is pending, the resolution is
+        // still marked as unusable (`is_usable() == false`) and will be re-resolved on the
+        // next attempt.
+        *conn_guard = ConnectionState::Failed;
+
         let conn_res = self.connect_new(context).await;
         match &conn_res {
             Ok(conn) => {
                 *conn_guard = ConnectionState::Connected(conn.clone());
             }
             Err(_) => {
-                *conn_guard = ConnectionState::Failed;
                 // If a connection attempt fails, invalidate the discovery cache file so subsequent
                 // attempts re-discover rather than pinning to a stale or unreachable cached entry.
                 if let Err(e) = crate::cache::remove_target_cache(context) {
@@ -892,59 +960,42 @@ impl Resolution {
         &self,
         context: &EnvironmentContext,
     ) -> std::result::Result<Arc<Connection>, crate::FfxTargetCrateError> {
-        let conn =
-            match &self.target {
-                ResolutionTarget::Addr(socket_addr) => {
-                    if !context.get(keys::NETWORK_ENABLED).unwrap_or(true) {
-                        return Err(crate::error::TargetResolutionError::NetworkDisabled.into());
-                    }
-                    let connector = SshConnector::new(
-                        netext::ScopedSocketAddr::from_socket_addr(*socket_addr)?,
-                        context,
-                    )?;
-                    emit_target_connection_event("SSH").await;
-                    Connection::new(connector).await.map_err(|e| {
-                        crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
-                            format!("{:?}", e),
-                        ))
-                    })?
+        let conn = match &self.target {
+            ResolutionTarget::Addr(socket_addr) => {
+                if !context.get(keys::NETWORK_ENABLED).unwrap_or(true) {
+                    return Err(crate::error::TargetResolutionError::NetworkDisabled.into());
                 }
-                ResolutionTarget::Usb(cid) => {
-                    if !context.get(keys::USB_ENABLED).unwrap_or(false) {
-                        return Err(crate::error::TargetResolutionError::UsbDisabled.into());
-                    }
-                    let connector = UsbConnector::new(*cid, context).await?;
-                    emit_target_connection_event("USB").await;
-                    Connection::new(connector).await.map_err(|e| {
-                        crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
-                            format!("{:?}", e),
-                        ))
-                    })?
+                let connector = SshConnector::new(
+                    netext::ScopedSocketAddr::from_socket_addr(*socket_addr)?,
+                    context,
+                )?;
+                emit_target_connection_event("SSH").await;
+                Connection::new(connector).await.map_err(crate::KnockError::from)?
+            }
+            ResolutionTarget::Usb(cid) => {
+                if !context.get(keys::USB_ENABLED).unwrap_or(false) {
+                    return Err(crate::error::TargetResolutionError::UsbDisabled.into());
                 }
-                ResolutionTarget::Vsock(cid) => {
-                    if !context.get(keys::VSOCK_ENABLED).unwrap_or(false) {
-                        return Err(crate::error::TargetResolutionError::VsockDisabled.into());
-                    }
-                    let connector = VSockConnector::new(*cid);
-                    emit_target_connection_event("VSOCK").await;
-                    Connection::new(connector).await.map_err(|e| {
-                        crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
-                            format!("{:?}", e),
-                        ))
-                    })?
+                let connector = UsbConnector::new(*cid, context).await?;
+                emit_target_connection_event("USB").await;
+                Connection::new(connector).await.map_err(crate::KnockError::from)?
+            }
+            ResolutionTarget::Vsock(cid) => {
+                if !context.get(keys::VSOCK_ENABLED).unwrap_or(false) {
+                    return Err(crate::error::TargetResolutionError::VsockDisabled.into());
                 }
-                ResolutionTarget::Uart(endpoint) => {
-                    let connector = UartConnector::new(endpoint.clone(), context)?;
-                    emit_target_connection_event("UART").await;
-                    Connection::new(connector).await.map_err(|e| {
-                        crate::KnockError::Critical(crate::KnockCriticalError::TargetError(
-                            format!("{:?}", e),
-                        ))
-                    })?
-                }
-                ResolutionTarget::TestMock(f) => f()?,
-                ResolutionTarget::TestMockAsync(f) => f().await?,
-            };
+                let connector = VSockConnector::new(*cid);
+                emit_target_connection_event("VSOCK").await;
+                Connection::new(connector).await.map_err(crate::KnockError::from)?
+            }
+            ResolutionTarget::Uart(endpoint) => {
+                let connector = UartConnector::new(endpoint.clone(), context)?;
+                emit_target_connection_event("UART").await;
+                Connection::new(connector).await.map_err(crate::KnockError::from)?
+            }
+            ResolutionTarget::TestMock(f) => f()?,
+            ResolutionTarget::TestMockAsync(f) => f().await?,
+        };
 
         Ok(Arc::new(conn))
     }
@@ -1085,6 +1136,7 @@ impl TryFromEnvContext for Resolution {
 #[cfg(test)]
 mod test {
     use super::*;
+    use ffx_config::environment::ExecutableKind;
     use std::cmp::Ordering;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
@@ -1581,5 +1633,194 @@ mod test {
             .unwrap();
 
         assert_eq!(res.addr().unwrap(), "127.0.0.1:8082".parse::<SocketAddr>().unwrap());
+    }
+
+    #[fuchsia::test]
+    async fn test_strict_resolves_id_and_nodename_from_targets_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_map =
+            [("shared_data".to_owned(), serde_json::json!(temp_dir.path().to_str().unwrap()))]
+                .into_iter()
+                .collect();
+        let strict_ctx = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+
+        let sa: SocketAddr = "192.168.1.50:8022".parse().unwrap();
+        let mut target_info = crate::TargetInfo::default();
+        target_info.nodename = Some("fuchsia-node".to_string());
+        target_info.serial_number = Some("04012C12D45E".to_string());
+        target_info.target_state = info::TargetState::Product;
+        target_info.addresses = vec![sa.into()];
+        crate::cache::register_targets(&strict_ctx, &[target_info]).unwrap();
+
+        let resolver = MockTargetResolver::new();
+
+        // 1. Resolve by `id:<serial-number>` with `use_cache = false` (simulating reconnect in strict mode).
+        let id_query = TargetInfoQuery::try_from("id:04012C12D45E").unwrap();
+        let res_id =
+            resolver.resolve_single_target(&id_query, false, &strict_ctx, None).await.unwrap();
+        assert_eq!(res_id.addr().unwrap(), sa);
+
+        // 2. Resolve by bare nodename in strict mode.
+        let name_query = TargetInfoQuery::try_from("fuchsia-node").unwrap();
+        let res_name =
+            resolver.resolve_single_target(&name_query, false, &strict_ctx, None).await.unwrap();
+        assert_eq!(res_name.addr().unwrap(), sa);
+    }
+
+    #[fuchsia::test]
+    async fn test_strict_miss_fails_without_discovery_or_cache() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let shared_dir = temp_dir.path().join("shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+
+        let config_map = [
+            ("shared_data".to_owned(), serde_json::json!(shared_dir.to_str().unwrap())),
+            (
+                "target".to_owned(),
+                serde_json::json!({"discovery_cache_dir": cache_dir.to_str().unwrap()}),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let strict_ctx = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+
+        // Populate the interactive discovery cache, and write an empty $SHARED_DATA/targets.json.
+        let cache_file = crate::cache::get_discovery_cache_file(&strict_ctx).unwrap();
+        let (sa, _) = get_addr_and_spec();
+        let mut target_info = crate::TargetInfo::default();
+        target_info.nodename = Some("cached-only-node".to_string());
+        target_info.target_state = info::TargetState::Product;
+        target_info.addresses = vec![sa.into()];
+        crate::cache::Cache::new(vec![target_info]).save(&cache_file).unwrap();
+        crate::cache::register_targets(&strict_ctx, &[]).unwrap();
+
+        // MockTargetResolver has no expectations: if strict mode attempts active discovery, it will panic.
+        let resolver = MockTargetResolver::new();
+        let query = TargetInfoQuery::try_from("cached-only-node").unwrap();
+        let err =
+            resolver.resolve_single_target(&query, true, &strict_ctx, None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::TargetNotFound, .. }
+        ));
+    }
+
+    #[fuchsia::test]
+    async fn test_strict_missing_targets_file_falls_back_to_discovery_bypassing_cache() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let shared_dir = temp_dir.path().join("shared");
+        std::fs::create_dir_all(&shared_dir).unwrap();
+
+        let config_map = [
+            ("shared_data".to_owned(), serde_json::json!(shared_dir.to_str().unwrap())),
+            (
+                "target".to_owned(),
+                serde_json::json!({"discovery_cache_dir": cache_dir.to_str().unwrap()}),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let strict_ctx = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+
+        // Populate the interactive discovery cache with a stale address, while leaving
+        // $SHARED_DATA/targets.json missing.
+        let cache_file = crate::cache::get_discovery_cache_file(&strict_ctx).unwrap();
+        let stale_sa: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        let mut cached_info = crate::TargetInfo::default();
+        cached_info.nodename = Some("usb-node".to_string());
+        cached_info.serial_number = Some("c86314704820".to_string());
+        cached_info.target_state = info::TargetState::Product;
+        cached_info.addresses = vec![stale_sa.into()];
+        crate::cache::Cache::new(vec![cached_info]).save(&cache_file).unwrap();
+
+        let discovered_sa: SocketAddr = "127.0.0.1:8022".parse().unwrap();
+        let th = make_target_handle_for_product("usb-node", discovered_sa);
+        let mut resolver = MockTargetResolver::new();
+        resolver.expect_discovered_targets().return_once(move |_| Ok(vec![th]));
+
+        let query = TargetInfoQuery::try_from("id:c86314704820").unwrap();
+        let res = resolver.resolve_single_target(&query, true, &strict_ctx, None).await.unwrap();
+        assert_eq!(res.addr().unwrap(), discovered_sa);
+    }
+
+    #[fuchsia::test]
+    async fn test_registered_targets_duplicate_id_returns_ambiguous() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_map =
+            [("shared_data".to_owned(), serde_json::json!(temp_dir.path().to_str().unwrap()))]
+                .into_iter()
+                .collect();
+        let strict_ctx = EnvironmentContext::strict(ExecutableKind::Test, config_map).unwrap();
+
+        let mut t1 = crate::TargetInfo::default();
+        t1.nodename = Some("node-1".to_string());
+        t1.serial_number = Some("DUP_ID".to_string());
+        t1.target_state = info::TargetState::Product;
+        t1.addresses = vec!["192.168.1.10:22".parse::<SocketAddr>().unwrap().into()];
+
+        let mut t2 = crate::TargetInfo::default();
+        t2.nodename = Some("node-2".to_string());
+        t2.serial_number = Some("DUP_ID".to_string());
+        t2.target_state = info::TargetState::Product;
+        t2.addresses = vec!["192.168.1.11:22".parse::<SocketAddr>().unwrap().into()];
+
+        crate::cache::register_targets(&strict_ctx, &[t1, t2]).unwrap();
+
+        let resolver = MockTargetResolver::new();
+        let query = TargetInfoQuery::try_from("id:DUP_ID").unwrap();
+        let err =
+            resolver.resolve_single_target(&query, true, &strict_ctx, None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            FfxTargetError::OpenTargetError { err: ffx::OpenTargetError::QueryAmbiguous, .. }
+        ));
+    }
+
+    #[fuchsia::test]
+    async fn test_get_connection_timeout_cancellation_marks_resolution_unusable() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let resolution =
+            Resolution::mock_async(|| futures::future::pending::<Result<Connection>>());
+        assert!(resolution.is_usable().await);
+
+        let res = resolution
+            .get_connection(&test_env.context)
+            .on_timeout(Duration::from_millis(10), || Err(anyhow::anyhow!("timed out").into()))
+            .await;
+        assert!(res.is_err());
+        assert!(
+            !resolution.is_usable().await,
+            "Resolution should be marked unusable if get_connection is cancelled by a timeout"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_usb_connect_error_to_non_fatal_command_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_socket = temp_dir.path().join("missing_usb.sock");
+        let test_env = ffx_config::test_env()
+            .user_config(keys::USB_ENABLED, serde_json::json!(true))
+            .user_config("connectivity.usb_driver_autostart", serde_json::json!(false))
+            .user_config(
+                usb_driver_api::CONFIG_USB_SOCKET_PATH,
+                serde_json::json!(missing_socket.to_string_lossy()),
+            )
+            .build()
+            .unwrap();
+        let handle = TargetHandle {
+            node_name: Some("usb-target".to_string()),
+            state: discovery::TargetState::Product {
+                addrs: vec![addr::TargetAddr::UsbCtx(4)],
+                serial: None,
+            },
+            manual: false,
+        };
+        let resolution = Resolution::from_target_handle(handle).unwrap();
+        let err = resolution.get_connection(&test_env.context).await.unwrap_err();
+        assert!(err.into_command_error().downcast_non_fatal().is_ok());
     }
 }

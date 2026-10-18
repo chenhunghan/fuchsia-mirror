@@ -89,7 +89,7 @@ export BAZEL_FUCHSIA_NINJA_PREBUILT="${_NINJA_PREBUILT}"
 export PATH="${_PREBUILT_PYTHON_DIR}/bin:${PATH}"
 
 # Provide a direct path to the prebuilt Python3 executable as well.
-readonly PREBUILT_PYTHON3="${_PREBUILT_PYTHON_DIR}/bin/python3"
+readonly _PREBUILT_PYTHON3="${_PREBUILT_PYTHON_DIR}/bin/python3"
 
 # An undocumented, but widely used, environment variable that tells Bazel to
 # not auto-detect the host C++ installation. This makes workspace setup faster
@@ -162,11 +162,15 @@ esac
 
 # We generate our own invocation id, to make it easier to propagate its value
 # to sub-build invocations.
-readonly RESULTSTORE_invocation_id="$("${PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
+readonly RESULTSTORE_invocation_id="$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
 
-# This is for ResultStore.
-# TODO: depend on GN arg bazel_upload_build_events = {"sponge", "resultstore"}
-readonly RESULTSTORE_URL="http://go/fxbtx"
+# main_build.py is already expected to set RS_results_url from the active
+# ResultStore profile into the build environment, but this fallback path
+# exists to make this wrapper usable standalone (outside of main_build.py).
+if [[ -z "${RS_results_url:-}" ]]; then
+  RS_results_url="$("${_PREBUILT_PYTHON3}" -S "${_SRCDIR}/../resultstore/rs_profile.py" run -- printenv RS_results_url 2>/dev/null || :)"
+fi
+readonly RESULTSTORE_URL="$RS_results_url"
 readonly RESULTSTORE_SUB_BUILDS_LINK="$RESULTSTORE_URL/?q=PARENT_BUILD_ID:$RESULTSTORE_invocation_id"
 
 # A list of extra Bazel arguments that must appear after the
@@ -386,7 +390,7 @@ _bazel_env=(
     RESULTSTORE_SIBLING_BUILDS_LINK="$RESULTSTORE_SUB_BUILDS_LINK"
     # LINT.ThenChange(
     #   //build/bazel/scripts/generate_invocation_bazelrc.py:related_invocations_env_vars,
-    #   //build/bazel/scripts/rsninja.sh:related_invocations_env_vars
+    #   //build/resultstore/rsninja.sh:related_invocations_env_vars
     # )
 )
 

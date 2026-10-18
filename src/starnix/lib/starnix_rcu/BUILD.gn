@@ -38,12 +38,6 @@ fuchsia_unittest_package("starnix_rcu-unittests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 rustc_library("starnix_rcu") {
   sources = [
     "src/lib.rs",
@@ -51,6 +45,7 @@ rustc_library("starnix_rcu") {
     "src/rcu_cache.rs",
     "src/rcu_hash_map.rs",
     "src/rcu_string.rs",
+    "src/rcu_vfs_conformance_tests.rs",
   ]
   edition = "2024"
   visibility = [
@@ -63,6 +58,7 @@ rustc_library("starnix_rcu") {
   deps = [
     "//src/lib/fuchsia-rcu",
     "//src/lib/fuchsia-rcu-collections",
+    "//src/lib/fuchsia-sync",
     "//src/starnix/lib/starnix_sync",
     "//src/starnix/lib/starnix_types",
     "//third_party/rust_crates:rapidhash",

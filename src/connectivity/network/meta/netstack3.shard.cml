@@ -9,6 +9,23 @@
             on_terminate: "reboot",
         },
     ],
+    offer: [
+        {
+            dictionary: "netstack3-config",
+            from: "parent",
+            to: "#netstack",
+            availability: "same_as_target",
+        },
+        {
+            config: [
+                "fuchsia.netstack3.DebugLogs",
+                "fuchsia.netstack3.OpaqueIids",
+            ],
+            from: "void",
+            to: "#netstack",
+            availability: "optional",
+        },
+    ],
     expose: [
         // TODO(https://fxbug.dev/324494668): remove this when Netstack2 is gone.
         {

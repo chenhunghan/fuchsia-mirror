@@ -124,6 +124,9 @@ graph TD
 
 ### 3.1. Memory Layout Matching & Verification
 - Mark FFI-shared structs with `#[repr(C)]`.
+- Do not heap-box (`kalloc::Box`) a ported Rust struct behind an extra pointer
+  in the C++ wrapper when the C++ class stored its fields inline; match the
+  inline layout in-place instead.
 - Always add compile-time static assertions for size and alignment in Rust using
   `zr::static_assert!`. Add matching `static_assert` assertions in C++ test
   files.
@@ -216,6 +219,10 @@ pub fn get_slice(mapped_addr: usize, size: usize) -> &'static [u8] {
 - Inline `asm!` must not use `options(nomem)` or `options(readonly)` where the
   C++ uses `asm volatile` with a memory clobber; those options let the compiler
   reorder memory accesses around the instruction.
+- Temporarily Releasing Locks (`call_unlocked`): Translate C++
+  `Guard::CallUnlocked` directly to `guard.as_mut().call_unlocked(|| { ... })`
+  rather than splitting a single lock guard scope into separate `{
+  ksync::lock!(...); }` blocks.
 
 ```rust
 #[guarded]
@@ -494,8 +501,15 @@ Ok(())
 - **Copied and Narrating Comments**: Do not copy a neighboring block's comment
   onto different code, or add comments noting where code was ported from.
   Comments on new Rust code are fine where they explain something the code does
-  not make obvious, such as why an `unsafe` block is sound or why the code
-  departs from the C++.
+  not make obvious, such as why an `unsafe` block is sound or why the code is
+  written the way it is (without describing C++ the change deletes; see below).
+- **No References to Deleted C++**: A comment may name C++ that stays in the
+  tree, such as an FFI counterpart or a C++ type the Rust binds to. It must not
+  describe C++ that the same change deletes ("like the C++ global was", "the C++
+  enum's `None` is omitted", "unlike `c_str()`"), because the comment stops
+  being true once the change lands. Explain a departure in present terms
+  ("statically initialized so it is usable during early boot") and put the
+  comparison with the old C++ in the commit message or the review thread.
 
 ### 3.16. Code Formatting & Line Length Limits
 - **100-Character Line Limit**: All lines in Rust (`.rs`) and C++ (`.cc`, `.h`)
@@ -628,8 +642,9 @@ Reviewers and Coders must audit code against this checklist:
      maintained if the ported file is not meaningfully divergent.
 28.  [ ] **Allocation Tier & Stack Parity**: Data and working buffers that were
      heap-allocated or static in C++ are not shifted onto the kernel stack in
-     Rust, with stack allocation reserved only for small scalar or primitive
-     helpers.
+     Rust (with stack allocation reserved only for small scalar or primitive
+     helpers), and inline C++ objects are not heap-boxed (`kalloc::Box`) behind
+     an extra pointer indirection in the C++ wrapper.
 29.  [ ] **Manual Deferred Cleanup**: C++ `fit::defer` cleanup guards are
      translated to `zr::defer` rather than manually duplicating cleanup logic
      before every early return.
@@ -677,16 +692,19 @@ Reviewers and Coders must audit code against this checklist:
 46.  [ ] **Invented C++ Methods**: FFI shims expose existing C++ methods rather
      than new ones added for the port.
 47.  [ ] **Copied and Narrating Comments**: No comment copied from a neighboring
-     block onto different code, and no "ported from" notes.
+     block onto different code, no "ported from" notes, and no comment that
+     describes or compares against C++ deleted by the same change.
 48.  [ ] **C-Style Out-Parameters on Rust Methods**: Rust methods do not retain
      C-style `&mut T` out-parameters paired with `bool` or `Status` returns when
      returning `Option<T>` or `Result<T, Status>` by value is possible (any
      out-pointer adaptation belongs only in `rust_*` FFI trampolines).
 49.  [ ] **Unnecessary Control-Flow Divergence or Ad-Hoc Caller Checks**: Ported
-     functions and syscalls preserve the C++ control flow and call the exact
-     corresponding methods/overloads on collaborating types rather than
-     inventing local enums, duplicating branch checks, or re-implementing checks
-     inline at the call site.
+     functions and syscalls preserve the C++ control flow (including translating
+     `Guard::CallUnlocked` directly to `guard.as_mut().call_unlocked(...)`
+     rather than splitting lock scopes) and call the exact corresponding
+     methods/overloads on collaborating types rather than inventing local enums,
+     duplicating branch checks, or re-implementing checks inline at the call
+     site.
 50.  [ ] **Synthetic Facade Methods or Non-Trivial `cpp_*` FFI Shims**: Rust
      facades for unported C++ types only expose methods that actually exist on
      the C++ class, and `cpp_*` FFI shims are strict 1:1 single-call forwards

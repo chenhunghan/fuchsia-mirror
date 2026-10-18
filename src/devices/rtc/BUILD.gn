@@ -5,7 +5,7 @@
 group("drivers") {
   testonly = true
   deps = [
-    "drivers/aml-rtc",
+    "drivers/goldfish-rtc",
     "drivers/pl031-rtc",
   ]
 

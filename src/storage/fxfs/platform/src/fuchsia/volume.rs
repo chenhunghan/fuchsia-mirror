@@ -9,10 +9,12 @@ use crate::fuchsia::file::{FlushType, FxFile};
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
 use crate::fuchsia::node::{FxNode, GetResult, NodeCache, OpenedNode};
 use crate::fuchsia::pager::Pager;
-use crate::fuchsia::profile::{AttributeRecordingHandle, FileRecordingHandle, ProfileState};
+use crate::fuchsia::profile::{
+    AttributeRecordingHandle, FileRecordingHandle, IO_SIZE, ProfileState, RecordingHandle,
+};
 use crate::fuchsia::symlink::FxSymlink;
 use crate::fuchsia::volumes_directory::VolumesDirectory;
-use anyhow::{Error, bail, ensure};
+use anyhow::{Context as _, Error, bail, ensure};
 use async_trait::async_trait;
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_fxfs::{
@@ -32,16 +34,17 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::{self, SyncOptions, TruncateGuard};
 use fxfs::future_with_guard::FutureWithGuard;
 use fxfs::log::*;
-use fxfs::object_handle::ReadObjectHandle;
+use fxfs::object_handle::{ObjectHandle as _, ReadObjectHandle};
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::object_record::ObjectItem;
 use fxfs::object_store::project_id::ProjectIdExt;
-use fxfs::object_store::transaction::{LockKey, Options, ReservationOptions, lock_keys};
+use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{
     AttributeId, AttributeKey, DataObjectHandle, DirType, HandleOptions, HandleOwner,
-    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue, ProjectId,
+    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectStoreTrait, ObjectValue, ProjectId,
 };
 use refaults_vmo::PageRefaultCounter;
+use scopeguard::ScopeGuard;
 use std::future::Future;
 use std::pin::pin;
 #[cfg(any(test, feature = "testing"))]
@@ -50,6 +53,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_profile::MAX_PROFILE_VMO_SIZE;
 use storage_units::BlockSize;
 use vfs::directory::entry::DirectoryEntry;
 use vfs::directory::simple::Simple;
@@ -257,7 +261,7 @@ impl FxVolume {
     /// Reports the filesystem info, but if the volume has a space limit applied then the space
     /// available and space used are reported based on the volume instead.
     pub fn filesystem_info_for_volume(&self) -> fio::FilesystemInfo {
-        let allocator = self.store.filesystem().allocator();
+        let allocator = self.store.filesystem().ensure_local().allocator();
         let info =
             if let Some(limit) = allocator.get_owner_bytes_limit(self.store.store_object_id()) {
                 filesystem::Info {
@@ -272,11 +276,82 @@ impl FxVolume {
     }
 
     /// Stop profiling, recover resources from it and finalize recordings.
-    pub async fn stop_profile_tasks(self: &Arc<Self>) {
-        let Some(mut state) = self.profile_state.lock().take() else { return };
-        state.wait_for_replay_to_finish().await;
-        self.pager.set_recorder(None);
-        state.wait_for_recording_to_finish().await;
+    pub async fn stop_profile_tasks(&self) {
+        let state = self.profile_state.lock().take();
+        if let Some(mut state) = state {
+            state.wait_for_replay_to_finish().await;
+            self.pager.set_recorder(None);
+            state.wait_for_recording_to_finish().await;
+        }
+    }
+
+    /// Reads the named profile from the volume's internal profile directory into a VMO.
+    pub async fn get_profile_vmo(self: &Arc<Self>, name: &str) -> Result<zx::Vmo, Error> {
+        let handle = self.open_replay_handle(name).await?.ok_or(FxfsError::NotFound)?;
+        let raw_size = handle.get_size();
+        if raw_size == 0 {
+            return Ok(zx::Vmo::create(0)?);
+        }
+        ensure!(raw_size <= MAX_PROFILE_VMO_SIZE, FxfsError::OutOfRange);
+        let file_size = raw_size as usize;
+        let block_size = handle.block_size().get() as usize;
+        let aligned_size = file_size.next_multiple_of(block_size);
+        ensure!(aligned_size <= MAX_PROFILE_VMO_SIZE as usize, FxfsError::OutOfRange);
+        let vmo = zx::Vmo::create(aligned_size as u64)?;
+        let buf_size = std::cmp::min(aligned_size, IO_SIZE);
+        let mut io_buf = handle.allocate_buffer(buf_size).await;
+        let mut temp_buf = vec![0u8; buf_size];
+        let mut offset = 0;
+        while offset < file_size {
+            let actual = handle
+                .read_aligned(offset as u64, io_buf.as_mut())
+                .await
+                .with_context(|| format!("Failed to read profile at offset: {offset}"))?;
+            if actual == 0 {
+                break;
+            }
+            io_buf.subslice(0..actual).copy_to_slice(&mut temp_buf[..actual]);
+            vmo.write(&temp_buf[..actual], offset as u64)?;
+            offset += actual;
+        }
+        Ok(vmo)
+    }
+
+    /// Writes `recorded_vmo` as the named profile in the volume's internal profile directory.
+    pub async fn write_profile_vmo(
+        self: &Arc<Self>,
+        name: &str,
+        recorded_vmo: zx::Vmo,
+    ) -> Result<(), Error> {
+        let vmo_size = recorded_vmo.get_size()? as usize;
+        let block_size = self.store().block_size().get() as usize;
+        ensure!(vmo_size % block_size == 0, FxfsError::InvalidArgs);
+        ensure!(vmo_size <= MAX_PROFILE_VMO_SIZE as usize, FxfsError::OutOfRange);
+
+        let recording_handle = Box::new(FileRecordingHandle::new(name, self.clone()).await?)
+            as Box<dyn RecordingHandle>;
+        let recording_handle = scopeguard::guard(recording_handle, |recording_handle| {
+            recording_handle.abort_cleanup();
+        });
+        if vmo_size > 0 {
+            let buf_size = std::cmp::min(vmo_size, IO_SIZE);
+            let mut io_buf = recording_handle.allocate_buffer(buf_size).await;
+            let mut temp_buf = vec![0u8; buf_size];
+            let mut offset = 0;
+            while offset < vmo_size {
+                let chunk_len = std::cmp::min(vmo_size - offset, io_buf.len());
+                recorded_vmo.read(&mut temp_buf[..chunk_len], offset as u64)?;
+                io_buf.as_mut().subslice_mut(0..chunk_len).copy_from_slice(&temp_buf[..chunk_len]);
+                recording_handle
+                    .append(io_buf.subslice(0..chunk_len))
+                    .await
+                    .context("Failed to write profile block")?;
+                offset += chunk_len;
+            }
+        }
+        let recording_handle = ScopeGuard::into_inner(recording_handle);
+        recording_handle.commit().await?;
+        Ok(())
     }
 
     /// Opens or creates the profile directory in the volume's internal directory.
@@ -311,6 +386,21 @@ impl FxVolume {
         })
     }
 
+    async fn open_replay_handle(
+        self: &Arc<Self>,
+        name: &str,
+    ) -> Result<Option<Box<dyn ReadObjectHandle>>, Error> {
+        let profile_dir = self.get_profile_directory().await?;
+        if let Some((id, descriptor, _)) = profile_dir.lookup(name).await? {
+            ensure!(matches!(descriptor, ObjectDescriptor::File), FxfsError::Inconsistent);
+            Ok(Some(Box::new(
+                ObjectStore::open_object(self, id, HandleOptions::default(), None).await?,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Starts recording a profile for the volume under the name given, and if a profile exists
     /// under that same name it is replayed and will be replaced after by the new recording if it
     /// is cleanly shutdown and finalized.
@@ -325,15 +415,7 @@ impl FxVolume {
         // should be ongoing at a time, as that is ensured in `VolumesDirectory`.
 
         // If there is a recording already, prepare to replay it.
-        let profile_dir = self.get_profile_directory().await?;
-        let replay_handle = if let Some((id, descriptor, _)) = profile_dir.lookup(name).await? {
-            ensure!(matches!(descriptor, ObjectDescriptor::File), FxfsError::Inconsistent);
-            Some(Box::new(
-                ObjectStore::open_object(self, id, HandleOptions::default(), None).await?,
-            ))
-        } else {
-            None
-        };
+        let replay_handle = self.open_replay_handle(name).await?;
 
         info!("Recording new profile '{name}' for volume object {}", self.store.store_object_id());
         // Begin recording first to ensure that we capture any activity from the replay.
@@ -454,7 +536,7 @@ impl FxVolume {
         }
 
         self.flush_all_files(FlushType::LastChance).await;
-        self.store.filesystem().graveyard().flush().await;
+        self.store.filesystem().ensure_local().graveyard().flush().await;
         if self.store.crypt().is_some() {
             if let Err(e) = self.store.lock().await {
                 // The store will be left in a safe state and there won't be data-loss unless
@@ -596,9 +678,7 @@ impl FxVolume {
             return Ok(());
         }
         // If this fails, the graveyard should clean it up on next mount.
-        let txn_options =
-            Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() };
-        self.store.tombstone_object(object_id, txn_options, truncate_guard).await?;
+        self.store.purge(object_id, truncate_guard).await?;
         Ok(())
     }
 
@@ -983,6 +1063,7 @@ impl FxVolume {
                 DebugRequest::ClearCaches { responder } => {
                     this.clear_caches();
                     let fs = this.store.filesystem();
+                    let fs = fs.ensure_local();
                     fs.root_store().clear_caches();
                     fs.root_parent_store().clear_caches();
                     fs.allocator().tree().clear_cache();
@@ -1065,6 +1146,12 @@ impl AsRef<ObjectStore> for FxVolume {
     }
 }
 
+impl AsRef<dyn ObjectStoreTrait> for FxVolume {
+    fn as_ref(&self) -> &dyn ObjectStoreTrait {
+        &*self.store
+    }
+}
+
 #[async_trait]
 impl FsInspectVolume for FxVolume {
     async fn get_volume_data(&self) -> Option<VolumeData> {
@@ -1072,8 +1159,12 @@ impl FsInspectVolume for FxVolume {
         let _guard = self.scope.try_active_guard()?;
 
         let object_count = self.store().object_count();
-        let (used_bytes, bytes_limit) =
-            self.store.filesystem().allocator().owner_allocation_info(self.store.store_object_id());
+        let (used_bytes, bytes_limit) = self
+            .store
+            .filesystem()
+            .ensure_local()
+            .allocator()
+            .owner_allocation_info(self.store.store_object_id());
         let encrypted = self.store().crypt().is_some();
         let port_koid = fasync::EHandle::local().port().as_handle_ref().koid().unwrap().raw_koid();
         Some(VolumeData { bytes_limit, used_bytes, used_nodes: object_count, encrypted, port_koid })
@@ -1281,7 +1372,7 @@ mod tests {
         .await;
         close_file_checked(f).await;
 
-        let (status, dst_token) = dst.get_token().await.expect("FIDL call failed");
+        let (status, dst_token) = dst.deprecated_get_token().await.expect("FIDL call failed");
         Status::ok(status).expect("get_token failed");
         src.rename("a", Event::from(dst_token.unwrap()), "b")
             .await
@@ -1332,7 +1423,7 @@ mod tests {
         .await;
         close_file_checked(f).await;
 
-        let (status, src_token) = src.get_token().await.expect("FIDL call failed");
+        let (status, src_token) = src.deprecated_get_token().await.expect("FIDL call failed");
         Status::ok(status).expect("get_token failed");
         src.rename("a", Event::from(src_token.unwrap()), "b")
             .await
@@ -1409,7 +1500,7 @@ mod tests {
         .await;
         close_file_checked(f).await;
 
-        let (status, dst_token) = dst.get_token().await.expect("FIDL call failed");
+        let (status, dst_token) = dst.deprecated_get_token().await.expect("FIDL call failed");
         Status::ok(status).expect("get_token failed");
         src.rename("a", Event::from(dst_token.unwrap()), "b")
             .await
@@ -1492,7 +1583,7 @@ mod tests {
         )
         .await;
 
-        let (status, dst_token) = dst.get_token().await.expect("FIDL call failed");
+        let (status, dst_token) = dst.deprecated_get_token().await.expect("FIDL call failed");
         Status::ok(status).expect("get_token failed");
         src.rename("a", Event::from(dst_token.unwrap()), "b")
             .await

@@ -12,6 +12,7 @@ FUCHSIA_DEVICE = "FuchsiaDevice"
 # Defined as an Auxiliary device in https://osscs.corp.google.com/fuchsia/fuchsia/+/main:tools/botanist/targets/auxiliary.go
 ACCESS_POINT = "AccessPoint"
 OPENWRT_AP = "OpenWrtAP"
+ATTENUATOR = "Attenuator"
 IPERF_SERVER = "IPerfServer"
 
 # LINT.IfChange(mobly_test_start)
@@ -28,4 +29,10 @@ TESTPARSER_RESULT_HEADER = "[=====MOBLY RESULTS=====]"
 # //src/testing/end_to_end/antlion/runner/src/driver/infra.rs:mobly_test_end,
 # //tools/testing/tefmocheck/string_in_log_check.go:mobly_test_end,
 # //tools/testing/testparser/moblytest.go:mobly_test_end,
+# )
+
+# LINT.IfChange(mobly_test_timeout)
+TESTPARSER_TIMEOUT_TYPE = "MoblyDriverTimeout"
+# LINT.ThenChange(
+# //tools/mobly_test_parser/moblytest.go:mobly_test_timeout,
 # )

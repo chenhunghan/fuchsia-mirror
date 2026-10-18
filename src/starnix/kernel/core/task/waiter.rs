@@ -601,8 +601,8 @@ impl Waiter {
             )
             .is_err()
         {
-            // Avoid attempting to freeze the task if there is a pending SIGKILL.
-            if current_task.read().has_signal_pending(SIGKILL) {
+            // Avoid attempting to freeze the task if it is exiting or has a pending SIGKILL.
+            if current_task.is_exitted() || current_task.read().has_signal_pending(SIGKILL) {
                 break;
             }
             // Ignore spurious wakeups from the [`PortEvent.futex`]
@@ -1386,14 +1386,35 @@ mod tests {
                 task_state.set_flags(TaskFlags::SIGNALS_AVAILABLE, true);
             }
 
-            let output: Result<(), Errno> = current_task
-                .run_in_state(RunState::Event(InterruptibleEvent::new()), move || {
-                    unreachable!("callback should not be called")
-                });
+            let event = InterruptibleEvent::default();
+            let output =
+                current_task.block_until(event.begin_wait(), zx::MonotonicInstant::INFINITE);
             assert_eq!(output, error!(EINTR));
 
             let output = current_task.run_in_state(RunState::Frozen(Waiter::new()), move || Ok(()));
             assert_eq!(output, Ok(()));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn block_until_stack_event_interrupted_by_other_thread() {
+        spawn_kernel_and_run(async |current_task| {
+            let task = Arc::clone(&current_task.task);
+            let interrupter = std::thread::spawn(move || {
+                while !matches!(task.read().run_state(), RunState::Event(_)) {
+                    std::thread::yield_now();
+                }
+                task.interrupt();
+            });
+
+            let event = InterruptibleEvent::default();
+            let output =
+                current_task.block_until(event.begin_wait(), zx::MonotonicInstant::INFINITE);
+            assert_eq!(output, error!(EINTR));
+            assert_eq!(current_task.read().run_state(), RunState::Running);
+
+            interrupter.join().expect("join interrupter");
         })
         .await;
     }
@@ -1458,6 +1479,24 @@ mod tests {
 
             let waiter = Waiter::new();
             waiter.stop(&current_task);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn wait_while_stopping_returns_eintr() {
+        spawn_kernel_and_run(async |current_task| {
+            current_task.write().set_stopped(
+                crate::ptrace::StopState::GroupStopping,
+                None,
+                Some(current_task),
+                None,
+            );
+
+            let event = InterruptibleEvent::default();
+            let output =
+                current_task.block_until(event.begin_wait(), zx::MonotonicInstant::INFINITE);
+            assert_eq!(output, error!(EINTR));
         })
         .await;
     }

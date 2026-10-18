@@ -30,12 +30,6 @@ import("//build/go/go_test.gni")
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-# A self-verification target for generated content in this file.
-if (is_host) {
-  verify_bazel2gn("verify_bazel2gn") {
-  }
-}
-
 if (is_host) {
   go_library("subprocess") {
     sources = [
@@ -48,19 +42,4 @@ if (is_host) {
       "//tools/lib/logger",
     ]
   }
-}
-if (is_host) {
-  go_test("subprocess_tests") {
-    sources = [ "subprocess_test.go" ]
-    embed = [ ":subprocess" ]
-    deps = [ "//third_party/golibs:github.com/google/go-cmp/cmp" ]
-  }
-}
-group("tests") {
-  deps = [ ":subprocess_tests" ]
-  visibility = [
-    ":*",
-    "//tools:*",
-  ]
-  testonly = true
 }

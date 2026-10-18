@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "src/graphics/drivers/msd-vsi-vip/src/address_space.h"
+#include "src/graphics/drivers/msd-vsi-vip/src/address_space_layout.h"
 
 namespace {
 
@@ -22,6 +23,8 @@ class TestAddressSpace : public ::testing::Test {
   }
 
  protected:
+  AddressSpace::PageDirectory* root() { return address_space_->root_.get(); }
+
   class MockAddressSpaceOwner : public AddressSpace::Owner {
    public:
     // Put bus addresses close to the 40 bit limit
@@ -80,8 +83,9 @@ class TestAddressSpace : public ::testing::Test {
       auto* pde = address_space_->root_->entry(page_directory_index);
       EXPECT_NE(*pde, AddressSpace::kInvalidPde);
 
+      bool writeable = bus_mapping->writeable();
       AddressSpace::pte_t expected_pte;
-      EXPECT_TRUE(AddressSpace::pte_encode(bus_addr[i], true, true, true, &expected_pte));
+      EXPECT_TRUE(AddressSpace::pte_encode(bus_addr[i], true, writeable, true, &expected_pte));
       auto* pte = page_table->entry(page_table_index);
       EXPECT_EQ(*pte, expected_pte);
     }
@@ -207,4 +211,51 @@ TEST_F(TestAddressSpace, ReleaseMapping) {
       address_space_, buffer, kGpuAddr, 0 /*page_offset */, kBufferSizeInPages, &mapping);
   EXPECT_TRUE(status.ok());
   EXPECT_TRUE(mapping->Release(nullptr /* bus_mappings_out */));
+}
+
+TEST_F(TestAddressSpace, InsertRingbufferReadOnly) {
+  const uint32_t kGpuAddr = AddressSpaceLayout::system_gpu_addr_base();
+  auto buffer = magma::PlatformBuffer::Create(1 * kPageSize, "test");
+  auto bus_mapping =
+      owner_.GetBusMapper()->MapPageRangeBus(buffer.get(), 0, 1, false /* writeable */);
+  EXPECT_TRUE(address_space_->Insert(kGpuAddr, bus_mapping.get()));
+  CheckPteEntries(bus_mapping.get(), kGpuAddr, 1);
+}
+
+TEST_F(TestAddressSpace, RollbackOnPteEncodeFailure) {
+  constexpr uint32_t kGpuAddr = 0x1000;
+  constexpr uint32_t kPageCount = 10;
+
+  auto buffer = magma::PlatformBuffer::Create(kPageCount * kPageSize, "test");
+  auto bus_mapping = owner_.GetBusMapper()->MapPageRangeBus(buffer.get(), 0, kPageCount);
+
+  // Make the 5th page have an invalid bus address (fails to fit in 40 bits).
+  bus_mapping->Get()[4] = 1ul << 42;
+
+  // Insert should fail.
+  EXPECT_FALSE(address_space_->Insert(kGpuAddr, bus_mapping.get()));
+
+  // Verify that the first 4 pages were rolled back and cleared.
+  // Since all inserted pages were cleared, the page table valid count should go back to 0,
+  // causing it to be garbage collected.
+  EXPECT_EQ(nullptr, root()->GetPageTable(0, false));
+}
+
+TEST_F(TestAddressSpace, RollbackAcrossPageTableBoundary) {
+  constexpr uint32_t kGpuAddr = 0x1000;
+  constexpr uint32_t kPageCount =
+      1025;  // 1024 entries per page table, so this crosses the boundary
+
+  auto buffer = magma::PlatformBuffer::Create(kPageCount * kPageSize, "test");
+  auto bus_mapping = owner_.GetBusMapper()->MapPageRangeBus(buffer.get(), 0, kPageCount);
+
+  // Make the 1025th page have an invalid bus address (fails to fit in 40 bits).
+  bus_mapping->Get()[1024] = 1ul << 42;
+
+  // Insert should fail.
+  EXPECT_FALSE(address_space_->Insert(kGpuAddr, bus_mapping.get()));
+
+  // Verify that the first 1024 pages were rolled back and cleared.
+  // The first page table (index 0) should be garbage collected.
+  EXPECT_EQ(nullptr, root()->GetPageTable(0, false));
 }

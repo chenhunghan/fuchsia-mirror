@@ -17,15 +17,15 @@ use crate::task::{
     TaskRunningState, ThreadState, Waiter,
 };
 use crate::vfs::{
-    AccessCheck, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle, FileMapping,
-    FileWriteGuardMode, FsContext, FsStr, LookupContext, LookupVec, MAX_SYMLINK_FOLLOWS,
-    NamespaceNode, OpenAccessCheck, ResolveBase, SymlinkMode, SymlinkTarget, new_pidfd,
+    AccessCheck, CreationStatus, DirEntry, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle,
+    FileMapping, FileWriteGuardMode, FsContext, FsStr, LookupContext, LookupVec,
+    MAX_SYMLINK_FOLLOWS, NamespaceNode, OpenAccessCheck, ResolveBase, SymlinkMode, SymlinkTarget,
+    new_pidfd,
 };
 use futures::FutureExt;
 use linux_uapi::CLONE_PIDFD;
 use starnix_logging::{CATEGORY_STARNIX, log_error, log_warn, track_file_not_found, track_stub};
 use starnix_registers::{HeapRegs, RegisterStorageEnum};
-use starnix_stack::clean_stack;
 use starnix_sync::{EventWaitGuard, UninterruptibleLock, WakeReason, assert_lock_level};
 use starnix_syscalls::SyscallResult;
 use starnix_syscalls::decls::Syscall;
@@ -520,6 +520,11 @@ impl CurrentTask {
         false
     }
 
+    /// Returns whether a deliverable signal or a task/thread-group stop is pending for this task.
+    pub fn is_interrupt_pending(&self) -> bool {
+        self.read().is_interrupt_pending()
+    }
+
     /// Set the RunState for the current task to the given value and then call the given callback.
     ///
     /// When the callback is done, the run_state is restored to `RunState::Running`.
@@ -529,8 +534,27 @@ impl CurrentTask {
     /// the task and the given `callback` actually blocks the task.
     ///
     /// This function can only be called in the `RunState::Running` state and cannot set the
-    /// run state to `RunState::Running`. For this reason, this function cannot be reentered.
+    /// run state to `RunState::Running` or `RunState::Event` (use [`Self::block_until`] for
+    /// `InterruptibleEvent`). For this reason, this function cannot be reentered.
     pub fn run_in_state<F, T>(&self, run_state: RunState, callback: F) -> Result<T, Errno>
+    where
+        F: FnOnce() -> Result<T, Errno>,
+    {
+        assert!(!matches!(run_state, RunState::Event(_)), "use block_until for RunState::Event");
+        // SAFETY: `run_state` is not `RunState::Event`.
+        unsafe { self.run_in_state_internal(run_state, callback) }
+    }
+
+    /// Internal implementation of [`Self::run_in_state`] that also accepts [`RunState::Event`].
+    ///
+    /// # Safety
+    /// If `run_state` is `RunState::Event(event_ref)`, `event_ref` must point to a live
+    /// `InterruptibleEvent` that outlives this call.
+    unsafe fn run_in_state_internal<F, T>(
+        &self,
+        run_state: RunState,
+        callback: F,
+    ) -> Result<T, Errno>
     where
         F: FnOnce() -> Result<T, Errno>,
     {
@@ -538,39 +562,36 @@ impl CurrentTask {
 
         // Check we do not hold any uninterruptible lock
         assert_lock_level::<UninterruptibleLock>();
-        // As an optimization, decommit unused pages of the stack to reduce memory pressure while
-        // the thread is blocked.
-        clean_stack();
 
         {
             let mut state = self.write();
             assert!(!state.is_blocked());
 
+            // `SIGKILL` and `ThreadGroup::kill` mark tasks `EXITED` synchronously without queueing
+            // a per-task signal, so check `is_exitted()` before blocking.
+            if self.is_exitted() {
+                return error!(EINTR);
+            }
             if run_state.ignores_signals() {
                 // Tasks frozen or stopped ignore all other signals except SIGKILL.
                 if state.has_signal_pending(SIGKILL) {
                     return error!(EINTR);
                 }
-            } else if state.is_any_signal_pending() {
+            } else if state.is_interrupt_pending() {
                 return error!(EINTR);
             }
-            state.set_run_state(run_state.clone());
+            // SAFETY: Upheld by the caller of `run_in_state_internal`.
+            let _ = unsafe { state.set_run_state(run_state.clone()) };
         }
 
-        let _waiting_guard = crate::task::ThreadLockupDetector::pause_tracking();
-        let result = callback();
-
-        {
+        let _reset_run_state = scopeguard::guard((), |()| {
             let mut state = self.write();
-            assert_eq!(
-                state.run_state(),
-                run_state,
-                "SignalState run state changed while waiting!"
-            );
-            state.set_run_state(RunState::Running);
-        };
-
-        result
+            // SAFETY: `RunState::Running` is always valid.
+            let prev_run_state = unsafe { state.set_run_state(RunState::Running) };
+            assert_eq!(prev_run_state, run_state, "SignalState run state changed while waiting!");
+        });
+        let _waiting_guard = crate::task::ThreadLockupDetector::pause_tracking();
+        callback()
     }
 
     pub fn block_until(
@@ -596,12 +617,18 @@ impl CurrentTask {
         new_owner: Option<&zx::Thread>,
         deadline: zx::MonotonicInstant,
     ) -> Result<(), Errno> {
-        self.run_in_state(RunState::Event(guard.event().clone()), move || {
-            guard.block_until(new_owner, deadline).map_err(|e| match e {
-                WakeReason::Interrupted => errno!(EINTR),
-                WakeReason::DeadlineExpired => errno!(ETIMEDOUT),
+        // SAFETY: `guard.event()` outlives this `run_in_state_internal` call, which resets
+        // `run_state` back to `RunState::Running` under `self.write()` (via `scopeguard::guard`)
+        // before returning.
+        unsafe {
+            let run_state = RunState::Event(crate::task::EventRef::new(guard.event()));
+            self.run_in_state_internal(run_state, move || {
+                guard.block_until(new_owner, deadline).map_err(|e| match e {
+                    WakeReason::Interrupted => errno!(EINTR),
+                    WakeReason::DeadlineExpired => errno!(ETIMEDOUT),
+                })
             })
-        })
+        }
     }
 
     /// Determine namespace node indicated by the dir_fd.
@@ -755,7 +782,32 @@ impl CurrentTask {
         // Lookup the child, without following a symlink or expecting it to be a directory.
         let mut child_context = context.with(SymlinkMode::NoFollow, DirectoryMode::AllowAny);
 
-        match parent.lookup_child(self, &mut child_context, basename) {
+        let child = if flags.contains(OpenFlags::CREAT)
+            && context.directory_mode != DirectoryMode::MustBeDirectory
+            && !DirEntry::is_reserved_name(basename)
+        {
+            // When creating, look up and create the child in a single step under the parent's
+            // children lock, like Linux's lookup_open(). A separate lookup first would just be
+            // repeated under the lock, which costs an extra round trip on remote filesystems.
+            let (child, status) = parent.open_create_node(
+                self,
+                basename,
+                mode.with_type(FileMode::IFREG),
+                DeviceId::NONE,
+            )?;
+            if status == CreationStatus::Created {
+                return Ok((child, true));
+            }
+            // The child already exists. Resolve the node that was found rather than looking it
+            // up again, which would revalidate it a second time. O_EXCL is only checked below,
+            // after mounts have been entered, so that RESOLVE_NO_XDEV takes precedence over
+            // EEXIST, as in Linux.
+            parent.resolve_child(self, &mut child_context, child)
+        } else {
+            parent.lookup_child(self, &mut child_context, basename)
+        };
+
+        match child {
             Ok(name) => {
                 if name.entry.node.is_lnk() {
                     if flags.contains(OpenFlags::PATH)
@@ -816,20 +868,14 @@ impl CurrentTask {
                     Ok((name, false))
                 }
             }
-            Err(e) if e == errno!(ENOENT) && flags.contains(OpenFlags::CREAT) => {
-                if context.directory_mode == DirectoryMode::MustBeDirectory {
-                    return error!(EISDIR);
-                }
-                Ok((
-                    parent.open_create_node(
-                        self,
-                        basename,
-                        mode.with_type(FileMode::IFREG),
-                        DeviceId::NONE,
-                        flags,
-                    )?,
-                    true,
-                ))
+            Err(e)
+                if e == errno!(ENOENT)
+                    && flags.contains(OpenFlags::CREAT)
+                    && context.directory_mode == DirectoryMode::MustBeDirectory =>
+            {
+                // A path that must be a directory is not created. Other children that did not
+                // exist were created above.
+                error!(EISDIR)
             }
             Err(e) => Err(e),
         }
@@ -2019,11 +2065,10 @@ impl CurrentTask {
         }
     }
 
-    /// Causes the current thread's thread group to exit, notifying any ptracer
-    /// of this task first.
+    /// Causes the current thread's thread group to exit, terminating sibling
+    /// tasks before notifying any ptracer of this task's exit.
     pub fn kill_thread_group(&mut self, exit_status: ExitStatus) {
-        self.ptrace_event(PtraceOptions::TRACEEXIT, exit_status.signal_info_status() as u64);
-        self.thread_group().kill(exit_status, None);
+        Arc::clone(self.thread_group()).kill(exit_status, Some(self));
     }
 
     /// The flags indicates only the flags as in clone3(), and does not use the low 8 bits for the

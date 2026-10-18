@@ -62,9 +62,6 @@ pub enum FfxTargetCrateError {
     #[error("Identify host failed with error: {0:?}")]
     IdentifyHost(fdomain_fuchsia_developer_remotecontrol::IdentifyHostError),
 
-    #[error("USB Driver error: {0}")]
-    UsbDriver(#[from] usb_driver_api::ProtocolError),
-
     #[error("Invalid network interface ID: {0}")]
     InvalidInterfaceId(#[from] netext::InvalidInterfaceIdError),
 
@@ -101,6 +98,12 @@ impl FfxTargetCrateError {
     pub fn into_command_error(self) -> ffx_command_error::Error {
         match self {
             Self::Target(err) => ffx_command_error::Error::User(anyhow::Error::new(err)),
+            Self::Knock(crate::KnockError::NonCritical(err)) => ffx_command_error::Error::User(
+                ffx_command_error::NonFatalError(anyhow::Error::new(Self::Knock(
+                    crate::KnockError::NonCritical(err),
+                )))
+                .into(),
+            ),
             Self::Fallback(err) => ffx_command_error::Error::Unexpected(err),
             other => ffx_command_error::Error::Unexpected(anyhow::Error::new(other)),
         }

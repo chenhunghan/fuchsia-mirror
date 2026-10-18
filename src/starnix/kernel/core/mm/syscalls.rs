@@ -11,11 +11,11 @@ use crate::mm::{
 };
 use crate::security;
 use crate::syscalls::time::TimeSpecPtr;
-use crate::task::CurrentTask;
+use crate::task::{CurrentTask, ProcessEntryRef};
 use crate::time::TargetTime;
 use crate::time::utc::estimate_boot_deadline_from_utc;
-use crate::vfs::FdNumber;
 use crate::vfs::buffers::{OutputBuffer, UserBuffersInputBuffer, UserBuffersOutputBuffer};
+use crate::vfs::{FdNumber, PidFdFileObject};
 use fuchsia_runtime::UtcTimeline;
 use linux_uapi::MLOCK_ONFAULT;
 use starnix_logging::{CATEGORY_STARNIX_MM, log_trace, track_stub};
@@ -23,6 +23,7 @@ use starnix_syscalls::SyscallArg;
 use starnix_types::time::{duration_from_timespec, time_from_timespec};
 use starnix_uapi::auth::{PTRACE_MODE_ATTACH_REALCREDS, PTRACE_MODE_READ_REALCREDS};
 use starnix_uapi::errors::{EINTR, Errno};
+use starnix_uapi::personality::PersonalityFlags;
 use starnix_uapi::user_address::{UserAddress, UserRef};
 use starnix_uapi::user_value::UserValue;
 use starnix_uapi::{
@@ -62,6 +63,8 @@ pub fn sys_mmap(
     offset: u64,
 ) -> Result<UserAddress, Errno> {
     let user_address = do_mmap(current_task, addr, length, prot, flags, fd, offset)?;
+    // Use the requested `prot` rather than the effective protection, which may include `PROT_EXEC`
+    // implied by `READ_IMPLIES_EXEC`: dynamic linkers request `PROT_EXEC` explicitly.
     if prot & PROT_EXEC != 0 {
         // Possibly loads a new module. Notify debugger for the change.
         // We only care about dynamic linker loading modules for now, which uses mmap. In the future
@@ -69,6 +72,20 @@ pub fn sys_mmap(
         notify_debugger_of_module_list(current_task)?;
     }
     Ok(user_address)
+}
+
+/// Returns whether [`ProtectionFlags::READ`] implies [`ProtectionFlags::EXEC`] for
+/// `current_task`, i.e. whether the [`PersonalityFlags::READ_IMPLIES_EXEC`] personality flag is
+/// set.
+///
+/// `personality(2)`:
+/// > READ_IMPLIES_EXEC (since Linux 2.6.8)
+/// >        With this flag set, PROT_READ implies PROT_EXEC for mmap(2).
+///
+/// TODO(https://fxbug.dev/508555755): `READ_IMPLIES_EXEC` should be cleared when executing a
+/// program with more privileges (e.g. set-user-ID, or with an SELinux domain transition).
+fn read_implies_exec(current_task: &CurrentTask) -> bool {
+    current_task.thread_group().read().personality.contains(PersonalityFlags::READ_IMPLIES_EXEC)
 }
 
 pub fn do_mmap(
@@ -80,7 +97,7 @@ pub fn do_mmap(
     fd: FdNumber,
     offset: u64,
 ) -> Result<UserAddress, Errno> {
-    let prot_flags = ProtectionFlags::from_access_bits(prot).ok_or_else(|| {
+    let mut prot_flags = ProtectionFlags::from_access_bits(prot).ok_or_else(|| {
         track_stub!(TODO("https://fxbug.dev/322874211"), "mmap parse protection", prot);
         errno!(EINVAL)
     })?;
@@ -107,6 +124,17 @@ pub fn do_mmap(
     }
 
     let file = if flags & MAP_ANONYMOUS != 0 { None } else { Some(current_task.files().get(fd)?) };
+
+    // With `READ_IMPLIES_EXEC`, `PROT_READ` implies `PROT_EXEC` (see personality(2)). Files that
+    // cannot be executed (e.g. on a `noexec` mount), or whose `mmap()` can't map them executable
+    // (e.g. binder or io_uring files), are still mapped, without `PROT_EXEC`.
+    if prot_flags.contains(ProtectionFlags::READ)
+        && read_implies_exec(current_task)
+        && file.as_ref().is_none_or(|file| file.can_exec() && file.ops().can_map_executable())
+    {
+        prot_flags |= ProtectionFlags::EXEC;
+    }
+
     if flags & (MAP_PRIVATE | MAP_SHARED) == 0
         || flags & (MAP_PRIVATE | MAP_SHARED) == MAP_PRIVATE | MAP_SHARED
     {
@@ -232,7 +260,7 @@ pub fn sys_madvise(
     length: usize,
     advice: u32,
 ) -> Result<(), Errno> {
-    current_task.mm()?.madvise(addr, length, advice)?;
+    current_task.mm()?.madvise(current_task, addr, length, advice)?;
     Ok(())
 }
 
@@ -361,12 +389,42 @@ pub fn sys_process_mrelease(
         return error!(EINVAL);
     }
     let file = current_task.files().get(pidfd)?;
-    let task = file.as_pid()?.get_task()?;
-    if !task.load_stopped().is_stopped() {
-        return error!(EINVAL);
-    }
+    // From <https://man7.org/linux/man-pages/man2/process_mrelease.2.html>:
+    //
+    //   The pidfd argument is a PID file descriptor (see pidfd_open(2)) that
+    //   refers to the process whose memory is to be released.
+    //   ...
+    //   EBADF  pidfd is not a valid PID file descriptor.
+    //
+    // Unlike `pidfd_send_signal(2)`, `process_mrelease(2)` only accepts PID file
+    // descriptors and rejects `/proc/<pid>` directory file descriptors.
+    let pidfd_file = file.downcast_file::<PidFdFileObject>().ok_or_else(|| errno!(EBADF))?;
+    let pid = pidfd_file.pid();
+    let Some(ProcessEntryRef::Process(thread_group)) = pid.get_process() else {
+        return error!(ESRCH);
+    };
 
-    task.mm()?.mrelease()
+    let mm = {
+        let thread_group_state = thread_group.read();
+        // From <https://man7.org/linux/man-pages/man2/process_mrelease.2.html>:
+        //
+        //   EINVAL The memory of the task cannot be released because the
+        //          process is not exiting, or by other reasons.
+        if thread_group_state.is_running() {
+            return error!(EINVAL);
+        }
+
+        // Find any remaining task in the thread group that still references the shared
+        // `MemoryManager`. Once all tasks in the thread group have cleared their `mm` in
+        // `CurrentTask::exit` (including zombie processes), `process_mrelease(2)` fails with
+        // `ESRCH`.
+        thread_group_state
+            .tasks()
+            .into_iter()
+            .find_map(|task| task.mm().ok())
+            .ok_or_else(|| errno!(ESRCH))?
+    };
+    mm.mrelease()
 }
 
 pub fn sys_membarrier(
@@ -464,7 +522,7 @@ fn do_futex<Key: FutexKey>(
     addr2: UserAddress,
     value3: u32,
 ) -> Result<usize, Errno> {
-    let futexes = Key::get_table_from_task(current_task)?;
+    let futexes = &current_task.kernel().shared_futexes;
     let cmd = op & (FUTEX_CMD_MASK as u32);
 
     let is_realtime = match (cmd, op & FUTEX_CLOCK_REALTIME != 0) {
@@ -520,7 +578,9 @@ fn do_futex<Key: FutexKey>(
             do_futex_wait_with_restart::<Key>(current_task, addr, value, bitset, deadline)?;
             Ok(0)
         }
-        FUTEX_WAKE => futexes.wake(current_task, addr, value as usize, FUTEX_BITSET_MATCH_ANY),
+        FUTEX_WAKE => {
+            futexes.wake::<Key>(current_task, addr, value as usize, FUTEX_BITSET_MATCH_ANY)
+        }
         FUTEX_WAKE_OP => {
             track_stub!(TODO("https://fxbug.dev/361181940"), "FUTEX_WAKE_OP");
             error!(ENOSYS)
@@ -537,7 +597,7 @@ fn do_futex<Key: FutexKey>(
             if value3 == 0 {
                 return error!(EINVAL);
             }
-            futexes.wake(current_task, addr, value as usize, value3)
+            futexes.wake::<Key>(current_task, addr, value as usize, value3)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
             let wake_count = value as usize;
@@ -546,7 +606,14 @@ fn do_futex<Key: FutexKey>(
                 return error!(EINVAL);
             }
             let expected_value = if cmd == FUTEX_CMP_REQUEUE { Some(value3) } else { None };
-            futexes.requeue(current_task, addr, wake_count, requeue_count, addr2, expected_value)
+            futexes.requeue::<Key>(
+                current_task,
+                addr,
+                wake_count,
+                requeue_count,
+                addr2,
+                expected_value,
+            )
         }
         FUTEX_WAIT_REQUEUE_PI => {
             track_stub!(TODO("https://fxbug.dev/361181558"), "FUTEX_WAIT_REQUEUE_PI");
@@ -558,7 +625,7 @@ fn do_futex<Key: FutexKey>(
         }
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 => {
             let deadline = read_timeout(current_task)?.unwrap_or(zx::MonotonicInstant::INFINITE);
-            futexes.lock_pi(current_task, addr, deadline)?;
+            futexes.lock_pi::<Key>(current_task, addr, deadline)?;
             Ok(0)
         }
         FUTEX_TRYLOCK_PI => {
@@ -566,7 +633,7 @@ fn do_futex<Key: FutexKey>(
             error!(ENOSYS)
         }
         FUTEX_UNLOCK_PI => {
-            futexes.unlock_pi(current_task, addr)?;
+            futexes.unlock_pi::<Key>(current_task, addr)?;
             Ok(0)
         }
         _ => {
@@ -583,21 +650,23 @@ fn do_futex_wait_with_restart<Key: FutexKey>(
     mask: u32,
     deadline: Option<TargetTime>,
 ) -> Result<(), Errno> {
-    let futexes = Key::get_table_from_task(current_task)?;
+    let futexes = &current_task.kernel().shared_futexes;
     let result = match deadline {
-        None => futexes.wait(current_task, addr, value, mask, zx::MonotonicInstant::INFINITE),
+        None => {
+            futexes.wait::<Key>(current_task, addr, value, mask, zx::MonotonicInstant::INFINITE)
+        }
         Some(TargetTime::Monotonic(mono_deadline)) => {
-            futexes.wait(current_task, addr, value, mask, mono_deadline)
+            futexes.wait::<Key>(current_task, addr, value, mask, mono_deadline)
         }
         Some(TargetTime::BootInstant(boot_deadline)) => {
             let timer_slack = current_task.read().get_timerslack();
-            futexes.wait_boot(current_task, addr, value, mask, boot_deadline, timer_slack)
+            futexes.wait_boot::<Key>(current_task, addr, value, mask, boot_deadline, timer_slack)
         }
         Some(TargetTime::RealTime(utc_deadline)) => {
             // Convert real time deadlines to boot time deadlines since waiting using a UTC deadline is unsupported.
             let (boot_deadline, _) = estimate_boot_deadline_from_utc(utc_deadline);
             let timer_slack = current_task.read().get_timerslack();
-            futexes.wait_boot(current_task, addr, value, mask, boot_deadline, timer_slack)
+            futexes.wait_boot::<Key>(current_task, addr, value, mask, boot_deadline, timer_slack)
         }
     };
     match result {
