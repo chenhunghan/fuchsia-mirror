@@ -4,7 +4,7 @@
 
 use anyhow::{Error, bail};
 use chrono::{TimeZone, Utc};
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_io_common as fio;
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::OpenFxFilesystem;
 use fxfs::fsck;
@@ -283,6 +283,30 @@ pub async fn mkdir(
         bail!("{} already exists", filename);
     }
     dir.create_child_dir(&mut transaction, &filename).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Create a symlink.
+pub async fn symlink(
+    fs: &OpenFxFilesystem,
+    vol: &Arc<ObjectStore>,
+    path: &Path,
+    target: &[u8],
+) -> Result<(), Error> {
+    let dir = walk_dir(vol, path.parent().unwrap()).await?;
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    let mut transaction = fs
+        .root_store()
+        .new_transaction(
+            lock_keys![LockKey::object(vol.store_object_id(), dir.object_id())],
+            Options::default(),
+        )
+        .await?;
+    if dir.lookup(filename).await?.is_some() {
+        bail!("{} already exists", filename);
+    }
+    dir.create_symlink(&mut transaction, target, filename).await?;
     transaction.commit().await?;
     Ok(())
 }

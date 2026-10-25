@@ -16,6 +16,7 @@
 #include "src/ui/lib/escher/vk/vulkan_context.h"
 
 namespace escher {
+class VulkanTester;
 typedef fit::function<void()> CommandBufferFinishedCallback;
 
 namespace impl {
@@ -40,22 +41,26 @@ class CommandBuffer {
 
   vk::CommandBuffer vk() const { return command_buffer_; }
 
-  // Return true if successful.  The callback will be invoked after all commands
-  // have finished executing on the GPU (there is no guarantee about how long
-  // afterward: this depends on when the CommandBufferPool that owns this buffer
-  // calls Retire()).
+  // Return true if successful.  The callback will be invoked by the owning
+  // `CommandBufferPool::Cleanup()` after all commands have finished executing
+  // on the GPU, the buffer has been returned to the pool, and the sequencer
+  // has been notified.  The callback may call `GetCommandBuffer()` and
+  // `Cleanup()` (a nested `Cleanup()` call returns false).
   bool Submit(vk::Queue queue, CommandBufferFinishedCallback callback);
 
   // During Submit(), these semaphores will be added to the vk::SubmitInfo.
-  // No-op if semaphore is null.
+  // No-op if semaphore is null. If a matching semaphore (by pointer or non-zero imported event
+  // KOID) is already present, merges |stage| into its existing pipeline stage mask instead of
+  // adding a duplicate entry.
   void AddWaitSemaphore(SemaphorePtr semaphore, vk::PipelineStageFlags stage);
 
   // During Submit(), these semaphores will be added to the vk::SubmitInfo.
-  // No-op if semaphore is null.
+  // No-op if semaphore is null or if a matching semaphore (by pointer or non-zero imported event
+  // KOID) is already present.
   void AddSignalSemaphore(SemaphorePtr semaphore);
 
-  // Checks to see if the provided semaphore is part of the command buffer's vector
-  // of signal semaphores.
+  // Checks whether |semaphore| (matching by pointer or non-zero imported event KOID) is already in
+  // the command buffer's signal semaphore list.
   bool ContainsSignalSemaphore(const SemaphorePtr& semaphore) const;
 
   // These resources will be retained until the command-buffer is finished
@@ -118,6 +123,7 @@ class CommandBuffer {
 
  private:
   friend class CommandBufferPool;
+  friend class escher::VulkanTester;
 
   // Called by CommandBufferPool, which is responsible for eventually destroying
   // the Vulkan command buffer and fence.  Submit() and Retire() use the fence
@@ -129,9 +135,13 @@ class CommandBuffer {
   // Called by CommandBufferPool when this buffer is obtained from it.
   void Begin(uint64_t sequence_number);
 
-  // Called by CommandBufferPool, to attempt to reset the buffer for reuse.
+  // Called by `CommandBufferPool`, to attempt to reset the buffer for reuse.
   // Return false and do nothing if the buffer's submission fence is not ready.
-  bool Retire();
+  // If successful, moves `callback_` into `out_callback` rather than running it
+  // directly, since the callback may trigger a re-entrant
+  // `CommandBufferPool::Cleanup()` call before the pool finishes retiring this
+  // buffer.
+  bool Retire(CommandBufferFinishedCallback* out_callback);
 
   const vk::Device device_;
   const vk::CommandBuffer command_buffer_;

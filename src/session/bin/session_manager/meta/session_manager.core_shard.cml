@@ -169,13 +169,6 @@
 
         // The routes listed below originate from `parent` or from `self`.
         {
-            directory: "dev-class",
-            from: "parent",
-            as: "dev-input-report",
-            to: "#session-manager",
-            subdir: "input-report",
-        },
-        {
             directory: "root-ssl-certificates",
             from: "parent",
             to: "#session-manager",
@@ -262,6 +255,7 @@
                 "fuchsia.device.NameProvider",
                 "fuchsia.hardware.power.statecontrol.Admin",
                 "fuchsia.hardware.power.statecontrol.ShutdownWatcherRegister",
+                "fuchsia.kernel.Stats",
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.power.button.Monitor",
                 "fuchsia.power.CollaborativeRebootInitiator",

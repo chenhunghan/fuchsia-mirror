@@ -17,6 +17,11 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/async_patterns/cpp:cpp_idk",
     "//sdk/lib/component/incoming/cpp:cpp_idk",
     "//sdk/lib/component/outgoing/cpp:cpp_idk",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp_idk",
+    "//sdk/lib/driver/runtime:driver_runtime_env_cpp_idk",
+    "//sdk/lib/driver/runtime:driver_runtime_env_idk",
+    "//sdk/lib/driver/runtime:driver_runtime_idk",
+    "//sdk/lib/driver/runtime:driver_runtime_testing_idk",
     "//sdk/lib/fidl:fidl_idk",
     "//sdk/lib/fidl/cpp:cpp_base_idk",
     "//sdk/lib/fidl/cpp:cpp_idk",
@@ -27,17 +32,22 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/fidl/hlcpp:hlcpp_idk",
     "//sdk/lib/fidl/hlcpp:hlcpp_sync_idk",
     "//sdk/lib/fidl_base:fidl_base_idk",
+    "//sdk/lib/fidl_driver:fidl_driver_idk",
+    "//sdk/lib/fidl_driver:fidl_driver_natural_idk",
+    "//sdk/lib/fidl_driver:fidl_driver_transport_idk",
     "//sdk/lib/fit:fit_idk",
     "//sdk/lib/fit-promise:fit-promise_idk",
     "//sdk/lib/images/cpp:cpp_idk",
     "//sdk/lib/magma_common:magma_common_idk",
     "//sdk/lib/media/cpp:no_converters_idk",
     "//sdk/lib/stdcompat:stdcompat_idk",
+    "//sdk/lib/sys/cpp:cpp_idk",
     "//sdk/lib/sys/service/cpp:cpp_idk",
     "//sdk/lib/syslog/cpp:cpp_idk",
     "//sdk/lib/syslog/structured_backend:structured_backend_idk",
     "//sdk/lib/utf-utils:utf-utils_idk",
     "//sdk/lib/vfs/cpp:cpp_idk",
+    "//zircon/system/ulib/inspect:inspect_idk",
     "//zircon/system/ulib/sync:sync-cpp_idk",
     "//zircon/system/ulib/zx:zx_idk",
 ]
@@ -94,6 +104,20 @@ NON_BUILD_HOST_TOOLS_ATOMS = _NON_BUILD_HOST_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK +
 ]
 
 ALL_HOST_TOOL_ATOMS = BUILD_HOST_TOOLS_ATOMS + NON_BUILD_HOST_TOOLS_ATOMS
+
+BUILD_FFX_TOOLS_ATOMS = [
+    # buildifier: keep sorted
+]
+
+_NON_BUILD_FFX_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK = [
+    # buildifier: keep sorted
+]
+
+NON_BUILD_FFX_TOOLS_ATOMS = _NON_BUILD_FFX_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK + [
+    # buildifier: keep sorted
+]
+
+ALL_FFX_TOOL_ATOMS = BUILD_FFX_TOOLS_ATOMS + NON_BUILD_FFX_TOOLS_ATOMS
 
 NOOP_ATOMS_LIST = [
     # buildifier: keep sorted

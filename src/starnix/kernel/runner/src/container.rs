@@ -45,15 +45,16 @@ use starnix_core::fs::tmpfs::TmpFs;
 use starnix_core::security;
 use starnix_core::task::container_namespace::ContainerNamespace;
 use starnix_core::task::{
-    CurrentTask, ExitStatus, Kernel, RoleOverrides, SchedulerManager, parse_cmdline,
+    CurrentTask, ExitStatus, Kernel, OomWatermarksMb, RoleOverrides, SchedulerManager,
+    parse_cmdline,
 };
-use starnix_core::vfs::{FileSystemOptions, FsContext, LookupContext, Namespace, WhatToMount};
+use starnix_core::vfs::{FileSystemOptions, LookupContext, Namespace, WhatToMount};
 use starnix_logging::{
     CATEGORY_STARNIX, NAME_CREATE_CONTAINER, log_debug, log_error, log_info, log_warn,
 };
 use starnix_modules::{
-    LayeredFsBuilder, LayeredFsMounts, OverlayStack, init_common_devices,
-    register_common_file_systems, register_common_syscalls,
+    LayeredFsBuilder, OverlayStack, init_common_devices, register_common_file_systems,
+    register_common_syscalls,
 };
 
 use starnix_task_command::TaskCommand;
@@ -267,7 +268,7 @@ pub struct ContainerProgram {
 
     /// The specifications for the file system mounts for this container.
     #[serde(default)]
-    mounts: Vec<String>,
+    pub mounts: Vec<String>,
 
     /// The features enabled for this container.
     #[serde(default)]
@@ -314,6 +315,12 @@ pub struct ContainerProgram {
     /// allows us to specify different constant bandwidth profiles for different workloads.
     #[serde(default)]
     task_role_overrides: Vec<TaskSchedulerMapping>,
+
+    /// Paths of executables whose processes are stopped only after all other processes except init
+    /// have exited when the container shuts down, e.g. one that writes crash dumps for processes
+    /// that crash during shutdown.
+    #[serde(default)]
+    pub stop_last_on_shutdown: Vec<String>,
 }
 
 /// Specifies a role override for a class of tasks whose process and thread names match provided
@@ -328,14 +335,26 @@ struct TaskSchedulerMapping {
     thread: String,
     /// An optional regular expression that will be matched against the task's cgroup path.
     cgroup: Option<String>,
+    /// An optional filter matching whether the task is the thread-group leader (`tid == pid`).
+    is_leader: Option<runner::serde::StoreAsString<bool>>,
+    /// An optional minimum Linux nice value (`-20..=19`, inclusive).
+    min_nice: Option<runner::serde::StoreAsString<i8>>,
+    /// An optional maximum Linux nice value (`-20..=19`, inclusive).
+    max_nice: Option<runner::serde::StoreAsString<i8>>,
 }
 
 impl std::fmt::Debug for TaskSchedulerMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "process `{}` thread `{}` cgroup `{:?}` role `{}`",
-            self.process, self.thread, self.cgroup, self.role
+            "process `{}` thread `{}` cgroup `{:?}` is_leader `{:?}` min_nice `{:?}` max_nice `{:?}` role `{}`",
+            self.process,
+            self.thread,
+            self.cgroup,
+            self.is_leader,
+            self.min_nice,
+            self.max_nice,
+            self.role
         )
     }
 }
@@ -526,6 +545,7 @@ async fn server_component_controller(
 pub async fn create_component_from_stream(
     mut request_stream: frunner::ComponentRunnerRequestStream,
     kernel_extra_features: Vec<String>,
+    oom_watermarks_mb: OomWatermarksMb,
 ) -> Result<(Container, ContainerServiceConfig), Error> {
     if let Some(event) = request_stream.try_next().await? {
         match event {
@@ -533,11 +553,16 @@ pub async fn create_component_from_stream(
                 let request_stream = controller.into_stream();
                 let mut start_info = ContainerStartInfo::new(start_info)?;
                 let (sender, receiver) = oneshot::channel::<TaskResult>();
-                let container = create_container(&mut start_info, &kernel_extra_features, sender)
-                    .await
-                    .with_source_context(|| {
-                        format!("creating container \"{}\"", start_info.program.name)
-                    })?;
+                let container = create_container(
+                    &mut start_info,
+                    &kernel_extra_features,
+                    oom_watermarks_mb,
+                    sender,
+                )
+                .await
+                .with_source_context(|| {
+                    format!("creating container \"{}\"", start_info.program.name)
+                })?;
                 let service_config =
                     ContainerServiceConfig { start_info, request_stream, receiver };
                 return Ok((container, service_config));
@@ -626,6 +651,7 @@ async fn get_bootloader_file_hardware_ddr() -> Result<Option<String>, Error> {
 async fn create_container(
     start_info: &mut ContainerStartInfo,
     kernel_extra_features: &[String],
+    oom_watermarks_mb: OomWatermarksMb,
     task_complete: oneshot::Sender<TaskResult>,
 ) -> Result<Container, Error> {
     fuchsia_trace::duration!(CATEGORY_STARNIX, NAME_CREATE_CONTAINER);
@@ -648,6 +674,7 @@ async fn create_container(
         }
     };
     let (mut features, modules) = parse_features(&start_info, kernel_extra_features)?;
+    features.kernel.oom_watermarks_mb = Some(oom_watermarks_mb);
 
     log_debug!("Creating container with {features:#?}, {modules:#?}");
     let mut kernel_cmdline = BString::from(start_info.program.kernel_cmdline.as_bytes());
@@ -770,7 +797,15 @@ async fn create_container(
     // thread's role.
     let mut task_mappings = RoleOverrides::new();
     for m in &start_info.program.task_role_overrides {
-        task_mappings.add(m.process.clone(), m.thread.clone(), m.cgroup.clone(), m.role.clone());
+        task_mappings.add_with_filters(
+            m.process.clone(),
+            m.thread.clone(),
+            m.cgroup.clone(),
+            m.is_leader.as_ref().map(|v| **v),
+            m.min_nice.as_ref().map(|v| **v),
+            m.max_nice.as_ref().map(|v| **v),
+            m.role.clone(),
+        );
     }
     let task_mappings = task_mappings.build().context("adding custom task role")?;
     let scheduler_manager = SchedulerManager::new(task_mappings);
@@ -818,24 +853,21 @@ async fn create_container(
         device_tree,
     )
     .with_source_context(|| format!("creating Kernel: {}", start_info.program.name))?;
-    let (fs_context, feature_mounts) =
-        create_fs_context(&kernel, &features, start_info, &pkg_dir_proxy)
-            .source_context("creating FsContext")?;
     let init_pid = kernel.pids.lock().allocate_pid().source_context("allocating init pid")?;
     let init_tid = init_pid.id;
     // Lots of software assumes that the pid for the init process is 1.
     debug_assert_eq!(init_tid, 1);
 
-    let system_task = create_system_task(&kernel, Arc::clone(&fs_context))
-        .source_context("create system task")?;
+    let system_task = create_system_task(&kernel).source_context("create system task")?;
     // The system task gives pid 2. This value is less critical than giving
     // pid 1 to init, but this value matches what is supposed to happen.
     debug_assert_eq!(system_task.tid.id, 2);
 
-    feature_mounts(&system_task).source_context("mounting feature filesystems")?;
-
     kernel.kthreads.init(system_task).source_context("initializing kthreads")?;
     let system_task = kernel.kthreads.system_task();
+
+    init_fs_context(&system_task, &features, start_info, &pkg_dir_proxy)
+        .source_context("initializing FsContext")?;
 
     kernel.syslog.init(&kernel).source_context("initializing syslog")?;
 
@@ -921,7 +953,7 @@ async fn create_container(
     log_info!("Creating init process.");
     node.record_int("init_started_at", zx::MonotonicInstant::get().into_nanos());
     let init_task =
-        create_init_process(&kernel, init_pid, initial_name, Arc::clone(&fs_context), &rlimits)
+        create_init_process(&kernel, init_pid, initial_name, system_task.fs().fork(), &rlimits)
             .with_source_context(|| format!("creating init task: {:?}", start_info.program.init))?;
 
     execute_task_with_prerun_result(
@@ -934,7 +966,6 @@ async fn create_container(
             log_info!("Finished running init process: {:?}", result);
             let _ = task_complete.send(result);
         },
-        None,
     )?;
 
     if !start_info.program.startup_file_path.is_empty() {
@@ -954,12 +985,13 @@ async fn create_container(
     })
 }
 
-fn create_fs_context(
-    kernel: &Kernel,
+fn init_fs_context(
+    system_task: &CurrentTask,
     features: &Features,
     start_info: &ContainerStartInfo,
     pkg_dir_proxy: &fio::DirectorySynchronousProxy,
-) -> Result<(Arc<FsContext>, LayeredFsMounts), Error> {
+) -> Result<(), Error> {
+    let kernel = system_task.kernel();
     // The mounts are applied in the order listed. Mounting will fail if the designated mount
     // point doesn't exist in a previous mount. The root must be first so other mounts can be
     // applied on top of it.
@@ -1025,10 +1057,15 @@ fn create_fs_context(
 
     let (mut root_fs, feature_mounts) = builder.build(kernel);
     if features.rootfs_rw {
-        root_fs = OverlayStack::wrap_fs_in_writable_layer(kernel, root_fs)?;
+        root_fs = OverlayStack::wrap_fs_in_writable_layer(system_task, root_fs)?;
     }
 
-    Ok((FsContext::new(Namespace::new_with_flags(root_fs, root.flags)), feature_mounts))
+    system_task
+        .fs()
+        .replace_bootstrap_namespace(system_task, Namespace::new_with_flags(root_fs, root.flags));
+    feature_mounts(system_task).source_context("mounting feature filesystems")?;
+
+    Ok(())
 }
 
 pub(crate) fn parse_rlimits(rlimits: &[String]) -> Result<Vec<(Resource, u64)>, Error> {

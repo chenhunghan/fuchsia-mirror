@@ -4,11 +4,16 @@
 
 #include <lib/sys/cpp/component_context.h>
 
+#include <cmath>
+#include <list>
+
+#include "src/camera/drivers/controller/ge2d_node.h"
 #include "src/camera/drivers/controller/memory_allocation.h"
 #include "src/camera/drivers/controller/pipeline_manager.h"
 #include "src/camera/drivers/controller/sherlock/common_util.h"
 #include "src/camera/drivers/controller/sherlock/monitoring_config.h"
 #include "src/camera/drivers/controller/sherlock/video_conferencing_config.h"
+#include "src/camera/drivers/controller/test/fake_ge2d.h"
 #include "src/camera/drivers/controller/test/fake_sysmem.h"
 #include "src/camera/lib/format_conversion/format_conversion.h"
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
@@ -232,6 +237,102 @@ TEST_F(ControllerMemoryAllocatorTest, ConvertImageFormat2TypeTest) {
   EXPECT_EQ(c_image_format.pixel_aspect_ratio_width, hlcpp_image_format.pixel_aspect_ratio().width);
   EXPECT_EQ(c_image_format.pixel_aspect_ratio_height,
             hlcpp_image_format.pixel_aspect_ratio().height);
+}
+
+std::list<std::reference_wrapper<const InternalConfigNode>> GetPathICNodes(
+    const std::vector<InternalConfigNode>& roots, const std::vector<uint8_t>& path);
+
+TEST_F(ControllerMemoryAllocatorTest, GetPathICNodesOutOfBounds) {
+  auto internal_config = MonitorConfigFullRes();
+  std::vector<InternalConfigNode> roots;
+  roots.push_back(internal_config);
+
+  // Valid path (size 1)
+  std::vector<uint8_t> valid_path = {0};
+  auto valid_nodes = GetPathICNodes(roots, valid_path);
+  EXPECT_EQ(valid_nodes.size(), 1u);
+
+  // Out of bounds root index
+  std::vector<uint8_t> oob_root_path = {1};
+  auto oob_root_nodes = GetPathICNodes(roots, oob_root_path);
+  EXPECT_TRUE(oob_root_nodes.empty());
+
+  // Out of bounds child index
+  // Assuming roots[0] has fewer than 10 children
+  std::vector<uint8_t> oob_child_path = {0, 10};
+  auto oob_child_nodes = GetPathICNodes(roots, oob_child_path);
+  EXPECT_TRUE(oob_child_nodes.empty());
+}
+
+TEST_F(ControllerMemoryAllocatorTest, PipelineManagerShutdownSyncTest) {
+  auto internal_config = MonitorConfigFullRes();
+  std::vector<InternalConfigNode> roots;
+  roots.push_back(internal_config);
+  pipeline_manager_->SetRoots(roots);
+
+  bool shutdown_complete = false;
+  pipeline_manager_->Shutdown([&]() { shutdown_complete = true; });
+  RunLoopUntilIdle();
+  EXPECT_TRUE(shutdown_complete);
+}
+
+namespace {
+
+class TestGe2dNode : public Ge2dNode {
+ public:
+  using Ge2dNode::Ge2dNode;
+  void ShutdownImpl(fit::closure callback) override { callback(); }
+};
+
+}  // namespace
+
+TEST_F(ControllerMemoryAllocatorTest, Ge2dNodeCropRectValidation) {
+  FakeGe2d fake_ge2d;
+  camera::InternalConfigNode internal_ge2d_node;
+  internal_ge2d_node.ge2d_info.config_type = camera::Ge2DConfig::GE2D_RESIZE;
+  internal_ge2d_node.output_constraints.emplace();
+
+  fuchsia::images2::ImageFormat input_format;
+  input_format.mutable_size()->width = 1000;
+  input_format.mutable_size()->height = 1000;
+  std::vector<fuchsia::images2::ImageFormat> input_formats;
+  input_formats.push_back(std::move(input_format));
+
+  ProcessNode::BufferAttachments attachments;
+  attachments.input_formats = std::cref(input_formats);
+
+  ProcessNode::FrameCallback frame_callback = [](ProcessNode::FrameToken token,
+                                                 frame_metadata_t metadata) {};
+
+  TestGe2dNode ge2d_node(dispatcher(), std::move(attachments), std::move(frame_callback),
+                         fake_ge2d.client(), internal_ge2d_node);
+
+  // Test invalid crop max < min bounds
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.5f, 0.1f, 0.2f, 0.9f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, 0.6f, 0.9f, 0.4f));
+
+  // Test invalid crop max == min bounds
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, 0.2f, 0.1f, 0.9f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, 0.4f, 0.9f, 0.4f));
+
+  // Test NaN values
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(NAN, 0.1f, 0.9f, 0.9f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, NAN, 0.9f, 0.9f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, 0.1f, NAN, 0.9f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.1f, 0.1f, 0.9f, NAN));
+
+  // Test floating point quantization to zero width and height
+  // 0.0001f * 1000.0f = 0.1f, + 0.5f = 0.6f -> uint32_t is 0. width = 0.
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.0f, 0.0f, 0.0001f, 1.0f));
+  EXPECT_EQ(ZX_ERR_INVALID_ARGS, ge2d_node.SetCropRect(0.0f, 0.0f, 1.0f, 0.0001f));
+
+  // Test valid crop rect succeeds
+  EXPECT_EQ(ZX_OK, ge2d_node.SetCropRect(0.1f, 0.1f, 0.9f, 0.9f));
+
+  // Cleanly shut down node before destruction to satisfy ProcessNode lifecycle contract.
+  bool shutdown_done = false;
+  ge2d_node.Shutdown([&] { shutdown_done = true; });
+  EXPECT_TRUE(shutdown_done);
 }
 
 }  // namespace camera

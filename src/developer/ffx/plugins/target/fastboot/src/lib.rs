@@ -4,7 +4,6 @@
 
 use anyhow::{Result, anyhow};
 use assembly_partitions_config::UploadMethod;
-use async_trait::async_trait;
 use discovery::TargetState;
 use errors::ffx_bail;
 use ffx_config::EnvironmentContext;
@@ -44,7 +43,6 @@ pub enum FastbootMessage {
     Variable { name: String, value: String },
 }
 
-#[async_trait(?Send)]
 impl FfxMain for FastbootTool {
     type Writer = VerifiedMachineWriter<FastbootMessage>;
 
@@ -98,6 +96,7 @@ where
                     flash_min_timeout_seconds,
                     flash_timeout_rate_mb_per_second,
                     cmd.max_download_size,
+                    cmd.streaming_flash,
                 )
                 .map_err(anyhow::Error::from),
                 sink(server)
@@ -302,6 +301,7 @@ async fn cmd_impl(
 #[cfg(test)]
 mod test {
     use super::*;
+    use async_trait::async_trait;
     use chrono::Duration;
     use ffx_fastboot_interface::fastboot_interface::*;
     use ffx_fastboot_interface::stream::StreamCommand;

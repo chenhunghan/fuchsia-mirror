@@ -73,7 +73,9 @@ unsafe extern "C" {
         pa: PAddr,
     ) -> Status;
 
-    fn cpp_vm_object_get_mapping_cache_policy_locked(vmo: *const VmObjectPhysical) -> ArchMmuFlags;
+    fn cpp_vm_object_physical_get_mapping_cache_policy_locked(
+        vmo: *const VmObjectPhysical,
+    ) -> ArchMmuFlags;
     fn cpp_vm_object_num_mappings_locked(vmo: *const VmObjectPhysical) -> usize;
     fn cpp_child_list_lock_acquire() -> bool;
     fn cpp_child_list_lock_release(should_clear: bool);
@@ -203,7 +205,7 @@ impl VmObjectPhysical {
 
     pub fn get_mapping_cache_policy_locked(&self) -> ArchMmuFlags {
         // SAFETY: Safe to call FFI wrapper with valid reference to self.
-        unsafe { cpp_vm_object_get_mapping_cache_policy_locked(self) }
+        unsafe { cpp_vm_object_physical_get_mapping_cache_policy_locked(self) }
     }
 
     pub fn num_mappings_locked(&self) -> usize {
@@ -285,17 +287,6 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_get_size(
 ) -> u64 {
     // SAFETY: The caller guarantees `ptr` points to an initialized `VmObjectPhysicalState`.
     unsafe { (*ptr).size }
-}
-
-/// # Safety
-///
-/// The caller must ensure `ptr` points to an initialized `VmObjectPhysicalState`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_object_physical_state_get_base(
-    ptr: *const VmObjectPhysicalState,
-) -> PAddr {
-    // SAFETY: The caller guarantees `ptr` points to an initialized `VmObjectPhysicalState`.
-    unsafe { (*ptr).base }
 }
 
 /// # Safety

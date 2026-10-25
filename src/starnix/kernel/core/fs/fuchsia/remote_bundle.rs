@@ -9,15 +9,16 @@ use crate::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, Waiter};
 use crate::vfs::fs_args::MountParams;
 use crate::vfs::{
     CacheConfig, CacheMode, DEFAULT_BYTES_PER_BLOCK, DirEntry, DirectoryEntryType, DirentSink,
-    FileObject, FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode,
-    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, OutputBuffer, SeekTarget,
-    StatxFlags, SymlinkTarget, ValueOrSize, default_seek, emit_dotdot, fileops_impl_directory,
-    fileops_impl_noop_sync, fileops_impl_seekable, fs_node_impl_dir_readonly, fs_node_impl_not_dir,
-    fs_node_impl_symlink,
+    FileObject, FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FileToken,
+    FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, OutputBuffer,
+    SeekTarget, StatxFlags, SymlinkTarget, ValueOrSize, default_seek, emit_dotdot,
+    fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_seekable,
+    fs_node_impl_dir_readonly, fs_node_impl_not_dir, fs_node_impl_symlink,
 };
 use anyhow::{Error, anyhow, ensure};
 use ext4_metadata::{Metadata, Node, NodeInfo};
 use fidl_fuchsia_io as fio;
+use once_cell::sync::OnceCell;
 use starnix_logging::{impossible_error, log_warn, track_stub};
 use starnix_sync::{
     DynamicLockDepRwLock, LockDepMutex, LockDepReadGuard, LockDepWriteGuard, RemoteBundleInnerLock,
@@ -131,13 +132,13 @@ impl RemoteBundle {
         self.metadata.get(inode_num).unwrap()
     }
 
-    fn get_xattr(&self, node: &FsNode, name: &FsStr) -> Result<ValueOrSize<FsString>, Errno> {
+    fn get_xattr(&self, node: &FsNode, name: &FsStr) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
         let value = &self
             .get_node(node.ino)
             .extended_attributes
             .get(&**name)
             .ok_or_else(|| errno!(ENODATA))?[..];
-        Ok(FsString::from(value).into())
+        Ok(Box::<[u8]>::from(&**value).into())
     }
 
     fn list_xattrs(&self, node: &FsNode) -> Result<ValueOrSize<Vec<FsString>>, Errno> {
@@ -182,6 +183,7 @@ impl FileSystemOps for RemoteBundle {
 
 struct File {
     inner: LockDepMutex<Inner, RemoteBundleInnerLock>,
+    exec_memory: OnceCell<Arc<MemoryObject>>,
 }
 
 enum Inner {
@@ -254,7 +256,7 @@ impl FsNodeOps for File {
         _current_task: &CurrentTask,
         name: &FsStr,
         _size: usize,
-    ) -> Result<ValueOrSize<FsString>, Errno> {
+    ) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
         let fs = node.fs();
         let bundle = RemoteBundle::from_fs(&fs);
         bundle.get_xattr(node, name)
@@ -323,22 +325,46 @@ impl FileOps for MemoryFile {
 
     fn get_memory(
         &self,
-        _file: &FileObject,
+        file: &FileObject,
         _current_task: &CurrentTask,
         _length: Option<usize>,
         prot: ProtectionFlags,
     ) -> Result<Arc<MemoryObject>, Errno> {
-        Ok(if prot.contains(ProtectionFlags::EXEC) {
-            Arc::new(
-                self.memory
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .map_err(impossible_error)?
-                    .replace_as_executable(&VMEX_RESOURCE)
-                    .map_err(impossible_error)?,
-            )
+        if prot.contains(ProtectionFlags::EXEC) {
+            let file_node = file.node().downcast_ops::<File>().unwrap();
+            file_node
+                .exec_memory
+                .get_or_try_init(|| {
+                    self.memory
+                        .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                        .and_then(|m| m.replace_as_executable(&VMEX_RESOURCE))
+                        .map(Arc::new)
+                        .map_err(impossible_error)
+                })
+                .cloned()
         } else {
-            self.memory.clone()
-        })
+            Ok(self.memory.clone())
+        }
+    }
+
+    fn get_file_token(
+        &self,
+        file: &FileObject,
+        _current_task: &CurrentTask,
+    ) -> Result<FileToken, Errno> {
+        let fs = file.node().fs();
+        let bundle = RemoteBundle::from_fs(&fs);
+        let ino = file.node().ino;
+        let (proxy, server_end) = fidl::endpoints::create_sync_proxy::<fio::FileMarker>();
+        bundle
+            .root
+            .open(&format!("{ino}"), bundle.rights, &Default::default(), server_end.into_channel())
+            .map_err(|_| errno!(EIO))?;
+        let token = proxy
+            .get_token(zx::MonotonicInstant::INFINITE)
+            .map_err(|err| errno!(EIO, format!("Error {err} on GetToken")))?
+            .map_err(|s| from_status_like_fdio!(zx::Status::err_from_raw(s)))?;
+        Ok(FileToken { token, offset: 0, keep_alive: proxy })
     }
 
     fn wait_async(
@@ -453,7 +479,11 @@ impl FsNodeOps for DirectoryObject {
                         server_end.into_channel(),
                     )
                     .map_err(|_| errno!(EIO))?;
-                Ok(fs.create_node(ino, File { inner: Inner::NeedsVmo(file).into() }, info))
+                Ok(fs.create_node(
+                    ino,
+                    File { inner: Inner::NeedsVmo(file).into(), exec_memory: OnceCell::new() },
+                    info,
+                ))
             }
         }
     }
@@ -464,7 +494,7 @@ impl FsNodeOps for DirectoryObject {
         _current_task: &CurrentTask,
         name: &FsStr,
         _size: usize,
-    ) -> Result<ValueOrSize<FsString>, Errno> {
+    ) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
         let fs = node.fs();
         let bundle = RemoteBundle::from_fs(&fs);
         bundle.get_xattr(node, name)
@@ -500,7 +530,7 @@ impl FsNodeOps for SymlinkObject {
         _current_task: &CurrentTask,
         name: &FsStr,
         _size: usize,
-    ) -> Result<ValueOrSize<FsString>, Errno> {
+    ) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
         let fs = node.fs();
         let bundle = RemoteBundle::from_fs(&fs);
         bundle.get_xattr(node, name)
@@ -535,6 +565,7 @@ fn to_fs_node_info(metadata_node: &ext4_metadata::Node) -> FsNodeInfo {
 #[cfg(test)]
 mod test {
     use crate::fs::fuchsia::RemoteBundle;
+    use crate::mm::ProtectionFlags;
     use crate::testing::spawn_kernel_and_run_with_pkgfs;
     use crate::vfs::buffers::VecOutputBuffer;
     use crate::vfs::{
@@ -547,6 +578,7 @@ mod test {
     use starnix_uapi::open_flags::OpenFlags;
     use starnix_uapi::{ino_t, off_t};
     use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
     use zx;
 
     #[::fuchsia::test]
@@ -571,32 +603,55 @@ mod test {
                 .lookup_child(&current_task, &mut context, "foo".into())
                 .expect("lookup failed");
 
-            let test_file = test_dir
+            let test_file_node = test_dir
                 .lookup_child(&current_task, &mut context, "file".into())
-                .expect("lookup failed")
-                .open(&current_task, OpenFlags::RDONLY)
-                .expect("open failed");
+                .expect("lookup failed");
+            let test_file =
+                test_file_node.open(&current_task, OpenFlags::RDONLY).expect("open failed");
+
+            let ro_mem1 = test_file
+                .get_memory(&current_task, None, ProtectionFlags::READ)
+                .expect("get_memory READ failed");
+            let rx_mem1 = test_file
+                .get_memory(&current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
+                .expect("get_memory READ|EXEC failed");
+            assert!(rx_mem1.get_rights().contains(zx::Rights::EXECUTE));
+
+            let test_file2 =
+                test_file_node.open(&current_task, OpenFlags::RDONLY).expect("open 2 failed");
+            let ro_mem2 = test_file2
+                .get_memory(&current_task, None, ProtectionFlags::READ)
+                .expect("get_memory READ 2 failed");
+            let rx_mem2 = test_file2
+                .get_memory(&current_task, None, ProtectionFlags::READ | ProtectionFlags::EXEC)
+                .expect("get_memory READ|EXEC 2 failed");
+            assert!(Arc::ptr_eq(&ro_mem1, &ro_mem2));
+            assert!(Arc::ptr_eq(&rx_mem1, &rx_mem2));
 
             let mut buffer = VecOutputBuffer::new(64);
             assert_eq!(test_file.read(&current_task, &mut buffer).expect("read failed"), 6);
             let buffer: Vec<u8> = buffer.into();
             assert_eq!(&buffer[..6], b"hello\n");
 
+            let file_token =
+                test_file.get_file_token(&current_task).expect("get_file_token failed");
+            assert_eq!(file_token.offset, 0);
+
             assert_eq!(
-                &test_file
+                &*test_file
                     .node()
                     .get_xattr(&current_task, &test_dir.mount, "user.a".into(), usize::MAX)
                     .expect("get_xattr failed")
                     .unwrap(),
-                "apple"
+                b"apple"
             );
             assert_eq!(
-                &test_file
+                &*test_file
                     .node()
                     .get_xattr(&current_task, &test_dir.mount, "user.b".into(), usize::MAX)
                     .expect("get_xattr failed")
                     .unwrap(),
-                "ball"
+                b"ball"
             );
             assert_eq!(
                 test_file

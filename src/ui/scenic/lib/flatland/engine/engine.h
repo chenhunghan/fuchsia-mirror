@@ -128,7 +128,9 @@ class Engine {
   view_tree::GeneratedSubtreeSnapshot GenerateViewTreeSnapshot(
       const TransformHandle& root_transform);
 
-  // Returns all renderables reachable from the display's root transform.
+  // Returns all renderables reachable from the display's root transform. As a side effect, runs
+  // any pending lazy GPU imports for image layers in the returned renderables via
+  // `DisplayCompositor::EnsureGpuImagesImported()`.
   Renderables GetRenderables(const FlatlandDisplay& display);
 
   static constexpr uint32_t kNumDisplayFramebuffers = 2;
@@ -143,8 +145,9 @@ class Engine {
   // Tally the frame result so that it can be displayed via Inspect.
   void RecordFrameResult(DisplayCompositor::RenderFrameResult result);
 
-  // Signal all release fences and skip rendering.
-  void SkipRender(scheduling::FramePresentedCallback callback);
+  // Takes pending fences from `flatland_presenter_` and forwards them with `callback` to
+  // `DisplayCompositor::SkipFrame()`.
+  void SkipRender(uint64_t frame_number, scheduling::FramePresentedCallback callback);
 
   std::shared_ptr<flatland::DisplayCompositor> flatland_compositor_;
   std::shared_ptr<flatland::FlatlandPresenterImpl> flatland_presenter_;

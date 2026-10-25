@@ -36,7 +36,6 @@
 #include <fbl/intrusive_single_list.h>
 #include <fbl/macros.h>
 #include <fbl/null_lock.h>
-#include <fbl/wavl_tree_best_node_observer.h>
 #include <kernel/cpu.h>
 #include <kernel/deadline.h>
 #include <kernel/koid.h>
@@ -488,6 +487,9 @@ class PreemptionState {
   friend class PreemptDisableTestAccess;
   friend concurrent::CapabilityToken<PreemptionState>;
 
+  // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
+  friend struct PreemptionStateLayout;
+
   // Implements the runtime assertion for concurrent::CapabilityToken<PreemptionState>::AssertHeld.
   static void AssertCapabilityHeld(concurrent::CapabilityToken<PreemptionState>::TagType);
 
@@ -632,6 +634,9 @@ class TaskState {
   // Dumping routines are allowed to see inside us.
   friend class ThreadDumper;
 
+  // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
+  friend struct TaskStateLayout;
+
   // The Thread's entry point, and its argument.
   thread_start_routine entry_ = nullptr;
   void* arg_ = nullptr;
@@ -672,6 +677,9 @@ class MemoryAllocationState {
   }
 
  private:
+  // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
+  friend struct MemoryAllocationStateLayout;
+
   // Notice that we aren't using atomic operations to access the field.  We don't need atomic
   // operations here as long as...
   //
@@ -1397,6 +1405,10 @@ struct Thread : public ChainLockable {
   // The global list of threads with migrate functions.
   static MigrateList migrate_list_ TA_GUARDED(list_lock_);
 
+  // <kernel/thread_layout.h> exposes member offsets to the Rust mirror of this class.
+  friend struct ThreadLayout;
+
+  // LINT.IfChange(ThreadLayout)
   Canary canary_;
 
   // These fields are among the most active in the thread. They are grouped
@@ -1523,6 +1535,10 @@ struct Thread : public ChainLockable {
   // be disabled while accessing it.
   ThreadStallState memory_stall_state_ TA_GUARDED(preempt_disabled_token) =
       ThreadStallState::IgnoredKernelOnly;
+  // LINT.ThenChange(
+  //   //zircon/kernel/kernel/thread.rs:ThreadLayout,
+  //   //zircon/kernel/include/kernel/thread_layout.h:ThreadLayout,
+  // )
 };
 
 // For the moment, the arch-specific current thread implementations need to come here, after the
@@ -1670,51 +1686,9 @@ inline fbl::WAVLTreeNodeState<Thread*>& WaitQueueCollection::BlockedThreadTreeTr
   return thread.wait_queue_state().blocked_threads_tree_node_;
 }
 
-inline SchedDuration WaitQueueCollection::MinRelativeDeadlineTraits::GetValue(const Thread& thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  const auto& scheduler_state = thread.scheduler_state();
-  if (scheduler_state.effective_profile().IsDeadline()) {
-    return scheduler_state.effective_profile().deadline().deadline_ns;
-  }
-  return SchedDuration::Max();
-}
-
-inline SchedDuration WaitQueueCollection::MinRelativeDeadlineTraits::GetSubtreeBest(
-    const Thread& thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return thread.wait_queue_state().subtree_min_deadline_;
-}
-
-inline bool WaitQueueCollection::MinRelativeDeadlineTraits::Compare(ValueType a, ValueType b)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return a < b;
-}
-
-inline void WaitQueueCollection::MinRelativeDeadlineTraits::AssignBest(
-    Thread& thread, SchedDuration val) TA_NO_THREAD_SAFETY_ANALYSIS {
-  thread.wait_queue_state().subtree_min_deadline_ = val;
-}
-
-inline void WaitQueueCollection::MinRelativeDeadlineTraits::ResetBest(Thread& thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  // In a debug build, reset the subtree best as we leave the collection.
-  // This can help to find bugs by allowing us to assert that the value is zero/max
-  // during insertion, however it is not strictly needed in a production build
-  // and can be skipped.
-#ifdef DEBUG_ASSERT_IMPLEMENTED
-  thread.wait_queue_state().subtree_min_deadline_ = SchedDuration::Max();
-#endif  // DEBUG_ASSERT_IMPLEMENTED
-}
-
 inline void PreemptionState::AssertCapabilityHeld(
     concurrent::CapabilityToken<PreemptionState>::TagType) {
   DEBUG_ASSERT(Thread::Current::preemption_state().PreemptIsEnabled() == false);
-}
-
-inline SchedulerState::WaitQueueInheritedSchedulerState*
-WaitQueueCollection::FindInheritedSchedulerStateStorage() TA_NO_THREAD_SAFETY_ANALYSIS {
-  return threads_.is_empty()
-             ? nullptr
-             : &threads_.back().wait_queue_state().inherited_scheduler_state_storage_;
 }
 
 struct BrwLockOps {
@@ -1781,8 +1755,6 @@ class ScopedMemoryStall {
 extern "C" {
 cpu_mask_t cpp_thread_get_cpu_affinity(const Thread* thread);
 cpu_mask_t cpp_thread_set_cpu_affinity(Thread* thread, cpu_mask_t affinity);
-ChainLock* cpp_thread_get_lock(Thread* thread);
-zx_status_t cpp_thread_wait_queue_state_blocked_status_locked(const Thread* thread);
 ThreadDispatcher* cpp_thread_user_thread(Thread* thread);
 zx_koid_t cpp_thread_tid(const Thread* thread);
 uint64_t cpp_thread_lock_flow_id(const Thread* thread);

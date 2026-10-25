@@ -150,6 +150,16 @@ zx_status_t Gt6853Device::Create(void* ctx, zx_device_t* parent) {
     return status;
   }
 
+  zx::result<> add_service_result = device->DdkAddService<fuchsia_input_report::Service>(
+      fuchsia_input_report::Service::InstanceHandler({
+          .input_device = device->bindings_.CreateHandler(device.get(), device->dispatcher_,
+                                                          fidl::kIgnoreBindingClosure),
+      }));
+  if (add_service_result.is_error()) {
+    zxlogf(ERROR, "DdkAddService failed: %s", add_service_result.status_string());
+    return add_service_result.status_value();
+  }
+
   if ((status = device->DdkAdd(ddk::DeviceAddArgs("goodix-gt6853")
                                    .set_inspect_vmo(device->inspector_.DuplicateVmo()))) != ZX_OK) {
     zxlogf(ERROR, "DdkAdd failed: %d", status);
@@ -244,14 +254,14 @@ void Gt6853Device::GetInputReportsReaderV2(GetInputReportsReaderV2RequestView re
 void Gt6853Device::GetDescriptor(GetDescriptorCompleter::Sync& completer) {
   constexpr size_t kDescriptorBufferSize = 512;
 
-  constexpr fuchsia_input_report::wire::Axis kAxisX = {
+  constexpr fuchsia_input::wire::Axis kAxisX = {
       .range = {.min = 0, .max = kMaxContactX},
-      .unit = {.type = fuchsia_input_report::wire::UnitType::kNone, .exponent = 0},
+      .unit = {.type = fuchsia_input::wire::UnitType::kNone, .exponent = 0},
   };
 
-  constexpr fuchsia_input_report::wire::Axis kAxisY = {
+  constexpr fuchsia_input::wire::Axis kAxisY = {
       .range = {.min = 0, .max = kMaxContactY},
-      .unit = {.type = fuchsia_input_report::wire::UnitType::kNone, .exponent = 0},
+      .unit = {.type = fuchsia_input::wire::UnitType::kNone, .exponent = 0},
   };
 
   fidl::Arena<kDescriptorBufferSize> allocator;

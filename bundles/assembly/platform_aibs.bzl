@@ -180,13 +180,8 @@ platform_aib_names = bringup_platform_aib_names + [
     "core_realm_networking",
     "network_realm",
     "network_realm_packages",
-    "network_realm_packages_gub",
     "network_tun",
     "thread_lowpan",
-    "networking_with_virtualization",
-    "networking_basic",
-    "networking_basic_packages",
-    "networking_basic_packages_gub",
     "mdns",
 
     # The minimal feature-set-level
@@ -247,9 +242,6 @@ platform_aib_names = bringup_platform_aib_names + [
     "memory_monitor_page_refaults",
 
     # Netstack
-    "netstack3",
-    "netstack3_packages",
-    "netstack3_packages_gub",
     "socket-proxy-enabled",
     "socket-proxy-disabled",
     "socket_proxy_packages",

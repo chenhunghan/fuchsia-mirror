@@ -205,6 +205,30 @@ constexpr size_t kInterruptDispatcherStateSize = 296 + (2 * kLockClassIdSize);
 constexpr size_t kInterruptDispatcherStateAlign = 8;
 constexpr size_t kInterruptDispatcherStateOffset = 56;
 
+// Size, alignment, and offset for PortDispatcherState.
+constexpr size_t kPortDispatcherStateSize = 176 + (2 * kLockClassIdSize);
+constexpr size_t kPortDispatcherStateAlign = 8;
+constexpr size_t kPortDispatcherStateOffset = 48;
+
+// Size, alignment, and list node offset for PortObserver.
+constexpr size_t kPortObserverSize = 160;
+constexpr size_t kPortObserverAlign = 8;
+constexpr size_t kPortObserverListNodeOffset = 136;
+
+// Size, alignment, and field offsets for PortPacket. Both C++ and Rust read and write every
+// field directly, so each offset is asserted on both sides.
+constexpr size_t kPortPacketSize = 88;
+constexpr size_t kPortPacketAlign = 8;
+constexpr size_t kPortPacketNodeOffset = 0;
+constexpr size_t kPortPacketPacketOffset = 16;
+constexpr size_t kPortPacketHandleOffset = 64;
+constexpr size_t kPortPacketObserverOffset = 72;
+constexpr size_t kPortPacketAllocatorOffset = 80;
+
+// Sentinel stored in PortPacket::packet.type by PortPacket::Cancel(). Shared by the C++
+// PortPacket helpers (is_canceled()) and the Rust PortDispatcher.
+constexpr uint32_t kPortPacketTypeCanceled = 0xffffffff;
+
 // Size and alignment for PortInterruptPacket.
 constexpr size_t kPortInterruptPacketSize = 32;
 constexpr size_t kPortInterruptPacketAlign = 8;
@@ -215,21 +239,46 @@ constexpr size_t kFutexContextStorageAlign = 8;
 
 // Size, alignment, and offset for ThreadDispatcherState.
 //
-// The offset is large because most of ThreadDispatcher's fields are still C++ and precede
-// opaque_storage_; it shrinks as those fields migrate into the Rust state.
+// The offset is larger than for most dispatchers because a few of ThreadDispatcher's fields are
+// still C++ and precede opaque_storage_; it shrinks as those fields migrate into the Rust state.
+// None of them contain a lockdep-instrumented lock, so the offset does not vary with lockdep.
 //
-// It is also configuration dependent, unlike every other dispatcher here, whose state sits
-// immediately after the Dispatcher base. Three lockdep-instrumented locks live in the C++
-// fields that precede opaque_storage_ - runtime_stats_'s SeqLock, exceptionate_'s mutex, and
-// core_thread_lock_ - and each grows by one lock class id when lockdep is enabled, moving
-// opaque_storage_ later by 3 * kLockClassIdSize bytes. The base offset is taken from the
-// compiler, not computed by hand.
-constexpr size_t kThreadDispatcherStateSize = 64;
+// The size does: the Rust state holds four lockdep-instrumented locks - its own mutex, the
+// SeqLock inside runtime_stats, the mutex inside the embedded Exceptionate, and the
+// core_thread_lock spinlock - and each grows by one lock class id when lockdep is enabled. The
+// base value is taken from the compiler, not computed by hand.
+constexpr size_t kThreadDispatcherStateSize = 328 + (4 * kLockClassIdSize);
 constexpr size_t kThreadDispatcherStateAlign = 8;
-constexpr size_t kThreadDispatcherStateOffset = 416 + (3 * kLockClassIdSize);
+constexpr size_t kThreadDispatcherStateOffset = 136;
+
+// Size and alignment for ThreadRuntimeStatsStorage (ThreadRuntimeStats).
+constexpr size_t kThreadRuntimeStatsStorageSize = 56 + kLockClassIdSize;
+constexpr size_t kThreadRuntimeStatsStorageAlign = 8;
 
 // Size and alignment for Backtrace.
 constexpr size_t kBacktraceSize = 272;
 constexpr size_t kBacktraceAlign = 8;
+
+// Size and alignment for HandleTableStorage (HandleTable).
+#if defined(__riscv)
+#if defined(WITH_LOCK_DEP)
+constexpr size_t kHandleTableStorageSize = 120;
+#else
+constexpr size_t kHandleTableStorageSize = 112;
+#endif
+constexpr size_t kHandleTableStorageAlign = 8;
+#else  // __x86_64__ or __aarch64__
+#if defined(WITH_LOCK_DEP)
+constexpr size_t kHandleTableStorageSize = 192;
+#else
+constexpr size_t kHandleTableStorageSize = 176;
+#endif
+constexpr size_t kHandleTableStorageAlign = 16;
+#endif
+
+// Size and alignment for ExceptionateStorage (Exceptionate). The Exceptionate's mutex grows by one
+// lock class id when lockdep is enabled.
+constexpr size_t kExceptionateStorageSize = 56 + kLockClassIdSize;
+constexpr size_t kExceptionateStorageAlign = 8;
 
 #endif  // ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_

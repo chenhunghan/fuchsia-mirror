@@ -116,6 +116,29 @@ async fn test_node_token() {
 }
 
 #[fuchsia::test]
+async fn test_power_element_token() {
+    let (mut fixture, mut harness) = FakeCqhci::new(None);
+    let token = zx::Event::create();
+    harness =
+        harness.set_power_element_token(token.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap());
+    let started_driver = harness.start_driver().await.expect("failed to start driver");
+
+    // With suspend enabled, the driver must register its power element token as an execution
+    // state dependency at power level 1 while starting.
+    let request = fixture
+        .handles
+        .execution_state_dependency_receiver
+        .next()
+        .await
+        .expect("driver did not add an execution state dependency");
+    let dependency_token = request.dependency_token.expect("missing dependency token");
+    assert_eq!(dependency_token.koid().unwrap(), token.koid().unwrap());
+    assert_eq!(request.power_level, Some(1));
+
+    started_driver.stop_driver().await;
+}
+
+#[fuchsia::test]
 async fn test_io() {
     let (_fixture, mut harness) = FakeCqhci::new(None);
     let started_driver = harness.start_driver().await.expect("failed to start driver");
@@ -328,6 +351,31 @@ async fn test_error_recovery() {
     // clients (1 reader, 1 flusher), at most 2 tasks should fail (the one we explicitly failed,
     // and any which was already in-flight).
     assert!(state.lock().num_errors <= 2);
+    assert!(fixture.cleared_tasks_count() > 0);
+
+    started_driver.stop_driver().await;
+}
+
+#[fuchsia::test]
+async fn test_device_exception_event_ignored() {
+    let (fixture, mut harness) = FakeCqhci::new(None);
+    let started_driver = harness.start_driver().await.expect("failed to start driver");
+
+    assert!(!sdmmc_spec::CqhciCqInterruptStatusEnableRegister::enabled().device_exception_event());
+    assert!(!sdmmc_spec::CqhciCqInterruptSignalEnableRegister::enabled().device_exception_event());
+
+    let block_client = connect_block_client(&started_driver, "user").await;
+    fixture.inject_device_exception_event_next(2);
+
+    let buf = vec![0x5Au8; 512];
+    block_client.write_at(BufferSlice::from(&buf[..]), 0).await.expect("write failed");
+
+    let mut read_buf = vec![0u8; 512];
+    block_client
+        .read_at(MutableBufferSlice::from(&mut read_buf[..]), 0)
+        .await
+        .expect("read failed");
+    assert_eq!(read_buf, buf);
 
     started_driver.stop_driver().await;
 }

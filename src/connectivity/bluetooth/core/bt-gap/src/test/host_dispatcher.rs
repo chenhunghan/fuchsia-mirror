@@ -21,7 +21,10 @@ use log::info;
 use std::collections::{HashMap, HashSet};
 
 use crate::build_config::{BrEdrConfig, Config};
-use crate::host_dispatcher::{DEFAULT_DEVICE_NAME, HostDispatcher, NameReplace, test as hd_test};
+use crate::host_device::HostDevice;
+use crate::host_dispatcher::{
+    DEFAULT_DEVICE_NAME, HostDispatcher, NameReplace, test as hd_test, try_restore_bonds,
+};
 use crate::store::stash::Stash;
 use crate::types;
 
@@ -107,6 +110,88 @@ async fn on_device_changed_inspect_state() {
                     }
                 }
             }
+        }
+    });
+}
+
+#[fuchsia::test]
+fn set_pairing_delegate_inspect_state() {
+    let mut exec = fasync::TestExecutor::new();
+    let stash = Stash::in_memory_mock();
+    let inspector = inspect::Inspector::default();
+    let system_inspect = inspector.root().create_child("system");
+    let (gas_channel_sender, _generic_access_req_stream) = mpsc::channel(0);
+    let watch_peers_broker = hanging_get::HangingGetBroker::new(
+        HashMap::new(),
+        |_, _| true,
+        hanging_get::DEFAULT_CHANNEL_SIZE,
+    );
+    let watch_hosts_broker = hanging_get::HangingGetBroker::new(
+        Vec::new(),
+        |_, _| true,
+        hanging_get::DEFAULT_CHANNEL_SIZE,
+    );
+    let dispatcher = HostDispatcher::new(
+        Appearance::Display,
+        Default::default(),
+        stash,
+        system_inspect,
+        gas_channel_sender,
+        watch_peers_broker.new_publisher(),
+        watch_peers_broker.new_registrar(),
+        watch_hosts_broker.new_publisher(),
+        watch_hosts_broker.new_registrar(),
+    );
+
+    // Initially, no pairing_delegate node is present under system.
+    assert_data_tree!(@executor exec, inspector, root: {
+        system: {
+            host_count: 0u64,
+            peer_count: 0u64,
+            device_class: "default",
+            peers: {},
+            hosts: {},
+            discovery_sessions: 0u64,
+            discovery_history: {},
+            recently_removed: {},
+        }
+    });
+
+    // Setting a pairing delegate creates the pairing_delegate node with capabilities.
+    let (delegate_proxy, delegate_server) =
+        fidl::endpoints::create_proxy_and_stream::<sys::PairingDelegateMarker>();
+    dispatcher
+        .set_pairing_delegate(
+            delegate_proxy,
+            sys::InputCapability::Confirmation,
+            sys::OutputCapability::Display,
+        )
+        .expect("should set pairing delegate");
+
+    assert_data_tree!(@executor exec, inspector, root: {
+        system: contains {
+            pairing_delegate: {
+                input_capability: "Confirmation",
+                output_capability: "Display",
+            }
+        }
+    });
+
+    // Closing the upstream PairingDelegate channel terminates PairingDispatcher and removes the
+    // pairing_delegate node from the Inspect hierarchy.
+    drop(delegate_server);
+    let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+    assert_data_tree!(@executor exec, inspector, root: {
+        system: {
+            host_count: 0u64,
+            peer_count: 0u64,
+            device_class: "default",
+            peers: {},
+            hosts: {},
+            discovery_sessions: 0u64,
+            discovery_history: {},
+            recently_removed: {},
         }
     });
 }
@@ -236,6 +321,68 @@ async fn test_commit_bootstrap_doesnt_fail_from_host_failure() {
     let (result, _bonding_delegate_stream) =
         futures::future::join(host_dispatcher.commit_bootstrap(vec![identity]), run_delegate).await;
     assert_matches!(result, Ok(()));
+}
+
+#[fuchsia::test]
+async fn try_restore_bonds_redacts_secret_keys_on_error() {
+    let host_addr = Address::Public([1; 6]);
+    let bond = example::bond(host_addr, Address::Public([2; 6]));
+    let peer_id = bond.identifier;
+
+    let (mut host_server, host_device) = HostDevice::mock_from_id(HostId(1));
+    let dispatcher = hd_test::make_simple_test_dispatcher();
+    dispatcher.stash().store_bonds(vec![bond]).await.expect("store_bonds succeeds");
+
+    let echo_errors = async {
+        let mut bonding_stream = match host_server.next().await {
+            Some(Ok(HostRequest::SetBondingDelegate { delegate, .. })) => delegate.into_stream(),
+            other => panic!("expected SetBondingDelegate, got: {other:?}"),
+        };
+        match bonding_stream.next().await {
+            Some(Ok(BondingDelegateRequest::RestoreBonds { bonds, responder })) => {
+                responder.send(&bonds).expect("send RestoreBonds errors");
+            }
+            other => panic!("expected RestoreBonds, got: {other:?}"),
+        }
+    };
+
+    let (result, ()) =
+        join(try_restore_bonds(host_device, dispatcher, &host_addr), echo_errors).await;
+    let err_msg = result.expect_err("try_restore_bonds should report rejected bonds").to_string();
+    assert!(err_msg.contains(&format!("{:?}", Some(peer_id))));
+    assert!(!err_msg.contains(&format!("{:?}", [0u8; 16])));
+}
+
+#[fuchsia::test]
+async fn add_host_device_continues_when_restore_bonds_reports_errors() {
+    let dispatcher = hd_test::make_simple_test_dispatcher();
+    let host_id = HostId(1);
+    let host_addr = Address::Public([1; 6]);
+    let mut rejected_bond = example::bond(host_addr, Address::Public([3; 6]));
+    rejected_bond.identifier = PeerId(11);
+    let rejected_id = rejected_bond.identifier;
+    dispatcher.stash().store_bonds(vec![rejected_bond]).await.expect("store_bonds succeeds");
+
+    let (_host_server, _host_device, _gas_endpoints, _bonding_delegate) =
+        hd_test::create_and_add_test_host_with_bond_behavior(
+            host_id,
+            &dispatcher,
+            hd_test::RestoreBondsBehavior::RejectPeers(HashSet::from([rejected_id])),
+        )
+        .await
+        .expect("host init should succeed even when RestoreBonds rejects a bond");
+    assert!(host_is_in_dispatcher(&host_id, &dispatcher));
+
+    let second_host_id = HostId(2);
+    let second_host_addr = Address::Public([2; 6]);
+    let accepted_bond = example::bond(second_host_addr, Address::Public([4; 6]));
+    dispatcher.stash().store_bonds(vec![accepted_bond]).await.expect("store_bonds succeeds");
+
+    let (_host_server, _host_device, _gas_endpoints, _bonding_delegate) =
+        hd_test::create_and_add_test_host_to_dispatcher(second_host_id, &dispatcher)
+            .await
+            .expect("host init should succeed when RestoreBonds accepts persisted bonds");
+    assert!(host_is_in_dispatcher(&second_host_id, &dispatcher));
 }
 
 #[fuchsia::test]

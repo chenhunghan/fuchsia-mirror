@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::conversion::convert_start_args;
+use crate::conversion::{
+    convert_health_alert, convert_health_check_error, convert_health_check_request,
+    convert_health_check_response, convert_start_args,
+};
 use crate::loader::{Library, LoaderService};
 use crate::modules::ModulesAndSymbols;
 use crate::utils::*;
@@ -18,11 +21,14 @@ use fidl_fuchsia_power_broker::{
 };
 use fidl_next::ClientDispatcher;
 use fidl_next_fuchsia_driver_framework as fidl_next_fdf;
+use fuchsia_async::TimeoutExt;
 use fuchsia_sync::Mutex;
-use futures::channel::oneshot;
-use futures::{FutureExt, TryStreamExt};
+use futures::channel::{mpsc, oneshot};
+use futures::future::FusedFuture;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use log::warn;
 use namespace::Namespace;
+use std::collections::HashMap;
 use std::ffi::c_char;
 use std::ptr::NonNull;
 use std::sync::{Arc, Weak};
@@ -43,6 +49,45 @@ type DriverClient = fidl_next::Client<
     fidl_next_fuchsia_driver_framework::Driver,
     fdf_fidl::DriverChannel<fdf::AsyncDispatcher>,
 >;
+
+/// The maximum number of health alerts from a driver that can be queued for forwarding to
+/// DriverManager. Alerts received while the queue is full are dropped.
+const HEALTH_ALERT_QUEUE_CAPACITY: usize = 64;
+
+// Per-level deadlines for a driver to answer a HealthCheck. A check that misses its deadline
+// fails with TIMEOUT, which usually means the driver's dispatcher is wedged. These three
+// constants mirror the deadlines documented on
+// `fuchsia.driver.framework/HealthCheckRequest`; keep them in sync.
+const PING_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(250);
+const FAST_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(2);
+const DEEP_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(120);
+
+struct DriverEventHandler {
+    alert_tx: mpsc::Sender<fidl_fdf::HealthAlert>,
+    // Number of alerts dropped because the queue was full. Only used to rate-limit the warning.
+    dropped: u64,
+}
+
+impl<T: fidl_next::Transport> fidl_next_fdf::DriverClientHandler<T> for DriverEventHandler {
+    async fn on_health_alert(
+        &mut self,
+        request: fidl_next::Request<fidl_next_fdf::driver::OnHealthAlert, T>,
+    ) {
+        let Some(alert) = convert_health_alert(request.payload().alert) else {
+            return;
+        };
+        if let Err(e) = self.alert_tx.try_send(alert)
+            && e.is_full()
+        {
+            // Warn at 1, 2, 4, 8, ... drops so an alert flood doesn't become a log flood. This
+            // mirrors the SDK's HealthAlertReporter.
+            self.dropped += 1;
+            if self.dropped.is_power_of_two() {
+                warn!("Health alert queue full; dropped {} alerts so far", self.dropped);
+            }
+        }
+    }
+}
 
 struct LoadedDriver(u64);
 
@@ -198,7 +243,24 @@ enum DriverPowerState {
 enum PowerConfiguration {
     DriverOwned,
     RuntimeControlled,
-    HostOwned,
+    NoElement,
+}
+
+impl From<&fdata::Dictionary> for PowerConfiguration {
+    fn from(program: &fdata::Dictionary) -> Self {
+        let power_aware = get_program_string(program, "suspend_enabled")
+            .map_or_else(|_| false, |val| matches!(val, "true"));
+
+        let power_managed_dispatchers_enabled =
+            get_program_string(program, "power_managed_dispatchers_enabled")
+                .map_or_else(|_| false, |val| matches!(val, "true"));
+
+        match (power_aware, power_managed_dispatchers_enabled) {
+            (_, true) => PowerConfiguration::RuntimeControlled,
+            (true, false) => PowerConfiguration::DriverOwned,
+            (false, false) => PowerConfiguration::NoElement,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -263,10 +325,8 @@ struct PowerElementHandles {
     topology: Option<TopologyProxy>,
 }
 
-#[allow(unused)]
 #[derive(Debug)]
 enum PowerElementState {
-    HostOwned(PowerElementHandles),
     DriverOwned(Option<ClientEnd<ElementControlMarker>>),
     RuntimeControlled(PowerElementHandles),
     NoElement,
@@ -279,6 +339,31 @@ impl Drop for DriverInner {
 }
 
 impl DriverInner {
+    fn new(
+        hooks: Hooks,
+        legacy_state: Option<LegacyDynamicallyLinkedState>,
+        node_token: Option<fidl::Event>,
+        power_element: PowerElementState,
+    ) -> Self {
+        Self {
+            legacy_state,
+            hooks,
+            dispatcher: None,
+            always_on_dispatcher: None,
+            token: None,
+            shutdown_signaler: None,
+            node_token,
+            power_element,
+            active_lease: None,
+            stop_lease: None,
+            power_state: DriverPowerState::Resumed,
+            resume_sender: None,
+            internal_stop_tx: None,
+            power_element_runner_task: None,
+            resume_requester: None,
+        }
+    }
+
     fn destroy(&mut self) {
         if let Some(token) = self.token.take() {
             self.hooks.destroy(token);
@@ -352,16 +437,7 @@ impl Driver {
                 });
                 (power_element, for_driver)
             }
-            PowerConfiguration::HostOwned => {
-                let power_element = PowerElementState::HostOwned(PowerElementHandles {
-                    control: Some(control_client),
-                    runner: Some(runner_server),
-                    lessor: lessor_client.into_proxy(),
-                    element_token: token,
-                    topology: None,
-                });
-                (power_element, None)
-            }
+            PowerConfiguration::NoElement => (PowerElementState::NoElement, None),
         }
     }
 
@@ -414,18 +490,7 @@ impl Driver {
             None
         };
 
-        let power_aware = get_program_string(program, "suspend_enabled")
-            .map_or_else(|_| false, |val| matches!(val, "true"));
-
-        let power_managed_dispatchers_enabled =
-            get_program_string(program, "power_managed_dispatchers_enabled")
-                .map_or_else(|_| false, |val| matches!(val, "true"));
-
-        let power_config = match (power_aware, power_managed_dispatchers_enabled) {
-            (_, true) => PowerConfiguration::RuntimeControlled,
-            (true, false) => PowerConfiguration::DriverOwned,
-            (false, false) => PowerConfiguration::HostOwned,
-        };
+        let power_config = PowerConfiguration::from(program);
 
         let library = LoaderService::try_load(vmo, &vmar).await?;
         start_args.vmar = vmar;
@@ -451,23 +516,7 @@ impl Driver {
             url: url.clone(),
             node_name,
             runtime_handle: Mutex::new(None),
-            inner: Mutex::new(DriverInner {
-                legacy_state,
-                hooks,
-                dispatcher: None,
-                always_on_dispatcher: None,
-                token: None,
-                shutdown_signaler: None,
-                node_token,
-                power_element,
-                active_lease: None,
-                stop_lease: None,
-                power_state: DriverPowerState::Resumed,
-                resume_sender: None,
-                internal_stop_tx: None,
-                power_element_runner_task: None,
-                resume_requester: None,
-            }),
+            inner: Mutex::new(DriverInner::new(hooks, legacy_state, node_token, power_element)),
         });
         let driver_runtime_handle = env.new_driver(Arc::into_raw(driver.clone()));
 
@@ -527,18 +576,7 @@ impl Driver {
             get_program_string(program, "default_dispatcher_scheduler_role").unwrap_or("");
         let allowed_scheduler_roles = get_program_strvec(program, "allowed_scheduler_roles")?;
 
-        let power_aware = get_program_string(program, "suspend_enabled")
-            .map_or_else(|_| false, |val| matches!(val, "true"));
-
-        let power_managed_dispatchers_enabled =
-            get_program_string(program, "power_managed_dispatchers_enabled")
-                .map_or_else(|_| false, |val| matches!(val, "true"));
-
-        let power_config = match (power_aware, power_managed_dispatchers_enabled) {
-            (_, true) => PowerConfiguration::RuntimeControlled,
-            (true, false) => PowerConfiguration::DriverOwned,
-            (false, false) => PowerConfiguration::HostOwned,
-        };
+        let power_config = PowerConfiguration::from(program);
 
         let incoming = start_args.incoming.take().ok_or(Status::INVALID_ARGS)?;
         let incoming: Namespace = incoming.try_into().map_err(|_| Status::INVALID_ARGS)?;
@@ -567,23 +605,7 @@ impl Driver {
             url: url.clone(),
             node_name,
             runtime_handle: Mutex::new(None),
-            inner: Mutex::new(DriverInner {
-                legacy_state: None,
-                hooks,
-                dispatcher: None,
-                always_on_dispatcher: None,
-                token: None,
-                shutdown_signaler: None,
-                node_token,
-                power_element,
-                active_lease: None,
-                stop_lease: None,
-                power_state: DriverPowerState::Resumed,
-                resume_sender: None,
-                internal_stop_tx: None,
-                power_element_runner_task: None,
-                resume_requester: None,
-            }),
+            inner: Mutex::new(DriverInner::new(hooks, None, node_token, power_element)),
         });
         let driver_runtime_handle = env.new_driver(Arc::into_raw(driver.clone()));
 
@@ -651,6 +673,9 @@ impl Driver {
         );
         let client_dispatcher = ClientDispatcher::new(client);
         let client = client_dispatcher.client();
+        // A futures mpsc channel holds `buffer + number of senders` messages, and there is a
+        // single sender.
+        let (alert_tx, alert_rx) = mpsc::channel(HEALTH_ALERT_QUEUE_CAPACITY - 1);
 
         let client_dispatcher_task = {
             let self_clone = self.clone();
@@ -663,7 +688,7 @@ impl Driver {
                         Some(hooks.initialize(server.into_untyped().into_driver_handle()));
                 };
 
-                client_dispatcher.run_client().await
+                client_dispatcher.run(DriverEventHandler { alert_tx, dropped: 0 }).await.map(|_| ())
             })
         };
 
@@ -673,11 +698,19 @@ impl Driver {
             Ok(Ok(())) => {}
             Ok(Err(status)) => {
                 warn!("Driver failed to start: {status:?}");
+                client.close();
+                if let Err(e) = client_dispatcher_task.await {
+                    log::error!("Client dispatcher failed: {e:?}");
+                }
                 self.shutdown(driver_request);
                 return Err(status);
             }
             Err(e) => {
                 warn!("Driver start FIDL error: {:?}", e);
+                client.close();
+                if let Err(e) = client_dispatcher_task.await {
+                    log::error!("Client dispatcher failed: {e:?}");
+                }
                 self.shutdown(driver_request);
                 return Err(Status::INTERNAL);
             }
@@ -697,6 +730,7 @@ impl Driver {
                 driver_request,
                 client_dispatcher_task,
                 internal_stop_rx,
+                alert_rx,
                 client,
             )
             .await;
@@ -710,6 +744,7 @@ impl Driver {
         driver_request: ServerEnd<fdh::DriverMarker>,
         client_dispatcher_task: F,
         internal_stop_rx: oneshot::Receiver<()>,
+        mut alert_rx: mpsc::Receiver<fidl_fdf::HealthAlert>,
         client: DriverClient,
     ) where
         F: std::future::Future<Output = Result<O, E>> + Send + Unpin + 'static,
@@ -723,36 +758,161 @@ impl Driver {
         let mut internal_stop_receiver = internal_stop_rx.fuse();
 
         let (resume_sender, resume_receiver) = oneshot::channel();
+        // In-flight health checks are polled concurrently with the request stream and dropped
+        // when the loop exits, so a hung check never blocks Stop. An empty `FuturesUnordered`
+        // reports itself as terminated, which `select!` skips. The responders are kept out of
+        // the futures so that every check still in flight when the loop exits can be answered
+        // before the channel is closed (see below).
+        let mut health_checks = futures::stream::FuturesUnordered::new();
+        let mut health_check_responders: HashMap<u64, fdh::DriverHealthCheckResponder> =
+            HashMap::new();
+        let mut next_health_check_id: u64 = 0;
 
-        let should_stop = futures::select! {
-            res = driver_request_stream.try_next().fuse() => {
-                match res {
-                    Ok(Some(request)) => match request {
-                        fdh::DriverRequest::Stop { control_handle: _ } => {
-                            Driver::handle_stop_request(weak_self.clone(), resume_sender)
+        let should_stop = loop {
+            futures::select! {
+                res = driver_request_stream.try_next().fuse() => {
+                    match res {
+                        Ok(Some(request)) => match request {
+                            fdh::DriverRequest::Stop { control_handle: _ } => {
+                                break Driver::handle_stop_request(weak_self.clone(), resume_sender);
+                            }
+                            fdh::DriverRequest::HealthCheck { request, responder } => {
+                                let req_next = convert_health_check_request(request);
+                                let timeout = match req_next {
+                                    fidl_next_fdf::HealthCheckRequest::Ping => Some(PING_TIMEOUT),
+                                    fidl_next_fdf::HealthCheckRequest::Fast => Some(FAST_TIMEOUT),
+                                    fidl_next_fdf::HealthCheckRequest::Deep => Some(DEEP_TIMEOUT),
+                                    // A level this host does not know has no deadline to
+                                    // enforce, so it is not forwarded.
+                                    _ => None,
+                                };
+                                // A suspended driver's dispatchers are stopped by the runtime,
+                                // so forwarding the check to the driver's `fdf::Health` server
+                                // (via `client` below) would only time out and misreport a
+                                // correctly suspended driver as wedged. `driver-host` is the
+                                // sole enforcement point for the protocol invariant that
+                                // `fdf::Health.HealthCheck` is never sent between `Suspend` and
+                                // the completion of `Resume`; the C++ and Rust SDK servers rely
+                                // on this and do not track suspend state themselves. The same
+                                // gate is applied again when an in-flight check completes (see
+                                // the `health_checks` arm below): a check that was forwarded
+                                // while resumed but whose deadline ran out while the driver was
+                                // suspending is answered INVALID_STATE rather than TIMEOUT.
+                                let Some(timeout) = timeout else {
+                                    let _ = responder
+                                        .send(Err(fidl_fdf::HealthCheckError::NotSupported));
+                                    continue;
+                                };
+                                let power_state =
+                                    weak_self.upgrade().map(|driver| driver.inner.lock().power_state);
+                                if power_state != Some(DriverPowerState::Resumed) {
+                                    log::warn!(
+                                        "HealthCheck received while driver is not resumed \
+                                         (state: {power_state:?}); answering INVALID_STATE"
+                                    );
+                                    let _ = responder
+                                        .send(Err(fidl_fdf::HealthCheckError::InvalidState));
+                                    continue;
+                                }
+                                let id = next_health_check_id;
+                                next_health_check_id += 1;
+                                health_check_responders.insert(id, responder);
+                                let client_clone = client.clone();
+                                health_checks.push(async move {
+                                    let res = async move {
+                                        match client_clone.health_check(req_next).await {
+                                            Ok(Ok(resp)) => {
+                                                Ok(convert_health_check_response(resp))
+                                            }
+                                            Ok(Err(err)) => Err(convert_health_check_error(err)),
+                                            // A driver built against an SDK that predates
+                                            // HealthCheck answers the flexible method with
+                                            // UNKNOWN_METHOD. That is expected, not an error.
+                                            Err(fidl_next::Error::Protocol(
+                                                fidl_next::ProtocolError::FrameworkError(
+                                                    fidl_next::FrameworkError::UnknownMethod,
+                                                ),
+                                            )) => Err(fidl_fdf::HealthCheckError::NotSupported),
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "Failed to forward HealthCheck to driver: {e:?}"
+                                                );
+                                                Err(fidl_fdf::HealthCheckError::InternalError)
+                                            }
+                                        }
+                                    }
+                                    // On deadline the two-way future is dropped, which cancels
+                                    // the transaction so a late reply is discarded. The check
+                                    // itself keeps running inside the driver until it finishes
+                                    // or the driver stops.
+                                    .on_timeout(fuchsia_async::MonotonicInstant::after(timeout), || {
+                                        Err(fidl_fdf::HealthCheckError::Timeout)
+                                    })
+                                    .await;
+                                    (id, res)
+                                });
+                            }
+                        },
+                        Ok(None) => {
+                            log::warn!("Driver request stream closed unexpectedly");
+                            break false;
                         }
-                    },
-                    Ok(None) => {
-                        log::warn!("Driver request stream closed unexpectedly");
-                        false
-                    }
-                    Err(e) => {
-                        log::warn!("Error in driver request stream: {e:?}");
-                        false
+                        Err(e) => {
+                            log::warn!("Error in driver request stream: {e:?}");
+                            break false;
+                        }
                     }
                 }
-            }
-            res = internal_stop_receiver => {
-                log::warn!("Power transition failed, stopping driver internally {:?}", res);
-                // Unblock the resume_receiver.
-                resume_sender.send(()).ok();
-                true
-            }
-            res = client_dispatcher_done => {
-                log::warn!("Client dispatcher finished unexpectedly: {:?}", res);
-                false
+                (id, res) = health_checks.select_next_some() => {
+                    if let Some(responder) = health_check_responders.remove(&id) {
+                        // Re-check the gate from the request arm: if the driver left the
+                        // resumed state while this check was in flight, its result (typically
+                        // a TIMEOUT from stopped dispatchers) says nothing about its health.
+                        let resumed = weak_self.upgrade().is_some_and(|driver| {
+                            driver.inner.lock().power_state == DriverPowerState::Resumed
+                        });
+                        let res = if resumed {
+                            res
+                        } else {
+                            Err(fidl_fdf::HealthCheckError::InvalidState)
+                        };
+                        // Generated Rust FIDL table responders take
+                        // `Result<&HealthCheckResponse, HealthCheckError>`.
+                        let _ = responder.send(res.as_ref().map_err(|e| *e));
+                    }
+                }
+                alert = alert_rx.select_next_some() => {
+                    // A send error means the channel is closed, which the request-stream arm
+                    // above already handles by exiting the loop.
+                    let _ = driver_request_stream
+                        .control_handle()
+                        .send_on_health_alert(&alert);
+                }
+                res = &mut internal_stop_receiver => {
+                    log::warn!("Power transition failed, stopping driver internally {:?}", res);
+                    // Unblock the resume_receiver.
+                    resume_sender.send(()).ok();
+                    break true;
+                }
+                res = &mut client_dispatcher_done => {
+                    log::warn!("Client dispatcher finished unexpectedly: {:?}", res);
+                    break false;
+                }
             }
         };
+
+        // Abandon the in-flight checks, then answer each of them with INVALID_STATE: the driver
+        // is no longer running. Every HealthCheck must be answered before the channel is closed
+        // below, because the C++ client bindings in driver_manager cannot represent a two-way
+        // call that is cut short by a ZX_OK epitaph. This also releases the responders'
+        // references before `driver_request_stream` is unwrapped.
+        drop(health_checks);
+        for (_, responder) in health_check_responders.drain() {
+            let _ = responder.send(Err(fidl_fdf::HealthCheckError::InvalidState));
+        }
+        // Dropping the receiver makes stop-time `try_send` in the event handler fail as
+        // disconnected (silently) rather than filling the queue and logging drops.
+        drop(alert_rx);
 
         if should_stop {
             // Ignore the result as its possible we dropped the sender by not assigning it
@@ -760,7 +920,13 @@ impl Driver {
             resume_receiver.await.ok();
             if let Err(e) = client.stop().await {
                 log::warn!("Failed to send stop request: {e:?}");
+                client.close();
             }
+            if let Err(e) = client_dispatcher_done.await {
+                log::error!("Client dispatcher failed: {e:?}");
+            }
+        } else if !client_dispatcher_done.is_terminated() {
+            client.close();
             if let Err(e) = client_dispatcher_done.await {
                 log::error!("Client dispatcher failed: {e:?}");
             }
@@ -825,56 +991,37 @@ impl Driver {
         scope: &fuchsia_async::Scope,
     ) {
         let mut inner = self.inner.lock();
-        match &mut inner.power_element {
-            PowerElementState::HostOwned(PowerElementHandles { runner, .. }) => {
-                // Host-owned power element: simply acknowledges the level-change request.
-                if let Some(runner_channel) = runner.take() {
-                    scope.spawn_local(async move {
-                        let mut element_runner_req_stream = runner_channel.into_stream();
-                        while let Ok(Some(ElementRunnerRequest::SetLevel { level: _, responder })) =
-                            element_runner_req_stream.try_next().await
-                        {
-                            responder.send().ok();
-                        }
-                    });
+        if let PowerElementState::RuntimeControlled(PowerElementHandles { runner, .. }) =
+            &mut inner.power_element
+        {
+            // Runtime-controlled power element: Deeply integrated with the driver and the
+            // driver runtime. Element changes propagate through to the driver runtime to
+            // manage task dispatching, and call a lifecycle hook on the driver to manage
+            // the state of the hardware.
+            inner.power_element_runner_task = Some(self.spawn_power_element_runner(
+                runner.take().expect("runner"),
+                client,
+                scope,
+            ));
+            drop(inner);
+
+            let weak_self = Arc::downgrade(self);
+            let resume_requester = fdf_env::ResumeRequester::new(move || {
+                if let Some(driver) = weak_self.upgrade() {
+                    driver.request_power_lease();
+                    Ok(())
                 } else {
-                    log::error!(
-                        "Host-owned power element: Failed to get power element runner handle for {}",
-                        self.node_name
-                    );
+                    Err(zx::Status::PEER_CLOSED)
                 }
-            }
-            PowerElementState::RuntimeControlled(PowerElementHandles { runner, .. }) => {
-                // Runtime-controlled power element: Deeply integrated with the driver and the
-                // driver runtime. Element changes propagate through to the driver runtime to
-                // manage task dispatching, and call a lifecycle hook on the driver to manage
-                // the state of the hardware.
-                inner.power_element_runner_task = Some(self.spawn_power_element_runner(
-                    runner.take().expect("runner"),
-                    client,
-                    scope,
-                ));
-                drop(inner);
+            });
 
-                let weak_self = Arc::downgrade(self);
-                let resume_requester = fdf_env::ResumeRequester::new(move || {
-                    if let Some(driver) = weak_self.upgrade() {
-                        driver.request_power_lease();
-                        Ok(())
-                    } else {
-                        Err(zx::Status::PEER_CLOSED)
-                    }
-                });
-
-                let registration = self
-                    .runtime_handle
-                    .lock()
-                    .as_ref()
-                    .expect("driver must have a runtime handle")
-                    .register_resume_requester(resume_requester);
-                self.inner.lock().resume_requester = Some(registration);
-            }
-            _ => {}
+            let registration = self
+                .runtime_handle
+                .lock()
+                .as_ref()
+                .expect("driver must have a runtime handle")
+                .register_resume_requester(resume_requester);
+            self.inner.lock().resume_requester = Some(registration);
         }
     }
 
@@ -1165,8 +1312,7 @@ impl Driver {
 
         // Drop the element control channel to destroy the power element
         match &mut self.inner.lock().power_element {
-            PowerElementState::HostOwned(PowerElementHandles { control, .. })
-            | PowerElementState::RuntimeControlled(PowerElementHandles { control, .. })
+            PowerElementState::RuntimeControlled(PowerElementHandles { control, .. })
             | PowerElementState::DriverOwned(control) => {
                 drop(control.take());
             }
@@ -1451,5 +1597,582 @@ mod tests {
         assert!(driver.inner.lock().active_lease.is_some());
 
         shutdown_test_driver(driver, scope).await;
+    }
+
+    /// The transport of the lifecycle server of the fake driver below.
+    type FailingStartTransport = fdf_fidl::DriverChannel<fdf::AsyncDispatcher>;
+
+    /// A `fuchsia.driver.framework/Driver` server that fails `Start`. Nothing else is ever
+    /// called on it because the driver host doesn't talk to a driver that failed to start.
+    struct FailingStartHandler;
+
+    impl fidl_next_fdf::DriverServerHandler<FailingStartTransport> for FailingStartHandler {
+        async fn start(
+            &mut self,
+            _request: fidl_next::Request<fidl_next_fdf::driver::Start, FailingStartTransport>,
+            responder: fidl_next::Responder<fidl_next_fdf::driver::Start, FailingStartTransport>,
+        ) {
+            let _ = responder.respond_err(Status::INTERNAL).await;
+        }
+
+        async fn stop(&mut self) {
+            unreachable!("stop is not sent to a driver that failed to start");
+        }
+
+        async fn suspend(
+            &mut self,
+            _responder: fidl_next::Responder<fidl_next_fdf::driver::Suspend, FailingStartTransport>,
+        ) {
+            unreachable!("suspend is not sent to a driver that failed to start");
+        }
+
+        async fn resume(
+            &mut self,
+            _request: fidl_next::Request<fidl_next_fdf::driver::Resume, FailingStartTransport>,
+            _responder: fidl_next::Responder<fidl_next_fdf::driver::Resume, FailingStartTransport>,
+        ) {
+            unreachable!("resume is not sent to a driver that failed to start");
+        }
+
+        async fn health_check(
+            &mut self,
+            _request: fidl_next::Request<fidl_next_fdf::driver::HealthCheck, FailingStartTransport>,
+            _responder: fidl_next::Responder<
+                fidl_next_fdf::driver::HealthCheck,
+                FailingStartTransport,
+            >,
+        ) {
+            unreachable!("health check is not sent to a driver that failed to start");
+        }
+    }
+
+    unsafe extern "C" fn failing_start_initialize(
+        server_handle: fdf_sys::fdf_handle_t,
+    ) -> *mut std::ffi::c_void {
+        let root_dispatcher = unsafe {
+            fdf::DriverDispatcherRef::from_raw(
+                NonNull::new(fdf_sys::fdf_dispatcher_get_current_dispatcher())
+                    .expect("Non-null current dispatcher"),
+            )
+        };
+        let server_channel = unsafe {
+            fdf::Channel::<[fidl_next::Chunk]>::from_driver_handle(
+                fdf::DriverHandle::new_unchecked(
+                    std::num::NonZero::new(server_handle).expect("valid driver handle"),
+                ),
+            )
+        };
+        let always_on = root_dispatcher.always_on_dispatcher();
+        let server_end: fidl_next::ServerEnd<fidl_next_fdf::Driver, FailingStartTransport> =
+            fidl_next::ServerEnd::from_untyped(fdf_fidl::DriverChannel::new_with_dispatcher(
+                fdf::AsyncDispatcher::new(&always_on),
+                server_channel,
+            ));
+        // The server task owns the channel and keeps it open after the failed `Start` reply until
+        // the driver host closes its end or shuts the driver down, matching C++ `DriverServer2`
+        // where the server binding outlives a failed `Start` reply.
+        always_on.spawn(async move {
+            let _ = fidl_next::ServerDispatcher::new(server_end).run(FailingStartHandler).await;
+        });
+        std::ptr::null_mut()
+    }
+
+    unsafe extern "C" fn failing_start_destroy(_token: *mut std::ffi::c_void) {}
+
+    static FAILING_START_REGISTRATION: fdf_sys::DriverRegistration = fdf_sys::DriverRegistration {
+        version: fdf_sys::DRIVER_REGISTRATION_VERSION_MAX,
+        v1: fdf_sys::DriverRegistration_driver_registration_v1 {
+            initialize: Some(failing_start_initialize),
+            destroy: Some(failing_start_destroy),
+        },
+    };
+
+    #[fuchsia::test]
+    async fn start_failure_closes_client_before_shutdown() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let scope = fuchsia_async::Scope::new();
+        for _ in 0..20 {
+            let (driver, _power_broker) = create_test_driver(&env);
+            driver.inner.lock().hooks =
+                Hooks::new(std::ptr::addr_of!(FAILING_START_REGISTRATION).cast_mut()).unwrap();
+            let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+            let (_driver_client, driver_server) =
+                fidl::endpoints::create_endpoints::<fdh::DriverMarker>();
+            let status = driver
+                .start(fidl_fdf::DriverStartArgs::default(), driver_server, shutdown_sender, &scope)
+                .await
+                .expect_err("expected Driver::start to fail");
+            assert_eq!(status, Status::INTERNAL);
+            shutdown_receiver.await.expect("driver shutdown did not complete");
+            while Arc::strong_count(&driver) > 1 {
+                fuchsia_async::Timer::new(fuchsia_async::MonotonicDuration::from_millis(1)).await;
+            }
+        }
+        scope.abort().await;
+    }
+
+    #[fuchsia::test]
+    fn power_configuration_from_program() {
+        let empty = fdata::Dictionary::default();
+        assert_eq!(PowerConfiguration::from(&empty), PowerConfiguration::NoElement);
+
+        let false_both = fdata::Dictionary {
+            entries: Some(vec![
+                fdata::DictionaryEntry {
+                    key: "suspend_enabled".to_string(),
+                    value: Some(Box::new(fdata::DictionaryValue::Str("false".to_string()))),
+                },
+                fdata::DictionaryEntry {
+                    key: "power_managed_dispatchers_enabled".to_string(),
+                    value: Some(Box::new(fdata::DictionaryValue::Str("false".to_string()))),
+                },
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(PowerConfiguration::from(&false_both), PowerConfiguration::NoElement);
+
+        let driver_owned = fdata::Dictionary {
+            entries: Some(vec![fdata::DictionaryEntry {
+                key: "suspend_enabled".to_string(),
+                value: Some(Box::new(fdata::DictionaryValue::Str("true".to_string()))),
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(PowerConfiguration::from(&driver_owned), PowerConfiguration::DriverOwned);
+
+        let runtime_controlled = fdata::Dictionary {
+            entries: Some(vec![fdata::DictionaryEntry {
+                key: "power_managed_dispatchers_enabled".to_string(),
+                value: Some(Box::new(fdata::DictionaryValue::Str("true".to_string()))),
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(
+            PowerConfiguration::from(&runtime_controlled),
+            PowerConfiguration::RuntimeControlled
+        );
+    }
+
+    #[fuchsia::test]
+    async fn process_power_elements_respects_configuration() {
+        let incoming: Incoming = namespace::Namespace::new().into();
+
+        // 1. NoElement with no handles -> NoElement
+        let (state, for_driver) =
+            Driver::process_power_elements(None, PowerConfiguration::NoElement, &incoming);
+        assert!(matches!(state, PowerElementState::NoElement));
+        assert!(for_driver.is_none());
+
+        // 2. DriverOwned with handles -> DriverOwned, runner and lessor remain in for_driver
+        let (control_client, _control_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::ElementControlMarker>();
+        let (_runner_client, runner_server) =
+            fidl::endpoints::create_endpoints::<ElementRunnerMarker>();
+        let (lessor_client, _lessor_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::LessorMarker>();
+        let pe_args = fidl_fdf::PowerElementArgs {
+            control_client: Some(control_client),
+            runner_server: Some(runner_server),
+            lessor_client: Some(lessor_client),
+            token: Some(zx::Event::create()),
+            ..Default::default()
+        };
+        let (state, for_driver) = Driver::process_power_elements(
+            Some(pe_args),
+            PowerConfiguration::DriverOwned,
+            &incoming,
+        );
+        assert!(matches!(state, PowerElementState::DriverOwned(Some(_))));
+        let pe_args = for_driver.as_ref().unwrap();
+        assert!(pe_args.control_client.is_none());
+        assert!(pe_args.runner_server.is_some());
+        assert!(pe_args.lessor_client.is_some());
+        assert!(pe_args.token.is_some());
+
+        // 3. RuntimeControlled with handles -> RuntimeControlled, only token remains in for_driver
+        let (control_client, _control_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::ElementControlMarker>();
+        let (_runner_client, runner_server) =
+            fidl::endpoints::create_endpoints::<ElementRunnerMarker>();
+        let (lessor_client, _lessor_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::LessorMarker>();
+        let pe_args = fidl_fdf::PowerElementArgs {
+            control_client: Some(control_client),
+            runner_server: Some(runner_server),
+            lessor_client: Some(lessor_client),
+            token: Some(zx::Event::create()),
+            ..Default::default()
+        };
+        let (state, for_driver) = Driver::process_power_elements(
+            Some(pe_args),
+            PowerConfiguration::RuntimeControlled,
+            &incoming,
+        );
+        assert!(matches!(state, PowerElementState::RuntimeControlled(_)));
+        let pe_args = for_driver.as_ref().unwrap();
+        assert!(pe_args.control_client.is_none());
+        assert!(pe_args.runner_server.is_none());
+        assert!(pe_args.lessor_client.is_none());
+        assert!(pe_args.token.is_some());
+
+        // 4. NoElement even if handles are provided -> NoElement and None for driver
+        let (control_client, _control_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::ElementControlMarker>();
+        let (_runner_client, runner_server) =
+            fidl::endpoints::create_endpoints::<ElementRunnerMarker>();
+        let (lessor_client, _lessor_server) =
+            fidl::endpoints::create_endpoints::<fidl_fuchsia_power_broker::LessorMarker>();
+        let pe_args = fidl_fdf::PowerElementArgs {
+            control_client: Some(control_client),
+            runner_server: Some(runner_server),
+            lessor_client: Some(lessor_client),
+            token: Some(zx::Event::create()),
+            ..Default::default()
+        };
+        let (state, for_driver) =
+            Driver::process_power_elements(Some(pe_args), PowerConfiguration::NoElement, &incoming);
+        assert!(matches!(state, PowerElementState::NoElement));
+        assert!(for_driver.is_none());
+    }
+}
+
+#[cfg(test)]
+mod health_check_tests {
+    use super::*;
+    use fdf::OnDispatcher;
+    use fidl_next::{Request, Responder, ServerDispatcher, ServerEnd as NextServerEnd};
+    use fidl_next_fuchsia_driver_framework::{DriverServerHandler, driver};
+    use std::ffi::c_void;
+    use std::num::NonZero;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    static SUSPEND_TEST_HEALTH_CHECK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    type Transport = fdf_fidl::DriverChannel<fdf::AsyncDispatcher>;
+
+    struct MockDriverServer {
+        count_calls: AtomicBool,
+        fidl_server: fidl_next::Server<fidl_next_fdf::Driver, Transport>,
+        hung_responders: Vec<Responder<driver::HealthCheck, Transport>>,
+    }
+
+    impl DriverServerHandler<Transport> for MockDriverServer {
+        async fn start(
+            &mut self,
+            request: Request<driver::Start, Transport>,
+            responder: Responder<driver::Start, Transport>,
+        ) {
+            let count_calls = request.payload().start_args.url.as_deref() == Some("suspend-test");
+            self.count_calls.store(count_calls, Ordering::SeqCst);
+            let _ = responder.respond(()).await;
+        }
+
+        async fn stop(&mut self) {
+            self.fidl_server.close();
+        }
+
+        async fn suspend(&mut self, responder: Responder<driver::Suspend, Transport>) {
+            let _ = responder.respond(()).await;
+        }
+
+        async fn resume(
+            &mut self,
+            _request: Request<driver::Resume, Transport>,
+            responder: Responder<driver::Resume, Transport>,
+        ) {
+            let _ = responder.respond(()).await;
+        }
+
+        async fn health_check(
+            &mut self,
+            request: Request<driver::HealthCheck, Transport>,
+            responder: Responder<driver::HealthCheck, Transport>,
+        ) {
+            if self.count_calls.load(Ordering::SeqCst) {
+                SUSPEND_TEST_HEALTH_CHECK_CALLS.fetch_add(1, Ordering::SeqCst);
+            }
+            match request.payload().request {
+                fidl_next_fdf::HealthCheckRequest::Ping => {
+                    // Simulate a hung driver to exercise the Ping timeout in driver-host.
+                    // Hold onto the responder without replying so `ServerDispatcher` can still
+                    // process subsequent requests (such as `Stop`) and `Responder::drop` does not
+                    // close the channel early.
+                    self.hung_responders.push(responder);
+                }
+                fidl_next_fdf::HealthCheckRequest::Deep => {
+                    let _ =
+                        responder.respond_err(fidl_next_fdf::HealthCheckError::NotSupported).await;
+                }
+                _ => {
+                    let _ = self
+                        .fidl_server
+                        .on_health_alert(fidl_next_fdf::HealthAlert::UpstreamNeighborFault(
+                            fidl_next_fdf::HealthCheckResponse {
+                                conditions: Some(vec![fidl_next_fdf::HealthCondition {
+                                    status: Some(fidl_next_fdf::HealthStatus::Degraded),
+                                    reason_code: Some("LINK_TIMEOUT".to_string()),
+                                    message: Some("neighbor link timed out".to_string()),
+                                    ..Default::default()
+                                }]),
+                                ..Default::default()
+                            },
+                        ))
+                        .await;
+                    let _ = responder
+                        .respond(fidl_next_fdf::HealthCheckResponse {
+                            conditions: Some(vec![fidl_next_fdf::HealthCondition {
+                                status: Some(fidl_next_fdf::HealthStatus::Degraded),
+                                reason_code: Some("HOST_FORWARD_OK".to_string()),
+                                last_observed: Some(7),
+                                ..Default::default()
+                            }]),
+                            ..Default::default()
+                        })
+                        .await;
+                }
+            }
+        }
+    }
+
+    unsafe extern "C" fn mock_initialize(server_handle: fdf_sys::fdf_handle_t) -> *mut c_void {
+        let root_dispatcher =
+            NonNull::new(unsafe { fdf_sys::fdf_dispatcher_get_current_dispatcher() })
+                .expect("Non-null current dispatcher");
+        let channel = unsafe {
+            fdf::Channel::<[fidl_next::Chunk]>::from_driver_handle(
+                fdf::DriverHandle::new_unchecked(
+                    NonZero::new(server_handle).expect("valid driver handle"),
+                ),
+            )
+        };
+        let root_dispatcher = unsafe { fdf::DriverDispatcherRef::from_raw(root_dispatcher) };
+        let always_on = fdf::AsyncDispatcher::new(&root_dispatcher.always_on_dispatcher());
+        let server_end: NextServerEnd<fidl_next_fdf::Driver, Transport> =
+            NextServerEnd::from_untyped(fdf_fidl::DriverChannel::new_with_dispatcher(
+                always_on.clone(),
+                channel,
+            ));
+        let dispatcher = ServerDispatcher::new(server_end);
+        let handler = MockDriverServer {
+            count_calls: AtomicBool::new(false),
+            fidl_server: dispatcher.server(),
+            hung_responders: Vec::new(),
+        };
+        always_on.spawn(async move {
+            let _ = dispatcher.run(handler).await;
+        });
+        std::ptr::dangling_mut()
+    }
+
+    unsafe extern "C" fn mock_destroy(_token: *mut c_void) {}
+
+    static MOCK_REGISTRATION: fdf_sys::DriverRegistration = fdf_sys::DriverRegistration {
+        version: fdf_sys::DRIVER_REGISTRATION_VERSION_MAX,
+        v1: fdf_sys::DriverRegistration_driver_registration_v1 {
+            initialize: Some(mock_initialize),
+            destroy: Some(mock_destroy),
+        },
+    };
+
+    fn create_test_driver(env: &fdf_env::Environment) -> Arc<Driver> {
+        // Hooks::new only reads through the pointer, so casting away const is sound here.
+        let hooks = Hooks::new((&raw const MOCK_REGISTRATION) as *mut _).unwrap();
+        let driver = Arc::new(Driver {
+            url: "fuchsia-boot:///#meta/mock.cm".to_string(),
+            node_name: "mock".to_string(),
+            runtime_handle: Mutex::new(None),
+            inner: Mutex::new(DriverInner::new(hooks, None, None, PowerElementState::NoElement)),
+        });
+        let driver_runtime_handle = env.new_driver(Arc::into_raw(driver.clone()));
+        let driver_clone = driver.clone();
+        let dispatcher = AutoReleaseDispatcher::from(
+            driver_runtime_handle
+                .new_dispatcher(
+                    fdf::DispatcherBuilder::new().name("mock-default").shutdown_observer(
+                        move |_| {
+                            let _ = driver_clone;
+                        },
+                    ),
+                )
+                .unwrap(),
+        );
+        let always_on_dispatcher = dispatcher.always_on_dispatcher();
+        driver.inner.lock().dispatcher = Some(dispatcher);
+        driver.inner.lock().always_on_dispatcher = Some(always_on_dispatcher);
+        *driver.runtime_handle.lock() = Some(driver_runtime_handle);
+        driver
+    }
+
+    /// Creates a mock driver and starts it, returning the handles a test needs to drive it and
+    /// observe its shutdown. The returned `Scope` must stay alive for the duration of the test.
+    async fn start_test_driver(
+        env: &fdf_env::Environment,
+    ) -> (Arc<Driver>, fdh::DriverProxy, oneshot::Receiver<Weak<Driver>>, fuchsia_async::Scope)
+    {
+        start_test_driver_with_args(env, fidl_fdf::DriverStartArgs::default()).await
+    }
+
+    async fn start_test_driver_with_args(
+        env: &fdf_env::Environment,
+        start_args: fidl_fdf::DriverStartArgs,
+    ) -> (Arc<Driver>, fdh::DriverProxy, oneshot::Receiver<Weak<Driver>>, fuchsia_async::Scope)
+    {
+        let scope = fuchsia_async::Scope::new();
+        let driver = create_test_driver(env);
+        let (driver_proxy, driver_server_end) =
+            fidl::endpoints::create_proxy::<fdh::DriverMarker>();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        driver.start(start_args, driver_server_end, shutdown_tx, &scope).await.unwrap();
+        (driver, driver_proxy, shutdown_rx, scope)
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_forwards_health_check() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver(&env).await;
+
+        let fast_res =
+            driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Fast).await.unwrap().unwrap();
+        let conditions = fast_res.conditions.expect("conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].status, Some(fidl_fdf::HealthStatus::Degraded));
+        assert_eq!(conditions[0].reason_code.as_deref(), Some("HOST_FORWARD_OK"));
+        assert_eq!(conditions[0].last_observed, Some(fidl::BootInstant::from_nanos(7)));
+
+        let deep_res = driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Deep).await.unwrap();
+        assert_eq!(deep_res.unwrap_err(), fidl_fdf::HealthCheckError::NotSupported);
+
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        env.destroy_all_dispatchers();
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_rejects_health_check_while_suspended() {
+        SUSPEND_TEST_HEALTH_CHECK_CALLS.store(0, Ordering::SeqCst);
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver_with_args(
+            &env,
+            fidl_fdf::DriverStartArgs {
+                url: Some("suspend-test".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        for state in [
+            DriverPowerState::SuspendRequested,
+            DriverPowerState::Suspended,
+            DriverPowerState::ResumeRequested,
+        ] {
+            driver.inner.lock().power_state = state;
+            let res = driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Fast).await.unwrap();
+            assert_eq!(res.unwrap_err(), fidl_fdf::HealthCheckError::InvalidState);
+            assert_eq!(SUSPEND_TEST_HEALTH_CHECK_CALLS.load(Ordering::SeqCst), 0);
+        }
+
+        driver.inner.lock().power_state = DriverPowerState::Resumed;
+        let fast_res =
+            driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Fast).await.unwrap().unwrap();
+        let conditions = fast_res.conditions.expect("conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].reason_code.as_deref(), Some("HOST_FORWARD_OK"));
+        assert_eq!(SUSPEND_TEST_HEALTH_CHECK_CALLS.load(Ordering::SeqCst), 1);
+
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        env.destroy_all_dispatchers();
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_health_check_timeout_and_concurrent_stop() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver(&env).await;
+
+        // Ping level hangs in MockDriverServer and must time out after 250ms in driver-host.
+        let ping_res = driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Ping).await.unwrap();
+        assert_eq!(ping_res.unwrap_err(), fidl_fdf::HealthCheckError::Timeout);
+
+        // Start another hanging health check and immediately issue Stop to verify Stop is not
+        // blocked by an in-flight HealthCheck.
+        let inflight_fut = driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Ping);
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        // The in-flight check is answered with INVALID_STATE, not cut short by the channel
+        // closing, so driver_manager never sees a two-way call end in a ZX_OK epitaph.
+        let inflight_res = inflight_fut.await.unwrap();
+        assert_eq!(inflight_res.unwrap_err(), fidl_fdf::HealthCheckError::InvalidState);
+        env.destroy_all_dispatchers();
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_in_flight_health_check_answers_invalid_state_on_suspend()
+    {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver(&env).await;
+
+        // Ping level hangs in MockDriverServer. Forward it while resumed, then suspend the driver
+        // while the check is in flight: when its 250ms deadline runs out, the completion must be
+        // answered INVALID_STATE (the driver is not resumed) rather than TIMEOUT.
+        let inflight_fut = driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Ping);
+        fuchsia_async::Timer::new(fuchsia_async::MonotonicInstant::after(
+            zx::MonotonicDuration::from_millis(50),
+        ))
+        .await;
+        driver.inner.lock().power_state = DriverPowerState::Suspended;
+        let inflight_res = inflight_fut.await.unwrap();
+        assert_eq!(inflight_res.unwrap_err(), fidl_fdf::HealthCheckError::InvalidState);
+
+        driver.inner.lock().power_state = DriverPowerState::Resumed;
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        env.destroy_all_dispatchers();
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_rejects_unknown_health_check_level() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver(&env).await;
+
+        // A level this host does not know is answered locally rather than forwarded.
+        let unknown = fidl_fdf::HealthCheckRequest::from_primitive_allow_unknown(0xdead);
+        let res = driver_proxy.health_check(unknown).await.unwrap();
+        assert_eq!(res.unwrap_err(), fidl_fdf::HealthCheckError::NotSupported);
+
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        env.destroy_all_dispatchers();
+    }
+
+    #[fuchsia::test]
+    async fn test_run_termination_watcher_forwards_on_health_alert() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, driver_proxy, shutdown_rx, _scope) = start_test_driver(&env).await;
+
+        let mut event_stream = driver_proxy.take_event_stream();
+        let _ =
+            driver_proxy.health_check(fidl_fdf::HealthCheckRequest::Fast).await.unwrap().unwrap();
+
+        let event = event_stream.try_next().await.unwrap().expect("expected OnHealthAlert event");
+        let fdh::DriverEvent::OnHealthAlert { alert } = event;
+        let fidl_fdf::HealthAlert::UpstreamNeighborFault(details) = alert else {
+            panic!("expected UpstreamNeighborFault, got {alert:?}");
+        };
+        let conditions = details.conditions.expect("expected alert conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].status, Some(fidl_fdf::HealthStatus::Degraded));
+        assert_eq!(conditions[0].reason_code.as_deref(), Some("LINK_TIMEOUT"));
+        assert_eq!(conditions[0].message.as_deref(), Some("neighbor link timed out"));
+
+        driver_proxy.stop().unwrap();
+        drop(driver);
+        shutdown_rx.await.unwrap();
+        env.destroy_all_dispatchers();
     }
 }

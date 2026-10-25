@@ -8,8 +8,9 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 from daemon.daemon import CommandHandlerRegistry, Daemon
+from daemon.handlers import start
 from daemon.state import Process, Thread
-from pydap.client import DapClient, DapError
+from pydap.client import DapError
 from pydap.dap_types import Breakpoint, Source, StackFrame
 from pydap.models import (
     DataBreakpointInfoResponse,
@@ -36,6 +37,7 @@ from shared.protocol.async_backtrace import (
     AsyncBacktraceResponse,
 )
 from shared.protocol.attach import AttachRequest
+from shared.protocol.console import ConsoleRequest, ConsoleResponse
 from shared.protocol.continue_request import ContinueRequest
 from shared.protocol.evaluate import EvaluateRequest, EvaluateResponse
 from shared.protocol.finish import FinishRequest
@@ -46,12 +48,17 @@ from shared.protocol.stack_trace import (
     StackTraceRequest,
     ThreadStackTraceResponse,
 )
+from shared.protocol.start import StartRequest
 from shared.protocol.step_in import StepInRequest
 from shared.protocol.threads import ThreadsRequest
 from shared.protocol.variables import VariablesRequest
 from zxdb_dap import (
     AsyncTaskNode,
+    ZxdbConsoleCommandArguments,
+    ZxdbDapClient,
     ZxdbPauseArguments,
+    ZxdbStackFrame,
+    ZxdbStackTraceArguments,
 )
 
 
@@ -895,11 +902,16 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resp.success)
         self.assertEqual(daemon.threads, {})
 
+    @patch("daemon.daemon.UDS_PATH")
     @patch("daemon.daemon.asyncio.start_unix_server")
     @patch("daemon.daemon.ZxdbDapClient")
     async def test_run_cleanup_detach_on_existing_session(
-        self, mock_dap_client_class: Mock, mock_start_unix_server: Mock
+        self,
+        mock_dap_client_class: Mock,
+        mock_start_unix_server: Mock,
+        mock_uds_path: Mock,
     ) -> None:
+        mock_uds_path.exists.return_value = False
         mock_dap_client = mock_dap_client_class.return_value
         mock_dap_client.zxdb_detach = AsyncMock()
         mock_dap_client.close = AsyncMock()
@@ -1254,6 +1266,138 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
         mock_dap_client.evaluate.assert_called_once()
 
     @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_console_without_thread_id(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+
+        mock_cmd_resp = Mock()
+        mock_cmd_resp.success = True
+        mock_cmd_resp.body.output = "Process 1 symbol status\n"
+        mock_dap_client.zxdb_console_command = AsyncMock(
+            return_value=mock_cmd_resp
+        )
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        resp = await daemon.registry.handle(
+            "console",
+            ConsoleRequest(input="sym-stat"),
+        )
+
+        self.assertTrue(resp.success)
+        self.assertIsNotNone(resp.body)
+        assert isinstance(resp.body, ConsoleResponse)
+        self.assertEqual(resp.body.output, "Process 1 symbol status\n")
+        mock_dap_client.stack_trace.assert_not_called()
+        mock_dap_client.zxdb_console_command.assert_called_once_with(
+            ZxdbConsoleCommandArguments(command="sym-stat", frame_id=None)
+        )
+
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_console_with_thread_and_frame(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+
+        mock_stack_resp = Mock()
+        mock_frame_0 = Mock()
+        mock_frame_0.id = 41
+        mock_frame_1 = Mock()
+        mock_frame_1.id = 42
+        mock_stack_resp.body.stack_frames = [mock_frame_0, mock_frame_1]
+        mock_dap_client.stack_trace = AsyncMock(return_value=mock_stack_resp)
+
+        mock_cmd_resp = Mock()
+        mock_cmd_resp.success = True
+        mock_cmd_resp.body.output = "rax = 0x1\n"
+        mock_dap_client.zxdb_console_command = AsyncMock(
+            return_value=mock_cmd_resp
+        )
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+        daemon.get_or_create_thread(1).is_stopped = True
+
+        resp = await daemon.registry.handle(
+            "console",
+            ConsoleRequest(input="regs", thread_id=1, frame_index=1),
+        )
+
+        self.assertTrue(resp.success)
+        self.assertIsNotNone(resp.body)
+        assert isinstance(resp.body, ConsoleResponse)
+        self.assertEqual(resp.body.output, "rax = 0x1\n")
+        mock_dap_client.stack_trace.assert_called_once()
+        mock_dap_client.zxdb_console_command.assert_called_once_with(
+            ZxdbConsoleCommandArguments(command="regs", frame_id=42)
+        )
+
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_console_frame_out_of_range(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+
+        mock_stack_resp = Mock()
+        mock_frame_0 = Mock()
+        mock_frame_0.id = 41
+        mock_stack_resp.body.stack_frames = [mock_frame_0]
+        mock_dap_client.stack_trace = AsyncMock(return_value=mock_stack_resp)
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+        daemon.get_or_create_thread(1).is_stopped = True
+
+        resp = await daemon.registry.handle(
+            "console",
+            ConsoleRequest(input="regs", thread_id=1, frame_index=5),
+        )
+
+        self.assertFalse(resp.success)
+        self.assertIn("out of range", resp.message or "")
+        mock_dap_client.zxdb_console_command.assert_not_called()
+
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_console_frame_index_without_thread_id(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        resp = await daemon.registry.handle(
+            "console",
+            ConsoleRequest(input="regs", thread_id=None, frame_index=2),
+        )
+
+        self.assertFalse(resp.success)
+        self.assertIn("thread_id is required", resp.message or "")
+        mock_dap_client.zxdb_console_command.assert_not_called()
+
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_console_dap_error(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+        mock_dap_client.zxdb_console_command = AsyncMock(
+            side_effect=DapError("not a valid verb")
+        )
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        resp = await daemon.registry.handle(
+            "console",
+            ConsoleRequest(input="bad_cmd"),
+        )
+
+        self.assertFalse(resp.success)
+        self.assertIn("not a valid verb", resp.message or "")
+
+    @patch("daemon.daemon.ZxdbDapClient")
     async def test_handle_stack_trace_elides_subtle_frames(
         self, mock_dap_client_class: Mock
     ) -> None:
@@ -1261,7 +1405,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp = Mock()
         mock_stack_resp.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=1,
                 name="f1",
                 line=1,
@@ -1269,7 +1413,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=2,
                 name="f2",
                 line=2,
@@ -1279,7 +1423,9 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         mock_stack_resp.body.total_frames = 2
-        mock_dap_client.stack_trace = AsyncMock(return_value=mock_stack_resp)
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
+            return_value=mock_stack_resp
+        )
 
         daemon = Daemon(port=15678)
         daemon.zxdb_writer = Mock()
@@ -1318,7 +1464,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp = Mock()
         mock_stack_resp.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=1,
                 name="f1",
                 line=1,
@@ -1326,7 +1472,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=2,
                 name="f2",
                 line=2,
@@ -1334,7 +1480,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=3,
                 name="f3",
                 line=3,
@@ -1342,7 +1488,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="normal",
                 source=None,
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=4,
                 name="f4",
                 line=4,
@@ -1350,7 +1496,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="C++ stdlib"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=5,
                 name="f5",
                 line=5,
@@ -1360,7 +1506,9 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         mock_stack_resp.body.total_frames = 5
-        mock_dap_client.stack_trace = AsyncMock(return_value=mock_stack_resp)
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
+            return_value=mock_stack_resp
+        )
 
         daemon = Daemon(port=15678)
         daemon.zxdb_writer = Mock()
@@ -1390,7 +1538,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp = Mock()
         mock_stack_resp.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=1,
                 name="f1",
                 line=1,
@@ -1398,7 +1546,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="normal",
                 source=None,
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=2,
                 name="f2",
                 line=2,
@@ -1406,7 +1554,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="normal",
                 source=None,
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=3,
                 name="f3",
                 line=3,
@@ -1414,7 +1562,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=4,
                 name="f4",
                 line=4,
@@ -1422,7 +1570,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=5,
                 name="f5",
                 line=5,
@@ -1432,7 +1580,9 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         mock_stack_resp.body.total_frames = 5
-        mock_dap_client.stack_trace = AsyncMock(return_value=mock_stack_resp)
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
+            return_value=mock_stack_resp
+        )
 
         daemon = Daemon(port=15678)
         daemon.zxdb_writer = Mock()
@@ -1457,6 +1607,54 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(frames[3].frame_index, 4)
 
     @patch("daemon.daemon.ZxdbDapClient")
+    async def test_handle_stack_trace_unwinder_and_trust(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        mock_dap_client = mock_dap_client_class.return_value
+
+        mock_stack_resp = Mock()
+        mock_stack_resp.body.stack_frames = [
+            ZxdbStackFrame(
+                id=1,
+                name="f1",
+                line=10,
+                column=1,
+                presentation_hint="normal",
+                source=None,
+                trust="FP",
+            ),
+        ]
+        mock_stack_resp.body.total_frames = 1
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
+            return_value=mock_stack_resp
+        )
+
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        with patch.object(daemon, "ensure_stopped", new_callable=AsyncMock):
+            resp = await daemon.registry.handle(
+                "stack-trace",
+                StackTraceRequest(
+                    thread_id=1,
+                    force_remote_unwind=True,
+                    unwinder="fp",
+                ),
+            )
+
+            self.assertTrue(resp.success)
+            mock_dap_client.zxdb_stack_trace.assert_called_once_with(
+                ZxdbStackTraceArguments(
+                    thread_id=1,
+                    remote_unwind=True,
+                    unwinder="fp",
+                )
+            )
+            assert isinstance(resp.body, ThreadStackTraceResponse)
+            self.assertEqual(len(resp.body.stack_frames), 1)
+            self.assertEqual(resp.body.stack_frames[0].trust, "FP")
+
+    @patch("daemon.daemon.ZxdbDapClient")
     async def test_handle_stack_trace_exception(
         self, mock_dap_client_class: Mock
     ) -> None:
@@ -1465,9 +1663,9 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
         mock_dap_client._send_request = AsyncMock(
             return_value={"invalid": "response_structure"}
         )
-        # Real stack_trace calls _send_request and model_validate
-        mock_dap_client.stack_trace = lambda args: DapClient.stack_trace(
-            mock_dap_client, args
+        # Real zxdb_stack_trace calls _send_request and model_validate
+        mock_dap_client.zxdb_stack_trace = (
+            lambda args: ZxdbDapClient.zxdb_stack_trace(mock_dap_client, args)
         )
 
         daemon = Daemon(port=15678)
@@ -1490,7 +1688,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp_1 = Mock()
         mock_stack_resp_1.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=1,
                 name="f1",
                 line=1,
@@ -1498,7 +1696,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
                 presentation_hint="subtle",
                 source=Source(origin="Rust panic"),
             ),
-            StackFrame(
+            ZxdbStackFrame(
                 id=2,
                 name="f2",
                 line=2,
@@ -1511,7 +1709,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp_2 = Mock()
         mock_stack_resp_2.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=3,
                 name="worker_func",
                 line=3,
@@ -1522,7 +1720,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
         ]
         mock_stack_resp_2.body.total_frames = 1
 
-        mock_dap_client.stack_trace = AsyncMock(
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
             side_effect=[mock_stack_resp_1, mock_stack_resp_2]
         )
 
@@ -1602,7 +1800,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
 
         mock_stack_resp_1 = Mock()
         mock_stack_resp_1.body.stack_frames = [
-            StackFrame(
+            ZxdbStackFrame(
                 id=1,
                 name="func_ok",
                 line=1,
@@ -1613,7 +1811,7 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
         ]
         mock_stack_resp_1.body.total_frames = 1
 
-        mock_dap_client.stack_trace = AsyncMock(
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
             side_effect=[mock_stack_resp_1, Exception("Thread exited")]
         )
 
@@ -2511,6 +2709,120 @@ class TestCommandHandlerRegistry(unittest.IsolatedAsyncioTestCase):
             )
             mock_stack.assert_not_called()
             assert_state_unchanged()
+
+    def test_update_resumed_threads_clears_orphan_threads(self) -> None:
+        """Verifies whole-system resume clears stopped state on orphan threads."""
+        daemon = Daemon(port=15678)
+        bound_thread = daemon.get_or_create_thread(
+            101, process_id=1001, is_stopped=True
+        )
+        orphan_thread = daemon.get_or_create_thread(
+            102, process_id=None, is_stopped=True
+        )
+        self.assertTrue(bound_thread.is_stopped)
+        self.assertTrue(orphan_thread.is_stopped)
+
+        daemon.update_resumed_threads(thread_id=101, single_thread=False)
+
+        self.assertFalse(bound_thread.is_stopped)
+        self.assertFalse(orphan_thread.is_stopped)
+
+
+class TestDaemonStart(unittest.IsolatedAsyncioTestCase):
+    @patch("daemon.handlers.start.portpicker.pick_unused_port")
+    async def test_start_handler_port_allocation(self, mock_pick: Mock) -> None:
+        mock_pick.return_value = 54321
+        daemon = Daemon(port=None)
+
+        # Select an unused port dynamically when starting a new session without
+        # an explicit port.
+        req1 = StartRequest(connect=False)
+        with patch.object(
+            daemon, "_check_already_running", return_value=None
+        ), patch.object(
+            daemon, "_start_dap_server", new_callable=AsyncMock
+        ) as mock_start_server, patch.object(
+            daemon, "_connect_to_dap", new_callable=AsyncMock, return_value=True
+        ):
+            resp1 = await start.handle(daemon, req1)
+            self.assertTrue(resp1.success)
+            self.assertEqual(daemon.port, 54321)
+
+        # Fall back to DEFAULT_DAP_PORT when attaching without an explicit port.
+        daemon2 = Daemon(port=None)
+        req2 = StartRequest(connect=True)
+        with patch.object(
+            daemon2, "_check_already_running", return_value=None
+        ), patch.object(
+            daemon2,
+            "_connect_to_dap",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            resp2 = await start.handle(daemon2, req2)
+            self.assertTrue(resp2.success)
+            self.assertEqual(daemon2.port, 15678)
+
+        # Honor the user-specified custom port when connecting to an
+        # existing DAP server.
+        daemon3 = Daemon(port=None)
+        req3 = StartRequest(connect=True, port=9999)
+        with patch.object(
+            daemon3, "_check_already_running", return_value=None
+        ), patch.object(
+            daemon3,
+            "_connect_to_dap",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            resp3 = await start.handle(daemon3, req3)
+            self.assertTrue(resp3.success)
+            self.assertEqual(daemon3.port, 9999)
+
+        # Respect explicitly provided port configuration.
+        daemon4 = Daemon(port=None)
+        req4 = StartRequest(connect=False, port=9999)
+        with patch.object(
+            daemon4, "_check_already_running", return_value=None
+        ), patch.object(
+            daemon4, "_start_dap_server", new_callable=AsyncMock
+        ) as mock_start_server, patch.object(
+            daemon4,
+            "_connect_to_dap",
+            new_callable=AsyncMock,
+            return_value=True,
+        ):
+            resp4 = await start.handle(daemon4, req4)
+            self.assertTrue(resp4.success)
+            self.assertEqual(daemon4.port, 9999)
+
+    @patch("daemon.daemon.FfxCmd")
+    @patch("daemon.daemon.package_server")
+    async def test_start_dap_server_early_exit(
+        self, mock_package_server: Mock, mock_ffx_cmd: Mock
+    ) -> None:
+        mock_package_server.is_running = AsyncMock(return_value=False)
+        mock_package_server.ephemeral_repository_name = Mock(
+            return_value="zxdb-123"
+        )
+        mock_package_server.start = AsyncMock()
+
+        # Simulate early exit by having run_to_completion() return quickly
+        # without sending SIGUSR1.
+        mock_dap_proc = AsyncMock()
+        mock_output = Mock()
+        mock_output.return_code = 123
+        mock_dap_proc.run_to_completion = AsyncMock(return_value=mock_output)
+        mock_ffx_cmd.return_value.start = AsyncMock(return_value=mock_dap_proc)
+
+        daemon = Daemon(port=15678)
+
+        resp = await daemon._start_dap_server()
+
+        self.assertIsNotNone(resp)
+        assert resp is not None
+        self.assertFalse(resp.success)
+        self.assertEqual(resp.message, "zxdb exited early with code 123")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 use crate::fuchsia::device::BlockServer;
 use crate::fuchsia::dirent_cache::DirentCacheKey;
 use crate::fuchsia::errors::map_to_status;
-use crate::fuchsia::file::FxFile;
+use crate::fuchsia::file::{FlushType, FxFile};
 use crate::fuchsia::node::{FxNode, GetResult, OpenedNode};
 use crate::fuchsia::symlink::FxSymlink;
 use crate::fuchsia::volume::{FxVolume, RootDir};
@@ -860,7 +860,7 @@ impl MutableDirectory for FxDirectory {
                     self.store().store_object_id(),
                     self.directory.object_id()
                 )],
-                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
+                Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
             )
             .await
             .map_err(map_to_status)?;
@@ -874,6 +874,7 @@ impl MutableDirectory for FxDirectory {
 
     async fn sync(&self) -> Result<(), zx::Status> {
         // FDIO implements `syncfs` by calling sync on a directory, so replicate that behaviour.
+        self.volume().flush_all_files(FlushType::Sync).await;
         self.volume()
             .store()
             .filesystem()
@@ -6125,6 +6126,137 @@ mod tests {
         // When the connection is closed, the strong reference is dropped, which invokes
         // FxSymlink's Drop implementation and removes it from the node cache.
         assert!(!volume.cache().contains_key(symlink_id));
+
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_sync_flushes_file_data() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let volume = fixture.volume().volume();
+
+        let file = open_file_checked(
+            root,
+            "test_file",
+            fio::Flags::FLAG_MAYBE_CREATE | fio::PERM_READABLE | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+
+        let (_mutable, immutable) = file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("transport error on get_attributes")
+            .expect("get_attributes failed");
+        let file_id = immutable.id.unwrap();
+
+        let node = volume
+            .cache()
+            .get(file_id)
+            .expect("Node should be cached")
+            .into_any()
+            .downcast::<FxFile>()
+            .unwrap();
+
+        file::write(&file, b"hello world").await.expect("write failed");
+
+        assert!(node.handle().needs_flush());
+
+        root.sync()
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("sync failed");
+
+        assert!(!node.handle().needs_flush());
+
+        close_file_checked(file).await;
+        drop(node);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_large_symlink_attributes_and_target() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let block_size = fixture.fs().block_size();
+
+        assert_eq!(
+            root.create_symlink("too_big", &vec![b'a'; 4094], None)
+                .await
+                .expect("FIDL call failed")
+                .expect_err("too big symlink target should fail"),
+            zx::Status::BAD_PATH.into_raw(),
+        );
+
+        let inline_target = vec![b'i'; 256];
+        let spilled_target = vec![b's'; 4093];
+
+        let crypt: Arc<CryptBase> = fixture.crypt().unwrap();
+        crypt
+            .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
+            .expect("Failed to add wrapping key");
+        let fscrypt_dir = open_dir_checked(
+            &root,
+            "fscrypt_dir",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_DIRECTORY,
+            Default::default(),
+        )
+        .await;
+        fscrypt_dir
+            .update_attributes(&fio::MutableNodeAttributes {
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier: WRAPPING_KEY_ID,
+                    flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::ok)
+            .expect("update_attributes failed");
+
+        for dir in [&root, &fscrypt_dir] {
+            let (inline_proxy, inline_server) = create_proxy::<fio::SymlinkMarker>();
+            dir.create_symlink("inline_symlink", &inline_target, Some(inline_server))
+                .await
+                .expect("FIDL call failed")
+                .expect("create_symlink failed");
+
+            let (spilled_proxy, spilled_server) = create_proxy::<fio::SymlinkMarker>();
+            dir.create_symlink("spilled_symlink", &spilled_target, Some(spilled_server))
+                .await
+                .expect("FIDL call failed")
+                .expect("create_symlink failed");
+
+            let inline_info = inline_proxy.describe().await.expect("describe failed");
+            assert_eq!(inline_info.target.as_deref(), Some(inline_target.as_slice()));
+            let (_, inline_immutable) = inline_proxy
+                .get_attributes(
+                    fio::NodeAttributesQuery::CONTENT_SIZE | fio::NodeAttributesQuery::STORAGE_SIZE,
+                )
+                .await
+                .expect("FIDL call failed")
+                .expect("get_attributes failed");
+            assert_eq!(inline_immutable.content_size, Some(256));
+            assert_eq!(inline_immutable.storage_size, Some(0));
+
+            let spilled_info = spilled_proxy.describe().await.expect("describe failed");
+            assert_eq!(spilled_info.target.as_deref(), Some(spilled_target.as_slice()));
+            let (_, spilled_immutable) = spilled_proxy
+                .get_attributes(
+                    fio::NodeAttributesQuery::CONTENT_SIZE | fio::NodeAttributesQuery::STORAGE_SIZE,
+                )
+                .await
+                .expect("FIDL call failed")
+                .expect("get_attributes failed");
+            assert_eq!(spilled_immutable.content_size, Some(4093));
+            assert_eq!(spilled_immutable.storage_size, Some(block_size.get()));
+        }
 
         fixture.close().await;
     }

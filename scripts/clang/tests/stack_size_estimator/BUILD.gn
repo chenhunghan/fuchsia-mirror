@@ -10,9 +10,7 @@ if (is_host) {
     sources = [
       "test_call_graph.json",
       "test_combined.json",
-      "test_config.json",
       "test_indirect.json",
-      "test_input.json",
       "test_stack_sizes.json",
     ]
     outputs = [ "$target_out_dir/test_data/{{source_file_part}}" ]
@@ -25,7 +23,6 @@ if (is_host) {
       "//scripts/clang/stack_size_estimator/call_graph.py",
       "//scripts/clang/stack_size_estimator/graph.py",
       "//scripts/clang/stack_size_estimator/stack_estimator.py",
-      "//scripts/clang/stack_size_estimator/symbolizer.py",
     ]
     testdata_dir = "$target_out_dir/test_data"
     deps = [ ":test_data" ]

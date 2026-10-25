@@ -10,6 +10,7 @@ use crate::mm::{FutexTable, MappingSummary, MlockPinFlavor};
 use crate::power::{SuspendResumeManagerHandle, create_watcher_for_wake_events};
 use crate::ptrace::StopState;
 use crate::security::{self, AuditLogger};
+use crate::signals::SignalInfo;
 use crate::task::container_namespace::ContainerNamespace;
 use crate::task::limits::SystemLimits;
 use crate::task::memory_attribution::MemoryAttributionManager;
@@ -17,8 +18,8 @@ use crate::task::net::NetstackDevices;
 use crate::task::tracing::TracePerformanceEventManager;
 use crate::task::{
     AbstractUnixSocketNamespace, AbstractVsockSocketNamespace, CurrentTask, DelayedReleaser,
-    IpTables, KernelCgroups, KernelStats, KernelThreads, PidTable, SchedulerManager, Syslog, Task,
-    ThreadGroup, UtsNamespace, UtsNamespaceHandle,
+    ExitStatus, IpTables, KernelCgroups, KernelStats, KernelThreads, PidTable, SchedulerManager,
+    Syslog, Task, ThreadGroup, UtsNamespace, UtsNamespaceHandle,
 };
 use crate::time::{HrTimerManager, HrTimerManagerHandle};
 use crate::vdso::vdso_loader::Vdso;
@@ -57,6 +58,7 @@ use starnix_sync::{
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::{Errno, errno};
 use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::signals::SIGKILL;
 use starnix_uapi::{VMADDR_CID_HOST, from_status_like_fdio};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -66,13 +68,25 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use zx::CpuFeatureFlags;
+use zx::{CpuFeatureFlags, CpuSveFeatureFlags};
+
+/// Host kernel free-memory watermarks (in MiB) configured via Product Assembly
+/// (`platform.kernel.oom`) and routed to `starnix_kernel` as structured configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OomWatermarksMb {
+    pub out_of_memory_mb: u32,
+    pub critical_mb: u32,
+    pub warning_mb: u32,
+}
 
 /// Kernel features are specified in the component manifest of the starnix container
 /// or explicitly provided to the kernel constructor in tests.
 #[derive(Debug, Default, Clone)]
 pub struct KernelFeatures {
     pub bpf_v2: bool,
+
+    /// Whether the `devtmpfs` filesystem and automatic device node creation are enabled.
+    pub devtmpfs: bool,
 
     /// Whether the kernel supports the S_ISUID and S_ISGID bits.
     ///
@@ -140,6 +154,14 @@ pub struct KernelFeatures {
 
     /// Whether to log unexpected lookup misses in `sysfs` via `track_stub_log!`.
     pub log_sysfs_lookup_misses: bool,
+
+    /// Free-memory watermarks (in MiB) for `/proc/zoneinfo`.
+    pub oom_watermarks_mb: Option<OomWatermarksMb>,
+
+    /// Paths of executables whose processes are stopped only after all other processes except init
+    /// have exited when the kernel shuts down, e.g. one that writes crash dumps for processes that
+    /// crash during shutdown. See `Kernel::run_shutdown()`.
+    pub stop_last_on_shutdown: Vec<FsString>,
 }
 
 impl KernelFeatures {
@@ -156,10 +178,20 @@ impl KernelFeatures {
     }
 }
 
-/// Kernel command line argument structure
+/// Kernel command line or module argument structure (`name` or `name=value`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArgNameAndValue<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
+}
+
+impl<'a> From<&'a str> for ArgNameAndValue<'a> {
+    fn from(arg: &'a str) -> Self {
+        match arg.split_once('=') {
+            Some((name, value)) => Self { name, value: Some(value) },
+            None => Self { name: arg, value: None },
+        }
+    }
 }
 
 type DeferredDropCallback = Box<dyn FnOnce() + Send + Sync>;
@@ -236,6 +268,21 @@ impl<'a> Drop for MountsWriteGuard<'a> {
         }
     }
 }
+
+/// Maximum time after shutdown starts before deferred-shutdown processes receive SIGKILL.
+///
+/// Deferred-shutdown processes are processes that are still handling a core-dump signal
+/// when their normal shutdown SIGKILL timeout expires (e.g., while writing a crash dump),
+/// along with any child processes they spawn. See `ThreadGroup::shut_down()`.
+///
+/// `component_manager` forcibly kills the container if it does not stop within 5s by
+/// default, which skips filesystem unmounts and `on_stop`. Setting this timeout to 3s
+/// gives crash dumps time to finish (typically 1-2.5s in testing) while leaving 2s for
+/// the remaining shutdown steps (`stop_last_on_shutdown` processes, `init`, unmounts,
+/// and `on_stop`, which took up to 0.6s in testing).
+// TODO(https://fxbug.dev/574471394): Remove once non-forced shutdown lets the container
+// run its own shutdown sequence.
+const DEFERRED_SHUTDOWN_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(3);
 
 /// The shared, mutable state for the entire Starnix kernel.
 ///
@@ -403,8 +450,8 @@ pub struct Kernel {
     /// Handler for crashing Linux processes.
     pub crash_reporter: CrashReporter,
 
-    /// Whether this kernel is shutting down. When shutting down, new processes may not be spawned.
-    shutting_down: AtomicBool,
+    /// When this kernel started shutting down, if it has. See `run_shutdown()`.
+    shutdown_start: OnceLock<zx::MonotonicInstant>,
 
     /// True to disable syslog access to unprivileged callers.  This also controls whether read
     /// access to /dev/kmsg requires privileged capabilities.
@@ -548,7 +595,12 @@ impl Kernel {
                 log_debug!("CPU feature flags are only supported on ARM64: {}, reporting 0", e);
                 CpuFeatureFlags::empty()
             });
-        let hwcaps = HwCaps::from_cpu_feature_flags(cpu_feature_flags);
+        let cpu_sve_feature_flags = zx::system_get_feature_flags::<CpuSveFeatureFlags>()
+            .unwrap_or_else(|e| {
+                log_debug!("CPU SVE feature flags failed: {}, reporting 0", e);
+                CpuSveFeatureFlags::empty()
+            });
+        let hwcaps = HwCaps::from_cpu_feature_flags(cpu_feature_flags, cpu_sve_feature_flags);
 
         let this = Arc::new_cyclic(|kernel| Kernel {
             weak_self: kernel.clone(),
@@ -599,7 +651,7 @@ impl Kernel {
             hrtimer_manager,
             memory_attribution_manager: MemoryAttributionManager::new(kernel.clone()),
             crash_reporter,
-            shutting_down: AtomicBool::new(false),
+            shutdown_start: OnceLock::new(),
             container_control_handle: Default::default(),
             ebpf_state: Default::default(),
             cgroups: Default::default(),
@@ -665,8 +717,10 @@ impl Kernel {
     ///
     /// Shutdown happens in several phases:
     ///
-    /// 1. Disable launching new processes
-    /// 2. Shut down individual ThreadGroups until only the init and system tasks remain
+    /// 1. Stop processes from being created, except by deferred shutdown processes until the
+    ///    deferred shutdown deadline
+    /// 2. Shut down individual ThreadGroups until only the init and system tasks remain, stopping
+    ///    the `stop_last_on_shutdown` ones last
     /// 3. Repeat the above for the init task
     /// 4. Clean up kernel-internal structures that can hold processes alive
     /// 5. Ensure this process is the only one running in the kernel job.
@@ -683,28 +737,50 @@ impl Kernel {
         const INIT_PID: i32 = 1;
         const SYSTEM_TASK_PID: i32 = 2;
 
-        // Step 1: Prevent new processes from being created once they observe this update. We don't
-        // want the thread driving shutdown to be racing with other threads creating new processes.
-        if self
-            .shutting_down
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        // Step 1: From here on, only deferred shutdown processes may create processes, and only
+        // until the deferred shutdown deadline (see `create_zircon_process()`). This keeps Step 2
+        // finite: each round waits for its thread groups to exit, and after the deadline no new
+        // ones can appear.
+        if self.shutdown_start.set(zx::MonotonicInstant::get()).is_err() {
             log_info!("Additional thread tried to initiate shutdown while already in-progress.");
             return;
         }
+        let deferred_shutdown_deadline =
+            self.deferred_shutdown_deadline().expect("shutdown has started");
 
         log_info!("Shutting down Starnix kernel.");
 
         // Step 2: Shut down thread groups in a loop until init and the system task are all that
-        // remain.
+        // remain. Processes running a `stop_last_on_shutdown` executable are kept until everything
+        // else has exited, e.g. so that processes that crash during shutdown can still have their
+        // crash dumps written.
+        // TODO(https://fxbug.dev/574471394): Remove once a shutdown that isn't forced lets the
+        // container run its own shutdown sequence.
+        let stop_last = &self.features.stop_last_on_shutdown;
+        let is_stop_last = |tg: &ThreadGroup| {
+            let exe = tg.read().first_task().and_then(|task| task.mm().ok());
+            let exe = exe.and_then(|mm| mm.executable_node());
+            exe.is_some_and(|exe| stop_last.contains(&exe.path_escaping_chroot()))
+        };
+        let mut keep_stop_last = !stop_last.is_empty();
         loop {
-            let tgs = self
-                .pids
-                .get_thread_groups(&RcuReadScope::new())
-                .filter(|tg| tg.leader.id != SYSTEM_TASK_PID && tg.leader.id != INIT_PID)
+            // Collect under the pid table lock so that no process is caught while it's being
+            // created. `is_stop_last()` runs after the lock is released.
+            let tgs = {
+                let pids = self.pids.lock();
+                pids.get_thread_groups(&RcuReadScope::new())
+                    .filter(|tg| tg.leader.id != SYSTEM_TASK_PID && tg.leader.id != INIT_PID)
+                    .collect::<Vec<_>>()
+            };
+            let tgs = tgs
+                .into_iter()
+                .filter(|tg| !(keep_stop_last && is_stop_last(tg)))
                 .collect::<Vec<_>>();
             if tgs.is_empty() {
+                if keep_stop_last {
+                    keep_stop_last = false;
+                    continue;
+                }
                 log_info!("pid table is empty except init and system task");
                 break;
             }
@@ -712,7 +788,10 @@ impl Kernel {
             log_info!(tgs:?; "shutting down thread groups");
             let mut tasks = vec![];
             for tg in tgs {
-                let task = fasync::Task::local(ThreadGroup::shut_down(Arc::downgrade(&tg)));
+                let task = fasync::Task::local(ThreadGroup::shut_down(
+                    Arc::downgrade(&tg),
+                    deferred_shutdown_deadline,
+                ));
                 tasks.push(task);
             }
             futures::future::join_all(tasks).await;
@@ -722,7 +801,9 @@ impl Kernel {
         let maybe_init = self.get_init_task().ok().map(|t| Arc::downgrade(&t.thread_group));
         if let Some(init) = maybe_init {
             log_info!("shutting down init");
-            ThreadGroup::shut_down(init).await;
+            ThreadGroup::shut_down(init, deferred_shutdown_deadline).await;
+            // If init forked while handling a core-dump signal, its children can outlive it.
+            self.kill_processes_created_during_shutdown();
         } else {
             log_info!("init already terminated");
         }
@@ -812,7 +893,35 @@ impl Kernel {
     }
 
     pub fn is_shutting_down(&self) -> bool {
-        self.shutting_down.load(Ordering::Acquire)
+        self.shutdown_start.get().is_some()
+    }
+
+    /// Until when deferred shutdown processes may keep running and create processes, or `None` if
+    /// the kernel is not shutting down. See `ThreadGroup::shut_down()`.
+    pub fn deferred_shutdown_deadline(&self) -> Option<zx::MonotonicInstant> {
+        self.shutdown_start.get().map(|start| *start + DEFERRED_SHUTDOWN_TIMEOUT)
+    }
+
+    /// SIGKILLs every process created during shutdown, all of which deferred shutdown processes
+    /// created (e.g. crash dumpers). See `ThreadGroup::shut_down()`.
+    ///
+    /// A dumper that outlives the process it dumps fails, gets reported as a crash and can keep
+    /// that process stopped under ptrace while it does. Processes still handling a core-dump signal
+    /// aren't killed here: after their dumper exits, their handler re-raises the signal so Starnix
+    /// files a crash report, the only record of a crash whose dump missed the deadline. Their own
+    /// `ThreadGroup::shut_down()` gives them a moment to do so before sending SIGKILL.
+    pub fn kill_processes_created_during_shutdown(&self) {
+        // Collect under the pid table lock so that a process being created (which holds it from
+        // the deadline check until its first task is added) is either fully added or not created.
+        let created = {
+            let pids = self.pids.lock();
+            pids.get_thread_groups(&RcuReadScope::new())
+                .filter(|tg| tg.created_during_shutdown.load(Ordering::Relaxed))
+                .collect::<Vec<_>>()
+        };
+        for tg in created {
+            tg.kill(ExitStatus::Kill(SignalInfo::kernel(SIGKILL)), None);
+        }
     }
 
     pub fn allow_unprivileged_bpf(&self) -> bool {
@@ -1027,13 +1136,13 @@ impl Kernel {
                 let set_properties = |node: &fuchsia_inspect::Node| {
                     node.record_string("command", task.command().to_string());
 
-                    let scheduler_state = task.read().scheduler_state.clone();
+                    let scheduler_state = task.scheduler_state.lock().clone();
                     if !scheduler_state.is_default() {
                         node.record_child("sched", |node| {
                             node.record_string(
                                 "role_name",
                                 self.scheduler
-                                    .role_name(&task)
+                                    .role_name(&task, &scheduler_state)
                                     .map(|n| Cow::Borrowed(n))
                                     .unwrap_or_else(|e| Cow::Owned(e.to_string())),
                             );
@@ -1123,11 +1232,7 @@ impl Kernel {
 
     /// Returns an iterator of the command line arguments.
     pub fn cmdline_args_iter(&self) -> impl Iterator<Item = ArgNameAndValue<'_>> {
-        parse_cmdline(self.cmdline.to_str().unwrap_or_default()).filter_map(|arg| {
-            arg.split_once('=')
-                .map(|(name, value)| ArgNameAndValue { name: name, value: Some(value) })
-                .or(Some(ArgNameAndValue { name: arg, value: None }))
-        })
+        parse_cmdline(self.cmdline.to_str().unwrap_or_default()).map(ArgNameAndValue::from)
     }
 
     /// Returns the container-configured CacheConfig.
@@ -1210,11 +1315,23 @@ fn arm32_hwcap(cpu_feature_flags: CpuFeatureFlags) -> HwCap {
             _ => {}
         }
     }
+    // Both FEAT_FHM and FEAT_SVE architecturally require FEAT_FP16 (which is defined for both
+    // AArch64 and AArch32 execution states).
+    // TODO(https://fxbug.dev/42081850): Expose a dedicated `ZX_ARM64_FEATURE_ISA_FP16` flag from
+    // Zircon so standalone Armv8.2 FEAT_FP16 cores without FHM or SVE also report FP16 hwcaps.
+    if cpu_feature_flags
+        .intersects(CpuFeatureFlags::ARM64_FEATURE_ISA_FHM | CpuFeatureFlags::ARM64_FEATURE_ISA_SVE)
+    {
+        hwcap |= arch32::HWCAP_FPHP | arch32::HWCAP_ASIMDHP;
+    }
     HwCap { hwcap, hwcap2 }
 }
 
 #[cfg(target_arch = "aarch64")]
-fn arm64_hwcap(cpu_feature_flags: CpuFeatureFlags) -> HwCap {
+fn arm64_hwcap(
+    cpu_feature_flags: CpuFeatureFlags,
+    cpu_sve_feature_flags: CpuSveFeatureFlags,
+) -> HwCap {
     // See https://docs.kernel.org/arch/arm64/elf_hwcaps.html for details.
     use starnix_uapi;
     let mut hwcap = 0;
@@ -1241,7 +1358,54 @@ fn arm64_hwcap(cpu_feature_flags: CpuFeatureFlags) -> HwCap {
             CpuFeatureFlags::ARM64_FEATURE_ISA_TS => hwcap |= starnix_uapi::HWCAP_FLAGM,
             CpuFeatureFlags::ARM64_FEATURE_ISA_DPB => hwcap |= starnix_uapi::HWCAP_DCPOP,
             CpuFeatureFlags::ARM64_FEATURE_ISA_RNDR => hwcap2 |= starnix_uapi::HWCAP2_RNG,
+            CpuFeatureFlags::ARM64_FEATURE_ISA_SVE => hwcap |= starnix_uapi::HWCAP_SVE,
             _ => {}
+        }
+    }
+    // Both FEAT_FHM and FEAT_SVE architecturally require FEAT_FP16 (HWCAP_FPHP and HWCAP_ASIMDHP).
+    // Per ACLE Function Multi-Versioning (FMV) dependency rules (used by LLVM/compiler-rt), "sve"
+    // and "sve2" targets transitively require FEAT_FP | FEAT_FP16 | FEAT_SVE, where compiler-rt
+    // derives FEAT_FP16 from HWCAP_FPHP.
+    // TODO(https://fxbug.dev/42081850): Expose a dedicated `ZX_ARM64_FEATURE_ISA_FP16` flag from
+    // Zircon so standalone Armv8.2 FEAT_FP16 cores without FHM or SVE also report FP16 hwcaps.
+    if cpu_feature_flags
+        .intersects(CpuFeatureFlags::ARM64_FEATURE_ISA_FHM | CpuFeatureFlags::ARM64_FEATURE_ISA_SVE)
+    {
+        hwcap |= starnix_uapi::HWCAP_FPHP | starnix_uapi::HWCAP_ASIMDHP;
+    }
+    if cpu_feature_flags.contains(CpuFeatureFlags::ARM64_FEATURE_ISA_SVE) {
+        for feature in cpu_sve_feature_flags.iter() {
+            match feature {
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEI8MM => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEI8MM
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF32MM => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEF32MM
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF64MM => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEF64MM
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBF16 => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEBF16
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVE2 => hwcap2 |= starnix_uapi::HWCAP2_SVE2,
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEAES => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEAES
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEPMULL => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEPMULL
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBITPERM => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVEBITPERM
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESHA3 => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVESHA3
+                }
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESM4 => {
+                    hwcap2 |= starnix_uapi::HWCAP2_SVESM4
+                }
+                _ => {}
+            }
         }
     }
     HwCap { hwcap, hwcap2 }
@@ -1249,19 +1413,28 @@ fn arm64_hwcap(cpu_feature_flags: CpuFeatureFlags) -> HwCap {
 
 impl HwCaps {
     #[cfg(target_arch = "aarch64")]
-    pub fn from_cpu_feature_flags(cpu_feature_flags: CpuFeatureFlags) -> Self {
-        Self { arch32: arm32_hwcap(cpu_feature_flags), arch64: arm64_hwcap(cpu_feature_flags) }
+    pub fn from_cpu_feature_flags(
+        cpu_feature_flags: CpuFeatureFlags,
+        cpu_sve_feature_flags: CpuSveFeatureFlags,
+    ) -> Self {
+        Self {
+            arch32: arm32_hwcap(cpu_feature_flags),
+            arch64: arm64_hwcap(cpu_feature_flags, cpu_sve_feature_flags),
+        }
     }
 
     #[cfg(not(target_arch = "aarch64"))]
-    pub fn from_cpu_feature_flags(_cpu_feature_flags: CpuFeatureFlags) -> Self {
+    pub fn from_cpu_feature_flags(
+        _cpu_feature_flags: CpuFeatureFlags,
+        _cpu_sve_feature_flags: CpuSveFeatureFlags,
+    ) -> Self {
         Self { arch64: HwCap::default() }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use super::parse_cmdline;
+    use super::*;
 
     #[test]
     fn test_parse_cmdline() {
@@ -1276,5 +1449,193 @@ mod test {
             "eleventh",
         ];
         assert_eq!(parse_cmdline(cmdline).collect::<Vec<_>>(), expected);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_arm64_hwcap_sve() {
+        let empty =
+            HwCaps::from_cpu_feature_flags(CpuFeatureFlags::empty(), CpuSveFeatureFlags::empty());
+        assert_eq!(empty.arch64.hwcap, 0);
+        assert_eq!(empty.arch64.hwcap2, 0);
+
+        let expected_sve_hwcap =
+            starnix_uapi::HWCAP_SVE | starnix_uapi::HWCAP_FPHP | starnix_uapi::HWCAP_ASIMDHP;
+        let sve_only = HwCaps::from_cpu_feature_flags(
+            CpuFeatureFlags::ARM64_FEATURE_ISA_SVE,
+            CpuSveFeatureFlags::empty(),
+        );
+        assert_eq!(sve_only.arch64.hwcap, expected_sve_hwcap);
+        assert_eq!(sve_only.arch64.hwcap2, 0);
+        assert_eq!(
+            sve_only.arch32.hwcap,
+            empty.arch32.hwcap
+                | starnix_uapi::arch32::HWCAP_FPHP
+                | starnix_uapi::arch32::HWCAP_ASIMDHP
+        );
+        assert_eq!(sve_only.arch32.hwcap2, 0);
+
+        let fhm_only = HwCaps::from_cpu_feature_flags(
+            CpuFeatureFlags::ARM64_FEATURE_ISA_FHM,
+            CpuSveFeatureFlags::empty(),
+        );
+        assert_eq!(
+            fhm_only.arch64.hwcap,
+            starnix_uapi::HWCAP_ASIMDFHM | starnix_uapi::HWCAP_FPHP | starnix_uapi::HWCAP_ASIMDHP
+        );
+        assert_eq!(fhm_only.arch64.hwcap2, 0);
+        assert_eq!(
+            fhm_only.arch32.hwcap,
+            empty.arch32.hwcap
+                | starnix_uapi::arch32::HWCAP_ASIMDFHM
+                | starnix_uapi::arch32::HWCAP_FPHP
+                | starnix_uapi::arch32::HWCAP_ASIMDHP
+        );
+        assert_eq!(fhm_only.arch32.hwcap2, 0);
+
+        let cases = [
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEI8MM, starnix_uapi::HWCAP2_SVEI8MM),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF32MM, starnix_uapi::HWCAP2_SVEF32MM),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF64MM, starnix_uapi::HWCAP2_SVEF64MM),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBF16, starnix_uapi::HWCAP2_SVEBF16),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVE2, starnix_uapi::HWCAP2_SVE2),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEAES, starnix_uapi::HWCAP2_SVEAES),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEPMULL, starnix_uapi::HWCAP2_SVEPMULL),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBITPERM, starnix_uapi::HWCAP2_SVEBITPERM),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESHA3, starnix_uapi::HWCAP2_SVESHA3),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESM4, starnix_uapi::HWCAP2_SVESM4),
+        ];
+
+        let mut all_sve_flags = CpuSveFeatureFlags::empty();
+        let mut expected_hwcap2 = 0;
+        for (flag, hwcap2_bit) in cases {
+            let without_sve = HwCaps::from_cpu_feature_flags(CpuFeatureFlags::empty(), flag);
+            assert_eq!(without_sve.arch64.hwcap, 0);
+            assert_eq!(without_sve.arch64.hwcap2, 0);
+
+            let caps = HwCaps::from_cpu_feature_flags(CpuFeatureFlags::ARM64_FEATURE_ISA_SVE, flag);
+            assert_eq!(caps.arch64.hwcap, expected_sve_hwcap);
+            assert_eq!(caps.arch64.hwcap2, hwcap2_bit);
+            all_sve_flags |= flag;
+            expected_hwcap2 |= hwcap2_bit;
+        }
+
+        let all_caps =
+            HwCaps::from_cpu_feature_flags(CpuFeatureFlags::ARM64_FEATURE_ISA_SVE, all_sve_flags);
+        assert_eq!(all_caps.arch64.hwcap, expected_sve_hwcap);
+        assert_eq!(all_caps.arch64.hwcap2, expected_hwcap2);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn test_arm64_hwcap_sve_gating_and_linux_abi() {
+        // The HWCAP bit positions are part of the Linux ABI
+        // (`arch/arm64/include/uapi/asm/hwcap.h` and `arch/arm/include/uapi/asm/hwcap.h`). Pin
+        // them, so that a wrong uapi binding or a transposed mapping in `arm64_hwcap` /
+        // `arm32_hwcap` is caught immediately.
+        assert_eq!(starnix_uapi::HWCAP_FP, 1 << 0);
+        assert_eq!(starnix_uapi::HWCAP_ASIMD, 1 << 1);
+        assert_eq!(starnix_uapi::HWCAP_FPHP, 1 << 9);
+        assert_eq!(starnix_uapi::HWCAP_ASIMDHP, 1 << 10);
+        assert_eq!(starnix_uapi::HWCAP_SVE, 1 << 22);
+        assert_eq!(starnix_uapi::HWCAP_ASIMDFHM, 1 << 23);
+        assert_eq!(starnix_uapi::arch32::HWCAP_FPHP, 1 << 22);
+        assert_eq!(starnix_uapi::arch32::HWCAP_ASIMDHP, 1 << 23);
+        assert_eq!(starnix_uapi::arch32::HWCAP_ASIMDFHM, 1 << 25);
+        let expected_sve_hwcap =
+            starnix_uapi::HWCAP_SVE | starnix_uapi::HWCAP_FPHP | starnix_uapi::HWCAP_ASIMDHP;
+        let sve_mappings = [
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVE2, starnix_uapi::HWCAP2_SVE2, 1 << 1),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEAES, starnix_uapi::HWCAP2_SVEAES, 1 << 2),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEPMULL, starnix_uapi::HWCAP2_SVEPMULL, 1 << 3),
+            (
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBITPERM,
+                starnix_uapi::HWCAP2_SVEBITPERM,
+                1 << 4,
+            ),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESHA3, starnix_uapi::HWCAP2_SVESHA3, 1 << 5),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVESM4, starnix_uapi::HWCAP2_SVESM4, 1 << 6),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEI8MM, starnix_uapi::HWCAP2_SVEI8MM, 1 << 9),
+            (
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF32MM,
+                starnix_uapi::HWCAP2_SVEF32MM,
+                1 << 10,
+            ),
+            (
+                CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEF64MM,
+                starnix_uapi::HWCAP2_SVEF64MM,
+                1 << 11,
+            ),
+            (CpuSveFeatureFlags::ARM64_FEATURE_ISA_SVEBF16, starnix_uapi::HWCAP2_SVEBF16, 1 << 12),
+        ];
+        let mut all_sve_flags = CpuSveFeatureFlags::empty();
+        let mut all_sve_hwcap2 = 0u32;
+        for (flag, hwcap2_bit, linux_bit) in sve_mappings {
+            assert_eq!(hwcap2_bit, linux_bit, "{flag:?}");
+            assert_eq!(all_sve_hwcap2 & hwcap2_bit, 0, "{flag:?} HWCAP2 bit is not unique");
+            all_sve_flags |= flag;
+            all_sve_hwcap2 |= hwcap2_bit;
+        }
+        // Every named SVE subfeature reported by Zircon has a mapping.
+        let all_named_sve_flags = <CpuSveFeatureFlags as bitflags::Flags>::FLAGS
+            .iter()
+            .filter(|f| f.is_named())
+            .fold(CpuSveFeatureFlags::empty(), |acc, f| acc | *f.value());
+        assert_eq!(all_sve_flags, all_named_sve_flags);
+
+        // Linux never reports HWCAP2_SVE* without HWCAP_SVE. Without ZX_ARM64_FEATURE_ISA_SVE, the
+        // SVE subfeatures (all of them at once, or even unknown bits in ZX_FEATURE_KIND_CPU_SVE)
+        // must be ignored, while unrelated hwcaps are unaffected.
+        let non_sve_cpu_flags = CpuFeatureFlags::ARM64_FEATURE_ISA_FP
+            | CpuFeatureFlags::ARM64_FEATURE_ISA_ASIMD
+            | CpuFeatureFlags::ARM64_FEATURE_ISA_I8MM
+            | CpuFeatureFlags::ARM64_FEATURE_ISA_RNDR;
+        let non_sve_hwcap = starnix_uapi::HWCAP_FP | starnix_uapi::HWCAP_ASIMD;
+        let non_sve_hwcap2 = starnix_uapi::HWCAP2_I8MM | starnix_uapi::HWCAP2_RNG;
+        let baseline =
+            HwCaps::from_cpu_feature_flags(non_sve_cpu_flags, CpuSveFeatureFlags::empty());
+        assert_eq!(baseline.arch64.hwcap, non_sve_hwcap);
+        assert_eq!(baseline.arch64.hwcap2, non_sve_hwcap2);
+        for sve_flags in [all_sve_flags, CpuSveFeatureFlags::from_bits_retain(!0)] {
+            let gated = HwCaps::from_cpu_feature_flags(CpuFeatureFlags::empty(), sve_flags);
+            assert_eq!(gated.arch64.hwcap, 0, "{sve_flags:?}");
+            assert_eq!(gated.arch64.hwcap2, 0, "{sve_flags:?}");
+
+            let gated = HwCaps::from_cpu_feature_flags(non_sve_cpu_flags, sve_flags);
+            assert_eq!(gated.arch64.hwcap, non_sve_hwcap, "{sve_flags:?}");
+            assert_eq!(gated.arch64.hwcap & starnix_uapi::HWCAP_SVE, 0, "{sve_flags:?}");
+            assert_eq!(gated.arch64.hwcap2, non_sve_hwcap2, "{sve_flags:?}");
+            assert_eq!(gated.arch64.hwcap2 & all_sve_hwcap2, 0, "{sve_flags:?}");
+            // The 32-bit (compat) hwcaps never include SVE.
+            assert_eq!(gated.arch32.hwcap, baseline.arch32.hwcap);
+            assert_eq!(gated.arch32.hwcap2, baseline.arch32.hwcap2);
+
+            // With ZX_ARM64_FEATURE_ISA_SVE, exactly the known subfeature bits are added on top of
+            // the unrelated hwcaps, and unknown bits in ZX_FEATURE_KIND_CPU_SVE are still ignored.
+            let enabled = HwCaps::from_cpu_feature_flags(
+                non_sve_cpu_flags | CpuFeatureFlags::ARM64_FEATURE_ISA_SVE,
+                sve_flags,
+            );
+            assert_eq!(enabled.arch64.hwcap, non_sve_hwcap | expected_sve_hwcap);
+            assert_eq!(enabled.arch64.hwcap2, non_sve_hwcap2 | all_sve_hwcap2);
+            assert_eq!(
+                enabled.arch32.hwcap,
+                baseline.arch32.hwcap
+                    | starnix_uapi::arch32::HWCAP_FPHP
+                    | starnix_uapi::arch32::HWCAP_ASIMDHP
+            );
+            assert_eq!(enabled.arch32.hwcap2, baseline.arch32.hwcap2);
+        }
+
+        // Leaving out a single subfeature clears exactly its HWCAP2 bit, which catches duplicated
+        // or transposed mappings that `test_arm64_hwcap_sve`'s single-flag checks would not.
+        for (flag, hwcap2_bit, _) in sve_mappings {
+            let all_but_one = HwCaps::from_cpu_feature_flags(
+                CpuFeatureFlags::ARM64_FEATURE_ISA_SVE,
+                all_sve_flags.difference(flag),
+            );
+            assert_eq!(all_but_one.arch64.hwcap, expected_sve_hwcap, "{flag:?}");
+            assert_eq!(all_but_one.arch64.hwcap2, all_sve_hwcap2 & !hwcap2_bit, "{flag:?}");
+        }
     }
 }

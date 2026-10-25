@@ -31,7 +31,6 @@ rustc_library(
     ],
 )
 
-# @bazel2gn:skip
 rustc_test(
     name = "internet-checksum_test",
     build_flags = [
@@ -46,7 +45,6 @@ rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 wrap_host_rust_test(
     name = "internet-checksum_host_test",
     binary_name = "internet-checksum_test",

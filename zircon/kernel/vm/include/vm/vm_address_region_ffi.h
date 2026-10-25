@@ -31,9 +31,21 @@ struct CppVmAddressRegionEnumerator {
   };
 };
 
+using VmMappingProtectionRangesCursor = VmMappingProtectionRanges::const_iterator;
+static_assert(sizeof(VmMappingProtectionRangesCursor) == kVmMappingProtectionRangesCursorSize);
+static_assert(alignof(VmMappingProtectionRangesCursor) == kVmMappingProtectionRangesCursorAlign);
+
 __BEGIN_CDECLS
 
-void cpp_vm_address_region_free(VmAddressRegion* vmar);
+void cpp_vm_address_region_construct_root(ffi::Uninitialized<VmAddressRegion>* slot,
+                                          VmAspace* aspace, vaddr_t base, size_t size,
+                                          uint32_t vmar_flags);
+void cpp_vm_address_region_construct_child(ffi::Uninitialized<VmAddressRegion>* slot,
+                                           VmAddressRegion* parent, vaddr_t base, size_t size,
+                                           uint32_t vmar_flags, const char* name);
+void cpp_vm_address_region_construct_kernel_root(ffi::Uninitialized<VmAddressRegion>* slot,
+                                                 VmAspace* kernel_aspace);
+void cpp_vm_address_region_destruct(VmAddressRegion* vmar);
 void* cpp_vm_address_region_state(VmAddressRegion* vmar);
 void* cpp_vm_address_region_or_mapping_state(VmAddressRegionOrMapping* region_or_mapping);
 bool cpp_vm_address_region_or_mapping_lock_is_held(
@@ -44,9 +56,10 @@ VmAddressRegion* cpp_vm_address_region_or_mapping_as_vm_address_region(
     VmAddressRegionOrMapping* region_or_mapping);
 VmMapping* cpp_vm_address_region_or_mapping_as_vm_mapping(
     VmAddressRegionOrMapping* region_or_mapping);
-zx_status_t cpp_vm_address_region_destroy(VmAddressRegion* vmar);
 zx_status_t cpp_vm_address_region_set_memory_priority(VmAddressRegion* vmar,
                                                       VmAddressRegion::MemoryPriority priority);
+zx_status_t cpp_vm_address_region_set_memory_priority_locked(
+    VmAddressRegion* vmar, VmAddressRegion::MemoryPriority priority);
 zx_status_t cpp_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base, size_t size,
                                         VmAddressRegionOpChildren op_children);
 zx_status_t cpp_vm_address_region_protect(VmAddressRegion* vmar, vaddr_t base, size_t size,
@@ -77,9 +90,17 @@ VmAddressRegionOrMapping* cpp_vm_address_region_enumerator_next(
 void cpp_vm_address_region_enumerator_pause(CppVmAddressRegionEnumerator* enumerator);
 void cpp_vm_address_region_enumerator_resume(CppVmAddressRegionEnumerator* enumerator);
 
-void cpp_vm_mapping_free(VmMapping* mapping);
+void cpp_vm_mapping_construct(ffi::Uninitialized<VmMapping>* slot, VmAddressRegion* parent,
+                              bool private_clone, vaddr_t base, size_t size, uint32_t vmar_flags,
+                              VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
+                              bool mergeable);
+void cpp_vm_mapping_construct_with_ranges(ffi::Uninitialized<VmMapping>* slot,
+                                          VmAddressRegion* parent, bool private_clone, vaddr_t base,
+                                          size_t size, uint32_t vmar_flags, VmObject* vmo,
+                                          uint64_t vmo_offset, arch_mmu_flags_t first_mmu_flags,
+                                          VmMappingProtectionRanges* ranges, bool mergeable);
+void cpp_vm_mapping_destruct(VmMapping* mapping);
 void* cpp_vm_mapping_state(VmMapping* mapping);
-zx_status_t cpp_vm_mapping_destroy(VmMapping* mapping);
 zx_status_t cpp_vm_mapping_map_range(VmMapping* mapping, size_t offset, size_t len, bool commit,
                                      bool ignore_existing);
 zx_status_t cpp_vm_mapping_debug_unmap(VmMapping* mapping, vaddr_t base, size_t size);
@@ -87,15 +108,17 @@ zx_status_t cpp_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base, size_
                                          arch_mmu_flags_t new_arch_mmu_flags);
 zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping);
 void cpp_vm_mapping_mark_mergeable(VmMapping* mapping);
-typedef zx_status_t (*cpp_vm_mapping_enumerate_protection_ranges_cb)(void* ctx, vaddr_t base,
-                                                                     size_t len,
-                                                                     arch_mmu_flags_t flags);
-zx_status_t cpp_vm_mapping_enumerate_protection_ranges_locked(
-    const VmMapping* mapping, vaddr_t base, size_t size,
-    cpp_vm_mapping_enumerate_protection_ranges_cb cb, void* ctx);
-VmMapping::FlagsRange cpp_vm_mapping_arch_mmu_flags_range_locked(const VmMapping* mapping,
-                                                                 vaddr_t offset);
-arch_mmu_flags_t cpp_vm_mapping_arch_mmu_flags_locked(const VmMapping* mapping, vaddr_t offset);
+bool cpp_vm_mapping_protection_ranges_is_empty(const VmMappingProtectionRanges* ranges);
+void cpp_vm_mapping_protection_ranges_clear(VmMappingProtectionRanges* ranges);
+void cpp_vm_mapping_protection_ranges_upper_bound(
+    const VmMappingProtectionRanges* ranges, vaddr_t key,
+    ffi::Uninitialized<VmMappingProtectionRangesCursor>* out_cursor);
+bool cpp_vm_mapping_protection_ranges_cursor_is_valid(
+    const VmMappingProtectionRangesCursor* cursor);
+void cpp_vm_mapping_protection_ranges_cursor_get(const VmMappingProtectionRangesCursor* cursor,
+                                                 vaddr_t* out_key, arch_mmu_flags_t* out_flags);
+void cpp_vm_mapping_protection_ranges_cursor_next(VmMappingProtectionRangesCursor* cursor);
+void cpp_vm_mapping_protection_ranges_cursor_prev(VmMappingProtectionRangesCursor* cursor);
 zx_status_t cpp_vm_mapping_page_fault_locked(VmMapping* mapping, vaddr_t va, uint32_t pf_flags,
                                              size_t additional_pages,
                                              MultiPageRequest* page_request, uint32_t* out_mapped);

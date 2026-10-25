@@ -7,8 +7,8 @@ use crate::util;
 use anyhow::{bail, ensure};
 use assembly_config_capabilities::{Config, ConfigValueType};
 use assembly_config_schema::platform_settings::connectivity_config::{
-    NetworkingConfig, PlatformConnectivityConfig, WlanPolicyLayer, WlanRecoveryProfile,
-    WlanRoamingMode, WlanRoamingPolicy, WlanRoamingProfile,
+    PlatformConnectivityConfig, WlanPolicyLayer, WlanRecoveryProfile, WlanRoamingMode,
+    WlanRoamingPolicy, WlanRoamingProfile,
 };
 use assembly_constants::{BoardFeature, FileEntry, PackageDestination, PackageSetDestination};
 
@@ -62,57 +62,35 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
             })?;
         }
 
-        // The configuration of networking is dependent on all three of:
+        // Whether networking is enabled is dependent on all three of:
         // - the feature_set_level
         // - the build_type
-        // - the requested configuration type
-        let networking = match (
+        // - whether networking was requested by the product
+        let enable_networking = match (
             context.feature_set_level,
             context.build_type,
             &connectivity_config.network.networking,
         ) {
-            // bootstrap must not attempt to configure it, it's always None
+            // bootstrap must not attempt to configure it, it's always disabled
             (FeatureSetLevel::Bootstrap, _, Some(_)) => {
                 bail!("The configuration of networking is not an option for `bootstrap`")
             }
-            (FeatureSetLevel::Bootstrap, _, None) => None,
-            (FeatureSetLevel::Embeddable, _, _) => None,
+            (FeatureSetLevel::Bootstrap | FeatureSetLevel::Embeddable, _, _) => false,
 
             // utility, in user mode, only gets networking if requested.
-            (FeatureSetLevel::Utility, BuildType::User, networking) => networking.as_ref(),
+            (FeatureSetLevel::Utility, BuildType::User, networking) => networking.is_some(),
 
-            // all other combinations get the network package that they request
-            (_, _, Some(networking)) => Some(networking),
-
-            // otherwise, the 'standard' networking package is used
-            (_, _, None) => Some(&NetworkingConfig::Standard),
+            // all other combinations enable networking (`Standard` and `Basic`
+            // both include the same bundles while `NetworkingConfig` is
+            // soft-transitioned).
+            (_, _, _) => true,
         };
-        if let Some(networking) = networking {
-            let maybe_gub_bundle = |bundle| {
-                if connectivity_config.network.use_unified_binary {
-                    format!("{bundle}_gub").into()
-                } else {
-                    std::borrow::Cow::Borrowed(bundle)
-                }
-            };
-
+        if enable_networking {
             // The 'core_realm_networking' and 'network_realm' bundles are
             // required if networking is enabled.
             builder.platform_bundle("core_realm_networking")?;
             builder.platform_bundle("network_realm")?;
-            builder.platform_bundle(maybe_gub_bundle("network_realm_packages").as_ref())?;
-
-            // Which specific network package is selectable by the product.
-            match networking {
-                NetworkingConfig::Standard => {
-                    builder.platform_bundle("networking_with_virtualization")?;
-                }
-                NetworkingConfig::Basic => {
-                    builder.platform_bundle("networking_basic")?;
-                    builder
-                        .platform_bundle(maybe_gub_bundle("networking_basic_packages").as_ref())?;
-                }
-            }
+            builder.platform_bundle("network_realm_packages")?;
 
             let config_src = connectivity_config
                 .network
@@ -126,13 +104,6 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
                 source: config_src,
                 destination: "netcfg_default.json5".into(),
             })?;
-
-            if let Some(netstack_config_path) = &connectivity_config.network.netstack_config_path {
-                builder.package("netstack").config_data(FileEntry {
-                    source: netstack_config_path.clone(),
-                    destination: "default.json".into(),
-                })?;
-            }
 
             if let Some(google_maps_api_key_path) =
                 &connectivity_config.network.google_maps_api_key_path
@@ -175,9 +146,6 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
                     Config::new_void(),
                 )?;
             }
-
-            builder.platform_bundle("netstack3")?;
-            builder.platform_bundle(maybe_gub_bundle("netstack3_packages").as_ref())?;
 
             // Define netstack3 configuration capabilities.
             //

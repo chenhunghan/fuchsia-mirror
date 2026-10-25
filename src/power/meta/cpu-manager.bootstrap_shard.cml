@@ -31,9 +31,19 @@
             to: "#cpu_manager",
         },
         {
-            protocol: [ "fuchsia.thermal.ClientStateConnector" ],
+            protocol: [
+                "fuchsia.power.powercap.ClientStateWatcher",
+                "fuchsia.thermal.ClientStateConnector",
+            ],
             from: "#power_manager",
             to: "#cpu_manager",
+        },
+        {
+            protocol: [ "fuchsia.power.broker.Topology" ],
+            from: "#power-broker",
+            to: "#cpu_manager",
+            availability: "optional",
+            source_availability: "unknown",
         },
         {
             protocol: [

@@ -40,7 +40,23 @@ CppVmAddressRegionEnumerator::~CppVmAddressRegionEnumerator() {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" {
-FFI_ALWAYS_INLINE void cpp_vm_address_region_free(VmAddressRegion* vmar) { delete vmar; }
+FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_root(
+    ffi::Uninitialized<VmAddressRegion>* slot, VmAspace* aspace, vaddr_t base, size_t size,
+    uint32_t vmar_flags) {
+  slot->Initialize(*aspace, base, size, vmar_flags);
+}
+FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_child(
+    ffi::Uninitialized<VmAddressRegion>* slot, VmAddressRegion* parent, vaddr_t base, size_t size,
+    uint32_t vmar_flags, const char* name) {
+  slot->Initialize(*parent, base, size, vmar_flags, name);
+}
+FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_kernel_root(
+    ffi::Uninitialized<VmAddressRegion>* slot, VmAspace* kernel_aspace) {
+  slot->Initialize(*kernel_aspace);
+}
+FFI_ALWAYS_INLINE void cpp_vm_address_region_destruct(VmAddressRegion* vmar) {
+  vmar->~VmAddressRegion();
+}
 FFI_ALWAYS_INLINE void* cpp_vm_address_region_state(VmAddressRegion* vmar) {
   return &vmar->opaque_storage_;
 }
@@ -64,8 +80,16 @@ FFI_ALWAYS_INLINE VmMapping* cpp_vm_address_region_or_mapping_as_vm_mapping(
     VmAddressRegionOrMapping* region_or_mapping) {
   return static_cast<VmMapping*>(region_or_mapping);
 }
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_destroy(VmAddressRegion* vmar) {
-  return vmar->Destroy();
+FFI_ALWAYS_INLINE void cpp_vm_address_region_commit_high_memory_priority(VmAddressRegion* vmar) {
+  vmar->CommitHighMemoryPriorityImpl();
+}
+FFI_ALWAYS_INLINE bool cpp_vm_address_region_subregions_is_empty(const VmAddressRegion* vmar)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  return vmar->subregions_.IsEmpty();
+}
+FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_subregions_front(
+    VmAddressRegion* vmar) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return &vmar->subregions_.front();
 }
 FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_subregions_find_region(
     const VmAddressRegion* vmar, vaddr_t addr) TA_NO_THREAD_SAFETY_ANALYSIS {
@@ -86,6 +110,10 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_subregions_insert_region(
     VmAddressRegion* vmar, VmAddressRegionOrMapping* region) TA_NO_THREAD_SAFETY_ANALYSIS {
   return vmar->subregions_.InsertRegion(fbl::RefPtr(region));
 }
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_remove_region(
+    VmAddressRegion* vmar, VmAddressRegionOrMapping* region) TA_NO_THREAD_SAFETY_ANALYSIS {
+  vmar->subregions_.RemoveRegion(region);
+}
 FFI_ALWAYS_INLINE size_t cpp_vm_address_region_subregions_size_slow(const VmAddressRegion* vmar)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return vmar->subregions_.size_slow();
@@ -100,6 +128,10 @@ FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_for_each(
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_set_memory_priority(
     VmAddressRegion* vmar, VmAddressRegion::MemoryPriority priority) {
   return vmar->SetMemoryPriority(priority);
+}
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_set_memory_priority_locked(
+    VmAddressRegion* vmar, VmAddressRegion::MemoryPriority priority) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return vmar->SetMemoryPriorityLocked(priority);
 }
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base,
                                                           size_t size,

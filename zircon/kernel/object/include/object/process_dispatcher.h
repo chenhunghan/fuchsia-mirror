@@ -102,7 +102,6 @@ uintptr_t cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* pr
 #endif
 void* cpp_process_dispatcher_futex_context(const ProcessDispatcher* process);
 zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatcher* process, Thread* core_thread);
-zx_koid_t cpp_process_get_job_koid(const ProcessDispatcher* process);
 zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process, ThreadDispatcher* thread,
                                                bool ensure_initial_thread,
                                                const UserEntryState* entry);
@@ -221,11 +220,6 @@ class ProcessDispatcher final
     return shareable_state_->aspace()->arch_aspace().pt_phys();
   }
 #endif
-
-  uintptr_t arch_table_phys() const {
-    // TODO(https://fxbug.dev/42055932): Figure out how to make tracing works in restricted mode.
-    return shareable_state_->aspace()->arch_aspace().arch_table_phys();
-  }
 
   uintptr_t vdso_base_address() const { return shareable_state_->aspace()->vdso_base_address(); }
 
@@ -393,11 +387,6 @@ class ProcessDispatcher final
 
   // compute the vdso code address and store in vdso_code_address_
   uintptr_t cache_vdso_code_address();
-
-  // The diagnostic code is allow to know about the internals of this code.
-  friend void DumpProcessList();
-  friend void KillProcess(zx_koid_t id);
-  friend void DumpProcessMemoryUsage(const char* prefix, size_t min_bytes);
 
   ProcessDispatcher(fbl::RefPtr<ShareableProcessState> shareable_state,
                     fbl::RefPtr<JobDispatcher> job, ktl::string_view name, uint32_t flags);

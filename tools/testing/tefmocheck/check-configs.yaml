@@ -53,7 +53,8 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Trace size: streamed 400 MB"
   log_types: ["syslogType"]
-  skip_all_passed_tests: true
+  skip_passed_test: true
+  attribute_to_test: true
 
 # Image too large causes booting to fail.
 - kind: "string_in_log"
@@ -174,12 +175,6 @@ failure_mode_checks:
   emit_synthetic_test_case: true
 # LINT.ThenChange(//src/starnix/kernel/core/signals/signal_handling.rs:restricted_mode_core_dump_tefmo)
 
-# LINT.IfChange
-- kind: "string_in_log"
-  string: "honeydew.errors.HealthCheckError: health check failed on"
-  log_types: ["swarmingOutputType"]
-# LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/fuchsia_device/fuchsia_device.py)
-
 # LINT.IfChange(blob_write_failure)
 - kind: "string_in_log"
   string: "failed to write blob"
@@ -222,6 +217,14 @@ failure_mode_checks:
   string: "failed to probe irremovable device"
   log_types: ["serialLogType"]
 # LINT.ThenChange(/src/devices/block/drivers/sdmmc/sdmmc-root-device.cc:failed_to_probe_irremovable_device)
+
+# For https://fxbug.dev/575732757 and https://fxbug.dev/575374637.
+# Matches driver_manager start failures for both C++ ('driver/ufs-pdev.so',
+# 'driver/ufs-pci.so') and Rust ('driver/ufs_rust.so') UFS drivers.
+- kind: "string_in_log"
+  string: "Failed to start driver 'driver/ufs"
+  log_types: ["serialLogType"]
+  skip_passed_task: true
 
 # For https://fxbug.dev/486245491
 # LINT.IfChange(no_response_tefmo)
@@ -450,10 +453,10 @@ failure_mode_checks:
 # TODO(https://fxbug.dev/448121736): Remove once cause of panic is resolved.
 # LINT.IfChange(scheduler_start_finish_time)
 - kind: "string_in_log"
-  string: "state->start_time() < state->finish_time()"
+  string: "state.start_time < state.finish_time"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
   attribute_to_test: true
-# LINT.ThenChange(//zircon/kernel/kernel/scheduler.cc:scheduler_start_finish_time)
+# LINT.ThenChange(//zircon/kernel/kernel/scheduler.rs:scheduler_start_finish_time)
 
 - kind: "string_in_log"
   string: "ZIRCON KERNEL PANIC"
@@ -656,15 +659,22 @@ failure_mode_checks:
 # This error is emitted by `fastboot` when it fails to write an image
 # to the disk. It is generally caused by ECC errors.
 - kind: "string_in_log"
-  string: "FAILED (remote: 'error writing the image')"
+  string: "error writing the image"
   log_types: ["swarmingOutputType"]
   infra_failure: true
+  skip_passed_task: true
 
 # For https://fxbug.dev/42178156.
 # This error usually means some kind of USB flakiness/instability when fastboot flashing.
 - kind: "string_in_log"
-  string: "FAILED (Status read failed (Protocol error))"
+  string: "Error reading from bulk endpoint"
   log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "Error writing to bulk endpoint"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
 
 # For https://fxbug.dev/559487345.
 - kind: "string_in_log"
@@ -682,6 +692,26 @@ failure_mode_checks:
   log_types: ["swarmingOutputType"]
   skip_passed_task: true
 
+- kind: "string_in_log"
+  string: "Fastboot error: Read error: Timed out"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "Flash operation cancelled by signal: context deadline exceeded"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "Failed to upload bootloader: NotFound"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
+  string: "When running in strict mode, this tool does not support Targets in Product mode."
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
 # For https://fxbug.dev/42130478.
 - kind: "string_in_log"
   string: "botanist ERROR: start target error"
@@ -695,6 +725,11 @@ failure_mode_checks:
 # For https://fxbug.dev/42137283.
 - kind: "string_in_log"
   string: "botanist ERROR: timed out trying to connect to ssh"
+  log_types: ["swarmingOutputType"]
+
+# For https://fxbug.dev/527997914.
+- kind: "string_in_log"
+  string: "botanist ERROR: cannot connect to address"
   log_types: ["swarmingOutputType"]
 
 # For https://fxbug.dev/42139705.
@@ -733,6 +768,7 @@ failure_mode_checks:
   log_types: ["swarmingOutputType"]
 
 # For https://fxbug.dev/42173783.
+# LINT.IfChange(timeout_reaching_target)
 - kind: "string_in_log"
   string: "Timeout attempting to reach target"
   log_types: ["swarmingOutputType"]
@@ -742,6 +778,11 @@ failure_mode_checks:
   skip_passed_task: true
   attribute_to_test: true
   add_tag: true
+# LINT.ThenChange(
+#     //src/developer/ffx/lib/target/src/lib.rs:timeout_reaching_target,
+#     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx.py:timeout_reaching_target,
+#     //tools/lib/ffxutil/constants/constants.go:timeout_reaching_target
+# )
 
 # For https://fxbug.dev/354707902.
 - kind: "string_in_log"
@@ -828,6 +869,16 @@ failure_mode_checks:
   string: "One or more FuchsiaDevice's health check failed in teardown_test. So failing the test case..."
   log_types: ["swarmingOutputType"]
 # LINT.ThenChange(//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test/__init__.py)
+
+# LINT.IfChange
+- kind: "string_in_log"
+  string: "honeydew.errors.HealthCheckError: health check failed on"
+  log_types: ["swarmingOutputType"]
+  skip_passed_test: true
+  ignore_flakes: true
+  attribute_to_test: true
+  add_tag: true
+# LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/fuchsia_device/fuchsia_device.py)
 
 - kind: "string_in_log"
   string: "botanist ERROR: failed to start ssh session"
@@ -919,6 +970,10 @@ failure_mode_checks:
 
 - kind: "string_in_log"
   string: "botanist ERROR: failed to reconnect to target"
+  log_types: ["swarmingOutputType"]
+
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to initialize ffx tester"
   log_types: ["swarmingOutputType"]
 
 # General ffx error check. Keep near the end of Category 3 so more specific

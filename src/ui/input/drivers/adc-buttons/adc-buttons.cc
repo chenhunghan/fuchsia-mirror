@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/driver/fidl.h>
 #include <fidl/fuchsia.input.report/cpp/fidl.h>
+#include <fidl/fuchsia.input/cpp/fidl.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio.h>
@@ -24,30 +25,30 @@ constexpr uint32_t kDefaultPollingRateUsec = 1'000;
 struct MetadataValues {
   uint32_t polling_rate_usec = kDefaultPollingRateUsec;
   std::map<uint32_t, std::vector<fuchsia_buttons::Button>> configs;
-  std::set<fuchsia_input_report::ConsumerControlButton> buttons;
+  std::set<fuchsia_input::ConsumerControlButton> buttons;
 };
 
-fuchsia_input_report::ConsumerControlButton ConvertConsumerControlButton(
+fuchsia_input::ConsumerControlButton ConvertConsumerControlButton(
     adc_buttons::ConsumerControlButton type) {
   switch (type) {
     case adc_buttons::ConsumerControlButton::kCameraDisable:
-      return fuchsia_input_report::ConsumerControlButton::kCameraDisable;
+      return fuchsia_input::ConsumerControlButton::kCameraDisable;
     case adc_buttons::ConsumerControlButton::kFactoryReset:
-      return fuchsia_input_report::ConsumerControlButton::kFactoryReset;
+      return fuchsia_input::ConsumerControlButton::kFactoryReset;
     case adc_buttons::ConsumerControlButton::kFunction:
-      return fuchsia_input_report::ConsumerControlButton::kFunction;
+      return fuchsia_input::ConsumerControlButton::kFunction;
     case adc_buttons::ConsumerControlButton::kMicMute:
-      return fuchsia_input_report::ConsumerControlButton::kMicMute;
+      return fuchsia_input::ConsumerControlButton::kMicMute;
     case adc_buttons::ConsumerControlButton::kPause:
-      return fuchsia_input_report::ConsumerControlButton::kPause;
+      return fuchsia_input::ConsumerControlButton::kPause;
     case adc_buttons::ConsumerControlButton::kPower:
-      return fuchsia_input_report::ConsumerControlButton::kPower;
+      return fuchsia_input::ConsumerControlButton::kPower;
     case adc_buttons::ConsumerControlButton::kReboot:
-      return fuchsia_input_report::ConsumerControlButton::kReboot;
+      return fuchsia_input::ConsumerControlButton::kReboot;
     case adc_buttons::ConsumerControlButton::kVolumeDown:
-      return fuchsia_input_report::ConsumerControlButton::kVolumeDown;
+      return fuchsia_input::ConsumerControlButton::kVolumeDown;
     case adc_buttons::ConsumerControlButton::kVolumeUp:
-      return fuchsia_input_report::ConsumerControlButton::kVolumeUp;
+      return fuchsia_input::ConsumerControlButton::kVolumeUp;
   }
 }
 
@@ -65,7 +66,7 @@ fuchsia_buttons::AdcButtonsMetadata ConvertMetadata(
       fuchsia_buttons::Button button;
 
       if (btn.types.has_value()) {
-        std::vector<fuchsia_input_report::ConsumerControlButton> button_types;
+        std::vector<fuchsia_input::ConsumerControlButton> button_types;
         for (const auto& type : *btn.types) {
           button_types.push_back(ConvertConsumerControlButton(type));
         }
@@ -118,10 +119,10 @@ zx::result<MetadataValues> ParseMetadata(const fuchsia_buttons::AdcButtonsMetada
     ret.buttons.insert(button.types()->begin(), button.types()->end());
     ret.configs[*button.button_config()->adc()->channel_idx()].emplace_back(std::move(button));
   }
-  if (ret.buttons.size() >= fuchsia_input_report::kConsumerControlMaxNumButtons) {
+  if (ret.buttons.size() >= fuchsia_input::kConsumerControlMaxNumButtons) {
     fdf::error(
         "{}: More buttons than expected (max = {}). Please increase kConsumerControlMaxNumButtons",
-        __func__, fuchsia_input_report::kConsumerControlMaxNumButtons);
+        __func__, fuchsia_input::kConsumerControlMaxNumButtons);
     return zx::error(ZX_ERR_INTERNAL);
   }
 
@@ -188,17 +189,13 @@ zx::result<> AdcButtons::Start(fdf::DriverContext context) {
       dispatcher(), std::move(clients), zx::usec(values.value().polling_rate_usec),
       std::move(values.value().buttons));
 
-  auto result = outgoing()->component().AddUnmanagedProtocol<fuchsia_input_report::InputDevice>(
-      input_report_bindings_.CreateHandler(device_.get(), dispatcher(),
-                                           fidl::kIgnoreBindingClosure),
-      kDeviceName);
+  zx::result result = outgoing()->AddService<fuchsia_input_report::Service>(
+      fuchsia_input_report::Service::InstanceHandler({
+          .input_device = input_report_bindings_.CreateHandler(device_.get(), dispatcher(),
+                                                               fidl::kIgnoreBindingClosure),
+      }));
   if (result.is_error()) {
-    fdf::error("Failed to add Device service: {}", result);
-    return result.take_error();
-  }
-
-  if (zx::result result = CreateDevfsNode(); result.is_error()) {
-    fdf::error("Failed to export to devfs: {}", result);
+    fdf::error("Failed to add input report service: {}", result);
     return result.take_error();
   }
 
@@ -208,25 +205,6 @@ zx::result<> AdcButtons::Start(fdf::DriverContext context) {
 void AdcButtons::Stop(fdf::StopCompleter completer) {
   device_->Shutdown();
   completer(zx::ok());
-}
-
-zx::result<> AdcButtons::CreateDevfsNode() {
-  zx::result connector = devfs_connector_.Bind(dispatcher());
-  if (connector.is_error()) {
-    return connector.take_error();
-  }
-
-  fuchsia_driver_framework::DevfsAddArgs devfs_args{
-      {.connector = std::move(connector.value()), .class_name = "input-report"}};
-
-  zx::result child = AddOwnedChild(kDeviceName, devfs_args);
-  if (child.is_error()) {
-    fdf::error("Failed to add child: {}", child);
-    return child.take_error();
-  }
-  child_ = std::move(child.value());
-
-  return zx::ok();
 }
 
 }  // namespace adc_buttons

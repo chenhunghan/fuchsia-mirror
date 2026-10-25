@@ -15,6 +15,7 @@
 
 #include <arch/arm64.h>
 #include <kernel/cpu.h>
+#include <ktl/atomic.h>
 
 enum arm64_microarch {
   UNKNOWN,
@@ -67,9 +68,13 @@ enum arm64_microarch {
 extern "C" enum arm64_microarch midr_to_microarch(uint64_t midr);
 
 extern uint32_t arm64_isa_features;
+extern uint32_t arm64_sve_features;
 extern bool feat_pmuv3_enabled;
 
 inline bool arm64_feature_test(uint32_t feature) { return arm64_isa_features & feature; }
+inline bool arm64_sve_feature_test(uint32_t feature) {
+  return ktl::atomic_ref(arm64_sve_features).load(ktl::memory_order_relaxed) & feature;
+}
 
 struct arm64_cache_features {
   // block size of the dc zva instruction, dcache cache line and icache cache line
@@ -142,6 +147,6 @@ extern "C" void arm64_feature_debug(bool full);
 // MPIDR.
 extern "C" bool arm64_feature_current_is_first_in_cluster();
 
-void arm64_print_midr_cpu_name(FILE*);
+extern "C" void arm64_print_midr_cpu_name(FILE*);
 
 #endif  // ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_FEATURE_H_

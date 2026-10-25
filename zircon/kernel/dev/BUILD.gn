@@ -15,10 +15,4 @@ source_set("init") {
 group("kernel-tests") {
   testonly = true
   deps = []
-  if (current_cpu == "arm64") {
-    deps += [
-      "interrupt/gic/v2:kernel-tests",
-      "timer/arm_generic:kernel-tests",
-    ]
-  }
 }

@@ -39,7 +39,7 @@ use fxfs::object_store::volume::root_volume;
 use fxfs::serialized_types::LATEST_VERSION;
 use fxfs::{fsck, metrics};
 use fxfs_trace::{TraceFutureExt, trace_future_args};
-use refaults_vmo::PageRefaultCounter;
+use refaults_vmo::PageFaultCounter;
 use std::ops::Deref;
 use std::sync::{Arc, Weak};
 use storage_device::DeviceHolder;
@@ -345,9 +345,9 @@ impl Component {
         let inspect_tree =
             Arc::new(FsInspectTree::new(weak_fs, fuchsia_inspect::component::inspector().root()));
 
-        let blob_resupplied_count = Arc::new(PageRefaultCounter::new()?);
-        connect_to_protocol::<fattribution::PageRefaultSinkMarker>()?
-            .send_page_refault_count(blob_resupplied_count.readonly_vmo()?)?;
+        let page_fault_counter = Arc::new(PageFaultCounter::new()?);
+        connect_to_protocol::<fattribution::PagerStatsSinkMarker>()?
+            .send_pager_stats(page_fault_counter.readonly_vmo()?)?;
 
         let mem_monitor = match MemoryPressureMonitor::start() {
             Ok(v) => Some(v),
@@ -365,7 +365,7 @@ impl Component {
             root_volume,
             Arc::downgrade(&inspect_tree),
             mem_monitor,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await?;
@@ -391,10 +391,14 @@ impl Component {
             "Mounted"
         );
 
-        if let Some(profile_time) = options.startup_profiling_seconds {
+        if let Some(profile_time) = options.startup_profiling_seconds.filter(|&t| t > 0) {
             // Unwrap ok, shouldn't have anything else recording or replaying this early in startup.
             volumes
-                .record_and_replay_profile(None, ".boot".to_owned(), profile_time)
+                .record_and_replay_profile(
+                    None,
+                    storage_profile::BOOT_PROFILE_NAME.to_owned(),
+                    profile_time,
+                )
                 .await
                 .unwrap();
         }

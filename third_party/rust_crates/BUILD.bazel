@@ -24,18 +24,23 @@ exports_files([
 # LINT.IfChange
 package_group(
     name = "md5_visibility",
-    packages = [],
+    packages = [
+        "//src/connectivity/wlan/lib/rsn",
+    ],
 )
 
 package_group(
     name = "sha1_visibility",
-    packages = [],
+    packages = [
+        "//src/connectivity/wlan/lib/rsn",
+    ],
 )
 
 package_group(
     name = "once_cell_visibility",
     packages = [
         "//src/lib/async-utils",
+        "//src/storage/ext4",
 
         # Not enforced, matching visibility.gni.
         "//third_party/...",
@@ -64,17 +69,24 @@ package_group(
     name = "bincode_visibility",
     packages = [
         "//src/storage/ext4/lib/metadata",
+        "//src/storage/fxfs",
+        "//src/storage/lib/mapping",
+        "//src/storage/lib/sparse/rust",
     ],
 )
 
 package_group(
     name = "regex_visibility",
     packages = [
+        "//src/connectivity/wlan/lib/ieee80211-testutils",
+        "//src/connectivity/wlan/lib/sme",
         "//src/developer/ffx/command",
         "//src/developer/ffx/config",
         "//src/developer/ffx/lib/netext",
         "//src/developer/ffx/lib/target_errors",
         "//src/developer/ffx/lib/trace",
+        "//src/developer/ffx/plugins/sdk",
+        "//src/developer/ffx/tools/bluetooth/common",
         "//src/lib/analytics/rust",
         "//src/lib/assembly/util",
         "//src/lib/diagnostics/log/rust",
@@ -85,6 +97,7 @@ package_group(
         "//tools/fidl/fidldoc",
         "//tools/gtest_test_parser",
         "//tools/pretty_serial",
+        "//tools/zedmon/client",
 
         # Matches visibility.gni, which allows all of vendor/ without exposing
         # internal paths.

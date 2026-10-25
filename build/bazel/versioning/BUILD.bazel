@@ -66,6 +66,7 @@ config_setting(
         "//sdk/ctf/plasa:__subpackages__",
         "//src/sys/pkg/tests/pkg-resolver/template:__pkg__",
         "//src/tests/benchmarks/fidl/benchmark_suite/gen:__pkg__",
+        "//zircon/tools/zither:__pkg__",
     ],
 )
 
@@ -102,6 +103,12 @@ config_setting(
 config_setting(
     name = "is_api_level_32",
     flag_values = {"//build/bazel/versioning:api_level": "32"},
+    visibility = _api_level_condition_visibility,
+)
+
+config_setting(
+    name = "is_api_level_33",
+    flag_values = {"//build/bazel/versioning:api_level": "33"},
     visibility = _api_level_condition_visibility,
 )
 

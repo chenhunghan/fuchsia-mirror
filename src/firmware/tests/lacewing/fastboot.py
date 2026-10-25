@@ -9,6 +9,7 @@ import re
 from typing import Tuple
 
 import fuchsia_base_test
+from honeydew.transports.ffx import types as ffx_types
 from mobly import asserts, signals, test_runner
 
 # Required fastboot variables.
@@ -50,7 +51,7 @@ _REQUIRED_VARS = {
 # we assume there is at most one arg per variable, and any other colon belongs
 # to the value, e.g. `foo:a:b:c` results in name="foo:a", value="b:c".
 _GETVAR_REGEX = re.compile(
-    r"(\(bootloader\) )?(?P<name>[a-z\-]+(:[a-z0-9]+)?): ?(?P<val>.*)"
+    r"(\(bootloader\) )?(?P<name>[a-z\-]+(:[a-z0-9_.\-]+)?): ?(?P<val>.*)"
 )
 
 
@@ -88,6 +89,7 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
     async def setup_class(self) -> None:
         """Initializes all DUT(s)"""
         await super().setup_class()
+        self._product_bundle_path = self.user_params["product_bundle_path"]
 
         # TODO(http://b/276740268#comment33): add support for rebooting into
         # fastboot here and leaving the device in fastboot mode for the entire
@@ -107,34 +109,39 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
             await self.dut.fastboot.boot_to_fuchsia_mode()
         await super().teardown_test()
 
+    def _getvar(self, expected_name: str) -> str:
+        """Queries a single fastboot variable and returns its value."""
+        lines = self.dut.fastboot.run(["getvar", expected_name])
+
+        if len(lines) == 1:
+            output = lines[0]
+        elif len(lines) == 2 and ignore_line(lines[0]):
+            output = lines[1]
+        else:
+            raise signals.TestFailure(
+                "Unexpected getvar output",
+                extras={"lines": lines},
+            )
+        name, value = parse_getvar(output)
+
+        asserts.assert_equal(
+            name, expected_name, "getvar name doesn't match expected"
+        )
+        return value
+
     def test_getvar(self) -> None:
         """Tests fastboot variables."""
         # Make sure each variable can also be individually queried and that the
         # value is what we expect.
         logging.info("Checking `getvar` variables")
         for expected_name, expected_values in _REQUIRED_VARS.items():
-            lines = self.dut.fastboot.run(["getvar", expected_name])
-
-            if len(lines) == 1:
-                output = lines[0]
-            elif len(lines) == 2 and ignore_line(lines[0]):
-                output = lines[1]
-            else:
-                raise signals.TestFailure(
-                    "Unexpected getvar output",
-                    extras={"lines": lines},
-                )
-            name, value = parse_getvar(output)
-
-            asserts.assert_equal(
-                name, expected_name, "getvar name doesn't match expected"
-            )
+            value = self._getvar(expected_name)
             if expected_values:
                 asserts.assert_in(
                     value,
                     expected_values,
                     "getvar value doesn't match expected",
-                    extras={"name": name},
+                    extras={"name": expected_name},
                 )
 
         # Make sure all the variables we care about also exist in `getvar all`.
@@ -151,6 +158,58 @@ class FastbootTest(fuchsia_base_test.FuchsiaBaseTest):
             asserts.assert_in(
                 name, getvar_all_vars, "Missing variable in `getvar all`"
             )
+
+    def test_reboot_bootloader(self) -> None:
+        """Tests rebooting from fastboot mode back into fastboot mode."""
+        logging.info("Rebooting from fastboot back into fastboot mode")
+        # `ffx target fastboot reboot bootloader` waits for the target to
+        # disconnect from USB, re-enumerate in fastboot mode, and respond to
+        # `getvar` before returning.
+        self.dut.ffx.run(
+            cmd=[
+                "--target",
+                self.dut.fastboot.node_id,
+                "target",
+                "fastboot",
+                "reboot",
+                "bootloader",
+            ],
+            include_target=False,
+            log_status_on_failure=False,
+            machine=ffx_types.MachineFormat.RAW,
+        )
+        self.dut.fastboot.wait_for_fastboot_mode()
+
+    async def _flash_and_boot_fuchsia(self) -> None:
+        """Flashes the product bundle in fastboot mode and waits for Fuchsia mode."""
+        self.dut.ffx.notify_intentional_disconnect()
+        self.dut.ffx.run(
+            cmd=[
+                "--target",
+                self.dut.fastboot.node_id,
+                "target",
+                "flash",
+                "--product-bundle",
+                self._product_bundle_path,
+            ],
+            include_target=False,
+            log_status_on_failure=False,
+            machine=ffx_types.MachineFormat.RAW,
+        )
+        self.dut.fastboot.wait_for_fuchsia_mode()
+        await self.dut.wait_for_online()
+        await self.dut.on_device_boot()
+
+    async def test_flash_bootloader(self) -> None:
+        """Tests flashing bootloader, rebooting, and flashing bootloader again."""
+        logging.info("Flashing product bundle (pass 1)")
+        await self._flash_and_boot_fuchsia()
+
+        logging.info(
+            "Rebooting into newly flashed bootloader and flashing again (pass 2)"
+        )
+        self.dut.fastboot.boot_to_fastboot_mode()
+        await self._flash_and_boot_fuchsia()
 
 
 if __name__ == "__main__":

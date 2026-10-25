@@ -6,20 +6,21 @@ use crate::task::{CurrentTask, RunState};
 use crate::vfs::{EpollEventHandler, FdNumber};
 use bitflags::bitflags;
 use futures::stream::AbortHandle;
+use rustc_hash::FxHashMap;
 use slab::Slab;
 use smallvec::SmallVec;
 use starnix_lifecycle::AtomicCounter;
 use starnix_sync::{
     EventHandlerReadyQueueLock, EventWaitGuard, InterruptibleEvent, LockDepMutex, NotifyKind,
-    PortEvent, PortWaitResult, PortWaiterCallbacksLock, PortWaiterWaitQueuesLock,
-    WaitQueueImplLock, WaiterEventHandlerLock,
+    ObjectWaitGuard, ObjectWaiter, PortEvent, PortWaitResult, PortWaiterCallbacksLock,
+    PortWaiterWaitQueuesLock, WaitQueueImplLock, WaiterEventHandlerLock,
 };
 use starnix_types::ownership::debug_assert_no_local_temp_ref;
 use starnix_uapi::error;
 use starnix_uapi::errors::{EINTR, Errno};
 use starnix_uapi::signals::{SIGKILL, SigSet, Signal};
 use starnix_uapi::vfs::FdEvents;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 use syncio::zxio::zxio_signals_t;
 use syncio::{ZxioSignals, ZxioWeak};
@@ -367,7 +368,9 @@ bitflags! {
 /// a Waiter should have a single owner. So the Arc is hidden inside Waiter.
 struct PortWaiter {
     port: PortEvent,
-    callbacks: LockDepMutex<HashMap<WaitKey, WaitCallback>, PortWaiterCallbacksLock>, // the key 0 is reserved for 'no handler'
+    // Keys in `callbacks` and `wait_queues` come from `next_key`, so the faster
+    // non-DoS-resistant `FxHashMap` is safe here.
+    callbacks: LockDepMutex<FxHashMap<WaitKey, WaitCallback>, PortWaiterCallbacksLock>, // the key 0 is reserved for 'no handler'
     next_key: AtomicCounter<u64>,
     options: WaiterOptions,
 
@@ -376,7 +379,7 @@ struct PortWaiter {
     ///
     /// This lock is nested inside the WaitQueue.waiters lock.
     wait_queues: LockDepMutex<
-        HashMap<WaitKey, Weak<LockDepMutex<WaitQueueImpl, WaitQueueImplLock>>>,
+        FxHashMap<WaitKey, Weak<LockDepMutex<WaitQueueImpl, WaitQueueImplLock>>>,
         PortWaiterWaitQueuesLock,
     >,
 }
@@ -769,6 +772,7 @@ enum WaiterKind {
     Port(Weak<PortWaiter>),
     Event(Weak<InterruptibleEvent>),
     AbortHandle(Weak<futures::stream::AbortHandle>),
+    ObjectWaiter(Weak<ObjectWaiter>),
 }
 
 impl Default for WaiterKind {
@@ -795,11 +799,24 @@ impl WaiterRef {
         WaiterRef(WaiterKind::AbortHandle(Arc::downgrade(handle)))
     }
 
+    /// Returns a `WaiterRef` for the `ObjectWaiter`.
+    ///
+    /// Interrupting the returned `WaiterRef` interrupts the underlying `ObjectWaiter`, causing
+    /// `ObjectWaitGuard::wait_many` to return `ObjectWaitError::Interrupted`. A task blocking in
+    /// `wait_many` passes this `WaiterRef` to `RunState::Waiter` so that signals, task exit, and
+    /// freezing can interrupt the wait. Accepting `&ObjectWaitGuard` ensures that
+    /// `ObjectWaiter::begin_wait` was called before entering `RunState::Waiter`, preventing missed
+    /// interruptions.
+    pub fn from_object_waiter(guard: &ObjectWaitGuard<'_>) -> WaiterRef {
+        WaiterRef(WaiterKind::ObjectWaiter(Arc::downgrade(guard.waiter())))
+    }
+
     pub fn is_valid(&self) -> bool {
         match &self.0 {
             WaiterKind::Port(waiter) => waiter.strong_count() != 0,
             WaiterKind::Event(event) => event.strong_count() != 0,
             WaiterKind::AbortHandle(handle) => handle.strong_count() != 0,
+            WaiterKind::ObjectWaiter(waiter) => waiter.strong_count() != 0,
         }
     }
 
@@ -818,6 +835,11 @@ impl WaiterRef {
             WaiterKind::AbortHandle(handle) => {
                 if let Some(handle) = handle.upgrade() {
                     handle.abort();
+                }
+            }
+            WaiterKind::ObjectWaiter(waiter) => {
+                if let Some(waiter) = waiter.upgrade() {
+                    waiter.interrupt();
                 }
             }
         }
@@ -853,6 +875,8 @@ impl WaiterRef {
                     return Some(NotifiableRef::AbortHandle(handle));
                 }
             }
+            // An `ObjectWaiter` is never added to a `WaitQueue`, and only supports interruptions.
+            WaiterKind::ObjectWaiter(_) => (),
         }
         None
     }
@@ -897,6 +921,9 @@ impl PartialEq for WaiterRef {
             (WaiterKind::Port(lhs), WaiterKind::Port(rhs)) => Weak::ptr_eq(lhs, rhs),
             (WaiterKind::Event(lhs), WaiterKind::Event(rhs)) => Weak::ptr_eq(lhs, rhs),
             (WaiterKind::AbortHandle(lhs), WaiterKind::AbortHandle(rhs)) => Weak::ptr_eq(lhs, rhs),
+            (WaiterKind::ObjectWaiter(lhs), WaiterKind::ObjectWaiter(rhs)) => {
+                Weak::ptr_eq(lhs, rhs)
+            }
             _ => false,
         }
     }
@@ -1195,6 +1222,7 @@ mod tests {
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use crate::vfs::eventfd::{EventFdType, new_eventfd};
     use assert_matches::assert_matches;
+    use starnix_sync::ObjectWaitError;
     use starnix_uapi::open_flags::OpenFlags;
     use starnix_uapi::signals::SIGUSR1;
 
@@ -1372,6 +1400,58 @@ mod tests {
             });
 
             assert_eq!(output, Ok(()));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn waiter_kind_object_waiter() {
+        spawn_kernel_and_run_sync(|current_task| {
+            let waiter = ObjectWaiter::new();
+            let event = zx::Event::create();
+            // Waits for `event` in `RunState::Waiter`, with the `WaiterRef` of `guard`.
+            let wait = |guard: ObjectWaitGuard<'_>| {
+                let waiter_ref = WaiterRef::from_object_waiter(&guard);
+                current_task.run_in_state(RunState::Waiter(waiter_ref), || {
+                    Ok(guard.wait_many(
+                        [event.wait_item(zx::Signals::USER_0)],
+                        zx::MonotonicInstant::INFINITE,
+                    ))
+                })
+            };
+
+            // An interruption of the task while it is blocked in `zx_object_wait_many` ends the
+            // wait.
+            let task = current_task.task.clone();
+            let thread = fuchsia_runtime::with_thread_self(|thread| {
+                thread.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle")
+            });
+            let interrupter = std::thread::spawn(move || {
+                while thread.info().expect("info").state
+                    != zx::ThreadState::Blocked(zx::ThreadBlockType::WaitMany)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                task.interrupt();
+            });
+            assert_eq!(wait(waiter.begin_wait()), Ok(Err(ObjectWaitError::Interrupted)));
+            interrupter.join().expect("join");
+
+            // An interruption through the `WaiterRef` after `begin_wait` ends the wait, even if the
+            // task has not blocked yet.
+            let guard = waiter.begin_wait();
+            let waiter_ref = WaiterRef::from_object_waiter(&guard);
+            waiter_ref.interrupt();
+            assert_eq!(wait(guard), Ok(Err(ObjectWaitError::Interrupted)));
+
+            // The next wait ignores the previous interruptions, and ends when the object is
+            // signaled.
+            event.signal(zx::Signals::NONE, zx::Signals::USER_0).expect("signal");
+            assert_eq!(wait(waiter.begin_wait()), Ok(Ok([zx::Signals::USER_0])));
+
+            // The `WaiterRef` does not keep the waiter alive.
+            std::mem::drop(waiter);
+            assert!(!waiter_ref.is_valid());
         })
         .await;
     }

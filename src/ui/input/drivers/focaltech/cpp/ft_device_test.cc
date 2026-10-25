@@ -231,8 +231,7 @@ class FocaltechTest : public testing::Test {
     ASSERT_OK(driver_test_.StartDriver());
     VerifyGpioInit();
 
-    zx::result input_device = driver_test_.ConnectThroughDevfs<fuchsia_input_report::InputDevice>(
-        FtDevice::kChildNodeName);
+    zx::result input_device = driver_test_.Connect<fuchsia_input_report::Service::InputDevice>();
     ASSERT_OK(input_device);
     input_device_.Bind(std::move(input_device.value()),
                        driver_test_.runtime().GetForegroundDispatcher()->async_dispatcher());
@@ -303,12 +302,12 @@ void VerifyDescriptor(const fuchsia_input_report::wire::DeviceDescriptor& descri
 
     EXPECT_EQ(c.position_x().range.min, 0);
     EXPECT_EQ(c.position_x().range.max, x_max);
-    EXPECT_EQ(c.position_x().unit.type, fuchsia_input_report::wire::UnitType::kOther);
+    EXPECT_EQ(c.position_x().unit.type, fuchsia_input::wire::UnitType::kOther);
     EXPECT_EQ(c.position_x().unit.exponent, 0);
 
     EXPECT_EQ(c.position_y().range.min, 0);
     EXPECT_EQ(c.position_y().range.max, y_max);
-    EXPECT_EQ(c.position_y().unit.type, fuchsia_input_report::wire::UnitType::kOther);
+    EXPECT_EQ(c.position_y().unit.type, fuchsia_input::wire::UnitType::kOther);
     EXPECT_EQ(c.position_y().unit.exponent, 0);
   }
 }

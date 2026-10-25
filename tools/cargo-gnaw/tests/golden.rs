@@ -211,6 +211,11 @@ fn main() {
             golden_expected_filename: vec!["remove_rustflags", "BUILD.gn"],
             options: Options { extra_args: vec!["--skip-root"], ..Default::default() },
         },
+        TestCase {
+            manifest_path: vec!["inputs", "Cargo.toml"],
+            golden_expected_filename: vec!["inputs", "BUILD.gn"],
+            options: Options { extra_args: vec!["--skip-root"], ..Default::default() },
+        },
     ];
 
     let run_gnaw = |manifest_path: &[&str], extra_args: &[&str], output_sdk_metadata: bool| {
@@ -333,7 +338,7 @@ fn main() {
 
 fn copy_contents(original_test_dir: &Path, test_dir_path: &Path) {
     // copy the contents of original test dir to test_dir
-    for entry in walkdir::WalkDir::new(&original_test_dir) {
+    for entry in walkdir::WalkDir::new(&original_test_dir).follow_links(true) {
         let entry = entry.expect("walking original test directory to copy files to /tmp");
         if !entry.file_type().is_file() {
             continue;

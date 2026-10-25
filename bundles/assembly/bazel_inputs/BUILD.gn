@@ -94,7 +94,6 @@ group("embeddable") {
     "//bundles/assembly/bazel_inputs/src/bringup/bin/critical-services:package",
     "//bundles/assembly/bazel_inputs/src/devices/bus/drivers/platform:package",
     "//bundles/assembly/bazel_inputs/src/diagnostics/archivist:package",
-    "//bundles/assembly/bazel_inputs/src/power/shutdown-shim:package",
   ]
 }
 
@@ -638,40 +637,15 @@ group("network_realm") {
 
 group("network_realm_packages") {
   deps = [
+    "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package",
+    "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package",
   ]
-}
-
-group("network_realm_packages_gub") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package_gub",
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package_gub",
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package_gub",
-    "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package_gub",
-    "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package_gub",
-    "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package_gub",
-  ]
-}
-
-group("networking_with_virtualization") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-advanced" ]
-}
-
-group("networking_basic") {
-  deps = []
-}
-
-group("networking_basic_packages") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic" ]
-}
-
-group("networking_basic_packages_gub") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic_gub" ]
 }
 
 group("core_realm_eng") {
@@ -771,7 +745,6 @@ group("development_support_tools_connectivity_networking") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/network/mdns/util:mdns-util",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/net-cli",
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/tools/sockscripter:package",
     "//bundles/assembly/bazel_inputs/third_party/iperf:iperf3_pkg",
     "//bundles/assembly/bazel_inputs/third_party/tcpdump",
   ]
@@ -1063,7 +1036,6 @@ group("testing_support") {
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/elf:elf-test-create-raw-processes-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/elf:elf-test-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/fuzz:fuzz-test-runner",
-    "//bundles/assembly/bazel_inputs/src/sys/test_runners/gotests:go-test-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:gtest-create-raw-processes-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:gtest-runner",
     "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:zxtest-runner",
@@ -1107,23 +1079,7 @@ group("fshost_common") {
 
 group("fshost_eng") {
   testonly = true
-  deps = [ ":fshost_eng.bootfs_files_package.bazel_input" ]
-}
-
-fuchsia_package("fshost_eng.bootfs_files_package") {
-  testonly = true
-  deps = [
-    "//src/devices/block/bin/biotime:bootfs",
-    "//src/devices/block/bin/gpt:bootfs",
-    "//src/devices/block/bin/iochk:bootfs",
-    "//src/devices/block/bin/iotime:bootfs",
-    "//src/devices/block/bin/lsblk:bootfs",
-  ]
-}
-
-export_fuchsia_package_to_bazel("fshost_eng.bootfs_files_package.bazel_input") {
-  testonly = true
-  package = ":fshost_eng.bootfs_files_package"
+  deps = [ "//bundles/assembly/bazel_inputs/src/devices/block/bin:block_tools" ]
 }
 
 group("fshost_non_eng") {
@@ -1278,21 +1234,6 @@ group("vsock_service") {
 
 group("vsock_service_bootstrap") {
   deps = [ "//bundles/assembly/bazel_inputs/src/paravirtualization/vsock:vsock_service" ]
-}
-
-group("netstack3") {
-  deps = []
-}
-
-group("netstack3_packages") {
-  deps =
-      [ "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3" ]
-}
-
-group("netstack3_packages_gub") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3_gub",
-  ]
 }
 
 group("socket-proxy-enabled") {

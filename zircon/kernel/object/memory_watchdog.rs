@@ -573,9 +573,10 @@ impl MemoryWatchdogState {
         // to a lower pressure state, so we can re-enter OOM multiple times before that
         // happens.
         let mut oom_entry_logged = false;
-        // Accumulates the total number of pages evicted during a contiguous OOM period (which may
-        // involve multiple bounces in and out of OOM level).
+        // Accumulates the total number of pages evicted and time spent evicting during a
+        // contiguous OOM period (which may involve multiple bounces in and out of OOM level).
         let mut total_oom_evicted_pages: u64 = 0;
+        let mut total_oom_eviction_duration = DurationMono::ZERO;
 
         // SAFETY: `worker_thread` is the single thread that mutates `prev_mem_event_idx`,
         // `prev_mem_state_eval_time`, `min_free_target`, and `eviction_trigger` (after `init`),
@@ -597,6 +598,7 @@ impl MemoryWatchdogState {
                     }
 
                     count_pressure_event(self.mem_event_idx.load());
+                    let eviction_start = current_mono_time();
                     // Keep trying to perform eviction for as long as we are evicting non-zero pages
                     // and we remain in the out of memory state.
                     while self.mem_event_idx.load() == PressureLevel::OutOfMemory {
@@ -620,6 +622,8 @@ impl MemoryWatchdogState {
                             total_oom_evicted_pages.saturating_add(evicted_pages);
                         self.mem_event_idx.store(self.calculate_pressure_level());
                     }
+                    total_oom_eviction_duration =
+                        total_oom_eviction_duration + (current_mono_time() - eviction_start);
                 }
 
                 // Check to see if the PMM has failed any allocations.  If the PMM has ever failed
@@ -655,14 +659,16 @@ impl MemoryWatchdogState {
                         if total_oom_evicted_pages > 0 {
                             let mut buf = [0u8; pretty::MAX_FORMAT_SIZE_LEN];
                             kprintln!(
-                                "memory-pressure: reclaimed {:s} to avoid OOM",
+                                "memory-pressure: reclaimed {:s} in {}ms to avoid OOM",
                                 pretty::format_size_rs(
                                     &mut buf,
                                     (total_oom_evicted_pages * PAGE_SIZE) as usize
-                                )
+                                ),
+                                total_oom_eviction_duration.into_millis()
                             );
                             total_oom_evicted_pages = 0;
                         }
+                        total_oom_eviction_duration = DurationMono::ZERO;
                         oom_entry_logged = false;
                     }
 
@@ -713,7 +719,7 @@ impl MemoryWatchdogState {
                         {
                             self.eviction_trigger();
                         } else {
-                            Pin::new_unchecked(&mut *self.eviction_trigger.get()).set_oneshot(
+                            Pin::new_unchecked(&*self.eviction_trigger.get()).set_oneshot(
                                 (time_now + *self.eviction_delay_ms.get()).into_nanos(),
                                 eviction_trigger_callback,
                                 self as *const Self as *mut c_void,
@@ -1057,25 +1063,6 @@ pub unsafe extern "C" fn rust_memory_watchdog_destroy(storage: *mut MemoryWatchd
     // SAFETY: `storage` points to an initialized `MemoryWatchdogState`.
     unsafe {
         core::ptr::drop_in_place(storage);
-    }
-}
-
-/// Retrieves the memory pressure event for `kind`.
-///
-/// # Safety
-///
-/// `storage` must point to a valid, initialized `MemoryWatchdogState`, and `out_event` must point
-/// to valid uninitialized memory for `Option<fbl::RefPtr<EventDispatcher>>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_memory_watchdog_get_mem_pressure_event(
-    storage: *const MemoryWatchdogState,
-    kind: u32,
-    out_event: *mut MaybeUninit<Option<fbl::RefPtr<EventDispatcher>>>,
-) {
-    // SAFETY: `storage` and `out_event` are valid pointers per the caller contract.
-    unsafe {
-        let state = &*storage;
-        (*out_event).write(state.get_mem_pressure_event(kind));
     }
 }
 

@@ -201,10 +201,9 @@ fn maybe_reset_signal_state(
     // for it to be received before the credentials are committed (in which case it should be
     // cleared), or afterward (in which case it need not be cleared).  It's therefore acceptable to
     // take the signal queues' locks here, rather than holding them across the credentials commit.
-    // Fatal signals (notably `SIGKILL`) should not be cleared on domain transitions, since the
-    // process is already doomed and should still terminate rather than returning to userspace once
-    // the `exec()` is complete.
-    // TODO: https://fxbug.dev/509895244 - Preserve queued fatal signals.
+    // Note that `SIGKILL` transitions the thread group to the exiting state immediately on
+    // delivery rather than being queued here, so clearing the signal queues cannot cancel a
+    // pending `SIGKILL`.
     let mut task_mutable_state = current_task.write();
     let mut thread_group_signal_queue = current_task.thread_group().pending_signals.lock();
 
@@ -379,7 +378,6 @@ pub(in crate::security) fn bprm_creds_for_exec(
         // Check that ptrace permission is allowed if the process is traced.
         if let Some(ptracer) = current_task.ptracer_task() {
             let tracer_sid = ptracer.real_creds().security_state.current_sid;
-            // TODO: https://fxbug.dev/412581419 - SIGKILL the process on failure.
             check_permission(
                 &permission_check,
                 current_task,
@@ -975,7 +973,6 @@ pub(in crate::security) fn set_procattr(
             // Check that ptrace permission is allowed if the process is traced.
             if let Some(ptracer) = current_task.ptracer_task() {
                 let tracer_sid = ptracer.real_creds().security_state.current_sid;
-                // TODO: https://fxbug.dev/412581419 - SIGKILL the process on failure.
                 check_permission(
                     &permission_check,
                     current_task,
@@ -1211,8 +1208,6 @@ mod tests {
         .await;
     }
 
-    // TODO(http://b/330904217): reenable test once filesystems are labeled and access is denied.
-    #[ignore]
     #[fuchsia::test]
     async fn exec_transition_denied_for_executable_with_no_entrypoint_perm() {
         spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
@@ -1276,8 +1271,6 @@ mod tests {
         .await;
     }
 
-    // TODO(http://b/330904217): reenable test once filesystems are labeled and access is denied.
-    #[ignore]
     #[fuchsia::test]
     async fn exec_no_trans_denied_for_executable() {
         spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {

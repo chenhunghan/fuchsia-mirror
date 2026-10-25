@@ -149,7 +149,8 @@ CRATE_ANNOTATIONS = {
     ],
     "libc": [
         crate.annotation(
-            version = "0.2.189",
+            version = "0.2.190",
+            gen_build_script = False,
             rustc_flags = crate.select(
                 common = [
                     "--cfg=libc_priv_mod_use",
@@ -213,7 +214,7 @@ CRATE_ANNOTATIONS = {
                 },
             ),
             rustc_flags = [
-                "--cfg=fasync",
+                "--cfg=export_testing_macro",
             ],
         ),
     ],
@@ -376,17 +377,17 @@ CRATE_ANNOTATIONS = {
     ],
     "ref-cast": [
         crate.annotation(
-            version = "1.0.26",
+            version = "1.0.27",
             rustc_env = {
-                "CARGO_PKG_VERSION_PATCH": "26",
+                "CARGO_PKG_VERSION_PATCH": "27",
             },
         ),
     ],
     "ref-cast-impl": [
         crate.annotation(
-            version = "1.0.26",
+            version = "1.0.27",
             rustc_env = {
-                "CARGO_PKG_VERSION_PATCH": "26",
+                "CARGO_PKG_VERSION_PATCH": "27",
             },
         ),
     ],
@@ -452,9 +453,9 @@ CRATE_ANNOTATIONS = {
             gen_build_script = False,
         ),
         crate.annotation(
-            version = "2.0.20",
+            version = "2.0.21",
             rustc_env = {
-                "CARGO_PKG_VERSION_PATCH": "20",
+                "CARGO_PKG_VERSION_PATCH": "21",
             },
             rustc_flags = [
                 "--cfg=error_generic_member_access",
@@ -464,9 +465,9 @@ CRATE_ANNOTATIONS = {
     ],
     "thiserror-impl": [
         crate.annotation(
-            version = "2.0.20",
+            version = "2.0.21",
             rustc_env = {
-                "CARGO_PKG_VERSION_PATCH": "20",
+                "CARGO_PKG_VERSION_PATCH": "21",
             },
         ),
     ],
@@ -517,21 +518,21 @@ CRATE_ANNOTATIONS = {
                 selects = {
                     "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
                         "//third_party/rust_crates/ask2patch/memchr",
-                        "//third_party/rust_crates/forks/libc-0.2.189:libc",
+                        "//third_party/rust_crates/forks/libc-0.2.190:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
                         "//third_party/rust_crates/vendor/mio-1.2.1:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
                         "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
-                        "//third_party/rust_crates/vendor/socket2-0.6.4:socket2",
+                        "//third_party/rust_crates/vendor/socket2-0.6.5:socket2",
                     ],
                     "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
                         "//third_party/rust_crates/ask2patch/memchr",
-                        "//third_party/rust_crates/forks/libc-0.2.189:libc",
+                        "//third_party/rust_crates/forks/libc-0.2.190:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
                         "//third_party/rust_crates/vendor/mio-1.2.1:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
                         "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
-                        "//third_party/rust_crates/vendor/socket2-0.6.4:socket2",
+                        "//third_party/rust_crates/vendor/socket2-0.6.5:socket2",
                     ],
                 },
             ),
@@ -641,9 +642,9 @@ CRATE_ANNOTATIONS = {
     ],
     "zip": [
         crate.annotation(
-            version = "8.6.0",
+            version = "9.0.5",
             rustc_env = {
-                "CARGO_PKG_VERSION": "8.6.0",
+                "CARGO_PKG_VERSION": "9.0.5",
             },
         ),
     ],

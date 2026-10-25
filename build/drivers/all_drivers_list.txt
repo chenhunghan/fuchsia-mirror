@@ -111,12 +111,12 @@
 //src/devices/board/drivers/nelson/post-init:post-init-driver
 //src/devices/board/drivers/nelson:nelson-module-driver
 //src/devices/board/drivers/qemu-arm64:qemu-arm64-driver
-//src/devices/board/drivers/qemu-riscv64:qemu-riscv64-driver
 //src/devices/board/drivers/sherlock/post-init:post-init-driver
 //src/devices/board/drivers/sherlock:sherlock-driver
 //src/devices/board/drivers/sherlock:sherlock-factory-driver
 //src/devices/board/drivers/vim3-devicetree:bazel_package.bazel_build
 //src/devices/board/drivers/vim3-dml:vim3-dml-driver
+//src/devices/board/drivers/virt:virt-driver
 //src/devices/bus/drivers/platform/test/power-integration-test:test-power-child-driver
 //src/devices/bus/drivers/platform/test/power-integration-test:test-power-integration-board-driver
 //src/devices/bus/drivers/platform/test/power-integration-test:test-power-parent-driver
@@ -171,6 +171,7 @@
 //src/devices/nand/drivers/skip-block:driver
 //src/devices/pci/drivers/pci/test:pci_fake-driver
 //src/devices/pci/drivers/pci:bus-pci-driver
+//src/devices/pci/drivers/pciroot-banjo-adapter:pciroot-banjo-adapter-driver
 //src/devices/power/drivers/aml-meson-power:aml-meson-power-driver
 //src/devices/power/drivers/aml-pwm-regulator:aml-pwm-regulator-driver
 //src/devices/power/drivers/fusb302:fusb302-driver
@@ -186,7 +187,6 @@
 //src/devices/rtc/drivers/pl031-rtc:pl031-rtc-driver
 //src/devices/securemem/drivers/aml-securemem:aml-securemem-driver
 //src/devices/serial/drivers/aml-uart:aml-uart-driver
-//src/devices/serial/drivers/dw-apb-uart:dw-apb-uart-driver
 //src/devices/serial/drivers/ftdi:ftdi-driver
 //src/devices/serial/drivers/ftdi:ftdi-fake-usb-driver
 //src/devices/serial/drivers/serial:serial-driver
@@ -401,7 +401,7 @@
 //src/ui/input/drivers/usb-hid:usb-hid-driver
 //src/ui/input/drivers/usb-hid:usb-one-endpoint-hid-fake-usb-driver
 //src/ui/input/drivers/usb-hid:usb-two-endpoint-hid-fake-usb-driver
-//src/ui/input/drivers/virtio:virtio_input-driver
+//src/ui/input/drivers/virtio:driver-cpp
 //src/ui/light/drivers/aml-light:aml-light-driver
 //tools/create/goldens/my-driver-cpp:driver
 //zircon/third_party/dev/ethernet/e1000:e1000-driver

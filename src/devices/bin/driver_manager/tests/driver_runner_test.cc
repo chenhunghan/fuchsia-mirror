@@ -23,6 +23,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "src/devices/bin/driver_manager/composite/composite_node_spec.h"
+#include "src/devices/bin/driver_manager/driver_development/driver_development_service.h"
 #include "src/devices/bin/driver_manager/node.h"
 #include "src/devices/bin/driver_manager/testing/fake_driver_index.h"
 #include "src/devices/bin/driver_manager/tests/driver_runner_test_fixture.h"
@@ -93,21 +94,23 @@ class DriverRunnerTest : public DriverRunnerTestBase, public ::testing::WithPara
     driver_runner().power_manager()->FetchCpuToken();
   }
 
-  zx::result<StartDriverResult> StartRootDriver() {
+  zx::result<StartDriverResult> StartRootDriver(bool suspend_enabled = false) {
     if (use_dynamic_linker_) {
-      return DriverRunnerTestBase::StartRootDriverDynamicLinking();
+      return DriverRunnerTestBase::StartRootDriverDynamicLinking(
+          kDefaultDriverHostPkgConfig, kDefaultRootDriverPkgConfig, suspend_enabled);
     } else {
-      return DriverRunnerTestBase::StartRootDriver();
+      return DriverRunnerTestBase::StartRootDriver(suspend_enabled);
     }
   }
 
   StartDriverResult StartSecondDriver(
       std::string_view moniker, bool colocate = false, bool host_restart_on_crash = false,
       bool use_next_vdso = false,
-      fidl::ClientEnd<fuchsia_io::Directory> ns_svc = fidl::ClientEnd<fuchsia_io::Directory>()) {
+      fidl::ClientEnd<fuchsia_io::Directory> ns_svc = fidl::ClientEnd<fuchsia_io::Directory>(),
+      bool suspend_enabled = false) {
     return DriverRunnerTestBase::StartSecondDriver(moniker, colocate, host_restart_on_crash,
                                                    use_next_vdso, use_dynamic_linker(),
-                                                   std::move(ns_svc));
+                                                   std::move(ns_svc), suspend_enabled);
   }
 
   // If |use_dynamic_linker| is not provided, it will be generated from the test configuration.
@@ -156,7 +159,7 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesAndCpuOverride) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver, controller] = StartSecondDriver("dev.second");
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
   EXPECT_TRUE(did_bind_1);
   StopListener& stop_listener = ServeStopListener(std::move(controller));
 
@@ -245,7 +248,7 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesAndCpuOverride) {
   bound_completion.Wait();
 
   auto [driver_2, controller_2] =
-      StartSecondDriver("dev.second", false, false, false, std::move(svc_endpoints.client));
+      StartSecondDriver("dev.second", false, false, false, std::move(svc_endpoints.client), true);
   {
     auto deadline = zx::deadline_after(zx::sec(5));
     while (!did_bind_2 && zx::clock::get_monotonic() < deadline) {
@@ -282,7 +285,7 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesAndCpuOverride) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver_3, controller_3] = StartSecondDriver("dev.second");
+  auto [driver_3, controller_3] = StartSecondDriver("dev.second", false, false, false, {}, true);
   {
     auto deadline = zx::deadline_after(zx::sec(5));
     while (!did_bind_3 && zx::clock::get_monotonic() < deadline) {
@@ -333,7 +336,7 @@ TEST_P(DriverRunnerTest, RestartWithCpuTokenOverrideOnly) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver, controller] = StartSecondDriver("dev.second");
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
   EXPECT_TRUE(did_bind_4);
   StopListener& stop_listener = ServeStopListener(std::move(controller));
 
@@ -413,7 +416,7 @@ TEST_P(DriverRunnerTest, RestartWithCpuTokenOverrideOnly) {
   bound_completion.Wait();
 
   auto [driver_2, controller_2] =
-      StartSecondDriver("dev.second", false, false, false, std::move(svc_endpoints.client));
+      StartSecondDriver("dev.second", false, false, false, std::move(svc_endpoints.client), true);
   {
     auto deadline = zx::deadline_after(zx::sec(5));
     while (!did_bind_5 && zx::clock::get_monotonic() < deadline) {
@@ -450,7 +453,7 @@ TEST_P(DriverRunnerTest, RestartWithCpuTokenOverrideOnly) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver_3, controller_3] = StartSecondDriver("dev.second");
+  auto [driver_3, controller_3] = StartSecondDriver("dev.second", false, false, false, {}, true);
   {
     auto deadline = zx::deadline_after(zx::sec(5));
     while (!did_bind_6 && zx::clock::get_monotonic() < deadline) {
@@ -502,7 +505,7 @@ TEST_P(DriverRunnerTest, RestartWithNodePowerTokenOverrides) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver, controller] = StartSecondDriver("dev.second");
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
   EXPECT_TRUE(did_bind_1);
   StopListener& stop_listener = ServeStopListener(std::move(controller));
 
@@ -559,7 +562,7 @@ TEST_P(DriverRunnerTest, RestartWithNodePowerTokenOverrides) {
         ZX_ASSERT_MSG(false, " WaitForDriver failed: %s.",
                       result.error_value().FormatDescription().c_str());
       });
-  auto [driver_2, controller_2] = StartSecondDriver("dev.second");
+  auto [driver_2, controller_2] = StartSecondDriver("dev.second", false, false, false, {}, true);
   EXPECT_TRUE(did_bind_2);
 
   std::shared_ptr<driver_manager::Node> node_ptr = nullptr;
@@ -2931,7 +2934,7 @@ TEST_P(DriverRunnerTest, LeaseAllDriversForShutdown) {
   SetupDriverRunnerWithPower(std::move(topology_endpoints.client), std::move(cpu_endpoints.client));
 
   // Start the root driver.
-  auto root_driver = StartRootDriver();
+  auto root_driver = StartRootDriver(true);
   ASSERT_EQ(ZX_OK, root_driver.status_value());
 
   // Add a child node.
@@ -2949,7 +2952,7 @@ TEST_P(DriverRunnerTest, LeaseAllDriversForShutdown) {
         }
         ZX_ASSERT_MSG(false, "WaitForDriver failed");
       });
-  auto [driver, controller] = StartSecondDriver("dev.second");
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
   EXPECT_TRUE(did_bind);
 
   // Call LeaseStatecontrolShutdown.
@@ -2968,6 +2971,404 @@ TEST_P(DriverRunnerTest, LeaseAllDriversForShutdown) {
   // Clean up.
   ServeStopListener(std::move(controller));
   StopDriverComponent(std::move(root_driver->controller));
+}
+
+TEST_P(DriverRunnerTest, DriverDevelopmentRunHealthCheck) {
+  SetupDriverRunner();
+
+  auto root_driver = StartRootDriver();
+  ASSERT_EQ(ZX_OK, root_driver.status_value());
+  root_driver->driver->SetHealthCheckHandler(
+      [](const fdfw::HealthCheckRequest& req)
+          -> fit::result<fdfw::HealthCheckError, fdfw::HealthCheckResponse> {
+        return fit::ok(fdfw::HealthCheckResponse{{
+            .conditions = {{{{
+                .status = fdfw::HealthStatus::kDegraded,
+                .reason_code = "DEV_SERVICE_OK",
+            }}}},
+        }});
+      });
+  auto unbound_child = root_driver->driver->AddChild("unbound_child", false, false);
+
+  driver_manager::DriverDevelopmentService service(driver_runner(), dispatcher());
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_driver_development::Manager>::Create();
+  fidl::BindServer(dispatcher(), std::move(server_end), &service);
+  fidl::WireClient<fuchsia_driver_development::Manager> client(std::move(client_end), dispatcher());
+
+  auto req = fuchsia_driver_framework::wire::HealthCheckRequest::kFast;
+
+  auto expect_ok = [&](std::string_view target) {
+    SCOPED_TRACE(target);
+    bool called = false;
+    client->RunHealthCheck(fidl::StringView::FromExternal(target), req)
+        .ThenExactlyOnce(
+            [&called](fidl::WireUnownedResult<fuchsia_driver_development::Manager::RunHealthCheck>&
+                          result) {
+              ASSERT_TRUE(result.ok());
+              ASSERT_TRUE(result->is_ok());
+              ASSERT_EQ(1u, result->value()->conditions().size());
+              EXPECT_EQ(fuchsia_driver_framework::wire::HealthStatus::kDegraded,
+                        result->value()->conditions()[0].status());
+              EXPECT_EQ("DEV_SERVICE_OK", result->value()->conditions()[0].reason_code().get());
+              called = true;
+            });
+    EXPECT_TRUE(RunLoopUntilIdle());
+    EXPECT_TRUE(called);
+  };
+  auto expect_error = [&](std::string_view target,
+                          fuchsia_driver_framework::wire::HealthCheckError expected) {
+    SCOPED_TRACE(target);
+    bool called = false;
+    client->RunHealthCheck(fidl::StringView::FromExternal(target), req)
+        .ThenExactlyOnce(
+            [&called,
+             expected](fidl::WireUnownedResult<fuchsia_driver_development::Manager::RunHealthCheck>&
+                           result) {
+              ASSERT_TRUE(result.ok());
+              ASSERT_TRUE(result->is_error());
+              EXPECT_EQ(expected, result->error_value());
+              called = true;
+            });
+    EXPECT_TRUE(RunLoopUntilIdle());
+    EXPECT_TRUE(called);
+  };
+
+  // The root node's component moniker is "root" and its topological path is "dev".
+  expect_ok("root");
+  expect_ok("dev");
+
+  // An unbound node exists in the topology but has no running driver, so it returns INVALID_STATE.
+  expect_error("dev.unbound_child",
+               fuchsia_driver_framework::wire::HealthCheckError::kInvalidState);
+  expect_error("dev/unbound_child",
+               fuchsia_driver_framework::wire::HealthCheckError::kInvalidState);
+
+  // Unknown monikers and partial matches (such as a driver URL substring) return NOT_FOUND.
+  expect_error("root-driver.cm", fuchsia_driver_framework::wire::HealthCheckError::kNotFound);
+  expect_error("nonexistent_node", fuchsia_driver_framework::wire::HealthCheckError::kNotFound);
+
+  StopDriverComponent(std::move(root_driver->controller));
+}
+
+TEST_P(DriverRunnerTest, InspectHealthChecks) {
+  SetupDriverRunner();
+
+  auto root_driver = StartRootDriver();
+  ASSERT_EQ(ZX_OK, root_driver.status_value());
+  root_driver->driver->SetHealthCheckHandler([](const fdfw::HealthCheckRequest& req)
+                                                 -> fit::result<fdfw::HealthCheckError,
+                                                                fdfw::HealthCheckResponse> {
+    return fit::ok(fdfw::HealthCheckResponse{{
+        .diagnostics =
+            std::vector<fdfw::HealthDiagnosticItem>{
+                {{.key = "pipe", .value = fdfw::HealthDiagnosticValue::WithStringValue("stalled")}},
+                {{.key = "drift", .value = fdfw::HealthDiagnosticValue::WithIntValue(-12)}},
+                {{.key = "frames", .value = fdfw::HealthDiagnosticValue::WithUintValue(42u)}},
+                {{.key = "locked", .value = fdfw::HealthDiagnosticValue::WithBoolValue(false)}},
+                {{.key = "last_vsync",
+                  .value = fdfw::HealthDiagnosticValue::WithTimestamp(zx::time_boot(123456789))}},
+            },
+        .conditions =
+            std::vector<fdfw::HealthCondition>{
+                {{
+                    .status = fdfw::HealthStatus::kUnhealthy,
+                    .reason_code = "VSYNC_STALLED",
+                    .message = "No VSYNC interrupt in 500ms",
+                    .diagnostics =
+                        std::vector<fdfw::HealthDiagnosticItem>{
+                            {{.key = "stall_ms",
+                              .value = fdfw::HealthDiagnosticValue::WithUintValue(500u)}},
+                        },
+                    .first_observed = zx::time_boot(1000),
+                    .last_observed = zx::time_boot(2000),
+                    .occurrence_count = 3,
+                }},
+                {{
+                    .status = fdfw::HealthStatus::kDegraded,
+                    .reason_code = "TE_JITTER",
+                }},
+            },
+    }});
+  });
+
+  auto read_hc_inspect = [this]() -> inspect::Hierarchy {
+    class FakeHcContext : public fpromise::context {
+     public:
+      fpromise::executor* executor() const override { return nullptr; }
+      fpromise::suspended_task suspend_task() override { return fpromise::suspended_task(); }
+    } context;
+    // Also verify the lazy "health_checks" node registered on the component inspector.
+    auto full = inspect::ReadFromInspector(inspector_.inspector())(context).take_value();
+    EXPECT_NE(nullptr, full.GetByPath({"health_checks"}));
+    auto inspector = driver_runner().InspectHealthChecks()(context).take_value();
+    return inspect::ReadFromInspector(inspector)(context).take_value();
+  };
+
+  // Before running a health check, InspectHealthChecks() has no child nodes.
+  {
+    auto hierarchy = read_hc_inspect();
+    EXPECT_TRUE(hierarchy.children().empty());
+  }
+
+  auto req = fuchsia_driver_framework::HealthCheckRequest::kFast;
+  bool hc_done = false;
+  driver_runner().root_node()->RunHealthCheck(req, [&hc_done](auto result) {
+    ASSERT_TRUE(result.is_ok());
+    hc_done = true;
+  });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(hc_done);
+
+  {
+    auto hierarchy = read_hc_inspect();
+    const auto* root_node = hierarchy.GetByPath({"root"});
+    ASSERT_NE(nullptr, root_node);
+    EXPECT_EQ("UNHEALTHY",
+              root_node->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ(nullptr, root_node->node().get_property<inspect::StringPropertyValue>("error"));
+    EXPECT_EQ("FAST",
+              root_node->node().get_property<inspect::StringPropertyValue>("level")->value());
+    EXPECT_NE(nullptr,
+              root_node->node().get_property<inspect::IntPropertyValue>("last_check_monotonic_ns"));
+    EXPECT_EQ(root_driver_url,
+              root_node->node().get_property<inspect::StringPropertyValue>("driver_url")->value());
+
+    const auto* diag_node = hierarchy.GetByPath({"root", "diagnostics"});
+    ASSERT_NE(nullptr, diag_node);
+    EXPECT_EQ("stalled",
+              diag_node->node().get_property<inspect::StringPropertyValue>("pipe")->value());
+    EXPECT_EQ(-12, diag_node->node().get_property<inspect::IntPropertyValue>("drift")->value());
+    EXPECT_EQ(42u, diag_node->node().get_property<inspect::UintPropertyValue>("frames")->value());
+    EXPECT_EQ(false, diag_node->node().get_property<inspect::BoolPropertyValue>("locked")->value());
+    EXPECT_EQ(123456789,
+              diag_node->node().get_property<inspect::IntPropertyValue>("last_vsync")->value());
+
+    // Both conditions are published under "conditions", keyed by reason code.
+    const auto* vsync_node = hierarchy.GetByPath({"root", "conditions", "VSYNC_STALLED"});
+    ASSERT_NE(nullptr, vsync_node);
+    EXPECT_EQ("UNHEALTHY",
+              vsync_node->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ("No VSYNC interrupt in 500ms",
+              vsync_node->node().get_property<inspect::StringPropertyValue>("message")->value());
+    EXPECT_EQ(
+        1000,
+        vsync_node->node().get_property<inspect::IntPropertyValue>("first_observed")->value());
+    EXPECT_EQ(2000,
+              vsync_node->node().get_property<inspect::IntPropertyValue>("last_observed")->value());
+    EXPECT_EQ(
+        3u,
+        vsync_node->node().get_property<inspect::UintPropertyValue>("occurrence_count")->value());
+    const auto* vsync_diag =
+        hierarchy.GetByPath({"root", "conditions", "VSYNC_STALLED", "diagnostics"});
+    ASSERT_NE(nullptr, vsync_diag);
+    EXPECT_EQ(500u,
+              vsync_diag->node().get_property<inspect::UintPropertyValue>("stall_ms")->value());
+
+    const auto* jitter_node = hierarchy.GetByPath({"root", "conditions", "TE_JITTER"});
+    ASSERT_NE(nullptr, jitter_node);
+    EXPECT_EQ("DEGRADED",
+              jitter_node->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ(nullptr, jitter_node->node().get_property<inspect::StringPropertyValue>("message"));
+  }
+
+  // A "no information" error (UNAVAILABLE) does not replace the informative UNHEALTHY record.
+  root_driver->driver->SetHealthCheckHandler(
+      [](const fdfw::HealthCheckRequest& req)
+          -> fit::result<fdfw::HealthCheckError, fdfw::HealthCheckResponse> {
+        return fit::error(fdfw::HealthCheckError::kUnavailable);
+      });
+  hc_done = false;
+  driver_runner().root_node()->RunHealthCheck(req, [&hc_done](auto result) {
+    ASSERT_TRUE(result.is_error());
+    hc_done = true;
+  });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(hc_done);
+  {
+    auto hierarchy = read_hc_inspect();
+    const auto* root_node = hierarchy.GetByPath({"root"});
+    ASSERT_NE(nullptr, root_node);
+    EXPECT_EQ("UNHEALTHY",
+              root_node->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ(nullptr, root_node->node().get_property<inspect::StringPropertyValue>("error"));
+    EXPECT_NE(nullptr, hierarchy.GetByPath({"root", "conditions", "VSYNC_STALLED"}));
+  }
+
+  // A TIMEOUT is informative, so it replaces the record and is encoded as status "ERROR" with
+  // the error named separately and a synthetic DISPATCHER_TIMEOUT condition.
+  root_driver->driver->SetHealthCheckHandler(
+      [](const fdfw::HealthCheckRequest& req)
+          -> fit::result<fdfw::HealthCheckError, fdfw::HealthCheckResponse> {
+        return fit::error(fdfw::HealthCheckError::kTimeout);
+      });
+  hc_done = false;
+  driver_runner().root_node()->RunHealthCheck(req, [&hc_done](auto result) {
+    ASSERT_TRUE(result.is_error());
+    hc_done = true;
+  });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(hc_done);
+  {
+    auto hierarchy = read_hc_inspect();
+    const auto* root_node = hierarchy.GetByPath({"root"});
+    ASSERT_NE(nullptr, root_node);
+    EXPECT_EQ("ERROR",
+              root_node->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ("TIMEOUT",
+              root_node->node().get_property<inspect::StringPropertyValue>("error")->value());
+    EXPECT_EQ("FAST",
+              root_node->node().get_property<inspect::StringPropertyValue>("level")->value());
+    EXPECT_NE(nullptr, hierarchy.GetByPath({"root", "conditions", "DISPATCHER_TIMEOUT"}));
+    EXPECT_EQ(nullptr, hierarchy.GetByPath({"root", "diagnostics"}));
+  }
+
+  StopDriverComponent(std::move(root_driver->controller));
+}
+
+TEST_P(DriverRunnerTest, RestartWithPowerDependenciesRootWithoutPowerElementChildWithPowerElement) {
+  auto cleanup = fit::defer([this]() { realm().ClearCreateChildHandlers(); });
+  SetupDriverRunner();
+
+  EnableIntrospector();
+
+  // Start root driver WITHOUT power element opt-in.
+  auto root_driver = StartRootDriver(false);
+  ASSERT_EQ(ZX_OK, root_driver.status_value());
+
+  PrepareRealmForSecondDriverComponentStart();
+  std::shared_ptr<CreatedChild> child = root_driver->driver->AddChild("second", false, false);
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  bool did_bind_1 = false;
+  child->node_controller.value()->WaitForDriver().Then(
+      [&did_bind_1](fidl::Result<fuchsia_driver_framework::NodeController::WaitForDriver>& result) {
+        if (result.is_ok() && result.value().driver_started_node_token().has_value()) {
+          did_bind_1 = true;
+          return;
+        }
+        ZX_ASSERT_MSG(false, " WaitForDriver failed");
+      });
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
+  EXPECT_TRUE(did_bind_1);
+  StopListener& stop_listener_second = ServeStopListener(std::move(controller));
+  StopListener& stop_listener_root = ServeStopListener(std::move(root_driver->controller));
+
+  zx::eventpair d_ep1, d_ep2;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &d_ep1, &d_ep2));
+  fuchsia_component_sandbox::wire::DictionaryRef dict_ref;
+  dict_ref.token = std::move(d_ep1);
+
+  zx::event token;
+  ASSERT_EQ(zx::event::create(0, &token), ZX_OK);
+  std::vector<fuchsia_power_broker::LevelDependency> power_deps;
+  power_deps.push_back(fuchsia_power_broker::LevelDependency{{
+      .dependent_level = 1,
+      .requires_token = std::move(token),
+      .requires_level_by_preference = std::vector<uint8_t>{1},
+  }});
+
+  zx::event cpu_override_token;
+  ASSERT_EQ(zx::event::create(0, &cpu_override_token), ZX_OK);
+
+  zx::eventpair release_fence1, release_fence2;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &release_fence1, &release_fence2));
+
+  realm().AddCreateChildHandler([](const fdecl::CollectionRef& collection, const fdecl::Child& decl,
+                                   const std::vector<fdecl::Offer>& offers) {
+    if (collection.name() == "boot-drivers" &&
+        (decl.name().value() == "root" || decl.name().value() == "dev.second")) {
+      return true;
+    }
+    return false;
+  });
+
+  // Restart the subtree rooted at "root" (where root has NO power element, but child "second"
+  // DOES).
+  driver_runner().RestartWithDictionaryAndPowerDependencies(
+      "root", fidl::ToNatural(std::move(dict_ref)), std::move(power_deps),
+      std::move(cpu_override_token), {}, std::move(release_fence2));
+
+  while (!stop_listener_second.is_stopped() || !stop_listener_root.is_stopped()) {
+    RunLoopUntilIdle();
+  }
+
+  // Start root again WITHOUT power element.
+  StartDriverHandler root_start_handler = [this](TestDriver* driver,
+                                                 fdfw::DriverStartArgs start_args) {
+    ValidateProgram(start_args.program(), root_driver_binary, "false", "false", "false");
+  };
+  auto root_driver_2 = StartDriverWithConfig("root",
+                                             {
+                                                 .url = root_driver_url,
+                                                 .binary = root_driver_binary,
+                                                 .use_dynamic_linker = use_dynamic_linker(),
+                                                 .suspend_enabled = false,
+                                             },
+                                             std::move(root_start_handler));
+
+  // Root driver re-adds child "second".
+  std::shared_ptr<CreatedChild> child_2 = root_driver_2.driver->AddChild("second", false, false);
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  bool did_bind_2 = false;
+  child_2->node_controller.value()->WaitForDriver().Then(
+      [&did_bind_2](fidl::Result<fuchsia_driver_framework::NodeController::WaitForDriver>& result) {
+        if (result.is_ok() && result.value().driver_started_node_token().has_value()) {
+          did_bind_2 = true;
+          return;
+        }
+        ZX_ASSERT_MSG(false, " WaitForDriver failed");
+      });
+
+  async::Loop background_loop(&kAsyncLoopConfigNoAttachToCurrentThread);
+  background_loop.StartThread("TestTopologyLoop");
+
+  auto svc_endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  auto test_topology = std::make_unique<TestTopology>(background_loop.dispatcher());
+  auto svc_dir = std::make_unique<TestDirectory>(background_loop.dispatcher());
+  bool did_connect = false;
+  svc_dir->SetDirents({"fuchsia.power.broker.Topology"});
+  svc_dir->SetOpenHandler([&test_topology, &did_connect](const std::string& path,
+                                                         fidl::ServerEnd<fuchsia_io::Node> object) {
+    if (path == "fuchsia.power.broker.Topology") {
+      test_topology->Bind(fidl::ServerEnd<fuchsia_power_broker::Topology>(object.TakeChannel()));
+      did_connect = true;
+    }
+  });
+
+  libsync::Completion bound_completion;
+  async::PostTask(background_loop.dispatcher(), [&]() {
+    svc_dir->Bind(std::move(svc_endpoints.server));
+    bound_completion.Signal();
+  });
+  bound_completion.Wait();
+
+  // Start second driver WITH power element opt-in and verify it connects to the topology in /svc
+  // and receives the overrides from the non-PE root.
+  auto [driver_2, controller_2] =
+      StartSecondDriver("dev.second", false, false, false, std::move(svc_endpoints.client), true);
+  {
+    auto deadline = zx::deadline_after(zx::sec(5));
+    while (!did_bind_2 && zx::clock::get_monotonic() < deadline) {
+      RunLoopUntilIdle();
+      zx::nanosleep(zx::deadline_after(zx::msec(10)));
+    }
+  }
+  EXPECT_TRUE(did_bind_2);
+  EXPECT_TRUE(did_connect);
+  ServeStopListener(std::move(controller_2));
+
+  libsync::Completion destroy_completion;
+  async::PostTask(background_loop.dispatcher(), [&]() {
+    svc_dir.reset();
+    test_topology.reset();
+    destroy_completion.Signal();
+  });
+  destroy_completion.Wait();
+  background_loop.Quit();
+  background_loop.JoinThreads();
+
+  StopDriverComponent(std::move(root_driver_2.controller));
 }
 
 // The tests are parameterized on whether to use the dynamic linker or not.

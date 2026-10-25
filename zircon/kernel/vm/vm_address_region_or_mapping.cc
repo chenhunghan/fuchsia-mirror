@@ -29,62 +29,27 @@ VmAddressRegionOrMapping::VmAddressRegionOrMapping(vaddr_t base, size_t size, ui
 }
 
 zx_status_t VmAddressRegionOrMapping::Destroy() {
-  AssertRegionOrMappingCanary();
-  Guard<CriticalMutex> region_guard{aspace()->region_lock()};
-  Guard<CriticalMutex> guard{aspace()->lock()};
-  if (state_locked() != LifeCycleState::ALIVE) {
-    return ZX_ERR_BAD_STATE;
-  }
-
-  return DestroyLocked();
+  return rust_vm_address_region_or_mapping_destroy(this);
 }
 
 VmAddressRegionOrMapping::~VmAddressRegionOrMapping() {
-  LTRACEF("%p\n", this);
-
-  ASSERT([&]() TA_NO_THREAD_SAFETY_ANALYSIS { return state_locked() != LifeCycleState::ALIVE; }());
-
-  DEBUG_ASSERT([&]() TA_NO_THREAD_SAFETY_ANALYSIS {
-    return memory_priority_locked() == MemoryPriority::DEFAULT;
-  }());
-
-  rust_vm_address_region_or_mapping_destruct(&opaque_storage_);
+  rust_vm_address_region_or_mapping_destruct(this);
 }
 
 zx_status_t VmAddressRegionOrMapping::DestroyLocked() {
-  if (is_mapping()) {
-    return static_cast<VmMapping*>(this)->DestroyLockedImpl();
-  }
-  return static_cast<VmAddressRegion*>(this)->DestroyLockedImpl();
+  return rust_vm_address_region_or_mapping_destroy_locked(this);
 }
 
 zx_status_t VmAddressRegionOrMapping::Activate() {
-  if (is_mapping()) {
-    return static_cast<VmMapping*>(this)->ActivateImpl();
-  }
-  return static_cast<VmAddressRegion*>(this)->ActivateImpl();
+  return rust_vm_address_region_or_mapping_activate(this);
 }
 
 void VmAddressRegionOrMapping::DumpLocked(uint depth, bool verbose) const {
-  if (is_mapping()) {
-    static_cast<const VmMapping*>(this)->DumpLockedImpl(depth, verbose);
-  } else {
-    static_cast<const VmAddressRegion*>(this)->DumpLockedImpl(depth, verbose);
-  }
+  rust_vm_address_region_or_mapping_dump_locked(this, depth, verbose);
 }
 
 void VmAddressRegionOrMapping::CommitHighMemoryPriority() {
-  if (is_mapping()) {
-    static_cast<VmMapping*>(this)->CommitHighMemoryPriorityImpl();
-  } else {
-    static_cast<VmAddressRegion*>(this)->CommitHighMemoryPriorityImpl();
-  }
+  rust_vm_address_region_or_mapping_commit_high_memory_priority(this);
 }
 
-void VmAddressRegionOrMapping::fbl_recycle() {
-  if (is_mapping()) {
-    delete static_cast<VmMapping*>(this);
-  } else {
-    delete static_cast<VmAddressRegion*>(this);
-  }
-}
+void VmAddressRegionOrMapping::fbl_recycle() { rust_vm_address_region_or_mapping_recycle(this); }

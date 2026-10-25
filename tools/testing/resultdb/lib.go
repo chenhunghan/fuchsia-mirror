@@ -17,6 +17,7 @@ import (
 
 	resultpb "go.chromium.org/luci/resultdb/proto/v1"
 	sinkpb "go.chromium.org/luci/resultdb/sink/proto/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -59,19 +60,101 @@ const (
 	MaxPropertiesSize = 20 * 1024
 )
 
-// ParseSummary unmarshals the summary.json file content into runtests.TestSummary struct.
-func ParseSummary(filePath string) (*runtests.TestSummary, error) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
+// UploadRequest represents a serialized payload to be posted to ResultSink.
+type UploadRequest struct {
+	Endpoint string          `json:"endpoint"`
+	Data     json.RawMessage `json:"data"`
+}
+
+// ParseSummaryTests unmarshals the "tests" array of a summary.json file into
+// a runtests.TestSummary. Other top-level fields, such as Outputs, are left
+// empty.
+func ParseSummaryTests(filePath string) (*runtests.TestSummary, error) {
 	var summary runtests.TestSummary
-	if err := json.Unmarshal(content, &summary); err != nil {
+	if err := forEachSummaryTest(filePath, func(test *runtests.TestDetails) error {
+		summary.Tests = append(summary.Tests, *test)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return &summary, nil
 }
 
+// forEachSummaryTest decodes the "tests" array in a summary.json file one
+// TestDetails element at a time and calls fn on each element, avoiding holding
+// all TestDetails (and their nested TestCaseResult slices) in memory at once.
+func forEachSummaryTest(filePath string, fn func(*runtests.TestDetails) error) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(f)
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok != json.Delim('{') {
+		return fmt.Errorf("expected '{' at start of %s, got %v", filePath, tok)
+	}
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("expected string key in %s, got %v", filePath, keyTok)
+		}
+		if key != "tests" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return err
+			}
+			continue
+		}
+
+		arrTok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if arrTok == nil {
+			continue
+		}
+		if arrTok != json.Delim('[') {
+			return fmt.Errorf("expected '[' for tests field in %s, got %v", filePath, arrTok)
+		}
+		for dec.More() {
+			var test runtests.TestDetails
+			if err := dec.Decode(&test); err != nil {
+				return err
+			}
+			if err := fn(&test); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	}
+
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TODO(b/527958872): Remove legacy flat test-id and summary batch conversion logic
+// once Fuchsia test results fully transition to structured test identifiers.
+// Major functions and helpers to be removed:
+//   - SummaryToResultSink
+//   - testToResultSink
+//   - MaxTestIDLength checks and flat test_id formatting in testCaseToResultSink
+//     and testDetailsToResultSink (along with testsSkipped return plumbing)
+//   - unreachable legacy scheme switch branches in testDetailsToResultSink
+//
 // SummaryToResultSink converts runtests.TestSummary data into an array of result_sink TestResult and TestExoneration.
 func SummaryToResultSink(s *runtests.TestSummary, tags []*resultpb.StringPair, outputRoot string) ([]*sinkpb.TestResult, []*sinkpb.TestExoneration, []string) {
 	if len(outputRoot) == 0 {
@@ -127,11 +210,11 @@ func testToResultSink(test *runtests.TestDetails, tags []*resultpb.StringPair, r
 	return r, exonerations, ts
 }
 
-// determineScheme inspects a test's test cases to determine the appropriate
+// DetermineScheme inspects a test's test cases to determine the appropriate
 // ResultDB module scheme (e.g. "rust", "go", "mobly", "gtest", "flat", or "single").
 // Returns "single" if the test has no cases (indicating a standalone script/binary test).
 // If a test has cases with conflicting formats, it logs a warning and falls back to "flat".
-func determineScheme(test *runtests.TestDetails) string {
+func DetermineScheme(test *runtests.TestDetails) string {
 	if len(test.Cases) == 0 {
 		return "single"
 	}
@@ -171,6 +254,84 @@ func determineScheme(test *runtests.TestDetails) string {
 	}
 }
 
+// parentInvocationLevelArtifacts creates resultdb artifacts for parent invocation-level files
+// with the "parent/" key prefix to be sent to ResultDB sub-invocations.
+func parentInvocationLevelArtifacts(outputRoot string, invocationArtifacts []string) map[string]*sinkpb.Artifact {
+	artifacts := InvocationLevelArtifacts(outputRoot, invocationArtifacts)
+	parentArtifacts := make(map[string]*sinkpb.Artifact, len(artifacts))
+	for k, v := range artifacts {
+		parentArtifacts[path.Join("parent", k)] = v
+	}
+	return parentArtifacts
+}
+
+// TestToUploadRequests converts a single runtests.TestDetails into serialized UploadRequests
+// suitable for sending to ResultSink endpoints.
+func TestToUploadRequests(test *runtests.TestDetails, tags []*resultpb.StringPair, outputRoot string, parentArtifacts []string) ([]UploadRequest, []string, error) {
+	if len(outputRoot) == 0 {
+		outputRoot, _ = os.Getwd()
+	}
+	rootPath, _ := filepath.Abs(outputRoot)
+	testResults, exonerations, testsSkipped := testToResultSink(test, tags, rootPath)
+
+	artifacts := parentInvocationLevelArtifacts(rootPath, parentArtifacts)
+	if len(test.Cases) > 0 {
+		for _, of := range test.OutputFiles {
+			outputFile := filepath.Join(rootPath, test.OutputDir, of)
+			if isReadable(outputFile) {
+				artifacts[artifactName(of)] = &sinkpb.Artifact{
+					Body: &sinkpb.Artifact_FilePath{FilePath: outputFile},
+				}
+			} else {
+				log.Printf("[Warn] outputFile: %s is not readable, skip.", outputFile)
+			}
+		}
+	}
+
+	var uploadRequests []UploadRequest
+	for i := 0; i < len(testResults); i += MaxBatchSize {
+		end := min(i+MaxBatchSize, len(testResults))
+		data, err := protojson.Marshal(&sinkpb.ReportTestResultsRequest{
+			TestResults: testResults[i:end],
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal ReportTestResultsRequest: %w", err)
+		}
+		uploadRequests = append(uploadRequests, UploadRequest{
+			Endpoint: "ReportTestResults",
+			Data:     data,
+		})
+	}
+	for i := 0; i < len(exonerations); i += MaxBatchSize {
+		end := min(i+MaxBatchSize, len(exonerations))
+		data, err := protojson.Marshal(&sinkpb.ReportTestExonerationsRequest{
+			TestExonerations: exonerations[i:end],
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal ReportTestExonerationsRequest: %w", err)
+		}
+		uploadRequests = append(uploadRequests, UploadRequest{
+			Endpoint: "ReportTestExonerations",
+			Data:     data,
+		})
+	}
+
+	if len(artifacts) > 0 {
+		data, err := protojson.Marshal(&sinkpb.ReportInvocationLevelArtifactsRequest{
+			Artifacts: artifacts,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal ReportInvocationLevelArtifactsRequest: %w", err)
+		}
+		uploadRequests = append(uploadRequests, UploadRequest{
+			Endpoint: "ReportInvocationLevelArtifacts",
+			Data:     data,
+		})
+	}
+
+	return uploadRequests, testsSkipped, nil
+}
+
 // InvocationLevelArtifacts creates resultdb artifacts for invocation-level files to be sent to ResultDB.
 func InvocationLevelArtifacts(outputRoot string, invocationArtifacts []string) map[string]*sinkpb.Artifact {
 	if len(outputRoot) == 0 {
@@ -200,43 +361,25 @@ func InvocationLevelArtifacts(outputRoot string, invocationArtifacts []string) m
 	return artifacts
 }
 
-func ProcessSummaries(summaries []string, tags []*resultpb.StringPair, outputRoot string) ([]*sinkpb.ReportTestResultsRequest, []*sinkpb.ReportTestExonerationsRequest, []string, error) {
-	var requests []*sinkpb.ReportTestResultsRequest
-	var exonerationRequests []*sinkpb.ReportTestExonerationsRequest
-	var allTestsSkipped []string
-
-	for _, summaryFile := range summaries {
-		summary, err := ParseSummary(summaryFile)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		testResults, exonerations, testsSkipped := SummaryToResultSink(summary, tags, outputRoot)
-		requests = append(requests, createTestResultsRequests(testResults, MaxBatchSize)...)
-		exonerationRequests = append(exonerationRequests, createTestExonerationsRequests(exonerations, MaxBatchSize)...)
-		allTestsSkipped = append(allTestsSkipped, testsSkipped...)
-	}
-
-	return requests, exonerationRequests, allTestsSkipped, nil
-}
+var invalidArtifactNameChars = regexp.MustCompile(`[^a-zA-Z0-9-_.\/]`)
 
 // artifactName returns a unique name to correspond to the file which
 // will be uploaded as a resultDB artifact.
 func artifactName(file string) string {
-	re := regexp.MustCompile(`[^a-zA-Z0-9-_.\/]`)
-	invalidChars := re.FindAllString(file, -1)
-	for _, ch := range invalidChars {
-		file = strings.ReplaceAll(file, ch, "_")
-	}
-	return file
+	return invalidArtifactNameChars.ReplaceAllString(file, "_")
 }
 
-// set the TestMetadata on TestResult
-func setTestMetadata(r *sinkpb.TestResult, testDetail runtests.TestDetails, displayName string) {
-	r.TestMetadata = &resultpb.TestMetadata{
-		Name: displayName,
-	}
+// testMetadataFields holds the BugComponent and Location shared across all
+// results within a single TestDetails.
+type testMetadataFields struct {
+	bugComponent *resultpb.BugComponent
+	location     *resultpb.TestLocation
+}
+
+func resolveTestMetadataFields(testDetail *runtests.TestDetails) testMetadataFields {
+	var m testMetadataFields
 	if testDetail.Metadata.ComponentID > 0 {
-		r.TestMetadata.BugComponent = &resultpb.BugComponent{
+		m.bugComponent = &resultpb.BugComponent{
 			System: &resultpb.BugComponent_IssueTracker{
 				IssueTracker: &resultpb.IssueTrackerComponent{
 					ComponentId: int64(testDetail.Metadata.ComponentID),
@@ -253,9 +396,23 @@ func setTestMetadata(r *sinkpb.TestResult, testDetail runtests.TestDetails, disp
 		if err != nil {
 			log.Printf("[Warn] Failed to parse test location for %q: %v", label, err)
 		} else {
-			r.TestMetadata.Location = loc
+			m.location = loc
 		}
 	}
+	return m
+}
+
+func (m testMetadataFields) apply(r *sinkpb.TestResult, displayName string) {
+	r.TestMetadata = &resultpb.TestMetadata{
+		Name:         displayName,
+		BugComponent: m.bugComponent,
+		Location:     m.location,
+	}
+}
+
+// set the TestMetadata on TestResult
+func setTestMetadata(r *sinkpb.TestResult, testDetail *runtests.TestDetails, displayName string) {
+	resolveTestMetadataFields(testDetail).apply(r, displayName)
 }
 
 // parseTestLocation parses a test's source label and resolves
@@ -379,7 +536,7 @@ func parseTestLocation(label string) (*resultpb.TestLocation, error) {
 // to ResultSink's TestResult. A testcase will not be converted if test result cannot be
 // mapped to result_sink.Status.
 func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.StringPair, testDetail *runtests.TestDetails, outputRoot string) ([]*sinkpb.TestResult, []*sinkpb.TestExoneration, []string) {
-	var testResults []*sinkpb.TestResult
+	testResults := make([]*sinkpb.TestResult, 0, len(testCases)+2)
 	var testExonerations []*sinkpb.TestExoneration
 	var testsSkipped []string
 
@@ -387,7 +544,7 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 	// to see if it passed, which would mean that a failed result for a test case is
 	// expected and thus should be reported as a passed result.
 	testStatus, _, _ := resultDBStatus(testDetail.Status)
-	scheme := determineScheme(testDetail)
+	scheme := DetermineScheme(testDetail)
 
 	// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
 	// '!', '"', '#', etc.) as leading characters for fine_name and case_name
@@ -426,6 +583,19 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 		testIdentifier = testIdentifierFromRust
 	}
 
+	metadataFields := resolveTestMetadataFields(testDetail)
+	startTime := timestamppb.New(testDetail.StartTime)
+
+	// Within a single TestDetails, almost all test cases share the same Format
+	// and have no per-case Tags, so their Properties and Tags are identical.
+	// Cache them by Format to avoid rebuilding a structpb.Struct and calling
+	// proto.Size on every test case.
+	type cachedPropsAndTags struct {
+		properties *structpb.Struct
+		tags       []*resultpb.StringPair
+	}
+	var cachedByFormat map[string]cachedPropsAndTags
+
 	for _, testCase := range testCases {
 		testID := fmt.Sprintf("%s/%s:%s", testDetail.Name, testCase.SuiteName, testCase.CaseName)
 		if len(testID) > MaxTestIDLength {
@@ -434,7 +604,22 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 			continue
 		}
 
-		properties, testCaseTags := testCaseProperties(testCase, testDetail, tags)
+		var properties *structpb.Struct
+		var testCaseTags []*resultpb.StringPair
+		if len(testCase.Tags) == 0 {
+			if cached, ok := cachedByFormat[testCase.Format]; ok {
+				properties, testCaseTags = cached.properties, cached.tags
+			} else {
+				properties, testCaseTags = testCaseProperties(testCase, testDetail, tags)
+				if cachedByFormat == nil {
+					cachedByFormat = make(map[string]cachedPropsAndTags, 1)
+				}
+				cachedByFormat[testCase.Format] = cachedPropsAndTags{properties: properties, tags: testCaseTags}
+			}
+		} else {
+			properties, testCaseTags = testCaseProperties(testCase, testDetail, tags)
+		}
+
 		fineName, caseName := testIdentifier(&testCase)
 		testIDStructured := &sinkpb.TestIdentifier{
 			FineName:           sanitizeIdentifier(fineName),
@@ -459,22 +644,24 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 			testCaseStatus = testStatus
 		}
 		r.StatusV2 = testCaseStatus
-		r.StartTime = timestamppb.New(testDetail.StartTime)
+		r.StartTime = startTime
 		if testCase.Duration > 0 {
 			r.Duration = durationpb.New(testCase.Duration)
 		}
-		r.Artifacts = make(map[string]*sinkpb.Artifact)
-		for _, of := range testCase.OutputFiles {
-			outputFile := filepath.Join(outputRoot, testDetail.OutputDir, of)
-			if isReadable(outputFile) {
-				r.Artifacts[artifactName(of)] = &sinkpb.Artifact{
-					Body: &sinkpb.Artifact_FilePath{FilePath: outputFile},
+		if len(testCase.OutputFiles) > 0 {
+			r.Artifacts = make(map[string]*sinkpb.Artifact, len(testCase.OutputFiles))
+			for _, of := range testCase.OutputFiles {
+				outputFile := filepath.Join(outputRoot, testDetail.OutputDir, of)
+				if isReadable(outputFile) {
+					r.Artifacts[artifactName(of)] = &sinkpb.Artifact{
+						Body: &sinkpb.Artifact_FilePath{FilePath: outputFile},
+					}
+				} else {
+					log.Printf("[Warn] outputFile: %s is not readable, skip.", outputFile)
 				}
-			} else {
-				log.Printf("[Warn] outputFile: %s is not readable, skip.", outputFile)
 			}
 		}
-		setTestMetadata(&r, *testDetail, testCase.DisplayName)
+		metadataFields.apply(&r, testCase.DisplayName)
 		testResults = append(testResults, &r)
 
 		if testCase.Status == runtests.TestExonerated {
@@ -543,7 +730,7 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 	properties, testTags := testDetailProperties(testDetail, tags)
 	var testIDStructured *sinkpb.TestIdentifier
 	if len(testDetail.Cases) == 0 {
-		scheme := determineScheme(testDetail)
+		scheme := DetermineScheme(testDetail)
 		switch scheme {
 		case "single":
 			testIDStructured = &sinkpb.TestIdentifier{
@@ -594,7 +781,7 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 		}
 	}
 
-	setTestMetadata(&r, *testDetail, "")
+	setTestMetadata(&r, testDetail, "")
 
 	if testDetail.Status == runtests.TestExonerated {
 		return &r, &sinkpb.TestExoneration{
@@ -822,40 +1009,4 @@ func truncateString(str string, maxLength int) string {
 		byteCount = byteCount + len(string(char))
 	}
 	return str
-}
-
-// createTestResultsRequests breaks an array of sinkpb.TestResult into an array of sinkpb.ReportTestResultsRequest
-// using the specified chunk size limit.
-func createTestResultsRequests(results []*sinkpb.TestResult, chunkSize int) []*sinkpb.ReportTestResultsRequest {
-	return chunkSlice(results, chunkSize, func(chunk []*sinkpb.TestResult) *sinkpb.ReportTestResultsRequest {
-		return &sinkpb.ReportTestResultsRequest{TestResults: chunk}
-	})
-}
-
-// createTestExonerationsRequests breaks an array of sinkpb.TestExoneration into an array of sinkpb.ReportTestExonerationsRequest
-// using the specified chunk size limit.
-func createTestExonerationsRequests(exonerations []*sinkpb.TestExoneration, chunkSize int) []*sinkpb.ReportTestExonerationsRequest {
-	return chunkSlice(exonerations, chunkSize, func(chunk []*sinkpb.TestExoneration) *sinkpb.ReportTestExonerationsRequest {
-		return &sinkpb.ReportTestExonerationsRequest{TestExonerations: chunk}
-	})
-}
-
-// chunkSlice generic helper splits a slice of T into chunks of the specified size,
-// and wraps each chunk into a request R using the provided wrapper function.
-func chunkSlice[T any, R any](items []T, chunkSize int, wrapper func([]T) R) []R {
-	if len(items) == 0 {
-		return nil
-	}
-	totalChunks := (len(items)-1)/chunkSize + 1
-	requests := make([]R, totalChunks)
-	for i := 0; i < totalChunks; i++ {
-		start := i * chunkSize
-		end := start + chunkSize
-		if end > len(items) {
-			end = len(items)
-		}
-		// Use 3-index slicing to set capacity to length for safety
-		requests[i] = wrapper(items[start:end:end])
-	}
-	return requests
 }

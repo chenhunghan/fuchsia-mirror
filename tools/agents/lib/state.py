@@ -16,6 +16,8 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from agents.lib.agent_hooks import installer
+
 
 def get_default_state_dir() -> pathlib.Path:
     """Resolve default state directory adhering to Fuchsia XDG standards."""
@@ -49,6 +51,7 @@ class StateJournal:
     managed_grants: dict[str, list[str]] = dataclasses.field(
         default_factory=lambda: {"allow": [], "deny": [], "ask": []}
     )
+    grant_reasons: dict[str, str] = dataclasses.field(default_factory=dict)
     history: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
@@ -72,6 +75,7 @@ def load_state(state_path: pathlib.Path) -> StateJournal:
             fuchsia_root=data.get("fuchsia_root", ""),
             active_profile=data.get("active_profile", ""),
             managed_grants=managed_grants,
+            grant_reasons=dict(data.get("grant_reasons", {})),
             history=list(data.get("history", [])),
         )
     except Exception:
@@ -245,10 +249,12 @@ def rollback(
             cat: list(prev_entry.get("managed_grants", {}).get(cat, []))
             for cat in ("allow", "deny", "ask")
         }
+        new_reasons = dict(prev_entry.get("grant_reasons", {}))
         new_timestamp = prev_entry.get("timestamp", "")
     else:
         new_profile = ""
         new_managed = {"allow": [], "deny": [], "ask": []}
+        new_reasons = {}
         new_timestamp = ""
 
     if dry_run:
@@ -272,8 +278,14 @@ def rollback(
             config_path.unlink()
             print(f"\nRemoved configuration file: {config_path}")
 
+    if remaining_history and remaining_history[-1].get("agent_hooks", True):
+        installer.install_agent_hooks(config_path, state_path)
+    else:
+        installer.uninstall_agent_hooks(config_path)
+
     state.active_profile = new_profile
     state.managed_grants = new_managed
+    state.grant_reasons = new_reasons
     state.last_updated = new_timestamp
     state.history = remaining_history
     save_state(state, state_path)
@@ -333,6 +345,8 @@ def reset(
         temp_config.replace(config_path)
         print(f"\nPurged Fuchsia-managed rules from: {config_path}")
 
+    installer.uninstall_agent_hooks(config_path)
+
     clean_state = StateJournal(fuchsia_root=state.fuchsia_root)
     save_state(clean_state, state_path)
     print(f"Successfully reset state journal at: {state_path}")
@@ -359,12 +373,15 @@ def format_status(config_path: pathlib.Path, state_path: pathlib.Path) -> str:
         except Exception:
             pass
 
+    hooks_path = installer.get_hooks_path(config_path)
+    hooks_configured = installer.get_agent_hooks_status(config_path)
     lines: list[str] = [
         "=== AI Coding Agent Configuration Status ===",
         f"Active Profile : {state.active_profile or '(none)'}",
         f"Last Updated   : {state.last_updated or '(never)'}",
         f"Fuchsia Root   : {state.fuchsia_root or '(not set)'}",
         f"Config File    : {config_path} {'[exists]' if config_exists else '[not found]'}",
+        f"Agent Hooks    : {hooks_path} {'[configured]' if hooks_configured else '[not configured]'}",
         f"State File     : {state_path} {'[exists]' if state_path.is_file() else '[not found]'}",
         "",
         "Rule Breakdown:",

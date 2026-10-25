@@ -4,7 +4,7 @@
 
 use crate::arch::execution::new_syscall_from_state;
 use crate::mm::{IOVecPtr, MemoryAccessor, MemoryAccessorExt};
-use crate::ptrace::StopState;
+use crate::ptrace::{PtraceEvent, PtraceEventData, PtraceOptions, StopState};
 use crate::security;
 use crate::signals::syscalls::WaitingOptions;
 use crate::signals::{
@@ -14,7 +14,6 @@ use crate::task::{
     CurrentTask, Pid, PidTableGuard, ProcessSelector, Task, TaskMutableState, ThreadGroup,
     ThreadState, WaitQueue, ZombieNotification, ZombieProcess,
 };
-use bitflags::bitflags;
 use starnix_logging::track_stub;
 use starnix_registers::HeapRegs;
 use starnix_syscalls::SyscallResult;
@@ -28,16 +27,14 @@ use starnix_uapi::signals::{SIGKILL, SIGSTOP, SIGTRAP, SigSet, Signal, Unchecked
 use starnix_uapi::user_address::ArchSpecific;
 use starnix_uapi::user_address::{LongPtr, MultiArchUserRef, UserAddress, UserRef};
 use starnix_uapi::{
-    PTRACE_CONT, PTRACE_DETACH, PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC, PTRACE_EVENT_EXIT,
-    PTRACE_EVENT_FORK, PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP, PTRACE_EVENT_VFORK,
-    PTRACE_EVENT_VFORK_DONE, PTRACE_GET_SYSCALL_INFO, PTRACE_GETEVENTMSG, PTRACE_GETREGSET,
+    PTRACE_CONT, PTRACE_DETACH, PTRACE_GET_SYSCALL_INFO, PTRACE_GETEVENTMSG, PTRACE_GETREGSET,
     PTRACE_GETSIGINFO, PTRACE_GETSIGMASK, PTRACE_INTERRUPT, PTRACE_KILL, PTRACE_LISTEN,
     PTRACE_O_EXITKILL, PTRACE_O_TRACECLONE, PTRACE_O_TRACEEXEC, PTRACE_O_TRACEEXIT,
     PTRACE_O_TRACEFORK, PTRACE_O_TRACESYSGOOD, PTRACE_O_TRACEVFORK, PTRACE_O_TRACEVFORKDONE,
     PTRACE_PEEKDATA, PTRACE_PEEKTEXT, PTRACE_PEEKUSR, PTRACE_POKEDATA, PTRACE_POKETEXT,
     PTRACE_POKEUSR, PTRACE_SETOPTIONS, PTRACE_SETREGSET, PTRACE_SETSIGINFO, PTRACE_SETSIGMASK,
     PTRACE_SYSCALL, PTRACE_SYSCALL_INFO_ENTRY, PTRACE_SYSCALL_INFO_EXIT, PTRACE_SYSCALL_INFO_NONE,
-    clone_args, errno, error, ptrace_syscall_info, uapi,
+    errno, error, ptrace_syscall_info, uapi,
 };
 use zerocopy::IntoBytes;
 
@@ -117,71 +114,6 @@ pub enum PtraceAttachType {
     Attach,
     /// Attached with PTRACE_SEIZE
     Seize,
-}
-
-bitflags! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    #[repr(transparent)]
-    pub struct PtraceOptions: u32 {
-        const EXITKILL = starnix_uapi::PTRACE_O_EXITKILL;
-        const TRACECLONE = starnix_uapi::PTRACE_O_TRACECLONE;
-        const TRACEEXEC = starnix_uapi::PTRACE_O_TRACEEXEC;
-        const TRACEEXIT = starnix_uapi::PTRACE_O_TRACEEXIT;
-        const TRACEFORK = starnix_uapi::PTRACE_O_TRACEFORK;
-        const TRACESYSGOOD = starnix_uapi::PTRACE_O_TRACESYSGOOD;
-        const TRACEVFORK = starnix_uapi::PTRACE_O_TRACEVFORK;
-        const TRACEVFORKDONE = starnix_uapi::PTRACE_O_TRACEVFORKDONE;
-        const TRACESECCOMP = starnix_uapi::PTRACE_O_TRACESECCOMP;
-        const SUSPEND_SECCOMP = starnix_uapi::PTRACE_O_SUSPEND_SECCOMP;
-    }
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum PtraceEvent {
-    #[default]
-    None = 0,
-    Stop = PTRACE_EVENT_STOP,
-    Clone = PTRACE_EVENT_CLONE,
-    Fork = PTRACE_EVENT_FORK,
-    Vfork = PTRACE_EVENT_VFORK,
-    VforkDone = PTRACE_EVENT_VFORK_DONE,
-    Exec = PTRACE_EVENT_EXEC,
-    Exit = PTRACE_EVENT_EXIT,
-    Seccomp = PTRACE_EVENT_SECCOMP,
-}
-
-impl PtraceEvent {
-    pub fn from_option(option: &PtraceOptions) -> Self {
-        match *option {
-            PtraceOptions::TRACECLONE => PtraceEvent::Clone,
-            PtraceOptions::TRACEFORK => PtraceEvent::Fork,
-            PtraceOptions::TRACEVFORK => PtraceEvent::Vfork,
-            PtraceOptions::TRACEVFORKDONE => PtraceEvent::VforkDone,
-            PtraceOptions::TRACEEXEC => PtraceEvent::Exec,
-            PtraceOptions::TRACEEXIT => PtraceEvent::Exit,
-            PtraceOptions::TRACESECCOMP => PtraceEvent::Seccomp,
-            _ => unreachable!("Bad ptrace event specified"),
-        }
-    }
-}
-
-/// Information about what caused a ptrace-event-stop.
-pub struct PtraceEventData {
-    /// The event that caused the task to stop (e.g., PTRACE_EVENT_TRACEFORK or PTRACE_EVENT_EXIT).
-    pub event: PtraceEvent,
-
-    /// The message associated with the event (e.g., tid, exit status)..
-    pub msg: u64,
-}
-
-impl PtraceEventData {
-    pub fn new(option: PtraceOptions, msg: u64) -> Self {
-        Self { event: PtraceEvent::from_option(&option), msg }
-    }
-    pub fn new_from_event(event: PtraceEvent, msg: u64) -> Self {
-        Self { event, msg }
-    }
 }
 
 /// The ptrace state that a new task needs to connect to the same tracer as the
@@ -419,40 +351,6 @@ impl PtraceState {
             _ => (),
         }
         Ok((info_len as i32, info))
-    }
-
-    /// Gets the core state for this ptrace if the options set on this ptrace
-    /// match |trace_kind|.  Returns a pair: the trace option you *should* use
-    /// (sometimes this is different from the one that the caller thinks it
-    /// should use), and the core state.
-    pub fn get_core_state_for_clone(
-        &self,
-        clone_args: &clone_args,
-    ) -> (PtraceOptions, Option<PtraceCoreState>) {
-        // ptrace(2): If the tracee calls clone(2) with the CLONE_VFORK flag,
-        // PTRACE_EVENT_VFORK will be delivered instead if PTRACE_O_TRACEVFORK
-        // is set, otherwise if the tracee calls clone(2) with the exit signal
-        // set to SIGCHLD, PTRACE_EVENT_FORK will be delivered if
-        // PTRACE_O_TRACEFORK is set.
-        let trace_type = if clone_args.flags & (starnix_uapi::CLONE_UNTRACED as u64) != 0 {
-            PtraceOptions::empty()
-        } else {
-            if clone_args.flags & (starnix_uapi::CLONE_VFORK as u64) != 0 {
-                PtraceOptions::TRACEVFORK
-            } else if clone_args.exit_signal != (starnix_uapi::SIGCHLD as u64) {
-                PtraceOptions::TRACECLONE
-            } else {
-                PtraceOptions::TRACEFORK
-            }
-        };
-
-        if !self.has_option(trace_type)
-            && (clone_args.flags & (starnix_uapi::CLONE_PTRACE as u64) == 0)
-        {
-            return (PtraceOptions::empty(), None);
-        }
-
-        (trace_type, Some(self.get_core_state()))
     }
 }
 
@@ -746,24 +644,33 @@ fn ptrace_cont(
 
     let signal_mask = state.signal_mask();
     if let Some(ptrace) = &mut state.ptrace {
-        if data != 0 {
-            if let Some(last_signal) = &mut ptrace.last_signal {
-                // If the tracer resumes the tracee with the same signal number (or one already
-                // updated via `PTRACE_SETSIGINFO`), preserve `last_signal`'s `siginfo_t` details
-                // and `force` state; otherwise replace `last_signal` with the newly injected
-                // signal so details and `force` from the stopping signal do not leak.
-                if let Some(si) = &siginfo {
-                    if last_signal.signal == si.signal {
-                        siginfo = Some(last_signal.clone());
+        if let Some(si) = &mut siginfo {
+            // If the tracer resumes the tracee with the same signal number (or one already
+            // updated via `PTRACE_SETSIGINFO`), preserve `last_signal`'s `siginfo_t` details
+            // and `force` state; otherwise replace `last_signal` with the newly injected
+            // signal so details and `force` from the stopping signal do not leak.
+            // Note: Suppressing unforced `SIGSTOP` / `SIGKILL` here when resuming `init` (PID 1)
+            // differs from Linux, where signals injected via `PTRACE_CONT` / `PTRACE_DETACH`
+            // bypass send-time filtering and only catchable signals are filtered at delivery time.
+            match &mut ptrace.last_signal {
+                Some(last_signal) if last_signal.signal == si.signal => {
+                    if tracee.thread_group().ignores_signal(last_signal) {
+                        siginfo = None;
                     } else {
+                        *si = last_signal.clone();
+                    }
+                }
+                last_signal => {
+                    if tracee.thread_group().ignores_signal(si) {
+                        siginfo = None;
+                    } else if let Some(last_signal) = last_signal {
                         *last_signal = si.clone();
                     }
                 }
             }
-            new_state = if siginfo
-                .as_ref()
-                .is_some_and(|si| !signal_mask.has_signal(si.signal) || si.force)
-            {
+        }
+        if let Some(si) = &siginfo {
+            new_state = if !signal_mask.has_signal(si.signal) || si.force {
                 PtraceStatus::Continuing
             } else {
                 PtraceStatus::Default
@@ -1177,7 +1084,7 @@ fn do_attach(
 /// Uses the given core ptrace state (including tracer, attach type, etc) to
 /// attach to another task, given by `tracee_task`.  Also sends a signal to stop
 /// tracee_task.  Typical for when inheriting ptrace state from another task.
-pub fn ptrace_attach_from_state(
+pub(super) fn ptrace_attach_from_state(
     tracee_task: &Arc<Task>,
     ptrace_state: PtraceCoreState,
 ) -> Result<(), Errno> {
@@ -1204,8 +1111,7 @@ pub fn ptrace_attach_from_state(
         // Ptrace-emitted SIGTRAP signal cannot be blocked.
         SignalInfo::forced(SIGTRAP)
     } else {
-        // Note, SIGSTOP can never be blocked, but we use `forced` anyway to be consistent.
-        SignalInfo::forced(SIGSTOP)
+        SignalInfo::kernel(SIGSTOP)
     };
     send_signal_first(tracee_task, state, signal);
 

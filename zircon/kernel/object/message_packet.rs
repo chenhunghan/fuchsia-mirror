@@ -9,6 +9,7 @@
 
 use super::buffer_chain::{BufferChain, CONTIGUOUS_SIZE};
 use super::handle::HandleOwner;
+use crate::object::Handle;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use core::ffi::c_void;
 use core::mem::{self, MaybeUninit, align_of, size_of};
@@ -419,7 +420,7 @@ impl MessagePacket {
             // Delete the handle via HandleOwner dtor.
             // SAFETY: Each entry is a valid handle pointer (or null) owned by `self`.
             unsafe {
-                drop(HandleOwner::from_raw(raw));
+                drop(HandleOwner::from_raw(raw.cast::<Handle>()));
             }
         }
     }
@@ -564,12 +565,6 @@ pub unsafe extern "C" fn rust_message_packet_delete(packet: *mut MessagePacket) 
             drop(MessagePacketPtr::from_raw(packet));
         }
     }
-}
-
-/// Returns the number of handles attached to the packet.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_num_handles(packet: &MessagePacket) -> usize {
-    packet.num_handles()
 }
 
 /// Returns a mutable pointer to the attached handle pointers.

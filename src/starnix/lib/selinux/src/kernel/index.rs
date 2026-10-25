@@ -2,10 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::permissions::{
-    ClassPermission as _, FileClass, KernelClass, KernelPermission, ProcessPermission,
-};
-use super::{AccessVectorComputer, KernelAccessDecision, ObjectClass};
+use super::permissions::{ClassPermission, FileClass, KernelClass, ProcessPermission};
+use super::{KernelAccessDecision, ObjectClass};
 use crate::NullessByteStr;
 use crate::policy::{
     AccessDecision, AccessVector, Class, ClassId, HandleUnknown, HasPolicyId as _, PermissionId,
@@ -13,16 +11,20 @@ use crate::policy::{
     XpermsKind,
 };
 
-use std::collections::HashMap;
+use fuchsia_rcu::RcuDroppable;
 use std::ops::Deref;
 use strum::VariantArray as _;
+
+// SAFETY: `Policy` contains only plain data and heap-allocated slices/tables with no custom `Drop`
+// logic, so it is safe to drop asynchronously on the RCU reclamation thread.
+unsafe impl RcuDroppable for Policy {}
 
 /// Array of [`PermissionId`] values for each of a kernel security class' permissions.
 type KernelPermissionIdsArray = [Option<PermissionId>; 32];
 
 /// Cached `process` class identifier and permission bitmask for `transition` and `dyntransition`
 /// checks across different roles.
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug, RcuDroppable)]
 struct ProcessTransitionPermissions {
     class: ClassId,
     permissions: AccessVector,
@@ -35,11 +37,11 @@ struct ProcessTransitionPermissions {
 /// of classes that are identified by string names included in each collection entry. However,
 /// `policy_index.class(KernelClass::Process.into()).unwrap()` yields the [`Class`] entry in the
 /// policy's collection of classes without scanning by name.
-#[derive(Debug)]
+#[derive(Debug, RcuDroppable)]
 pub(crate) struct PolicyIndex {
-    /// Map from [`KernelClass`]es to their corresponding [`ClassId`]s in the associated policy's
-    /// classes collection.
-    classes: HashMap<KernelClass, ClassId>,
+    /// Index mapping [`KernelClass`]es to their corresponding [`ClassId`]s in the associated
+    /// policy's classes collection.
+    classes: [Option<ClassId>; KernelClass::VARIANTS.len()],
     /// Index mapping kernel class permissions to their policy-specific [`AccessVector`] bit index.
     permissions: [KernelPermissionIdsArray; KernelClass::VARIANTS.len()],
     /// Cached `process` class ID and `transition`/`dyntransition` permission bitmask, if defined by
@@ -59,15 +61,31 @@ impl PolicyIndex {
     pub fn new(policy: Policy) -> Result<Self, anyhow::Error> {
         let policy_classes = policy.classes();
 
-        let mut classes = HashMap::with_capacity(KernelClass::VARIANTS.len());
+        let mut classes = [None; KernelClass::VARIANTS.len()];
+        let mut permissions = [KernelPermissionIdsArray::default(); KernelClass::VARIANTS.len()];
 
-        // Insert elements for each kernel object class. If the policy defines that unknown
-        // kernel classes should cause rejection then return an error describing the missing
-        // element.
+        // Accumulate classes and permissions indexed by kernel class and permission enums. If the
+        // policy defines that unknown classes or permissions should cause rejection then return an
+        // error describing the missing element.
         for known_class in KernelClass::VARIANTS {
             match policy_classes.get_by_name(known_class.name().as_bytes()) {
                 Some(class) => {
-                    classes.insert(*known_class, class.id());
+                    let class_index = *known_class as usize;
+                    classes[class_index] = Some(class.id());
+                    let class_permissions = &mut permissions[class_index];
+                    for permission in known_class.permissions() {
+                        if let Some(permission_id) =
+                            policy.find_permission_id_by_name(class, permission.name())
+                        {
+                            class_permissions[permission.id() as usize] = Some(permission_id);
+                        } else if policy.handle_unknown() == HandleUnknown::Reject {
+                            return Err(anyhow::anyhow!(
+                                "missing permission {:?}:{:?}",
+                                known_class.name(),
+                                permission.name(),
+                            ));
+                        }
+                    }
                 }
                 None => {
                     if policy.handle_unknown() == HandleUnknown::Reject {
@@ -77,35 +95,9 @@ impl PolicyIndex {
             }
         }
 
-        // Allow unused space in the classes map to be released.
-        classes.shrink_to_fit();
-
-        // Accumulate permissions indexed by kernel permission enum. If the policy defines that
-        // unknown permissions or classes should cause rejection then return an error describing the
-        // missing element.
-        let mut permissions = [KernelPermissionIdsArray::default(); _];
-        for kernel_permission in KernelPermission::all_variants() {
-            let kernel_class_name = kernel_permission.class().name();
-            if let Some(class) = policy_classes.get_by_name(kernel_class_name.as_bytes()) {
-                if let Some(permission_id) =
-                    policy.find_permission_id_by_name(class, kernel_permission.name())
-                {
-                    let kernel_class_id = kernel_permission.class() as usize;
-                    let kernel_permission_id = kernel_permission.id() as usize;
-                    permissions[kernel_class_id][kernel_permission_id] = Some(permission_id);
-                } else if policy.handle_unknown() == HandleUnknown::Reject {
-                    return Err(anyhow::anyhow!(
-                        "missing permission {:?}:{:?}",
-                        kernel_class_name,
-                        kernel_permission.name(),
-                    ));
-                }
-            }
-        }
-
         let mut index = Self { classes, permissions, process_transition_permissions: None, policy };
         index.process_transition_permissions =
-            index.classes.get(&KernelClass::Process).map(|&class| {
+            index.classes[KernelClass::Process as usize].map(|class| {
                 let mut permissions = AccessVector::NONE;
                 if let Some(transition) =
                     index.kernel_permission_to_access_vector(ProcessPermission::Transition)
@@ -126,21 +118,18 @@ impl PolicyIndex {
     /// Returns the policy entry for a class identified either by its well-known kernel object
     /// class enum value, or its policy-defined Id.
     pub fn class(&self, object_class: ObjectClass) -> Option<&Class> {
-        match object_class {
-            ObjectClass::Kernel(kernel_class) => {
-                let &class_id = self.classes.get(&kernel_class)?;
-                self.policy.classes().get_by_id(class_id)
-            }
-            ObjectClass::ClassId(class_id) => self.policy.classes().get_by_id(class_id),
-        }
+        let class_id = match object_class {
+            ObjectClass::Kernel(kernel_class) => self.classes[kernel_class as usize]?,
+            ObjectClass::ClassId(class_id) => class_id,
+        };
+        self.policy.classes().get_by_id(class_id)
     }
 
     /// Returns the policy [`AccessVector`] for a well-known kernel object class permission.
-    pub fn kernel_permission_to_access_vector<P: Into<KernelPermission>>(
+    fn kernel_permission_to_access_vector<P: ClassPermission>(
         &self,
         permission: P,
     ) -> Option<AccessVector> {
-        let permission = permission.into();
         let class_index = permission.class() as usize;
         let permission_index = permission.id() as usize;
         let permission_id = self.permissions[class_index][permission_index]?;
@@ -157,7 +146,7 @@ impl PolicyIndex {
         object_class: impl Into<ObjectClass>,
         name: &[u8],
     ) -> SecurityContext {
-        // TODO: https://fxbug.dev/361552580 - For `KernelClass`es, apply the kernel's notion
+        // TODO: https://fxbug.dev/574857992 - For `KernelClass`es, apply the kernel's notion
         // of whether the class is "process", or socket-like when `target_class` is `None`?
         let target_class = self.class(object_class.into());
         self.policy.compute_create_context(source_context, target_context, target_class, name)
@@ -180,7 +169,7 @@ impl PolicyIndex {
             // Process domain transitions ("transition" and "dyntransition") across different roles
             // require explicit authorization in policy via a role allow rule ("allow old_role
             // new_role;").
-            if let Some(process_transition) = self.process_transition_permissions
+            if let Some(ref process_transition) = self.process_transition_permissions
                 && target_class.id() == process_transition.class
                 && source_context.role() != target_context.role()
                 && (decision.allow & process_transition.permissions) != AccessVector::NONE
@@ -247,10 +236,14 @@ impl PolicyIndex {
         let class_id = class.and_then(|class| self.class(class.into())).map(|class| class.id());
         self.policy.genfscon_label_for_fs_and_path(fs_type, node_path, class_id)
     }
-}
 
-impl AccessVectorComputer for PolicyIndex {
-    fn access_decision_to_kernel_access_decision(
+    /// Translates the given [`AccessDecision`] to a [`KernelAccessDecision`].
+    ///
+    /// The loaded policy's "handle unknown" configuration determines how `permissions`
+    /// entries not explicitly defined by the policy are handled. Allow-unknown will
+    /// result in unknown `permissions` being allowed, while they are denied (and audited)
+    /// if the policy uses deny-unknown.
+    pub fn access_decision_to_kernel_access_decision(
         &self,
         class: KernelClass,
         access_decision: AccessDecision,
@@ -272,17 +265,16 @@ impl AccessVectorComputer for PolicyIndex {
         let decision_allow = access_decision.allow;
         let decision_audit = (access_decision.allow & access_decision.auditallow)
             | (!access_decision.allow & access_decision.auditdeny);
-        for permission in class.permissions() {
-            if let Some(permission_access_vector) =
-                self.kernel_permission_to_access_vector(*permission)
-            {
+        for (id, permission_id) in self.permissions[class as usize].iter().enumerate() {
+            if let Some(permission_id) = permission_id {
                 // If the permission is known, set the corresponding bit according to
                 // `decision_allow` and `decision_audit`.
-                let bit = 1 << permission.id();
+                let permission_access_vector = AccessVector::from(*permission_id);
+                let bit = 1 << id;
                 let allow = decision_allow & permission_access_vector == permission_access_vector;
                 let audit = decision_audit & permission_access_vector == permission_access_vector;
-                kernel_allow = (kernel_allow & !bit) | ((allow as u32) << permission.id());
-                kernel_audit = (kernel_audit & !bit) | ((audit as u32) << permission.id());
+                kernel_allow = (kernel_allow & !bit) | ((allow as u32) << id);
+                kernel_audit = (kernel_audit & !bit) | ((audit as u32) << id);
             }
         }
         KernelAccessDecision {

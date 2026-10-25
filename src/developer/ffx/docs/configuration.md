@@ -37,8 +37,7 @@ ffx config env get
     | `connectivity.enable_uart`              | Allow ffx to use a UART connection.|
     |                                         | Defaults to `false`.               |
     | `connectivity.enable_usb`               | Allow ffx to use a USB connection. |
-    |                                         | Not supported on mac. Defaults to  |
-    |                                         | `false`.                           |
+    |                                         | Defaults to `false`.               |
     | `connectivity.enable_vsock`             | Allow using a VSOCK socket to      |
     |                                         | connect to virtual machine targets |
     |                                         | where supported. Defaults to       |
@@ -70,6 +69,13 @@ ffx config env get
     | `discovery.mdns.enabled`                | Determines whether mDNS broadcasts |
     |                                         | are used to discover targets.      |
     |                                         | Default: `true`                    |
+    | `discovery.mdns.interfaces`             | List of host network interface     |
+    |                                         | names (as a JSON array or          |
+    |                                         | comma-separated string) on which   |
+    |                                         | mDNS discovery executes. When      |
+    |                                         | unset or empty, all                |
+    |                                         | multicast-capable interfaces are   |
+    |                                         | used.                              |
     | `discovery.timeout`                     | When doing _local_ discovery in    |
     |                                         | `ffx target list`, how long in     |
     |                                         | milliseconds to wait before        |

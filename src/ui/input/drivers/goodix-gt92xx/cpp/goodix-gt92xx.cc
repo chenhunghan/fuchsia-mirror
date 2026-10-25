@@ -28,12 +28,12 @@ namespace goodix {
 
 namespace {
 
-constexpr fuchsia_input_report::wire::Axis XYAxis(int64_t max) {
+constexpr fuchsia_input::wire::Axis XYAxis(int64_t max) {
   return {
       .range = {.min = 0, .max = max},
       .unit =
           {
-              .type = fuchsia_input_report::wire::UnitType::kOther,
+              .type = fuchsia_input::wire::UnitType::kOther,
               .exponent = 0,
           },
   };
@@ -238,6 +238,16 @@ zx_status_t Gt92xxDevice::Create(zx_device_t* device) {
       zxlogf(WARNING, "Gt92xxDevice::Create: Failed to apply role: %s",
              zx_status_get_string(status));
     }
+  }
+
+  zx::result<> add_service_result = goodix_dev->DdkAddService<fuchsia_input_report::Service>(
+      fuchsia_input_report::Service::InstanceHandler({
+          .input_device = goodix_dev->bindings_.CreateHandler(
+              goodix_dev.get(), goodix_dev->dispatcher_, fidl::kIgnoreBindingClosure),
+      }));
+  if (add_service_result.is_error()) {
+    zxlogf(ERROR, "gt92xx: Could not add service: %s", add_service_result.status_string());
+    return add_service_result.status_value();
   }
 
   status = goodix_dev->DdkAdd(ddk::DeviceAddArgs("gt92xx-HidDevice")

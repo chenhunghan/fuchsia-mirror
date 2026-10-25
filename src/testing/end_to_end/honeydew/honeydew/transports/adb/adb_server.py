@@ -79,12 +79,15 @@ class AdbServer:
         self,
         adb_binary_path: str,
         serial_id: str,
-        output_dir: Path | None = None,
+        output_dir: Path | str | None = None,
         vendor_keys_path: str | None = None,
     ):
         self._adb_binary_path: str = adb_binary_path
         self._serial_id: str = serial_id
-        self._output_dir: Path = output_dir or Path(tempfile.gettempdir())
+        self._output_dir: Path = (
+            Path(output_dir) if output_dir else Path(tempfile.gettempdir())
+        )
+        self._output_dir.mkdir(parents=True, exist_ok=True)
         self._vendor_keys_path: str | None = vendor_keys_path
 
         # Use RLock to allow reentrant calls
@@ -96,7 +99,8 @@ class AdbServer:
         self._process: subprocess.Popen[str] | None = None
         self._server_port: int | None = None
         self._server_thread: threading.Thread | None = None
-        self._adb_server_count: int = 0
+        self._attempt_count: int = 0
+        self._server_id: int = 0
         atexit.register(self.stop)
 
     def start(self) -> None:
@@ -116,9 +120,9 @@ class AdbServer:
                 _LOGGER.debug("Not starting ADB server, already started.")
                 return
 
-            if self._adb_server_count >= AdbServer._MAX_SERVER_RESTARTS:
-                # self._adb_server_count is updated by self._run_server() and tracks the total number
-                # of server instances across both crashes and calls to self.restart().
+            if self._attempt_count >= AdbServer._MAX_SERVER_RESTARTS:
+                # self._attempt_count is updated by self._run_server() and tracks the number
+                # of server attempts across both crashes and calls to self.restart().
                 _LOGGER.error(
                     "Exceeded maximum number of ADB server restarts. Giving up."
                 )
@@ -189,7 +193,7 @@ class AdbServer:
     def reset_restart_count(self) -> None:
         """Resets the accumulated server restart count to zero."""
         with self._lock:
-            self._adb_server_count = 0
+            self._attempt_count = 0
 
     def host(self) -> str:
         return AdbServer._SERVER_HOST_IP
@@ -205,8 +209,9 @@ class AdbServer:
         until either it hits AdbServer._MAX_SERVER_RESTARTS successive tries, or another thread sets
         self._server_stop_requested.
 
-        It also has one important side effect: incrementing self._adb_server_count, which tracks
-        the overall number of server processes across both crashes AND calls to self.restart().
+        It also has two important side effects: incrementing self._attempt_count (which tracks
+        server attempts across both crashes AND calls to self.restart()) and self._server_id
+        (which generates a unique ID for each server process).
 
         Raises:
             RuntimeError: If the server crashes too many times in a row, this method gives up and
@@ -232,8 +237,9 @@ class AdbServer:
 
             adb_server_restarts += 1
             with self._lock:
-                self._adb_server_count += 1
-                server_name = f"adb_server_{self._adb_server_count}"
+                self._attempt_count += 1
+                self._server_id += 1
+                server_name = f"adb_server_{self._server_id}"
 
             try:
                 self._run_one_server(server_name)
@@ -412,6 +418,7 @@ class AdbServer:
                 else:
                     server_env.pop("ADB_VENDOR_KEYS", None)
 
+                self._output_dir.mkdir(parents=True, exist_ok=True)
                 log_file_path = self._output_dir / f"{server_name}_log.txt"
                 output_file = open(log_file_path, "w", encoding="utf-8")
                 try:

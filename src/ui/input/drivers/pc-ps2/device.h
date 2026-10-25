@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.hardware.input/cpp/wire.h>
 #include <fidl/fuchsia.input.report/cpp/wire.h>
+#include <fidl/fuchsia.input/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/irq.h>
@@ -18,7 +19,6 @@
 #include <condition_variable>
 
 #include <ddktl/device.h>
-#include <ddktl/protocol/empty-protocol.h>
 #include <ddktl/unbind-txn.h>
 
 #include "src/ui/input/drivers/pc-ps2/controller.h"
@@ -82,7 +82,7 @@ constexpr uint8_t kAck = 0xfa;
 class I8042Device;
 using DeviceType = ddk::Device<I8042Device, ddk::Suspendable, ddk::Unbindable,
                                ddk::Messageable<fuchsia_input_report::InputDevice>::Mixin>;
-class I8042Device : public DeviceType, public ddk::EmptyProtocol<ZX_PROTOCOL_INPUTREPORT> {
+class I8042Device : public DeviceType {
  public:
   // Max unacknowledged report count allowed for 1/2 second.
   // PS/2 mouse default sampling rate is 100 Hz, yielding 50 reports per 1/2 second (100 Hz / 2).
@@ -184,6 +184,8 @@ class I8042Device : public DeviceType, public ddk::EmptyProtocol<ZX_PROTOCOL_INP
   KeyStatus RemoveKey(fuchsia_input::wire::Key key);
   // Mouse input
   void ProcessMouse(zx::time timestamp, uint8_t code);
+
+  fidl::ServerBindingGroup<fuchsia_input_report::InputDevice> bindings_;
 };
 
 }  // namespace i8042

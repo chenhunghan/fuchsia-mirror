@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use async_trait::async_trait;
 use fdomain_client::fidl::{DiscoverableProtocolMarker, Proxy};
 use fdomain_fuchsia_developer_remotecontrol::RemoteControlProxy;
 use ffx_command_error::{FfxContext as _, Result};
@@ -29,20 +28,13 @@ impl From<RemoteControlProxy> for RemoteControlProxyHolder {
     }
 }
 
-#[async_trait(?Send)]
 impl TryFromEnv for RemoteControlProxyHolder {
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
         let behavior = target_env.init_connection_behavior(env.environment_context()).await?;
         let ConnectionBehavior::Direct(dc) = &*behavior;
-        let conn = dc
-            .resolution()
-            .await
-            .map_err(|e| e.into_command_error())?
-            .get_connection(env.environment_context())
-            .await
-            .map_err(|e| e.into_command_error())?;
+        let (_resolution, conn) = dc.connect(env.environment_context()).await?;
         conn.rcs_proxy_fdomain().await.bug().map(Into::into).map_err(Into::into)
     }
 }

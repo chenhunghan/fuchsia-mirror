@@ -17,8 +17,12 @@
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/sync/cpp/completion.h>
 #include <zircon/compiler.h>
+#include <zircon/syscalls.h>
 
+#include <cstring>
+#include <deque>
 #include <queue>
+#include <vector>
 
 #include <usb-endpoint/usb-endpoint-client.h>
 #include <usb-inspect/usb-inspect.h>
@@ -36,6 +40,10 @@ constexpr size_t kVmoDataSize = 4096;
 
 constexpr uint16_t kBulkMaxPacket = 512;
 
+constexpr size_t kAdbHeaderSize = 24;
+constexpr uint32_t kAdbCommandConnect = 0x4e584e43;  // "CNXN"
+constexpr uint32_t kAdbProtocolVersionMin = 0x01000000;
+
 constexpr char kDeviceName[] = "usb-adb-function";
 
 namespace fadb = fuchsia_hardware_adb;
@@ -43,18 +51,17 @@ namespace fendpoint = fuchsia_hardware_usb_endpoint;
 
 // The driver's internal state machine. Begins in kAwaitingUsbConnection.
 enum class State : uint8_t {
-  // In kAwaitingUsbConnection, we have called function_.SetInterface(this), and
-  // are waiting for the function driver to call SetConfigured(true). Calls to
-  // SetConfigured(false) are ignored.
+  // In kAwaitingUsbConnection, we have called function_.Configure(), and
+  // are waiting for usb-peripheral to call SetConfigured(true). Calls to
+  // SetConfigured(false) complete immediately with ZX_OK.
   //
   // Once SetConfigured(true) has been called, we:
-  // - Send USB "receive" requests to the endpoint,
+  // - Configure and enable the bulk endpoints,
+  // - Queue USB receive requests to the bulk OUT endpoint,
   // - Tell any connected UsbAdbImpl clients that the device is online, and
   // - Move to kOnline.
   //
-  // If a fadb::Device client requests shutdown by calling StopAdb() or closing
-  // a UsbAdbImpl connection, we call function_.Deconfigure(), and move
-  // to kStoppingForReconnect. If Stop is called, we move to kStoppingForUnbind.
+  // If Stop is called, we move to kStoppingForUnbind.
   kAwaitingUsbConnection,
 
   // In kOnline, the USB connection is live, and we respond to any
@@ -63,33 +70,32 @@ enum class State : uint8_t {
   // If any of the following happen:
   // - A fadb::Device client calls StopAdb().
   // - A UsbAdbImpl client closes their channel.
-  // - The USB function driver calls SetConfigured(false)
+  // - usb-peripheral calls SetConfigured(false).
+  // - The host sends an adb CNXN after the device has already sent data in this
+  //   session, meaning the host started a new adb session without a USB
+  //   disconnect (e.g. its adb server was restarted mid-transfer).
   // - Stop gets called.
   //
-  // ... we call function_.Deconfigure() and move to kStoppingForReconnect or
-  // kStoppingForUnbind. (We hold onto the responder for any calls to StopAdb()).
+  // ... we disable endpoints, cancel in-flight requests, and move to
+  // kStoppingForReconnect or kStoppingForUnbind.
   kOnline,
 
   // In kStoppingForUnbind, we wait for all outstanding USB requests to be completed.
-  // Once they have been, we:
-  // - Return OK to any pending StopAdb() calls (e.g. if Stop() was called while
-  //   a reconnect was pending),
-  // - Tell any connected UsbAdbImpl clients that the device is offline,
-  // - Close all UsbAdbImpl connections.
-  //
-  // At that point, since the stoppage was caused by a call to Stop (or
-  // Stop called while shutting down), we respond that the driver has
-  // shutdown successfully.
+  // Once they have been, we close any UsbAdbImpl connection, reply to any pending
+  // StopAdb()/SetConfigured(false) completers, deconfigure the USB function, and
+  // complete the driver Stop callback.
   kStoppingForUnbind,
 
   // In kStoppingForReconnect, we wait for all outstanding USB requests to be completed.
-  // Once they have been, we:
-  // - Return OK to any StopAdb() calls that triggered the stoppage,
-  // - Tell any connected UsbAdbImpl clients that the device is offline,
-  // - Close all UsbAdbImpl connections.
-  //
-  // At that point, we restart the USB connection by calling
-  // function_.Configure(), and move back to kAwaitingUsbConnection.
+  // Once they have been:
+  // - If the stop was initiated by ADB while online (reset_usb_on_stop_ is true),
+  //   we call function_.Deconfigure() and StartUsb() (function_.Configure()) to
+  //   bounce the USB connection for adbd re-enumeration, then move to
+  //   kAwaitingUsbConnection.
+  // - If the stop was initiated by SetConfigured(false) (host reset or physical unplug),
+  //   we keep usb_function_binding_ and adb_binding_ bound, notify adb_binding_
+  //   that the device is offline, reply to set_configured_completers_, and move
+  //   back to kAwaitingUsbConnection.
   kStoppingForReconnect,
 };
 
@@ -140,15 +146,51 @@ class UsbAdbDevice : public fdf::DriverBase2,
   void SetState(State new_state);
   zx::result<> StartUsb();
   zx::result<> EnableEndpoints();
+  void PurgeOfflineQueues();
   void ResetOrStopUsb(State stop_state);
   void CheckUsbStopComplete();
 
   fidl::ServerBindingGroup<fadb::Device> device_bindings_;
 
-  // Structure to store pending transfer requests when there are not enough USB request buffers.
+  struct AdbHeader {
+    uint32_t command;
+    uint32_t arg0;
+    uint32_t arg1;
+    uint32_t data_length;
+    uint32_t data_check;
+    uint32_t magic;
+
+    // FromVaddr reads the header information out of a DMA payload pointed at by the given vaddr and
+    // fixes up the endianness of all fields.
+    static AdbHeader FromVaddr(const zx_vaddr_t vaddr) {
+      auto* bytes = reinterpret_cast<const uint8_t*>(vaddr);
+      zx_cache_flush(bytes, kAdbHeaderSize, ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE);
+
+      AdbHeader header;
+
+      std::memcpy(&header.command, bytes + 0, sizeof(uint32_t));
+      std::memcpy(&header.arg0, bytes + 4, sizeof(uint32_t));
+      std::memcpy(&header.arg1, bytes + 8, sizeof(uint32_t));
+      std::memcpy(&header.data_length, bytes + 12, sizeof(uint32_t));
+      std::memcpy(&header.data_check, bytes + 16, sizeof(uint32_t));
+      std::memcpy(&header.magic, bytes + 20, sizeof(uint32_t));
+      header.command = le32toh(header.command);
+      header.arg0 = le32toh(header.arg0);
+      header.arg1 = le32toh(header.arg1);
+      header.data_length = le32toh(header.data_length);
+      header.data_check = le32toh(header.data_check);
+      header.magic = le32toh(header.magic);
+
+      return header;
+    }
+  };
+
+  // Structure to store pending and in-flight transfer requests.
   struct txn_req_t {
     QueueTxRequest request;
     size_t start = 0;
+    std::vector<uint64_t> in_flight_vmo_ids;
+    zx_status_t status = ZX_OK;
     QueueTxCompleter::Async completer;
   };
 
@@ -162,6 +204,11 @@ class UsbAdbDevice : public fdf::DriverBase2,
   void TxComplete(std::vector<fendpoint::Completion> completion);
   void RxComplete(std::vector<fendpoint::Completion> completion);
 
+  // Returns true if |completion| is a successful bulk OUT transfer that ends with an adb CNXN
+  // packet header sent as its own USB packet, either alone or after whole packets of an interrupted
+  // transfer.
+  bool IsAdbConnect(const fendpoint::Completion& completion);
+
   fidl::SyncClient<fuchsia_hardware_usb_function::UsbFunction> function_;
   // Owning ServerBinding for USB function interface.
   std::optional<fidl::ServerBinding<fuchsia_hardware_usb_function::UsbFunctionInterface>>
@@ -173,6 +220,8 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // Callbacks to call when the USB stack has been brought down and it's safe to
   // call AdbStart().
   std::vector<StopAdbCompleter::Async> stop_completers_;
+  // Completers for SetConfigured(false) held until CancelAll and in-flight requests finish.
+  std::vector<SetConfiguredCompleter::Async> set_configured_completers_;
   // Holds Stop callback to be invoked once shutdown is complete.
   std::optional<fdf::StopCompleter> shutdown_callback_;
 
@@ -229,13 +278,24 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // Bulk IN/TX endpoint
   usb::EndpointClient<UsbAdbDevice> bulk_in_ep_{usb::EndpointType::BULK, this,
                                                 std::mem_fn(&UsbAdbDevice::TxComplete)};
-  // Queue of pending transfer requests that need to be transmitted once the BULK IN request buffers
-  // become available.
-  std::queue<txn_req_t> tx_pending_reqs_;
+  // Queue of pending and in-flight transfer requests awaiting BULK IN transmission completion.
+  std::deque<txn_req_t> tx_pending_reqs_;
 
   bool bulk_in_cancelled_ = false;
   bool bulk_out_cancelled_ = false;
   bool pending_reconfigure_ = false;
+  bool reset_usb_on_stop_ = false;
+  bool usb_disconnect_observed_ = false;
+  bool adb_connected_during_stop_ = false;
+
+  // Whether the host has sent anything since the endpoints were last enabled.
+  bool host_data_received_ = false;
+
+  // Whether data has been queued to the host since it first sent something after the endpoints
+  // were last enabled, i.e. the device has answered the host's CNXN. A CNXN received after that
+  // means the host started a new adb session without a USB disconnect. Data queued before the host
+  // sends anything (e.g. written by a client while offline) does not count.
+  bool host_session_started_ = false;
 
   bool CancelAllCompleted() const { return bulk_in_cancelled_ && bulk_out_cancelled_; }
   bool AllRequestsReturned() {

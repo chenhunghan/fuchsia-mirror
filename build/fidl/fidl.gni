@@ -5,7 +5,6 @@
 # First, import the gni files that define the names of the other toolchains, and
 # the "is_<foo>_toolchain" variables that are used throughout this file.
 import("//build/fidl/toolchain.gni")
-import("//build/go/toolchain.gni")
 import("//build/testing/host_test_data.gni")
 
 # LINT.IfChange(fidl)
@@ -17,14 +16,12 @@ import("//build/testing/host_test_data.gni")
 
 # Declares a FIDL library.
 #
-# Supported backends: Rust, C++, HLCPP, banjo_{c,cpp,rust},
-# Go, and Zither.
+# Supported backends: Rust, C++, HLCPP, banjo_{c,cpp,rust}, and Zither.
 #
 # Subtargets:
 #  * `${target_name}`: available only in the FIDL toolchain
 #  * `${target_name}_sdk`: available only in the FIDL toolchain
-#  * `${target_name}_go`: available only in the Go toolchain
-#  * `${target_name}_${backend_name}`: available in every toolchain but Go
+#  * `${target_name}_${backend_name}`: available in every toolchain
 #  * `${target_name}_host_test_data`: available on host toolchain
 #
 # Parameters
@@ -110,14 +107,6 @@ import("//build/testing/host_test_data.gni")
 #
 #   enable_rust (optional flag, default to true)
 #     Set to false to disable Rust bindings for this library
-#
-#   enable_rust_drivers (optional flag, default to false)
-#     Set to true to enable experimental rust driver transport support
-#     outside the 'next' bindings. Rust driver transport bindings are
-#     always enabled for the rust_next bindings (see `enable_rust_next`)
-#     if `contains_drivers` is set, as that's the supported mechanism
-#     for using driver transport from rust.
-
 #
 #   enable_hlcpp (optional flag, default to false)
 #     Set to true to enable legacy HLCPP bindings for this library
@@ -207,13 +196,10 @@ template("fidl") {
   enable_banjo = defined(invoker.enable_banjo) && invoker.enable_banjo
   enable_hlcpp = defined(invoker.enable_hlcpp) && invoker.enable_hlcpp
   enable_zither = defined(invoker.enable_zither) && invoker.enable_zither
-  enable_rust_drivers =
-      defined(invoker.enable_rust_drivers) && invoker.enable_rust_drivers
 
   not_needed([
                "enable_cpp",
                "enable_rust",
-               "enable_rust_drivers",
                "enable_rust_next",
                "enable_banjo",
                "enable_hlcpp",
@@ -412,33 +398,6 @@ template("fidl") {
     }
   }
 
-  if (is_go_toolchain) {
-    # Only import the fidl_go() template when in the Go toolchain.
-    import("//build/go/fidl_go.gni")
-
-    # Define the Go bindings
-    fidl_go("${target_name}_go") {
-      forward_variables_from(invoker,
-                             [
-                               "applicable_licenses",
-                               "testonly",
-                               "visibility",
-                               "public_deps",
-                             ])
-      forward_variables_from(common_parameters, "*")
-      fidl_gen_dir += "/go"
-    }
-
-    # This template does not accept `deps`, but it will have an indirect
-    # dependency on the SDK category marker via `fidl_ir_target`.
-
-    not_needed(invoker,
-               [
-                 "contains_drivers",
-                 "sdk_category",
-               ])
-  }
-
   if (is_fidl_toolchain || toolchain_variant.supports_cpp ||
       toolchain_variant.supports_rust) {
     # The C, C++, and Rust bindings are compiled in their own toolchain, from
@@ -497,7 +456,7 @@ template("fidl") {
                                  "visibility",
                                ])
         forward_variables_from(common_parameters, "*")
-        if (!is_host && enable_rust_drivers) {
+        if (!is_host) {
           forward_variables_from(invoker, [ "contains_drivers" ])
         }
         deps = [ "//sdk/categories:marker-${marker_category}" ]

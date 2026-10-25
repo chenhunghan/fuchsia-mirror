@@ -17,7 +17,6 @@ rustc_library("rust") {
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_next",
     "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust_next",
-    "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
     "//sdk/fidl/fuchsia.device.fs:fuchsia.device.fs_rust",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
@@ -55,6 +54,7 @@ rustc_library("rust") {
     "//examples/fidl/fuchsia.examples:fuchsia.examples_rust_next",
     "//sdk/fidl/fuchsia.hardware.i2c:fuchsia.hardware.i2c_rust",
     "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust",
     "//src/lib/fuchsia",
     "//third_party/rust_crates:anyhow",
   ]
@@ -62,6 +62,7 @@ rustc_library("rust") {
   sources = [
     "src/context.rs",
     "src/error.rs",
+    "src/health.rs",
     "src/incoming.rs",
     "src/lib.rs",
     "src/macros.rs",

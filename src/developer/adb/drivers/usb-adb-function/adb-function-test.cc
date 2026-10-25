@@ -15,6 +15,7 @@
 #include <lib/zx/result.h>
 #include <zircon/compiler.h>
 
+#include <cstring>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -33,6 +34,9 @@ class UsbAdbTestHelper {
   static void set_state(UsbAdbDevice& device, State state) { device.state_ = state; }
   static bool has_usb_function_binding(const UsbAdbDevice& device) {
     return device.usb_function_binding_.has_value();
+  }
+  static bool has_adb_binding(const UsbAdbDevice& device) {
+    return device.adb_binding_.has_value();
   }
   static bool CancelAllCompleted(const UsbAdbDevice& device) { return device.CancelAllCompleted(); }
   static bool AllRequestsReturned(UsbAdbDevice& device) { return device.AllRequestsReturned(); }
@@ -106,6 +110,25 @@ class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
   void set_cancel_status(zx_status_t status) {
     std::lock_guard<std::mutex> _(lock_);
     cancel_status_ = status;
+  }
+
+  void RequestCompleteAtIndex(size_t index, zx_status_t status, size_t actual) {
+    std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
+    std::optional<fidl::ServerBindingRef<fuchsia_hardware_usb_endpoint::Endpoint>> local_binding;
+    {
+      std::lock_guard<std::mutex> _(lock_);
+      ASSERT_LT(index, requests_.size());
+      local_binding = binding_ref_;
+      auto request = std::move(requests_[index]);
+      requests_.erase(requests_.begin() + static_cast<std::ptrdiff_t>(index));
+      completions.emplace_back(std::move(fuchsia_hardware_usb_endpoint::Completion()
+                                             .request(std::move(request))
+                                             .status(status)
+                                             .transfer_size(actual)));
+    }
+    if (local_binding.has_value()) {
+      EXPECT_TRUE(fidl::SendEvent(*local_binding)->OnCompletion(std::move(completions)).is_ok());
+    }
   }
 
  private:
@@ -444,7 +467,9 @@ class UsbAdbTest : public testing::Test {
 
   fidl::WireSyncClient<fadb::UsbAdbImpl> NormalStartAdb() {
     auto [client_end, server_end] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
-    EXPECT_TRUE(client_->StartAdb(std::move(server_end)).ok());
+    auto start_res = client_->StartAdb(std::move(server_end));
+    EXPECT_TRUE(start_res.ok());
+    EXPECT_TRUE(start_res->is_ok());
     WaitConfigured();
     EnableUsb();
 
@@ -500,19 +525,17 @@ class UsbAdbTest : public testing::Test {
     }});
     EXPECT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
 
-    ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-        [&]() {
-          size_t count = 0;
-          driver_test_.RunInEnvironmentTypeContext([&count](UsbAdbEnvironment& env) {
-            count = env.fake_dev_->fake_endpoint(kBulkOutEp).pending_request_count();
-          });
-          bool is_online = false;
-          driver_test_.RunInDriverContext([&is_online](UsbAdbDevice& dev) {
-            is_online = (UsbAdbTestHelper::state(dev) == State::kOnline);
-          });
-          return (count == kBulkRxCount) && is_online;
-        },
-        zx::sec(5)));
+    driver_test_.runtime().RunUntil([&]() {
+      size_t count = 0;
+      driver_test_.RunInEnvironmentTypeContext([&count](UsbAdbEnvironment& env) {
+        count = env.fake_dev_->fake_endpoint(kBulkOutEp).pending_request_count();
+      });
+      bool is_online = false;
+      driver_test_.RunInDriverContext([&is_online](UsbAdbDevice& dev) {
+        is_online = (UsbAdbTestHelper::state(dev) == State::kOnline);
+      });
+      return (count == kBulkRxCount) && is_online;
+    });
   }
 
   void WaitConfigured() {
@@ -558,14 +581,12 @@ class UsbAdbTest : public testing::Test {
   }
 
   void WaitForState(State target_state) {
-    ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-        [&]() {
-          bool match = false;
-          driver_test_.RunInDriverContext(
-              [&](UsbAdbDevice& dev) { match = (UsbAdbTestHelper::state(dev) == target_state); });
-          return match;
-        },
-        zx::sec(5)));
+    driver_test_.runtime().RunUntil([&]() {
+      bool match = false;
+      driver_test_.RunInDriverContext(
+          [&](UsbAdbDevice& dev) { match = (UsbAdbTestHelper::state(dev) == target_state); });
+      return match;
+    });
   }
 
   void ExpectHandleOneEventSafe(fidl::WireSyncClient<fadb::UsbAdbImpl>& client,
@@ -620,6 +641,10 @@ class UsbAdbTest : public testing::Test {
       env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, size);
     });
   }
+
+  // Simulates the host starting an adb session: the host's CNXN is passed to the client, and the
+  // device replies. Defined below, after the adb header helpers.
+  void StartHostSession(fidl::WireSyncClient<fadb::UsbAdbImpl>& usb_impl);
 
   // Safety net that drains any fake endpoint requests still outstanding at
   // deconfigure time. The driver now issues its own CancelAll() at the start of
@@ -684,8 +709,7 @@ TEST_F(UsbAdbTest, StartStop) {
 
   driver_test_.RunInEnvironmentTypeContext(
       [&](UsbAdbEnvironment& env) { env.CancelAllUsbRequests(); });
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil([&]() { return stop_finished.load(); },
-                                                           zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() { return stop_finished.load(); });
 
   driver_test_.RunInEnvironmentTypeContext(
       [&](UsbAdbEnvironment& env) { env.fake_dev_->set_on_deconfigured(nullptr); });
@@ -738,8 +762,7 @@ TEST_F(UsbAdbTest, UsbStackRequestsStop) {
 
   usb_impl = {};
 
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&] { return set_configured_finished.load(); }, zx::sec(5)));
+  driver_test_.runtime().RunUntil([&] { return set_configured_finished.load(); });
 
   SafeStopDriver();
 }
@@ -778,10 +801,245 @@ TEST_F(UsbAdbTest, RecvAdbMessage) {
   driver_test_.runtime().RunUntilIdle();
 
   EXPECT_NO_FATAL_FAILURE(ExpectReceiveData(kReceiveSize));
-  ASSERT_TRUE(
-      driver_test_.runtime().RunWithTimeoutOrUntil([&] { return completed.load(); }, zx::sec(5)));
+  driver_test_.runtime().RunUntil([&] { return completed.load(); });
   EXPECT_EQ(response_status, ZX_OK);
   EXPECT_EQ(actual_size, kReceiveSize);
+
+  SafeStopDriver();
+}
+
+// Returns an adb packet header (struct amessage) for |command| with a valid magic.
+std::vector<uint8_t> AdbHeader(uint32_t command) {
+  const uint32_t fields[] = {command, 0x01000001, 256 * 1024, 0, 0, command ^ 0xffffffff};
+  std::vector<uint8_t> header(sizeof(fields));
+  memcpy(header.data(), fields, sizeof(fields));
+  return header;
+}
+
+constexpr uint32_t kAdbCnxn = 0x4e584e43;
+constexpr uint32_t kAdbWrte = 0x45545257;
+
+void UsbAdbTest::StartHostSession(fidl::WireSyncClient<fadb::UsbAdbImpl>& usb_impl) {
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbCnxn));
+  });
+  auto result = usb_impl->Receive();
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->is_ok());
+  ASSERT_EQ(result->value()->data.size(), AdbHeader(kAdbCnxn).size());
+
+  ASSERT_NO_FATAL_FAILURE(SendTestData(usb_impl, 100));
+}
+
+TEST_F(UsbAdbTest, CnxnDuringHostSessionRestartsUsb) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  // The host starts a session. Its CNXN is passed to the client as usual.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbCnxn));
+  });
+  auto first = usb_impl->Receive();
+  ASSERT_TRUE(first.ok());
+  ASSERT_TRUE(first->is_ok());
+  EXPECT_EQ(first->value()->data.size(), AdbHeader(kAdbCnxn).size());
+
+  // The device replies, which establishes the session.
+  ASSERT_NO_FATAL_FAILURE(SendTestData(usb_impl, 100));
+
+  // The host adb server restarts and sends a new CNXN without a USB disconnect. The driver restarts
+  // USB: the client is told the device is offline and its connection is closed.
+  handler.expected_statuses_.emplace(0);
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbCnxn));
+  });
+  ExpectHandleOneEventSafe(usb_impl, handler);
+  EXPECT_EQ(usb_impl.HandleOneEvent(handler).status(), ZX_ERR_PEER_CLOSED);
+
+  WaitForState(State::kAwaitingUsbConnection);
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 1u); });
+
+  usb_impl = {};
+  SafeStopDriver();
+}
+
+// Returns |stale_bytes| of filler followed by |tail|, as the device receives it when the host's
+// previous transfer was interrupted partway through a request.
+std::vector<uint8_t> AfterStaleData(size_t stale_bytes, const std::vector<uint8_t>& tail) {
+  std::vector<uint8_t> data(stale_bytes, 0xab);
+  data.insert(data.end(), tail.begin(), tail.end());
+  return data;
+}
+
+TEST_F(UsbAdbTest, CnxnAfterInterruptedTransferRestartsUsb) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  // The host starts a session and the device replies.
+  ASSERT_NO_FATAL_FAILURE(StartHostSession(usb_impl));
+
+  // The host adb server is killed after two packets of a transfer, and the restarted server's CNXN
+  // completes the same request. The driver still recognizes the CNXN and restarts USB.
+  handler.expected_statuses_.emplace(0);
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp)
+        .RequestComplete(ZX_OK, AfterStaleData(2 * kBulkMaxPacket, AdbHeader(kAdbCnxn)));
+  });
+  ExpectHandleOneEventSafe(usb_impl, handler);
+  EXPECT_EQ(usb_impl.HandleOneEvent(handler).status(), ZX_ERR_PEER_CLOSED);
+
+  WaitForState(State::kAwaitingUsbConnection);
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 1u); });
+
+  usb_impl = {};
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, CnxnNotInItsOwnPacketIsDelivered) {
+  auto usb_impl = NormalStartAdb();
+  ASSERT_NO_FATAL_FAILURE(StartHostSession(usb_impl));
+
+  // A CNXN header that does not start on a packet boundary, or that is followed by more data, was
+  // not sent as its own packet, so it is payload and is passed to the client.
+  std::vector<uint8_t> unaligned = AfterStaleData(100, AdbHeader(kAdbCnxn));
+  std::vector<uint8_t> leading = AdbHeader(kAdbCnxn);
+  leading.resize(kBulkMaxPacket + 100, 0xab);
+  for (const auto& data : {unaligned, leading}) {
+    driver_test_.RunInEnvironmentTypeContext([&data](UsbAdbEnvironment& env) {
+      env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, data);
+    });
+    auto result = usb_impl->Receive();
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result->is_ok());
+    EXPECT_EQ(result->value()->data.size(), data.size());
+  }
+
+  driver_test_.RunInDriverContext(
+      [](UsbAdbDevice& dev) { EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kOnline); });
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, CnxnBeforeDeviceRepliesIsDelivered) {
+  auto usb_impl = NormalStartAdb();
+
+  // Until the device has sent anything, a repeated CNXN does not indicate a stale session and is
+  // passed to the client.
+  for (int i = 0; i < 2; i++) {
+    driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+      env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbCnxn));
+    });
+    auto result = usb_impl->Receive();
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result->is_ok());
+    EXPECT_EQ(result->value()->data.size(), AdbHeader(kAdbCnxn).size());
+  }
+
+  driver_test_.RunInDriverContext(
+      [](UsbAdbDevice& dev) { EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kOnline); });
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, OtherHeadersDuringHostSessionAreDelivered) {
+  auto usb_impl = NormalStartAdb();
+  ASSERT_NO_FATAL_FAILURE(StartHostSession(usb_impl));
+
+  // Only CNXN restarts USB; other packet headers are passed to the client.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbWrte));
+  });
+  auto result = usb_impl->Receive();
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->is_ok());
+  EXPECT_EQ(result->value()->data.size(), AdbHeader(kAdbWrte).size());
+
+  driver_test_.RunInDriverContext(
+      [](UsbAdbDevice& dev) { EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kOnline); });
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, OfflineTxDoesNotStartHostSession) {
+  auto [client_end, server_end] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  ASSERT_TRUE(client_->StartAdb(std::move(server_end)).ok());
+  auto usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      std::move(client_end), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // While offline, the client queues more data than fits in the bulk IN request pool, so some of
+  // it is still being sent after the endpoints are enabled, from TxComplete(). A FIDL message is
+  // limited to 64 KiB, so the data is queued as two writes that together need more requests than
+  // the pool has.
+  constexpr size_t kChunksPerWrite = kBulkTxCount / 2 + 1;
+  constexpr size_t kOfflineWrites = 2;
+  static_assert(kChunksPerWrite * kOfflineWrites > kBulkTxCount);
+  std::vector<uint8_t> offline_data(kVmoDataSize * kChunksPerWrite, 0xaa);
+  std::atomic<size_t> offline_tx_done = 0;
+  std::atomic<size_t> offline_tx_ok = 0;
+  for (size_t i = 0; i < kOfflineWrites; i++) {
+    usb_impl
+        ->QueueTx(fidl::VectorView<uint8_t>::FromExternal(offline_data.data(), offline_data.size()))
+        .ThenExactlyOnce([&](auto& result) {
+          if (result.ok() && result->is_ok()) {
+            offline_tx_ok++;
+          }
+          offline_tx_done++;
+        });
+  }
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::TxPendingReqsCount(dev); });
+    return count == kOfflineWrites;
+  });
+
+  // Bring USB online, and let the host read everything queued while offline.
+  WaitConfigured();
+  EnableUsb();
+  driver_test_.runtime().RunUntil([&]() {
+    driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+      auto& bulk_in = env.fake_dev_->fake_endpoint(kBulkInEp);
+      while (bulk_in.pending_request_count() > 0) {
+        bulk_in.RequestComplete(ZX_OK, kVmoDataSize);
+      }
+    });
+    return offline_tx_done.load() == kOfflineWrites;
+  });
+  EXPECT_EQ(offline_tx_ok.load(), kOfflineWrites);
+
+  // The host has not sent anything yet, so the data sent so far does not mean that the device has
+  // answered a host session. The host's first CNXN is passed to the client rather than treated as a
+  // restarted host.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_OK, AdbHeader(kAdbCnxn));
+  });
+  std::atomic<bool> received = false;
+  size_t received_size = 0;
+  usb_impl->Receive().ThenExactlyOnce([&](auto& result) {
+    if (result.ok() && result->is_ok()) {
+      received_size = result->value()->data.size();
+    }
+    received = true;
+  });
+  driver_test_.runtime().RunUntil([&]() { return received.load(); });
+  EXPECT_EQ(received_size, AdbHeader(kAdbCnxn).size());
+
+  driver_test_.RunInDriverContext(
+      [](UsbAdbDevice& dev) { EXPECT_EQ(UsbAdbTestHelper::state(dev), State::kOnline); });
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
 
   SafeStopDriver();
 }
@@ -809,16 +1067,20 @@ TEST_F(UsbAdbTest, VerifyShutdownCompletesWhenHardwareUnresponsive) {
     env.fake_dev_->fake_endpoint(kBulkInEp).set_cancel_status(ZX_ERR_IO_NOT_PRESENT);
   });
 
-  // The driver should handle the error and still complete shutdown.
+  // The driver should reply ZX_OK to held SetConfigured(false) completers before Deconfigure()
+  // and complete shutdown cleanly.
+  std::atomic<bool> set_configured_replied = false;
   async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
       .ThenExactlyOnce([&](auto& result) {
-        EXPECT_TRUE(result.ok() || result.status() == ZX_ERR_PEER_CLOSED ||
-                    result.status() == ZX_ERR_CANCELED);
+        EXPECT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        set_configured_replied = true;
       });
 
   driver_test_.runtime().RunUntilIdle();
 
   EXPECT_TRUE(driver_test_.StopDriver().is_ok());
+  driver_test_.runtime().RunUntil([&]() { return set_configured_replied.load(); });
   driver_stopped_ = true;
 }
 
@@ -846,8 +1108,7 @@ TEST_F(UsbAdbTest, VerifyInspect) {
   driver_test_.runtime().RunUntilIdle();
 
   EXPECT_NO_FATAL_FAILURE(ExpectReceiveData(200));
-  ASSERT_TRUE(
-      driver_test_.runtime().RunWithTimeoutOrUntil([&] { return completed.load(); }, zx::sec(5)));
+  driver_test_.runtime().RunUntil([&] { return completed.load(); });
   EXPECT_EQ(response_status, ZX_OK);
   EXPECT_EQ(actual_size, 200u);
 
@@ -915,8 +1176,7 @@ TEST_F(UsbAdbTest, QueueTxZeroLengthRejected) {
     completed = true;
   });
 
-  ASSERT_TRUE(
-      driver_test_.runtime().RunWithTimeoutOrUntil([&]() { return completed.load(); }, zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() { return completed.load(); });
 
   async_usb = {};
 }
@@ -937,14 +1197,12 @@ TEST_F(UsbAdbTest, OfflineRxQueuedAndServicedOnline) {
   });
 
   // Wait for the driver to queue the Receive request in its software queue.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        size_t count = 0;
-        driver_test_.RunInDriverContext(
-            [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::RxRequestsCount(dev); });
-        return count == 1;
-      },
-      zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::RxRequestsCount(dev); });
+    return count == 1;
+  });
 
   // Bring USB online.
   WaitConfigured();
@@ -956,8 +1214,7 @@ TEST_F(UsbAdbTest, OfflineRxQueuedAndServicedOnline) {
   });
 
   // Wait for the background thread to finish.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil([&]() { return rx_completed.load(); },
-                                                           zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() { return rx_completed.load(); });
 
   usb_impl = {};
 }
@@ -986,16 +1243,18 @@ TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
     env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
   });
 
-  EnsureIfaceBound();
-  ASSERT_TRUE(iface_client_.is_valid());
-  fidl::Result result = iface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
-  }});
-  EXPECT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
-  driver_test_.runtime().RunUntilIdle();
+  // Trigger ADB-initiated USB reset via StopAdb().
+  auto dev_client_end = client_.TakeClientEnd();
+  fidl::WireClient async_client(std::move(dev_client_end),
+                                fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> stop_done = false;
+  async_client->StopAdb().ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.ok());
+    stop_done = true;
+  });
+  WaitForState(State::kStoppingForReconnect);
 
-  // 1. Endpoints should have been disabled immediately upon deconfigure request:
+  // 1. DisableEndpoint should have been called immediately upon stop request:
   driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
     auto eps = env.fake_dev_->disabled_endpoints();
     EXPECT_EQ(eps.size(), 2u);
@@ -1004,6 +1263,7 @@ TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
   // 2. Deconfigure() should NOT have been called yet while CancelAll is pending:
   driver_test_.RunInEnvironmentTypeContext(
       [&](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+  EXPECT_FALSE(stop_done.load());
 
   // 3. Release CancelAll:
   driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
@@ -1014,15 +1274,14 @@ TEST_F(UsbAdbTest, IsConfiguredReflectsDeconfigureState) {
     env.CancelAllUsbRequests();
   });
 
-  // 4. Now Deconfigure() should have been called:
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        size_t count = 0;
-        driver_test_.RunInEnvironmentTypeContext(
-            [&](UsbAdbEnvironment& env) { count = env.fake_dev_->deconfigure_count(); });
-        return count >= 1;
-      },
-      zx::sec(5)));
+  // 4. Now Deconfigure() should have been called and StopAdb() completed:
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInEnvironmentTypeContext(
+        [&](UsbAdbEnvironment& env) { count = env.fake_dev_->deconfigure_count(); });
+    return count >= 1 && stop_done.load();
+  });
+  async_client = {};
 }
 
 TEST_F(UsbAdbTest, OfflineTxQueuedAndFlushedOnline) {
@@ -1042,14 +1301,12 @@ TEST_F(UsbAdbTest, OfflineTxQueuedAndFlushedOnline) {
       });
 
   // Wait for the driver to receive and queue the request in its software queue.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        size_t count = 0;
-        driver_test_.RunInDriverContext(
-            [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::TxPendingReqsCount(dev); });
-        return count == 1;
-      },
-      zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::TxPendingReqsCount(dev); });
+    return count == 1;
+  });
 
   // Verify that nothing has been queued to the hardware yet.
   driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
@@ -1061,15 +1318,13 @@ TEST_F(UsbAdbTest, OfflineTxQueuedAndFlushedOnline) {
   EnableUsb();
 
   // The driver should now automatically dequeue the request and queue it to bulk IN endpoint.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        size_t pending_endpoints = 0;
-        driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
-          pending_endpoints = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
-        });
-        return pending_endpoints == 1;
-      },
-      zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() {
+    size_t pending_endpoints = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending_endpoints = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending_endpoints == 1;
+  });
 
   // Complete the request at the hardware layer.
   driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
@@ -1077,8 +1332,7 @@ TEST_F(UsbAdbTest, OfflineTxQueuedAndFlushedOnline) {
   });
 
   // Wait for the FIDL callback to finish.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil([&]() { return tx_completed.load(); },
-                                                           zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() { return tx_completed.load(); });
 }
 
 TEST_F(UsbAdbTest, UsbFunctionBindingReconfigure) {
@@ -1096,27 +1350,25 @@ TEST_F(UsbAdbTest, UsbFunctionBindingReconfigure) {
   }});
   ASSERT_TRUE(config_result_first.is_ok());
 
-  CancelAllUsbRequestsOnDeconfigure();
-
   auto deconfig_result = iface_client_->SetConfigured({{
       .configured = false,
       .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
   }});
   ASSERT_TRUE(deconfig_result.is_ok());
 
-  // Wait for requests to drain and the driver to restart USB before re-binding.
+  // SetConfigured(false) must transition cleanly to kAwaitingUsbConnection without tearing down
+  // usb_function_binding_ or calling Deconfigure().
   WaitForState(State::kAwaitingUsbConnection);
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
 
-  iface_client_ = {};
-  ASSERT_NO_FATAL_FAILURE(EnsureIfaceBound());
-
+  // Re-configuring on the same iface_client_ must succeed.
   auto config_result = iface_client_->SetConfigured({{
       .configured = true,
       .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
   }});
   ASSERT_TRUE(config_result.is_ok());
 
-  // Let the message loop process the asynchronous unbind handlers
   driver_test_.runtime().RunUntilIdle();
 
   // Verify that driver is online AND usb_function_binding_ remains bound.
@@ -1146,14 +1398,21 @@ TEST_F(UsbAdbTest, DisconnectTransitionsToStoppingState) {
     env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
   });
 
-  // Deconfiguring USB transitions driver state to kStoppingForReconnect.
-  auto deconfig_result = iface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
-  }});
-  ASSERT_TRUE(deconfig_result.is_ok());
+  // Deconfiguring USB transitions driver state to kStoppingForReconnect and holds the
+  // SetConfigured(false) completer until CancelAll finishes.
+  auto iface_client_end = iface_client_.TakeClientEnd();
+  fidl::WireClient async_iface(std::move(iface_client_end),
+                               fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> unconfigured_done = false;
+  async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
+      .ThenExactlyOnce([&](auto& result) {
+        EXPECT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        unconfigured_done = true;
+      });
 
   WaitForState(State::kStoppingForReconnect);
+  EXPECT_FALSE(unconfigured_done.load());
 
   // Release cancellation so the driver can finish stopping cleanly.
   driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
@@ -1163,6 +1422,9 @@ TEST_F(UsbAdbTest, DisconnectTransitionsToStoppingState) {
     env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
     env.CancelAllUsbRequests();
   });
+
+  driver_test_.runtime().RunUntil([&]() { return unconfigured_done.load(); });
+  async_iface = {};
 
   ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
 }
@@ -1341,33 +1603,133 @@ TEST_F(UsbAdbTest, InspectLifecycleEvents) {
     }
   }
 
-  // 3. StopAdb logs "adb_client_disconnected: StopAdb".
-  usb_impl = {};
-  iface_client_ = {};
-  usb_impl = NormalStartAdb();
+  // 3. StopAdb while kOnline logs both "adb_client_disconnected: StopAdb" and "reset_usb_on_stop".
+  // SetConfigured(false) in step 2 keeps both usb_function_binding_ and adb_binding_ bound,
+  // so drain the offline status event and re-enable USB on the existing bindings.
+  handler.expected_statuses_.emplace(fadb::StatusFlags(0));
+  ExpectHandleOneEventSafe(usb_impl, handler);
+  EnableUsb();
   handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
   ExpectHandleOneEventSafe(usb_impl, handler);
 
-  auto stop_res = client_->StopAdb();
-  ASSERT_TRUE(stop_res.ok());
-  EXPECT_TRUE(stop_res->is_ok());
-  WaitForState(State::kAwaitingUsbConnection);
+  // Hold CancelAll briefly so we also exercise connecting a new ADB client while stopping for
+  // reconnect ("adb_client_connected_during_stop").
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
+  });
+
+  std::atomic<bool> stop_done = false;
+  auto dev_client_end = client_.TakeClientEnd();
+  fidl::WireClient async_client(std::move(dev_client_end),
+                                fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  async_client->StopAdb().ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.ok());
+    stop_done = true;
+  });
+  WaitForState(State::kStoppingForReconnect);
   ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_disconnected: StopAdb"));
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("reset_usb_on_stop"));
 
-  // 4. Closing the UsbAdbImpl client channel logs "adb_client_disconnected: unbind".
-  usb_impl = {};
+  auto [client_end_during_stop, server_end_during_stop] =
+      fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  std::atomic<bool> start_during_stop_done = false;
+  async_client->StartAdb(std::move(server_end_during_stop)).ThenExactlyOnce([&](auto& result) {
+    EXPECT_TRUE(result.ok());
+    start_during_stop_done = true;
+  });
+  driver_test_.runtime().RunUntil([&]() { return start_during_stop_done.load(); });
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_connected_during_stop"));
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(false);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
+    env.CancelAllUsbRequests();
+  });
+  driver_test_.runtime().RunUntil([&]() { return stop_done.load(); });
+  WaitForState(State::kAwaitingUsbConnection);
+  async_client = {};
+  client_.Bind(*driver_test_.Connect<fadb::Service::Adb>());
+  client_end_during_stop.reset();
+  driver_test_.runtime().RunUntil([&]() {
+    bool bound = true;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { bound = UsbAdbTestHelper::has_adb_binding(dev); });
+    return !bound;
+  });
+
+  // 4. RxComplete / TxComplete observing ZX_ERR_IO_NOT_PRESENT while kOnline logs
+  // "usb_disconnect_observed: RxComplete" / "usb_disconnect_observed: TxComplete", and
+  // closing UsbAdbImpl when configure subsequently fails logs "restarting_usb_connection_failed".
   iface_client_ = {};
   usb_impl = NormalStartAdb();
   handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
   ExpectHandleOneEventSafe(usb_impl, handler);
 
-  usb_impl = {};
-  WaitForState(State::kAwaitingUsbConnection);
-  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_disconnected: unbind"));
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0);
+  });
+  driver_test_.runtime().RunUntil([&]() {
+    inspect::Inspector inspector;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
+    ReadInspect(inspector);
+    return has_function_event("usb_disconnect_observed: RxComplete");
+  });
 
-  // 5. Closing the UsbFunctionInterface client channel logs "usb_function_disconnected: unbind".
-  iface_client_ = {};
-  WaitConfigured();
+  // Reset usb_disconnect_observed_ via SetConfigured(false) -> SetConfigured(true), then queue a TX
+  // packet and fail it with ZX_ERR_IO_NOT_PRESENT to verify "usb_disconnect_observed: TxComplete".
+  ASSERT_TRUE(iface_client_
+                  ->SetConfigured({{
+                      .configured = false,
+                      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+                  }})
+                  .is_ok());
+  WaitForState(State::kAwaitingUsbConnection);
+  handler.expected_statuses_.emplace(fadb::StatusFlags(0));
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  EnableUsb();
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  uint8_t tx_byte = 0x55;
+  auto async_usb = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  async_usb->QueueTx(fidl::VectorView<uint8_t>::FromExternal(&tx_byte, 1))
+      .ThenExactlyOnce([](auto&) {});
+  driver_test_.runtime().RunUntil([&]() {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 1u;
+  });
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0);
+  });
+  driver_test_.runtime().RunUntil([&]() {
+    inspect::Inspector inspector;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
+    ReadInspect(inspector);
+    return has_function_event("usb_disconnect_observed: TxComplete");
+  });
+
+  // Re-cycle SetConfigured(false)/(true) so usb_disconnect_observed_ is false, close
+  // iface_client_ while bound to verify "usb_function_disconnected: unbind", inject Configure
+  // failure, and close async_usb to verify "adb_client_disconnected: unbind" +
+  // "restarting_usb_connection_failed".
+  ASSERT_TRUE(iface_client_
+                  ->SetConfigured({{
+                      .configured = false,
+                      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
+                  }})
+                  .is_ok());
+  WaitForState(State::kAwaitingUsbConnection);
+  EnableUsb();
   iface_client_ = {};
   driver_test_.runtime().RunUntil([&]() {
     inspect::Inspector inspector;
@@ -1377,7 +1739,15 @@ TEST_F(UsbAdbTest, InspectLifecycleEvents) {
     return has_function_event("usb_function_disconnected: unbind");
   });
 
-  // 6. Stopping the driver logs "driver_stopped".
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { env.fake_dev_->set_configure_status(ZX_ERR_BAD_STATE); });
+
+  async_usb = {};
+  WaitForState(State::kAwaitingUsbConnection);
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("adb_client_disconnected: unbind"));
+  ASSERT_NO_FATAL_FAILURE(expect_lifecycle_event("restarting_usb_connection_failed"));
+
+  // 5. Stopping the driver logs "driver_stopped".
   inspect::Inspector inspector;
   driver_test_.RunInDriverContext(
       [&](UsbAdbDevice& dev) { inspector = UsbAdbTestHelper::GetInspector(dev); });
@@ -1441,14 +1811,12 @@ TEST_F(UsbAdbTest, EarlyConnectRace) {
   async_usb->QueueTx(fidl::VectorView<uint8_t>::FromExternal(test_data, sizeof(test_data)))
       .ThenExactlyOnce([&](auto& response) { completed = true; });
 
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        size_t count = 0;
-        driver_test_.RunInDriverContext(
-            [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::TxPendingReqsCount(dev); });
-        return count == 1;
-      },
-      zx::sec(5)));
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::TxPendingReqsCount(dev); });
+    return count == 1;
+  });
 
   SafeStopDriver();
 }
@@ -1475,19 +1843,9 @@ TEST_F(UsbAdbTest, ReconnectHandlesConfigureFailureGracefully) {
   driver_test_.RunInEnvironmentTypeContext(
       [](UsbAdbEnvironment& env) { env.fake_dev_->set_configure_status(ZX_ERR_BAD_STATE); });
 
-  // Trigger disconnect by deconfiguring USB.
-  auto deconfig_result = iface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
-  }});
-  ASSERT_TRUE(deconfig_result.is_ok());
-
-  // Wait for requests to drain and unbind to process.
-  driver_test_.runtime().RunUntilIdle();
-
-  // Cancel any remaining USB endpoint requests.
-  driver_test_.RunInEnvironmentTypeContext(
-      [](UsbAdbEnvironment& env) { env.CancelAllUsbRequests(); });
+  // Trigger an ADB-initiated USB reset by closing the UsbAdbImpl channel while online.
+  usb_impl = {};
+  WaitForState(State::kAwaitingUsbConnection);
 
   // The driver should have attempted to restart USB, encountered ZX_ERR_BAD_STATE,
   // transitioned cleanly to kAwaitingUsbConnection, and logged a warning without panicking.
@@ -1615,10 +1973,6 @@ TEST_F(UsbAdbTest, ReconnectHandlesConfigureEndpointFailureGracefully) {
 
   // Wait for requests to drain and driver to reach kAwaitingUsbConnection.
   WaitForState(State::kAwaitingUsbConnection);
-
-  // Re-acquire the newly bound iface_client after driver restarted USB.
-  iface_client_ = {};
-  WaitConfigured();
   ASSERT_TRUE(iface_client_.is_valid());
 
   // Set the fake USB device to fail endpoint configuration on reconnect.
@@ -1670,21 +2024,30 @@ TEST_F(UsbAdbTest, SetConfiguredTrueDuringStoppingReconfiguresCleanly) {
 
   EnsureIfaceBound();
   ASSERT_TRUE(iface_client_.is_valid());
+  auto iface_client_end = iface_client_.TakeClientEnd();
+  fidl::WireClient async_iface(std::move(iface_client_end),
+                               fdf::Dispatcher::GetCurrent()->async_dispatcher());
 
-  // 2. Disconnect USB: SetConfigured(false).
-  auto res_unconfig = iface_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
-  }});
-  EXPECT_TRUE(res_unconfig.is_ok());
+  // 2. Disconnect USB: SetConfigured(false) asynchronously while CancelAll is held.
+  std::atomic<bool> unconfigured_done = false;
+  async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kFull)
+      .ThenExactlyOnce([&](auto& result) {
+        EXPECT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        unconfigured_done = true;
+      });
   WaitForState(State::kStoppingForReconnect);
+  EXPECT_FALSE(unconfigured_done.load());
 
   // 3. While still in kStoppingForReconnect, host reconnects: SetConfigured(true).
-  auto res_config = iface_client_->SetConfigured({{
-      .configured = true,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kFull,
-  }});
-  EXPECT_TRUE(res_config.is_ok());
+  std::atomic<bool> reconfigured_done = false;
+  async_iface->SetConfigured(true, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kFull)
+      .ThenExactlyOnce([&](auto& result) {
+        EXPECT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        reconfigured_done = true;
+      });
+  driver_test_.runtime().RunUntil([&]() { return reconfigured_done.load(); });
 
   // 4. Release CancelAll so the stopping process completes.
   driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
@@ -1697,8 +2060,427 @@ TEST_F(UsbAdbTest, SetConfiguredTrueDuringStoppingReconfiguresCleanly) {
 
   // 5. The driver should complete its stop and immediately transition to State::kOnline.
   WaitForState(State::kOnline);
+  driver_test_.runtime().RunUntil([&]() { return unconfigured_done.load(); });
+  async_iface = {};
 
   ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that SetConfigured(false) from usb-peripheral (e.g. on physical unplug or host reset)
+// holds its FIDL completer until CancelAll() finishes, does NOT call function_->Deconfigure()
+// or StartUsb(), and keeps both usb_function_binding_ and adb_binding_ alive across reconnect.
+TEST_F(UsbAdbTest, SetConfiguredFalseDoesNotDeconfigureFunctionAndKeepsAdbBound) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
+  });
+
+  auto iface_client_end = iface_client_.TakeClientEnd();
+  fidl::WireClient async_iface(std::move(iface_client_end),
+                               fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  std::atomic<bool> set_configured_done = false;
+  async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        set_configured_done = true;
+      });
+
+  WaitForState(State::kStoppingForReconnect);
+  EXPECT_FALSE(set_configured_done.load());
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(false);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
+    env.CancelAllUsbRequests();
+  });
+
+  driver_test_.runtime().RunUntil([&]() { return set_configured_done.load(); });
+  WaitForState(State::kAwaitingUsbConnection);
+
+  // Verify Deconfigure() was NEVER called and both bindings remain alive.
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+  driver_test_.RunInDriverContext([](UsbAdbDevice& dev) {
+    EXPECT_TRUE(UsbAdbTestHelper::has_usb_function_binding(dev));
+    EXPECT_TRUE(UsbAdbTestHelper::has_adb_binding(dev));
+  });
+
+  // The existing usb_impl client must receive OnStatusChanged(0) without its channel closing.
+  handler.expected_statuses_.emplace(fadb::StatusFlags(0));
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  // Re-configuring on the same async_iface brings the same usb_impl client back online.
+  std::atomic<bool> reconfigured_done = false;
+  async_iface->SetConfigured(true, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        reconfigured_done = true;
+      });
+  driver_test_.runtime().RunUntil([&]() { return reconfigured_done.load(); });
+  WaitForState(State::kOnline);
+
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  async_iface = {};
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies the physical unplug race: when DWC3 cancels an active RX request with
+// ZX_ERR_IO_NOT_PRESENT slightly before usb-peripheral delivers SetConfigured(false),
+// ReceiveQueued() does not re-queue the failed request onto the disconnecting endpoint,
+// and if adbd calls StopAdb() before SetConfigured(false) arrives, SetConfigured(false)
+// coalesces cleanly without logging a warning or calling function_->Deconfigure().
+TEST_F(UsbAdbTest, SetConfiguredFalseDuringStopAdbCoalescesWithoutDeconfigure) {
+  auto usb_impl_sync = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl_sync, handler);
+
+  auto usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl_sync.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // 1. Queue a Receive() call and complete one bulk OUT request with ZX_ERR_IO_NOT_PRESENT.
+  std::atomic<bool> rx_failed = false;
+  usb_impl->Receive().ThenExactlyOnce([&](auto& response) {
+    ASSERT_TRUE(response.ok());
+    ASSERT_TRUE(response->is_error());
+    EXPECT_EQ(response->error_value(), ZX_ERR_CANCELED);
+    rx_failed = true;
+  });
+
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::RxRequestsCount(dev); });
+    return count == 1;
+  });
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0);
+  });
+
+  driver_test_.runtime().RunUntil([&]() { return rx_failed.load(); });
+
+  // ReceiveQueued() must have returned the request to the pool rather than re-queuing it onto the
+  // disconnecting endpoint.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    EXPECT_EQ(env.fake_dev_->fake_endpoint(kBulkOutEp).pending_request_count(), kBulkRxCount - 1);
+  });
+
+  // 2. Hold CancelAll and simulate adbd calling StopAdb() 5ms before SetConfigured(false) arrives.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
+  });
+
+  auto dev_client_end = client_.TakeClientEnd();
+  fidl::WireClient async_client(std::move(dev_client_end),
+                                fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> stop_adb_done = false;
+  async_client->StopAdb().ThenExactlyOnce([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->is_ok());
+    stop_adb_done = true;
+  });
+
+  WaitForState(State::kStoppingForReconnect);
+  EXPECT_FALSE(stop_adb_done.load());
+
+  // 3. Now SetConfigured(false) arrives from usb-peripheral while kStoppingForReconnect is active.
+  auto iface_client_end = iface_client_.TakeClientEnd();
+  fidl::WireClient async_iface(std::move(iface_client_end),
+                               fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> set_configured_done = false;
+  async_iface->SetConfigured(false, fuchsia_hardware_usb_descriptor::wire::UsbSpeed::kHigh)
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        set_configured_done = true;
+      });
+
+  driver_test_.runtime().RunUntilIdle();
+  EXPECT_FALSE(stop_adb_done.load());
+  EXPECT_FALSE(set_configured_done.load());
+
+  // 4. Release CancelAll and verify both completers finish without calling Deconfigure().
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(false);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
+    env.CancelAllUsbRequests();
+  });
+
+  driver_test_.runtime().RunUntil(
+      [&]() { return stop_adb_done.load() && set_configured_done.load(); });
+  WaitForState(State::kAwaitingUsbConnection);
+
+  driver_test_.RunInEnvironmentTypeContext(
+      [](UsbAdbEnvironment& env) { EXPECT_EQ(env.fake_dev_->deconfigure_count(), 0u); });
+
+  usb_impl = {};
+  async_client = {};
+  async_iface = {};
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+// Verifies that StartAdb() can be called after USB is already online (State::kOnline) AND
+// while a previous session's stop/reconnect is still draining (State::kStoppingForReconnect).
+TEST_F(UsbAdbTest, StartAdbAfterUsbAlreadyOnlineAndDuringStop) {
+  // Part A: Bring USB online BEFORE calling StartAdb(), and verify that a Bulk OUT packet
+  // arriving before StartAdb() is buffered in pending_replies_ and delivered once StartAdb()
+  // and Receive() are called.
+  WaitConfigured();
+  EnableUsb();
+  WaitForState(State::kOnline);
+  ExpectReceiveData(32);
+
+  auto [client_end1, server_end1] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  auto start_res1 = client_->StartAdb(std::move(server_end1));
+  ASSERT_TRUE(start_res1.ok());
+  ASSERT_TRUE(start_res1->is_ok());
+
+  fidl::WireSyncClient<fadb::UsbAdbImpl> usb_impl1(std::move(client_end1));
+  EventHandler handler1;
+  handler1.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl1, handler1);
+
+  auto rx1_res = usb_impl1->Receive();
+  ASSERT_TRUE(rx1_res.ok());
+  ASSERT_TRUE(rx1_res->is_ok());
+  EXPECT_EQ(rx1_res->value()->data.size(), 32u);
+
+  // Part B: Hold CancelAll, call StopAdb(), and immediately call StartAdb() with a new channel
+  // while the driver is still in State::kStoppingForReconnect.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(true);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(true);
+  });
+
+  auto dev_client_end = client_.TakeClientEnd();
+  fidl::WireClient async_client(std::move(dev_client_end),
+                                fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> stop_done = false;
+  async_client->StopAdb().ThenExactlyOnce([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->is_ok());
+    stop_done = true;
+  });
+
+  WaitForState(State::kStoppingForReconnect);
+  handler1.expected_statuses_.emplace(fadb::StatusFlags(0));
+  ExpectHandleOneEventSafe(usb_impl1, handler1);
+  usb_impl1 = {};
+
+  // Connect new ADB session while State::kStoppingForReconnect is still draining!
+  auto [client_end2, server_end2] = fidl::Endpoints<fadb::UsbAdbImpl>::Create();
+  std::atomic<bool> start2_done = false;
+  async_client->StartAdb(std::move(server_end2)).ThenExactlyOnce([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->is_ok());
+    start2_done = true;
+  });
+  driver_test_.runtime().RunUntil([&]() { return start2_done.load(); });
+
+  // Queue an offline Receive() on the new session while still stopping.
+  fidl::WireClient<fadb::UsbAdbImpl> usb_impl2(std::move(client_end2),
+                                               fdf::Dispatcher::GetCurrent()->async_dispatcher());
+  std::atomic<bool> rx2_done = false;
+  usb_impl2->Receive().ThenExactlyOnce([&](auto& response) {
+    ASSERT_TRUE(response.ok());
+    ASSERT_TRUE(response->is_ok());
+    EXPECT_EQ(response->value()->data.size(), 64u);
+    rx2_done = true;
+  });
+  driver_test_.runtime().RunUntilIdle();
+
+  // Release CancelAll so the stop completes and restarts USB (Deconfigure -> Configure).
+  iface_client_ = {};
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkInEp).ReleaseCancelAll();
+    env.fake_dev_->fake_endpoint(kBulkOutEp).set_hold_cancel(false);
+    env.fake_dev_->fake_endpoint(kBulkInEp).set_hold_cancel(false);
+    env.CancelAllUsbRequests();
+  });
+
+  driver_test_.runtime().RunUntil([&]() { return stop_done.load(); });
+  WaitForState(State::kAwaitingUsbConnection);
+
+  // Re-enable USB and verify the new ADB session comes online and services its queued Receive().
+  WaitConfigured();
+  EnableUsb();
+  ExpectReceiveData(64);
+  driver_test_.runtime().RunUntil([&]() { return rx2_done.load(); });
+
+  usb_impl2 = {};
+  async_client = {};
+  ASSERT_NO_FATAL_FAILURE(SafeStopDriver());
+}
+
+TEST_F(UsbAdbTest, QueueTxCompletesOnHardwareTxComplete) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  auto async_usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // Queue a payload without pre-queuing a completion on the fake Bulk IN endpoint.
+  // SendQueued() submits the request to kBulkInEp, while the QueueTx FIDL completer remains
+  // pending until TxComplete() receives the hardware completion.
+  std::vector<uint8_t> payload = {'r', 'e', 's', 't', 'a', 'r', 't', 'i', 'n', 'g'};
+  std::atomic<bool> tx_completed = false;
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload.data(), payload.size()))
+      .ThenExactlyOnce([&tx_completed](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        tx_completed = true;
+      });
+
+  driver_test_.runtime().RunUntil([&] {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 1u;
+  });
+
+  driver_test_.runtime().RunUntilIdle();
+  EXPECT_FALSE(tx_completed.load());
+
+  // Complete the in-flight Bulk IN request on the endpoint and verify QueueTx completes.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, payload.size());
+  });
+
+  driver_test_.runtime().RunUntil([&] { return tx_completed.load(); });
+
+  async_usb_impl = {};
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, QueueTxPipelinedFifoAndErrorCompletion) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  auto async_usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  std::vector<uint8_t> payload1 = {1, 2, 3, 4};
+  std::vector<uint8_t> payload2 = {5, 6, 7, 8};
+  std::atomic<bool> tx1_ok = false;
+  std::atomic<bool> tx2_failed = false;
+
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload1.data(), payload1.size()))
+      .ThenExactlyOnce([&tx1_ok](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        tx1_ok = true;
+      });
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload2.data(), payload2.size()))
+      .ThenExactlyOnce([&tx2_failed](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_error());
+        tx2_failed = true;
+      });
+
+  driver_test_.runtime().RunUntil([&] {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 2u;
+  });
+
+  driver_test_.runtime().RunUntilIdle();
+  EXPECT_FALSE(tx1_ok.load());
+  EXPECT_FALSE(tx2_failed.load());
+
+  // Complete first Bulk IN request -> only tx1 resolves; tx2 remains pending.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, payload1.size());
+  });
+  driver_test_.runtime().RunUntil([&] { return tx1_ok.load(); });
+  driver_test_.runtime().RunUntilIdle();
+  EXPECT_FALSE(tx2_failed.load());
+
+  // Complete second Bulk IN request with hardware error -> tx2 resolves with error.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0);
+  });
+  driver_test_.runtime().RunUntil([&] { return tx2_failed.load(); });
+
+  async_usb_impl = {};
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, QueueTxOutOfOrderCompletionMatchesByVmoId) {
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  auto async_usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  std::vector<uint8_t> payload1 = {1, 2, 3, 4};
+  std::vector<uint8_t> payload2 = {5, 6, 7, 8};
+  std::atomic<bool> tx1_ok = false;
+  std::atomic<bool> tx2_ok = false;
+
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload1.data(), payload1.size()))
+      .ThenExactlyOnce([&tx1_ok](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        tx1_ok = true;
+      });
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload2.data(), payload2.size()))
+      .ThenExactlyOnce([&tx2_ok](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        tx2_ok = true;
+      });
+
+  driver_test_.runtime().RunUntil([&] {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 2u;
+  });
+
+  // Complete the second request (index 1) out of order before the first request (index 0).
+  // Matching by VMO ID must resolve tx2 while keeping tx1 pending until its own request completes.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestCompleteAtIndex(1, ZX_OK, payload2.size());
+  });
+  driver_test_.runtime().RunUntil([&] { return tx2_ok.load(); });
+  driver_test_.runtime().RunUntilIdle();
+  EXPECT_FALSE(tx1_ok.load());
+
+  // Complete the remaining first request -> tx1 resolves.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestCompleteAtIndex(0, ZX_OK, payload1.size());
+  });
+  driver_test_.runtime().RunUntil([&] { return tx1_ok.load(); });
+
+  async_usb_impl = {};
+  SafeStopDriver();
 }
 
 }  // namespace usb_adb_function

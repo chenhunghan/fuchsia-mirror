@@ -99,7 +99,7 @@
     <project name="third_party/crashpad"
              path="third_party/crashpad/src"
              remote="https://fuchsia.googlesource.com/third_party/crashpad"
-             revision="9b0c4be8ddc831f448a54b6aa114b40207d5217c"
+             revision="0eb4194c77384fdea2deb0444948a742bd178d74"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="chromium/mini_chromium"
              path="third_party/mini_chromium/src"
@@ -115,7 +115,7 @@
              path="third_party/curl/src"
              remote="https://fuchsia.googlesource.com/third_party/curl"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="01346829096c61b372692f6dc43ffa778c6caccd"/>
+             revision="3163ec065643ba20709f190111f42c3e1fe95273"/>
     <project name="third_party/github.com/google/emboss"
              path="third_party/github.com/google/emboss/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/emboss"
@@ -292,7 +292,7 @@
     <project name="llvm-project/libc"
              path="third_party/llvm-libc/src"
              remote="https://llvm.googlesource.com/llvm-project/libc"
-             revision="009c58ddd21400154e3b6a8702b75cec89e30519"/>
+             revision="0ec9842b92a1375f78f8a78f24f289d08ae7086e"/>
     <project name="third_party/luci-go"
              path="third_party/luci-go"
              revision="897c3b0c38036908e016300c70509509b13001a0"
@@ -407,12 +407,12 @@
              path="third_party/perfetto"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/perfetto"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="3901fd73526edecf3e1cfa2d8e3db2a965e4f637" />
+             revision="d8f3a40fe7e73a4ae0f6e8d8f06d26f3cae4867e" />
     <project name="third_party/pigweed"
              path="third_party/pigweed/src"
              remote="https://fuchsia.googlesource.com/third_party/pigweed.googlesource.com/pigweed/pigweed"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="032e5f7678a741edfcb9bcd62853f237925ca3fb"/>
+             revision="0a80fe7ced56bdd4ff575eae8452b312886f85a9"/>
     <project name="third_party/github.com/google/python_portpicker"
              path="third_party/python_portpicker/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/python_portpicker"
@@ -457,12 +457,12 @@
     <project name="third_party/sbase"
              path="third_party/sbase"
              remote="https://fuchsia.googlesource.com/third_party/sbase"
-             revision="072df49d23ae6febf0d7386dee40fd2e70eb4378"
+             revision="d694f731bc860baebea48aa2efb590231dcfcdf9"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="scudo"
              path="third_party/scudo/src"
              remote="https://llvm.googlesource.com/scudo"
-             revision="f6baf2b4ebfa85356638f63e1263b8cb929c0bd4"/>
+             revision="fb854b368e5333f894a8b051760c731d5d4b708b"/>
     <project name="gwp-asan"
              path="third_party/scudo/gwp_asan"
              remote="https://llvm.googlesource.com/gwp-asan"
@@ -519,7 +519,7 @@
              path="third_party/openthread"
              remote="https://fuchsia.googlesource.com/third_party/openthread"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="c7d4295df1a3208c0dfb5f33ebfa508f8a9bb2ed"/>
+             revision="618ebb3902feb61254dfcb52944e5a2ff1080ae8"/>
     <project name="third_party/openweave-core"
              path="third_party/openweave-core"
              remote="https://fuchsia.googlesource.com/third_party/openweave-core"

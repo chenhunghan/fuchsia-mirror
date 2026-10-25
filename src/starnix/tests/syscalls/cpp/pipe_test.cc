@@ -4,10 +4,15 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/poll.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <thread>
 
 #include <fbl/unique_fd.h>
@@ -301,6 +306,391 @@ TEST(PipeTest, PolloutFragmentation) {
   EXPECT_EQ(p.revents, POLLOUT);
 }
 
+TEST(PipeTest, PartialEfaultRollbackAndShortCounts) {
+  const size_t page_size = sysconf(_SC_PAGE_SIZE);
+  auto mapping = test_helper::ScopedMMap::MMap(nullptr, 2 * page_size, PROT_READ | PROT_WRITE,
+                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_TRUE(mapping.is_ok()) << mapping.error_value();
+  char* valid_page = static_cast<char*>(mapping->mapping());
+  char* bad_page = valid_page + page_size;
+  ASSERT_EQ(mprotect(bad_page, page_size, PROT_NONE), 0);
+  memset(valid_page, 'X', page_size);
+
+  // 1. Sub-PIPE_BUF writev with a trailing faulting iovec must fail atomically with EFAULT and
+  // leave 0 bytes in the pipe.
+  {
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    iovec iov[2] = {
+        {.iov_base = valid_page, .iov_len = 100},
+        {.iov_base = bad_page, .iov_len = 100},
+    };
+    EXPECT_THAT(writev(pipe.WriteSide().get(), iov, 2), SyscallFailsWithErrno(EFAULT));
+    int avail = -1;
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 0);
+  }
+
+  // 2. Multi-page write and writev spanning [valid_page, bad_page] must commit the first page and
+  // return a short write count of page_size rather than failing with EFAULT.
+  {
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    EXPECT_THAT(write(pipe.WriteSide().get(), valid_page, 2 * page_size),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(page_size)));
+    int avail = -1;
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, static_cast<int>(page_size));
+
+    std::vector<char> drain(page_size);
+    EXPECT_THAT(read(pipe.ReadSide().get(), drain.data(), page_size),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(page_size)));
+
+    iovec iov[2] = {
+        {.iov_base = valid_page, .iov_len = page_size},
+        {.iov_base = bad_page, .iov_len = page_size},
+    };
+    EXPECT_THAT(writev(pipe.WriteSide().get(), iov, 2),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(page_size)));
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, static_cast<int>(page_size));
+  }
+
+  // 3. vmsplice from a PROT_NONE page fails with EFAULT, while vmsplice across
+  // [valid_page, bad_page] returns a short count of page_size.
+  {
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    iovec bad_iov = {.iov_base = bad_page, .iov_len = page_size};
+    EXPECT_THAT(vmsplice(pipe.WriteSide().get(), &bad_iov, 1, SPLICE_F_NONBLOCK),
+                SyscallFailsWithErrno(EFAULT));
+    int avail = -1;
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 0);
+
+    iovec mixed_iov[2] = {
+        {.iov_base = valid_page, .iov_len = page_size},
+        {.iov_base = bad_page, .iov_len = page_size},
+    };
+    EXPECT_THAT(vmsplice(pipe.WriteSide().get(), mixed_iov, 2, SPLICE_F_NONBLOCK),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(page_size)));
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, static_cast<int>(page_size));
+  }
+
+  // 4. read, readv, and vmsplice from a pipe into a faulting buffer mid-message must roll back the
+  // partial copy, return EFAULT, and preserve the unread message in the pipe.
+  {
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    ASSERT_EQ(write(pipe.WriteSide().get(), "AAAABBBB", 8), 8);
+
+    EXPECT_THAT(read(pipe.ReadSide().get(), bad_page, 8), SyscallFailsWithErrno(EFAULT));
+    int avail = -1;
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 8);
+
+    iovec fault_iov[2] = {
+        {.iov_base = valid_page, .iov_len = 4},
+        {.iov_base = bad_page, .iov_len = 4},
+    };
+    EXPECT_THAT(readv(pipe.ReadSide().get(), fault_iov, 2), SyscallFailsWithErrno(EFAULT));
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 8);
+
+    EXPECT_THAT(vmsplice(pipe.ReadSide().get(), fault_iov, 2, SPLICE_F_NONBLOCK),
+                SyscallFailsWithErrno(EFAULT));
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 8);
+
+    char verify_buf[8] = {};
+    ASSERT_EQ(read(pipe.ReadSide().get(), verify_buf, 8), 8);
+    EXPECT_EQ(std::string(verify_buf, 8), "AAAABBBB");
+  }
+
+  // 5. readv and vmsplice across two separate 4-byte pipe buffers (enqueued via vmsplice so Linux
+  // does not merge them with PIPE_BUF_FLAG_CAN_MERGE) with [4B valid, 4B PROT_NONE] must consume
+  // the first buffer, preserve the second buffer on EFAULT, and return 4.
+  {
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    char msg1[4] = {'A', 'A', 'A', 'A'};
+    char msg2[4] = {'B', 'B', 'B', 'B'};
+    iovec init_iov[2] = {
+        {.iov_base = msg1, .iov_len = 4},
+        {.iov_base = msg2, .iov_len = 4},
+    };
+    ASSERT_EQ(vmsplice(pipe.WriteSide().get(), init_iov, 2, 0), 8);
+
+    iovec fault_iov[2] = {
+        {.iov_base = valid_page, .iov_len = 4},
+        {.iov_base = bad_page, .iov_len = 4},
+    };
+    EXPECT_THAT(readv(pipe.ReadSide().get(), fault_iov, 2), SyscallSucceedsWithValue(4));
+    EXPECT_EQ(std::string(valid_page, 4), "AAAA");
+
+    int avail = -1;
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 4);
+
+    char rem_buf[4] = {};
+    ASSERT_EQ(read(pipe.ReadSide().get(), rem_buf, 4), 4);
+    EXPECT_EQ(std::string(rem_buf, 4), "BBBB");
+
+    char msg3[4] = {'C', 'C', 'C', 'C'};
+    char msg4[4] = {'D', 'D', 'D', 'D'};
+    iovec init_iov2[2] = {
+        {.iov_base = msg3, .iov_len = 4},
+        {.iov_base = msg4, .iov_len = 4},
+    };
+    ASSERT_EQ(vmsplice(pipe.WriteSide().get(), init_iov2, 2, 0), 8);
+    EXPECT_THAT(vmsplice(pipe.ReadSide().get(), fault_iov, 2, SPLICE_F_NONBLOCK),
+                SyscallSucceedsWithValue(4));
+    EXPECT_EQ(std::string(valid_page, 4), "CCCC");
+    SAFE_SYSCALL(ioctl(pipe.ReadSide().get(), FIONREAD, &avail));
+    EXPECT_EQ(avail, 4);
+    ASSERT_EQ(read(pipe.ReadSide().get(), rem_buf, 4), 4);
+    EXPECT_EQ(std::string(rem_buf, 4), "DDDD");
+  }
+}
+
+TEST(PipeTest, SubPipeBufReadAndPartialSpliceWakeBlockedWriter) {
+  const size_t page_size = sysconf(_SC_PAGE_SIZE);
+
+  // 1. Reading < PIPE_BUF (100 bytes) from a full pipe must wake a blocked small writer.
+  // Before fixing sub-PIPE_BUF writer wakeups, Starnix only notified writers when free capacity
+  // reached >= PIPE_BUF (4096 bytes), so freeing 100 bytes left the blocked writer hung.
+  {
+    test_helper::ScopedPipe pipe;
+    SAFE_SYSCALL(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, 2 * page_size));
+
+    // Enqueue a 100-byte vmsplice segment at the head of the pipe so Slot 0 on Linux is a
+    // non-mergeable 100-byte buffer, then fill the remaining capacity of the 2-page pipe.
+    std::vector<char> head_buf(100, 'H');
+    iovec head_iov = {.iov_base = head_buf.data(), .iov_len = head_buf.size()};
+    ASSERT_EQ(vmsplice(pipe.WriteSide().get(), &head_iov, 1, 0), 100);
+
+    std::vector<char> page_buf(page_size, 'A');
+    ASSERT_EQ(write(pipe.WriteSide().get(), page_buf.data(), page_size),
+              static_cast<ssize_t>(page_size));
+
+    // On Starnix, pipe capacity is tracked in bytes (2 * page_size), so fill the remaining
+    // `page_size - 100` bytes; on Linux, both pipe_buffer slots are already occupied so a
+    // non-blocking write returns EAGAIN.
+    SAFE_SYSCALL(fcntl(pipe.WriteSide().get(), F_SETFL, O_NONBLOCK));
+    ssize_t rem = write(pipe.WriteSide().get(), page_buf.data(), page_size - 100);
+    if (rem == -1) {
+      ASSERT_EQ(errno, EAGAIN);
+    } else {
+      ASSERT_EQ(rem, static_cast<ssize_t>(page_size - 100));
+    }
+    SAFE_SYSCALL(fcntl(pipe.WriteSide().get(), F_SETFL, 0));
+
+    std::thread reader([&pipe]() {
+      usleep(20000);
+      char small_buf[100];
+      EXPECT_EQ(read(pipe.ReadSide().get(), small_buf, sizeof(small_buf)), 100);
+    });
+
+    const char payload[] = "ABCD";
+    EXPECT_THAT(write(pipe.WriteSide().get(), payload, 4), SyscallSucceedsWithValue(4));
+    reader.join();
+  }
+
+  // 2. Splicing a single page out of a full 2-page pipe (leaving the source pipe non-empty) must
+  // also wake a writer blocked on the source pipe.
+  {
+    test_helper::ScopedPipe pipe_a;
+    test_helper::ScopedPipe pipe_b;
+
+    SAFE_SYSCALL(fcntl(pipe_a.WriteSide().get(), F_SETPIPE_SZ, 2 * page_size));
+    std::vector<char> fill(2 * page_size, 'A');
+    ASSERT_EQ(write(pipe_a.WriteSide().get(), fill.data(), fill.size()),
+              static_cast<ssize_t>(2 * page_size));
+
+    std::thread splicer([&pipe_a, &pipe_b, page_size]() {
+      usleep(20000);
+      EXPECT_EQ(
+          splice(pipe_a.ReadSide().get(), nullptr, pipe_b.WriteSide().get(), nullptr, page_size, 0),
+          static_cast<ssize_t>(page_size));
+    });
+
+    const char payload[] = "EFGH";
+    EXPECT_THAT(write(pipe_a.WriteSide().get(), payload, 4), SyscallSucceedsWithValue(4));
+    splicer.join();
+  }
+}
+
+TEST(PipeTest, SetPipeSizeRoundingAndWakeBlockedWriter) {
+  const int page_size = getpagesize();
+  test_helper::ScopedPipe pipe;
+
+  // 1. Negative F_SETPIPE_SZ arguments must be rejected with EINVAL.
+  EXPECT_THAT(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, -1), SyscallFailsWithErrno(EINVAL));
+
+  // 2. Non-power-of-two sizes above page_size must round up to the next power of two.
+  // Before fixing F_SETPIPE_SZ rounding, Starnix rounded 3 * page_size to 3 * page_size instead
+  // of 4 * page_size.
+  EXPECT_THAT(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, 3 * page_size),
+              SyscallSucceedsWithValue(4 * page_size));
+  EXPECT_THAT(fcntl(pipe.WriteSide().get(), F_GETPIPE_SZ), SyscallSucceedsWithValue(4 * page_size));
+
+  // 3. Growing a full pipe via F_SETPIPE_SZ must wake a blocked writer and assert POLLOUT.
+  std::vector<char> fill(4 * page_size, 'F');
+  ASSERT_EQ(write(pipe.WriteSide().get(), fill.data(), fill.size()), 4 * page_size);
+
+  pollfd pfd = {
+      .fd = pipe.WriteSide().get(),
+      .events = POLLOUT,
+      .revents = 0,
+  };
+  EXPECT_EQ(poll(&pfd, 1, 0), 0);
+
+  std::atomic<bool> writer_done{false};
+  std::thread resizer([&pipe, page_size, &writer_done]() {
+    usleep(20000);
+    EXPECT_THAT(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, 8 * page_size),
+                SyscallSucceedsWithValue(8 * page_size));
+    // Linux kernels prior to 6.6.15 (CVE-2023-52672, "pipe: wakeup wr_wait after setting
+    // max_usage") wake `pipe->wr_wait` inside `pipe_resize_ring()` before updating
+    // `pipe->max_usage` in `pipe_set_size()`. If the blocked writer evaluates `pipe_writable()`
+    // before `pipe->max_usage` is updated, it goes back to sleep with `pipe->max_usage` already
+    // set to the new capacity. Re-issuing `F_SETPIPE_SZ` with the same capacity is a wakeup no-op
+    // on Starnix (`requested_capacity == old_capacity`) but triggers `pipe_resize_ring()` on
+    // unpatched Linux kernels to wake `pipe->wr_wait` once `pipe->max_usage` reflects 8 pages.
+    while (!writer_done.load(std::memory_order_acquire)) {
+      usleep(10000);
+      if (!writer_done.load(std::memory_order_acquire)) {
+        EXPECT_THAT(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, 8 * page_size),
+                    SyscallSucceedsWithValue(8 * page_size));
+      }
+    }
+  });
+
+  const char payload[] = "GROW";
+  EXPECT_THAT(write(pipe.WriteSide().get(), payload, 4), SyscallSucceedsWithValue(4));
+  writer_done.store(true, std::memory_order_release);
+  resizer.join();
+
+  pfd.revents = 0;
+  EXPECT_EQ(poll(&pfd, 1, 0), 1);
+  EXPECT_EQ(pfd.revents, POLLOUT);
+}
+
+TEST(PipeTest, SpliceValidationAndRlimitFsize) {
+  // 1. Non-null offset pointers on non-pipe non-seekable descriptors (such as sockets) must return
+  // EFAULT for unmapped pointers and EINVAL for valid pointers, rather than ESPIPE.
+  {
+    int sock_fds[2];
+    SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
+    fbl::unique_fd sock_rd(sock_fds[0]);
+    fbl::unique_fd sock_wr(sock_fds[1]);
+    test_helper::ScopedPipe pipe(O_NONBLOCK);
+
+    loff_t valid_offset = 0;
+    loff_t* bad_offset = reinterpret_cast<loff_t*>(0x1);
+
+    EXPECT_THAT(splice(sock_rd.get(), &valid_offset, pipe.WriteSide().get(), nullptr, 4, 0),
+                SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(splice(sock_rd.get(), bad_offset, pipe.WriteSide().get(), nullptr, 4, 0),
+                SyscallFailsWithErrno(EFAULT));
+    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), &valid_offset, 4, 0),
+                SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), bad_offset, 4, 0),
+                SyscallFailsWithErrno(EFAULT));
+  }
+
+  // 2. vmsplice must validate iovec user addresses and short-circuit zero-length requests before
+  // downcasting the target file descriptor to a pipe.
+  {
+    fbl::unique_fd dev_null(open("/dev/null", O_RDWR));
+    ASSERT_TRUE(dev_null.is_valid());
+
+    EXPECT_THAT(vmsplice(dev_null.get(), nullptr, 0, 0), SyscallSucceedsWithValue(0));
+
+    iovec empty_iov = {.iov_base = nullptr, .iov_len = 0};
+    EXPECT_THAT(vmsplice(dev_null.get(), &empty_iov, 1, 0), SyscallSucceedsWithValue(0));
+
+    iovec bad_iov = {.iov_base = reinterpret_cast<void*>(~0ull), .iov_len = 4096};
+    EXPECT_THAT(vmsplice(dev_null.get(), &bad_iov, 1, 0), SyscallFailsWithErrno(EFAULT));
+  }
+
+  // 3. splice from a pipe to a regular file under RLIMIT_FSIZE must check RLIMIT_FSIZE against
+  // actual bytes available in the pipe (after EOF/EAGAIN checks) rather than the requested length.
+  {
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([] {
+      static volatile sig_atomic_t sigxfsz_count = 0;
+      struct sigaction sa = {};
+      sa.sa_handler = [](int) { sigxfsz_count = sigxfsz_count + 1; };
+      SAFE_SYSCALL(sigaction(SIGXFSZ, &sa, nullptr));
+
+      test_helper::ScopedTempFD temp_file;
+      ASSERT_TRUE(temp_file.is_valid());
+
+      const rlimit rl = {.rlim_cur = 4, .rlim_max = 4};
+      SAFE_SYSCALL(setrlimit(RLIMIT_FSIZE, &rl));
+
+      // 3a. Requesting len = 8 (> RLIMIT_FSIZE) when the pipe only has 4 bytes must transfer 4
+      // bytes and not raise SIGXFSZ.
+      {
+        test_helper::ScopedPipe pipe(O_NONBLOCK);
+        ASSERT_EQ(write(pipe.WriteSide().get(), "AAAA", 4), 4);
+        loff_t off = 0;
+        sigxfsz_count = 0;
+        EXPECT_THAT(
+            splice(pipe.ReadSide().get(), nullptr, temp_file.fd(), &off, 8, SPLICE_F_NONBLOCK),
+            SyscallSucceedsWithValue(4));
+        EXPECT_EQ(off, 4);
+        EXPECT_EQ(sigxfsz_count, 0);
+      }
+
+      // 3b. Splicing from an empty non-blocking pipe or an EOF pipe when off >= RLIMIT_FSIZE must
+      // return EAGAIN or 0 without raising SIGXFSZ.
+      {
+        test_helper::ScopedPipe pipe(O_NONBLOCK);
+        loff_t off = 4;
+        sigxfsz_count = 0;
+        EXPECT_THAT(
+            splice(pipe.ReadSide().get(), nullptr, temp_file.fd(), &off, 4, SPLICE_F_NONBLOCK),
+            SyscallFailsWithErrno(EAGAIN));
+        EXPECT_EQ(sigxfsz_count, 0);
+
+        pipe.WriteSide().reset();
+        EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, temp_file.fd(), &off, 4, 0),
+                    SyscallSucceedsWithValue(0));
+        EXPECT_EQ(sigxfsz_count, 0);
+      }
+
+      // 3c. Splicing 8 bytes in the pipe at off = 0 with RLIMIT_FSIZE = 4 clamps the transfer to 4
+      // bytes, leaves the remaining 4 bytes in the pipe, and raises SIGXFSZ; splicing again at
+      // off = 4 fails with EFBIG, raises SIGXFSZ, and preserves the remaining 4 bytes in the pipe.
+      {
+        test_helper::ScopedPipe pipe(O_NONBLOCK);
+        ASSERT_EQ(write(pipe.WriteSide().get(), "AAAABBBB", 8), 8);
+        loff_t off = 0;
+        sigxfsz_count = 0;
+        EXPECT_THAT(
+            splice(pipe.ReadSide().get(), nullptr, temp_file.fd(), &off, 8, SPLICE_F_NONBLOCK),
+            SyscallSucceedsWithValue(4));
+        EXPECT_EQ(off, 4);
+        EXPECT_EQ(sigxfsz_count, 1);
+
+        sigxfsz_count = 0;
+        EXPECT_THAT(
+            splice(pipe.ReadSide().get(), nullptr, temp_file.fd(), &off, 4, SPLICE_F_NONBLOCK),
+            SyscallFailsWithErrno(EFBIG));
+        EXPECT_EQ(sigxfsz_count, 1);
+
+        char rem[4] = {};
+        ASSERT_EQ(read(pipe.ReadSide().get(), rem, sizeof(rem)), 4);
+        EXPECT_EQ(std::string(rem, 4), "BBBB");
+      }
+    });
+    ASSERT_TRUE(helper.WaitForChildren());
+  }
+}
+
 // Verify that when the only writer (a child process) exits, the pipe is immediately closed even if
 // the child is not yet reaped.
 TEST(PipeTest, ZombieWriter) {
@@ -413,16 +803,25 @@ TEST(PipeTest, PollHupWithoutPollinOnEmptyClosedPipe) {
 TEST(PipeTest, ZeroLengthIoAndSplicePrecedence) {
   int pipe_a[2];
   int pipe_b[2];
+  int blocking_pipe[2];
   SAFE_SYSCALL(pipe2(pipe_a, O_NONBLOCK));
   SAFE_SYSCALL(pipe2(pipe_b, O_NONBLOCK));
+  SAFE_SYSCALL(pipe2(blocking_pipe, 0));
   fbl::unique_fd a_rd(pipe_a[0]);
   fbl::unique_fd a_wr(pipe_a[1]);
   fbl::unique_fd b_rd(pipe_b[0]);
   fbl::unique_fd b_wr(pipe_b[1]);
+  fbl::unique_fd blk_rd(blocking_pipe[0]);
+  fbl::unique_fd blk_wr(blocking_pipe[1]);
 
-  // Zero-length read on an empty pipe returns 0 rather than EAGAIN.
+  // Zero-length read and readv on empty non-blocking and blocking pipes return 0 rather than
+  // EAGAIN or blocking.
   char buf[1];
+  iovec empty_iov = {.iov_base = buf, .iov_len = 0};
   EXPECT_THAT(read(a_rd.get(), buf, 0), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(readv(a_rd.get(), &empty_iov, 1), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(read(blk_rd.get(), buf, 0), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(readv(blk_rd.get(), &empty_iov, 1), SyscallSucceedsWithValue(0));
 
   // Passing a non-null invalid offset pointer for a pipe fd in splice fails with ESPIPE before
   // dereferencing the pointer (EFAULT).
@@ -433,9 +832,116 @@ TEST(PipeTest, ZeroLengthIoAndSplicePrecedence) {
   // Zero-length splice returns 0 before validating flags or file descriptors.
   EXPECT_THAT(splice(-1, nullptr, -1, nullptr, 0, ~0u), SyscallSucceedsWithValue(0));
 
-  // Zero-length write on a broken pipe returns 0 without raising SIGPIPE.
+  // Zero-length write and writev on broken non-blocking and blocking pipes return 0 without EPIPE
+  // or raising SIGPIPE.
   b_rd.reset();
+  blk_rd.reset();
   EXPECT_THAT(write(b_wr.get(), "", 0), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(writev(b_wr.get(), &empty_iov, 1), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(write(blk_wr.get(), "", 0), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(writev(blk_wr.get(), &empty_iov, 1), SyscallSucceedsWithValue(0));
 }
 
+TEST(PipeTest, SpliceNonblockSocketEndpoint) {
+  int sock_fds[2];
+  SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
+  fbl::unique_fd sock_rd(sock_fds[0]);
+  fbl::unique_fd sock_wr(sock_fds[1]);
+
+  test_helper::ScopedPipe pipe;
+
+  // SPLICE_F_NONBLOCK must make splice from an empty blocking socket return EAGAIN immediately
+  // without mutating the socket's O_NONBLOCK flag.
+  EXPECT_THAT(splice(sock_rd.get(), nullptr, pipe.WriteSide().get(), nullptr, 4, SPLICE_F_NONBLOCK),
+              SyscallFailsWithErrno(EAGAIN));
+  EXPECT_EQ(fcntl(sock_rd.get(), F_GETFL) & O_NONBLOCK, 0);
+
+  // O_NONBLOCK on the pipe write end must also make splice from an empty blocking socket return
+  // EAGAIN immediately even when SPLICE_F_NONBLOCK is not passed, without mutating the socket's
+  // O_NONBLOCK flag.
+  test_helper::ScopedPipe nb_pipe(O_NONBLOCK);
+  EXPECT_THAT(splice(sock_rd.get(), nullptr, nb_pipe.WriteSide().get(), nullptr, 4, 0),
+              SyscallFailsWithErrno(EAGAIN));
+  EXPECT_EQ(fcntl(sock_rd.get(), F_GETFL) & O_NONBLOCK, 0);
+}
+
+TEST(PipeTest, SpliceFromSocketReaderClosesMidFlight) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    signal(SIGPIPE, SIG_IGN);
+
+    int sock_fds[2];
+    SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
+    fbl::unique_fd sock_rd(sock_fds[0]);
+    fbl::unique_fd sock_wr(sock_fds[1]);
+
+    test_helper::ScopedPipe pipe;
+
+    const int page_size = getpagesize();
+    SAFE_SYSCALL(fcntl(pipe.WriteSide().get(), F_SETPIPE_SZ, page_size));
+    std::vector<char> fill(page_size, 'A');
+    ASSERT_EQ(write(pipe.WriteSide().get(), fill.data(), fill.size()), page_size);
+
+    const char payload[] = "data";
+    ASSERT_EQ(write(sock_wr.get(), payload, 4), 4);
+
+    std::thread closer([&pipe]() {
+      usleep(20000);
+      pipe.ReadSide().reset();
+    });
+
+    EXPECT_THAT(splice(sock_rd.get(), nullptr, pipe.WriteSide().get(), nullptr, 4, 0),
+                SyscallFailsWithErrno(EPIPE));
+    closer.join();
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PipeTest, TeeAndSplicePipeToPipeEdgeCases) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    signal(SIGPIPE, SIG_IGN);
+
+    test_helper::ScopedPipe pipe_a;
+    test_helper::ScopedPipe pipe_b(O_NONBLOCK);
+
+    // O_NONBLOCK on pipe_b causes tee on empty pipe_a to return EAGAIN immediately.
+    EXPECT_THAT(tee(pipe_a.ReadSide().get(), pipe_b.WriteSide().get(), 16, 0),
+                SyscallFailsWithErrno(EAGAIN));
+
+    // Close pipe_a writer (EOF on pipe_a).
+    pipe_a.WriteSide().reset();
+
+    // tee from an EOF pipe into a writable pipe returns 0 immediately.
+    EXPECT_EQ(tee(pipe_a.ReadSide().get(), pipe_b.WriteSide().get(), 16, 0), 0);
+
+    // Fill pipe_b completely; tee from an EOF pipe into a full non-blocking pipe returns EAGAIN.
+    const int page_size = getpagesize();
+    SAFE_SYSCALL(fcntl(pipe_b.WriteSide().get(), F_SETPIPE_SZ, page_size));
+    std::vector<char> fill(page_size, 'B');
+    ASSERT_EQ(write(pipe_b.WriteSide().get(), fill.data(), fill.size()), page_size);
+    EXPECT_THAT(tee(pipe_a.ReadSide().get(), pipe_b.WriteSide().get(), 16, 0),
+                SyscallFailsWithErrno(EAGAIN));
+
+    // Closing the destination reader causes tee to return EPIPE even when the source is at EOF.
+    pipe_b.ReadSide().reset();
+    EXPECT_THAT(tee(pipe_a.ReadSide().get(), pipe_b.WriteSide().get(), 16, 0),
+                SyscallFailsWithErrno(EPIPE));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(PipeTest, SpliceEofPipeToClosedSocket) {
+  test_helper::ScopedPipe pipe;
+  pipe.WriteSide().reset();
+
+  int sock_fds[2];
+  SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
+  close(sock_fds[0]);
+  fbl::unique_fd sock_wr(sock_fds[1]);
+
+  // Splicing from an empty pipe with no writers (EOF) returns 0 immediately without invoking
+  // write() on the closed destination socket.
+  EXPECT_EQ(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), nullptr, 16, 0), 0);
+}
 }  // namespace

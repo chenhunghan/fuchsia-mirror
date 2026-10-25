@@ -37,7 +37,6 @@ ffx_plugin("ffx_flash") {
     "//src/lib/gcs",
     "//src/lib/structured_ui",
     "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:async-trait",
     "//third_party/rust_crates:chrono",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
@@ -58,7 +57,7 @@ ffx_plugin("ffx_flash") {
     "//third_party/rust_crates:tempfile",
   ]
   args_test_deps = [
-    "//third_party/rust_crates:anyhow",
+    "//src/lib/fuchsia",
     "//third_party/rust_crates:tempfile",
   ]
 

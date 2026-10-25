@@ -20,6 +20,7 @@ Responsibilities are divided into the following classes:
 import argparse
 import dataclasses
 import datetime
+import enum
 import functools
 import getpass
 import json
@@ -32,7 +33,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, TextIO
 
 # Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
@@ -41,14 +42,40 @@ if str(_FUCHSIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_ROOT))
 
 from build.auth import gcloud
+from build.bazel.scripts import bazel_invocation as bazel_inv
+from build.profile import procfs
 from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
 from build.resultstore import rs_profile
-from build.scripts import properties, signal_utils
+from build.scripts import build_timeout, properties, pstree, signal_utils
 
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
 JSONObject = dict[str, JSONValue]
 JSONArray = list[JSONValue]
+
+
+class PreflightStatus(enum.Enum):
+    """Outcome of a PreflightAction."""
+
+    # Action succeeded; continue with remaining actions and the build.
+    OK = "ok"
+    # Action failed; run remaining actions, then abort before the build.
+    ERROR = "error"
+    # Action failed fatally; abort immediately without running remaining actions.
+    FATAL = "fatal"
+
+
+# A preflight action is a callback that runs under the build lock immediately
+# before a build command is spawned. This is used for build-tool-specific setup
+# or health checks (e.g. checking if a persistent Ninja server is wedged and
+# killing it before Ninja runs; Bazel does not need this).
+#
+# - Attached to a BuildCommandExecution via BuildInvocation.new_build_command_execution(),
+#   not stored globally on FuchsiaBuildConfig.
+# - Skipped entirely during dry runs (--dry-run).
+# - Intended for build commands (is_build=True); non-build commands like queries
+#   do not register them.
+PreflightAction = Callable[[], PreflightStatus]
 
 _SCRIPT = pathlib.Path(__file__)
 
@@ -396,18 +423,36 @@ def _collect_bazel_metadata(log_dir: pathlib.Path) -> JSONObject:
     }
 
 
-def _collect_timeout_metadata(log_dir: pathlib.Path) -> JSONObject:
-    """Discovers diagnostic snapshots generated during build timeout."""
-    timeout_dir = log_dir / TIMEOUT_LOGS_DIR
-    if not timeout_dir.exists():
-        return {}
-    snapshots = sorted(f.name for f in timeout_dir.iterdir() if f.is_file())
-    if not snapshots:
-        return {}
-    return {
-        "log_dir": str(timeout_dir.resolve()),
-        "snapshots": snapshots,
+# Persistent background daemons that run throughout the entire build session.
+# These ambient IPC servers are naturally alive and waiting on pipes/sockets,
+# so excluding them prevents crowding out the actual hung build actions
+# (e.g. compilers, linkers, code generators) in at-a-glance timeout summaries.
+# Note: Raw process snapshots (pstree_*.json) and full ASCII trees still capture
+# these processes in their entirety for post-mortem forensics.
+DEFAULT_TIMEOUT_EXCLUDED_PROCESSES: frozenset[str] = frozenset(
+    {
+        # RBE (Remote Build Execution) client daemon handling remote caching and execution.
+        "reproxy",
+        # ResultStore streaming proxy daemon recording build telemetry events.
+        "rsproxy",
+        # C++ header dependency scanning server for remote compile actions.
+        "scandeps_server",
     }
+)
+
+
+def _collect_timeout_metadata(
+    log_dir: pathlib.Path,
+    filter_fn: Callable[[pstree.ProcessNode], bool] | None = None,
+    max_leaves: int = build_timeout.DEFAULT_METADATA_MAX_LEAVES,
+) -> build_timeout.TimeoutMetadata | None:
+    """Discovers diagnostic snapshots generated during build timeout and extracts active leaf processes."""
+    timeout_dir = log_dir / TIMEOUT_LOGS_DIR
+    if filter_fn is None:
+        filter_fn = lambda n: n.comm not in DEFAULT_TIMEOUT_EXCLUDED_PROCESSES
+    return build_timeout.TimeoutMetadata.collect(
+        timeout_dir, filter_fn=filter_fn, max_leaves=max_leaves
+    )
 
 
 def exists(path: pathlib.Path) -> bool:
@@ -645,7 +690,10 @@ class FuchsiaBuildContext(object):
                 pass
 
         if not user:
-            if self.auth_type in ("loas", "oauth"):
+            if self.rbe_auth_type in (
+                "loas",
+                "oauth",
+            ) or self.resultstore_auth_type in ("loas", "oauth"):
                 raise BuildConfigurationError(
                     "USER environment variable is not set and could not be "
                     "inferred. This is required for RBE/ResultStore user authentication."
@@ -734,7 +782,11 @@ class FuchsiaBuildContext(object):
             The Path to the isolated credentials file, or None if isolation failed
             or was bypassed.
         """
-        if self.auth_type in ("machine", "none"):
+        # Skip credential isolation if neither service requires user-based credentials.
+        if self.rbe_auth_type in (
+            "machine",
+            "none",
+        ) and self.resultstore_auth_type in ("machine", "none"):
             return None
 
         isolate_script = self.gcloud_creds_script
@@ -743,7 +795,12 @@ class FuchsiaBuildContext(object):
                 f"Required in-tree credentials management script is missing or unreadable: {isolate_script}"
             )
 
-        quota_project = self.rbe_quota_project
+        # Use ResultStore's quota project if RBE does not require user credentials.
+        quota_project = (
+            self.rbe_quota_project
+            if self.rbe_auth_type not in ("machine", "none")
+            else self.resultstore_quota_project
+        )
         if not quota_project:
             return None
 
@@ -769,16 +826,16 @@ class FuchsiaBuildContext(object):
 
         return None
 
-    @property
+    @functools.cached_property
     def auth_env(self) -> dict[str, str]:
         """Returns a dictionary of authentication-related environment variables."""
         env: dict[str, str] = {}
         env["USER"] = self.authenticated_user
+        env["FX_BUILD_RBE_AUTH_TYPE"] = self.rbe_auth_type
+        env["FX_BUILD_RS_AUTH_TYPE"] = self.resultstore_auth_type
 
         if not self.needs_auth:
             return env
-
-        env["FX_BUILD_AUTH_TYPE"] = self.auth_type
 
         # Isolate Google Application Credentials to avoid global quota_project_id contamination.
         local_adc_path = self._isolate_gcloud_credentials()
@@ -788,7 +845,10 @@ class FuchsiaBuildContext(object):
             env["GOOGLE_APPLICATION_CREDENTIALS"] = self.env[
                 "GOOGLE_APPLICATION_CREDENTIALS"
             ]
-        elif self.auth_type not in ("machine", "none"):
+        elif self.rbe_auth_type not in (
+            "machine",
+            "none",
+        ) or self.resultstore_auth_type not in ("machine", "none"):
             try:
                 default_adc = pathlib.Path.home() / gcloud.ADC_SUBPATH
                 env["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_adc)
@@ -807,33 +867,32 @@ class FuchsiaBuildContext(object):
 
         return env
 
-    @property
+    @functools.cached_property
     def build_service_env(self) -> dict[str, str]:
         """Returns a dictionary of environment variables related to build-service proxying/overrides."""
         env: dict[str, str] = {}
 
         # Override the remote execution and resultstore proxy endpoints with
         # unix:// socket paths if explicit CLI sockets are passed.
-        # LINT.IfChange(bazel_socket_env_vars)
         if self.config.remote_proxy_socket:
             socket_str = str(self.config.remote_proxy_socket)
             # Override for reproxy, through build/rbe/fuchsia-reproxy-wrap.sh:
             env["RBE_service"] = f"unix://{socket_str}"
             # Override for rsproxy, through build/resultstore/fuchsia-rsproxy-wrap.sh:
             env["RS_cas_service"] = f"unix://{socket_str}"
-            # Consumed by build/bazel/scripts/generate_invocation_bazelrc.py to route Bazel remote traffic
-            env["FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"] = socket_str
 
         if self.config.resultstore_proxy_socket:
             socket_str = str(self.config.resultstore_proxy_socket)
             # Override for rsproxy, through build/resultstore/fuchsia-rsproxy-wrap.sh:
             env["RS_rs_service"] = f"unix://{socket_str}"
-            # Consumed by build/bazel/scripts/generate_invocation_bazelrc.py to route Bazel resultstore traffic
-            env["FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"] = socket_str
-        # LINT.ThenChange(
-        #   //build/bazel/scripts/generate_invocation_bazelrc.py:bazel_socket_env_vars,
-        #   //build/bazel_sdk/tests/scripts/run_tests.py:bazel_socket_env_vars
-        # )
+
+        # Consumed by Bazel invocation generators to route Bazel remote/resultstore traffic:
+        env.update(
+            bazel_inv.socket_env_vars(
+                rbe_socket=self.config.remote_proxy_socket,
+                resultstore_socket=self.config.resultstore_proxy_socket,
+            )
+        )
 
         # Export instance configurations from active profiles (or CLI overrides),
         # which directly drive/influence the reproxy and rsproxy daemons.
@@ -842,6 +901,96 @@ class FuchsiaBuildContext(object):
 
         if self.rbe_enabled:
             env.update(self.rbe_profile.to_env_dict())
+
+        return env
+
+    @functools.cached_property
+    def configured_env(self) -> dict[str, str]:
+        """Returns caller-provided and configuration-derived environment variables.
+
+        These variables combine workspace configuration, build service settings,
+        and forwarded caller environment variables, excluding single-use invocation
+        state generated by this script (such as FX_BUILD_UUID and FX_BUILD_LOGDIR).
+        """
+        # Setting TERM=dumb is a standard convention to turn off interactive features.
+        # See https://en.wikipedia.org/wiki/Computer_terminal#Dumb_terminals
+        # and https://developers.google.com/style/inclusive-documentation#ableist-language
+        # regarding non-inclusive language.
+        if self.config.status:
+            term = self.env.get("TERM", "dumb")
+            ninja_status = self.env.get("NINJA_STATUS", "[%f/%t][%p/%w](%r) ")
+        else:
+            term = "dumb"
+            ninja_status = "[%f/%t] "
+
+        env: dict[str, str] = {
+            "TERM": term,
+            "PATH": self.env.get("PATH", ""),
+            "NINJA_STATUS": ninja_status,
+            "NINJA_STATUS_MAX_COMMANDS": self.env.get(
+                "NINJA_STATUS_MAX_COMMANDS", "4"
+            ),
+            "NINJA_STATUS_REFRESH_MILLIS": self.env.get(
+                "NINJA_STATUS_REFRESH_MILLIS", "100"
+            ),
+            "NINJA_PERSISTENT_MODE": self.env.get("NINJA_PERSISTENT_MODE", "0"),
+            "PYTHONPATH": self.env.get("PYTHONPATH", str(self.source_dir)),
+            "PYTHONPYCACHEPREFIX": self.env.get(
+                "PYTHONPYCACHEPREFIX",
+                str(self.build_dir / "__pycache__"),
+            ),
+        }
+
+        if self.env.get("HOME"):
+            env["HOME"] = self.env["HOME"]
+
+        # Forwarded standard variables
+        forward_vars = [
+            "SSH_AUTH_SOCK",  # need to forward the authentication socket (used by gnubby) for bazel
+            "MAKEFLAGS",
+            "TMPDIR",  # was passed for Goma on macOS, but it might have other uses.
+            "CLICOLOR_FORCE",
+            "FUCHSIA_BAZEL_DISK_CACHE",
+            "FUCHSIA_BAZEL_DISK_CACHE_SIZE",
+            "FUCHSIA_BAZEL_JOB_COUNT",
+            "FUCHSIA_BAZEL_PRINT_COMMANDS",
+            "FUCHSIA_DEBUG_BAZEL_SANDBOX",
+            "NINJA_PERSISTENT_TIMEOUT_SECONDS",
+            "NINJA_PERSISTENT_LOG_FILE",
+            "FX_BUILD_RBE_STATS",
+            "FX_BUILD_QUIET",
+            "FX_REMOTE_BUILD_METRICS",  # Honor environment variable to disable RBE build metrics.
+            "BUILDBUCKET_ID",  # Propagated in infra environments to tag ResultStore/BES uploads
+            "BUILDBUCKET_BUILDER",
+            "SWARMING_TASK_ID",
+        ]
+        for var in forward_vars:
+            if var in self.env:
+                env[var] = self.env[var]
+
+        env.update(self.auth_env)
+
+        resultstore = self.config.resultstore
+        # LINT.IfChange(resultstore_ninja_env_vars)
+        env["FX_INTERNAL_RESULTSTORE_NINJA"] = (
+            "1" if resultstore in ("all", "ninja") else "0"
+        )
+        # LINT.ThenChange(//build/resultstore/fuchsia-rsproxy-wrap.sh:resultstore_ninja_env_vars)
+
+        # FX_INTERNAL_RESULTSTORE_BAZEL convention: "0" indicates disabled
+        # to downstream wrapper.bazel.sh and devshell test assertions.
+        env[bazel_inv.ENV_RESULTSTORE_BAZEL] = (
+            bazel_inv.resultstore_bazel_config(
+                resultstore_mode=resultstore,
+                resultstore_auth_type=self.resultstore_auth_type,
+                in_infra="BUILDBUCKET_ID" in self.env,
+            )
+            or "0"
+        )
+
+        env[casfs.ENV_CASFS_VIRTUALIZE] = "1" if self.config.rbe_casfs else "0"
+
+        env.update(self.build_service_env)
 
         return env
 
@@ -916,6 +1065,11 @@ class FuchsiaBuildContext(object):
         """Returns the path to the fint_build.py script."""
         return self.source_dir / FINT_BUILD_PY_RELATIVE_PATH
 
+    @property
+    def fint_build_cmd_prefix(self) -> list[str]:
+        """Returns the common command prefix to invoke fint_build.py under the active interpreter."""
+        return [str(PYTHON_BIN), "-S", "-u", str(self.fint_build_py)]
+
     def _fint_wrapper_cmd(
         self,
         static_path: pathlib.Path | None = None,
@@ -937,10 +1091,7 @@ class FuchsiaBuildContext(object):
             ninja_error_logging_output: Path where Ninja should write its error logs (ninja_errors.json).
             ninja_action_metrics_output: Path where Ninja should write its action metrics (ninja_action_metrics.json).
         """
-        yield str(PYTHON_BIN)
-        yield "-S"
-        yield "-u"
-        yield str(self.fint_build_py)
+        yield from self.fint_build_cmd_prefix
 
         if static_path:
             yield "--static"
@@ -1121,14 +1272,14 @@ class FuchsiaBuildContext(object):
                 "Make sure you have run 'fx set'."
             )
 
-    @property
+    @functools.cached_property
     def rbe_enabled(self) -> bool:
         if self.config.rbe is not None:
             return self.config.rbe
 
         return self._rbe_settings.needs_reproxy
 
-    @property
+    @functools.cached_property
     def needs_auth(self) -> bool:
         if (
             self.config.resultstore != "none"
@@ -1178,8 +1329,8 @@ class FuchsiaBuildContext(object):
             )
 
     @functools.cached_property
-    def auth_type(self) -> str:
-        """Automatically detect the authentication type (loas, oauth, machine, or none)."""
+    def _detected_auth_type(self) -> str:
+        """Automatically detect the host authentication type (loas, oauth, machine, or none)."""
         mode = self.config.auth_mode
         if mode == "none" or not self.needs_auth:
             return "none"
@@ -1190,6 +1341,29 @@ class FuchsiaBuildContext(object):
         # Under 'user' or 'auto' mode: run our auth selection script
         return self._run_select_auth_script()
 
+    @functools.cached_property
+    def rbe_auth_type(self) -> str:
+        """Determines the authentication mechanism for RBE."""
+        if self.config.auth_mode == "none":
+            return "none"
+        if not self.rbe_enabled or self.rbe_profile.auth_type == "none":
+            return "none"
+        if not self._rbe_settings.needs_auth:
+            return "none"
+        return self._detected_auth_type
+
+    @functools.cached_property
+    def resultstore_auth_type(self) -> str:
+        """Determines the authentication mechanism for ResultStore."""
+        if self.config.auth_mode == "none":
+            return "none"
+        if (
+            self.config.resultstore == "none"
+            or self.resultstore_profile.auth_type == "none"
+        ):
+            return "none"
+        return self._detected_auth_type
+
 
 class BuildInvocation(object):
     """BuildInvocation represents a single build run.
@@ -1198,11 +1372,15 @@ class BuildInvocation(object):
     for generating a unique ID, and creating a single-use log directory.
     """
 
-    def __init__(self, context: FuchsiaBuildContext) -> None:
+    def __init__(
+        self, context: FuchsiaBuildContext, create_log_dir: bool = True
+    ) -> None:
         self.context = context
-        # Accessing log_dir triggers the cached_property evaluation,
-        # which creates the directory and writes the invocation_id.
-        _ = self.log_dir
+        self._create_log_dir = create_log_dir
+        if self._create_log_dir:
+            # Accessing log_dir triggers the cached_property evaluation,
+            # which creates the directory and writes the invocation_id.
+            _ = self.log_dir
 
     def write_metadata_json(self, output_path: pathlib.Path) -> None:
         """Serializes build log paths and metadata to a structured JSON file.
@@ -1265,7 +1443,7 @@ class BuildInvocation(object):
 
         timeout_metadata = _collect_timeout_metadata(log_dir)
         if timeout_metadata:
-            metadata["timeout"] = timeout_metadata
+            metadata["timeout"] = timeout_metadata.to_dict()
 
         try:
             mkdir(output_path.parent)
@@ -1275,13 +1453,56 @@ class BuildInvocation(object):
                 f"Failed to serialize or write metadata JSON: {e}",
                 file=sys.stderr,
             )
+            return
         except Exception as e:
             msg(f"Unexpected error writing metadata JSON: {e}", file=sys.stderr)
+            return
+
+        if timeout_metadata and timeout_metadata.active_processes:
+            self._run_fint_ingest_timeout(output_path)
+
+    def _run_fint_ingest_timeout(self, metadata_path: pathlib.Path) -> None:
+        """Invokes fint_build.py to ingest timeout diagnostics into build_artifacts.json."""
+        context_path = self.context.config.fint_context_path
+        if not context_path or not self.context.fint_build_py.exists():
+            return
+        cmd = self.context.fint_build_cmd_prefix + [
+            "--context",
+            str(context_path),
+            "--ingest-timeout-metadata",
+            str(metadata_path),
+        ]
+        if self.context.config.verbose:
+            cmd.append("--verbose")
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15.0,
+            )
+        except subprocess.TimeoutExpired as e:
+            msg(
+                f"Timed out after {e.timeout}s ingesting timeout metadata into fint build artifacts",
+                file=sys.stderr,
+            )
+        except subprocess.CalledProcessError as e:
+            msg(
+                f"Failed to ingest timeout metadata into fint build artifacts: {e.stderr.strip()}",
+                file=sys.stderr,
+            )
+        except OSError as e:
+            msg(
+                f"Failed to execute fint timeout ingestion: {e}",
+                file=sys.stderr,
+            )
 
     @functools.cached_property
     def build_uuid(self) -> str:
-        """Generates a unique ID for this build."""
-        return str(uuid.uuid4())
+        """Generates a unique ID for this build or inherits an existing outer UUID."""
+        return self.context.env.get("FX_BUILD_UUID") or str(uuid.uuid4())
 
     @functools.cached_property
     def timestamp(self) -> str:
@@ -1298,21 +1519,27 @@ class BuildInvocation(object):
         """
         if self.context.config.log_dir:
             log_dir = self.context.config.log_dir.resolve()
+        elif self.context.env.get("FX_BUILD_LOGDIR"):
+            log_dir = pathlib.Path(
+                self.context.env["FX_BUILD_LOGDIR"]
+            ).resolve()
         else:
             logs_root = self.context.out_dir / "_build_logs"
             build_dir_name = self.context.build_dir.name
             log_dir_base = logs_root / build_dir_name
-            mkdir(log_dir_base)
+            if self._create_log_dir:
+                mkdir(log_dir_base)
 
             # Use consistent UUID and timestamp
             log_dir = (
                 log_dir_base / f"build.{self.timestamp}.{self.build_uuid[:8]}"
             )
 
-        mkdir(log_dir)
+        if self._create_log_dir:
+            mkdir(log_dir)
 
-        # Record the invocation Id
-        write_text(log_dir / "invocation_id", self.build_uuid + "\n")
+            # Record the invocation Id
+            write_text(log_dir / "invocation_id", self.build_uuid + "\n")
         return log_dir
 
     # LINT.ThenChange(//tools/devshell/lib/vars.sh:build_log_dir_structure)
@@ -1328,8 +1555,26 @@ class BuildInvocation(object):
         from falling back successfully).
         """
         path = self.log_dir / ".home"
-        mkdir(path)
+        if self._create_log_dir:
+            mkdir(path)
         return path
+
+    @functools.cached_property
+    def ephemeral_env(self) -> dict[str, str]:
+        """Returns single-use environment variables specific to this invocation instance."""
+        env = {
+            "FX_BUILD_UUID": self.build_uuid,
+            "FX_BUILD_LOGDIR": str(self.log_dir),
+        }
+        if not self.context.env.get("HOME"):
+            env["HOME"] = str(self.temp_home)
+        return env
+
+    def get_build_env(self) -> dict[str, str]:
+        """Curate a build environment for this invocation."""
+        build_env = dict(self.context.configured_env)
+        build_env.update(self.ephemeral_env)
+        return build_env
 
     @property
     def ninja_errors_path(self) -> pathlib.Path:
@@ -1367,8 +1612,13 @@ class BuildInvocation(object):
 
         # Auth type handling
         yield "--auth-type"
-        yield context.auth_type
-        if context.auth_type == "machine":
+        yield context.rbe_auth_type
+        # Only pass --use-machine-credentials if ResultStore is disabled or also using machine auth,
+        # avoiding overriding ResultStore's auth_type: none in fuchsia-rsproxy-wrap.sh.
+        if context.rbe_auth_type == "machine" and (
+            context.config.resultstore == "none"
+            or context.resultstore_auth_type == "machine"
+        ):
             yield "--use-machine-credentials"
 
         # Log directory setup
@@ -1413,114 +1663,28 @@ class BuildInvocation(object):
             yield "--verbose"
         if context.config.tui:
             yield "--no-separate-pgrp"
+        for proc in sorted(DEFAULT_TIMEOUT_EXCLUDED_PROCESSES):
+            yield "--exclude-process-from-summary"
+            yield proc
 
         yield "--"
-
-    def get_build_env(self) -> dict[str, str]:
-        """Curate a build environment for this invocation."""
-        build_env = {
-            "FX_BUILD_UUID": self.build_uuid,
-            "FX_BUILD_LOGDIR": str(self.log_dir),
-            "TERM": self.context.env.get(
-                "TERM", "dumb"
-            ),  # passed for the pretty ninja UI
-            "PATH": self.context.env.get(
-                "PATH", ""
-            ),  # passed through. The ninja actions should invoke tools without relying on PATH.
-            # Ensure HOME is defined to support user-less/home-less environments (b/559830870)
-            "HOME": self.context.env.get("HOME") or str(self.temp_home),
-            # By default, also show the number of actively running actions.
-            "NINJA_STATUS": self.context.env.get(
-                "NINJA_STATUS", "[%f/%t][%p/%w](%r) "
-            ),
-            # By default, print the 4 oldest commands that are still running.
-            "NINJA_STATUS_MAX_COMMANDS": self.context.env.get(
-                "NINJA_STATUS_MAX_COMMANDS", "4"
-            ),
-            "NINJA_STATUS_REFRESH_MILLIS": self.context.env.get(
-                "NINJA_STATUS_REFRESH_MILLIS", "100"
-            ),
-            "NINJA_PERSISTENT_MODE": self.context.env.get(
-                "NINJA_PERSISTENT_MODE", "0"
-            ),
-            "PYTHONPYCACHEPREFIX": self.context.env.get(
-                "PYTHONPYCACHEPREFIX",
-                str(self.context.build_dir / "__pycache__"),
-            ),
-        }
-
-        if not self.context.config.status:
-            # Setting TERM=dumb is a standard convention to turn off interactive features.
-            # See https://en.wikipedia.org/wiki/Computer_terminal#Dumb_terminals
-            # and https://developers.google.com/style/inclusive-documentation#ableist-language
-            # regarding non-inclusive language.
-            build_env["TERM"] = "dumb"
-            build_env["NINJA_STATUS"] = "[%f/%t] "
-
-        # Forwarded standard variables
-        forward_vars = [
-            "SSH_AUTH_SOCK",  # need to forward the authentication socket (used by gnubby) for bazel
-            "MAKEFLAGS",
-            "TMPDIR",  # was passed for Goma on macOS, but it might have other uses.
-            "CLICOLOR_FORCE",
-            "FUCHSIA_BAZEL_DISK_CACHE",
-            "FUCHSIA_BAZEL_DISK_CACHE_SIZE",
-            "FUCHSIA_BAZEL_JOB_COUNT",
-            "FUCHSIA_BAZEL_PRINT_COMMANDS",
-            "FUCHSIA_DEBUG_BAZEL_SANDBOX",
-            "NINJA_PERSISTENT_TIMEOUT_SECONDS",
-            "NINJA_PERSISTENT_LOG_FILE",
-            "FX_BUILD_RBE_STATS",
-            "FX_BUILD_QUIET",
-            "FX_REMOTE_BUILD_METRICS",  # Honor environment variable to disable RBE build metrics.
-            "BUILDBUCKET_ID",  # Propagated in infra environments to tag ResultStore/BES uploads
-            "BUILDBUCKET_BUILDER",
-            "SWARMING_TASK_ID",
-        ]
-        for var in forward_vars:
-            if var in self.context.env:
-                build_env[var] = self.context.env[var]
-
-        build_env.update(self.context.auth_env)
-
-        # Inject ResultStore induction signals to allow passive wrappers to dynamically
-        # configure themselves at runtime.
-        resultstore = self.context.config.resultstore
-        # LINT.IfChange(resultstore_ninja_env_vars)
-        build_env["FX_INTERNAL_RESULTSTORE_NINJA"] = (
-            "1" if resultstore in ("all", "ninja") else "0"
-        )
-        # LINT.ThenChange(//build/resultstore/fuchsia-rsproxy-wrap.sh:resultstore_ninja_env_vars)
-
-        # LINT.IfChange(resultstore_bazel_env_vars)
-        resultstore_bazel = "0"
-        if resultstore in ("all", "bazel"):
-            # Decide between "resultstore" (developer) and "resultstore_infra" (infra).
-            if (
-                self.context.auth_type == "loas"
-                and "BUILDBUCKET_ID" not in self.context.env
-            ):
-                resultstore_bazel = "resultstore"
-            else:
-                resultstore_bazel = "resultstore_infra"
-        build_env["FX_INTERNAL_RESULTSTORE_BAZEL"] = resultstore_bazel
-        # LINT.ThenChange(//build/bazel/wrapper.bazel.sh:resultstore_bazel_env_vars)
-
-        build_env[casfs.ENV_CASFS_VIRTUALIZE] = (
-            "1" if self.context.config.rbe_casfs else "0"
-        )
-
-        build_env.update(self.context.build_service_env)
-
-        return build_env
 
     def new_build_command_execution(
         self,
         command_type: str,
         build_command: list[str],
         is_build: bool = True,
+        preflight_actions: Sequence[PreflightAction] = (),
     ) -> "BuildCommandExecution":
-        """Creates a self-contained BuildCommandExecution."""
+        """Creates a self-contained BuildCommandExecution.
+
+        Args:
+          command_type: one of 'ninja', 'bazel' or 'other'.
+          build_command: the build tool command tokens.
+          is_build: whether this is a real build (vs. a query/tool command).
+          preflight_actions: optional build-tool-specific callables to run under
+            the build lock, just before the build command is spawned.
+        """
         build_env = self.get_build_env()
         context = self.context
 
@@ -1533,6 +1697,7 @@ class BuildInvocation(object):
                 env=build_env,
                 invocation=self,
                 is_build=is_build,
+                preflight_actions=preflight_actions,
             )
 
         top_cmd = list(self.top_build_command_prefix())
@@ -1584,6 +1749,7 @@ class BuildInvocation(object):
             env=build_env,
             invocation=self,
             is_build=is_build,
+            preflight_actions=preflight_actions,
         )
 
     def _inject_ninja_args(
@@ -1635,6 +1801,9 @@ class BuildCommandExecution(object):
       full_command: shell command tokens
       env: environment variables
       invocation: the build invocation this execution belongs to
+      is_build: whether this is a real build (vs. a query/tool command)
+      preflight_actions: tool-specific callables run under the build lock
+        just before the command is spawned (skipped in dry-run mode)
       cleanup_files: list of files to remove after execution
     """
 
@@ -1642,6 +1811,7 @@ class BuildCommandExecution(object):
     env: dict[str, str]
     invocation: BuildInvocation
     is_build: bool = True
+    preflight_actions: Sequence[PreflightAction] = ()
     cleanup_files: list[pathlib.Path] = dataclasses.field(default_factory=list)
 
     def _run_without_locking(self) -> BuildResult:
@@ -1659,7 +1829,8 @@ class BuildCommandExecution(object):
             auth_summary = (
                 f"\n[Auth Configuration Resolved]:\n"
                 f"  Config Auth Mode: {config.auth_mode}\n"
-                f"  Resolved Auth:    {self.invocation.context.auth_type}\n"
+                f"  RBE Auth:         {self.invocation.context.rbe_auth_type}\n"
+                f"  ResultStore Auth: {self.invocation.context.resultstore_auth_type}\n"
                 f"  Auth User:       {self.invocation.context.authenticated_user}\n"
                 f"  Metadata Host:   {self.env.get('GCE_METADATA_HOST', 'NOT_SET')}\n"
                 f"  Java Metadata:   {self.env.get('G_CLOUD_METADATA_HOST', 'NOT_SET')}\n"
@@ -1671,6 +1842,19 @@ class BuildCommandExecution(object):
         # but we have forwarded --dry-run to the top_build_wrapper, which
         # will skip the actual build execution. This allows for high-fidelity
         # verification of the entire wrapper orchestration stack.
+
+        # Run preflight actions here so they execute under BuildLock (acquired in
+        # run()) and cannot race a concurrent build of the same directory.
+        if not config.dry_run:
+            preflight_failed = False
+            for action in self.preflight_actions:
+                status = action()
+                if status == PreflightStatus.FATAL:
+                    return BuildResult(return_code=1)
+                if status == PreflightStatus.ERROR:
+                    preflight_failed = True
+            if preflight_failed:
+                return BuildResult(return_code=1)
 
         # If the TUI is enabled, we MUST NOT use a separate process group,
         # otherwise the TUI will be suspended when it tries to interact with
@@ -1744,6 +1928,74 @@ def find_fuchsia_dir(from_path: pathlib.Path | None = None) -> pathlib.Path:
             raise ValueError(
                 f"Could not find Fuchsia checkout directory from: {start_path}"
             )
+
+
+# Timeout for probing whether the Ninja persistent server is responding.
+_NINJA_SERVER_PROBE_TIMEOUT_S = 5
+
+
+def _kill_ninja_persistent_server(
+    build_dir: pathlib.Path,
+    proc_root: pathlib.Path = procfs.DEFAULT_PROC_ROOT,
+) -> None:
+    """Kills any Ninja persistent server for build_dir by scanning /proc.
+
+    Identifies the server by process name ('ninja'), working directory
+    (build_dir), and NINJA_PERSISTENT_MODE=server in its environment.
+    Linux-only; a no-op elsewhere.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        resolved_build_dir = build_dir.resolve()
+    except OSError:
+        return
+
+    for pid in procfs.iter_pids(proc_root):
+        # Check cheap procfs entries (comm, cwd) before reading environ.
+        if procfs.read_process_comm(pid, proc_root) != "ninja":
+            continue
+        if procfs.read_process_cwd(pid, proc_root) != resolved_build_dir:
+            continue
+        environ = procfs.read_process_environ(pid, proc_root)
+        if not environ or environ.get("NINJA_PERSISTENT_MODE") != "server":
+            continue
+        msg(f"Killing Ninja persistent server (PID {pid})")
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            # The process exited, or belongs to another user; skip it.
+            continue
+
+
+def _kill_ninja_persistent_server_if_stuck(
+    build_dir: pathlib.Path,
+    env: dict[str, str],
+    ninja_bin: str,
+    proc_root: pathlib.Path = procfs.DEFAULT_PROC_ROOT,
+) -> PreflightStatus:
+    """Kills the Ninja persistent server for build_dir if it is unresponsive.
+
+    Probes the server with `ninja -t server pid` (`status` and `stop` do not
+    wait for an IPC reply from the server). If the probe times out, the server
+    is considered stuck and terminated via /proc. Other outcomes (a PID, -1
+    when no server is running, or an error) leave the server alone.
+    """
+    cmd = [ninja_bin, "-C", str(build_dir), "-t", "server", "pid"]
+    try:
+        subprocess.run(
+            cmd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_NINJA_SERVER_PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        msg("Ninja persistent server is not responding, killing it.")
+        _kill_ninja_persistent_server(build_dir, proc_root=proc_root)
+    except OSError as e:
+        msg(f"Failed to probe Ninja persistent server: {e}")
+    return PreflightStatus.OK
 
 
 def new_ninja_build_command_execution(
@@ -1828,9 +2080,28 @@ def new_ninja_build_command_execution(
     )
     is_build = is_ninja_build_command(build_cmd)
     invocation = BuildInvocation(context)
+
+    # Ensure any wedged persistent server from an interrupted build is
+    # cleaned up before starting a new build.
+    preflight_actions: list[PreflightAction] = []
+    if is_build and is_ninja_persistent_mode_enabled(context.env):
+        preflight_actions.append(
+            lambda: _kill_ninja_persistent_server_if_stuck(
+                context.build_dir, context.env, ninja_bin
+            )
+        )
+
     return invocation.new_build_command_execution(
-        "ninja", build_cmd, is_build=is_build
+        "ninja",
+        build_cmd,
+        is_build=is_build,
+        preflight_actions=preflight_actions,
     )
+
+
+def is_ninja_persistent_mode_enabled(env: Mapping[str, str]) -> bool:
+    """Returns True if NINJA_PERSISTENT_MODE is enabled for client builds."""
+    return env.get("NINJA_PERSISTENT_MODE") in ("1", "on", "client")
 
 
 def is_ninja_build_command(ninja_args: list[str]) -> bool:
@@ -1915,6 +2186,102 @@ def new_other_build_command_execution(
     return invocation.new_build_command_execution(
         "other", other_args, is_build=is_build
     )
+
+
+def format_env(env: Mapping[str, str], fmt: str = "export") -> str:
+    """Formats an environment dictionary for output."""
+    if fmt == "json":
+        return json.dumps(dict(env), indent=2) + "\n"
+    elif fmt == "null":
+        return "\0".join(f"{k}={v}" for k, v in sorted(env.items())) + "\0"
+    elif fmt == "raw":
+        return "\n".join(f"{k}={v}" for k, v in sorted(env.items())) + "\n"
+    elif fmt == "export":
+        return (
+            "\n".join(
+                f"export {k}={shlex.quote(v)}" for k, v in sorted(env.items())
+            )
+            + "\n"
+        )
+    raise ValueError(f"Unknown format: {fmt}")
+
+
+class EnvInspectionExecution:
+    """Handles inspection mode for the 'env' subcommand."""
+
+    def __init__(
+        self,
+        formatted_output: str,
+        invocation: BuildInvocation | None = None,
+    ) -> None:
+        self.formatted_output = formatted_output
+        self.invocation = invocation
+
+    def run(self) -> BuildResult:
+        sys.stdout.write(self.formatted_output)
+        sys.stdout.flush()
+        return BuildResult(return_code=0)
+
+
+def new_env_command_execution(
+    context: FuchsiaBuildContext,
+    env_args: list[str],
+) -> BuildCommandExecution | EnvInspectionExecution:
+    """Construct an execution for the 'env' subcommand.
+
+    If a command is provided, executes that command within the curated build environment
+    (with is_build=False, bypassing BuildLock and daemon wrappers).
+    Otherwise, prints the configured build environment to stdout.
+    """
+    parser = argparse.ArgumentParser(
+        prog="main_build.py env",
+        description=(
+            "Inspect or execute commands within the curated build environment.\n\n"
+            "By default, inspection mode prints only configured environment variables\n"
+            "without disk litter. Use --all to include ephemeral invocation state."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        choices=("export", "raw", "json", "null"),
+        default="export",
+        help="Output format when printing the environment (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="include_all",
+        help="Include ephemeral invocation variables (FX_BUILD_UUID, FX_BUILD_LOGDIR) in inspection output.",
+    )
+    parser.add_argument(
+        "cmd",
+        nargs=argparse.REMAINDER,
+        help="Optional command to execute within the build environment.",
+    )
+
+    args = parser.parse_args(env_args)
+    cmd = list(args.cmd)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+
+    # For both inspection and execution mode, avoid creating out/_build_logs/<build_dir>/build.*
+    # directories on disk. This prevents read-only helper tools (e.g. `env -- ninja -t compdb`)
+    # from creating empty log directories that shadow the last real build in `fx build-logs`.
+    invocation = BuildInvocation(context, create_log_dir=False)
+    if not cmd:
+        # Inspection mode: emit configured environment variables without disk litter.
+        # Pass create_log_dir=False so that metadata reporting (--output-metadata-json)
+        # uses this invocation without creating a log directory on disk.
+        env_to_format = (
+            invocation.get_build_env()
+            if args.include_all
+            else context.configured_env
+        )
+        formatted = format_env(env_to_format, fmt=args.format)
+        return EnvInspectionExecution(formatted, invocation=invocation)
+
+    # Execution mode: run the command within the complete build environment
+    return invocation.new_build_command_execution("other", cmd, is_build=False)
 
 
 def _main_arg_parser() -> argparse.ArgumentParser:
@@ -2076,6 +2443,12 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         help="Execute an arbitrary command.",
         description="Expects arbitrary arguments to be passed after 'other'.",
     ).set_defaults(func=new_other_build_command_execution)
+    subparsers.add_parser(
+        "env",
+        add_help=False,
+        help="Inspect or execute commands within the curated build environment.",
+        description="Inspect the build environment or run arbitrary commands within it.",
+    ).set_defaults(func=new_env_command_execution)
     return parser
 
 

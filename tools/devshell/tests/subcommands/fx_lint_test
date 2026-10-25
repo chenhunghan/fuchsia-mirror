@@ -62,7 +62,9 @@ INNER_EOF
 }
 
 TEST_fx-lint-no-args() {
-  BT_EXPECT "${fx}" lint --dry-run 2> stderr
+  local out="${BT_TEMP_DIR}/_fx_lint_output"
+  BT_EXPECT "${fx}" lint --dry-run > "${out}" 2> stderr
+  BT_EXPECT grep -q -E '"shac check .*--quiet"' "${out}"
 }
 
 TEST_fx-lint-commands() {
@@ -87,6 +89,12 @@ TEST_fx-lint-fix-flag() {
   printf -v csfiles ",%s" "${files[@]}"
   BT_EXPECT "${fx}" lint --fix --verbose --files="${csfiles:1}" > "${out}"
   BT_EXPECT grep -q -E '"shac fix .*rust.rs"' "${out}"
+}
+
+TEST_fx-lint-only-flag() {
+  local out="${BT_TEMP_DIR}/_fx_lint_output"
+  BT_EXPECT "${fx}" lint --only=commit_msg --verbose > "${out}"
+  BT_EXPECT grep -q -E '"shac check .*--only=commit_msg"' "${out}"
 }
 
 TEST_fx-lint-nonexistent-file() {

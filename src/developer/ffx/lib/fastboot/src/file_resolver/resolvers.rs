@@ -6,7 +6,6 @@ use crate::error::FfxFastbootError;
 use crate::file_resolver::FileResolver;
 type Result<T> = std::result::Result<T, FfxFastbootError>;
 
-use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use std::fs::{File, create_dir_all};
 use std::io::copy;
@@ -37,7 +36,6 @@ impl EmptyResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for EmptyResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         if PathBuf::from(file).is_absolute() {
@@ -79,7 +77,6 @@ impl Resolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for Resolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         let path = Path::new(file);
@@ -114,7 +111,6 @@ impl ZipArchiveResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for ZipArchiveResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         let mut file = self
@@ -124,7 +120,7 @@ impl FileResolver for ZipArchiveResolver {
 
         let mut outpath = PathBuf::new();
         outpath.push(self.temp_dir.path());
-        outpath.push(file.mangled_name());
+        outpath.push(file.mangled_name().map_err(FfxFastbootError::ZipArchiveRead)?);
         if let Some(p) = outpath.parent() {
             if !p.exists() {
                 create_dir_all(&p)?;
@@ -174,7 +170,6 @@ impl TarResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for TarResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         let path = Path::new(file);

@@ -28,7 +28,6 @@ rustc_proc_macro(
     ],
 )
 
-# @bazel2gn:skip
 rustc_test(
     name = "net-declare-macros_test",
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
@@ -37,7 +36,6 @@ rustc_test(
     deps = ["//third_party/rust_crates/vendor:assert_matches"],
 )
 
-# @bazel2gn:skip
 wrap_host_rust_test(
     name = "net-declare-macros_host_test",
     binary_name = "net-declare-macros_test",
@@ -53,7 +51,6 @@ rustc_library(
     deps = ["//sdk/fidl/fuchsia.net:fuchsia.net_rust_common"],
 )
 
-# @bazel2gn:skip
 rustc_test(
     name = "net-declare_test",
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
@@ -61,7 +58,6 @@ rustc_test(
     deps = ["//src/connectivity/lib/net-types"],
 )
 
-# @bazel2gn:skip
 wrap_host_rust_test(
     name = "net-declare_host_test",
     binary_name = "net-declare_test",

@@ -10,6 +10,7 @@ use fake_bti::{FakeBti, FakeBtiPinnedVmos};
 use fdf_component::ServiceOffer;
 use fdf_component::testing::harness::TestHarness;
 use fdf_fidl::{DriverChannel, FidlExecutor};
+use fidl_fuchsia_power_system as fpower;
 use fidl_next_fuchsia_hardware_cqhci::{self as cqhci, CqhciHostInfo, EmmcPartitionId};
 use fidl_next_fuchsia_hardware_inlineencryption as finlineencryption;
 use fidl_next_fuchsia_hardware_rpmb as rpmb;
@@ -50,8 +51,17 @@ impl FakeCqhci {
     ) -> (Self, TestHarness<CqhciDriver>) {
         let (non_cq_interrupt_sink, non_cq_interrupt_receiver) = mpsc::unbounded();
         let (rpmb_request_sender, rpmb_request_receiver) = mpsc::unbounded();
+        let (execution_state_dependency_sender, execution_state_dependency_receiver) =
+            mpsc::unbounded();
         let scope = fasync::Scope::new_with_name("test");
         let mut service_fs = ServiceFs::new();
+        let cpu_element_manager_scope = scope.to_handle();
+        service_fs.dir("svc").add_service_connector(move |server_end| {
+            cpu_element_manager_scope.spawn(serve_cpu_element_manager(
+                server_end,
+                execution_state_dependency_sender.clone(),
+            ));
+        });
         let config =
             Config { suspend_enabled: true }.to_vmo().expect("failed to create config vmo");
         let mut harness = TestHarness::<CqhciDriver>::new().set_config(config);
@@ -76,6 +86,7 @@ impl FakeCqhci {
             hardware_irq: host.task_handler.irq.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
             non_cq_interrupt_receiver,
             rpmb_request_receiver,
+            execution_state_dependency_receiver,
         };
 
         let offers = [ServiceOffer::<cqhci::Service>::new_next()
@@ -111,6 +122,10 @@ impl FakeCqhci {
         self.host.task_handler.fail_next_crypto_gce(count);
     }
 
+    pub fn inject_device_exception_event_next(&self, count: u32) {
+        self.host.task_handler.inject_device_exception_event_next(count);
+    }
+
     pub fn invalidate_crypto_slot(&self, slot: u8) {
         self.host.task_handler.state.lock().valid_crypto_slots.remove(&slot);
     }
@@ -123,6 +138,11 @@ impl FakeCqhci {
     /// Returns the number of completed tasks.
     pub fn completed_tasks(&self) -> u32 {
         self.host.task_handler.completed_tasks.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of times CLEAR_ALL_TASKS was issued.
+    pub fn cleared_tasks_count(&self) -> u32 {
+        self.host.task_handler.state.lock().cleared_tasks_count
     }
 }
 
@@ -382,6 +402,34 @@ pub struct TestHandles {
     pub hardware_irq: zx::VirtualInterrupt,
     pub non_cq_interrupt_receiver: mpsc::UnboundedReceiver<Arc<zx::VirtualInterrupt>>,
     pub rpmb_request_receiver: mpsc::UnboundedReceiver<futures::channel::oneshot::Sender<()>>,
+    /// Receives every `fuchsia.power.system/CpuElementManager.AddExecutionStateDependency`
+    /// request the driver makes.
+    pub execution_state_dependency_receiver:
+        mpsc::UnboundedReceiver<fpower::CpuElementManagerAddExecutionStateDependencyRequest>,
+}
+
+/// Serves a fake `fuchsia.power.system/CpuElementManager` that accepts every dependency and
+/// forwards the request to `sender`.
+fn serve_cpu_element_manager(
+    server_end: fidl::endpoints::ServerEnd<fpower::CpuElementManagerMarker>,
+    sender: mpsc::UnboundedSender<fpower::CpuElementManagerAddExecutionStateDependencyRequest>,
+) -> BoxFuture<'static, ()> {
+    async move {
+        let mut stream = server_end.into_stream();
+        while let Some(Ok(request)) = stream.next().await {
+            match request {
+                fpower::CpuElementManagerRequest::AddExecutionStateDependency {
+                    payload,
+                    responder,
+                } => {
+                    let _ = sender.unbounded_send(payload);
+                    responder.send(Ok(())).ok();
+                }
+                _ => panic!("unexpected CpuElementManager request"),
+            }
+        }
+    }
+    .boxed()
 }
 
 struct FakeHardwareState {
@@ -391,6 +439,7 @@ struct FakeHardwareState {
     sd_data: Vec<u32>,
     requests_to_fail: u32,
     requests_to_fail_crypto_gce: u32,
+    requests_to_inject_device_exception_event: u32,
     rpmb_active: bool,
     wake_event: event_listener::Event,
     erase_group_start: Option<u32>,
@@ -402,6 +451,7 @@ struct FakeHardwareState {
     /// resets the hardware (by disabling CQE). While true, the driver must not attempt to submit
     /// new tasks.
     driver_in_recovery: bool,
+    cleared_tasks_count: u32,
 }
 
 impl FakeHardwareState {
@@ -534,11 +584,29 @@ impl mmio::Mmio for FakeMmio {
                     Ok(())
                 }
                 CQHCI_CQ_CTL_OFFSET => {
-                    if value & CqhciCqCtlRegister::HALT.bits() != 0 {
+                    let clear_all_tasks = value & CqhciCqCtlRegister::CLEAR_ALL_TASKS.bits() != 0;
+                    if clear_all_tasks {
+                        buf[CQHCI_CQ_TDBR_OFFSET / 4] = 0;
+                    }
+                    let cleared_value = value & !CqhciCqCtlRegister::CLEAR_ALL_TASKS.bits();
+                    let request_halt = if cleared_value & CqhciCqCtlRegister::HALT.bits() != 0 {
+                        if buf[idx] & CqhciCqCtlRegister::HALT.bits() != 0 {
+                            buf[idx] = cleared_value;
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        buf[idx] = cleared_value;
+                        false
+                    };
+                    if clear_all_tasks {
+                        state.tasks_in_progress = 0;
+                        state.cleared_tasks_count += 1;
+                    }
+                    if request_halt {
                         state.halt = true;
                         state.wake_event.notify(usize::MAX);
-                    } else {
-                        buf[idx] = value;
                     }
                     Ok(())
                 }
@@ -662,6 +730,7 @@ impl FakeTaskHandler {
                 sd_data: vec![0; 0x400],
                 requests_to_fail: 0,
                 requests_to_fail_crypto_gce: 0,
+                requests_to_inject_device_exception_event: 0,
                 rpmb_active: false,
                 wake_event: event_listener::Event::new(),
                 erase_group_start: None,
@@ -670,6 +739,7 @@ impl FakeTaskHandler {
                 active_partition: EmmcPartitionId::UserDataPartition as u32,
                 valid_crypto_slots: std::collections::HashSet::new(),
                 driver_in_recovery: false,
+                cleared_tasks_count: 0,
             })),
             bti,
             partition_vmos,
@@ -696,6 +766,10 @@ impl FakeTaskHandler {
 
     fn fail_next_crypto_gce(&self, count: u32) {
         self.state.lock().requests_to_fail_crypto_gce = count;
+    }
+
+    fn inject_device_exception_event_next(&self, count: u32) {
+        self.state.lock().requests_to_inject_device_exception_event = count;
     }
 
     async fn poll(self: &Arc<Self>) {
@@ -952,6 +1026,10 @@ impl FakeTaskHandler {
                 terri.set_response_mode_error_fields_valid(true);
                 state.store32(MmioRegionType::Cqhci, CQHCI_CQ_TERRI_OFFSET as usize, terri.0);
             } else {
+                if state.requests_to_inject_device_exception_event > 0 {
+                    state.requests_to_inject_device_exception_event -= 1;
+                    cqhci_irq_status.set_device_exception_event(true);
+                }
                 cqhci_irq_status.set_task_complete(true);
                 let current_tcn = state.load32(MmioRegionType::Cqhci, CQHCI_CQ_TCN_OFFSET as usize);
                 let new_tcn = current_tcn | (1 << task_id);

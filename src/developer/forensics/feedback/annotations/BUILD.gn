@@ -43,8 +43,8 @@ source_set("annotations") {
   ]
 
   deps = [
-    "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_hlcpp",
-    "//sdk/lib/fdio",
+    "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_cpp",
+    "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/feedback:constants",
     "//src/lib/files",
@@ -98,7 +98,7 @@ source_set("data_register") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/annotations",
     "//src/lib/fxl",
     "//third_party/rapidjson",

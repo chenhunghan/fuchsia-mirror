@@ -25,11 +25,16 @@
                 "fuchsia.pkg.resolution.PackageResolver",
                 "fuchsia.pkg.RetainedBlobs",
                 "fuchsia.pkg.RetainedPackages",
+                "fuchsia.storage.mapping.FileMapper",
             ],
         },
         {
             resolver: "base_resolver",
             path: "/svc/fuchsia.component.resolution.Resolver-base",
+        },
+        {
+            resolver: "full_resolver",
+            path: "/svc/fuchsia.component.resolution.Resolver-full",
         },
         {
             directory: "pkgfs",
@@ -87,18 +92,10 @@
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.metrics.MetricEventLoggerFactory",
-                "fuchsia.update.CommitStatusProvider",
-            ],
-        },
-
-        // TODO(https://fxbug.dev/542865121): Make these capabilties required when pkg-cache
-        //     replaces pkg-resolver as the provider of the full and OTA resolvers.
-        {
-            protocol: [
                 "fuchsia.pkg.Authority",
                 "fuchsia.pkg.http.Client",
+                "fuchsia.update.CommitStatusProvider",
             ],
-            availability: "optional",
         },
         {
             protocol: "fuchsia.tracing.provider.Registry",
@@ -181,6 +178,15 @@
             default: false,
         },
         {
+            // Duration in seconds to record and replay the `.boot` blob profile on startup when
+            // driver blob paging is enabled. If 0, startup profiling is disabled.
+            config: "fuchsia.fshost.StartupProfilingSeconds",
+            key: "startup_profiling_seconds",
+            type: "uint32",
+            availability: "optional",
+            default: 0,
+        },
+        {
             config: "fuchsia.zircon.system.pkgfs.cmd",
             key: "system_image_hash",
             type: "string",
@@ -190,6 +196,10 @@
     expose: [
         {
             resolver: "base_resolver",
+            from: "self",
+        },
+        {
+            resolver: "full_resolver",
             from: "self",
         },
         {
@@ -206,6 +216,7 @@
                 "fuchsia.pkg.resolution.PackageResolver",
                 "fuchsia.pkg.RetainedBlobs",
                 "fuchsia.pkg.RetainedPackages",
+                "fuchsia.storage.mapping.FileMapper",
             ],
             from: "self",
         },

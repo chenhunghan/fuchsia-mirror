@@ -16,11 +16,14 @@ fuchsia_structured_config_rust_lib("battery-manager-config") {
 
 battery_manager_deps = [
   ":battery-manager-config",
+  "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+  "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
   "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
   "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
   "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
   "//sdk/fidl/fuchsia.power.battery.test:fuchsia.power.battery.test_rust",
   "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+  "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
   "//sdk/lib/power/state_recorder/rust",
   "//sdk/rust/zx",
   "//src/lib/diagnostics/inspect/runtime/rust",
@@ -30,6 +33,8 @@ battery_manager_deps = [
   "//src/lib/fuchsia-async",
   "//src/lib/fuchsia-component",
   "//src/lib/fuchsia-runtime",
+  "//src/power/lib/election",
+  "//src/power/lib/governor",
   "//third_party/rust_crates:anyhow",
   "//third_party/rust_crates:futures",
   "//third_party/rust_crates:log",
@@ -40,10 +45,13 @@ battery_manager_deps = [
 ]
 
 battery_manager_sources = [
+  "src/arbiter.rs",
   "src/battery_info_recorders.rs",
   "src/battery_manager.rs",
   "src/battery_simulator.rs",
+  "src/cache.rs",
   "src/config.rs",
+  "src/governor_supervisor.rs",
   "src/main.rs",
   "src/polisher.rs",
 ]

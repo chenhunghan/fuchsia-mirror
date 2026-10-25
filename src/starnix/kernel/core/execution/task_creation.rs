@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::fs::tmpfs::TmpFs;
 use crate::mm::MemoryManager;
 use crate::security;
 use crate::signals::SignalActions;
@@ -9,7 +10,7 @@ use crate::task::{
     CurrentTask, Kernel, Pid, PidTableGuard, RobustListHeadPtr, SeccompFilterContainer,
     SeccompState, Task, TaskBuilder, ThreadGroup, ThreadGroupParent, ThreadGroupWriteGuard,
 };
-use crate::vfs::{FsContext, SharedFdTable};
+use crate::vfs::{FsContext, Namespace, SharedFdTable};
 use starnix_sync::allow_subclass;
 use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
@@ -21,6 +22,7 @@ use starnix_uapi::signals::{SIGCHLD, Signal};
 use starnix_uapi::{errno, error, from_status_like_fdio, rlimit};
 use std::ffi::CString;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Result returned when creating new Zircon processes for tasks.
 ///
@@ -34,6 +36,16 @@ pub struct TaskInfo {
     pub memory_manager: Option<Arc<MemoryManager>>,
 }
 
+/// Whether `create_zircon_process()` may create a process while the kernel shuts down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreateDuringShutdown {
+    /// Never, e.g. when the kernel starts a process.
+    Never,
+    /// Until the deferred shutdown deadline, when a deferred shutdown process creates it. See
+    /// `ThreadGroupMutableState::is_deferred_shutdown_process()`.
+    UntilDeadline,
+}
+
 pub fn create_zircon_process(
     kernel: &Arc<Kernel>,
     parent: Option<ThreadGroupWriteGuard<'_>>,
@@ -41,10 +53,19 @@ pub fn create_zircon_process(
     exit_signal: Option<Signal>,
     signal_actions: Arc<SignalActions>,
     name: TaskCommand,
+    create_during_shutdown: CreateDuringShutdown,
 ) -> Result<TaskInfo, Errno> {
-    // Don't allow new processes to be created once the kernel has started shutting down.
-    if kernel.is_shutting_down() {
-        return error!(EBUSY);
+    // During shutdown, only deferred shutdown processes may create processes, and only until the
+    // deferred shutdown deadline. The processes they create are deferred shutdown processes too.
+    // This keeps Kernel::run_shutdown() finite. See
+    // ThreadGroupMutableState::is_deferred_shutdown_process().
+    let deferred_shutdown_deadline = kernel.deferred_shutdown_deadline();
+    if let Some(deadline) = deferred_shutdown_deadline {
+        if create_during_shutdown == CreateDuringShutdown::Never
+            || zx::MonotonicInstant::get() >= deadline
+        {
+            return error!(EBUSY);
+        }
     }
     let (process, root_vmar) =
         create_shared(&kernel.kthreads.starnix_process, zx::ProcessOptions::empty(), name)
@@ -64,6 +85,9 @@ pub fn create_zircon_process(
         exit_signal,
         signal_actions,
     );
+    if deferred_shutdown_deadline.is_some() {
+        thread_group.created_during_shutdown.store(true, Ordering::Relaxed);
+    }
 
     Ok(TaskInfo { thread_group, memory_manager: None })
 }
@@ -123,8 +147,8 @@ fn create_shared(
 /// `init` means that `init` is responsible for waiting on the process when it dies and thereby
 /// cleaning up its zombie.
 ///
-/// If you just need a kernel task, and not an entire userspace process, consider using
-/// `create_system_task` instead. Even better, consider using the `kthreads` threadpool.
+/// If you just need a kernel task, and not an entire userspace process, consider using the
+/// `kthreads` threadpool instead.
 ///
 /// If `seclabel` is set, or the container specified a `default_seclabel`, then it will be
 /// resolved against the `kernel`'s active security policy, and applied to the new task.
@@ -165,6 +189,7 @@ pub fn create_init_child_process(
                 Some(SIGCHLD),
                 SignalActions::default(),
                 initial_name.clone(),
+                CreateDuringShutdown::Never,
             )
         },
         creds.into(),
@@ -198,8 +223,8 @@ pub fn create_init_child_process(
 /// tasks cannot be created by userspace directly.
 ///
 /// This function should only be called as part of booting a kernel instance. To create a
-/// process after the kernel has already booted, consider `create_init_child_process`
-/// or `create_system_task`.
+/// process after the kernel has already booted, consider `create_init_child_process`, or use
+/// `kthreads` for kernel background work.
 ///
 /// The process created by this function should always have pid 1. We require the caller to
 /// pass the `pid` as an argument to clarify that it's the callers responsibility to determine
@@ -226,6 +251,7 @@ pub fn create_init_process(
                 Some(SIGCHLD),
                 SignalActions::default(),
                 initial_name.clone(),
+                CreateDuringShutdown::Never,
             )
         },
         Credentials::root(),
@@ -235,18 +261,21 @@ pub fn create_init_process(
     Ok(builder)
 }
 
-/// Create a task that runs inside the kernel.
+/// Creates the `kthreadd` system task that runs inside the kernel.
 ///
 /// There is no underlying Zircon process to host the task. Instead, the work done by this task
-/// is performed by a thread in the original Starnix process, possible as part of a thread
+/// is performed by a thread in the original Starnix process, possibly as part of a thread
 /// pool.
 ///
-/// This function is the preferred way to create a context for doing background work inside the
-/// kernel.
+/// The task is initialized with a temporary bootstrap `"rootfs"` [`TmpFs`] intended to be
+/// replaced with the container's root filesystem via [`FsContext::replace_bootstrap_namespace`]
+/// during kernel boot.
 ///
-/// Rather than calling this function directly, consider using `kthreads`, which provides both
-/// a system task and a threadpool on which the task can do work.
-pub fn create_system_task(kernel: &Arc<Kernel>, fs: Arc<FsContext>) -> Result<CurrentTask, Errno> {
+/// This function should only be called during kernel initialization to set up `kthreads`. To do
+/// background work inside the kernel after boot, use `kthreads`, which provides both the system
+/// task and a threadpool on which it can do work.
+pub fn create_system_task(kernel: &Arc<Kernel>) -> Result<CurrentTask, Errno> {
+    let fs = FsContext::new(Namespace::new(TmpFs::new_fs_with_name(kernel, "rootfs".into())));
     let builder = create_task(
         kernel,
         TaskCommand::new(b"kthreadd"),
@@ -331,12 +360,9 @@ where
                 .set(*resource, rlimit { rlim_cur: *limit, rlim_max: *limit });
         }
 
-        let (pgid, sid) = {
-            let tg_state = builder.thread_group().read();
-            (tg_state.process_group.clone(), tg_state.session.clone())
-        };
+        let sid = builder.thread_group().read().session.clone();
         pids.add_task(Arc::clone(&builder.task));
-        pids.attach_pgid(&pgid, builder.thread_group());
+        pids.attach_pgid(&builder.thread_group().pgid(), builder.thread_group());
         pids.attach_sid(&sid, builder.thread_group());
         Ok(())
     });
@@ -353,12 +379,11 @@ pub fn create_kernel_thread(
     let mut pids = system_task.kernel().pids.lock();
     let pid = pids.allocate_pid()?;
 
-    let scheduler_state;
+    let scheduler_state = system_task.scheduler_state.lock().fork();
     let uts_ns;
     let default_timerslack_ns;
     {
         let state = system_task.read();
-        scheduler_state = state.scheduler_state.fork();
         uts_ns = state.uts_ns.clone();
         default_timerslack_ns = state.default_timerslack_ns;
     }

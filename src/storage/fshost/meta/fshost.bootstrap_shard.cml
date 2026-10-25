@@ -46,7 +46,7 @@
             availability: "optional",
         },
         {
-            protocol: "fuchsia.memory.attribution.PageRefaultSink",
+            protocol: "fuchsia.memory.attribution.PagerStatsSink",
             from: "parent",
             to: "#fshost",
             dependency: "weak",
@@ -113,11 +113,18 @@
         {
             config: [
                 "fuchsia.fshost.DisableAutomount",
+                "fuchsia.fshost.StartupProfilingSeconds",
                 "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "parent",
             to: "#fshost",
             availability: "optional",
+        },
+        {
+            config: "fuchsia.diagnostics.StorageStallWatchdogEnabled",
+            from: "parent",
+            to: "#fshost",
+            availability: "transitional",
         },
         {
             protocol: [

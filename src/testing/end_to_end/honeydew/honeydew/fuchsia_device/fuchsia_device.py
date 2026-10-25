@@ -3,17 +3,13 @@
 # found in the LICENSE file.
 """FuchsiaDevice abstract base class implementation."""
 
-import asyncio
 import dataclasses
 import inspect
-import ipaddress
 import json
 import logging
 import os
-import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from functools import cached_property
 from typing import Any
 
 import fidl_fuchsia_buildinfo as f_buildinfo
@@ -29,15 +25,8 @@ import honeydew.affordances.connectivity.wlan.core as wlan_core
 from honeydew import affordances_capable, errors
 from honeydew.affordances import location
 from honeydew.affordances.connectivity import netstack
-from honeydew.affordances.connectivity.bluetooth.avrcp import (
-    avrcp,
-    avrcp_using_sl4f,
-)
 from honeydew.affordances.connectivity.bluetooth.gap import gap, gap_using_fc
 from honeydew.affordances.connectivity.bluetooth.le import le, le_using_fc
-from honeydew.affordances.connectivity.bluetooth.utils import (
-    types as bluetooth_types,
-)
 from honeydew.affordances.connectivity.wlan import wlan_policy, wlan_policy_ap
 from honeydew.affordances.drivers import battery_manager
 from honeydew.affordances.drivers.fake_battery import (
@@ -102,8 +91,7 @@ from honeydew.auxiliary_devices.usb_power_hub import (
 )
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx
-from honeydew.transports.ffx import types as ffx_types
+from honeydew.transports.ffx import ffx, ffx_with_monitor
 from honeydew.transports.ffx.config import FfxConfigData
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
@@ -111,7 +99,6 @@ from honeydew.transports.fuchsia_controller import (
 )
 from honeydew.transports.serial import serial as serial_transport_interface
 from honeydew.transports.serial import serial_using_unix_socket
-from honeydew.transports.sl4f import sl4f as sl4f_transport
 from honeydew.typing import custom_types
 from honeydew.utils import common, properties
 
@@ -155,8 +142,6 @@ _LOG_SEVERITIES: dict[custom_types.LEVEL, f_diagnostics_types.Severity] = {
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-_REBOOT_OFFLINE_TIMEOUT_SEC: int = 60
-
 
 class FuchsiaDevice(
     affordances_capable.RebootCapableDevice,
@@ -198,7 +183,7 @@ class FuchsiaDevice(
                         }
                     },
                     "affordances": {
-                        "bluetooth": {
+                        "tracing": {
                             "implementation": "fuchsia-controller",
                         },
                     },
@@ -368,7 +353,7 @@ class FuchsiaDevice(
         """Returns the FFX transport object.
 
         Returns:
-            FFX transport interface implementation.
+            FFX or FFXWithMonitor transport instance.
 
         Raises:
             FfxCommandError: Failed to instantiate.
@@ -382,22 +367,20 @@ class FuchsiaDevice(
                 should_exist=False,
             )
             if config_use_monitor_state is not None:
-                use_monitor_state = config_use_monitor_state
-        query: str = (
-            str(self._device_info.ip_port)
-            if self._device_info.ip_port
-            else self.device_name
-        )
-        ffx_obj: ffx.FFX = ffx.FFX(
-            args=ffx_types.FfxArgs(
-                query=query,
-                name=self.device_name,
+                use_monitor_state = bool(config_use_monitor_state)
+        if use_monitor_state:
+            return ffx_with_monitor.FFXWithMonitor(
+                target_name=self.device_name,
                 config_data=self._ffx_config_data,
-                use_monitor_state=use_monitor_state,
+                target_ip_port=self._device_info.ip_port,
                 device_ip_change=self,
             )
+        return ffx.FFX(
+            target_name=self.device_name,
+            config_data=self._ffx_config_data,
+            target_ip_port=self._device_info.ip_port,
+            device_ip_change=self,
         )
-        return ffx_obj
 
     @properties.Transport
     def fuchsia_controller(
@@ -438,7 +421,7 @@ class FuchsiaDevice(
         if fastboot_node_id is None:
             try:
                 fastboot_node_id = self.ffx.serial_number
-            except Exception as err:
+            except errors.HoneydewError as err:
                 _LOGGER.debug(
                     "Failed to get serial number from FFX for %s: %s",
                     self.device_name,
@@ -480,28 +463,6 @@ class FuchsiaDevice(
             )
         )
         return serial_obj
-
-    @properties.Transport
-    def sl4f(self) -> sl4f_transport.SL4F:
-        """Returns the SL4F transport object.
-
-        Returns:
-            SL4F transport interface implementation.
-
-        Raises:
-            Sl4fError: Failed to instantiate.
-        """
-        device_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
-        if self._device_info.ip_port:
-            device_ip = self._device_info.ip_port.ip
-
-        sl4f_obj: sl4f_transport.SL4F = sl4f_transport.SL4F(
-            device_name=self.device_name,
-            device_ip=device_ip,
-            ffx_transport=self.ffx,
-            device_ip_change=self,
-        )
-        return sl4f_obj
 
     # List all the affordances
     @properties.Affordance
@@ -560,6 +521,7 @@ class FuchsiaDevice(
         return starnix_using_ffx.StarnixUsingFfx(
             device_name=self.device_name,
             ffx=self.ffx,
+            inspect=self,
         )
 
     @properties.Affordance
@@ -626,24 +588,6 @@ class FuchsiaDevice(
             fuchsia_controller=self.fuchsia_controller,
             ffx_transport=self.ffx,
         )
-
-    @properties.Affordance
-    def bluetooth_avrcp(self) -> avrcp.Avrcp:
-        """Returns a Bluetooth Avrcp affordance object.
-
-        Returns:
-            Bluetooth Avrcp object
-        """
-        if (
-            self._get_bluetooth_affordances_implementation()
-            == bluetooth_types.Implementation.SL4F
-        ):
-            return avrcp_using_sl4f.AvrcpUsingSl4f(
-                device_name=self.device_name,
-                sl4f=self.sl4f,
-                reboot_affordance=self,
-            )
-        raise NotImplementedError
 
     @properties.Affordance
     def bluetooth_le(self) -> le.LE:
@@ -870,7 +814,7 @@ class FuchsiaDevice(
             raise errors.HealthCheckError(
                 f"health check failed on '{self._device_info.name}'"
             ) from err
-            # LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
+            # LINT.ThenChange(//tools/testing/tefmocheck/check-configs.yaml)
 
     def _check_connections(self) -> None:
         """Checks health of all device transports."""
@@ -879,9 +823,6 @@ class FuchsiaDevice(
         self.ffx.check_connection()
 
         self.fuchsia_controller.check_connection()
-
-        if self._is_sl4f_needed:
-            self.sl4f.check_connection()
 
     def get_inspect_data(
         self,
@@ -961,7 +902,6 @@ class FuchsiaDevice(
 
         Raises:
             FuchsiaControllerError: On communications failure.
-            Sl4fError: On communications failure.
         """
         timestamp: str = datetime.now().strftime("%Y-%m-%d-%I-%M-%S-%p")
         message = f"[Host Time: {timestamp}] - {message}"
@@ -974,12 +914,7 @@ class FuchsiaDevice(
 
         Raises:
             FuchsiaControllerError: On communications failure.
-            Sl4fError: On communications failure.
         """
-        # Restart the SL4F server on device boot up.
-        if self._is_sl4f_needed:
-            await common.retry(fn=self.sl4f.start_server, wait_time=5)
-
         # Create a new Fuchsia controller context for new device connection.
         self.fuchsia_controller.create_context()
 
@@ -1015,7 +950,6 @@ class FuchsiaDevice(
         Raises:
             NotSupportedError: If power switch is not set.
             FuchsiaControllerError: On communications failure.
-            Sl4fError: On communications failure.
         """
         if self._power_switch is None:
             raise errors.NotSupportedError(
@@ -1030,16 +964,20 @@ class FuchsiaDevice(
                 message=f"Powering cycling {self.device_name}...",
                 level=custom_types.LEVEL.INFO,
             )
-        except Exception:  # pylint: disable=broad-except
+        except errors.FIDL_ERRORS + (RuntimeError, errors.HoneydewError):
             # power_cycle can be used as a recovery mechanism when device is
             # unhealthy. So any calls to device prior to power_cycle can
             # fail in such cases and thus ignore them.
+            # `RuntimeError` is raised by the native Fuchsia-Controller
+            # bindings for internal errors, e.g. from
+            # `Context.connect_remote_control_proxy()`. See `_CONTROLLER_ERRORS`
+            # in //src/testing/end_to_end/honeydew/honeydew/transports/fuchsia_controller/fuchsia_controller.py.
             pass
 
         _LOGGER.info("Powering off %s...", self.device_name)
         self.ffx.notify_intentional_disconnect()
         self._power_switch.power_off(self._power_switch_outlet)
-        await asyncio.to_thread(self.wait_for_offline)
+        self.wait_for_offline()
 
         _LOGGER.info("Powering on %s...", self.device_name)
         self._power_switch.power_on(self._power_switch_outlet)
@@ -1128,7 +1066,7 @@ class FuchsiaDevice(
 
         self.ffx.notify_intentional_disconnect()
         self._usb_power_hub.power_off(self._usb_power_hub_port)
-        await asyncio.to_thread(self.wait_for_offline)
+        self.wait_for_offline()
 
     async def resume(self) -> None:
         """Resume the device by reconnecting USB power.
@@ -1168,7 +1106,6 @@ class FuchsiaDevice(
 
         Raises:
             FuchsiaControllerError: On communications failure.
-            Sl4fError: On communications failure.
             FuchsiaDeviceError: If device fails to go offline.
         """
         _LOGGER.info("Lacewing is rebooting %s...", self.device_name)
@@ -1178,31 +1115,8 @@ class FuchsiaDevice(
         )
 
         self.ffx.notify_intentional_disconnect()
-
-        # Start wait for offline in background to avoid race conditions.
-        _LOGGER.info(
-            "Starting background wait for %s to go offline...", self.device_name
-        )
-        wait_process = self.ffx.wait_for_rcs_disconnection()
-        try:
-            await self._send_reboot_command()
-
-            _LOGGER.info(
-                "Waiting for background offline process to complete..."
-            )
-            try:
-                await asyncio.to_thread(
-                    wait_process.wait, timeout=_REBOOT_OFFLINE_TIMEOUT_SEC
-                )
-            except subprocess.TimeoutExpired as err:
-                raise errors.FuchsiaDeviceError(
-                    f"'{self.device_name}' failed to go offline within "
-                    f"{_REBOOT_OFFLINE_TIMEOUT_SEC} seconds."
-                ) from err
-        finally:
-            if wait_process.poll() is None:
-                wait_process.kill()
-                wait_process.wait()
+        await self._send_reboot_command()
+        self.wait_for_offline()
         await self.wait_for_online()
         await self.on_device_boot()
 
@@ -1285,7 +1199,9 @@ class FuchsiaDevice(
             elif isinstance(target_addr, custom_types.TargetUsb):
                 self.ffx.resolve_target_address()
                 self.fuchsia_controller.after_usb_reconnect()
-        except Exception as err:
+        # `ValueError` covers malformed `ffx` output, from `json.loads()` and
+        # `TargetAddr.from_json()`.
+        except (errors.HoneydewError, ValueError) as err:
             raise errors.FuchsiaDeviceError(
                 f"Failed to resolve IP for '{self.device_name}'"
             ) from err
@@ -1328,7 +1244,6 @@ class FuchsiaDevice(
 
         Raises:
             FuchsiaControllerError: On communications failure.
-            Sl4fError: On communications failure.
         """
         _LOGGER.info("Collecting snapshot on %s...", self.device_name)
         # Take the snapshot before creating the directory or file, as
@@ -1360,17 +1275,7 @@ class FuchsiaDevice(
         """
         _LOGGER.info("Waiting for %s to go offline...", self.device_name)
         try:
-            wait_process = self.ffx.wait_for_rcs_disconnection()
-            try:
-                wait_process.wait(timeout=60)
-            except subprocess.TimeoutExpired as err:
-                raise errors.FuchsiaDeviceError(
-                    f"'{self.device_name}' failed to go offline within 60 seconds."
-                ) from err
-            finally:
-                if wait_process.poll() is None:
-                    wait_process.kill()
-                    wait_process.wait()
+            self.ffx.wait_for_rcs_disconnection()
             _LOGGER.info("%s is offline.", self.device_name)
         except (
             errors.DeviceNotConnectedError,
@@ -1523,7 +1428,16 @@ class FuchsiaDevice(
             raise errors.FuchsiaDeviceError(
                 f"Boot ID not populated in IdentifyHost response for {self.device_name}"
             )
-        except Exception as err:
+        except errors.FIDL_ERRORS + (
+            RuntimeError,
+            AssertionError,
+            errors.HoneydewError,
+        ) as err:
+            # `RuntimeError`: internal errors from the native Fuchsia-Controller
+            # bindings, see `_CONTROLLER_ERRORS` in
+            # //src/testing/end_to_end/honeydew/honeydew/transports/fuchsia_controller/fuchsia_controller.py.
+            # `AssertionError`: raised by `unwrap()` on a FIDL result that holds
+            # an error (//tools/fidl/fidlgen_python/codegen/union.tmpl).
             raise errors.FuchsiaDeviceError(
                 f"Failed to get boot ID from {self.device_name}"
             ) from err
@@ -1720,47 +1634,13 @@ class FuchsiaDevice(
             ) from status
         return await self._read_snapshot_from_channel(channel_client)
 
-    def _get_bluetooth_affordances_implementation(
-        self,
-        should_exist: bool = True,
-    ) -> bluetooth_types.Implementation | None:
-        """Parses the bluetooth affordance config information and returns which bluetooth
-        implementation to use.
-
-        Returns:
-            bluetooth_types.Implementation
-
-        Raises:
-            errors.ConfigError: If bluetooth affordance implementation detail is missing or not valid.
-        """
-        if self._config is None:
-            return None
-
-        bluetooth_affordance_implementation: str | None = common.read_from_dict(
-            self._config,
-            key_path=("affordances", "bluetooth", "implementation"),
-            should_exist=should_exist,
-        )
-        if bluetooth_affordance_implementation is None:
-            return None
-
-        try:
-            return bluetooth_types.Implementation(
-                bluetooth_affordance_implementation
-            )
-        except ValueError as err:
-            raise errors.ConfigError(
-                f"Invalid value passed in config['affordances']['bluetooth']['implementation]. "
-                f"Valid values are: {list(map(str, bluetooth_types.Implementation))}"
-            ) from err
-
     def _get_tracing_affordance_implementation(
         self,
         should_exist: bool = False,
     ) -> tracing_types.Implementation:
         """Parses the tracing affordance config and returns which implementation to use."""
         if self._config is None:
-            return tracing_types.Implementation.FUCHSIA_CONTROLLER
+            return tracing_types.Implementation.FFX
 
         tracing_affordance_implementation: str | None = common.read_from_dict(
             self._config,
@@ -1768,7 +1648,7 @@ class FuchsiaDevice(
             should_exist=should_exist,
         )
         if tracing_affordance_implementation is None:
-            return tracing_types.Implementation.FUCHSIA_CONTROLLER
+            return tracing_types.Implementation.FFX
 
         try:
             return tracing_types.Implementation(
@@ -1779,17 +1659,3 @@ class FuchsiaDevice(
                 f"Invalid value passed in config['affordances']['tracing']['implementation']. "
                 f"Valid values are: {list(map(str, tracing_types.Implementation))}"
             ) from err
-
-    @cached_property
-    def _is_sl4f_needed(self) -> bool:
-        """Returns whether or not SL4F will be used.
-
-        Returns:
-            True if SL4F is needed. False, otherwise.
-        """
-        if (
-            self._get_bluetooth_affordances_implementation(should_exist=False)
-            == bluetooth_types.Implementation.SL4F
-        ):
-            return True
-        return False

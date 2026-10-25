@@ -140,7 +140,11 @@
             to: "#boot-drivers",
         },
         {
-            config: "fuchsia.usb.dwc3.BypassPlatformExtension",
+            config: [
+                "fuchsia.storage.ufs.AutoHibernateTimerUs",
+                "fuchsia.storage.ufs.EnableAutoHibernate",
+                "fuchsia.usb.dwc3.BypassPlatformExtension",
+            ],
             from: "void",
             to: "#boot-drivers",
             availability: "optional",
@@ -585,6 +589,7 @@
                 "fuchsia.hardware.haptics.Service",
                 "fuchsia.hardware.nfc.Service",
                 "fuchsia.hardware.pci.DebugService",
+                "fuchsia.hardware.power.charger.DebugService",
                 "fuchsia.hardware.power.suspend.SuspendService",
                 "fuchsia.hardware.power.usb.DebugService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
@@ -672,6 +677,7 @@
                 "fuchsia.hardware.usb.device.Service",
                 "fuchsia.hardware.usb.peripheral.Service",
                 "fuchsia.hardware.usb.tester.Service",
+                "fuchsia.hardware.usb.UsbService",
                 "fuchsia.hardware.usb.virtualbustest.Service",
                 "fuchsia.input.report.Service",
                 "fuchsia.lowpan.spinel.Service",

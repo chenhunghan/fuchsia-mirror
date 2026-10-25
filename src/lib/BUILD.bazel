@@ -2,7 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
+
+# Host tests for //src/lib defined in Bazel. These are exported to `fx test`
+# and infra builders through the `bazel_tests` target in //src/lib/BUILD.gn.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/lib/fuchsia-emulated-handle:fuchsia-emulated-handle-shutdown-test",
+        "//src/lib/fuchsia-emulated-handle:fuchsia-emulated-handle_test",
+        "//src/lib/gcs/test:gcs_test_client_bin_test",
+        "//src/lib/go-benchmarking:go_benchmarking_test",
+        "//src/lib/inet:libinet_host_test",
+        "//src/lib/listnode:listnode_host_tests",
+    ],
+)
 
 # Device tests for //src/lib defined in Bazel. These are exported to `fx test`
 # and infra builders through the `bazel_tests` target in //src/lib/BUILD.gn.
@@ -10,7 +27,14 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/lib/atomic-storage:atomic-storage-tests",
         "//src/lib/backoff:backoff_tests",
         "//src/lib/callback:callback_tests",
+        "//src/lib/cstringify:cstringify-test",
+        "//src/lib/error/clonable_error:clonable_error_tests",
+        "//src/lib/fuchsia-image-format:fuchsia-image-format-tests",
+        "//src/lib/inet:libinet_tests",
+        "//src/lib/listnode:listnode-package",
+        "//src/lib/watch_handler:watch-handler-tests",
     ],
 )

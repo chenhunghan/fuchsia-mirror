@@ -9,6 +9,11 @@
     ],
     children: [
         {
+            name: "netstack",
+            url: "fuchsia-pkg://fuchsia.com/netstack3#meta/netstack3.cm",
+            on_terminate: "reboot",
+        },
+        {
             name: "dhcpd",
             url: "fuchsia-pkg://fuchsia.com/dhcpv4-server#meta/dhcpv4_server.cm",
         },
@@ -29,6 +34,11 @@
             url: "fuchsia-pkg://fuchsia.com/google-http-client#meta/google-http-client.cm",
         },
         {
+            name: "netcfg",
+            url: "fuchsia-pkg://fuchsia.com/netcfg-basic#meta/netcfg-basic.cm",
+            startup: "eager",
+        },
+        {
             name: "reachability",
             url: "fuchsia-pkg://fuchsia.com/reachability#meta/reachability.cm",
             startup: "eager",
@@ -36,12 +46,19 @@
     ],
     offer: [
         {
-            protocol: [
-                "fuchsia.scheduler.deprecated.ProfileProvider",
-                "fuchsia.scheduler.RoleManager",
-            ],
+            dictionary: "netstack3-config",
             from: "parent",
-            to: [ "#netstack" ],
+            to: "#netstack",
+            availability: "same_as_target",
+        },
+        {
+            config: [
+                "fuchsia.netstack3.DebugLogs",
+                "fuchsia.netstack3.OpaqueIids",
+            ],
+            from: "void",
+            to: "#netstack",
+            availability: "optional",
         },
         {
             protocol: [ "fuchsia.scheduler.RoleManager" ],
@@ -51,10 +68,7 @@
         {
             protocol: [ "fuchsia.stash.SecureStore" ],
             from: "parent",
-            to: [
-                "#dhcpd",
-                "#netstack",
-            ],
+            to: [ "#dhcpd" ],
         },
         {
             protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
@@ -106,7 +120,6 @@
                 "fuchsia.net.routes.admin.RouteTableV6",
                 "fuchsia.net.routes.admin.RuleTableV4",
                 "fuchsia.net.routes.admin.RuleTableV6",
-                "fuchsia.net.stack.Stack",
             ],
             from: "#netstack",
             to: [ "#netcfg" ],
@@ -166,12 +179,6 @@
             subdir: "netcfg",
         },
         {
-            directory: "config-data",
-            from: "parent",
-            to: "#netstack",
-            subdir: "netstack",
-        },
-        {
             directory: "root-ssl-certificates",
             from: "parent",
             to: [ "#http-client" ],
@@ -214,11 +221,6 @@
             config: "fuchsia.power.SuspendEnabled",
             from: "parent",
             to: "#netstack",
-        },
-        {
-            storage: "cache",
-            from: "parent",
-            to: [ "#netstack" ],
         },
         {
             storage: "data",
@@ -299,6 +301,11 @@
                 "fuchsia.net.name.DnsServerWatcher",
             ],
             from: "#netcfg",
+        },
+        {
+            protocol: "fuchsia.net.virtualization.Control",
+            from: "void",
+            availability: "optional",
         },
     ],
 }

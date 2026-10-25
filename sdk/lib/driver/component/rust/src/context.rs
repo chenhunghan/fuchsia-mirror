@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{Incoming, Node, ParentProperty, PropertyValue};
+use crate::{HealthAlertReporter, Incoming, Node, ParentProperty, PropertyValue};
 use fuchsia_async::ScopeHandle;
 use fuchsia_component::server::{ServiceFs, ServiceObjTrait};
 use fuchsia_component_config::Config;
@@ -13,7 +13,7 @@ use namespace::Namespace;
 use zx::Status;
 
 use fdf::AsyncDispatcher;
-use fidl_fuchsia_driver_framework::DriverStartArgs;
+use fidl_next_fuchsia_driver_framework::{DriverStartArgs, HealthAlert};
 
 pub use fuchsia_inspect_contrib::content_publisher as inspect_publisher;
 
@@ -28,9 +28,24 @@ pub struct DriverContext {
     /// The incoming namespace constructed from [`DriverStartArgs::incoming`]. Since producing this
     /// consumes the incoming namespace from [`Self::start_args`], that will always be [`None`].
     pub incoming: Incoming,
+    health_alert_reporter: HealthAlertReporter,
 }
 
 impl DriverContext {
+    /// Returns a reporter through which the driver can proactively emit
+    /// `fuchsia.driver.framework/Driver.OnHealthAlert` events after [`crate::Driver::start`] has
+    /// consumed this context. The reporter is cheap to clone and may be used from any thread.
+    pub fn health_alert_reporter(&self) -> HealthAlertReporter {
+        self.health_alert_reporter.clone()
+    }
+
+    /// Reports `alert` to the driver framework. Equivalent to
+    /// `self.health_alert_reporter().report_health_alert(alert)`; see
+    /// [`HealthAlertReporter::report_health_alert`].
+    pub fn report_health_alert(&self, alert: HealthAlert) {
+        self.health_alert_reporter.report_health_alert(alert);
+    }
+
     /// Binds the node proxy client end from the start args into a [`NodeProxy`] that can be used
     /// to add child nodes. Dropping this proxy will result in the node being removed and the
     /// driver starting shutdown, so it should be bound and stored in your driver object in its
@@ -42,6 +57,10 @@ impl DriverContext {
     /// arguments.
     pub fn take_node(&mut self) -> Result<Node, Status> {
         let node_client = self.start_args.node.take().ok_or(Status::INVALID_ARGS)?;
+        let node_client =
+            fidl::endpoints::ClientEnd::<fidl_fuchsia_driver_framework::NodeMarker>::new(
+                node_client.into_untyped(),
+            );
         Ok(Node::from(node_client.into_proxy()))
     }
 
@@ -69,6 +88,7 @@ impl DriverContext {
             error!("Tried to serve on outgoing directory but it wasn't available");
             return Err(Status::INVALID_ARGS);
         };
+        let outgoing_dir = into_legacy_server_end(outgoing_dir);
         outgoing_fs.serve_connection(outgoing_dir).map_err(|err| {
             error!("Failed to serve outgoing directory: {err}");
             Status::INTERNAL
@@ -112,6 +132,12 @@ impl DriverContext {
         })
     }
 
+    /// Returns the name of the node that the driver is bound to, if present in the start
+    /// arguments.
+    pub fn node_name(&self) -> Option<&str> {
+        self.start_args.node_name.as_deref()
+    }
+
     /// Takes the node token from the start arguments, if the driver host provided one. The token
     /// identifies the driver's node to other framework services, such as the power framework.
     ///
@@ -137,7 +163,7 @@ impl DriverContext {
             entry.properties.iter().map(move |property| ParentProperty {
                 parent: &entry.name,
                 key: &property.key,
-                value: PropertyValue(property.value.clone()),
+                value: PropertyValue::from(&property.value),
             })
         })
     }
@@ -159,15 +185,20 @@ impl DriverContext {
     pub(crate) fn new(
         root_dispatcher: AsyncDispatcher,
         mut start_args: DriverStartArgs,
+        health_alert_reporter: HealthAlertReporter,
     ) -> Result<Self, Status> {
-        let incoming_namespace: Namespace = start_args
-            .incoming
-            .take()
-            .unwrap_or_default()
-            .try_into()
-            .map_err(|_| Status::INVALID_ARGS)?;
+        let mut incoming_namespace = Namespace::new();
+        for entry in start_args.incoming.take().unwrap_or_default() {
+            let path = entry
+                .path
+                .ok_or(Status::INVALID_ARGS)?
+                .parse()
+                .map_err(|_| Status::INVALID_ARGS)?;
+            let directory = into_legacy_client_end(entry.directory.ok_or(Status::INVALID_ARGS)?);
+            incoming_namespace.add(&path, directory).map_err(|_| Status::INVALID_ARGS)?;
+        }
         let incoming = Incoming::from(incoming_namespace);
-        Ok(DriverContext { root_dispatcher, start_args, incoming })
+        Ok(DriverContext { root_dispatcher, start_args, incoming, health_alert_reporter })
     }
 
     pub(crate) fn start_logging(&self, driver_name: &str) -> Result<(), Status> {
@@ -190,4 +221,21 @@ impl DriverContext {
         }
         Ok(())
     }
+}
+
+/// Converts a `fidl_next::ClientEnd` into a legacy `fidl::endpoints::ClientEnd` over a Zircon
+/// channel for APIs like `namespace::Namespace` that still accept `fidl_fuchsia_io` endpoints.
+fn into_legacy_client_end<P, M: fidl::endpoints::ProtocolMarker>(
+    client_end: fidl_next::ClientEnd<P, zx::Channel>,
+) -> fidl::endpoints::ClientEnd<M> {
+    fidl::endpoints::ClientEnd::new(client_end.into_untyped())
+}
+
+/// Converts a `fidl_next::ServerEnd` into a legacy `fidl::endpoints::ServerEnd` over a Zircon
+/// channel for APIs like `fuchsia_component::server::ServiceFs` that still accept
+/// `fidl_fuchsia_io` endpoints.
+fn into_legacy_server_end<P, M: fidl::endpoints::ProtocolMarker>(
+    server_end: fidl_next::ServerEnd<P, zx::Channel>,
+) -> fidl::endpoints::ServerEnd<M> {
+    fidl::endpoints::ServerEnd::new(server_end.into_untyped())
 }

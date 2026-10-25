@@ -123,7 +123,7 @@ pub fn do_mmap(
         return error!(EINVAL);
     }
 
-    let file = if flags & MAP_ANONYMOUS != 0 { None } else { Some(current_task.files().get(fd)?) };
+    let file = if flags & MAP_ANONYMOUS != 0 { None } else { Some(current_task.get_file(fd)?) };
 
     // With `READ_IMPLIES_EXEC`, `PROT_READ` implies `PROT_EXEC` (see personality(2)). Files that
     // cannot be executed (e.g. on a `noexec` mount), or whose `mmap()` can't map them executable
@@ -197,12 +197,23 @@ pub fn do_mmap(
     security::mmap_file(current_task, file.as_ref(), prot_flags, options)?;
 
     if flags & MAP_ANONYMOUS != 0 {
-        fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "AnonymousMmap");
+        fuchsia_trace::duration!(
+            CATEGORY_STARNIX_MM,
+            "AnonymousMmap",
+            "prot" => prot,
+            "map_fixed" => (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0,
+        );
         current_task.mm()?.map_anonymous(addr, length, prot_flags, options, MappingName::None)
     } else {
-        fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "FileBackedMmap");
-        // TODO(tbodt): maximize protection flags so that mprotect works
         let file = file.expect("file retrieved above for file-backed mapping");
+        fuchsia_trace::duration!(
+            CATEGORY_STARNIX_MM,
+            "FileBackedMmap",
+            "fs" => std::str::from_utf8(file.fs.name()).unwrap_or("<non-utf8>"),
+            "prot" => prot,
+            "map_fixed" => (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0,
+        );
+        // TODO(tbodt): maximize protection flags so that mprotect works
         file.mmap(current_task, addr, memory_offset, length, prot_flags, options)
     }
 }
@@ -388,7 +399,7 @@ pub fn sys_process_mrelease(
     if flags != 0 {
         return error!(EINVAL);
     }
-    let file = current_task.files().get(pidfd)?;
+    let file = current_task.get_file(pidfd)?;
     // From <https://man7.org/linux/man-pages/man2/process_mrelease.2.html>:
     //
     //   The pidfd argument is a PID file descriptor (see pidfd_open(2)) that

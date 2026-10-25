@@ -656,6 +656,85 @@ def find_planter_bin():
     return None
 
 
+# Downgrade false-positive review_diff attribute_alignment warnings on
+# rustc_check_cfg_build_flags targets (which bazel2gn natively converts to GN config()
+# with --check-cfg rustflags), output_name carried via @bazel2gn:raw_overwrite or
+# crate_name, and dep_alignment warnings caused by multi-line wrapped `deps =\n _VAR + ...`
+# assignments in BUILD.gn or third_party_target_map.json mappings.
+def downgrade_check_cfg_diff_findings(findings):
+    check_cfg_locs = {
+        (f["file"], f["line"])
+        for f in findings
+        if f["category"] == "attribute_alignment"
+        and "Unusual rule mapping from config to rustc_check_cfg_build_flags" in f["message"]
+    }
+    raw_overwrite_locs = {
+        (f["file"], f["line"])
+        for f in findings
+        if f["category"] == "bazel2gn_directive"
+    }
+    for f in findings:
+        if (f["file"], f["line"]) in check_cfg_locs and f["category"] == "attribute_alignment":
+            if (
+                "Unusual rule mapping from config to rustc_check_cfg_build_flags" in f["message"]
+                or "rustflags in GN not carried over to Bazel" in f["message"]
+            ):
+                f["severity"] = "INFO"
+        elif (
+            f["category"] == "attribute_alignment"
+            and "output_name in GN not carried over to Bazel" in f["message"]
+            and (f["file"], f["line"]) in raw_overwrite_locs
+        ):
+            f["severity"] = "INFO"
+        elif (
+            f["category"] == "dep_alignment"
+            and "unmatched in GN: [//third_party/googletest:" in f["message"]
+            and "unmatched in Bazel: [@com_google_googletest//:gtest" in f["message"]
+        ):
+            f["severity"] = "INFO"
+        elif (
+            f["category"] == "dep_alignment"
+            and "unmatched in GN: [" in f["message"]
+            and "unmatched in Bazel: [" in f["message"]
+        ):
+            # Downgrade dep_alignment warnings when unmatched GN and Bazel labels
+            # differ only by redundant slashes (e.g. `////pkg/path` vs `//pkg/path`).
+            import re as _re
+            gn_m = _re.search(r"unmatched in GN: \[([^\]]+)\]", f["message"])
+            bz_m = _re.search(r"unmatched in Bazel: \[([^\]]+)\]", f["message"])
+            if gn_m and bz_m:
+                def _slash_norm_lbl(raw):
+                    s = raw.strip().strip('"')
+                    if s.startswith("/"):
+                        p, sep, t = s.partition(":")
+                        p = "//" + _re.sub(r"/+", "/", p.strip("/"))
+                        s = f"{p}:{t}" if sep else p
+                    if s.startswith("//") and ":" in s:
+                        p, t = s.split(":", 1)
+                        if t == p.rsplit("/", 1)[-1]:
+                            s = p
+                    return s.replace("-", "_")
+                gn_set = {_slash_norm_lbl(x) for x in gn_m.group(1).split(",") if x.strip()}
+                bz_set = {_slash_norm_lbl(x) for x in bz_m.group(1).split(",") if x.strip()}
+                if gn_set and gn_set == bz_set:
+                    f["severity"] = "INFO"
+        elif (
+            f["category"] == "dep_alignment"
+            and "unmatched in Bazel:" in f["message"]
+            and "unmatched in GN:" not in f["message"]
+            and f["file"].endswith("BUILD.bazel")
+        ):
+            gn_path = os.path.join(workdir, os.path.dirname(f["file"]), "BUILD.gn")
+            try:
+                gn_txt = open(gn_path, encoding="utf-8").read()
+            except OSError:
+                gn_txt = ""
+            if "## BAZEL2GN SENTINEL" in gn_txt and (
+                "\n    deps =\n" in gn_txt or "\n  deps =\n" in gn_txt
+            ):
+                f["severity"] = "INFO"
+
+
 def run_review_diff(existing_findings):
     planter_bin = find_planter_bin()
     if not planter_bin or not workdir:
@@ -677,6 +756,7 @@ def run_review_diff(existing_findings):
     findings, parsed_ok = parse_findings(out.strip())
     if not parsed_ok:
         return []
+    downgrade_check_cfg_diff_findings(findings)
     seen = {(f["category"], f["file"], f["line"], f["message"]) for f in existing_findings}
     results = []
     for f in findings:

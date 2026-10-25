@@ -78,6 +78,7 @@ rustc_library("ebpf") {
     "src/tests/branch_ptr_gt_zero_prunes_live.data",
     "src/tests/branch_ptr_jsgt_zero_keeps_live.data",
     "src/tests/branch_zero_jgt_ptr_prunes_live.data",
+    "src/tests/cmpxchg_both_outcomes.data",
     "src/tests/cmpxchg_prune_point.data",
     "src/tests/context_parameter.data",
     "src/tests/datadep_call_oob.data",
@@ -89,6 +90,7 @@ rustc_library("ebpf") {
     "src/tests/err_atomic_not_map_value.data",
     "src/tests/err_atomic_variable_offset.data",
     "src/tests/err_bounded_loop_oob_last_iteration.data",
+    "src/tests/err_cmpxchg_both_outcomes.data",
     "src/tests/err_context_parameter.data",
     "src/tests/err_infinite_loop_counter.data",
     "src/tests/err_infinite_loop_same_state.data",
@@ -123,6 +125,11 @@ rustc_library("ebpf") {
     "src/tests/ptr_sub_ptr_offset.data",
     "src/tests/range_narrowing_with_conditional_jump.data",
     "src/tests/read_only_helper.data",
+    "src/tests/releasable_compare.data",
+    "src/tests/releasable_compare_variable_offset.data",
+    "src/tests/releasable_free_offset.data",
+    "src/tests/releasable_sub_ptrs.data",
+    "src/tests/releasable_use_after_free_compare.data",
     "src/tests/releasable_use_after_free_helper.data",
     "src/tests/releasable_use_after_free_offset.data",
     "src/tests/releasable_use_after_free_offset_helper.data",
@@ -289,8 +296,7 @@ rustc_library("ebpf") {
     "//third_party/rust_crates:test-case",
   ]
   with_unit_tests = true
-  deps = []
-  deps += [
+  deps = [
     "//src/starnix/lib/linux_uapi",
     "//third_party/rust_crates:bitflags",
     "//third_party/rust_crates:byteorder",
@@ -299,7 +305,4 @@ rustc_library("ebpf") {
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:zerocopy",
   ]
-  if (is_fuchsia) {
-    deps += [ "//src/starnix/lib/starnix_sync" ]
-  }
 }

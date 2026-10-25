@@ -187,6 +187,7 @@ config("compiler") {
   asmflags = cflags
 }
 
+# LINT.IfChange(libcxx_include)
 # This is separate from :compiler so it can be removed from configs when also
 # adding :no-libc++-include.
 config("libc++-include") {
@@ -210,6 +211,8 @@ config("no-libc++-include") {
     cflags_cc = [ "-nostdinc++" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:libcxx_include)
 
 compiler_config("cpu_baseline") {
   if (current_cpu != "wasm32") {
@@ -303,6 +306,7 @@ config("toolchain_version_stamp") {
   rustflags = [ "--cfg=__rust_toolchain=\"${rustc_version_string}\"" ]
 }
 
+# LINT.IfChange(relative_paths)
 compiler_config("relative_paths") {
   if (is_gcc) {
     # Relativize paths without leaking the build output directory in debug info.
@@ -360,6 +364,8 @@ compiler_config("relative_paths") {
   # Available since: https://github.com/rust-lang/rust/pull/87320
   rustflags = [ "-Zremap-cwd-prefix=." ]
 }
+
+# LINT.ThenChange(BUILD.bazel:relative_paths)
 
 # LINT.IfChange(debug)
 config("debug") {
@@ -574,6 +580,7 @@ config("optimize_size_thinlto_clang") {
   }
 }
 
+# LINT.IfChange(optimize_sanitizer)
 config("optimize_sanitizer") {
   # Instrumentation adds overhead that is greatly improved by optimization.
   # -O1 is well-tested with the instrumentation modes and does not degrade the
@@ -583,17 +590,27 @@ config("optimize_sanitizer") {
   rustflags = [ "-Copt-level=1" ]
 }
 
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer)
+
 config("optimize_profile") {
   cflags = [ "-O1" ]
   ldflags = cflags
   rustflags = [ "-Copt-level=1" ]
 }
 
+# LINT.IfChange(optimize_coverage)
 config("optimize_coverage") {
   cflags = [ "-O1" ]
   ldflags = cflags
   rustflags = [ "-Copt-level=1" ]
 }
+
+# LINT.ThenChange(
+#   //build/bazel/templates/template.bazelrc:rust_coverage,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:coverage,
+# )
+
+# LINT.IfChange(debuginfo_configs)
 
 # Each of the debuginfo_$debuginfo configs below corresponds to a single setting
 # that controls the amount of debugging information used and is controlled by
@@ -635,6 +652,8 @@ config("debuginfo_debug") {
   rustflags = [ "-Cdebuginfo=2" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:debuginfo_configs)
+
 # LINT.IfChange(dwarf_version)
 config("dwarf_version") {
   cflags = [ "-gdwarf-${dwarf_version}" ]
@@ -672,6 +691,8 @@ config("compress_debuginfo") {
 #   BUILD.bazel:compress_debuginfo,
 #   compress_debuginfo_build_flags.bzl)
 
+# LINT.IfChange(default_debuginfo)
+
 compiler_config("default_debuginfo") {
   cflags = []
   linker_flags = []
@@ -698,6 +719,8 @@ compiler_config("default_debuginfo") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:default_debuginfo)
+
 config("default_frame_pointers") {
   if (enable_frame_pointers) {
     configs = [ ":frame_pointers" ]
@@ -706,6 +729,7 @@ config("default_frame_pointers") {
   }
 }
 
+# LINT.IfChange(frame_pointers)
 variant("frame_pointers") {
   cflags = [
     "-fno-omit-frame-pointer",
@@ -717,6 +741,8 @@ variant("frame_pointers") {
     defines = [ "WITH_FRAME_POINTERS=1" ]
   }
 }
+
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer)
 
 variant("no_frame_pointers") {
   cflags = [ "-fomit-frame-pointer" ]
@@ -844,7 +870,7 @@ config("default_warnings") {
   ]
 }
 
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl:default_warnings)
+# LINT.ThenChange(//build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:default_warnings)
 
 # Code that goes into the SDK or otherwise contributes to the SDK surface area
 # in source form will be compiled in many different environments. As such, we
@@ -1186,7 +1212,10 @@ config("Wno-unused-but-set-variable") {
 # that doesn't comply with.
 config("Wno-unused-but-set-global") {
   cflags = [ "-Wno-unused-but-set-global" ]
-  visibility = [ "//vendor/*" ]
+  visibility = [
+    "//third_party/sbase:*",
+    "//vendor/*",
+  ]
 }
 
 # Config to suppress Wbitwise-instead-of-logical warning in the third party code
@@ -1371,6 +1400,7 @@ config("all_source") {
   defines = [ "_ALL_SOURCE" ]
 }
 
+# LINT.IfChange(auto_var_init)
 config("auto_var_init") {
   if (!is_gcc) {
     # Automatically initialize variables with a pattern.
@@ -1378,6 +1408,9 @@ config("auto_var_init") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:auto_var_init)
+
+# LINT.IfChange(thread_safety_annotations)
 config("thread_safety_annotations") {
   if (!is_gcc) {
     cflags = [
@@ -1392,6 +1425,11 @@ config("thread_safety_annotations") {
     defines = [ "_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS=1" ]
   }
 }
+
+# LINT.ThenChange(
+#   BUILD.bazel:thread_safety_annotations,
+#   //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:thread_safety_annotations,
+# )
 
 # Generally, we don't want to opt out of thread safety annotations, but
 # occasionally, we get false positives, and need to work around them when
@@ -1594,6 +1632,7 @@ config("crel") {
   }
 }
 
+# LINT.IfChange(standalone)
 # This should be used by executables that avoid the normal libc dependencies.
 # These must also omit toolchain-provided instrumentation runtimes that will
 # themselves depend on libc.
@@ -1616,6 +1655,8 @@ config("standalone") {
     ldflags += [ "-unwindlib=none" ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:standalone)
 
 # Enable LLD's balanced partitioning for ordering function sections.
 compiler_config("bp-compression-sort") {

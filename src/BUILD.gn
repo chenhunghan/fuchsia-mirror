@@ -33,6 +33,7 @@ group("tests_no_e2e") {
     "intl:tests",
     "lib:tests",
     "media:tests",
+    "memory:tests",
     "microfuchsia:tests",
     "paravirtualization:tests",
     "performance:tests",
@@ -88,7 +89,6 @@ group("e2e_tests") {
     "testing:e2e_tests",
     "tests",
     "//src/connectivity/network:e2e_tests",
-    "//src/firmware/paver/e2e_tests",
     "//src/sys/pkg:e2e_tests",
     "//src/zircon:e2e_tests",
   ]

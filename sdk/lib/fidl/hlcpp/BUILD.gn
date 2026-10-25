@@ -6,7 +6,6 @@ import("//build/components.gni")
 import("//build/cpp/sdk_source_set.gni")
 import("//build/test.gni")
 import("//sdk/ctf/build/ctf.gni")
-import("//tools/fidl/gidl/gidl.gni")
 
 config("config") {
   include_dirs = [ "include" ]
@@ -62,7 +61,6 @@ hlcpp_bindings_libraries_visibility = [
   "//src/camera/bin/device_watcher:*",
   "//src/camera/bin/factory:*",
   "//src/camera/bin/virtual_camera:*",
-  "//src/connectivity/bluetooth/lib/fidl:*",
   "//src/connectivity/ethernet/drivers/asix-88179:*",
   "//src/connectivity/network/testing/netemul/network-context/fidl:*",
   "//src/connectivity/network/testing/netemul/sync-manager/fidl:*",

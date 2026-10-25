@@ -4,6 +4,7 @@
 
 #include "src/ui/lib/escher/impl/command_buffer.h"
 
+#include <algorithm>
 #include <memory_resource>
 
 #include "src/lib/fxl/macros.h"
@@ -17,6 +18,17 @@
 
 namespace escher {
 namespace impl {
+namespace {
+
+// Returns true if |a| and |b| refer to the same Semaphore instance or wrap duplicate handles to
+// the same imported Zircon kernel event (non-zero KOID). Unimported semaphores have
+// koid() == Semaphore::kInvalidKoid and only match by pointer identity.
+bool AreSemaphoresSame(const SemaphorePtr& a, const SemaphorePtr& b) {
+  FX_DCHECK(a && b);
+  return a == b || (b->koid() != Semaphore::kInvalidKoid && a->koid() == b->koid());
+}
+
+}  // namespace
 
 CommandBuffer::CommandBuffer(vk::Device device, vk::CommandBuffer command_buffer, vk::Fence fence,
                              vk::PipelineStageFlags pipeline_stage_mask, bool use_protected_memory)
@@ -103,25 +115,37 @@ vk::Result CommandBuffer::Wait(uint64_t nanoseconds) {
 
 void CommandBuffer::AddWaitSemaphore(SemaphorePtr semaphore, vk::PipelineStageFlags stage) {
   FX_DCHECK(is_active_);
-  if (semaphore) {
-    wait_semaphore_stages_.push_back(stage);
-    wait_semaphores_.push_back(std::move(semaphore));
+  if (!semaphore) {
+    return;
   }
+  FX_DCHECK(wait_semaphores_.size() == wait_semaphore_stages_.size());
+  for (size_t i = 0; i < wait_semaphores_.size(); ++i) {
+    if (AreSemaphoresSame(wait_semaphores_[i], semaphore)) {
+      // Vulkan binary semaphores are unsignaled by the first wait in a submission, so waiting on
+      // the same semaphore (or same underlying Zircon event) twice in one vk::SubmitInfo is
+      // invalid and can deadlock the queue. Coalesce duplicates by merging their stage masks.
+      wait_semaphore_stages_[i] |= stage;
+      return;
+    }
+  }
+  wait_semaphore_stages_.push_back(stage);
+  wait_semaphores_.push_back(std::move(semaphore));
 }
 
 void CommandBuffer::AddSignalSemaphore(SemaphorePtr semaphore) {
   FX_DCHECK(is_active_);
-  if (semaphore) {
-    if (ContainsSignalSemaphore(semaphore)) {
-      return;
-    }
+  if (semaphore && !ContainsSignalSemaphore(semaphore)) {
     signal_semaphores_.push_back(std::move(semaphore));
   }
 }
 
 bool CommandBuffer::ContainsSignalSemaphore(const SemaphorePtr& semaphore) const {
-  return std::find(signal_semaphores_.begin(), signal_semaphores_.end(), semaphore) !=
-         signal_semaphores_.end();
+  if (!semaphore) {
+    return false;
+  }
+  return std::ranges::any_of(signal_semaphores_, [&semaphore](const SemaphorePtr& existing) {
+    return AreSemaphoresSame(existing, semaphore);
+  });
 }
 
 void CommandBuffer::KeepAlive(const Resource* resource) {
@@ -398,7 +422,8 @@ void CommandBuffer::BeginRenderPass(vk::RenderPass render_pass,
 
 void CommandBuffer::EndRenderPass() { command_buffer_.endRenderPass(); }
 
-bool CommandBuffer::Retire() {
+bool CommandBuffer::Retire(CommandBufferFinishedCallback* out_callback) {
+  FX_DCHECK(out_callback);
   if (!is_active_) {
     // Submission failed, so proceed with cleanup.
     FX_DLOGS(INFO) << "CommandBuffer submission failed, proceeding with retirement";
@@ -416,18 +441,15 @@ bool CommandBuffer::Retire() {
   is_active_ = is_submitted_ = false;
   ESCHER_CHECKED_VK_RESULT(device_.resetFences(1, &fence_));
 
-  if (callback_) {
-    TRACE_DURATION("gfx", "escher::CommandBuffer::Retire::callback", "ptr", TA_POINTER(this));
-    callback_();
-    callback_ = nullptr;
-  }
-
   wait_semaphores_.clear();
   wait_semaphore_stages_.clear();
   signal_semaphores_.clear();
 
   auto result = command_buffer_.reset(vk::CommandBufferResetFlags());
   FX_DCHECK(result == vk::Result::eSuccess);
+
+  *out_callback = std::move(callback_);
+  callback_ = nullptr;
 
   return true;
 }

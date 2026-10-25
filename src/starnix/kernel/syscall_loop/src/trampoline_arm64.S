@@ -4,17 +4,11 @@
 
 #include <starnix_asm_utils/asm.h>
 
-FUNCTION(breakpoint_for_module_changes)
-  brk #0
-  ret
-END_FUNCTION(breakpoint_for_module_changes)
-
 //       fn restricted_enter_loop(
 //  x0    options: u32,
-//  x1    restricted_exit_callback: extern "C" fn(*mut RestrictedEnterContext<'_>, u64) -> bool,
-//  x2    restricted_exit_callback_context: *mut RestrictedEnterContext<'_>,
-//  x3    restricted_state: *mut zx::sys::zx_restricted_exception_t,
-//  x4    extended_pstate_ptr: *mut ExtendedPstatePointer,
+//  x1    restricted_exit_callback_context: *mut RestrictedEnterContext<'_>,
+//  x2    restricted_state: *mut zx::sys::zx_restricted_exception_t,
+//  x3    extended_pstate_ptr: *mut ExtendedPstatePointer,
 //  x0 ) -> zx::sys::zx_status_t;
 FUNCTION(restricted_enter_loop)
   // This function:
@@ -34,24 +28,26 @@ FUNCTION(restricted_enter_loop)
   // Save shadow call stack pointer and original options
   stp x0, x18, [sp, #-16]!   // Will be at [sp], #32
 
-  // Save restricted exit callback function and context
-  stp x1,  x2, [sp, #-16]!   // Will be at [sp], #16
+  // Save restricted exit callback context
+  str x1, [sp, #-16]!        // Will be at [sp], #16
 
   // Save address of restricted state and extended processor state mappings
-  stp x3,  x4, [sp, #-16]!   // Will be at [sp], #0
-
-  // Restore extended processor state for initial entry based on target CPSR mode.
-  // The restricted state CPSR register's bit 0x10 selects between aarch32 and aarch64 mode.
-  mov  x0, x4
-  ldrb w11, [x3, #34 * 8]
-  tbnz w11, #4, .Lrestore_initial_aarch32
-  bl   restore_extended_pstate
-  b    .restricted_enter_loop_top
-
-.Lrestore_initial_aarch32:
-  bl   restore_extended_aarch32_pstate
+  stp x2,  x3, [sp, #-16]!   // Will be at [sp], #0
 
 .restricted_enter_loop_top:
+  // Restore extended processor state based on target CPSR mode.
+  // The restricted state CPSR register's bit 0x10 selects between aarch32 and aarch64 mode.
+  ldr  x0, [sp, #8]
+  ldr  x10, [sp, #0]
+  ldrb w11, [x10, #34 * 8]
+  tbnz w11, #4, .Lrestore_aarch32
+  bl   restore_extended_pstate
+  b    .Lenter_restricted
+
+.Lrestore_aarch32:
+  bl   restore_extended_aarch32_pstate
+
+.Lenter_restricted:
   // Restore zx_restricted_enter options from stack
   ldr x0, [sp, #32]
 
@@ -180,8 +176,8 @@ FUNCTION(restricted_return_loop)
   // x2      extended_pstate_ptr: *mut ExtendedPstatePointer,
   // x0    ) -> bool
 
-  // Load callback context and function pointers stack
-  ldp x3, x0, [sp, #16]
+  // Load callback context pointer from stack
+  ldr x0, [sp, #16]
 
   // Restore reason code that we saved in x19 earlier.
   mov x1, x19
@@ -189,18 +185,14 @@ FUNCTION(restricted_return_loop)
   // Restore the extended pstate pointer
   ldr x2, [sp, #8]
 
-  // Call the callback
-  blr x3
+  // Call the callback directly to avoid indirect branch predictor overhead
+  bl restricted_exit_callback_c
 
   // Restore CFI state after callback
   .cfi_restore_state
 
   // Did the callback tell us to exit?
   cbz x0, .restricted_enter_loop_ret
-
-  // Restore extended processor state
-  ldr x0, [sp, #8]
-  bl restore_extended_pstate
 
   // Go back to the loop
   b .restricted_enter_loop_top
@@ -292,8 +284,8 @@ FUNCTION(restricted_return_loop_aarch32)
   // x2      extended_pstate_ptr: *mut ExtendedPstatePointer,
   // x0    ) -> bool
 
-  // Load callback context and function pointers stack
-  ldp x3, x0, [sp, #16]
+  // Load callback context pointer from stack
+  ldr x0, [sp, #16]
 
   // Restore reason code that we saved in x19 earlier.
   mov x1, x19
@@ -301,18 +293,14 @@ FUNCTION(restricted_return_loop_aarch32)
   // Load the extended pstate pointer
   ldr x2, [sp, #8]
 
-  // Call the callback.
-  blr x3
+  // Call the callback directly to avoid indirect branch predictor overhead.
+  bl restricted_exit_callback_c
 
   // Restore CFI state after callback
   .cfi_restore_state
 
   // Did the callback tell us to exit?
   cbz x0, .restricted_enter_loop_ret
-
-  // Restore extended processor state for aarch32
-  ldr x0, [sp, #8]
-  bl restore_extended_aarch32_pstate
 
   // Go back to the loop
   b .restricted_enter_loop_top

@@ -111,7 +111,9 @@ mod console_tests {
     };
     use core::ffi::CStr;
     use core::sync::atomic::{AtomicI32, Ordering};
-    use unittest::{assert_eq, expect_eq, expect_false, expect_lt, expect_ne, expect_true};
+    use unittest::{
+        assert_eq, assert_true, expect_eq, expect_false, expect_lt, expect_ne, expect_true,
+    };
     use zx_status::Status;
 
     // FFI imports.
@@ -304,16 +306,25 @@ mod console_tests {
     #[test]
     fn command_boot_test_success_test() {
         const MOCK_SUCCESS_STRING: &CStr = c"***Mock-boot-test-successful!***";
+        const MOCK_FAILURE_STRING: &CStr = c"***Mock-boot-test-failed!***";
 
         // Test success.
         console_run_script_locked("mock_success");
-        let res = boot_test_success(MOCK_SUCCESS_STRING);
+        let (res, output) =
+            capture_output_helper(|| boot_test_success(MOCK_SUCCESS_STRING, MOCK_FAILURE_STRING));
         expect_eq!(res, zx_status::sys::ZX_OK);
+        expect_true!(
+            output == c"*** Last script command result: 0 ***\n***Mock-boot-test-successful!***\n"
+        );
 
         // Test failure.
         let some_failure = console_run_script_locked("mock_failure");
-        let res = boot_test_success(MOCK_SUCCESS_STRING);
+        let (res, output) =
+            capture_output_helper(|| boot_test_success(MOCK_SUCCESS_STRING, MOCK_FAILURE_STRING));
         expect_eq!(res, some_failure);
+        expect_true!(
+            output == c"*** Last script command result: -10 ***\n***Mock-boot-test-failed!***\n"
+        );
 
         // Restore to success state.
         console_run_script_locked("mock_success");
@@ -631,6 +642,33 @@ mod console_tests {
         let res = unsafe { cb(1, core::ptr::null(), CMD_FLAG_PANIC) };
         expect_eq!(res, zx_status::sys::ZX_OK);
         expect_eq!(MOCK_PANIC_FLAGS.load(Ordering::Relaxed), CMD_FLAG_PANIC as i32);
+    }
+
+    /// test command visibility in Rust
+    #[test]
+    fn test_command_visibility_in_rust() {
+        // This test verifies that a command registered in Rust (via the `static_command!` macro)
+        // is correctly placed in the `.data.rel.ro.commands` linker section and is visible.
+        let mut found = false;
+        // SAFETY: `__start_commands` and `__stop_commands` bound the valid linker section of `Cmd`
+        // entries.
+        let commands = unsafe {
+            let start = &__start_commands as *const Cmd;
+            let stop = &__stop_commands as *const Cmd;
+            let len = stop.offset_from(start) as usize;
+            core::slice::from_raw_parts(start, len)
+        };
+
+        for cmd in commands {
+            if cmd.name() == "mock_success" {
+                found = true;
+                expect_true!(cmd.help() == "mock_success help");
+                expect_eq!(cmd.availability_mask, CMD_AVAIL_NORMAL);
+                break;
+            }
+        }
+
+        assert_true!(found);
     }
 
     // Verifies that the test command is registered correctly from the Rust side.

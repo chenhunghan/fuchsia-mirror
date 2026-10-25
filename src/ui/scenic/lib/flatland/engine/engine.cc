@@ -8,7 +8,6 @@
 #include <lib/async/cpp/time.h>
 #include <lib/syslog/cpp/macros.h>
 
-#include <array>
 #include <cstddef>
 #include <sstream>
 #include <string>
@@ -21,6 +20,7 @@
 #include "src/ui/scenic/lib/utils/check_is_on_thread.h"
 #include "src/ui/scenic/lib/utils/helpers.h"
 #include "src/ui/scenic/lib/utils/logging.h"
+#include "src/ui/scenic/lib/utils/pmr_stack_arena.h"
 
 // Hardcoded double buffering.
 // TODO(https://fxbug.dev/42156567): make this configurable.  Even fancier: is it worth considering
@@ -94,7 +94,7 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
     // `UpdateLinkWatchersAfterViewTreePublished()` observes an empty scene and the next frame
     // with a display performs a full rebuild.
     scene_state_.Clear();
-    SkipRender(std::move(callback));
+    SkipRender(frame_number, std::move(callback));
     return;
   }
 
@@ -156,7 +156,7 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
       it == seen_display_ids_.end() || !it->second) {
     FLATLAND_VERBOSE_LOG << "Engine::RenderScheduledFrame() frame_number=" << frame_number
                          << " skipped: display not yet added";
-    SkipRender(std::move(callback));
+    SkipRender(frame_number, std::move(callback));
     return;
   }
 
@@ -167,7 +167,7 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
     // LinkWatchers are still updated properly.
     FLATLAND_VERBOSE_LOG << "Engine::RenderScheduledFrame() frame_number=" << frame_number
                          << " skipped: display is dark";
-    SkipRender(std::move(callback));
+    SkipRender(frame_number, std::move(callback));
     return;
   }
 
@@ -175,14 +175,9 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
   // pre-reserve `kFrameLayerArenaCapacity` so the arena sees one allocation instead of wasting
   // stack buffer space on geometric growth.  Sized for more layers than a typical frame needs;
   // past that the arena falls back to the heap rather than failing.
-  // TODO(https://fxbug.dev/570155917): Avoid `-ftrivial-auto-var-init=pattern` overhead on PMR
-  // stack buffers.
   constexpr size_t kFrameLayerArenaCapacity = 128;
-  alignas(std::max_align_t) std::array<std::byte, kFrameLayerArenaCapacity * sizeof(ResolvedLayer)>
-      frame_layer_arena_buffer;
-  std::pmr::monotonic_buffer_resource frame_layer_arena(frame_layer_arena_buffer.data(),
-                                                        frame_layer_arena_buffer.size());
-  std::pmr::vector<ResolvedLayer> resolved_layers(&frame_layer_arena);
+  utils::PmrStackArena<kFrameLayerArenaCapacity * sizeof(ResolvedLayer)> frame_layer_arena;
+  std::pmr::vector<ResolvedLayer> resolved_layers(frame_layer_arena.resource());
   resolved_layers.reserve(kFrameLayerArenaCapacity);
   ComputeGlobalResolvedLayers(resolved_layers, scene_state_.resolved_layer_stacks,
                               scene_state_.snapshot.map);
@@ -214,7 +209,7 @@ void Engine::RenderScheduledFrame(uint64_t frame_number, zx::time presentation_t
   // invoke `callback` to continue the render loop.
   if (!first_frame_with_image_is_rendered_) {
     if (resolved_layers.empty()) {
-      SkipRender(std::move(callback));
+      SkipRender(frame_number, std::move(callback));
       return;
     }
     first_frame_with_image_is_rendered_ = true;
@@ -310,6 +305,8 @@ Renderables Engine::GetRenderables(const FlatlandDisplay& display) {
       ComputeGlobalResolvedLayers(scene_state.resolved_layer_stacks, scene_state.snapshot.map);
 
   CullLayersInPlace(&resolved_layers, hw_display->width_in_px(), hw_display->height_in_px());
+
+  flatland_compositor_->EnsureGpuImagesImported(resolved_layers);
 
   return resolved_layers;
 }
@@ -497,16 +494,14 @@ void Engine::SceneState::Clear() {
   cleared = true;
 }
 
-void Engine::SkipRender(scheduling::FramePresentedCallback callback) {
+void Engine::SkipRender(uint64_t frame_number, scheduling::FramePresentedCallback callback) {
   TRACE_DURATION("gfx", "flatland::Engine::SkipRender");
   utils::CheckIsOnMainThread();
 
-  const zx::time now = async::Now(async_get_default_dispatcher());
   auto fences = flatland_presenter_->TakeFences();
-  utils::SignalReleaseFences(fences.release_fences);
-  utils::SignalCounterFences(fences.release_counters, now);
-  utils::SignalCounterFences(fences.present_fences, now);
-  callback({.render_done_time = now, .actual_presentation_time = now});
+  flatland_compositor_->SkipFrame(frame_number, std::move(fences.release_fences),
+                                  std::move(fences.release_counters),
+                                  std::move(fences.present_fences), std::move(callback));
 }
 
 void Engine::AddDisplay(display::Display& display, uint32_t num_vmos) {

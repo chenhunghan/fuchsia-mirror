@@ -47,10 +47,13 @@ bool cpp_dispatcher_remove_observer(Dispatcher* dispatcher, SignalObserver* obse
 zx_status_t cpp_dispatcher_get_name(const Dispatcher* disp, char out_name[ZX_MAX_NAME_LEN]);
 zx_status_t cpp_dispatcher_set_name(Dispatcher* disp, const char* name, size_t len);
 uint32_t cpp_dispatcher_current_handle_count(const Dispatcher* disp);
+void cpp_dispatcher_increment_handle_count(Dispatcher* disp);
+bool cpp_dispatcher_decrement_handle_count(Dispatcher* disp);
 bool cpp_dispatcher_is_waitable(const Dispatcher* disp);
 void cpp_dispatcher_cancel(Dispatcher* disp, const void* handle);
 bool cpp_dispatcher_cancel_by_key(Dispatcher* disp, const void* handle, const void* port,
                                   uint64_t key);
+void cpp_dispatcher_set_owner(Dispatcher* disp, zx_koid_t new_owner);
 }
 
 template <typename T>
@@ -96,49 +99,53 @@ struct CanaryTag;
   }                                                                                    \
   void on_zero_handles() final { prefix##_on_zero_handles(this); }
 
-#define DECLARE_DISPTAG(T, E, M)                     \
-  class T;                                           \
-  template <>                                        \
-  struct DispatchTag<T> {                            \
-    static constexpr zx_obj_type_t ID = E;           \
-  };                                                 \
+#define DECLARE_DISPTAG(T, E)              \
+  class T;                                 \
+  template <>                              \
+  struct DispatchTag<T> {                  \
+    static constexpr zx_obj_type_t ID = E; \
+  };
+
+#define DECLARE_SOLO_DISPTAG(T, E, M)                \
+  DECLARE_DISPTAG(T, E)                              \
   template <>                                        \
   struct CanaryTag<T> {                              \
     static constexpr uint32_t magic = fbl::magic(M); \
   };
 
-DECLARE_DISPTAG(ProcessDispatcher, ZX_OBJ_TYPE_PROCESS, "PROC")
-DECLARE_DISPTAG(ThreadDispatcher, ZX_OBJ_TYPE_THREAD, "THRD")
-DECLARE_DISPTAG(VmObjectDispatcher, ZX_OBJ_TYPE_VMO, "VMOD")
-DECLARE_DISPTAG(ChannelDispatcher, ZX_OBJ_TYPE_CHANNEL, "CHAN")
-DECLARE_DISPTAG(EventDispatcher, ZX_OBJ_TYPE_EVENT, "EVTD")
-DECLARE_DISPTAG(PortDispatcher, ZX_OBJ_TYPE_PORT, "PORT")
-DECLARE_DISPTAG(InterruptDispatcher, ZX_OBJ_TYPE_INTERRUPT, "INTD")
-DECLARE_DISPTAG(LogDispatcher, ZX_OBJ_TYPE_LOG, "LOGD")
-DECLARE_DISPTAG(SocketDispatcher, ZX_OBJ_TYPE_SOCKET, "SOCK")
-DECLARE_DISPTAG(ResourceDispatcher, ZX_OBJ_TYPE_RESOURCE, "RSRD")
-DECLARE_DISPTAG(EventPairDispatcher, ZX_OBJ_TYPE_EVENTPAIR, "EPAI")
-DECLARE_DISPTAG(JobDispatcher, ZX_OBJ_TYPE_JOB, "JOBD")
-DECLARE_DISPTAG(VmAddressRegionDispatcher, ZX_OBJ_TYPE_VMAR, "VARD")
-DECLARE_DISPTAG(FifoDispatcher, ZX_OBJ_TYPE_FIFO, "FIFO")
-DECLARE_DISPTAG(GuestDispatcher, ZX_OBJ_TYPE_GUEST, "GSTD")
-DECLARE_DISPTAG(VcpuDispatcher, ZX_OBJ_TYPE_VCPU, "VCPU")
-DECLARE_DISPTAG(TimerDispatcher, ZX_OBJ_TYPE_TIMER, "TIMR")
-DECLARE_DISPTAG(IommuDispatcher, ZX_OBJ_TYPE_IOMMU, "IOMM")
-DECLARE_DISPTAG(BusTransactionInitiatorDispatcher, ZX_OBJ_TYPE_BTI, "BTID")
-DECLARE_DISPTAG(ProfileDispatcher, ZX_OBJ_TYPE_PROFILE, "PROF")
-DECLARE_DISPTAG(PinnedMemoryTokenDispatcher, ZX_OBJ_TYPE_PMT, "PIMT")
-DECLARE_DISPTAG(SuspendTokenDispatcher, ZX_OBJ_TYPE_SUSPEND_TOKEN, "SUTD")
-DECLARE_DISPTAG(PagerDispatcher, ZX_OBJ_TYPE_PAGER, "PGRD")
-DECLARE_DISPTAG(ExceptionDispatcher, ZX_OBJ_TYPE_EXCEPTION, "EXCD")
-DECLARE_DISPTAG(ClockDispatcher, ZX_OBJ_TYPE_CLOCK, "CLOK")
-DECLARE_DISPTAG(StreamDispatcher, ZX_OBJ_TYPE_STREAM, "STRM")
-DECLARE_DISPTAG(MsiDispatcher, ZX_OBJ_TYPE_MSI, "MSID")
-DECLARE_DISPTAG(IoBufferDispatcher, ZX_OBJ_TYPE_IOB, "IOBD")
-DECLARE_DISPTAG(CounterDispatcher, ZX_OBJ_TYPE_COUNTER, "CNTD")
-DECLARE_DISPTAG(IoBufferSharedRegionDispatcher, ZX_OBJ_TYPE_IOB_SHARED_REGION, "IOSR")
-DECLARE_DISPTAG(SamplerDispatcher, ZX_OBJ_TYPE_SAMPLER, "SMPL")
+DECLARE_SOLO_DISPTAG(ProcessDispatcher, ZX_OBJ_TYPE_PROCESS, "PROC")
+DECLARE_DISPTAG(ThreadDispatcher, ZX_OBJ_TYPE_THREAD)
+DECLARE_DISPTAG(VmObjectDispatcher, ZX_OBJ_TYPE_VMO)
+DECLARE_DISPTAG(ChannelDispatcher, ZX_OBJ_TYPE_CHANNEL)
+DECLARE_DISPTAG(EventDispatcher, ZX_OBJ_TYPE_EVENT)
+DECLARE_SOLO_DISPTAG(PortDispatcher, ZX_OBJ_TYPE_PORT, "PORT")
+DECLARE_DISPTAG(InterruptDispatcher, ZX_OBJ_TYPE_INTERRUPT)
+DECLARE_DISPTAG(LogDispatcher, ZX_OBJ_TYPE_LOG)
+DECLARE_DISPTAG(SocketDispatcher, ZX_OBJ_TYPE_SOCKET)
+DECLARE_DISPTAG(ResourceDispatcher, ZX_OBJ_TYPE_RESOURCE)
+DECLARE_DISPTAG(EventPairDispatcher, ZX_OBJ_TYPE_EVENTPAIR)
+DECLARE_SOLO_DISPTAG(JobDispatcher, ZX_OBJ_TYPE_JOB, "JOBD")
+DECLARE_DISPTAG(VmAddressRegionDispatcher, ZX_OBJ_TYPE_VMAR)
+DECLARE_DISPTAG(FifoDispatcher, ZX_OBJ_TYPE_FIFO)
+DECLARE_DISPTAG(GuestDispatcher, ZX_OBJ_TYPE_GUEST)
+DECLARE_DISPTAG(VcpuDispatcher, ZX_OBJ_TYPE_VCPU)
+DECLARE_DISPTAG(TimerDispatcher, ZX_OBJ_TYPE_TIMER)
+DECLARE_DISPTAG(IommuDispatcher, ZX_OBJ_TYPE_IOMMU)
+DECLARE_DISPTAG(BusTransactionInitiatorDispatcher, ZX_OBJ_TYPE_BTI)
+DECLARE_DISPTAG(ProfileDispatcher, ZX_OBJ_TYPE_PROFILE)
+DECLARE_DISPTAG(PinnedMemoryTokenDispatcher, ZX_OBJ_TYPE_PMT)
+DECLARE_DISPTAG(SuspendTokenDispatcher, ZX_OBJ_TYPE_SUSPEND_TOKEN)
+DECLARE_DISPTAG(PagerDispatcher, ZX_OBJ_TYPE_PAGER)
+DECLARE_DISPTAG(ExceptionDispatcher, ZX_OBJ_TYPE_EXCEPTION)
+DECLARE_DISPTAG(ClockDispatcher, ZX_OBJ_TYPE_CLOCK)
+DECLARE_DISPTAG(StreamDispatcher, ZX_OBJ_TYPE_STREAM)
+DECLARE_DISPTAG(MsiDispatcher, ZX_OBJ_TYPE_MSI)
+DECLARE_DISPTAG(IoBufferDispatcher, ZX_OBJ_TYPE_IOB)
+DECLARE_DISPTAG(CounterDispatcher, ZX_OBJ_TYPE_COUNTER)
+DECLARE_DISPTAG(IoBufferSharedRegionDispatcher, ZX_OBJ_TYPE_IOB_SHARED_REGION)
+DECLARE_DISPTAG(SamplerDispatcher, ZX_OBJ_TYPE_SAMPLER)
 
+#undef DECLARE_SOLO_DISPTAG
 #undef DECLARE_DISPTAG
 
 extern "C" {
@@ -170,9 +177,6 @@ zx_status_t cpp_dispatcher_make_port_observer(Dispatcher* disp, uint32_t options
 // It implements Recyclable because upon final Release() on the RefPtr
 // it might be necessary to implement a destruction pattern that avoids
 // deep recursion since the kernel stack is very limited.
-//
-// You don't derive directly from this class; instead derive
-// from SoloDispatcher or PeeredDispatcher.
 class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
                    private fbl::Recyclable<Dispatcher> {
  public:
@@ -186,8 +190,6 @@ class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
         static_cast<const fbl::RefCountedUpgradeable<Dispatcher>*>(this));
   }
 
-  // Dispatchers are either Solo or Peered. They handle refcounting
-  // and locking differently.
   virtual ~Dispatcher();
 
   zx_koid_t get_koid() const { return koid_; }
@@ -323,9 +325,6 @@ class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
   // By the time the result of the function is inspected, the signals may have already
   // changed. Typically should only be used for tests or logging.
   zx_signals_t PollSignals() const TA_EXCL(get_lock());
-
-  // Returns the information for zx_object_get_info(ZX_INFO_HANDLE_BASIC,..).
-  zx_info_handle_basic_t GetHandleInfo(zx_rights_t rights);
 
  protected:
   // At construction, the object is asserting |signals|.
@@ -483,146 +482,11 @@ class SoloDispatcher : public Dispatcher {
   mutable DECLARE_CRITICAL_MUTEX(SoloDispatcher, Flags) lock_;
 };
 
-// PeeredDispatchers have opposing endpoints to coordinate state
-// with. For example, writing into one endpoint of a Channel needs to
-// modify zx_signals_t state (for the readability bit) on the opposite
-// side. To coordinate their state, they share a mutex, which is held
-// by the PeerHolder. Both endpoints have a RefPtr back to the
-// PeerHolder; no one else ever does.
-
-// Thus creating a pair of peered objects will typically look
-// something like
-//     // Make the two RefPtrs for each endpoint's handle to the mutex.
-//     auto holder0 = AdoptRef(new PeerHolder<Foo>(...));
-//     auto holder1 = peer_holder0;
-//     // Create the opposing sides.
-//     auto foo0 = AdoptRef(new Foo(ktl::move(holder0, ...));
-//     auto foo1 = AdoptRef(new Foo(ktl::move(holder1, ...));
-//     // Initialize the opposing sides, teaching them about each other.
-//     foo0->Init(&foo1);
-//     foo1->Init(&foo0);
-
-// A PeeredDispatcher object, in its |on_zero_handles| call must clear
-// out its peer's |peer_| field. This is needed to avoid leaks, and to
-// ensure that |user_signal| can correctly report ZX_ERR_PEER_CLOSED.
-
-// TODO(kulakowski) We should investigate turning this into one
-// allocation. This would mean PeerHolder would have two EndPoint
-// members, and that PeeredDispatcher would have custom refcounting.
-template <typename Endpoint, lockdep::LockFlags Flags = lockdep::LockFlagsNone>
-class PeerHolder : public fbl::RefCounted<PeerHolder<Endpoint>> {
- public:
-  PeerHolder() = default;
-  ~PeerHolder() = default;
-
-  Lock<CriticalMutex>* get_lock() const { return &lock_; }
-
-  // See |SoloDispatcher::lock_| for explanation of why this is a CriticalMutex.
-  mutable DECLARE_CRITICAL_MUTEX(PeerHolder, Flags) lock_;
-};
-
-template <typename Self, zx_rights_t def_rights, zx_signals_t extra_signals = 0u,
-          lockdep::LockFlags Flags = lockdep::LockFlagsNone>
-class PeeredDispatcher : public Dispatcher {
- public:
-  static constexpr zx_rights_t default_rights() { return def_rights; }
-
-  // At construction, the object is asserting |signals|.
-  explicit PeeredDispatcher(fbl::RefPtr<PeerHolder<Self, Flags>> holder, zx_signals_t signals = 0u)
-      : Dispatcher(signals), holder_(ktl::move(holder)) {}
-  virtual ~PeeredDispatcher() = default;
-
-  zx_koid_t get_related_koid() const final { return peer_koid_; }
-  bool is_waitable() const final { return default_rights() & ZX_RIGHT_WAIT; }
-
-  zx_status_t user_signal_self(uint32_t clear_mask,
-                               uint32_t set_mask) final TA_NO_THREAD_SAFETY_ANALYSIS {
-    auto allowed_signals = ZX_USER_SIGNAL_ALL | extra_signals;
-    if ((set_mask & ~allowed_signals) || (clear_mask & ~allowed_signals))
-      return ZX_ERR_INVALID_ARGS;
-
-    Guard<CriticalMutex> guard{get_lock()};
-
-    UpdateStateLocked(clear_mask, set_mask);
-    return ZX_OK;
-  }
-
-  zx_status_t user_signal_peer(uint32_t clear_mask,
-                               uint32_t set_mask) final TA_NO_THREAD_SAFETY_ANALYSIS {
-    auto allowed_signals = ZX_USER_SIGNAL_ALL | extra_signals;
-    if ((set_mask & ~allowed_signals) || (clear_mask & ~allowed_signals))
-      return ZX_ERR_INVALID_ARGS;
-
-    Guard<CriticalMutex> guard{get_lock()};
-    // object_signal() may race with handle_close() on another thread.
-    if (!peer_)
-      return ZX_ERR_PEER_CLOSED;
-    peer_->UpdateStateLocked(clear_mask, set_mask);
-    return ZX_OK;
-  }
-
-  // All subclasses of PeeredDispatcher must implement a public
-  // |void on_zero_handles_locked()|. The peer lifetime management
-  // (i.e. the peer zeroing) is centralized here.
-  void on_zero_handles() final TA_NO_THREAD_SAFETY_ANALYSIS {
-    Guard<CriticalMutex> guard{get_lock()};
-    auto peer = ktl::move(peer_);
-    static_cast<Self*>(this)->on_zero_handles_locked();
-
-    // This is needed to avoid leaks, and to ensure that
-    // |user_signal| can correctly report ZX_ERR_PEER_CLOSED.
-    if (peer != nullptr) {
-      // This defeats the lock analysis in the usual way: it
-      // can't reason that the peers' get_lock() calls alias.
-      peer->peer_.reset();
-      static_cast<Self*>(peer.get())->OnPeerZeroHandlesLocked();
-    }
-  }
-
-  // Returns true if the peer has closed. Once the peer has closed it
-  // will never re-open.
-  bool PeerHasClosed() const {
-    Guard<CriticalMutex> guard{get_lock()};
-    return peer_ == nullptr;
-  }
-
- protected:
-  Lock<CriticalMutex>* get_lock() const final { return holder_->get_lock(); }
-
-  // Initialize this dispatcher's peer field.
-  //
-  // This method is logically part of the class constructor and must be called exactly once, during
-  // initialization, prior to any other thread obtaining a reference to the object.  These
-  // constraints allow for an optimization where fields are accessed without acquiring the lock,
-  // hence the TA_NO_THREAD_SAFETY_ANALYSIS annotation.
-  void InitPeer(fbl::RefPtr<Self> peer) TA_NO_THREAD_SAFETY_ANALYSIS {
-    DEBUG_ASSERT(!peer_);
-    DEBUG_ASSERT(peer_koid_ == ZX_KOID_INVALID);
-    peer_ = ktl::move(peer);
-    peer_koid_ = peer_->get_koid();
-  }
-
-  const fbl::RefPtr<Self>& peer() const TA_REQ(get_lock()) { return peer_; }
-  zx_koid_t peer_koid() const { return peer_koid_; }
-
-  const fbl::Canary<CanaryTag<Self>::magic> canary_;
-
- private:
-  fbl::RefPtr<Self> peer_ TA_GUARDED(get_lock());
-  // After InitPeer is called, this field is logically const.
-  zx_koid_t peer_koid_{ZX_KOID_INVALID};
-
-  const fbl::RefPtr<PeerHolder<Self, Flags>> holder_;
-};
-
 // DownCastDispatcher checks if a RefPtr<Dispatcher> points to a
 // dispatcher of a given dispatcher subclass T and, if so, moves the
 // reference to a RefPtr<T>, otherwise it leaves the
 // RefPtr<Dispatcher> alone.  Must be called with a pointer to a valid
 // (non-null) dispatcher.
-
-// Note that the Dispatcher -> Dispatcher versions come up in generic
-// code, and so aren't totally vacuous.
 
 // Dispatcher -> FooDispatcher
 template <typename T>
@@ -630,27 +494,6 @@ fbl::RefPtr<T> DownCastDispatcher(fbl::RefPtr<Dispatcher>* disp) {
   return (likely(DispatchTag<T>::ID == (*disp)->get_type()))
              ? fbl::RefPtr<T>::Downcast(ktl::move(*disp))
              : nullptr;
-}
-
-// Dispatcher -> Dispatcher
-template <>
-inline fbl::RefPtr<Dispatcher> DownCastDispatcher(fbl::RefPtr<Dispatcher>* disp) {
-  return ktl::move(*disp);
-}
-
-// const Dispatcher -> const FooDispatcher
-template <typename T>
-fbl::RefPtr<T> DownCastDispatcher(fbl::RefPtr<const Dispatcher>* disp) {
-  static_assert(ktl::is_const<T>::value, "");
-  return (likely(DispatchTag<typename ktl::remove_const<T>::type>::ID == (*disp)->get_type()))
-             ? fbl::RefPtr<T>::Downcast(ktl::move(*disp))
-             : nullptr;
-}
-
-// const Dispatcher -> const Dispatcher
-template <>
-inline fbl::RefPtr<const Dispatcher> DownCastDispatcher(fbl::RefPtr<const Dispatcher>* disp) {
-  return ktl::move(*disp);
 }
 
 // The same, but for Dispatcher* and FooDispatcher* instead of RefPtr.
@@ -661,12 +504,6 @@ T* DownCastDispatcher(Dispatcher* disp) {
   return (likely(DispatchTag<T>::ID == disp->get_type())) ? static_cast<T*>(disp) : nullptr;
 }
 
-// Dispatcher -> Dispatcher
-template <>
-inline Dispatcher* DownCastDispatcher(Dispatcher* disp) {
-  return disp;
-}
-
 // const Dispatcher -> const FooDispatcher
 template <typename T>
 const T* DownCastDispatcher(const Dispatcher* disp) {
@@ -674,12 +511,6 @@ const T* DownCastDispatcher(const Dispatcher* disp) {
   return (likely(DispatchTag<typename ktl::remove_const<T>::type>::ID == disp->get_type()))
              ? static_cast<const T*>(disp)
              : nullptr;
-}
-
-// const Dispatcher -> const Dispatcher
-template <>
-inline const Dispatcher* DownCastDispatcher(const Dispatcher* disp) {
-  return disp;
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_DISPATCHER_H_

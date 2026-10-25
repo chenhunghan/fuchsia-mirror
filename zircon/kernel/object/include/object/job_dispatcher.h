@@ -25,8 +25,6 @@
 
 #include "zircon/syscalls/object.h"
 
-class JobNode;
-
 // Job signal that is active when a job has no children (i.e., no child jobs and no child
 // processes).
 //
@@ -307,10 +305,6 @@ class JobDispatcher final
 const fbl::RefPtr<JobDispatcher>& GetRootJobDispatcher();
 const Handle& GetRootJobHandle();
 
-// Start the RootJobObserver. Must be called after the root job has at
-// least one child process or child job.
-void StartRootJobObserver();
-
 extern "C" {
 bool cpp_job_dispatcher_is_root(const JobDispatcher* job);
 zx_status_t cpp_job_dispatcher_create(uint32_t flags, JobDispatcher* parent,
@@ -327,11 +321,8 @@ zx_status_t cpp_job_dispatcher_set_timer_slack_policy(JobDispatcher* job,
 JobDispatcher* cpp_job_dispatcher_get_root_job();
 const Handle* cpp_job_dispatcher_get_root_job_handle();
 JobDispatcher* cpp_job_dispatcher_create_root_job();
-JobDispatcher* cpp_job_dispatcher_parent(const JobDispatcher* job);
-uint32_t cpp_job_dispatcher_max_height(const JobDispatcher* job);
 bool cpp_job_dispatcher_kill(JobDispatcher* job, int64_t return_code);
 void cpp_job_dispatcher_set_kill_on_oom(JobDispatcher* job, bool value);
-bool cpp_job_dispatcher_get_kill_on_oom(const JobDispatcher* job);
 bool cpp_job_dispatcher_kill_job_with_kill_on_oom(JobDispatcher* job);
 void cpp_job_dispatcher_get_info(const JobDispatcher* job, zx_info_job_t* info_out);
 zx_info_task_runtime_t cpp_job_dispatcher_get_runtime_stats(const JobDispatcher* job);

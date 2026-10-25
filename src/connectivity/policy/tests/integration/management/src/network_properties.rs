@@ -9,7 +9,6 @@ use fidl::endpoints::create_proxy;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
-use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_net_root as fnet_root;
 use fidl_fuchsia_net_routes as fnet_routes;
@@ -25,7 +24,7 @@ use futures::{FutureExt as _, SinkExt as _, StreamExt as _};
 use log::info;
 use net_declare::fidl_ip_v6;
 use net_types::ip::{Ip, Ipv4};
-use netstack_testing_common::realms::{self, Manager, ManagerConfig, SocketProxyType};
+use netstack_testing_common::realms::{self, ManagerConfig, SocketProxyType};
 use netstack_testing_common::{
     ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT, ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT,
     wait_for_component_stopped,
@@ -56,12 +55,12 @@ impl TakeNetwork for fnp_properties::NetworksWatchDefaultResponse {
     }
 }
 
-fn network(network_id: u32, mark: Option<u32>) -> fnp_socketproxy::Network {
-    fnp_socketproxy::Network {
+fn network(network_id: u32, mark: Option<u32>) -> fnp_properties::Network {
+    fnp_properties::Network {
         network_id: Some(network_id),
-        info: Some(fnp_socketproxy::NetworkInfo::Starnix(fnp_socketproxy::StarnixNetworkInfo {
-            mark: mark,
-            handle: None,
+        info: Some(fnp_properties::NetworkInfo::Starnix(fnp_properties::StarnixNetworkInfo {
+            mark,
+            handle: Some(network_id.into()),
             ..Default::default()
         })),
         ..Default::default()
@@ -174,11 +173,10 @@ async fn watch_default_and_record_properties<F, R>(
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_track_socket_marks<M: Manager>(name: &str) {
+async fn test_track_socket_marks(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, _>(
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
@@ -216,7 +214,7 @@ async fn test_track_socket_marks<M: Manager>(name: &str) {
 
                 let test = async move {
                     let socket_proxy = realm
-                        .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                        .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                             realms::constants::fake_socket_proxy::COMPONENT_NAME,
                         )
                         .expect("failed to connect to FakeSocketProxy");
@@ -310,8 +308,7 @@ async fn test_track_socket_marks<M: Manager>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Error> {
+async fn test_track_dns_changes(name: &str) -> Result<(), anyhow::Error> {
     const NDP_DNS_SERVER1: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::1");
     const NDP_DNS_SERVER2: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::2");
     const NDP_DNS_SERVER3: fnet::Ipv6Address = fidl_ip_v6!("2001:db8::3");
@@ -320,31 +317,24 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
     const DNS_SERVER_LIST: [fnet::Ipv6Address; 3] =
         [NDP_DNS_SERVER1, NDP_DNS_SERVER2, NDP_DNS_SERVER3];
 
-    let _if_name = with_netcfg_owned_device::<M, _>(
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _test_network, _interface_state, realm, _sandbox| {
             async move {
                 async fn update_dns(
-                    socket_proxy: &fnp_socketproxy::NetworkRegistryProxy,
+                    socket_proxy: &fnp_properties::NetworkRegistryProxy,
                     addresses: &[fnet::Ipv6Address],
                 ) {
                     socket_proxy
-                        .update(&fnp_socketproxy::Network {
-                            network_id: Some(TEST_NETWORK_ID),
-                            dns_servers: Some(fnp_socketproxy::NetworkDnsServers {
+                        .update(&fnp_properties::Network {
+                            dns_servers: Some(fnp_properties::NetworkDnsServers {
                                 v6: Some(addresses.to_vec()),
                                 v4: Some(vec![]),
                                 ..Default::default()
                             }),
-                            info: Some(fnp_socketproxy::NetworkInfo::Starnix(
-                                fnp_socketproxy::StarnixNetworkInfo {
-                                    mark: Some(123),
-                                    ..Default::default()
-                                },
-                            )),
-                            ..Default::default()
+                            ..network(TEST_NETWORK_ID, Some(123))
                         })
                         .await
                         .expect("fidl error")
@@ -359,7 +349,7 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
                 .fuse();
                 let mut wait_for_netmgr = pin!(wait_for_netmgr);
                 let socket_proxy = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy");
@@ -525,16 +515,15 @@ async fn test_track_dns_changes<M: Manager>(name: &str) -> Result<(), anyhow::Er
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_token_correlation<M: Manager>(name: &str) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_token_correlation(name: &str) -> Result<(), anyhow::Error> {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let socket_proxy = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy");
@@ -628,18 +617,15 @@ const TEST_NETWORK_ID_2: u32 = 3;
 const TEST_MARK_2: u32 = 456;
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_registry_dns_propagation<M: Manager>(
-    name: &str,
-) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_registry_dns_propagation(name: &str) -> Result<(), anyhow::Error> {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::netcfg::COMPONENT_NAME,
                     )
                     .expect("failed to connect to Netcfg NetworkRegistry");
@@ -655,20 +641,13 @@ async fn test_network_registry_dns_propagation<M: Manager>(
 
                 // Add the first delegated network.
                 delegated_networks
-                    .add(&fnp_socketproxy::Network {
-                        network_id: Some(TEST_NETWORK_ID),
-                        info: Some(fnp_socketproxy::NetworkInfo::Starnix(
-                            fnp_socketproxy::StarnixNetworkInfo {
-                                mark: Some(TEST_MARK),
-                                ..Default::default()
-                            },
-                        )),
-                        dns_servers: Some(fnp_socketproxy::NetworkDnsServers {
+                    .add(&fnp_properties::Network {
+                        dns_servers: Some(fnp_properties::NetworkDnsServers {
                             v6: Some(vec![NDP_DNS_SERVER]),
                             v4: Some(vec![]),
                             ..Default::default()
                         }),
-                        ..Default::default()
+                        ..network(TEST_NETWORK_ID, Some(TEST_MARK))
                     })
                     .await
                     .expect("fidl error")
@@ -683,20 +662,13 @@ async fn test_network_registry_dns_propagation<M: Manager>(
 
                 // Add second delegated network.
                 delegated_networks
-                    .add(&fnp_socketproxy::Network {
-                        network_id: Some(TEST_NETWORK_ID_2),
-                        info: Some(fnp_socketproxy::NetworkInfo::Starnix(
-                            fnp_socketproxy::StarnixNetworkInfo {
-                                mark: Some(TEST_MARK_2),
-                                ..Default::default()
-                            },
-                        )),
-                        dns_servers: Some(fnp_socketproxy::NetworkDnsServers {
+                    .add(&fnp_properties::Network {
+                        dns_servers: Some(fnp_properties::NetworkDnsServers {
                             v6: Some(vec![NDP_DNS_SERVER_2]),
                             v4: Some(vec![]),
                             ..Default::default()
                         }),
-                        ..Default::default()
+                        ..network(TEST_NETWORK_ID_2, Some(TEST_MARK_2))
                     })
                     .await
                     .expect("fidl error")
@@ -758,16 +730,15 @@ async fn test_network_registry_dns_propagation<M: Manager>(
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_registry_socket_marks_propagation(name: &str) {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::netcfg::COMPONENT_NAME,
                     )
                     .expect("failed to connect to Netcfg NetworkRegistry");
@@ -905,6 +876,19 @@ async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) 
                     Ok(Err(fnp_properties::WatchError::InvalidNetworkToken))
                 );
 
+                // Even though TEST_NETWORK_ID is no longer the default network,
+                // PrivilegedNetworkLookup.Lookup can still obtain a valid NetworkToken for
+                // it by its Starnix handle, which WatchProperties accepts.
+                let privileged_lookup = realm
+                    .connect_to_protocol::<fnp_properties::PrivilegedNetworkLookupMarker>()
+                    .expect("failed to connect to PrivilegedNetworkLookup");
+                let looked_up_token = privileged_lookup
+                    .lookup(&fnp_properties::LookupRequest::StarnixHandle(TEST_NETWORK_ID.into()))
+                    .await
+                    .expect("fidl error")
+                    .expect("failed to lookup non-default network");
+                assert_matches!(watch_properties(&networks, &looked_up_token).await, Ok(Ok(_)));
+
                 // Remove all the networks.
                 delegated_networks
                     .set_default(&fposix_socket::OptionalUint32::Unset(fposix_socket::Empty))
@@ -917,6 +901,17 @@ async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) 
                     .await
                     .expect("fidl error")
                     .expect("failed to remove network 1");
+
+                // Once TEST_NETWORK_ID is removed, Lookup returns NotFound.
+                assert_matches!(
+                    privileged_lookup
+                        .lookup(&fnp_properties::LookupRequest::StarnixHandle(
+                            TEST_NETWORK_ID.into(),
+                        ))
+                        .await
+                        .expect("fidl error"),
+                    Err(fnp_properties::LookupError::NotFound)
+                );
 
                 delegated_networks
                     .remove(TEST_NETWORK_ID_2)
@@ -931,18 +926,15 @@ async fn test_network_registry_socket_marks_propagation<M: Manager>(name: &str) 
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_registry_fuchsia_priority<M: Manager>(
-    name: &str,
-) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_registry_fuchsia_priority(name: &str) -> Result<(), anyhow::Error> {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy NetworkRegistry");
@@ -1081,18 +1073,15 @@ async fn test_network_registry_fuchsia_priority<M: Manager>(
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_token_peer_closed_on_removal<M: Manager>(
-    name: &str,
-) -> Result<(), anyhow::Error> {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_token_peer_closed_on_removal(name: &str) -> Result<(), anyhow::Error> {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy NetworkRegistry");
@@ -1184,11 +1173,10 @@ async fn test_network_token_peer_closed_on_removal<M: Manager>(
 
 /// Tests that `PropertyWatcher` tracks DNS configuration changes when the default network switches.
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
+async fn test_track_dns_changes_default_switch(name: &str) {
     use fnp_properties::{PropertyInterest, PropertyUpdate};
 
-    let _if_name = with_netcfg_owned_device::<M, _>(
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::None, ..Default::default() },
@@ -1231,7 +1219,7 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
 
                 let test = async move {
                     let delegated_networks = realm
-                        .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                        .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                             realms::constants::netcfg::COMPONENT_NAME,
                         )
                         .expect("failed to connect to Netcfg NetworkRegistry");
@@ -1242,20 +1230,13 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
                     // Add a network with DNS_1 and set it as default. The watcher should
                     // emit DNS_1.
                     delegated_networks
-                        .add(&fnp_socketproxy::Network {
-                            network_id: Some(1),
-                            info: Some(fnp_socketproxy::NetworkInfo::Starnix(
-                                fnp_socketproxy::StarnixNetworkInfo {
-                                    mark: Some(123),
-                                    ..Default::default()
-                                },
-                            )),
-                            dns_servers: Some(fnp_socketproxy::NetworkDnsServers {
+                        .add(&fnp_properties::Network {
+                            dns_servers: Some(fnp_properties::NetworkDnsServers {
                                 v6: Some(vec![DNS_1]),
                                 v4: Some(vec![]),
                                 ..Default::default()
                             }),
-                            ..Default::default()
+                            ..network(1, Some(123))
                         })
                         .await
                         .expect("fidl error")
@@ -1270,20 +1251,13 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
                     // Add a network with DNS_2 and set it as default. The watcher should
                     // emit DNS_2.
                     delegated_networks
-                        .add(&fnp_socketproxy::Network {
-                            network_id: Some(2),
-                            info: Some(fnp_socketproxy::NetworkInfo::Starnix(
-                                fnp_socketproxy::StarnixNetworkInfo {
-                                    mark: Some(456),
-                                    ..Default::default()
-                                },
-                            )),
-                            dns_servers: Some(fnp_socketproxy::NetworkDnsServers {
+                        .add(&fnp_properties::Network {
+                            dns_servers: Some(fnp_properties::NetworkDnsServers {
                                 v6: Some(vec![DNS_2]),
                                 v4: Some(vec![]),
                                 ..Default::default()
                             }),
-                            ..Default::default()
+                            ..network(2, Some(456))
                         })
                         .await
                         .expect("fidl error")
@@ -1382,16 +1356,15 @@ async fn test_track_dns_changes_default_switch<M: Manager>(name: &str) {
 
 /// Tests that removing a network while a client is watching properties emits `NETWORK_GONE`.
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_network_removal_reports_network_gone<M: Manager>(name: &str) {
-    let _if_name = with_netcfg_owned_device::<M, _>(
+async fn test_network_removal_reports_network_gone(name: &str) {
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs { socket_proxy_type: SocketProxyType::Fake, ..Default::default() },
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy NetworkRegistry");
@@ -1524,12 +1497,11 @@ async fn test_network_removal_reports_network_gone<M: Manager>(name: &str) {
 }
 
 #[netstack_test]
-#[variant(M, Manager)]
-async fn test_reachability_monitor_default_network_validation<M: Manager>(name: &str) {
+async fn test_reachability_monitor_default_network_validation(name: &str) {
     const TEST_NETWORK_ID: u32 = 123;
     const TEST_MARK: u32 = 321;
 
-    let _if_name = with_netcfg_owned_device::<M, _>(
+    let _if_name = with_netcfg_owned_device(
         name,
         ManagerConfig::EnableSocketProxy,
         NetcfgOwnedDeviceArgs {
@@ -1539,7 +1511,7 @@ async fn test_reachability_monitor_default_network_validation<M: Manager>(name: 
         |_if_id, _network, _interface_state, realm, _sandbox| {
             async move {
                 let delegated_networks = realm
-                    .connect_to_protocol_from_child::<fnp_socketproxy::NetworkRegistryMarker>(
+                    .connect_to_protocol_from_child::<fnp_properties::NetworkRegistryMarker>(
                         realms::constants::fake_socket_proxy::COMPONENT_NAME,
                     )
                     .expect("failed to connect to FakeSocketProxy NetworkRegistry");
@@ -1580,7 +1552,7 @@ async fn test_reachability_monitor_default_network_validation<M: Manager>(name: 
                 // Add network with FullConnectivity and set as default.
                 let mut valid_network = network(TEST_NETWORK_ID, Some(TEST_MARK));
                 valid_network.connectivity =
-                    Some(fnp_socketproxy::ConnectivityState::FullConnectivity);
+                    Some(fnp_properties::ConnectivityState::FullConnectivity);
                 delegated_networks
                     .add(&valid_network)
                     .await
@@ -1608,7 +1580,7 @@ async fn test_reachability_monitor_default_network_validation<M: Manager>(name: 
                 // Transition default network to PartialConnectivity (unvalidated)
                 let mut unvalidated_network = network(TEST_NETWORK_ID, Some(TEST_MARK));
                 unvalidated_network.connectivity =
-                    Some(fnp_socketproxy::ConnectivityState::PartialConnectivity);
+                    Some(fnp_properties::ConnectivityState::PartialConnectivity);
                 delegated_networks
                     .update(&unvalidated_network)
                     .await

@@ -26,6 +26,13 @@ tools/agents/
 │   └── permissions.md               # Permissions, 3-way reconciliation & regex expansion guide
 ├── lib/
 │   ├── __init__.py
+│   ├── agent_hooks/                 # Schema-driven PreToolUse command hook engine & policies
+│   │   ├── __init__.py
+│   │   ├── engine/                  # Shell lexer, CommandSchema parser, and routers
+│   │   ├── grant_policy.py          # GrantPolicyConfig and CommandRule matching
+│   │   ├── installer.py             # Managed hooks.json installer and uninstaller
+│   │   ├── pre_tool_use.py          # PreToolUse command hook entrypoint
+│   │   └── schemas.py               # Declarative CLI schemas (ffx, find, fx, git, etc.)
 │   ├── config.py                    # Atomic JSON I/O, .tmp swap, and backup creation
 │   ├── git_staging/                 # Git index staging partition & stash isolation helpers
 │   │   ├── __init__.py
@@ -43,11 +50,15 @@ tools/agents/
 ├── testing/
 │   ├── __init__.py
 │   ├── base.py                      # Hermetic base test case with tempdir & stream capture
+│   ├── runner.py                    # Parallel thread-pool unittest runner
 │   └── workspace.py                 # Fast git workspace test fixture with template cache
 └── tests/
     ├── __init__.py
+    ├── agent_hooks_engine_test.py   # Shell lexer, CommandSchema & router unit tests
+    ├── agent_hooks_policy_test.py   # CommandRule, grant policy & hooks.json unit tests
     ├── config_test.py               # Config I/O & atomic write unit tests
     ├── e2e_githooks_test.py         # End-to-end Git hooks test harness
+    ├── e2e_permissions_test.py      # End-to-end agent CLI permissions test harness
     ├── git_staging_test.py          # Git staging engine unit tests
     ├── githooks_adapters_test.py    # Hook adapter unit tests
     ├── githooks_installer_test.py   # Hook installer unit tests
@@ -96,17 +107,30 @@ tools/agents/
 ### 5. `lib/permissions.py` (Command Expansion & Profiles)
 
 - Defines profile specifications (`read-only`, `local-changes`, `external-changes`, `full-access`).
-- Generates anchored regex patterns `command(regex:...)` matching environment variable prefixes,
-  Git global flags, force-push flags, sed in-place flags, and prebuilt toolchain paths.
+- Generates anchored regex patterns `command(regex:...)` for `allow`/`ask` grants (matching
+  environment variable prefixes, tool global flags, and prebuilt toolchain paths) and canonical
+  literal `command(<rule>)` strings for `deny` grants.
 - For regex expansion details and manifest structure, see
   [`docs/permissions.md`](docs/permissions.md).
 
-### 6. `lib/services.py` (Multi-Repo Daemon Management)
+### 6. `lib/agent_hooks/` (`PreToolUse` Command Hook Engine & Schemas)
+
+- **`engine/`**: Decomposes compound shell commands (`shell_lexer.py`), parses flags and nested
+  subcommands against declarative `CommandSchema` definitions (`parser.py`), and routes tool calls
+  (`router.py`).
+- **`schemas.py`**: Declarative CLI schemas (`ffx`, `find`, `fx`, `git`, `grep`, `jiri`, `rm`,
+  `sed`) and `SCHEMAS_BY_PROG`.
+- **`grant_policy.py`**: Enforces literal `deny` grants across flag permutations, short
+  flag bundles, global flags, and `fx` delegation, and gates ungranted `sed -i` via `force_ask`.
+- **`installer.py` & `pre_tool_use.py`**: Manages the `fuchsia-agents` `PreToolUse` hook entry in
+  `hooks.json` alongside `config.json`.
+
+### 7. `lib/services.py` (Multi-Repo Daemon Management)
 
 - Discovers daemon service lists across public and vendor directories (`services.txt`).
 - Restarts running user daemons non-blockingly using `systemctl --user try-restart <service>`.
 
-### 7. `lib/state.py` (State Tracking & Reconciliation)
+### 8. `lib/state.py` (State Tracking & Reconciliation)
 
 - Tracks state in `~/.local/share/Fuchsia/agents/setup/state.json` (adhering to
   `$XDG_STATE_HOME` / `$XDG_DATA_HOME`).
@@ -116,7 +140,7 @@ tools/agents/
   (`reset`), and status reporting (`format_status`).
 - For the three-way reconciliation algorithm, see [`docs/permissions.md`](docs/permissions.md).
 
-### 8. `lib/git_staging/` (Git Staging & Stash Isolation)
+### 9. `lib/git_staging/` (Git Staging & Stash Isolation)
 
 - **`engine.py`**: Helpers for partitioning staged files and isolating unstaged edits.
   - **`partition_staged_files(repo_root)`**: Identifies `fully_staged` and `partially_staged` files.
@@ -127,7 +151,7 @@ tools/agents/
   - For details on stash isolation and failure recovery, see
     [`docs/git_hooks.md`](docs/git_hooks.md).
 
-### 9. `lib/githooks/` (Fuchsia Platform Hook Adapters & Dispatcher)
+### 10. `lib/githooks/` (Fuchsia Platform Hook Adapters & Dispatcher)
 
 - **`adapters.py`**: Fuchsia-specific adapters bridging the staging engine with platform tools:
   - `fx format-code` adapter (mutating formatting on fully staged files, read-only verification on
@@ -155,8 +179,7 @@ For deep-dive architecture and design details, see the guides in `docs/`:
 - **[Permissions & Configuration Architecture (`docs/permissions.md`)](docs/permissions.md)**:
   - Profile definitions (`read-only`, `local-changes`, `external-changes`, `full-access`).
   - Three-way reconciliation algorithm (preserving user custom rules across profile changes).
-  - Regex expansion mechanics (environment variables, Git global flags, force-push detection, sed
-    in-place, tool chaining).
+  - Regex expansion mechanics and schema-driven `PreToolUse` hook enforcement.
   - Multi-repository overlay discovery across `//` and `//vendor/*`.
 - **[Git Staging & Commit Hooks Architecture (`docs/git_hooks.md`)](docs/git_hooks.md)**:
   - Staged partition isolation (mutating formatting on fully staged files vs read-only checks on
@@ -172,8 +195,12 @@ For deep-dive architecture and design details, see the guides in `docs/`:
 ### 1. Adding or Modifying Permission Rules
 
 - **Manifest Files**: Permission lists reside under `.agents/config/permissions/` (e.g.
-  `read_only.txt`, `local_changes.txt`). Add commands as simple strings (e.g. `fx format-code`).
-- **Tool Global Flags**: To support global flags for a new tool (e.g. `jj`, `cipd`), update
+  `read_only.txt`, `local_changes.txt`, `never_allow.txt`). Add commands as simple strings (e.g.
+  `fx format-code`).
+- **CLI Command Schemas (`PreToolUse` Hook)**: To add or update tool schemas for `PreToolUse` hook
+  matching, update `lib/agent_hooks/schemas.py` and verify policy matching in
+  `tests/agent_hooks_policy_test.py`.
+- **Tool Global Flags**: To support global flags for a new tool in `allow`/`ask` regexes, update
   `TOOL_SPECS` in `lib/permissions.py` and verify regex expansion in `tests/permissions_test.py`.
 - **Profile Definitions**: Update `PROFILE_DEFINITIONS` in `lib/permissions.py` to change which
   manifest categories belong to `allow`, `deny`, or `ask`.
@@ -288,6 +315,25 @@ The standard, golden path workflow for configuring and running the test suite:
   # Or filter by substring with '-k':
   fx test agents_setup_test -- -k dry_run
   ```
+
+### Running End-to-End Permissions Tests (Live Agent CLI)
+
+The permissions test harness in `tools/agents/tests/e2e_permissions_test.py` validates that
+permissions generated by `fx agents setup` are recognized and enforced by the agent CLI in an
+isolated sandbox.
+
+In CI/CQ or default local test runs where `AGENT_CLI_PATH` is not set, live tests are automatically
+skipped while hermetic offline transcript and runner tests execute in <0.01s. When `AGENT_CLI_PATH`
+is set, `ParallelTextTestRunner` runs live sandbox test cases concurrently across worker threads
+(configurable via `AGENT_TEST_JOBS`, default `4`).
+
+```bash
+# Run offline test suite:
+fx test agents_e2e_permissions_test
+
+# Run live tests in parallel against the agent CLI:
+AGENT_CLI_PATH=/google/bin/releases/jetski-devs/tools/cli fx test agents_e2e_permissions_test
+```
 
 ### Code Formatting & Linting
 

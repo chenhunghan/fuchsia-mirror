@@ -20,6 +20,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use target_errors::{FfxTargetError, TargetSource};
 use tokio::sync::Mutex;
@@ -272,98 +273,13 @@ pub trait TargetResolver {
         source: Option<TargetSource>,
     ) -> impl Future<Output = Result<Resolution, FfxTargetError>> {
         async move {
-            // In strict mode, explicit `-t <addr>` queries have already returned in
-            // `resolve_target_address()`, so reaching here means `-t` is a symbolic query
-            // (`id:<serial>` or `<nodename>`). Resolve it from the registered targets file
-            // (`target.registered_targets`, defaulting to `$SHARED_DATA/targets.json`),
-            // including on reconnection (`use_cache == false`).
-            //
-            // TODO(b/571246542): Once `botanist` (`force_ffx_usb`) is updated
-            // to populate `$SHARED_DATA/targets.json` via `ffx target list --register` before
-            // invoking `ffx --strict -t id:<serial>`, remove the fallback to
-            // `discover_matching_targets()` below and return `TargetNotFound` whenever
-            // `targets.json` is missing.
-            if env_context.is_strict() {
-                match crate::cache::targets_file_path(env_context)
-                    .and_then(|path| crate::cache::load_registered_targets(&path))
-                {
-                    Ok(targets) => {
-                        let matched = match_target_infos_to_resolutions(targets, target_spec);
-                        return expect_single_target(target_spec, matched, source)
-                            .or_else_maybe_analytics(|e| {
-                                target_error_to_analytics(e).map(Into::into)
-                            })
-                            .await;
-                    }
-                    Err(crate::cache::CacheError::OpenFile { err, .. })
-                        if err.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        log::debug!(
-                            "Registered targets file not found in strict mode; temporarily falling back to discovery (b/571246542)"
-                        );
-                    }
-                    Err(crate::cache::CacheError::SharedData(_)) => {
-                        log::debug!(
-                            "Shared data path not configured in strict mode; temporarily falling back to discovery (b/571246542)"
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("Loading registered targets failed: {e:?}");
-                        return expect_single_target(target_spec, Vec::<Resolution>::new(), source)
-                            .or_else_maybe_analytics(|e| {
-                                target_error_to_analytics(e).map(Into::into)
-                            })
-                            .await;
-                    }
-                }
-
-                let resolutions = self
-                    .discover_matching_targets(target_spec, env_context, source.clone())
-                    .await?;
-                return expect_single_target(target_spec, resolutions, source)
-                    .or_else_maybe_analytics(|e| target_error_to_analytics(e).map(Into::into))
-                    .await;
-            }
-
-            let query_tag = target_spec.to_analytics_tag();
-            let mut resolutions: Option<Vec<Resolution>> = None;
-            if use_cache {
-                if let Some(cache_file) = crate::cache::get_discovery_cache_file(env_context) {
-                    match crate::cache::Cache::load(&cache_file) {
-                        Ok(cache) => {
-                            let matched =
-                                match_target_infos_to_resolutions(cache.targets, target_spec);
-                            if matched.is_empty() {
-                                // If the cache has no matches, leave `resolutions` as `None`
-                                // so that target resolution falls back to active discovery.
-                                emit_cache_event("cache_miss", &query_tag).await;
-                            } else {
-                                emit_cache_event("cache_hit", &query_tag).await;
-                                resolutions = Some(matched);
-                            }
-                        }
-                        Err(crate::cache::CacheError::OpenFile { err, .. })
-                            if err.kind() == std::io::ErrorKind::NotFound =>
-                        {
-                            emit_cache_event("no_cache_file", &query_tag).await;
-                        }
-                        Err(crate::cache::CacheError::Expired(_)) => {
-                            emit_cache_event("cache_expired", &query_tag).await;
-                        }
-                        Err(e) => {
-                            emit_cache_event("cache_invalid", &query_tag).await;
-                            log::warn!("Cache loading failed: {e:?}");
-                        }
-                    }
-                } else {
-                    emit_cache_event("no_cache_file", &query_tag).await;
-                }
+            let cached = if env_context.is_strict() {
+                lookup_registered_targets(target_spec, env_context)
             } else {
-                emit_cache_event("cache_disabled", &query_tag).await;
-            }
-
-            let resolutions = match resolutions {
-                Some(rs) => rs,
+                lookup_discovery_cache(target_spec, use_cache, env_context).await
+            };
+            let resolutions = match cached {
+                Some(resolutions) => resolutions,
                 None => {
                     self.discover_matching_targets(target_spec, env_context, source.clone()).await?
                 }
@@ -386,6 +302,66 @@ fn match_target_infos_to_resolutions(
         .filter(|ti| ti.match_query(target_spec))
         .filter_map(|ti| ResolutionTarget::from_target_info(&ti).map(Resolution::from_target))
         .collect()
+}
+
+// Looks up `target_spec` in `$SHARED_DATA/targets.json`, returning `None` if unconfigured or missing.
+// TODO(b/571246542): Stop returning `None` once `botanist` (`force_ffx_usb`) populates `targets.json`.
+fn lookup_registered_targets(
+    target_spec: &TargetInfoQuery,
+    env_context: &EnvironmentContext,
+) -> Option<Vec<Resolution>> {
+    match crate::registry::targets_file_path(env_context)
+        .and_then(|path| crate::registry::load_registered_targets(&path))
+    {
+        Ok(targets) => Some(match_target_infos_to_resolutions(targets, target_spec)),
+        Err(crate::registry::RegistryError::SharedData(_)) => None,
+        Err(crate::registry::RegistryError::Store(err)) if err.is_not_found() => None,
+        Err(e) => {
+            log::warn!("Loading registered targets failed: {e:?}");
+            Some(Vec::new())
+        }
+    }
+}
+
+// Looks up `target_spec` in the non-strict discovery cache when `use_cache` is true.
+async fn lookup_discovery_cache(
+    target_spec: &TargetInfoQuery,
+    use_cache: bool,
+    env_context: &EnvironmentContext,
+) -> Option<Vec<Resolution>> {
+    let query_tag = target_spec.to_analytics_tag();
+    if !use_cache {
+        emit_cache_event("cache_disabled", &query_tag).await;
+        return None;
+    }
+    let Some(cache_file) = crate::cache::get_discovery_cache_file(env_context) else {
+        emit_cache_event("no_cache_file", &query_tag).await;
+        return None;
+    };
+    match crate::cache::Cache::load(&cache_file) {
+        Ok(cache) => {
+            let resolutions = match_target_infos_to_resolutions(cache.targets, target_spec);
+            for r in &resolutions {
+                r.from_cache.store(true, Ordering::Relaxed);
+            }
+            let status = if resolutions.is_empty() { "cache_miss" } else { "cache_hit" };
+            emit_cache_event(status, &query_tag).await;
+            (!resolutions.is_empty()).then_some(resolutions)
+        }
+        Err(crate::cache::CacheError::Store(err)) if err.is_not_found() => {
+            emit_cache_event("no_cache_file", &query_tag).await;
+            None
+        }
+        Err(crate::cache::CacheError::Expired(_)) => {
+            emit_cache_event("cache_expired", &query_tag).await;
+            None
+        }
+        Err(e) => {
+            emit_cache_event("cache_invalid", &query_tag).await;
+            log::warn!("Cache loading failed: {e:?}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -477,20 +453,76 @@ pub fn build_discovery_builder_common(ctx: &EnvironmentContext) -> DiscoveryBuil
     build_discovery_builder(sources, ctx)
 }
 
+fn handle_transport_sources(th: &TargetHandle) -> DiscoverySources {
+    match &th.state {
+        discovery::TargetState::Product { addrs, .. } => {
+            let mut seen = DiscoverySources::empty();
+            for addr in addrs {
+                match addr {
+                    TargetAddr::Net(_) => seen.insert(DiscoverySources::MDNS),
+                    TargetAddr::UsbCtx(_) => seen.insert(DiscoverySources::USB_VSOCK),
+                    TargetAddr::Uart(_) => seen.insert(DiscoverySources::UART),
+                    TargetAddr::VSockCtx(_) => seen.insert(DiscoverySources::EMULATOR),
+                }
+            }
+            if seen.is_empty() { DiscoverySources::all() } else { seen }
+        }
+        discovery::TargetState::Fastboot(_)
+        | discovery::TargetState::Zedboot
+        | discovery::TargetState::Unknown => DiscoverySources::all(),
+    }
+}
+
+fn short_circuit_stream_by_sources(
+    stream: impl Stream<Item = TargetEvent>,
+    query: TargetInfoQuery,
+    sources: DiscoverySources,
+) -> impl Stream<Item = TargetHandle> {
+    let expected_transports =
+        sources & (DiscoverySources::MDNS | DiscoverySources::USB_VSOCK | DiscoverySources::UART);
+    let wait_for_all_transports =
+        matches!(query, TargetInfoQuery::NodenameOrId(_) | TargetInfoQuery::Id(_));
+    let is_first = matches!(query, TargetInfoQuery::First);
+    let (single_target_tx, single_target_rx) = futures::channel::oneshot::channel();
+    stream
+        .scan((DiscoverySources::empty(), Some(single_target_tx)), move |(seen, tx), ev| {
+            if tx.is_none() {
+                return futures::future::ready(None);
+            }
+            let th = if let TargetEvent::Added(th) = ev {
+                if !is_first {
+                    seen.insert(handle_transport_sources(&th));
+                    if !wait_for_all_transports
+                        || seen.contains(expected_transports)
+                        || seen.contains(DiscoverySources::EMULATOR)
+                    {
+                        if let Some(tx) = tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+                Some(th)
+            } else {
+                None
+            };
+            futures::future::ready(Some(th))
+        })
+        .filter_map(futures::future::ready)
+        .take_until(single_target_rx)
+}
+
 // Return a stream of TargetHandles that come from the specified sources, and
-// match the query. The discovery will return early if a result "perfectly"
-// matches the query (e.g. an mDNS response with the exact name requested).
+// match the query. The discovery will return early once all enabled transport
+// sources have reported a match for the query (or on the first match when only
+// a single transport is active).
 fn get_discovery_stream_with_sources(
     query: TargetInfoQuery,
     sources: DiscoverySources,
     ctx: &EnvironmentContext,
-) -> Result<impl Stream<Item = TargetHandle>> {
-    let discovery = build_discovery(sources, ctx);
-    // Just get the new handles
-    let stream = discovery.discovery_stream(query).map_err(anyhow::Error::from)?;
-    Ok(stream.filter_map(|ev| async move {
-        if let TargetEvent::Added(th) = ev { Some(th) } else { None }
-    }))
+) -> std::result::Result<impl Stream<Item = TargetHandle>, crate::FfxTargetCrateError> {
+    let discovery = build_discovery_builder(sources, ctx).with_short_circuit(false).build(ctx);
+    let stream = discovery.discovery_stream(query.clone())?;
+    Ok(short_circuit_stream_by_sources(stream, query, sources))
 }
 
 // Return a set of TargetHandles that come from the specified sources, and match
@@ -776,6 +808,10 @@ enum ConnectionState {
 pub struct Resolution {
     target: ResolutionTarget,
     discovered: Option<TargetHandle>,
+    // Set when loaded from the non-strict discovery cache, and cleared once a connection to the
+    // target succeeds, so it only marks resolutions that have not been verified against a live
+    // target.
+    from_cache: AtomicBool,
     connection: Mutex<ConnectionState>,
     rcs_proxy: Mutex<Option<RemoteControlProxy>>,
     identify_host_response: Mutex<Option<IdentifyHostResponse>>,
@@ -796,11 +832,19 @@ impl Resolution {
         Self {
             target,
             discovered: None,
+            from_cache: AtomicBool::new(false),
             connection: Mutex::new(ConnectionState::Uninitialized),
             rcs_proxy: Mutex::new(None),
             identify_host_response: Mutex::new(None),
         }
     }
+
+    /// Returns `true` if this [`Resolution`] was loaded from the non-strict discovery cache and
+    /// has not yet been verified by a successful connection.
+    pub fn from_cache(&self) -> bool {
+        self.from_cache.load(Ordering::Relaxed)
+    }
+
     fn from_addr(sa: SocketAddr) -> Self {
         let scope_id = if let SocketAddr::V6(addr) = sa { addr.scope_id() } else { 0 };
         let port = match sa.port() {
@@ -943,6 +987,7 @@ impl Resolution {
         let conn_res = self.connect_new(context).await;
         match &conn_res {
             Ok(conn) => {
+                self.from_cache.store(false, Ordering::Relaxed);
                 *conn_guard = ConnectionState::Connected(conn.clone());
             }
             Err(_) => {
@@ -1294,6 +1339,30 @@ mod test {
 
         // Now it should not be usable
         assert!(!resolution.is_usable().await);
+    }
+
+    #[fuchsia::test]
+    async fn test_successful_connection_clears_from_cache() {
+        #[derive(Debug)]
+        struct PlaceholderConnector;
+        impl crate::TargetConnector for PlaceholderConnector {
+            const CONNECTION_TYPE: &'static str = "placeholder";
+            async fn connect(
+                &mut self,
+            ) -> Result<crate::TargetConnection, crate::TargetConnectionError> {
+                Ok(crate::TargetConnection::FDomain(crate::FDomainConnection::invalid()))
+            }
+        }
+
+        let test_env = ffx_config::test_env().build().unwrap();
+        let conn =
+            std::sync::Mutex::new(Some(Connection::new(PlaceholderConnector).await.unwrap()));
+        let resolution = Resolution::mock(move || Ok(conn.lock().unwrap().take().unwrap()));
+        resolution.from_cache.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(resolution.from_cache());
+
+        resolution.get_connection(&test_env.context).await.unwrap();
+        assert!(!resolution.from_cache());
     }
 
     #[fuchsia::test]
@@ -1650,7 +1719,7 @@ mod test {
         target_info.serial_number = Some("04012C12D45E".to_string());
         target_info.target_state = info::TargetState::Product;
         target_info.addresses = vec![sa.into()];
-        crate::cache::register_targets(&strict_ctx, &[target_info]).unwrap();
+        crate::registry::register_targets(&strict_ctx, &[target_info]).unwrap();
 
         let resolver = MockTargetResolver::new();
 
@@ -1694,7 +1763,7 @@ mod test {
         target_info.target_state = info::TargetState::Product;
         target_info.addresses = vec![sa.into()];
         crate::cache::Cache::new(vec![target_info]).save(&cache_file).unwrap();
-        crate::cache::register_targets(&strict_ctx, &[]).unwrap();
+        crate::registry::register_targets(&strict_ctx, &[]).unwrap();
 
         // MockTargetResolver has no expectations: if strict mode attempts active discovery, it will panic.
         let resolver = MockTargetResolver::new();
@@ -1768,7 +1837,7 @@ mod test {
         t2.target_state = info::TargetState::Product;
         t2.addresses = vec!["192.168.1.11:22".parse::<SocketAddr>().unwrap().into()];
 
-        crate::cache::register_targets(&strict_ctx, &[t1, t2]).unwrap();
+        crate::registry::register_targets(&strict_ctx, &[t1, t2]).unwrap();
 
         let resolver = MockTargetResolver::new();
         let query = TargetInfoQuery::try_from("id:DUP_ID").unwrap();
@@ -1797,7 +1866,6 @@ mod test {
             "Resolution should be marked unusable if get_connection is cancelled by a timeout"
         );
     }
-
     #[fuchsia::test]
     async fn test_usb_connect_error_to_non_fatal_command_error() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1822,5 +1890,92 @@ mod test {
         let resolution = Resolution::from_target_handle(handle).unwrap();
         let err = resolution.get_connection(&test_env.context).await.unwrap_err();
         assert!(err.into_command_error().downcast_non_fatal().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn test_lookup_discovery_cache_skips_non_product_targets_as_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_env = ffx_config::test_env()
+            .user_config(
+                ffx_config::keys::DISCOVERY_CACHE_DIR_CONFIG,
+                serde_json::json!(dir.path().to_str().unwrap()),
+            )
+            .build()
+            .unwrap();
+        let cache_file = crate::cache::get_discovery_cache_file(&test_env.context).unwrap();
+
+        let mut fastboot_target = TargetInfo::default();
+        fastboot_target.nodename = Some("fb-node".to_string());
+        fastboot_target.target_state = info::TargetState::Fastboot;
+        fastboot_target.addresses = vec!["192.168.1.50:22".parse::<SocketAddr>().unwrap().into()];
+        crate::cache::Cache::new(vec![fastboot_target]).save(&cache_file).unwrap();
+
+        let query = TargetInfoQuery::try_from("fb-node").unwrap();
+        assert!(lookup_discovery_cache(&query, true, &test_env.context).await.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_short_circuit_stream_waits_for_all_enabled_transports_on_nodename() {
+        let mdns_addr: TargetAddr = "[fe80::1%1]:22".parse().unwrap();
+        let usb_addr = TargetAddr::UsbCtx(3);
+        let mdns_handle = TargetHandle {
+            node_name: Some("target-a".to_string()),
+            state: discovery::TargetState::Product { addrs: vec![mdns_addr.clone()], serial: None },
+            manual: false,
+        };
+        let usb_handle = TargetHandle {
+            node_name: Some("target-a".to_string()),
+            state: discovery::TargetState::Product {
+                addrs: vec![usb_addr.clone()],
+                serial: Some("SER123".to_string()),
+            },
+            manual: false,
+        };
+        // Add a trailing event after both transports have reported; the stream should
+        // short-circuit as soon as both MDNS and USB_VSOCK have emitted a handle.
+        let trailing_handle = TargetHandle {
+            node_name: Some("target-a".to_string()),
+            state: discovery::TargetState::Product { addrs: vec![mdns_addr], serial: None },
+            manual: false,
+        };
+        let inner_stream = futures::stream::iter(vec![
+            TargetEvent::Added(mdns_handle.clone()),
+            TargetEvent::Added(usb_handle.clone()),
+            TargetEvent::Added(trailing_handle),
+        ]);
+        let sources = DiscoverySources::MDNS | DiscoverySources::USB_VSOCK;
+        let query = TargetInfoQuery::NodenameOrId("target-a".to_string());
+        let results: Vec<TargetHandle> =
+            short_circuit_stream_by_sources(inner_stream, query, sources).collect().await;
+        assert_eq!(results, vec![mdns_handle, usb_handle]);
+    }
+
+    #[fuchsia::test]
+    async fn test_short_circuit_stream_single_transport_short_circuits_immediately() {
+        let usb_handle1 = TargetHandle {
+            node_name: Some("target-a".to_string()),
+            state: discovery::TargetState::Product {
+                addrs: vec![TargetAddr::UsbCtx(3)],
+                serial: Some("SER123".to_string()),
+            },
+            manual: false,
+        };
+        let usb_handle2 = TargetHandle {
+            node_name: Some("target-a".to_string()),
+            state: discovery::TargetState::Product {
+                addrs: vec![TargetAddr::UsbCtx(4)],
+                serial: Some("SER123".to_string()),
+            },
+            manual: false,
+        };
+        let inner_stream = futures::stream::iter(vec![
+            TargetEvent::Added(usb_handle1.clone()),
+            TargetEvent::Added(usb_handle2),
+        ]);
+        let sources = DiscoverySources::USB_VSOCK;
+        let query = TargetInfoQuery::NodenameOrId("target-a".to_string());
+        let results: Vec<TargetHandle> =
+            short_circuit_stream_by_sources(inner_stream, query, sources).collect().await;
+        assert_eq!(results, vec![usb_handle1]);
     }
 }

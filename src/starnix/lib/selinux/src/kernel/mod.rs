@@ -17,11 +17,12 @@ pub(crate) use avc::{AccessVectorCache, Query};
 pub(crate) use index::PolicyIndex;
 pub use permissions::*;
 
-use crate::policy::{AccessDecision, AccessVector, ClassId, XpermsBitmap};
+use crate::policy::{AccessVector, ClassId, XpermsBitmap};
+use fuchsia_rcu::RcuDroppable;
 use std::num::NonZeroU32;
 
 /// Identifies a specific class by its policy-defined Id, or as a kernel object class enum Id.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, RcuDroppable)]
 pub enum ObjectClass {
     /// Refers to a well-known SELinux [`KernelClass`] (e.g. "process", "file", "capability").
     Kernel(KernelClass),
@@ -64,22 +65,6 @@ pub(crate) struct KernelXpermsAccessDecision {
     pub has_todo: bool,
 }
 
-/// Owner of policy information that can translate [`KernelPermission`] values into
-/// [`AccessVector`] values that are consistent with the owned policy.
-pub(crate) trait AccessVectorComputer {
-    /// Translates the given [`AccessDecision`] to a [`KernelAccessDecision`].
-    ///
-    /// The loaded policy's "handle unknown" configuration determines how `permissions`
-    /// entries not explicitly defined by the policy are handled. Allow-unknown will
-    /// result in unknown `permissions` being allowed, while they are denied (and audited)
-    /// if the policy uses deny-unknown.
-    fn access_decision_to_kernel_access_decision(
-        &self,
-        class: KernelClass,
-        access_decision: AccessDecision,
-    ) -> KernelAccessDecision;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,10 +73,18 @@ mod tests {
     fn object_class_permissions() {
         let test_class_id = ClassId::for_test(20);
         assert_eq!(ObjectClass::ClassId(test_class_id), test_class_id.into());
-        for variant in ProcessPermission::PERMISSIONS {
+        for variant in KernelClass::Process.permissions() {
             assert_eq!(KernelClass::Process, variant.class());
             assert_eq!("process", variant.class().name());
             assert_eq!(ObjectClass::Kernel(KernelClass::Process), variant.class().into());
         }
+    }
+
+    #[test]
+    fn kernel_class_from_name() {
+        assert_eq!(KernelClass::from_name("process"), Some(KernelClass::Process));
+        assert_eq!(KernelClass::from_name("file"), Some(KernelClass::File));
+        assert_eq!(KernelClass::from_name("socket"), Some(KernelClass::Socket));
+        assert_eq!(KernelClass::from_name("non_existent_class"), None);
     }
 }

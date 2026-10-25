@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fbl/unique_fd.h>
@@ -323,6 +324,74 @@ TEST_F(AioWriteTest, WriteCompletesAfterSubmittingProcessExits) {
 
   const std::string expected = std::string(kHeader) + std::string(kBody);
   EXPECT_EQ(ReadFilePrefix(target_fd_.fd(), expected.size()), expected);
+}
+
+TEST(AioTest, MultiThreadExitGroupDrainsQueuedWrite) {
+  test_helper::ScopedPipe data_pipe;
+
+  constexpr size_t kWriteSize = 256ULL * 1024;
+  const std::vector<uint8_t> expected(kWriteSize, 0x5A);
+
+  test_helper::ForkHelper helper;
+  helper.KillChildrenOnDestroy();
+
+  pid_t child_pid = helper.RunInForkedProcess([&data_pipe, &expected] {
+    data_pipe.ReadSide().reset();
+
+    aio_context_t ctx = 0;
+    ASSERT_THAT(io_setup(4, &ctx), SyscallSucceeds());
+
+    test_helper::ScopedPipe ready_pipe;
+    test_helper::ScopedPipe block_pipe;
+
+    constexpr int kNumSiblingThreads = 3;
+    for (int i = 0; i < kNumSiblingThreads; ++i) {
+      std::thread([ready_w = ready_pipe.WriteSide().get(), block_r = block_pipe.ReadSide().get()] {
+        char tok = 'R';
+        EXPECT_THAT(write(ready_w, &tok, 1), SyscallSucceedsWithValue(1));
+        char unblock = 0;
+        // Sibling threads must remain blocked until `SYS_exit_group` terminates the entire thread
+        // group. If `read` returns, the thread unexpectedly woke up or encountered an error.
+        ssize_t read_res = read(block_r, &unblock, 1);
+        ADD_FAILURE() << "Sibling thread unexpectedly unblocked from read: " << read_res;
+      }).detach();
+    }
+    for (int i = 0; i < kNumSiblingThreads; ++i) {
+      char tok = 0;
+      ASSERT_THAT(read(ready_pipe.ReadSide().get(), &tok, 1), SyscallSucceedsWithValue(1));
+      EXPECT_EQ(tok, 'R');
+    }
+
+    struct iocb cb = {
+        .aio_data = 0x201,
+        .aio_lio_opcode = IOCB_CMD_PWRITE,
+        .aio_fildes = static_cast<uint32_t>(data_pipe.WriteSide().get()),
+        .aio_buf = ToAioBuf(expected.data()),
+        .aio_nbytes = expected.size(),
+    };
+    struct iocb* cbs[1] = {&cb};
+    ASSERT_THAT(io_submit(ctx, 1, cbs), SyscallSucceedsWithValue(1));
+
+    syscall(SYS_exit_group, testing::Test::HasFailure() ? 1 : 0);
+  });
+  ASSERT_GT(child_pid, 0);
+
+  data_pipe.WriteSide().reset();
+
+  std::vector<uint8_t> received(kWriteSize);
+  size_t total_read = 0;
+  while (total_read < kWriteSize) {
+    ssize_t n =
+        read(data_pipe.ReadSide().get(), received.data() + total_read, kWriteSize - total_read);
+    ASSERT_THAT(n, SyscallSucceeds());
+    if (n == 0) {
+      break;
+    }
+    total_read += static_cast<size_t>(n);
+  }
+  EXPECT_EQ(total_read, kWriteSize);
+  EXPECT_EQ(received, expected);
+  ASSERT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

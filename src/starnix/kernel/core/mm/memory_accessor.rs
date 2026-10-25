@@ -83,9 +83,24 @@ pub trait MemoryAccessor {
     fn zero(&self, addr: UserAddress, length: usize) -> Result<usize, Errno>;
 }
 
+/// Whether user-space memory is being accessed for reading or writing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingAccess {
+    ForReading,
+    ForWriting,
+}
+
 pub trait TaskMemoryAccessor: MemoryAccessor {
     /// Returns the maximum valid address for this memory accessor.
     fn maximum_valid_address(&self) -> Option<UserAddress>;
+
+    /// Ensures that any mappings in `buffers` are mapped in the user VMAR with the permissions
+    /// needed for `access`.
+    fn ensure_buffers_mapped_in_user_vmar(
+        &self,
+        buffers: &[UserBuffer],
+        access: MappingAccess,
+    ) -> Result<(), Errno>;
 }
 
 // TODO(https://fxbug.dev/42079727): replace this with MaybeUninit::as_bytes_mut.
@@ -187,11 +202,20 @@ pub unsafe fn read_to_array<T: FromBytes, E, const N: usize>(
 pub unsafe fn read_to_object_as_bytes<T: FromBytes, E>(
     read_fn: impl FnOnce(&mut [MaybeUninit<u8>]) -> Result<(), E>,
 ) -> Result<T, E> {
-    let mut object = MaybeUninit::uninit();
-    read_fn(object_as_mut_bytes(&mut object))?;
+    // Over-align the object to 8 bytes (a `T` with a larger alignment keeps it), the size of the
+    // words that `hermetic_copy` copies. When the user address is also 8-byte aligned, as it
+    // typically is for objects read from user memory, this lets every word access be aligned on
+    // both sides: arm64 aligns the user pointer and accesses the kernel buffer as is, and x64 and
+    // riscv64 only use their word loop when both pointers have the same alignment. A larger
+    // alignment would not change any access, since aligned 8-byte accesses never straddle a cache
+    // line.
+    #[repr(C, align(8))]
+    struct Aligned<T>(MaybeUninit<T>);
+    let mut object = Aligned(MaybeUninit::uninit());
+    read_fn(object_as_mut_bytes(&mut object.0))?;
     // SAFETY: The call to `read_fn` succeeded so we know that `object`
     // has been initialized.
-    let object = unsafe { object.assume_init() };
+    let object = unsafe { object.0.assume_init() };
     Ok(object)
 }
 

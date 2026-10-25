@@ -6,6 +6,7 @@ use anyhow::{Context as _, Error};
 use async_utils::event::Event;
 use fidl::endpoints::{ClientEnd, ServerEnd};
 use fidl_fuchsia_feedback as ffeedback;
+use fidl_fuchsia_hardware_power_statecontrol as fstatecontrol;
 use fidl_fuchsia_power_broker::{
     self as fpb, ElementControlRequest, ElementControlRequestStream, LeaseControlMarker,
     LeaseControlRequest, LeaseControlRequestStream, LeaseError, LeaseStatus, LessorRequest,
@@ -112,13 +113,15 @@ impl BrokerSvc {
                                         {
                                             log::debug!("{debug_info}: run_lease_control err: {:?}", err);
                                         }
-                                        // When the channel is closed, drop the lease.
+                                        // When the channel is closed, drop the lease if it is still
+                                        // present (it may have already been dropped if its target
+                                        // element was removed).
                                         log::debug!(
                                             "{debug_info}: Channel closed, dropping lease {lease_id}"
                                         );
                                         let mut broker = svc.broker.borrow_mut();
                                         if let Err(err) = broker.drop_lease(lease.id) {
-                                            log::error!("{debug_info}: drop_lease {lease_id} failed: {:?}", err);
+                                            log::debug!("{debug_info}: drop_lease {lease_id} failed: {:?}", err);
                                         }
                                     }
                                 })
@@ -327,9 +330,12 @@ impl BrokerSvc {
                     &mut crate::inspect::EagerInspectWriter,
                 );
 
-                // Drop provisional lease (if one was taken).
+                // Drop provisional lease (if one was taken; it may have already been dropped if
+                // the required element was removed while waiting for the lease to be satisfied).
                 if let Some(lease_id) = provisional_lease_id {
-                    self.broker.borrow_mut().drop_lease(lease_id).expect("drop failed");
+                    if let Err(err) = self.broker.borrow_mut().drop_lease(lease_id) {
+                        log::debug!("{debug_info}: drop_lease {lease_id} failed: {:?}", err);
+                    }
                 }
                 responder.send(res.map_err(Into::into)).context("send failed")?;
                 Ok(())
@@ -362,7 +368,7 @@ impl BrokerSvc {
                 log::debug!("LeaseToken closed, dropping lease {lease_id}");
                 let mut broker = svc.broker.borrow_mut();
                 if let Err(err) = broker.drop_lease(lease_id) {
-                    log::error!("drop_lease {lease_id} failed: {:?}", err);
+                    log::debug!("drop_lease {lease_id} failed: {:?}", err);
                 }
             }
         })
@@ -694,22 +700,36 @@ const DEFAULT_WATCHDOG_INTERVAL_SECONDS: u32 = 10;
 #[derive(Clone)]
 struct StuckDetector {
     set_level_timeout_seconds: u32,
+    reboot_on_set_level_timeout: bool,
     crash_reporter: Option<ffeedback::CrashReporterProxy>,
+    admin: Option<fstatecontrol::AdminProxy>,
 }
 
 impl StuckDetector {
     fn new(
         set_level_timeout_seconds: u32,
+        reboot_on_set_level_timeout: bool,
         crash_reporter: Option<ffeedback::CrashReporterProxy>,
+        admin: Option<fstatecontrol::AdminProxy>,
     ) -> Self {
+        if reboot_on_set_level_timeout && set_level_timeout_seconds == 0 {
+            log::error!(
+                "reboot_on_set_level_timeout is true, but set_level_timeout_seconds is 0; reboot will not occur on timeout"
+            );
+        }
         if set_level_timeout_seconds > 0 && crash_reporter.is_none() {
-            log::warn!(
+            log::error!(
                 "set_level_timeout_seconds is {}, but crash_reporter is None; crash reports will not be filed",
                 set_level_timeout_seconds
             );
         }
+        if set_level_timeout_seconds > 0 && reboot_on_set_level_timeout && admin.is_none() {
+            log::error!(
+                "reboot_on_set_level_timeout is true, but admin is None; reboot will not occur on timeout"
+            );
+        }
 
-        Self { set_level_timeout_seconds, crash_reporter }
+        Self { set_level_timeout_seconds, reboot_on_set_level_timeout, crash_reporter, admin }
     }
 
     fn from_config(config: &broker_config::Config) -> Self {
@@ -719,7 +739,18 @@ impl StuckDetector {
             None
         };
 
-        Self::new(config.set_level_timeout_seconds, crash_reporter)
+        let admin = if config.set_level_timeout_seconds > 0 && config.reboot_on_set_level_timeout {
+            fuchsia_component::client::connect_to_protocol::<fstatecontrol::AdminMarker>().ok()
+        } else {
+            None
+        };
+
+        Self::new(
+            config.set_level_timeout_seconds,
+            config.reboot_on_set_level_timeout,
+            crash_reporter,
+            admin,
+        )
     }
 
     fn spawn_watchdog(
@@ -762,9 +793,11 @@ impl StuckDetector {
 
                     crash_reported = true;
                     let reporter = this.crash_reporter.clone();
+                    let admin = this.admin.clone();
+                    let reboot_on_timeout = this.reboot_on_set_level_timeout;
                     let element_name = element_name.clone();
 
-                    // Spawn reporting onto the local executor so it runs to
+                    // Spawn reporting and reboot onto the local executor so it runs to
                     // completion even if set_level returns and drops _warn_task.
                     Task::local(async move {
                         if let Some(reporter) = reporter {
@@ -780,6 +813,26 @@ impl StuckDetector {
                                 Ok(Ok(result)) => log::info!("Crash report filed: {:?}", result),
                                 Ok(Err(e)) => log::warn!("Failed to file crash report: {:?}", e),
                                 Err(e) => log::warn!("Failed to call FileReport: {:?}", e),
+                            }
+                        }
+
+                        if reboot_on_timeout {
+                            if let Some(admin) = admin {
+                                log::info!("Initiating reboot due to stuck SetLevel...");
+                                let options = fstatecontrol::ShutdownOptions {
+                                    action: Some(fstatecontrol::ShutdownAction::Reboot),
+                                    reasons: Some(vec![
+                                        fstatecontrol::ShutdownReason::PowerLevelTransitionStuck,
+                                    ]),
+                                    ..Default::default()
+                                };
+                                match admin.shutdown(&options).await {
+                                    Ok(Ok(())) => {
+                                        log::info!("Shutdown/Reboot requested successfully")
+                                    }
+                                    Ok(Err(e)) => log::error!("Shutdown/Reboot failed: {:?}", e),
+                                    Err(e) => log::error!("Failed to call Shutdown: {:?}", e),
+                                }
                             }
                         }
                     })
@@ -998,8 +1051,9 @@ async fn main() -> Result<(), anyhow::Error> {
     component::health().set_ok();
 
     log::info!(
-        "StuckDetector config: set_level_timeout_seconds={}",
-        config.set_level_timeout_seconds
+        "StuckDetector config: set_level_timeout_seconds={}, reboot_on_set_level_timeout={}",
+        config.set_level_timeout_seconds,
+        config.reboot_on_set_level_timeout
     );
     let stuck_detector = StuckDetector::from_config(&config);
     let svc = Rc::new(BrokerSvc::new(stuck_detector));
@@ -1021,14 +1075,20 @@ async fn main() -> Result<(), anyhow::Error> {
 mod tests {
     use super::*;
     use fidl::endpoints::create_proxy_and_stream;
+    use test_case::test_case;
 
+    #[test_case(false; "no_reboot")]
+    #[test_case(true; "reboot")]
     #[fuchsia::test]
-    fn test_stuck_detector() {
+    fn test_stuck_detector(reboot_enabled: bool) {
         let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
         let (crash_reporter_proxy, mut crash_reporter_stream) =
             create_proxy_and_stream::<ffeedback::CrashReporterMarker>();
+        let (admin_proxy, mut admin_stream) =
+            create_proxy_and_stream::<fstatecontrol::AdminMarker>();
 
-        let detector = StuckDetector::new(1, Some(crash_reporter_proxy));
+        let detector =
+            StuckDetector::new(1, reboot_enabled, Some(crash_reporter_proxy), Some(admin_proxy));
 
         let task = detector.spawn_watchdog(
             "test_element".to_string(),
@@ -1061,17 +1121,45 @@ mod tests {
         responder.send(Ok(&ffeedback::FileReportResults::default())).unwrap();
         let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
 
+        // Check reboot.
+        if reboot_enabled {
+            let req = admin_stream
+                .next()
+                .now_or_never()
+                .expect("Expected reboot request")
+                .expect("Admin stream closed")
+                .unwrap();
+            let fstatecontrol::AdminRequest::Shutdown { options, responder } = req else {
+                panic!("Expected Shutdown request, got {:?}", req);
+            };
+            assert_eq!(options.action, Some(fstatecontrol::ShutdownAction::Reboot));
+            assert_eq!(
+                options.reasons,
+                Some(vec![fstatecontrol::ShutdownReason::PowerLevelTransitionStuck])
+            );
+            responder.send(Ok(())).unwrap();
+            let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        } else {
+            // Verify that NO reboot request was received.
+            assert!(admin_stream.next().now_or_never().is_none());
+        }
+
         // Clean up task.
         drop(task);
     }
 
+    #[test_case(false; "no_reboot")]
+    #[test_case(true; "reboot")]
     #[fuchsia::test]
-    fn test_stuck_detector_disabled() {
+    fn test_stuck_detector_disabled(reboot_enabled: bool) {
         let mut executor = fuchsia_async::TestExecutor::new_with_fake_time();
         let (crash_reporter_proxy, mut crash_reporter_stream) =
             create_proxy_and_stream::<ffeedback::CrashReporterMarker>();
+        let (admin_proxy, mut admin_stream) =
+            create_proxy_and_stream::<fstatecontrol::AdminMarker>();
 
-        let detector = StuckDetector::new(0, Some(crash_reporter_proxy));
+        let detector =
+            StuckDetector::new(0, reboot_enabled, Some(crash_reporter_proxy), Some(admin_proxy));
 
         let task = detector.spawn_watchdog(
             "test_element".to_string(),
@@ -1090,9 +1178,64 @@ mod tests {
             let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
         }
 
-        // Verify that NO crash report was filed.
+        // Verify that NO crash report was filed and NO reboot was requested.
         assert!(crash_reporter_stream.next().now_or_never().is_none());
+        assert!(admin_stream.next().now_or_never().is_none());
 
         drop(task);
+    }
+
+    #[fuchsia::test]
+    async fn test_add_dependency_required_element_removed_while_provisional_lease_pending() {
+        let svc = Rc::new(BrokerSvc::new(StuckDetector::new(0, false, None, None)));
+        let token_a = fpb::DependencyToken::create();
+
+        let (element_a, element_b) = {
+            let mut broker = svc.broker.borrow_mut();
+            let element_a = broker.add_element("A", 0, vec![0, 1], vec![]).unwrap();
+            broker
+                .register_dependency_token(
+                    element_a,
+                    token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
+                )
+                .unwrap();
+            let element_b = broker.add_element("B", 0, vec![0, 1], vec![]).unwrap();
+            let level_1 = broker.get_level_index(element_b, &1).unwrap().clone();
+            // Lease B at level 1 so B's required level is 1; adding a dependency from B(1) to A(1)
+            // will therefore acquire a provisional lease on A(1) and wait for it to be satisfied.
+            let _lease_b = broker.acquire_lease(element_b, level_1, zx::Koid::from_raw(1)).unwrap();
+            (element_a, element_b)
+        };
+
+        let (element_control_proxy, element_control_stream) =
+            create_proxy_and_stream::<fpb::ElementControlMarker>();
+        let control_task = Task::local(svc.clone().run_element_control(
+            element_b,
+            "B".to_string(),
+            element_control_stream,
+        ));
+
+        let mut add_dep_fut = element_control_proxy.add_dependency(fpb::LevelDependency {
+            dependent_level: Some(1),
+            requires_token: Some(token_a),
+            requires_level_by_preference: Some(vec![1]),
+            ..Default::default()
+        });
+
+        // Poll once so `handle_element_control_request` acquires the provisional lease on A(1)
+        // and suspends waiting for it to reach `LeaseStatus::Satisfied`.
+        assert!(futures::poll!(&mut add_dep_fut).is_pending());
+
+        // Remove A while the provisional lease on A(1) is still pending. This drops and vacates
+        // the provisional lease and closes its status channel.
+        svc.broker.borrow_mut().remove_element(&element_a);
+
+        // `AddDependency` must return an error without panicking when attempting to drop the
+        // already-dropped provisional lease.
+        let res = add_dep_fut.await.expect("FIDL call should not fail with peer closed");
+        assert_eq!(res, Err(fpb::ModifyDependencyError::NotAuthorized));
+
+        drop(element_control_proxy);
+        control_task.await.expect("run_element_control failed");
     }
 }

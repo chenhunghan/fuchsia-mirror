@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/fit/defer.h>
 #include <lib/fpromise/single_threaded_executor.h>
 
 #include <future>
@@ -987,6 +988,209 @@ TEST_F(PowerTest, PowerDownSuspendWithPhyFailureStillRecordsPowerDown) {
                   .ReadFrom(mock_device_.GetRegisters())
                   .host_controller_enable());
 
+  mock_device_.GetUicCmdProcessor().Reset();
+}
+
+// Resuming from PowerDown re-initializes the link and the device, but skips work whose result
+// cannot have changed across the power cycle: the persistent bRefClkFreq is only rewritten when the
+// device reports a different frequency, and the UniPro attributes that only feed inspect are not
+// re-read. The UIC power mode, which the link startup reset, is still re-applied.
+TEST_F(PowerTest, PowerDownResumeSkipsRedundantReconfiguration) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+
+  libsync::Completion sleep_complete;
+  std::atomic<uint32_t> reference_clock_reads{0};
+  std::atomic<uint32_t> reference_clock_writes{0};
+  std::atomic<uint32_t> unipro_attribute_reads{0};
+  std::atomic<uint32_t> power_mode_changes{0};
+  auto reset_hooks = fit::defer([&] {
+    mock_device_.GetQueryRequestProcessor().Reset();
+    mock_device_.GetUicCmdProcessor().Reset();
+  });
+
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        mock_device_.GetUicCmdProcessor().DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1,
+                                                                          ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeGet,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        switch (UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute()) {
+          case PA_RemoteVerInfo:
+          case PA_LocalVerInfo:
+          case PA_TActivate:
+          case PA_Granularity:
+          case PA_AvailTxDataLanes:
+          case PA_AvailRxDataLanes:
+          case PA_MaxRxHSGear:
+            unipro_attribute_reads.fetch_add(1);
+            break;
+          default:
+            break;
+        }
+        mock_device_.GetUicCmdProcessor().DefaultDmeGetHandler(mock_device, ucmdarg1, ucmdarg2,
+                                                               ucmdarg3);
+      });
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmePeerGet,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        unipro_attribute_reads.fetch_add(1);
+        mock_device_.GetUicCmdProcessor().DefaultDmePeerGetHandler(mock_device, ucmdarg1, ucmdarg2,
+                                                                   ucmdarg3);
+      });
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeSet,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        if (UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute() == PA_PWRMode) {
+          power_mode_changes.fetch_add(1);
+        }
+        mock_device_.GetUicCmdProcessor().DefaultDmeSetHandler(mock_device, ucmdarg1, ucmdarg2,
+                                                               ucmdarg3);
+      });
+  mock_device_.GetQueryRequestProcessor().SetHook(
+      QueryOpcode::kReadAttribute, [&](UfsMockDevice& mock_device, QueryRequestUpiuData& req_upiu,
+                                       QueryResponseUpiuData& rsp_upiu) {
+        if (req_upiu.idn == static_cast<uint8_t>(Attributes::bRefClkFreq)) {
+          reference_clock_reads.fetch_add(1);
+        }
+        return mock_device_.GetQueryRequestProcessor().DefaultReadAttributeHandler(
+            mock_device, req_upiu, rsp_upiu);
+      });
+  mock_device_.GetQueryRequestProcessor().SetHook(
+      QueryOpcode::kWriteAttribute, [&](UfsMockDevice& mock_device, QueryRequestUpiuData& req_upiu,
+                                        QueryResponseUpiuData& rsp_upiu) {
+        if (req_upiu.idn == static_cast<uint8_t>(Attributes::bRefClkFreq)) {
+          reference_clock_writes.fetch_add(1);
+        }
+        return mock_device_.GetQueryRequestProcessor().DefaultWriteAttributeHandler(
+            mock_device, req_upiu, rsp_upiu);
+      });
+
+  constexpr uint32_t kRefClk19_2MHz = static_cast<uint32_t>(AttributeReferenceClock::k19_2MHz);
+  constexpr uint32_t kRefClk38_4MHz = static_cast<uint32_t>(AttributeReferenceClock::k38_4MHz);
+  mock_device_.SetAttribute(Attributes::bRefClkFreq, kRefClk19_2MHz);
+
+  // 1. Driver initialization configures everything.
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+  EXPECT_EQ(reference_clock_writes.load(), 1u);
+  EXPECT_EQ(mock_device_.GetAttribute(Attributes::bRefClkFreq), kRefClk38_4MHz);
+  EXPECT_GT(unipro_attribute_reads.load(), 0u);
+  EXPECT_EQ(power_mode_changes.load(), 1u);
+
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+
+  // 2. Resume while the device still reports the expected reference clock.
+  reference_clock_reads.store(0);
+  reference_clock_writes.store(0);
+  unipro_attribute_reads.store(0);
+  power_mode_changes.store(0);
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  EXPECT_EQ(reference_clock_reads.load(), 1u);
+  EXPECT_EQ(reference_clock_writes.load(), 0u);
+  EXPECT_EQ(unipro_attribute_reads.load(), 0u);
+  EXPECT_EQ(power_mode_changes.load(), 1u);
+
+  // 3. Resume while the device reports a different reference clock: it is rewritten.
+  sleep_complete.Reset();
+  SetPowerLevelSync(Ufs::kPowerLevelOff);
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+  mock_device_.SetAttribute(Attributes::bRefClkFreq, kRefClk19_2MHz);
+  reference_clock_writes.store(0);
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  EXPECT_EQ(reference_clock_writes.load(), 1u);
+  EXPECT_EQ(mock_device_.GetAttribute(Attributes::bRefClkFreq), kRefClk38_4MHz);
+}
+
+TEST_F(PowerTest, PowerDownSuspendFallsBackToSleepWithCryptoKeys) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+
+  libsync::Completion sleep_complete;
+  std::atomic<uint32_t> link_startup_count{0};
+  std::atomic<uint32_t> post_suspend_count{0};
+  std::atomic<uint32_t> pre_resume_count{0};
+
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        mock_device_.GetUicCmdProcessor().DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1,
+                                                                          ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeLinkStartUp,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        mock_device_.GetUicCmdProcessor().DefaultDmeLinkStartUpHandler(mock_device, ucmdarg1,
+                                                                       ucmdarg2, ucmdarg3);
+        link_startup_count.fetch_add(1);
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+
+  // 1. With no keys programmed, the first real "off" is a PowerDown suspend.
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+  EXPECT_FALSE(dut_->HasProgrammedCryptoKeys());
+
+  dut_->SetHostControllerCallback([&](NotifyEvent event, uint64_t data) -> zx::result<> {
+    switch (event) {
+      case NotifyEvent::kPostSuspend:
+        post_suspend_count.fetch_add(1);
+        break;
+      case NotifyEvent::kPreResume:
+        pre_resume_count.fetch_add(1);
+        break;
+      default:
+        break;
+    }
+    return Ufs::NotifyEventCallback(event, data);
+  });
+
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  EXPECT_EQ(pre_resume_count.load(), 1u);
+  EXPECT_EQ(link_startup_count.load(), 2u);
+
+  // 2. Program an inline encryption key slot and verify CRYPTOCFG was written.
+  constexpr uint8_t kSlot = 3;
+  constexpr uint32_t kDataUnitSize = 4096;
+  constexpr uint32_t kCryptoCfgDword16 = 0x500 + kSlot * 0x80 + 0x40;
+  constexpr uint32_t kExpectedCryptoCfg = (1U << 31) | (kDataUnitSize / 512);
+  ASSERT_OK(dut_->ProgramCryptoSlotForTest(kSlot, kDataUnitSize));
+  EXPECT_TRUE(dut_->HasProgrammedCryptoKeys());
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(kCryptoCfgDword16), kExpectedCryptoCfg);
+
+  // 3. Suspend again. Because a key is live, the driver must stay in Sleep (link hibernate) rather
+  //    than PowerDown so that the host controller key table and CRYPTOCFG are retained.
+  sleep_complete.Reset();
+  SetPowerLevelSync(Ufs::kPowerLevelOff);
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+
+  ASSERT_FALSE(dut_->IsResumed());
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kSleep);
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerCondition(), scsi::PowerCondition::kIdle);
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentLinkState(), LinkState::kHibernate);
+  EXPECT_EQ(post_suspend_count.load(), 0u);
+  EXPECT_TRUE(HostControllerEnableReg::Get()
+                  .ReadFrom(mock_device_.GetRegisters())
+                  .host_controller_enable());
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(kCryptoCfgDword16), kExpectedCryptoCfg);
+
+  // 4. Resume from Sleep; verify the controller and link were not re-initialized.
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kActive);
+  EXPECT_EQ(pre_resume_count.load(), 1u);
+  EXPECT_EQ(link_startup_count.load(), 2u);
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(kCryptoCfgDword16), kExpectedCryptoCfg);
   mock_device_.GetUicCmdProcessor().Reset();
 }
 

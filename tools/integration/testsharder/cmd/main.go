@@ -32,10 +32,13 @@ import (
 )
 
 func usage() {
-	fmt.Printf(`testsharder [flags]
+	fmt.Fprintf(flag.CommandLine.Output(), `testsharder [flags]
 
 Shards tests produced by a build.
+
+Flags:
 `)
+	flag.PrintDefaults()
 }
 
 type testsharderFlags struct {
@@ -55,6 +58,7 @@ type testsharderFlags struct {
 	allowedDeviceTypes          flagmisc.StringsValue
 	allowedHostDeviceTypes      flagmisc.StringsValue
 	botDimensionsOverride       flagmisc.StringMapValue
+	randomOrderInShardsSeed     uint64
 }
 
 func parseFlags() testsharderFlags {
@@ -75,6 +79,7 @@ func parseFlags() testsharderFlags {
 	flag.Var(&flags.allowedDeviceTypes, "allowed-device-type", "the device types to run tests on. If disabled_device_types is set in the testsharder params, that will take precedence.")
 	flag.Var(&flags.allowedHostDeviceTypes, "allowed-host-device-type", "the host device types to run tests on.")
 	flag.Var(&flags.botDimensionsOverride, "bot-dimension", "swarming dimension of the bot to run tests on: id, pool, etc. Set a key-value pair (e.g., -bot-dimension key=value). Can be repeated.")
+	flag.Uint64Var(&flags.randomOrderInShardsSeed, "random-order-in-shards-seed", 0, "seed for randomizing test order within shards (0 means no randomization)")
 
 	flag.Usage = usage
 
@@ -377,6 +382,9 @@ func execute(ctx context.Context, flags testsharderFlags, params *proto.Params, 
 	multipliedAffectedShards = testsharder.SplitOutMultipliers(ctx, multipliedAffectedShards, testDurations, targetDuration, int(params.TargetTestCount), testsharder.MaxMultipliedRunsPerShard, testsharder.AffectedShardPrefix, flags.ignoreMultiplyIsolatedLimit)
 	shards = append(multipliedAffectedShards, shards...)
 	shards = append(shards, multipliedShards...)
+	if flags.randomOrderInShardsSeed != 0 {
+		testsharder.RandomizeTestOrder(shards, uint32(flags.randomOrderInShardsSeed))
+	}
 	if flags.preserveTestOrder {
 		// At this point, shards should only consist of tests defined in the modifiers
 		// so we can reorder the tests according to the order of the modifiers.

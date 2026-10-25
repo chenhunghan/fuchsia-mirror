@@ -8,8 +8,6 @@ use crate::error::Error;
 use crate::events::router::{ConsumerConfig, EventRouter, ProducerConfig};
 use crate::events::sources::EventSource;
 use crate::events::types::*;
-use crate::identity::ComponentIdentity;
-use crate::inspect::container::InspectHandle;
 use crate::inspect::repository::InspectRepository;
 use crate::inspect::servers::*;
 use crate::logs::debuglog::KernelDebugLog;
@@ -18,18 +16,19 @@ use crate::logs::serial::{SerialSink, launch_serial};
 use crate::logs::servers::*;
 use crate::pipeline::PipelineManager;
 use archivist_config::Config;
+use fidl_fuchsia_component_runtime as fruntime;
 use fidl_fuchsia_process_lifecycle::LifecycleRequestStream;
+use fuchsia_async as fasync;
+use fuchsia_component::runtime::DictionaryRouterReceiver;
 use fuchsia_component::server::{ServiceFs, ServiceObj};
 use fuchsia_inspect::component;
 use fuchsia_inspect::health::Reporter;
 use futures::channel::mpsc::unbounded;
 use futures::prelude::*;
 use log::{debug, error, info, warn};
-use moniker::ExtendedMoniker;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use {fidl_fuchsia_component_sandbox as fsandbox, fidl_fuchsia_io as fio, fuchsia_async as fasync};
 
 /// Responsible for initializing an `Archivist` instance. Supports multiple configurations by
 /// either calling or not calling methods on the builder like `serve_test_controller_protocol`.
@@ -54,9 +53,6 @@ pub struct Archivist {
 
     /// The server handling fuchsia.diagnostics.system.LogFlush
     flush_server: Arc<LogFlushServer>,
-
-    /// The server handling fuchsia.diagnostics.LogStream
-    log_stream_server: Arc<LogStreamServer>,
 
     /// The server handling fuchsia.inspect.InspectSink
     _inspect_sink_server: Arc<InspectSinkServer>,
@@ -166,10 +162,6 @@ impl Archivist {
             Arc::clone(&logs_repo),
             servers_scope.new_child_with_name("Log"),
         ));
-        let log_stream_server = Arc::new(LogStreamServer::new(
-            Arc::clone(&logs_repo),
-            servers_scope.new_child_with_name("LogStream"),
-        ));
 
         // Initialize the external event providers containing incoming diagnostics directories and
         // log sink connections.
@@ -202,24 +194,10 @@ impl Archivist {
             }
         }
 
-        // TODO(https://fxbug.dev/324494668): remove this when Netstack2 is gone.
-        if let Ok(dir) =
-            fuchsia_fs::directory::open_in_namespace("/netstack-diagnostics", fio::PERM_READABLE)
-        {
-            inspect_repo.add_inspect_handle(
-                Arc::new(ComponentIdentity::new(
-                    ExtendedMoniker::parse_str("core/network/netstack").unwrap(),
-                    "fuchsia-pkg://fuchsia.com/netstack#meta/netstack2.cm",
-                )),
-                InspectHandle::directory(dir),
-            );
-        }
-
         Self {
             accessor_server,
             log_server,
             flush_server,
-            log_stream_server,
             event_router,
             _inspect_sink_server: inspect_sink_server,
             pipeline_manager,
@@ -275,13 +253,12 @@ impl Archivist {
         mut self,
         mut fs: ServiceFs<ServiceObj<'static, ()>>,
         is_embedded: bool,
-        store: fsandbox::CapabilityStoreProxy,
         request_stream: LifecycleRequestStream,
     ) -> Result<(), Error> {
         debug!("Running Archivist.");
 
         // Start servicing all outgoing services.
-        self.serve_protocols(&mut fs, store).await;
+        self.serve_protocols(&mut fs).await;
         let svc_task = self.general_scope.spawn(fs.collect::<()>());
 
         let _inspect_server_task = inspect_runtime::publish(
@@ -295,7 +272,6 @@ impl Archivist {
             logs_repository,
             accessor_server: _accessor_server,
             log_server: _log_server,
-            log_stream_server: _log_stream_server,
             _inspect_sink_server,
             general_scope,
             incoming_events_scope,
@@ -342,21 +318,13 @@ impl Archivist {
         Ok(())
     }
 
-    async fn serve_protocols(
-        &mut self,
-        fs: &mut ServiceFs<ServiceObj<'static, ()>>,
-        mut store: fsandbox::CapabilityStoreProxy,
-    ) {
+    async fn serve_protocols(&mut self, fs: &mut ServiceFs<ServiceObj<'static, ()>>) {
         component::serve_inspect_stats();
         let mut svc_dir = fs.dir("svc");
 
-        let id_gen = sandbox::CapabilityIdGenerator::new();
-
         // Serve fuchsia.diagnostics.ArchiveAccessors backed by a pipeline.
-        let accessors_dict_id = self
-            .pipeline_manager
-            .serve_pipelines(Arc::clone(&self.accessor_server), &id_gen, &mut store)
-            .await;
+        let accessors_dict =
+            self.pipeline_manager.serve_pipelines(Arc::clone(&self.accessor_server)).await;
 
         // Serve fuchsia.logger.Log
         let log_server = Arc::clone(&self.log_server);
@@ -375,7 +343,7 @@ impl Archivist {
         // Install sample server to the accessors dictionary and start serving.
         // Note that the await is not awaiting on the request stream or anything like that;
         // the server spawns onto its owned Scope.
-        self.sample_server.install_and_serve(*accessors_dict_id, &id_gen, &mut store).await;
+        self.sample_server.install_and_serve(&accessors_dict).await;
 
         let server = self.freeze_server.clone();
         let scope = self.general_scope.clone();
@@ -386,13 +354,6 @@ impl Archivist {
             scope.spawn(async move {
                 let _ = server.handle_requests(stream).await;
             });
-        });
-
-        // Server fuchsia.logger.LogStream
-        let log_stream_server = Arc::clone(&self.log_stream_server);
-        svc_dir.add_fidl_service(move |stream| {
-            debug!("fuchsia.logger.LogStream connection");
-            log_stream_server.spawn(stream);
         });
 
         // Server fuchsia.diagnostics.LogSettings
@@ -407,42 +368,16 @@ impl Archivist {
             log_settings_server.spawn(stream);
         });
 
-        // Serve fuchsia.component.sandbox.Router
+        // Serve fuchsia.component.runtime.DictionaryRouter
         let router_scope =
-            self.servers_scope.new_child_with_name("fuchsia.component.sandbox.Router");
-        svc_dir.add_fidl_service(move |mut stream: fsandbox::DictionaryRouterRequestStream| {
-            let id_gen = Clone::clone(&id_gen);
-            let store = Clone::clone(&store);
-            router_scope.spawn(async move {
-                while let Ok(Some(request)) = stream.try_next().await {
-                    match request {
-                        fsandbox::DictionaryRouterRequest::Route { payload: _, responder } => {
-                            debug!("Got route request for the dynamic accessors dictionary");
-                            let dup_dict_id = id_gen.next();
-                            store
-                                .duplicate(*accessors_dict_id, dup_dict_id)
-                                .await
-                                .unwrap()
-                                .unwrap();
-                            let capability = store.export(dup_dict_id).await.unwrap().unwrap();
-                            let fsandbox::Capability::Dictionary(dict) = capability else {
-                                let _ = responder.send(Err(fsandbox::RouterError::Internal));
-                                continue;
-                            };
-                            let _ = responder.send(Ok(
-                                fsandbox::DictionaryRouterRouteResponse::Dictionary(dict),
-                            ));
-                        }
-                        fsandbox::DictionaryRouterRequest::_UnknownMethod {
-                            method_type,
-                            ordinal,
-                            ..
-                        } => {
-                            warn!(method_type:?, ordinal; "Got unknown interaction on Router");
-                        }
-                    }
-                }
-            });
+            self.servers_scope.new_child_with_name("fuchsia.component.runtime.DictionaryRouter");
+        svc_dir.add_fidl_service(move |stream: fruntime::DictionaryRouterRequestStream| {
+            let accessors_dict = accessors_dict.clone();
+            let router_receiver = DictionaryRouterReceiver::from(stream);
+            router_scope.spawn(router_receiver.handle_with(move |_request, _instance_token| {
+                debug!("Got route request for the dynamic accessors dictionary");
+                futures::future::ready(Ok(Some(accessors_dict.clone()))).boxed()
+            }));
         });
     }
 }

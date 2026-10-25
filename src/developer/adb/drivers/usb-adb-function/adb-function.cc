@@ -8,8 +8,11 @@
 #include <lib/driver/logging/cpp/structured_logger.h>
 #include <lib/zx/vmar.h>
 #include <zircon/assert.h>
+#include <zircon/syscalls.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 
 #include <usb/peripheral.h>
@@ -36,6 +39,34 @@ void CompleteTxn(CompleterType& completer, zx_status_t status) {
 
 }  // namespace
 
+void UsbAdbDevice::PurgeOfflineQueues() {
+  const size_t rx_count = rx_requests_.size();
+  const size_t reply_count = pending_replies_.size();
+  const size_t tx_count = tx_pending_reqs_.size();
+  if (rx_count > 0 || reply_count > 0 || tx_count > 0) {
+    zxlogf(INFO, "Purging queues (rx_requests: %zu, pending_replies: %zu, tx_pending_reqs: %zu)",
+           rx_count, reply_count, tx_count);
+  } else {
+    zxlogf(DEBUG, "Purging empty queues (rx_requests: 0, pending_replies: 0, tx_pending_reqs: 0)");
+  }
+  while (!rx_requests_.empty()) {
+    rx_requests_.front().Reply(fit::error(ZX_ERR_BAD_STATE));
+    rx_requests_.pop();
+  }
+  while (!pending_replies_.empty()) {
+    if (pending_replies_.front().request().has_value()) {
+      bulk_out_ep_.PutRequest(
+          usb::FidlRequest(std::move(pending_replies_.front().request().value())));
+    }
+    pending_replies_.pop();
+  }
+  while (!tx_pending_reqs_.empty()) {
+    CompleteTxn(tx_pending_reqs_.front().completer, ZX_ERR_CANCELED);
+    tx_pending_reqs_.pop_front();
+  }
+  UpdateQueueStats();
+}
+
 void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync& completer) {
   if (adb_binding_.has_value()) {
     zxlogf(WARNING, "ADB already connected");
@@ -45,10 +76,13 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
 
   switch (state_) {
     case State::kStoppingForUnbind:
-    case State::kStoppingForReconnect:
-      zxlogf(WARNING, "ADB connected while stopping");
+      zxlogf(WARNING, "ADB connected while stopping for unbind");
       completer.ReplyError(ZX_ERR_BAD_STATE);
       return;
+    case State::kStoppingForReconnect:
+      adb_connected_during_stop_ = true;
+      RecordEvent("adb_client_connected_during_stop");
+      break;
     case State::kOnline:
       // We're already online, so send the status change immediately.
       if (auto result =
@@ -72,6 +106,15 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
                                 info.FormatDescription().c_str());
                          RecordEvent("adb_client_disconnected: unbind");
                          adb_binding_.reset();
+                         adb_connected_during_stop_ = false;
+                         if (state_ == State::kAwaitingUsbConnection) {
+                           PurgeOfflineQueues();
+                           return;
+                         }
+                         if (state_ == State::kOnline && !usb_disconnect_observed_) {
+                           reset_usb_on_stop_ = true;
+                           RecordEvent("reset_usb_on_stop");
+                         }
                          ResetOrStopUsb(State::kStoppingForReconnect);
                        });
   completer.ReplySuccess();
@@ -80,7 +123,26 @@ void UsbAdbDevice::StartAdb(StartAdbRequestView request, StartAdbCompleter::Sync
 void UsbAdbDevice::StopAdb(StopAdbCompleter::Sync& completer) {
   zxlogf(INFO, "ADB client requested disconnect.");
   RecordEvent("adb_client_disconnected: StopAdb");
+  if (adb_binding_.has_value()) {
+    auto result = fidl::WireSendEvent(*adb_binding_)->OnStatusChanged(fadb::StatusFlags(0));
+    if (!result.ok()) {
+      zxlogf(ERROR, "Could not call UsbAdbImpl.OnStatusChanged.");
+    }
+    adb_binding_.reset();
+  }
+  adb_connected_during_stop_ = false;
+
+  if (state_ == State::kAwaitingUsbConnection) {
+    PurgeOfflineQueues();
+    completer.ReplySuccess();
+    return;
+  }
+
   stop_completers_.push_back(completer.ToAsync());
+  if (state_ == State::kOnline && !usb_disconnect_observed_) {
+    reset_usb_on_stop_ = true;
+    RecordEvent("reset_usb_on_stop");
+  }
   ResetOrStopUsb(State::kStoppingForReconnect);
 }
 
@@ -103,6 +165,8 @@ void UsbAdbDevice::ResetOrStopUsb(State stop_state) {
     case State::kStoppingForReconnect:
       if (stop_state == State::kStoppingForUnbind) {
         zxlogf(INFO, "Stop for unbind requested while already stopping for reconnect");
+        adb_connected_during_stop_ = false;
+        PurgeOfflineQueues();
         // Update state to kStoppingForUnbind so CheckUsbStopComplete will perform unbind
         // teardown once in-flight requests complete, then return immediately to avoid
         // re-issuing duplicate CancelAll or Deconfigure FIDL calls.
@@ -111,6 +175,8 @@ void UsbAdbDevice::ResetOrStopUsb(State stop_state) {
         return;
       }
       zxlogf(INFO, "Stop requested, but already stopping for reconnect");
+      PurgeOfflineQueues();
+      CheckUsbStopComplete();
       return;
     case State::kOnline:
       zxlogf(INFO, "Stopping USB");
@@ -121,27 +187,7 @@ void UsbAdbDevice::ResetOrStopUsb(State stop_state) {
   }
 
   // Purge any requests from internal queues.
-  // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
-  zxlogf(INFO, "rx_requests: %ld", rx_requests_.size());
-  while (!rx_requests_.empty()) {
-    rx_requests_.front().Reply(fit::error(ZX_ERR_BAD_STATE));
-    rx_requests_.pop();
-  }
-  // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
-  zxlogf(INFO, "pending_replies: %ld", pending_replies_.size());
-  while (!pending_replies_.empty()) {
-    if (pending_replies_.front().request().has_value()) {
-      bulk_out_ep_.PutRequest(
-          usb::FidlRequest(std::move(pending_replies_.front().request().value())));
-    }
-    pending_replies_.pop();
-  }
-  // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
-  zxlogf(INFO, "tx_pending_reqs: %ld", tx_pending_reqs_.size());
-  while (!tx_pending_reqs_.empty()) {
-    CompleteTxn(tx_pending_reqs_.front().completer, ZX_ERR_CANCELED);
-    tx_pending_reqs_.pop();
-  }
+  PurgeOfflineQueues();
 
   bulk_in_cancelled_ = false;
   bulk_out_cancelled_ = false;
@@ -227,10 +273,16 @@ void UsbAdbDevice::SendQueued() {
     return;
   }
 
-  while (!tx_pending_reqs_.empty()) {
-    auto& current = tx_pending_reqs_.front();
+  for (auto it = tx_pending_reqs_.begin(); it != tx_pending_reqs_.end();) {
+    if (it->start == it->request.data().size()) {
+      ++it;
+      continue;
+    }
+
     std::vector<fuchsia_hardware_usb_request::Request> requests;
-    while (current.start < current.request.data().size()) {
+    std::vector<uint64_t> queued_vmo_ids;
+    bool copy_failed = false;
+    while (it->start < it->request.data().size()) {
       auto req = bulk_in_ep_.GetRequest();
       if (!req) {
         break;
@@ -238,12 +290,13 @@ void UsbAdbDevice::SendQueued() {
       // Reset request buffers before copying new payload data.
       req->clear_buffers();
 
-      size_t to_copy = std::min(current.request.data().size() - current.start, kVmoDataSize);
+      size_t to_copy = std::min(it->request.data().size() - it->start, kVmoDataSize);
       zx::result<std::vector<size_t>> actual = req->CachedCopyTo(
-          0, current.request.data().data() + current.start, to_copy, bulk_in_ep_.GetMapped());
+          0, it->request.data().data() + it->start, to_copy, bulk_in_ep_.GetMapped());
       if (actual.is_error() || actual->size() != (*req)->data()->size()) {
         zxlogf(ERROR, "CachedCopyTo failed or size mismatch");
         bulk_in_ep_.PutRequest(std::move(req.value()));
+        copy_failed = true;
         break;
       }
       size_t actual_total = 0;
@@ -253,11 +306,24 @@ void UsbAdbDevice::SendQueued() {
         actual_total += (*actual)[i];
       }
 
+      queued_vmo_ids.push_back((*req)->data()->at(0).buffer()->vmo_id().value());
       requests.emplace_back(req->take_request());
-      current.start += actual_total;
+      it->start += actual_total;
     }
 
     if (requests.empty()) {
+      if (copy_failed) {
+        it->status = ZX_ERR_INTERNAL;
+        it->start = it->request.data().size();
+        if (it->in_flight_vmo_ids.empty()) {
+          CompleteTxn(it->completer, it->status);
+          it = tx_pending_reqs_.erase(it);
+          UpdateQueueStats();
+          continue;
+        }
+        ++it;
+        continue;
+      }
       // Out of hardware request descriptors; return until in-flight completions return descriptors.
       return;
     }
@@ -268,21 +334,34 @@ void UsbAdbDevice::SendQueued() {
     auto result = bulk_in_ep_->QueueRequests(std::move(requests));
     if (result.is_error()) {
       zxlogf(ERROR, "Failed to QueueRequests %s", result.error_value().FormatDescription().c_str());
-      CompleteTxn(current.completer, ZX_ERR_IO);
-      tx_pending_reqs_.pop();
-      UpdateQueueStats();
+      it->status = ZX_ERR_IO;
+      it->start = it->request.data().size();
+      if (it->in_flight_vmo_ids.empty()) {
+        CompleteTxn(it->completer, it->status);
+        tx_pending_reqs_.erase(it);
+        UpdateQueueStats();
+      }
       return;
     }
+    if (host_data_received_) {
+      host_session_started_ = true;
+    }
 
-    if (current.start == current.request.data().size()) {
-      CompleteTxn(current.completer, ZX_OK);
-      tx_pending_reqs_.pop();
-      UpdateQueueStats();
-    } else {
+    it->in_flight_vmo_ids.insert(it->in_flight_vmo_ids.end(), queued_vmo_ids.begin(),
+                                 queued_vmo_ids.end());
+    if (copy_failed) {
+      it->status = ZX_ERR_INTERNAL;
+      it->start = it->request.data().size();
+      ++it;
+      continue;
+    }
+
+    if (it->start < it->request.data().size()) {
       // Transaction was partially queued due to descriptor exhaustion.
       // Return and wait for in-flight requests to complete before queueing remaining bytes.
       return;
     }
+    ++it;
   }
 }
 
@@ -339,6 +418,13 @@ void UsbAdbDevice::ReceiveQueued() {
     UpdateQueueStats();
     req.reset_buffers(bulk_out_ep_.GetMapped());
 
+    // Do not re-queue requests onto the hardware endpoint if the completion failed due to
+    // disconnect or cancellation; return the request to the pool instead.
+    if (status == ZX_ERR_IO_NOT_PRESENT || status == ZX_ERR_CANCELED) {
+      bulk_out_ep_.PutRequest(std::move(req));
+      continue;
+    }
+
     // QueueRequests transfers ownership of `requests` via std::move to the endpoint FIDL client,
     // leaving `requests` empty. If QueueRequests returns an error (e.g. channel closed), return
     // early as endpoint teardown is initiated.
@@ -362,13 +448,18 @@ void UsbAdbDevice::QueueTx(QueueTxRequest& request, QueueTxCompleter::Sync& comp
 
   switch (state_) {
     case State::kStoppingForUnbind:
-    case State::kStoppingForReconnect:
       // Return early during shutdown.
       completer.Reply(fit::error(ZX_ERR_BAD_STATE));
       return;
+    case State::kStoppingForReconnect:
+      if (!adb_connected_during_stop_) {
+        completer.Reply(fit::error(ZX_ERR_BAD_STATE));
+        return;
+      }
+      [[fallthrough]];
     case State::kOnline:
     case State::kAwaitingUsbConnection:
-      tx_pending_reqs_.emplace(
+      tx_pending_reqs_.push_back(
           txn_req_t{.request = std::move(request), .start = 0, .completer = completer.ToAsync()});
       UpdateQueueStats();
       SendQueued();
@@ -378,10 +469,15 @@ void UsbAdbDevice::QueueTx(QueueTxRequest& request, QueueTxCompleter::Sync& comp
 void UsbAdbDevice::Receive(ReceiveCompleter::Sync& completer) {
   switch (state_) {
     case State::kStoppingForUnbind:
-    case State::kStoppingForReconnect:
       // Return early during shutdown.
       completer.Reply(fit::error(ZX_ERR_BAD_STATE));
       return;
+    case State::kStoppingForReconnect:
+      if (!adb_connected_during_stop_) {
+        completer.Reply(fit::error(ZX_ERR_BAD_STATE));
+        return;
+      }
+      [[fallthrough]];
     case State::kAwaitingUsbConnection:
       rx_requests_.emplace(completer.ToAsync());
       UpdateQueueStats();
@@ -409,12 +505,73 @@ void UsbAdbDevice::RxComplete(std::vector<fendpoint::Completion> completions) {
         CheckUsbStopComplete();
         break;
       case State::kOnline:
+        if (host_session_started_ && IsAdbConnect(completion)) {
+          // The host started a new adb session without a USB disconnect, e.g. because its adb
+          // server was restarted in the middle of a transfer. The client may be holding a
+          // partially received packet, and data from the previous session may still be queued
+          // ahead of the reply to this CNXN, which the host would reject. Restart USB as if the
+          // cable had been replugged: this flushes both directions, makes the client start over,
+          // and makes the host reconnect to a clean device.
+          zxlogf(WARNING, "Received adb CNXN during an existing host session; restarting USB");
+          RecordEvent("host_reconnected: CNXN during session");
+          bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(completion.request().value())));
+
+          // Only an explicit USB reset (Deconfigure() + StartUsb()) makes the host re-enumerate and
+          // tears down the client's session. If a bus disconnect is already in progress, the
+          // SetConfigured(false) that follows handles it instead.
+          if (!usb_disconnect_observed_) {
+            reset_usb_on_stop_ = true;
+            RecordEvent("reset_usb_on_stop");
+          }
+
+          ResetOrStopUsb(State::kStoppingForReconnect);
+          break;
+        }
+
+        if (completion.status().value_or(ZX_ERR_INTERNAL) == ZX_OK) {
+          host_data_received_ = true;
+        }
+        if (completion.status().value_or(ZX_ERR_INTERNAL) == ZX_ERR_IO_NOT_PRESENT) {
+          if (!usb_disconnect_observed_) {
+            usb_disconnect_observed_ = true;
+            RecordEvent("usb_disconnect_observed: RxComplete");
+          }
+        }
         pending_replies_.push(std::move(completion));
         UpdateQueueStats();
         ReceiveQueued();
         break;
     }
   }
+}
+
+bool UsbAdbDevice::IsAdbConnect(const fendpoint::Completion& completion) {
+  if (completion.status().value_or(ZX_ERR_INTERNAL) != ZX_OK || !completion.request().has_value()) {
+    return false;
+  }
+
+  // The host sends a CNXN header as a single short packet. Normally it fills a request on its own.
+  // But if the previous host session was killed in the middle of a transfer, the request may
+  // already hold some whole packets of that transfer, and the CNXN then completes the request after
+  // them. Packets before the final short packet are always full-sized, so the CNXN can only start
+  // at a multiple of the max packet size (512 bytes at high speed; 1024 at SuperSpeed is also a
+  // multiple of 512).
+  const size_t transfer_size = completion.transfer_size().value_or(0);
+  if (transfer_size < kAdbHeaderSize || transfer_size > kVmoDataSize ||
+      (transfer_size - kAdbHeaderSize) % kBulkMaxPacket != 0) {
+    return false;
+  }
+
+  std::optional<zx_vaddr_t> addr = bulk_out_ep_.GetMappedAddr(*completion.request(), 0);
+  if (!addr.has_value()) {
+    return false;
+  }
+
+  auto header = AdbHeader::FromVaddr(*addr + transfer_size - kAdbHeaderSize);
+
+  return (header.command == kAdbCommandConnect &&
+          header.magic == (kAdbCommandConnect ^ 0xffffffff) && header.data_length <= kVmoDataSize &&
+          header.arg0 >= kAdbProtocolVersionMin);
 }
 
 void UsbAdbDevice::TxComplete(std::vector<fendpoint::Completion> completions) {
@@ -428,8 +585,21 @@ void UsbAdbDevice::TxComplete(std::vector<fendpoint::Completion> completions) {
         CheckUsbStopComplete();
         break;
       case State::kOnline: {
-        zx_status_t status = *completion.status();
+        zx_status_t status = completion.status().value_or(ZX_ERR_INTERNAL);
+        if (status == ZX_ERR_IO_NOT_PRESENT) {
+          if (!usb_disconnect_observed_) {
+            usb_disconnect_observed_ = true;
+            RecordEvent("usb_disconnect_observed: TxComplete");
+          }
+        }
         usb::FidlRequest req(std::move(completion.request().value()));
+        std::optional<uint64_t> completed_vmo_id;
+        if (req->data().has_value() && !req->data()->empty() &&
+            req->data()->at(0).buffer().has_value() &&
+            req->data()->at(0).buffer()->Which() ==
+                fuchsia_hardware_usb_request::Buffer::Tag::kVmoId) {
+          completed_vmo_id = req->data()->at(0).buffer()->vmo_id().value();
+        }
         size_t size = req.length();
         if (status == ZX_OK) {
           bulk_in_inspect_.AddTxBytes(completion.transfer_size().value_or(0));
@@ -437,6 +607,25 @@ void UsbAdbDevice::TxComplete(std::vector<fendpoint::Completion> completions) {
           bulk_in_inspect_.AddFailedTxBytes(size);
         }
         bulk_in_ep_.PutRequest(std::move(req));
+
+        if (completed_vmo_id.has_value()) {
+          for (auto it = tx_pending_reqs_.begin(); it != tx_pending_reqs_.end(); ++it) {
+            auto vmo_it = std::find(it->in_flight_vmo_ids.begin(), it->in_flight_vmo_ids.end(),
+                                    *completed_vmo_id);
+            if (vmo_it != it->in_flight_vmo_ids.end()) {
+              it->in_flight_vmo_ids.erase(vmo_it);
+              if (status != ZX_OK && it->status == ZX_OK) {
+                it->status = status;
+              }
+              if (it->start == it->request.data().size() && it->in_flight_vmo_ids.empty()) {
+                CompleteTxn(it->completer, it->status);
+                tx_pending_reqs_.erase(it);
+              }
+              break;
+            }
+          }
+        }
+        UpdateQueueStats();
 
         // Do not queue requests if status is ZX_ERR_IO_NOT_PRESENT, as the underlying connection
         // could be disconnected or USB_RESET is being processed. Calling adb_send_locked in such
@@ -545,6 +734,10 @@ zx::result<> UsbAdbDevice::EnableEndpoints() {
     }
   }
 
+  usb_disconnect_observed_ = false;
+  adb_connected_during_stop_ = false;
+  host_data_received_ = false;
+  host_session_started_ = false;
   SetState(State::kOnline);
 
   SendQueued();
@@ -560,27 +753,31 @@ void UsbAdbDevice::SetConfigured(SetConfiguredRequest& request,
       completer.Reply(result.take_error());
       return;
     }
-  } else {
-    pending_reconfigure_ = false;
-    switch (state_) {
-      case State::kAwaitingUsbConnection:
-        // It's normal to receive SetConfigured(false) while the connection is
-        // starting up - ignore it.
-        break;
-      case State::kOnline:
-        RecordEvent("usb_bus_disconnected: SetConfigured(false)");
-        function_inspect_.OnUnconfigureStart();
-        ResetOrStopUsb(State::kStoppingForReconnect);
-        break;
-      case State::kStoppingForUnbind:
-      case State::kStoppingForReconnect:
-        zxlogf(
-            WARNING,
-            "Received SetConfigured(false) while stopping. This is unexpected, but probably fine.");
-        break;
-    }
+    completer.Reply(zx::ok());
+    return;
   }
-  completer.Reply(zx::ok());
+
+  pending_reconfigure_ = false;
+  reset_usb_on_stop_ = false;
+  switch (state_) {
+    case State::kAwaitingUsbConnection:
+      // It's normal to receive SetConfigured(false) while the connection is
+      // starting up - reply immediately.
+      completer.Reply(zx::ok());
+      return;
+    case State::kOnline:
+      RecordEvent("usb_bus_disconnected: SetConfigured(false)");
+      function_inspect_.OnUnconfigureStart();
+      set_configured_completers_.push_back(completer.ToAsync());
+      ResetOrStopUsb(State::kStoppingForReconnect);
+      return;
+    case State::kStoppingForUnbind:
+    case State::kStoppingForReconnect:
+      zxlogf(INFO, "Received SetConfigured(false) while already stopping; coalescing completer.");
+      set_configured_completers_.push_back(completer.ToAsync());
+      CheckUsbStopComplete();
+      return;
+  }
 }
 
 void UsbAdbDevice::SetInterface(SetInterfaceRequest& request,
@@ -607,6 +804,10 @@ void UsbAdbDevice::CheckUsbStopComplete() {
     return;
   }
 
+  // Teardown barrier: do not reply to held `SetConfigured(false)` / `StopAdb()` completers or tear
+  // down `usb_function_binding_` until DWC3 has returned every in-flight bulk IN/OUT request VMO
+  // (`AllRequestsReturned()`) and acknowledged both endpoint `CancelAll()` calls
+  // (`CancelAllCompleted()`).
   if (!AllRequestsReturned() || !CancelAllCompleted()) {
     // Still waiting for outstanding USB requests to return and CancelAll calls to complete.
     // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
@@ -625,8 +826,41 @@ void UsbAdbDevice::CheckUsbStopComplete() {
   } else {
     function_inspect_.SetConfigured(false);
   }
+  usb_disconnect_observed_ = false;
+  // Passive host bus resets and cable disconnects keep `usb_function_binding_` intact in
+  // `usb-peripheral` (`should_deconfigure_usb == false`), avoiding controller bounce loops while
+  // unplugging. `Deconfigure()` is strictly reserved for explicit daemon stops
+  // (`reset_usb_on_stop_`) and driver unbind (`kStoppingForUnbind`).
+  const bool should_deconfigure_usb = (state_ == State::kStoppingForUnbind) || reset_usb_on_stop_;
+  reset_usb_on_stop_ = false;
 
-  if (usb_function_binding_.has_value()) {
+  if (adb_binding_.has_value() &&
+      (state_ == State::kStoppingForUnbind || !adb_connected_during_stop_)) {
+    auto result = fidl::WireSendEvent(*adb_binding_)->OnStatusChanged(fadb::StatusFlags(0));
+    if (!result.ok()) {
+      zxlogf(ERROR, "Could not call UsbAdbImpl.OnStatusChanged.");
+    }
+    if (should_deconfigure_usb) {
+      adb_binding_.reset();
+    }
+  }
+  adb_connected_during_stop_ = false;
+
+  // Reply to held `SetConfigured(false)` and `StopAdb()` completers BEFORE calling `Deconfigure()`
+  // and closing `usb_function_binding_` so `usb-peripheral` observes `ZX_OK` rather than
+  // `ZX_ERR_PEER_CLOSED` even during driver unbind.
+  // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
+  zxlogf(INFO, "Calling stop_completers_ and set_configured_completers_");
+  while (!stop_completers_.empty()) {
+    stop_completers_.back().Reply(zx::ok());
+    stop_completers_.pop_back();
+  }
+  while (!set_configured_completers_.empty()) {
+    set_configured_completers_.back().Reply(zx::ok());
+    set_configured_completers_.pop_back();
+  }
+
+  if (should_deconfigure_usb && usb_function_binding_.has_value()) {
     fidl::Result deconfigure = function_->Deconfigure();
     if (deconfigure.is_error()) {
       zxlogf(ERROR, "Failed to deconfigure: %s",
@@ -635,23 +869,7 @@ void UsbAdbDevice::CheckUsbStopComplete() {
     usb_function_binding_.reset();
   }
 
-  if (adb_binding_.has_value()) {
-    auto result = fidl::WireSendEvent(*adb_binding_)->OnStatusChanged(fadb::StatusFlags(0));
-    if (!result.ok()) {
-      zxlogf(ERROR, "Could not call UsbAdbImpl.OnStatusChanged.");
-    }
-  }
-
-  adb_binding_.reset();
-
-  // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
-  zxlogf(INFO, "Calling stop_completers_");
-  while (!stop_completers_.empty()) {
-    stop_completers_.back().Reply(zx::ok());
-    stop_completers_.pop_back();
-  }
-
-  // Is this a proper shutdown, or a restart of USB?
+  // Is this a proper shutdown, an ADB-requested USB reset, or a host/bus unconfigure?
   if (state_ == State::kStoppingForUnbind) {
     bulk_out_ep_.Close();
     bulk_in_ep_.Close();
@@ -660,12 +878,20 @@ void UsbAdbDevice::CheckUsbStopComplete() {
       shutdown_callback_.value()(zx::ok());
       shutdown_callback_.reset();
     }
-  } else {
+  } else if (should_deconfigure_usb) {
+    // Any pending_reconfigure_ from the old usb_function_binding_ is invalidated by
+    // Deconfigure() and the subsequent USB bus reset; the host will issue a fresh
+    // SetConfigured(true) once re-enumeration completes.
+    pending_reconfigure_ = false;
     zxlogf(INFO, "Restarting USB connection.");
     if (zx::result<> result = StartUsb(); result.is_error()) {
       zxlogf(WARNING, "Restarting USB connection failed: %s", result.status_string());
+      RecordEvent("restarting_usb_connection_failed");
       SetState(State::kAwaitingUsbConnection);
-    } else if (pending_reconfigure_) {
+    }
+  } else {
+    SetState(State::kAwaitingUsbConnection);
+    if (pending_reconfigure_) {
       pending_reconfigure_ = false;
       zxlogf(INFO, "Applying pending reconfiguration after stop complete");
       (void)EnableEndpoints();
@@ -772,10 +998,11 @@ zx::result<> UsbAdbDevice::Start(fdf::DriverContext context) {
   component_inspector_ = context.CreateInspector(this);
   if (component_inspector_.has_value()) {
     inspect_node_ = component_inspector_->root().CreateChild("usb-adb-function");
-    function_inspect_.Init(inspect_node_, StateToString(state_));
-    bulk_in_inspect_.Init(inspect_node_, "bulk_in");
+    constexpr size_t kEventCapacity = 64;
+    function_inspect_.Init(inspect_node_, StateToString(state_), kEventCapacity);
+    bulk_in_inspect_.Init(inspect_node_, "bulk_in", kEventCapacity);
     bulk_in_inspect_.SetPoolCountsCallback([this]() { return bulk_in_ep_.GetPoolCounts(); });
-    bulk_out_inspect_.Init(inspect_node_, "bulk_out");
+    bulk_out_inspect_.Init(inspect_node_, "bulk_out", kEventCapacity);
     bulk_out_inspect_.SetPoolCountsCallback([this]() { return bulk_out_ep_.GetPoolCounts(); });
 
     RecordEvent("driver_started");

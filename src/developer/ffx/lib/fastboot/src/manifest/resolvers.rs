@@ -6,8 +6,8 @@ use crate::error::FfxFastbootError;
 use crate::file_resolver::FileResolver;
 use crate::file_resolver::resolvers::{Resolver, TarResolver};
 type Result<T> = std::result::Result<T, FfxFastbootError>;
-use async_trait::async_trait;
 use std::fs::{File, create_dir_all};
+use std::future::Future;
 use std::io::copy;
 use std::path::{Path, PathBuf};
 use tempfile::{TempDir, tempdir};
@@ -15,12 +15,10 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 /// Trait that allows the given Resolvers to find out where their flash manifest paths are
-#[async_trait]
 pub trait ManifestResolver {
-    async fn get_manifest_path(&self) -> &Path;
+    fn get_manifest_path(&self) -> impl Future<Output = &Path>;
 }
 
-#[async_trait]
 impl ManifestResolver for ArchiveResolver {
     async fn get_manifest_path(&self) -> &Path {
         self.manifest()
@@ -41,14 +39,12 @@ impl FlashManifestResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for FlashManifestResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         self.0.get_file(file).await
     }
 }
 
-#[async_trait]
 impl ManifestResolver for FlashManifestResolver {
     async fn get_manifest_path(&self) -> &Path {
         self.0.root_path()
@@ -73,9 +69,10 @@ impl ArchiveResolver {
 
         for i in 0..archive.len() {
             let mut archive_file = archive.by_index(i).map_err(FfxFastbootError::ZipArchiveRead)?;
-            let outpath = archive_file.mangled_name();
-            if (&*archive_file.name()).ends_with("flash.json")
-                || (&*archive_file.name()).ends_with("flash-manifest.manifest")
+            let outpath = archive_file.mangled_name().map_err(FfxFastbootError::ZipArchiveRead)?;
+            let archive_name = archive_file.name().map_err(FfxFastbootError::ZipArchiveRead)?;
+            if archive_name.ends_with("flash.json")
+                || archive_name.ends_with("flash-manifest.manifest")
             {
                 let mut internal_path = PathBuf::new();
                 internal_path.push(outpath.clone());
@@ -108,7 +105,6 @@ impl ArchiveResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for ArchiveResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         let mut file = match self.internal_manifest_path.parent() {
@@ -129,7 +125,7 @@ impl FileResolver for ArchiveResolver {
         };
         let mut outpath = PathBuf::new();
         outpath.push(self.temp_dir.path());
-        outpath.push(file.mangled_name());
+        outpath.push(file.mangled_name().map_err(FfxFastbootError::ZipArchiveRead)?);
         if let Some(p) = outpath.parent() {
             if !p.exists() {
                 create_dir_all(&p)?;
@@ -163,14 +159,12 @@ impl FlashManifestTarResolver {
     }
 }
 
-#[async_trait]
 impl FileResolver for FlashManifestTarResolver {
     async fn get_file(&mut self, file: &str) -> Result<String> {
         self.0.get_file(file).await
     }
 }
 
-#[async_trait]
 impl ManifestResolver for FlashManifestTarResolver {
     async fn get_manifest_path(&self) -> &Path {
         self.1.as_path()

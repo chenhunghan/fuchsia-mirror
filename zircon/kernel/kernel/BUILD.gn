@@ -17,10 +17,6 @@ source_set("kernel") {
     "brwlock.cc",
     "cpu_distance_map.cc",
     "cpu_search_set.cc",
-    "debug.cc",
-    "dpc.cc",
-    "event.cc",
-    "event_ffi.cc",
     "idle_power_thread.cc",
     "idle_power_thread_ffi.cc",
     "init.cc",
@@ -37,6 +33,7 @@ source_set("kernel") {
     "restricted_ffi.cc",
     "rppm_ffi.cc",
     "scheduler.cc",
+    "scheduler_ffi.cc",
     "scheduler_pi.cc",
     "scheduler_state.cc",
     "scheduler_state_ffi.cc",
@@ -61,6 +58,7 @@ source_set("kernel") {
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options:headers",
     "//zircon/kernel/lib/console",
+    "//zircon/kernel/lib/control-region",
     "//zircon/kernel/lib/counters",
     "//zircon/kernel/lib/cxxabi-dynamic-init",
     "//zircon/kernel/lib/fbl",
@@ -72,6 +70,7 @@ source_set("kernel") {
     "//zircon/kernel/lib/ktrace",
     "//zircon/kernel/lib/libc",
     "//zircon/kernel/lib/mmu_rcu",
+    "//zircon/kernel/lib/object-constants:headers",
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/power-management",
     "//zircon/kernel/lib/sched",
@@ -120,49 +119,33 @@ group("kernel-tests") {
 
 kernel_bindgen_crate("event-bindings") {
   visibility = [ "//zircon/kernel/*" ]
-  headers = [ "//zircon/kernel/include/kernel/event_ffi.h" ]
+  headers = [ "//zircon/kernel/include/kernel/event_layout.h" ]
   non_rust_deps = [ ":kernel" ]
   output_name = "event_bindings.rs"
   cpp = true
 
   edition = "2024"
   notice_year = 2026
-  function_allowlist = [
-    "cpp_event_.*",
-    "cpp_autounsignal_event_.*",
-  ]
+
+  # Layout contract only: the opaque `Event`/`AutounsignalEvent` types
+  # (re-exported by other bindgen crates for pointer signatures) and the
+  # `EventLayout` constants the Rust `Event` asserts its layout against.
+  function_blocklist = [ ".*" ]
+  var_allowlist = [ "EventLayout_k.*" ]
   type_allowlist = [
     "Event",
     "AutounsignalEvent",
-  ]
-  type_blocklist = [
-    "Deadline",
-    "Interruptible",
-    "OwnedWaitQueue",
-    "zx_instant_mono_t",
-    "zx_status_t",
   ]
   opaque_types = [
     "Event",
     "AutounsignalEvent",
   ]
-  function_blocklist = [
-    "Event_.*",
-    "AutounsignalEvent_.*",
-  ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [ "//sdk/rust/zx-types" ]
   expect_lints = [
     "non_camel_case_types",
     "non_upper_case_globals",
   ]
-  raw_lines = [
-    "#![no_std]",
-    "pub use zx_types::{zx_instant_mono_t, zx_status_t};",
-    "pub type Deadline = core::ffi::c_void;",
-    "pub type Interruptible = bool;",
-    "pub type OwnedWaitQueue = core::ffi::c_void;",
-  ]
+  raw_lines = [ "#![no_std]" ]
 }
 
 kernel_bindgen_crate("percpu-bindings") {
@@ -250,6 +233,33 @@ kernel_bindgen_crate("thread-lock-guard-bindings") {
   raw_lines = [ "#![no_std]" ]
 }
 
+kernel_bindgen_crate("thread-layout-bindings") {
+  visibility = [ "//zircon/kernel/*" ]
+  headers = [ "//zircon/kernel/include/kernel/thread_layout.h" ]
+  non_rust_deps = [ ":kernel" ]
+  cpp = true
+
+  edition = "2024"
+  notice_year = 2026
+
+  function_blocklist = [ ".*" ]
+  var_allowlist = [
+    "ThreadLayout_k.*",
+    "PreemptionStateLayout_k.*",
+    "TaskStateLayout_k.*",
+    "MemoryAllocationStateLayout_k.*",
+  ]
+  type_allowlist = [
+    "Thread.*Storage",
+    "PreemptionStateStorage",
+    "TaskStateStorage",
+    "MemoryAllocationStateStorage",
+  ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  expect_lints = [ "non_upper_case_globals" ]
+  raw_lines = [ "#![no_std]" ]
+}
+
 kernel_bindgen_crate("wait-queue-bindings") {
   visibility = [ "//zircon/kernel/*" ]
   headers = [ "//zircon/kernel/include/kernel/wait.h" ]
@@ -290,7 +300,6 @@ kernel_bindgen_crate("wait-queue-bindings") {
     "Thread",
     "Timer",
     "WaitQueueCollection_BlockedThreadTreeTraits",
-    "WaitQueueCollection_MinRelativeDeadlineTraits.*",
     "WaitQueueCollection_PrimaryKey",
     "WaitQueueCollection_Key",
     "WaitQueueBase_.*",
@@ -416,9 +425,13 @@ kernel_rust_mod("kernel-rs") {
 
   sources = [
     "align.rs",
+    "auto_preempt_disabler.rs",
     "bits.rs",
     "deadline.rs",
+    "debug.rs",
+    "dpc.rs",
     "event.rs",
+    "event_limiter.rs",
     "idle_power_thread.rs",
     "interrupt.rs",
     "koid.rs",
@@ -445,6 +458,7 @@ kernel_rust_mod("kernel-rs") {
     ":event-bindings",
     ":owned-wait-queue-bindings",
     ":percpu-bindings",
+    ":thread-layout-bindings",
     ":thread-lock-guard-bindings",
     ":wait-queue-bindings",
     "//sdk/rust/zx-status",
@@ -457,9 +471,11 @@ kernel_rust_mod("kernel-rs") {
     "//src/lib/zr",
     "//third_party/rust_crates:paste",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/backtrace:backtrace-rs",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/kconcurrent:kconcurrent_rs",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",

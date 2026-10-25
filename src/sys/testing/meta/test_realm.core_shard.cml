@@ -48,8 +48,9 @@
             to: "#testing",
         },
         {
-            protocol: "fuchsia.pkg.PackageResolver",
-            from: "#pkg-resolver",
+            protocol: "fuchsia.pkg.PackageResolver-full",
+            from: "parent",
+            as: "fuchsia.pkg.PackageResolver",
             to: "#testing",
         },
 
@@ -110,10 +111,10 @@
             source_availability: "unknown",
         },
         {
-            protocol: "fuchsia.component.resolution.Resolver",
-            from: "#pkg-resolver",
+            protocol: "fuchsia.component.resolution.Resolver-full",
+            from: "parent",
+            as: "fuchsia.component.resolution.Resolver",
             to: "#testing",
-            source_availability: "unknown",
         },
         {
             protocol: "fuchsia.intl.PropertyProvider",
@@ -550,16 +551,6 @@
             to: "#testing",
         },
         {
-            // TODO(https://fxbug.dev/324273348): Remove this capability once the clients have
-            // been migrated to services. The service capability has been added below.
-            directory: "dev-class",
-            from: "parent",
-            as: "dev-input-report",
-            to: "#testing",
-            subdir: "input-report",
-        },
-        {
-            // This service replaces the directory capability above.
             service: "fuchsia.input.report.Service",
             from: "parent",
             to: "#testing",

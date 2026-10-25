@@ -8,6 +8,8 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use chacha20::cipher::{KeyIvInit, StreamCipher as _, StreamCipherSeek};
 use chacha20::{self, ChaCha20};
+use fidl_fuchsia_fxfs_common as fidl_fuchsia_fxfs;
+use fidl_fuchsia_io_common as fidl_fuchsia_io;
 use fprint::TypeFingerprint;
 use futures::TryStreamExt as _;
 use futures::stream::FuturesUnordered;
@@ -34,7 +36,7 @@ pub use fidl_fuchsia_fxfs::{
     EmptyStruct, FscryptKeyIdentifier, FscryptKeyIdentifierAndNonce, ObjectType, WrappedKey,
 };
 
-pub use cipher::FSCRYPT_PADDING;
+pub use cipher::{FSCRYPT_PADDING, MAX_SYMLINK_LEN};
 pub const FXFS_KEY_SIZE: usize = 256 / 8;
 pub const FXFS_WRAPPED_KEY_SIZE: usize = FXFS_KEY_SIZE + 16;
 

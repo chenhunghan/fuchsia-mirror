@@ -48,7 +48,7 @@ type ShutdownReason = flexible enum {
     /// The Netstack component is changing versions.
     // TODO(https://fxbug.dev/42081574): Delete this reason once API Version 33
     // is retired.
-    @available(removed=NEXT)
+    @available(removed=33)
     NETSTACK_MIGRATION = 11;
 
     /// An Android-initiated shutdown reason that Starnix doesn't recognize.
@@ -75,4 +75,8 @@ type ShutdownReason = flexible enum {
     /// A critical driver has failed.
     @available(added=HEAD)
     CRITICAL_DRIVER_FAILURE = 19;
+
+    /// The system failed to transition between power levels within the expected time.
+    @available(added=HEAD)
+    POWER_LEVEL_TRANSITION_STUCK = 20;
 };

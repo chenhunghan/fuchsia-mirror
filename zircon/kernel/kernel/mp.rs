@@ -267,15 +267,117 @@ pub fn unplug_cpu(cpu: cpu_num_t) -> Result<(), Status> {
     Status::ok(status)
 }
 
+/// # Safety
+///
+/// `argv` must point to a valid array of at least `argc` [`crate::console::CmdArgs`] elements,
+/// where `argc >= 1` and each element's `arg_str` is a valid null-terminated C string.
+#[cfg(console_enabled)]
+unsafe extern "C" fn cmd_mp(
+    argc: core::ffi::c_int,
+    argv: *const crate::console::CmdArgs,
+    _flags: u32,
+) -> core::ffi::c_int {
+    use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
+    use crate::kernel::scheduler;
+    use core::ffi::c_int;
+    use kprint::kprintln;
+    use zx_types::ZX_OK;
+
+    // SAFETY: The caller guarantees `argc >= 1` and `argv` points to at least `argc` initialized
+    // `CmdArgs` elements.
+    let argv = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
+    let usage = || -> c_int {
+        kprintln!("usage:");
+        kprintln!("{:s} unplug <cpu_id>", argv[0].as_str());
+        kprintln!("{:s} hotplug <cpu_id>", argv[0].as_str());
+        kprintln!(
+            "{:s} reschedule <cpu_id>        : send a reschedule ipi to <cpu_id>",
+            argv[0].as_str()
+        );
+        Status::INTERNAL.into_raw()
+    };
+    if argc < 2 {
+        kprintln!("not enough arguments");
+        return usage();
+    }
+
+    if argv[1].as_str() == "unplug" {
+        if argc < 3 {
+            kprintln!("specify a cpu_id");
+            return usage();
+        }
+        let status = Status::result_into_raw(unplug_cpu(argv[2].arg_uint as cpu_num_t));
+        kprintln!(
+            "CPU {} unplug {:s} {}",
+            argv[2].arg_uint,
+            if status == ZX_OK { "succeeded" } else { "failed" },
+            status
+        );
+    } else if argv[1].as_str() == "hotplug" {
+        if argc < 3 {
+            kprintln!("specify a cpu_id");
+            return usage();
+        }
+        let status = Status::result_into_raw(hotplug_cpu(argv[2].arg_uint as cpu_num_t));
+        kprintln!(
+            "CPU {} hotplug {:s} {}",
+            argv[2].arg_uint,
+            if status == ZX_OK { "succeeded" } else { "failed" },
+            status
+        );
+    } else if argv[1].as_str() == "reschedule" {
+        if argc < 3 {
+            kprintln!("specify a cpu_id");
+            return usage();
+        }
+
+        let target_cpu = argv[2].arg_uint as cpu_num_t;
+        if !scheduler::peek_is_active(target_cpu) {
+            kprintln!("target cpu {} is not active", target_cpu);
+            return ZX_OK;
+        }
+
+        let mask = cpu_num_to_mask(target_cpu);
+        let sending_cpu;
+        {
+            // Disable interrupts so that the sending CPU we record here cannot change
+            // during our call to mp_reschedule.
+            let _irqd = InterruptDisableGuard::new();
+            sending_cpu = curr_cpu_num();
+            reschedule(mask, 0);
+        }
+
+        if sending_cpu == target_cpu {
+            kprintln!("sending cpu is same as target cpu, no ipi sent");
+        } else {
+            kprintln!("sent reschedule ipi to cpu {}", target_cpu);
+        }
+    } else {
+        kprintln!("unknown command");
+        return usage();
+    }
+
+    ZX_OK
+}
+
+#[cfg(console_enabled)]
+crate::console::static_command!(
+    CMD_MP,
+    c"mp".as_ptr(),
+    c"mp test commands".as_ptr(),
+    cmd_mp,
+    crate::console::CMD_AVAIL_NORMAL
+);
+
 /// Kernel MP unit tests.
 #[cfg(ktest)]
 #[unittest::suite(name = "mp_rust")]
 mod tests {
-    use super::{
-        Deadline, MpIpiTarget, get_online_mask, is_cpu_online, sync_exec, wait_for_all_cpus_ready,
-    };
+    use crate::arch_rs::InterruptDisableGuard;
+    use crate::kernel::thread::preempt_is_enabled;
     use crate::platform_rs::timer::InstantUnknown;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use unittest::{assert_false, assert_true, subtest};
 
     /// Verifies querying online CPU mask and per-CPU online status.
     #[test]
@@ -315,5 +417,176 @@ mod tests {
     fn test_mp_ready() {
         let status = wait_for_all_cpus_ready(Deadline::no_slack(InstantUnknown(0)));
         unittest::expect_ok!(status);
+    }
+
+    // Verify that preemption is disabled during mp_sync_exec'd tasks.
+    /// mp_sync_exec_preempt_disabled
+    #[test]
+    fn mp_sync_exec_preempt_disabled() {
+        let test_with_target_mask = subtest!(|target: MpIpiTarget, mask: cpu_mask_t| {
+            assert_true!(preempt_is_enabled());
+
+            let preempt_enabled = AtomicBool::new(false);
+            sync_exec(target, mask, || {
+                if preempt_is_enabled() {
+                    preempt_enabled.store(true, Ordering::Relaxed);
+                }
+            });
+
+            assert_false!(preempt_enabled.load(Ordering::Relaxed));
+
+            assert_true!(preempt_is_enabled());
+        });
+
+        // 1. ALL
+        assert_true!(test_with_target_mask(MpIpiTarget::All, /* ignored */ 0));
+        {
+            let _irqd = InterruptDisableGuard::new();
+            assert_true!(test_with_target_mask(MpIpiTarget::All, /* ignored */ 0));
+        }
+
+        // 2. ALL_BUT_LOCAL
+        {
+            let _irqd = InterruptDisableGuard::new();
+            assert_true!(test_with_target_mask(MpIpiTarget::AllButLocal, /* ignored */ 0));
+        }
+
+        // 3. MASK
+        assert_true!(test_with_target_mask(MpIpiTarget::Mask, CPU_MASK_ALL));
+        {
+            let _irqd = InterruptDisableGuard::new();
+            assert_true!(test_with_target_mask(MpIpiTarget::Mask, CPU_MASK_ALL));
+        }
+    }
+}
+
+/// Synchronous IPI unit tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "sync_ipi_tests_rust")]
+mod sync_ipi_tests {
+    use crate::arch_rs::{
+        InterruptDisableGuard, blocking_disallowed, curr_cpu_num, ints_disabled, max_num_cpus,
+    };
+    use crate::kernel::event::Event;
+    use crate::kernel::thread::{self, DEFAULT_PRIORITY, ThreadPtr};
+    use crate::platform_rs::timer::InstantMono;
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicI32, Ordering};
+    use debug::{ltracef, tracef};
+    use kprint::kprintln;
+    use pin_init::stack_pin_init;
+
+    const LOCAL_TRACE: u32 = 0;
+
+    const TEST_RUNS: u32 = 1000;
+
+    fn inorder_count_task(inorder_counter: &AtomicI32) {
+        assert!(ints_disabled());
+        assert!(blocking_disallowed());
+        let cpu_num = curr_cpu_num();
+
+        let oldval = inorder_counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(oldval, cpu_num as i32);
+        ltracef!("  CPU {} checked in\n", cpu_num);
+    }
+
+    fn counter_task(counter: &AtomicI32) {
+        assert!(ints_disabled());
+        assert!(blocking_disallowed());
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C" fn deadlock_test_thread(arg: *mut c_void) -> i32 {
+        // SAFETY: `arg` points to a valid `Event` that outlives this thread (joined in
+        // `deadlock_test` before `gate` goes out of scope).
+        let gate = unsafe { &*(arg as *const Event) };
+        let _ = gate.wait_infinite();
+
+        let counter = AtomicI32::new(0);
+        let _block_interrupts = InterruptDisableGuard::new();
+        sync_exec(MpIpiTarget::AllButLocal, 0, || counter_task(&counter));
+        0
+    }
+
+    fn deadlock_test() {
+        // Test for a deadlock caused by multiple CPUs broadcasting concurrently.
+        stack_pin_init!(let gate = Event::init_unsignaled());
+        let gate_ptr = (&raw const *gate).cast_mut().cast::<c_void>();
+
+        let mut threads: [Option<ThreadPtr>; 5] = [None; 5];
+        for slot in &mut threads {
+            // SAFETY: `deadlock_test_thread` and `gate_ptr` are valid, and all created threads
+            // are joined below before `gate` goes out of scope.
+            match unsafe {
+                thread::create_with_priority(
+                    c"sync_ipi_deadlock".as_ptr(),
+                    deadlock_test_thread,
+                    gate_ptr,
+                    DEFAULT_PRIORITY,
+                )
+            } {
+                Ok(t) => {
+                    // SAFETY: `t` was just created and has not been resumed or joined yet.
+                    unsafe { t.resume() };
+                    *slot = Some(t);
+                }
+                Err(_) => {
+                    tracef!("  failed to create thread\n");
+                    break;
+                }
+            }
+        }
+
+        gate.signal();
+
+        for thread in threads.into_iter().flatten() {
+            // SAFETY: Each thread in `threads` was created above and has not been joined yet.
+            let _ = unsafe { thread.join(InstantMono::INFINITE) };
+        }
+    }
+
+    /// sync_ipi_tests
+    #[test]
+    fn sync_ipi_tests() {
+        let num_cpus = max_num_cpus();
+        let online = get_online_mask();
+        let expected_online = 1u32.checked_shl(num_cpus).unwrap_or(0).wrapping_sub(1);
+        if online != expected_online {
+            kprintln!("Can only run test with all CPUs online");
+            return true;
+        }
+
+        let runs = TEST_RUNS;
+
+        // Test that we're actually blocking and only signaling the ones we target.
+        for _ in 0..runs {
+            ltracef!("Sequential test\n");
+            let inorder_counter = AtomicI32::new(0);
+            for j in 0..num_cpus {
+                sync_exec(MpIpiTarget::Mask, 1u32 << j, || inorder_count_task(&inorder_counter));
+                ltracef!("  Finished signaling CPU {}\n", j);
+            }
+        }
+
+        // Test that we can signal multiple CPUs at the same time.
+        for _ in 0..runs {
+            ltracef!("Counter test ({} CPUs)\n", num_cpus);
+            let counter = AtomicI32::new(0);
+
+            {
+                let _irqd = InterruptDisableGuard::new();
+
+                sync_exec(MpIpiTarget::AllButLocal, 0, || counter_task(&counter));
+            }
+
+            ltracef!("  Finished signaling all but local ({})\n", counter.load(Ordering::SeqCst));
+            unittest::assert_eq!(counter.load(Ordering::SeqCst) as u32, num_cpus - 1);
+        }
+
+        for _ in 0..runs {
+            ltracef!("Deadlock test\n");
+            deadlock_test();
+            ltracef!("Deadlock test passed\n");
+        }
     }
 }

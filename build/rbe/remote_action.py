@@ -11,6 +11,7 @@ Usage:
   $0 [remote-options...] -- command...
 """
 
+import abc
 import argparse
 import difflib
 import errno
@@ -23,7 +24,7 @@ import re
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import (
     AbstractSet,
@@ -32,12 +33,6 @@ from typing import (
 )
 
 import cl_utils
-
-# Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
-_FUCHSIA_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-if _FUCHSIA_DIR not in sys.path:
-    sys.path.insert(0, _FUCHSIA_DIR)
-
 import depfile
 import fuchsia
 import output_leak_scanner
@@ -401,15 +396,17 @@ def _remove_suffix(text: str, suffix: str) -> str:
 
 
 class ReproxyLogEntry(object):
-    def __init__(self, parsed_form: dict[str, Any]):
-        self._raw = parsed_form
+    """Structured representation of a single LogRecord from an action_log (.rrpl)."""
+
+    def __init__(self, log_record: str):
+        self._raw = textpb.parse_lazy(log_record)
 
     @property
-    def command(self) -> dict[str, Any]:
-        return self._raw["command"][0]
+    def command(self) -> Mapping[str, Any]:
+        return self._raw.get("command", [dict()])[0]
 
     @property
-    def identifiers(self) -> dict[str, Any]:
+    def identifiers(self) -> Mapping[str, Any]:
         return self.command["identifiers"][0]
 
     @property
@@ -417,7 +414,7 @@ class ReproxyLogEntry(object):
         return self.identifiers["execution_id"][0].text.strip('"')
 
     @property
-    def remote_metadata(self) -> dict[str, Any]:
+    def remote_metadata(self) -> Mapping[str, Any]:
         # remote_metadata does not always exist in the action log
         return self._raw.get("remote_metadata", [dict()])[0]
 
@@ -425,12 +422,12 @@ class ReproxyLogEntry(object):
     def action_digest(self) -> str:
         return self.remote_metadata["action_digest"][0].text.strip('"')
 
-    @property
+    @functools.cached_property
     def output_file_digests(self) -> dict[Path, str]:  # path, hash/size
         d = self.remote_metadata.get("output_file_digests", dict())
         return {Path(k): v.text.strip('"') for k, v in d.items()}
 
-    @property
+    @functools.cached_property
     def output_directory_digests(self) -> dict[Path, str]:  # path, hash/size
         d = self.remote_metadata.get("output_directory_digests", dict())
         return {Path(k): v.text.strip('"') for k, v in d.items()}
@@ -454,7 +451,7 @@ class ReproxyLogEntry(object):
             # conditions.  re-client treats all outputs as optional,
             # and does not consider missing outputs an error.
             return None
-        return DownloadStubInfo(
+        return Ext4DownloadStubInfo(
             path=path,
             type=type,
             blob_digest=digest,
@@ -498,20 +495,7 @@ class ReproxyLogEntry(object):
 
     @staticmethod
     def parse_action_log(log: Path) -> "ReproxyLogEntry":
-        with open(log) as f:
-            return ReproxyLogEntry._parse_lines(f.readlines())
-
-    @staticmethod
-    def _parse_lines(lines: Iterable[str]) -> "ReproxyLogEntry":
-        """Parse data from a .rrpl (reproxy log) file.
-
-        Args:
-          lines: text from a rewrapper --action_log file
-
-        Returns:
-          ReproxyLogEntry object.
-        """
-        return ReproxyLogEntry(textpb.parse(lines))
+        return ReproxyLogEntry(log.read_text())
 
 
 def _diagnose_fail_to_dial(line: str) -> None:
@@ -683,28 +667,21 @@ def download_temp_location(dest: Path) -> Path:
     return Path(str(dest) + ".download-tmp")
 
 
-class DownloadStubInfo(object):
-    """Contains infomation about a remotely stored artifact."""
+class DownloadStubInfo(abc.ABC):
+    """Contains information about a remotely stored artifact."""
 
     def __init__(
         self,
         path: Path,
         type: str,
         blob_digest: str,
-        action_digest: str,
-        build_id: str,
     ):
-        """Private raw constructor.
-
-        Use public methods like read_from_file().
-        """
+        """Initializes DownloadStubInfo."""
         self._path = path
         assert type in {"file", "dir"}
         self._type = type
         self._blob_digest = blob_digest
         assert "/" in blob_digest, "Expecting SHA256SUM/SIZE"
-        self._action_digest = action_digest
-        self._build_id = build_id
 
     @property
     def path(self) -> Path:
@@ -725,8 +702,52 @@ class DownloadStubInfo(object):
             self.path == other.path
             and self.type == other.type
             and self.blob_digest == other.blob_digest
-            and self._build_id == other._build_id
         )
+
+    @abc.abstractmethod
+    def create(
+        self,
+        working_dir_abs: Path,
+        dest: Path | None = None,
+        use_xattr: bool = _CAN_HAVE_XATTR,
+    ) -> None:
+        """Creates a download stub file."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def update(
+        self,
+        working_dir_abs: Path,
+        preserve_unchanged_output_mtime: bool = False,
+        use_xattr: bool = _CAN_HAVE_XATTR,
+    ) -> None:
+        """Writes or updates a download stub file."""
+        raise NotImplementedError
+
+
+class Ext4DownloadStubInfo(DownloadStubInfo):
+    """Text-based download stub with user.fuchsia.rbe.download_stub xattr."""
+
+    def __init__(
+        self,
+        path: Path,
+        type: str,
+        blob_digest: str,
+        action_digest: str,
+        build_id: str,
+    ):
+        super().__init__(
+            path=path,
+            type=type,
+            blob_digest=blob_digest,
+        )
+        self._action_digest = action_digest
+        self._build_id = build_id
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Ext4DownloadStubInfo):
+            return False
+        return super().__eq__(other) and self._build_id == other._build_id
 
     def _write(self, output_abspath: Path) -> None:
         """Writes download stub contents to file.
@@ -776,8 +797,90 @@ class DownloadStubInfo(object):
                 "true".encode(),
             )
 
+    def update(
+        self,
+        working_dir_abs: Path,
+        preserve_unchanged_output_mtime: bool = False,
+        use_xattr: bool = _CAN_HAVE_XATTR,
+    ) -> None:
+        """Write a download stub (or not, depending on conditions)."""
+        path = working_dir_abs / self.path
+        if preserve_unchanged_output_mtime and path.exists():
+            # Consider the cases where the existing output is or is not
+            # a download stub.
+            if is_download_stub_file(path, use_xattr=use_xattr):
+                # What if the local file is itself a download stub (w/ xattr)?
+                # If a download was skipped because the local and remote results
+                # already match, the blob_digests already matches, however, the
+                # stub's action_digest may have changed, as different actions
+                # can produce the same result.  The build_id will definitely
+                # change across builds.  Our choices are:
+                #   a) leave the old stub with its old action_digest.
+                #     Pro: preserving the stub file's timestamp lets the build
+                #       prune actions (ninja restat).
+                #     Con: action_digest does not reflect the latest remote
+                #       action that produced this artifact.
+                #   b) rewrite the stub file with the new action_digest.
+                #     Pro: action_digest reflects the latest remote action that
+                #       produced this artifact.
+                #     Con: Unconditionally updating the stub file takes away the
+                #       opportunity to prune build actions (ninja restat).
+                #
+                # We opt for a) because it will be possible to recover the
+                # latest action_digest from the action_log that produced the
+                # stub info.
+                old_stub_info = Ext4DownloadStubInfo.read_from_file(path)
+                # The blob_digest is all that matters for being able to download
+                # later.
+                if old_stub_info.blob_digest != self.blob_digest:
+                    self.create(
+                        working_dir_abs, use_xattr=use_xattr
+                    )  # overwrite the old stub
+                # otherwise, just leave the old stub as-is.
+                return
+
+            else:  # existing output is not a download stub
+                # When we *are* preserving timestamps of unchanged local
+                # (non-stub) artifacts, an existing output could mean:
+                # 1) The remote output was unchanged from the old local copy,
+                #   in which case, we want to keep it without overwriting it
+                #   with a download stub.  It would be ok to write a download
+                #   stub to the download_stub_backup_location(), but not necessary.
+                # 2) The local output is stale, and different from what would
+                #   have been downloaded, in which case, the new download stub
+                #   should be written over it.
+                # Reproxy might be able to distinguish which case applies, but this
+                # information isn't reflected in the action_log, unfortunately.
+                # In the worst case, we re-compute the digest of the file in
+                # question to determine the correct action.
+                #
+                # First, check whether or not the output is paired with a backup
+                # download stub (which is left behind by a stub_info.download()
+                # operation).
+                stub_backup_path = download_stub_backup_location(path)
+                if stub_backup_path.exists():  # assume it is a stub
+                    old_stub_info = Ext4DownloadStubInfo.read_from_file(
+                        stub_backup_path
+                    )
+                    old_blob_digest = old_stub_info.blob_digest
+                else:
+                    old_blob_digest = get_blob_digest(path)  # slow
+
+                if self.blob_digest != old_blob_digest:
+                    if stub_backup_path.exists():
+                        stub_backup_path.unlink()
+
+                    path.unlink()
+                    self.create(working_dir_abs, use_xattr=use_xattr)
+                # else blob_digests match, leave the old stub as-is.
+                return
+
+        # When we are *not* preserving timestamps of unchanged local
+        # artifacts, always writing the download stub is valid.
+        self.create(working_dir_abs, use_xattr=use_xattr)
+
     @staticmethod
-    def read_from_file(stub: Path) -> "DownloadStubInfo":
+    def read_from_file(stub: Path) -> "Ext4DownloadStubInfo":
         with open(stub) as f:
             first = f.readline()
             if first.rstrip() != _RBE_DOWNLOAD_STUB_IDENTIFIER:
@@ -793,7 +896,7 @@ class DownloadStubInfo(object):
                 continue
             variables[key] = value.rstrip()  # without trailing '\n'
 
-        return DownloadStubInfo(
+        return Ext4DownloadStubInfo(
             path=Path(variables["path"]),
             type=variables["type"],
             blob_digest=variables["blob_digest"],
@@ -905,11 +1008,11 @@ def undownload(path: Path, use_xattr: bool = _CAN_HAVE_XATTR) -> bool:
 
 def path_to_download_stub(
     stub_path: Path, use_xattr: bool = _CAN_HAVE_XATTR
-) -> DownloadStubInfo | None:
+) -> Ext4DownloadStubInfo | None:
     if not is_download_stub_file(stub_path, use_xattr=use_xattr):
         return None
 
-    return DownloadStubInfo.read_from_file(stub_path)
+    return Ext4DownloadStubInfo.read_from_file(stub_path)
 
 
 def download_file_to_path(
@@ -920,7 +1023,7 @@ def download_file_to_path(
     action_digest: str | None = None,
     use_xattr: bool = _CAN_HAVE_XATTR,
 ) -> cl_utils.SubprocessResult:
-    dl_stub_info = DownloadStubInfo(
+    dl_stub_info = Ext4DownloadStubInfo(
         path=path,
         type="file",
         blob_digest=blob_digest,
@@ -1048,6 +1151,8 @@ class RemoteAction(object):
         output_files: Sequence[Path] | None = None,
         output_dirs: Sequence[Path] | None = None,
         platform: str | None = None,
+        download_outputs: bool = True,
+        download_regex: str | None = None,
         remote_worker_pool: str | None = None,
         disable: bool = False,
         verbose: bool = False,
@@ -1087,6 +1192,8 @@ class RemoteAction(object):
           output_dirs: directories to be fetched after remote execution, relative to the
             current working dir.
           platform: rewrapper --platform, containing remote execution parameters
+          download_outputs: rewrapper --download_outputs (optional).
+          download_regex: rewrapper --download_regex (optional).
           disable: if true, execute locally.
           verbose: if true, print more information about what is happening.
           compare_with_local: if true, also run locally and compare outputs.
@@ -1212,6 +1319,9 @@ class RemoteAction(object):
             self._output_files.append(self._fsatrace_remote_trace)
             if self._remote_fsatrace_method == "wrap":
                 self._inputs.append(self._fsatrace_remote_wrapper)
+
+        self._download_outputs = download_outputs
+        self._download_regex = download_regex
 
         self._cleanup_files: list[Path] = []
 
@@ -1378,6 +1488,12 @@ exec "${{cmd[@]}}"
             )
             yield f"--platform={platform_value}"
 
+        if not self.download_outputs:
+            yield "--download_outputs=false"
+
+        if self.download_regex:
+            yield f"--download_regex={self.download_regex}"
+
         yield from self._options
 
     @property
@@ -1395,11 +1511,11 @@ exec "${{cmd[@]}}"
 
     @property
     def download_regex(self) -> str | None:
-        return self._rewrapper_known_options.download_regex
+        return self._download_regex
 
     @property
     def download_outputs(self) -> bool:
-        return self._rewrapper_known_options.download_outputs
+        return self._download_outputs
 
     @property
     def platform(self) -> str | None:
@@ -1907,82 +2023,11 @@ exec "${{cmd[@]}}"
 
     def _update_stub(self, stub_info: DownloadStubInfo) -> None:
         """Write a download stub (or not, depending on conditions)."""
-        path = self.working_dir / stub_info.path
-        if self.preserve_unchanged_output_mtime and path.exists():
-            # Consider the cases where the existing output is or is not
-            # a download stub.
-            if is_download_stub_file(path, use_xattr=self._use_xattr):
-                # What if the local file is itself a download stub (w/ xattr)?
-                # If a download was skipped because the local and remote results
-                # already match, the blob_digests already matches, however, the
-                # stub's action_digest may have changed, as different actions
-                # can produce the same result.  The build_id will definitely
-                # change across builds.  Our choices are:
-                #   a) leave the old stub with its old action_digest.
-                #     Pro: preserving the stub file's timestamp lets the build
-                #       prune actions (ninja restat).
-                #     Con: action_digest does not reflect the latest remote
-                #       action that produced this artifact.
-                #   b) rewrite the stub file with the new action_digest.
-                #     Pro: action_digest reflects the latest remote action that
-                #       produced this artifact.
-                #     Con: Unconditionally updating the stub file takes away the
-                #       opportunity to prune build actions (ninja restat).
-                #
-                # We opt for a) because it will be possible to recover the
-                # latest action_digest from the action_log that produced the
-                # stub info.
-                old_stub_info = DownloadStubInfo.read_from_file(path)
-                # The blob_digest is all that matters for being able to download
-                # later.
-                if old_stub_info.blob_digest != stub_info.blob_digest:
-                    stub_info.create(
-                        self.working_dir, use_xattr=self._use_xattr
-                    )  # overwrite the old stub
-                # otherwise, just leave the old stub as-is.
-                return
-
-            else:  # existing output is not a download stub
-                # When we *are* preserving timestamps of unchanged local
-                # (non-stub) artifacts, an existing output could mean:
-                # 1) The remote output was unchanged from the old local copy,
-                #   in which case, we want to keep it without overwriting it
-                #   with a download stub.  It would be ok to write a download
-                #   stub to the download_stub_backup_location(), but not necessary.
-                # 2) The local output is stale, and different from what would
-                #   have been downloaded, in which case, the new download stub
-                #   should be written over it.
-                # Reproxy might be able to distinguish which case applies, but this
-                # information isn't reflected in the action_log, unfortunately.
-                # In the worst case, we re-compute the digest of the file in
-                # question to determine the correct action.
-                #
-                # First, check whether or not the output is paired with a backup
-                # download stub (which is left behind by a stub_info.download()
-                # operation).
-                stub_backup_path = download_stub_backup_location(path)
-                if stub_backup_path.exists():  # assume it is a stub
-                    old_stub_info = DownloadStubInfo.read_from_file(
-                        stub_backup_path
-                    )
-                    old_blob_digest = old_stub_info.blob_digest
-                else:
-                    old_blob_digest = get_blob_digest(path)  # slow
-
-                if stub_info.blob_digest != old_blob_digest:
-                    if stub_backup_path.exists():
-                        stub_backup_path.unlink()
-
-                    stub_info.path.unlink()
-                    stub_info.create(
-                        self.working_dir, use_xattr=self._use_xattr
-                    )
-                # else blob_digests match, leave the old stub as-is.
-                return
-
-        # When we are *not* preserving timestamps of unchanged local
-        # artifacts, always writing the download stub is valid.
-        stub_info.create(self.working_dir, use_xattr=self._use_xattr)
+        stub_info.update(
+            self.working_dir,
+            preserve_unchanged_output_mtime=self.preserve_unchanged_output_mtime,
+            use_xattr=self._use_xattr,
+        )
 
     def downloader(self) -> remotetool.RemoteTool:
         cfg = self.exec_root / _REPROXY_CFG
@@ -2578,7 +2623,7 @@ def _download_input_for_mp(
 
 def _download_output_for_mp(
     packed_args: tuple[
-        DownloadStubInfo, remotetool.RemoteTool, Path, bool, bool
+        Ext4DownloadStubInfo, remotetool.RemoteTool, Path, bool, bool
     ],
 ) -> tuple[Path, cl_utils.SubprocessResult]:
     stub_info, downloader, working_dir_abs, verbose, use_xattr = packed_args
@@ -2651,7 +2696,7 @@ def download_input_stub_paths_batch(
 
 def download_output_stub_infos_batch(
     downloader: remotetool.RemoteTool,
-    stub_infos: Sequence[DownloadStubInfo],
+    stub_infos: Sequence[Ext4DownloadStubInfo],
     working_dir_abs: Path,
     parallel: bool = True,
     verbose: bool = False,
@@ -2703,17 +2748,6 @@ def _rewrapper_arg_parser() -> argparse.ArgumentParser:
         "--canonicalize_working_dir",
         type=cl_utils.bool_golang_flag,
         help="If true, remotely execute the command in a working dir location, that has the same depth as the actual build output dir relative to the exec_root.  This makes remote actions cacheable across different output dirs.",
-    )
-    parser.add_argument(
-        "--download_outputs",
-        type=cl_utils.bool_golang_flag,
-        default=True,
-        help="Set to false to avoid downloading outputs after remote execution succeeds.  Each toolchain (Rust, C++) may decide how to apply this to its set of outputs by default.  For example, for Rust, this affects only the main -o output.  Prefer using --download_regex over this option.",
-    )
-    parser.add_argument(
-        "--download_regex",
-        type=str,
-        help="Use a regex to specify which outputs to download or not.  Prefix with '-' to exclude files matching the pattern from downloading.  This flag takes precedence over --download_outputs.  This wrapper only supports a single regex value.",
     )
     return parser
 
@@ -2793,6 +2827,18 @@ def inherit_main_arg_parser_flags(
         "--platform",
         type=str,
         help="The rewrapper platform variable specifies remote execution parameters, such as OS type, image, worker constraints, etc.  The value specified in this wrapper is intercepted and merged with the value found in the --cfg.",
+    )
+    rewrapper_group.add_argument(
+        "--download_outputs",
+        type=cl_utils.bool_golang_flag,
+        default=True,
+        help="Set to false to avoid downloading outputs after remote execution succeeds.  Each toolchain (Rust, C++) may decide how to apply this to its set of outputs by default.  For example, for Rust, this affects only the main -o output.  Prefer using --download_regex over this option.",
+    )
+    rewrapper_group.add_argument(
+        "--download_regex",
+        type=str,
+        default=None,
+        help="Use a regex to specify which outputs to download or not.  Prefix with '-' to exclude files matching the pattern from downloading.  This flag takes precedence over --download_outputs.  This wrapper only supports a single regex value.",
     )
 
     main_group = parser.add_argument_group(
@@ -2983,6 +3029,8 @@ def remote_action_from_args(
         output_files=output_files,
         output_dirs=output_dirs,
         platform=main_args.platform,
+        download_outputs=main_args.download_outputs,
+        download_regex=main_args.download_regex,
         remote_worker_pool=main_args.remote_worker_pool,
         disable=main_args.local,
         verbose=main_args.verbose,

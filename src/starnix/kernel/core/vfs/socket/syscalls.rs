@@ -219,32 +219,46 @@ fn generate_autobind_address() -> FsString {
     format!("\0{value:05x}").into()
 }
 
+// Minimum IPv6 sockaddr length before sin6_scope_id (RFC 2133), matching Linux SIN6_LEN_RFC2133.
+const SIN6_LEN_RFC2133: usize = 24;
+
 pub fn sys_bind(
     current_task: &CurrentTask,
     fd: FdNumber,
     user_socket_address: UserAddress,
     user_address_length: usize,
 ) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
     let address = parse_socket_address(current_task, user_socket_address, user_address_length)?;
     if !address.valid_for_domain(socket.domain) {
-        if socket.domain == SocketDomain::Inet && address == SocketAddress::Unspecified {
-            if let Ok(local_addr) = socket.getsockname() {
-                if local_addr.maybe_inet_port().unwrap_or(0) != 0 {
-                    return Ok(());
-                }
-            }
-        }
         return match socket.domain {
             SocketDomain::Unix
             | SocketDomain::Vsock
-            | SocketDomain::Inet6
             | SocketDomain::Netlink
             | SocketDomain::Key
             | SocketDomain::Packet
             | SocketDomain::Qipcrtr => error!(EINVAL),
-            SocketDomain::Inet => error!(EAFNOSUPPORT),
+            SocketDomain::Inet => {
+                if user_address_length < std::mem::size_of::<uapi::sockaddr_in>() {
+                    return error!(EINVAL);
+                }
+                if address == SocketAddress::Unspecified {
+                    if let Ok(local_addr) = socket.getsockname() {
+                        if local_addr.maybe_inet_port().unwrap_or(0) != 0 {
+                            return Ok(());
+                        }
+                    }
+                }
+                error!(EAFNOSUPPORT)
+            }
+            SocketDomain::Inet6 => {
+                if user_address_length < SIN6_LEN_RFC2133 {
+                    error!(EINVAL)
+                } else {
+                    error!(EAFNOSUPPORT)
+                }
+            }
         };
     }
     if let Some(port) = address.maybe_inet_port() {
@@ -315,7 +329,7 @@ pub fn sys_bind(
 }
 
 pub fn sys_listen(current_task: &CurrentTask, fd: FdNumber, backlog: i32) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
     socket.listen(current_task, backlog)?;
     Ok(())
@@ -337,7 +351,7 @@ pub fn sys_accept4(
     user_address_length: UserRef<socklen_t>,
     flags: u32,
 ) -> Result<FdNumber, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let listening_socket = Socket::get_from_file(&file)?;
     let accepted_socket =
         file.blocking_op(current_task, FdEvents::POLLIN | FdEvents::POLLHUP, None, || {
@@ -375,9 +389,32 @@ pub fn sys_connect(
     user_socket_address: UserAddress,
     user_address_length: usize,
 ) -> Result<(), Errno> {
-    let client = current_task.files().get(fd)?;
+    let client = current_task.get_file(fd)?;
     let client = SocketFile::get_from_file(&client)?;
     let address = parse_socket_address(current_task, user_socket_address, user_address_length)?;
+    let domain = client.socket().domain;
+    if address != SocketAddress::Unspecified && !address.valid_for_domain(domain) {
+        match domain {
+            SocketDomain::Inet => {
+                if user_address_length < std::mem::size_of::<uapi::sockaddr_in>() {
+                    return error!(EINVAL);
+                }
+                return error!(EAFNOSUPPORT);
+            }
+            SocketDomain::Inet6 => {
+                if !(matches!(address, SocketAddress::Inet(_))
+                    && client.socket().socket_type == SocketType::Datagram)
+                {
+                    if user_address_length < SIN6_LEN_RFC2133 {
+                        return error!(EINVAL);
+                    }
+                    return error!(EAFNOSUPPORT);
+                }
+            }
+            SocketDomain::Unix => return error!(EINVAL),
+            _ => {}
+        }
+    }
     let peer = match address {
         SocketAddress::Unspecified => SocketPeer::Address(address),
         SocketAddress::Unix(ref name) => {
@@ -457,7 +494,7 @@ pub fn sys_getsockname(
     user_socket_address: UserAddress,
     user_address_length: UserRef<socklen_t>,
 ) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
     security::check_socket_getsockname_access(current_task, socket)?;
     let address_bytes = socket.getsockname()?.to_bytes();
@@ -473,7 +510,7 @@ pub fn sys_getpeername(
     user_socket_address: UserAddress,
     user_address_length: UserRef<socklen_t>,
 ) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
     security::check_socket_getpeername_access(current_task, socket)?;
     let address_bytes = socket.getpeername()?.to_bytes();
@@ -670,7 +707,7 @@ pub fn recvmsg_impl(
     user_message_header: &mut MsgHdrRef,
     flags: u32,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -685,7 +722,7 @@ pub fn sys_recvmmsg(
     mut flags: u32,
     user_timeout: TimeSpecPtr,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -740,7 +777,7 @@ pub fn sys_recvfrom(
     user_src_address: UserAddress,
     user_src_address_length: UserRef<socklen_t>,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -832,6 +869,13 @@ fn sendmsg_internal_with_header(
 
     let flags = SocketMessageFlags::from_bits(flags).ok_or_else(|| errno!(EOPNOTSUPP))?;
     let socket_ops = file.downcast_file::<SocketFile>().unwrap();
+    if dest_address.is_some()
+        && socket_ops.socket.domain == SocketDomain::Inet
+        && socket_ops.socket.socket_type != SocketType::Stream
+        && (message_header.name_len as usize) < std::mem::size_of::<uapi::sockaddr_in>()
+    {
+        return error!(EINVAL);
+    }
     socket_ops.sendmsg(
         current_task,
         file,
@@ -848,7 +892,7 @@ pub fn sys_sendmsg(
     user_message_header: MsgHdrPtr,
     flags: u32,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -862,7 +906,7 @@ pub fn sys_sendmmsg(
     mut vlen: u32,
     flags: u32,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -902,7 +946,7 @@ pub fn sys_sendto(
     user_dest_address: UserAddress,
     user_dest_address_length: socklen_t,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     if !file.node().is_sock() {
         return error!(ENOTSOCK);
     }
@@ -917,6 +961,13 @@ pub fn sys_sendto(
 
     let flags = SocketMessageFlags::from_bits(flags).ok_or_else(|| errno!(EOPNOTSUPP))?;
     let socket_file = file.downcast_file::<SocketFile>().unwrap();
+    if dest_address.is_some()
+        && socket_file.socket.domain == SocketDomain::Inet
+        && socket_file.socket.socket_type != SocketType::Stream
+        && (user_dest_address_length as usize) < std::mem::size_of::<uapi::sockaddr_in>()
+    {
+        return error!(EINVAL);
+    }
     socket_file.sendmsg(current_task, &file, &mut data, dest_address, vec![], flags)
 }
 
@@ -928,7 +979,7 @@ pub fn sys_getsockopt(
     user_optval: UserAddress,
     user_optlen: UserRef<socklen_t>,
 ) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
 
     let optlen = current_task.read_object(user_optlen)? as usize;
@@ -984,7 +1035,7 @@ pub fn sys_setsockopt(
     user_optval: UserAddress,
     optlen: socklen_t,
 ) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
 
     let user_opt = UserBuffer { address: user_optval, length: optlen as usize };
@@ -1011,7 +1062,7 @@ pub fn sys_setsockopt(
 }
 
 pub fn sys_shutdown(current_task: &CurrentTask, fd: FdNumber, how: u32) -> Result<(), Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
     let socket = Socket::get_from_file(&file)?;
     let how = match how {
         SHUT_RD => SocketShutdownFlags::READ,

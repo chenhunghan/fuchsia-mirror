@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <barrier>
 #include <string>
 #include <thread>
 
@@ -26,11 +27,24 @@ namespace {
 
 constexpr int kReadIndex = 0;
 constexpr int kWriteIndex = 1;
+constexpr char kExecmodNoTestLabel[] = "test_u:test_r:mprotect_execmod_no_test_t:s0";
 
 void *GetCurrentStackPage() {
   const long pagesize = sysconf(_SC_PAGESIZE);
   int stack_variable;
   return reinterpret_cast<void *>(((unsigned long)&stack_variable) & ~(pagesize - 1));
+}
+
+fbl::unique_fd CreateExecmodTestFile(const test_helper::ScopedTempDir &temp_dir, size_t min_size) {
+  std::string file_path = temp_dir.path() + "/test_file";
+  if (!files::WriteFile(file_path, "hello")) {
+    return fbl::unique_fd();
+  }
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDWR));
+  if (fd.is_valid() && min_size > 5) {
+    SAFE_SYSCALL(ftruncate(fd.get(), static_cast<off_t>(min_size)));
+  }
+  return fd;
 }
 
 }  // namespace
@@ -62,20 +76,22 @@ TEST(MProtectTest, ExecStackOfChildThread) {
     // Create the thread that will return the address of its stack
     struct ThreadArgs {
       // The pipe to notify the parent thread that the child has set the stack
-      int stack_was_set_fd[2];
+      int stack_was_set_fd[2] = {-1, -1};
       // The pipe to notify the child thread that it can exit
-      int child_can_exist_fd[2];
+      int child_can_exit_fd[2] = {-1, -1};
       void *stack = nullptr;
     };
 
     ThreadArgs thread_args;
-    SAFE_SYSCALL(pipe(thread_args.stack_was_set_fd));
-    SAFE_SYSCALL(pipe(thread_args.child_can_exist_fd));
-    auto cleanup = fit::defer([&]() {
+    ASSERT_THAT(pipe(thread_args.stack_was_set_fd), SyscallSucceeds());
+    auto cleanup_stack_was_set = fit::defer([&]() {
       SAFE_SYSCALL(close(thread_args.stack_was_set_fd[0]));
       SAFE_SYSCALL(close(thread_args.stack_was_set_fd[1]));
-      SAFE_SYSCALL(close(thread_args.child_can_exist_fd[0]));
-      SAFE_SYSCALL(close(thread_args.child_can_exist_fd[1]));
+    });
+    ASSERT_THAT(pipe(thread_args.child_can_exit_fd), SyscallSucceeds());
+    auto cleanup_child_can_exit = fit::defer([&]() {
+      SAFE_SYSCALL(close(thread_args.child_can_exit_fd[0]));
+      SAFE_SYSCALL(close(thread_args.child_can_exit_fd[1]));
     });
 
     pthread_t thread;
@@ -89,12 +105,18 @@ TEST(MProtectTest, ExecStackOfChildThread) {
 
       // Wait for the parent to signal that it's done with mprotect
       char exit_signal = 0;
-      SAFE_SYSCALL(read(args->child_can_exist_fd[kReadIndex], &exit_signal, sizeof(exit_signal)));
+      SAFE_SYSCALL(read(args->child_can_exit_fd[kReadIndex], &exit_signal, sizeof(exit_signal)));
       EXPECT_EQ(exit_signal, 'E');
       return nullptr;
     };
 
-    pthread_create(&thread, nullptr, +thread_lambda, &thread_args);
+    ASSERT_EQ(pthread_create(&thread, nullptr, +thread_lambda, &thread_args), 0);
+    auto join_thread = fit::defer([&]() {
+      char exit_signal = 'E';
+      SAFE_SYSCALL(
+          write(thread_args.child_can_exit_fd[kWriteIndex], &exit_signal, sizeof(exit_signal)));
+      pthread_join(thread, nullptr);
+    });
 
     // Wait until the child thread has set the stack and signaled us
     unsigned char ready_ack = 0;
@@ -103,14 +125,7 @@ TEST(MProtectTest, ExecStackOfChildThread) {
 
     long pagesize = sysconf(_SC_PAGESIZE);
     int result = mprotect(thread_args.stack, pagesize, PROT_READ | PROT_WRITE | PROT_EXEC);
-    EXPECT_EQ(result, 0);
-
-    // Signal child thread to finish
-    char exit_signal = 'E';
-    SAFE_SYSCALL(
-        write(thread_args.child_can_exist_fd[kWriteIndex], &exit_signal, sizeof(exit_signal)));
-
-    pthread_join(thread, nullptr);
+    EXPECT_THAT(result, SyscallSucceeds());
   }));
 }
 
@@ -184,7 +199,10 @@ TEST(MProtectTest, ExecStackInSignal) {
     pthread_t thread;
     auto thread_lambda = [](void *ptr) -> void * {
       initial_stack = GetCurrentStackPage();
-      SAFE_SYSCALL(pipe(fd));
+      if (pipe(fd) != 0) {
+        ADD_FAILURE() << "pipe failed: " << strerror(errno);
+        return nullptr;
+      }
       auto cleanup = fit::defer([&]() {
         SAFE_SYSCALL(close(fd[0]));
         SAFE_SYSCALL(close(fd[1]));
@@ -242,10 +260,6 @@ struct ExecmodTestParam {
   bool private_mapping = false;
   // Whether the test should modify the mapped memory.
   bool modify_mapping = false;
-  // Whether the mapping is made executable by a child process forked after the modification.
-  bool mprotect_after_fork = false;
-  // Whether the mapping is made executable after forking a child process, after the modification.
-  bool mprotect_in_parent_after_fork = false;
   // Whether mprotect is expected to succeed or not.
   bool expect_success = false;
   std::string TestSuffixGenerator() const {
@@ -265,12 +279,6 @@ struct ExecmodTestParam {
     } else {
       suffix += "NoModification_";
     }
-    if (mprotect_after_fork) {
-      suffix += "AfterFork_";
-    }
-    if (mprotect_in_parent_after_fork) {
-      suffix += "ParentAfterFork_";
-    }
     if (expect_success) {
       suffix += "MprotectSuccess";
     } else {
@@ -287,51 +295,32 @@ class MProtectExecmod : public testing::TestWithParam<ExecmodTestParam> {};
 TEST_P(MProtectExecmod, ExecMod) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   const auto param = MProtectExecmod::GetParam();
-  auto label = param.has_execmod_perm ? "test_u:test_r:mprotect_execmod_yes_test_t:s0"
-                                      : "test_u:test_r:mprotect_execmod_no_test_t:s0";
+  auto label =
+      param.has_execmod_perm ? "test_u:test_r:mprotect_execmod_yes_test_t:s0" : kExecmodNoTestLabel;
   ASSERT_TRUE(RunSubprocessAs(label, [&] {
     // Create a temporary file.
+    const long pagesize = sysconf(_SC_PAGESIZE);
     test_helper::ScopedTempDir temp_dir;
-    std::string file_path = temp_dir.path() + "/test_file";
-    ASSERT_TRUE(files::WriteFile(file_path, "hello"));
-    auto fd = fbl::unique_fd(open(file_path.c_str(), O_RDWR));
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
     ASSERT_TRUE(fd.is_valid());
 
     // Creates a mapping of the file, either private or shared.
-    long pagesize = sysconf(_SC_PAGESIZE);
     auto flags = param.private_mapping ? MAP_PRIVATE : MAP_SHARED;
-    auto mapping = test_helper::ScopedMMap::MMap(nullptr, pagesize, PROT_READ | PROT_WRITE, flags,
-                                                 fd.get(), 0);
+    auto mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, flags, fd.get(), /* offset = */ 0);
     ASSERT_TRUE(mapping.is_ok()) << mapping.error_value();
 
     // Modify the mapping.
     if (param.modify_mapping) {
       static_cast<char *>(mapping->mapping())[0] = 'j';
     }
+
     // Try to make the mapping executable.
-    auto try_mprotect = [&] {
-      int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
-      if (param.expect_success) {
-        EXPECT_THAT(result, SyscallSucceeds());
-      } else {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      }
-    };
-    if (param.mprotect_after_fork) {
-      // In a child process, which shares the modified pages.
-      test_helper::ForkHelper helper;
-      helper.RunInForkedProcess(try_mprotect);
-      EXPECT_TRUE(helper.WaitForChildren());
-    } else if (param.mprotect_in_parent_after_fork) {
-      // After forking a child process, while it shares the modified pages.
-      test_helper::EventFdSem sem(0);
-      test_helper::ForkHelper helper;
-      helper.RunInForkedProcess([&] { EXPECT_THAT(sem.Wait(), SyscallSucceeds()); });
-      try_mprotect();
-      EXPECT_THAT(sem.Notify(1), SyscallSucceeds());
-      EXPECT_TRUE(helper.WaitForChildren());
+    int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
+    if (param.expect_success) {
+      EXPECT_THAT(result, SyscallSucceeds());
     } else {
-      try_mprotect();
+      EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
     }
   }));
 }
@@ -346,17 +335,6 @@ const auto kExecmodSuccessFailureValues = ::testing::Values(
                      .private_mapping = true,
                      .modify_mapping = true,
                      .expect_success = true},
-    // `execmod` is still required after `fork()`, which shares the modified pages.
-    ExecmodTestParam{.has_execmod_perm = false,
-                     .private_mapping = true,
-                     .modify_mapping = true,
-                     .mprotect_after_fork = true,
-                     .expect_success = false},
-    ExecmodTestParam{.has_execmod_perm = false,
-                     .private_mapping = true,
-                     .modify_mapping = true,
-                     .mprotect_in_parent_after_fork = true,
-                     .expect_success = false},
     // `execmod` not required if the mapping is not private.
     ExecmodTestParam{.has_execmod_perm = false,
                      .private_mapping = false,
@@ -372,12 +350,261 @@ INSTANTIATE_TEST_SUITE_P(MProtectExecmod, MProtectExecmod, kExecmodSuccessFailur
                            return info.param.TestSuffixGenerator();
                          });
 
-// While a writable private file mapping is made executable, writes to it are temporarily blocked,
-// so that none can land between the `execmod` check and the protection change. This race itself
-// can't be tested deterministically. Instead, this checks that a thread that keeps writing to the
-// mapping is unaffected by the blocking: its write faults are retried rather than reported as
-// SIGSEGV, and write access is restored after the attempt is denied. The mapping was written
-// before the attempt, so the denial itself is deterministic.
+// Checks that `fork()` preserves the copy-on-write state of a private file mapping in the child
+// process: making an unmodified mapping executable in the child succeeds without `execmod`, while
+// making a modified mapping executable in the child requires `execmod`.
+TEST(ExecModTest, ForkPreservesCowModifiedInChild) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
+    ASSERT_TRUE(fd.is_valid());
+
+    for (bool modify_mapping : {false, true}) {
+      auto mapping = test_helper::ScopedMMap::MMap(
+          /* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
+          /* offset = */ 0);
+      ASSERT_TRUE(mapping.is_ok()) << mapping.error_value();
+
+      if (modify_mapping) {
+        static_cast<char *>(mapping->mapping())[0] = 'j';
+      }
+
+      test_helper::ForkHelper helper;
+      helper.RunInForkedProcess([&] {
+        int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
+        if (modify_mapping) {
+          EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
+        } else {
+          EXPECT_THAT(result, SyscallSucceeds());
+        }
+      });
+      EXPECT_TRUE(helper.WaitForChildren());
+    }
+  }));
+}
+
+// Checks that `fork()` preserves the copy-on-write state of a private file mapping in the parent
+// process while a child process shares the pages.
+TEST(ExecModTest, ForkPreservesCowModifiedInParent) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
+    ASSERT_TRUE(fd.is_valid());
+
+    for (bool modify_mapping : {false, true}) {
+      auto mapping = test_helper::ScopedMMap::MMap(
+          /* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
+          /* offset = */ 0);
+      ASSERT_TRUE(mapping.is_ok()) << mapping.error_value();
+
+      if (modify_mapping) {
+        static_cast<char *>(mapping->mapping())[0] = 'j';
+      }
+
+      test_helper::EventFdSem sem(0);
+      test_helper::ForkHelper helper;
+      helper.RunInForkedProcess([&] { EXPECT_THAT(sem.Wait(), SyscallSucceeds()); });
+
+      int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
+      if (modify_mapping) {
+        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
+      } else {
+        EXPECT_THAT(result, SyscallSucceeds());
+      }
+
+      EXPECT_THAT(sem.Notify(1), SyscallSucceeds());
+      EXPECT_TRUE(helper.WaitForChildren());
+    }
+  }));
+}
+
+// Checks that shrinking and regrowing a private file mapping in-place with `mremap()` preserves
+// its copy-on-write state on the regrown page.
+TEST(ExecModTest, ShrinkAndRegrowPreservesCowModified) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize * 2);
+    ASSERT_TRUE(fd.is_valid());
+
+    for (bool modify_mapping : {false, true}) {
+      size_t map_len = pagesize * 2;
+      void *map_addr = mmap(/* addr = */ nullptr, map_len, PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                            fd.get(), /* offset = */ 0);
+      ASSERT_NE(map_addr, MAP_FAILED) << strerror(errno);
+      auto cleanup_map = fit::defer([&] { SAFE_SYSCALL(munmap(map_addr, map_len)); });
+
+      // Unmap the second page so the mapping can later be grown in-place by `mremap`.
+      SAFE_SYSCALL(munmap(static_cast<char *>(map_addr) + pagesize, pagesize));
+      map_len = pagesize;
+
+      if (modify_mapping) {
+        static_cast<char *>(map_addr)[0] = 'j';
+      }
+
+      // Grow the mapping in-place back to 2 pages.
+      void *grown = mremap(map_addr, pagesize, pagesize * 2, /* flags = */ 0);
+      ASSERT_EQ(grown, map_addr) << strerror(errno);
+      map_len = pagesize * 2;
+
+      int result =
+          mprotect(static_cast<char *>(map_addr) + pagesize, pagesize, PROT_READ | PROT_EXEC);
+      if (modify_mapping) {
+        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
+      } else {
+        EXPECT_THAT(result, SyscallSucceeds());
+      }
+    }
+  }));
+}
+
+// Checks that moving a private file mapping to a new address with `mremap()` preserves its
+// copy-on-write state.
+TEST(ExecModTest, MovePreservesCowModified) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
+    ASSERT_TRUE(fd.is_valid());
+
+    for (bool modify_mapping : {false, true}) {
+      void *map_addr = mmap(/* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                            fd.get(), /* offset = */ 0);
+      ASSERT_NE(map_addr, MAP_FAILED) << strerror(errno);
+      auto cleanup_map = fit::defer([&] { SAFE_SYSCALL(munmap(map_addr, pagesize)); });
+
+      if (modify_mapping) {
+        static_cast<char *>(map_addr)[0] = 'j';
+      }
+
+      void *dst_addr = mmap(/* addr = */ nullptr, pagesize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                            /* fd = */ -1, /* offset = */ 0);
+      ASSERT_NE(dst_addr, MAP_FAILED) << strerror(errno);
+      auto cleanup_dst = fit::defer([&] { SAFE_SYSCALL(munmap(dst_addr, pagesize)); });
+
+      void *moved = mremap(map_addr, pagesize, pagesize, MREMAP_MAYMOVE | MREMAP_FIXED, dst_addr);
+      ASSERT_EQ(moved, dst_addr) << strerror(errno);
+      cleanup_dst.cancel();
+      map_addr = dst_addr;
+
+      int result = mprotect(map_addr, pagesize, PROT_READ | PROT_EXEC);
+      if (modify_mapping) {
+        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
+      } else {
+        EXPECT_THAT(result, SyscallSucceeds());
+      }
+    }
+  }));
+}
+
+// Checks that a modified private file mapping that is shrunk and regrown in-place with `mremap()`
+// still requires `execmod` in a child process after `fork()`.
+TEST(ExecModTest, ShrinkAndRegrowPreservesCowModifiedAcrossFork) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize * 2);
+    ASSERT_TRUE(fd.is_valid());
+
+    size_t map_len = pagesize * 2;
+    void *map_addr = mmap(/* addr = */ nullptr, map_len, PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                          fd.get(), /* offset = */ 0);
+    ASSERT_NE(map_addr, MAP_FAILED) << strerror(errno);
+    auto cleanup_map = fit::defer([&] { SAFE_SYSCALL(munmap(map_addr, map_len)); });
+
+    SAFE_SYSCALL(munmap(static_cast<char *>(map_addr) + pagesize, pagesize));
+    map_len = pagesize;
+
+    static_cast<char *>(map_addr)[0] = 'j';
+
+    void *grown = mremap(map_addr, pagesize, pagesize * 2, /* flags = */ 0);
+    ASSERT_EQ(grown, map_addr) << strerror(errno);
+    map_len = pagesize * 2;
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      EXPECT_THAT(
+          mprotect(static_cast<char *>(map_addr) + pagesize, pagesize, PROT_READ | PROT_EXEC),
+          SyscallFailsWithErrno(EACCES));
+    });
+    EXPECT_TRUE(helper.WaitForChildren());
+  }));
+}
+
+// Checks that a modified private file mapping moved with `mremap()` still requires `execmod` in a
+// child process after `fork()`.
+TEST(ExecModTest, MovePreservesCowModifiedAcrossFork) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
+    ASSERT_TRUE(fd.is_valid());
+
+    void *map_addr = mmap(/* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE,
+                          fd.get(), /* offset = */ 0);
+    ASSERT_NE(map_addr, MAP_FAILED) << strerror(errno);
+    auto cleanup_map = fit::defer([&] { SAFE_SYSCALL(munmap(map_addr, pagesize)); });
+
+    static_cast<char *>(map_addr)[0] = 'j';
+
+    void *dst_addr = mmap(/* addr = */ nullptr, pagesize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                          /* fd = */ -1, /* offset = */ 0);
+    ASSERT_NE(dst_addr, MAP_FAILED) << strerror(errno);
+    auto cleanup_dst = fit::defer([&] { SAFE_SYSCALL(munmap(dst_addr, pagesize)); });
+
+    void *moved = mremap(map_addr, pagesize, pagesize, MREMAP_MAYMOVE | MREMAP_FIXED, dst_addr);
+    ASSERT_EQ(moved, dst_addr) << strerror(errno);
+    cleanup_dst.cancel();
+    map_addr = dst_addr;
+
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      EXPECT_THAT(mprotect(map_addr, pagesize, PROT_READ | PROT_EXEC),
+                  SyscallFailsWithErrno(EACCES));
+    });
+    EXPECT_TRUE(helper.WaitForChildren());
+  }));
+}
+
+// Checks that `execmod` is not required on a second private mapping of the same file when only
+// the first private mapping was modified.
+TEST(ExecModTest, SecondMappingIsNotCowModified) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ASSERT_TRUE(RunSubprocessAs(kExecmodNoTestLabel, [&] {
+    const long pagesize = sysconf(_SC_PAGESIZE);
+    test_helper::ScopedTempDir temp_dir;
+    fbl::unique_fd fd = CreateExecmodTestFile(temp_dir, pagesize);
+    ASSERT_TRUE(fd.is_valid());
+
+    auto first_mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
+        /* offset = */ 0);
+    ASSERT_TRUE(first_mapping.is_ok()) << first_mapping.error_value();
+    static_cast<char *>(first_mapping->mapping())[0] = 'j';
+
+    auto second_mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, pagesize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(),
+        /* offset = */ 0);
+    ASSERT_TRUE(second_mapping.is_ok()) << second_mapping.error_value();
+
+    EXPECT_THAT(mprotect(second_mapping->mapping(), pagesize, PROT_READ | PROT_EXEC),
+                SyscallSucceeds());
+  }));
+}
+
+// Writable private file mappings are initially mapped read-only in the VMAR until the first write
+// fault enables write access and records the modification. This checks that concurrent writer
+// threads racing on the initial write fault and continuing to write to the mapping do not fault
+// while another thread attempts to make the mapping executable, and that the `mprotect` attempt is
+// denied with `EACCES` once the mapping has been written.
 TEST(MProtectTest, ExecmodWithConcurrentWrites) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:mprotect_execmod_no_test_t:s0", [&] {
@@ -393,34 +620,41 @@ TEST(MProtectTest, ExecmodWithConcurrentWrites) {
     ASSERT_TRUE(mapping.is_ok()) << mapping.error_value();
     volatile char *page = static_cast<volatile char *>(mapping->mapping());
 
-    // Keep writing to the mapping from another thread.
+    // Keep writing to the mapping from two concurrent threads so they also race on the initial
+    // write fault.
+    std::barrier start_barrier(2);
     std::atomic<bool> stop = false;
-    std::atomic<uint64_t> writes = 0;
-    std::thread writer([&] {
+    std::atomic<uint64_t> writes1 = 0;
+    std::atomic<uint64_t> writes2 = 0;
+    auto write_loop = [&](size_t index, std::atomic<uint64_t> &writes) {
+      start_barrier.arrive_and_wait();
       while (!stop) {
-        page[1] = 'j';
+        page[index] = 'j';
         writes.fetch_add(1);
       }
-    });
-    auto stop_writer = fit::defer([&] {
+    };
+    std::thread writer1(write_loop, /* index = */ 1, std::ref(writes1));
+    std::thread writer2(write_loop, /* index = */ 2, std::ref(writes2));
+    auto stop_writers = fit::defer([&] {
       stop = true;
-      writer.join();
+      writer1.join();
+      writer2.join();
     });
-    // Returns whether at least `count` writes were made within 10 seconds.
-    auto wait_for_writes = [&](uint64_t count) {
-      for (int i = 0; i < 10000 && writes < count; i++) {
+    // Returns whether both threads reached their target write counts within 10 seconds.
+    auto wait_for_writes = [&](uint64_t count1, uint64_t count2) {
+      for (int i = 0; i < 10000 && (writes1 < count1 || writes2 < count2); i++) {
         usleep(/*usec=*/1000);
       }
-      return writes >= count;
+      return writes1 >= count1 && writes2 >= count2;
     };
-    ASSERT_TRUE(wait_for_writes(/*count=*/1));
+    ASSERT_TRUE(wait_for_writes(/*count1=*/1, /*count2=*/1));
 
     // The mapping was modified, so making it executable requires `execmod`.
     EXPECT_THAT(mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC),
                 SyscallFailsWithErrno(EACCES));
 
-    // The mapping is still writable.
-    EXPECT_TRUE(wait_for_writes(/*count=*/writes + 1));
+    // The mapping is still writable by both threads.
+    EXPECT_TRUE(wait_for_writes(/*count1=*/writes1 + 1, /*count2=*/writes2 + 1));
   }));
 }
 

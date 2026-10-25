@@ -95,8 +95,13 @@ build --@rules_rust//rust/settings:clippy_flag=-Dwarnings
 # `remap-path-prefix` is only set in Bazel. It instructs rustc to rewrite source file paths that
 # begin with . (the current working directory) so that they begin with ../.. in the coverage mapping
 # data. This changes source file paths to formats expected by downstream coverage pipeline.
+# LINT.IfChange(rust_coverage)
 build:host_rust_coverage --@rules_rust//rust/settings:extra_rustc_flags=-Cinstrument-coverage,-Cllvm-args=-profile-correlate=binary,-Cllvm-args=-runtime-counter-relocation,--remap-path-prefix=.=../..
 build:fuchsia_rust_coverage --@rules_rust//rust/settings:extra_rustc_flags=-Cinstrument-coverage,-Cllvm-args=-profile-correlate=binary,-Copt-level=1,--remap-path-prefix=.=../..,-Clink-arg=-lzircon,-Clink-arg=build/config/profile/llvm_profile_counter_bias.ld
+# LINT.ThenChange(
+#   //build/config/BUILD.gn:optimize_coverage,
+#   //build/config/profile/BUILD.gn:rust_coverage,
+# )
 
 # Restore the repository rule behavior of adding an implicit watch() for
 # any Label value passed to repository_ctx.path(), as this is heavily used
@@ -149,6 +154,7 @@ build --@io_bazel_rules_go//go/config:pure=True
 common --experimental_exclude_starlark_flags_from_exec_config
 common --experimental_propagate_custom_flag=@io_bazel_rules_go//go/config:gc_linkopts
 common --experimental_propagate_custom_flag=@io_bazel_rules_go//go/config:pure
+common --experimental_propagate_custom_flag=@fuchsia_rules_common//build_flags:use_default_build_flags
 
 # Do not propagate defines to the exec config by default.
 # Explicitly propagate `EXECUTOR`, which is used in remote builds.
@@ -168,6 +174,9 @@ common --experimental_platform_in_output_dir=True
 # Enable dynamic linking of C++ stdlib for drivers in-tree.
 common --@rules_fuchsia//fuchsia/flags:dynamic_cpp_standard_library_for_drivers=True
 
+# Use in-tree default build_flags() targets for C++ toolchains and fx_cc_* rules.
+common --@fuchsia_rules_common//build_flags:use_default_build_flags=True
+
 # Turn off build-time venv generation to avoid creating dangling symlinks in bazel-out.
 # Without this, host_py_test targets would fail with `No such file or directory` when invoking the
 # interpreter. See https://fxbug.dev/527829442 for details.
@@ -182,8 +191,8 @@ build --@rules_python//python/config_settings:venvs_use_declare_symlink=no
 build --per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
 build --host_per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
 
-# Ignore upstream BUILD.bazel files inside third_party/boringssl/src so that
-# //third_party/boringssl/BUILD.bazel and //third_party/boringssl/rust/BUILD.bazel
-# can reference upstream sources directly without crossing subpackage boundaries.
-common --deleted_packages=third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys
+# Ignore upstream BUILD/BUILD.bazel files inside third_party/boringssl/src and
+# third_party/perfetto so that Fuchsia BUILD.bazel files can reference upstream
+# sources directly without crossing subpackage boundaries.
+common --deleted_packages=third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys,third_party/perfetto
 

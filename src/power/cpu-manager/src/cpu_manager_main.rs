@@ -14,9 +14,13 @@ use async_utils::event::Event as AsyncEvent;
 use cpu_manager_node_config::{
     ClusterConfig, CpuManagerMainConfig, CpuManagerMainDependencies, ThermalStateConfig,
 };
+use fidl::endpoints::{create_endpoints, create_request_stream};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_cpu as fcpu;
 use fidl_fuchsia_thermal as fthermal;
+use fuchsia_async as fasync;
 use fuchsia_inspect::{self as inspect, ArrayProperty as _, Property as _};
+use futures::TryStreamExt as _;
 use futures::lock::{Mutex, MutexGuard};
 use serde_derive::Deserialize;
 use serde_json as json;
@@ -39,8 +43,13 @@ use zx::sys;
 /// Handles Messages:
 ///     - GetDomainInfos
 ///     - SetBoost
+///     - GetMaxFrequency
 ///     - SetMaxFrequency
+///     - LeaseMaxFrequency
+///     - GetMinFrequency
+///     - LeaseMinFrequency
 ///     - UpdateThermalLoad
+///     - UpdatePowercapDomainOpps
 ///
 /// Sends Messages:
 ///     - GetCpuLoads
@@ -50,11 +59,107 @@ use zx::sys;
 ///     - SetOperatingPoint
 ///     - SetMinimumOperatingPointLimit
 ///
-/// FIDL dependencies: No direct dependencies
+/// FIDL dependencies:
+///     - fuchsia.power.broker.Topology (optional)
 
 // NOTE(https://fxbug.dev/42166756): The thermal state configuration for Sherlock is generated using
 // a process described in this bug.
 // TODO(https://fxbug/dev/85813): Move this comment to the sherlock node config.
+
+fn opp_to_min_freq_level(opp_index: usize, opp_count: usize) -> fbroker::PowerLevel {
+    ((opp_count - 1) - opp_index) as fbroker::PowerLevel
+}
+
+fn min_freq_level_to_opp(level: fbroker::PowerLevel, opp_count: usize) -> usize {
+    (opp_count - 1) - (level as usize)
+}
+
+fn opp_to_max_freq_cap_level(opp_index: usize) -> fbroker::PowerLevel {
+    opp_index as fbroker::PowerLevel
+}
+
+fn is_lease_open(token: &fbroker::LeaseToken) -> bool {
+    token.wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::ZERO).is_err()
+}
+
+async fn register_power_element(
+    topology: &fbroker::TopologyProxy,
+    element_name: &str,
+    initial_current_level: fbroker::PowerLevel,
+    valid_levels: Vec<fbroker::PowerLevel>,
+    runner_client: fidl::endpoints::ClientEnd<fbroker::ElementRunnerMarker>,
+    initial_lease_token: Option<fbroker::LeaseToken>,
+) -> Result<(fbroker::ElementControlProxy, fbroker::DependencyToken), Error> {
+    let (element_control_client, element_control_server) =
+        create_endpoints::<fbroker::ElementControlMarker>();
+    // TODO(https://fxbug.dev/574569750): Name initial leases in Power Broker once ElementSchema
+    // supports it.
+    topology
+        .add_element(fbroker::ElementSchema {
+            element_name: Some(element_name.to_string()),
+            initial_current_level: Some(initial_current_level),
+            valid_levels: Some(valid_levels),
+            element_control: Some(element_control_server),
+            element_runner: Some(runner_client),
+            initial_lease_token,
+            ..Default::default()
+        })
+        .await?
+        .map_err(|e| anyhow!("Topology.AddElement({element_name}) failed: {e:?}"))?;
+
+    let element_control = element_control_client.into_proxy();
+    let assertive_token = fbroker::DependencyToken::create();
+    let registered_token = assertive_token
+        .duplicate_handle(zx::Rights::SAME_RIGHTS)
+        .map_err(|s| anyhow!("duplicate_handle failed: {s}"))?;
+    element_control
+        .register_dependency_token(registered_token)
+        .await?
+        .map_err(|e| anyhow!("RegisterDependencyToken({element_name}) failed: {e:?}"))?;
+
+    Ok((element_control, assertive_token))
+}
+
+/// Initiates a Power Broker lease on `dependency_token` at `level`.
+///
+/// Creates a `LeaseToken` eventpair, duplicates the server end for `Topology.Lease`, and returns
+/// the client `LeaseToken`, a retained server `LeaseToken` (for peer-closed monitoring), and a
+/// `'static` future that resolves the `Topology.Lease` FIDL call so callers can drop internal
+/// locks before awaiting it.
+fn start_broker_lease(
+    topology: &fbroker::TopologyProxy,
+    dependency_token: fbroker::DependencyToken,
+    lease_name: &str,
+    level: fbroker::PowerLevel,
+) -> Result<
+    (
+        fbroker::LeaseToken,
+        fbroker::LeaseToken,
+        impl futures::Future<Output = Result<(), CpuManagerError>> + 'static,
+    ),
+    CpuManagerError,
+> {
+    let (client_token, server_token) = fbroker::LeaseToken::create();
+    let broker_server_token = server_token
+        .duplicate_handle(zx::Rights::SAME_RIGHTS)
+        .map_err(|s| CpuManagerError::GenericError(anyhow!("duplicate_handle: {s}")))?;
+    let lease_fut = topology.lease(fbroker::LeaseSchema {
+        lease_token: Some(broker_server_token),
+        lease_name: Some(lease_name.to_string()),
+        dependencies: Some(vec![fbroker::LeaseDependency {
+            requires_token: Some(dependency_token),
+            requires_level: Some(level),
+            ..Default::default()
+        }]),
+        ..Default::default()
+    });
+    Ok((client_token, server_token, async move {
+        lease_fut
+            .await
+            .map_err(|e| CpuManagerError::GenericError(e.into()))?
+            .map_err(|e| CpuManagerError::GenericError(anyhow!("Topology.Lease failed: {e:?}")))
+    }))
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Range<T: Clone + Copy + Debug> {
@@ -121,6 +226,9 @@ struct CpuCluster {
     /// The max frequency limit OPP that this cluster can run at.
     max_frequency_limit_opp_index: Option<u64>,
 
+    /// The max frequency limit OPP imposed by PowercapController on this cluster.
+    powercap_max_frequency_limit_opp_index: Option<u64>,
+
     /// Optional initial minimum OPP floor held from startup until the first boost cycle ends.
     /// On headless builds (such as `minimal`) where nothing requests a boost, this keeps the
     /// cluster pinned at a fixed floor for predictable microbenchmark performance.
@@ -128,15 +236,100 @@ struct CpuCluster {
 
     /// The minimum OPP limit index to apply when CPU boost is enabled.
     boost_opp: usize,
+
+    /// Retained Power Broker `ElementControl` proxies for this cluster's power elements.
+    element_controls: Vec<fbroker::ElementControlProxy>,
+
+    /// Dependency token for leasing this cluster's minimum frequency floor element (`cpu_cluster_{i}_min_freq`).
+    min_freq_dep_token: Option<fbroker::DependencyToken>,
+
+    /// Dependency token for leasing this cluster's maximum frequency ceiling element (`cpu_cluster_{i}_max_freq_cap`).
+    max_freq_cap_dep_token: Option<fbroker::DependencyToken>,
+
+    /// Active Power Broker lease for CPU boost on `cpu_cluster_{i}_min_freq`.
+    boost_lease: Option<fbroker::LeaseToken>,
+
+    /// Active legacy `SetMaxFrequency` lease token held by `cpu-manager`.
+    legacy_max_freq_cap_lease: Option<fbroker::LeaseToken>,
+
+    /// Active DomainController floor leases `(opp_index, server_token)` on this cluster.
+    min_freq_leases: Vec<(u64, fbroker::LeaseToken)>,
+
+    /// Active DomainController ceiling leases `(opp_index, server_token)` on this cluster.
+    max_freq_cap_leases: Vec<(u64, fbroker::LeaseToken)>,
 }
 
 impl CpuCluster {
-    /// Returns the minimum operating point limit index for this cluster given whether boost is
-    /// currently enabled. Operating points are sorted from highest frequency (index 0) to lowest,
-    /// so the higher-performance floor is the lower OPP index.
+    /// Removes any floor or ceiling leases whose client `LeaseToken` peer has closed.
+    ///
+    /// Lease drops are signaled via `EVENTPAIR_PEER_CLOSED` (either when an external client closes
+    /// its `LeaseToken` or when a legacy `SetMaxFrequency`/`ClearMaxFrequency` call drops
+    /// `legacy_max_freq_cap_lease`). Synchronously pruning closed tokens in `GetMaxFrequency` and
+    /// `GetMinFrequency` (and after dropping `legacy_max_freq_cap_lease`) guarantees set-read and
+    /// drop-read consistency even before asynchronous peer-closed watcher tasks run.
+    fn prune_closed_leases(&mut self) {
+        self.min_freq_leases.retain(|(_, token)| is_lease_open(token));
+        self.max_freq_cap_leases.retain(|(_, token)| is_lease_open(token));
+    }
+
+    /// Acquires or releases this cluster's Power Broker boost or `boot_min_opp` floor lease on
+    /// `cpu_cluster_{i}_min_freq`. Returns `Ok(true)` if the element is registered with Power
+    /// Broker, or `Ok(false)` if the caller should fall back to updating the driver directly.
+    async fn update_boost_lease(
+        &mut self,
+        topology: &fbroker::TopologyProxy,
+        boost_enabled: bool,
+    ) -> Result<bool, CpuManagerError> {
+        let Some(dep_token) = self
+            .min_freq_dep_token
+            .as_ref()
+            .and_then(|t| t.duplicate_handle(zx::Rights::SAME_RIGHTS).ok())
+        else {
+            self.boost_lease = None;
+            return Ok(false);
+        };
+        let target = match (boost_enabled, self.boot_min_opp) {
+            (true, Some(boot_min)) => Some(("boost", self.boost_opp.min(boot_min))),
+            (true, None) => Some(("boost", self.boost_opp)),
+            (false, Some(boot_min)) => Some(("boot_min_opp", boot_min)),
+            (false, None) => None,
+        }
+        // Operating points are ordered from highest frequency (index 0) to lowest
+        // (index `self.opps.len() - 1`). Only acquire a floor lease when `min_opp`
+        // raises the minimum frequency above the lowest-frequency operating point.
+        .filter(|&(_, min_opp)| min_opp < self.opps.len() - 1);
+        if let Some((lease_name, min_opp)) = target {
+            let level = opp_to_min_freq_level(min_opp, self.opps.len());
+            let (lease_token, _server_token, lease_fut) =
+                start_broker_lease(topology, dep_token, lease_name, level)?;
+            let _old_lease = self.boost_lease.replace(lease_token);
+            lease_fut.await?;
+        } else {
+            self.boost_lease = None;
+        }
+        Ok(true)
+    }
+
+    fn current_max_freq_cap_opp(&self) -> Option<u64> {
+        self.max_freq_cap_leases.iter().map(|(opp, _)| *opp).max()
+    }
+
+    fn configured_domain_min_opp(&self) -> u64 {
+        let default_min_opp = self.boot_min_opp.unwrap_or(self.opps.len() - 1) as u64;
+        self.min_freq_leases
+            .iter()
+            .map(|(opp, _)| *opp)
+            .min()
+            .map_or(default_min_opp, |opp| opp.min(default_min_opp))
+    }
+
+    /// Returns the effective minimum operating point limit index for this cluster, reconciling any
+    /// active floor leases with `boost_opp` when boost is enabled. Operating points are sorted from
+    /// highest frequency (index 0) to lowest, so the higher-performance floor is the lower OPP
+    /// index.
     fn min_opp(&self, boost_enabled: bool) -> usize {
-        let default_min_opp = self.boot_min_opp.unwrap_or(self.opps.len() - 1);
-        if boost_enabled { self.boost_opp.min(default_min_opp) } else { default_min_opp }
+        let domain_min = self.configured_domain_min_opp() as usize;
+        if boost_enabled { self.boost_opp.min(domain_min) } else { domain_min }
     }
 
     /// Given fractional loads for all system CPUs, gives this cluster's corresponding load and its
@@ -195,9 +388,18 @@ impl CpuCluster {
     ) -> Result<(), CpuManagerError> {
         // Constrain the index if it indicates an OPP higher than the maximum. OPPs are sorted from
         // highest frequency to lowest, so a lower index indicates a higher frequency.
+        // Note: `min_frequency_limit_opp_index` (configured via `SetMinimumOperatingPointLimit` by
+        // boost or floor leases) is clamped by the current operating point ceiling
+        // (`[max(minimum_opp, maximum_opp), maximum_opp]` in `fuchsia.hardware.cpu.ctrl/Device`),
+        // so a boost or floor lease cannot override the `max_frequency_limit_opp_index` or
+        // `powercap_max_frequency_limit_opp_index` ceiling set via `SetOperatingPoint`.
         if let Some(ref opp_limit_index) = self.max_frequency_limit_opp_index {
             index = index.max(*opp_limit_index as usize);
         }
+        if let Some(ref powercap_opp_limit_index) = self.powercap_max_frequency_limit_opp_index {
+            index = index.max(*powercap_opp_limit_index as usize);
+        }
+        index = index.min(self.opps.len() - 1);
 
         fuchsia_trace::counter!(
             c"cpu_manager",
@@ -440,6 +642,7 @@ pub struct CpuManagerMainBuilder<'a> {
     thermal_state_configs: Vec<ThermalStateConfig>,
     syscall_handler: Rc<dyn Node>,
     cpu_stats_handler: Rc<dyn Node>,
+    topology: Option<fbroker::TopologyProxy>,
     inspect_root: Option<&'a inspect::Node>,
 }
 
@@ -455,8 +658,10 @@ impl<'a> CpuManagerMainBuilder<'a> {
             data.config.clusters.iter().map(|c| nodes[&c.handler].clone()).collect();
         let cpu_stats_handler = nodes[&data.dependencies.cpu_stats_handler].clone();
         let syscall_handler = nodes[&data.dependencies.syscall_handler].clone();
+        let topology =
+            fuchsia_component::client::connect_to_protocol::<fbroker::TopologyMarker>().ok();
 
-        Self::new(
+        let mut builder = Self::new(
             Watts(data.config.sustainable_power),
             Watts(data.config.power_gain),
             data.config.clusters,
@@ -464,7 +669,9 @@ impl<'a> CpuManagerMainBuilder<'a> {
             data.config.thermal_states,
             syscall_handler,
             cpu_stats_handler,
-        )
+        );
+        builder.topology = topology;
+        builder
     }
 
     fn new(
@@ -484,6 +691,7 @@ impl<'a> CpuManagerMainBuilder<'a> {
             thermal_state_configs,
             cpu_stats_handler,
             syscall_handler,
+            topology: None,
             inspect_root: None,
         }
     }
@@ -491,6 +699,12 @@ impl<'a> CpuManagerMainBuilder<'a> {
     #[cfg(test)]
     pub fn with_inspect_root(mut self, root: &'a inspect::Node) -> Self {
         self.inspect_root = Some(root);
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_topology(mut self, topology: fbroker::TopologyProxy) -> Self {
+        self.topology = Some(topology);
         self
     }
 
@@ -533,8 +747,10 @@ impl<'a> CpuManagerMainBuilder<'a> {
             init_done: AsyncEvent::new(),
             cpu_stats_handler: self.cpu_stats_handler,
             syscall_handler: self.syscall_handler,
+            topology: self.topology,
             inspect,
-            mutable_inner: Mutex::new(mutable_inner),
+            mutable_inner: Rc::new(Mutex::new(mutable_inner)),
+            scope: fasync::Scope::new_with_name("cpu_manager_main"),
         }))
     }
 
@@ -566,11 +782,17 @@ pub struct CpuManagerMain {
     /// the GetCpuLoads message.
     cpu_stats_handler: Rc<dyn Node>,
 
+    /// Optional connection to Power Broker's Topology protocol for registering domain elements.
+    topology: Option<fbroker::TopologyProxy>,
+
     inspect: InspectData,
 
     /// Mutable inner state. This must be guarded with a Mutex rather than a RefCell because CPU
     /// boost requests can overlap with thermal updates.
-    mutable_inner: Mutex<MutableInner>,
+    mutable_inner: Rc<Mutex<MutableInner>>,
+
+    /// Scope owning background ElementRunner and lease watcher tasks.
+    scope: fasync::Scope,
 }
 
 /// A performance model for a future time interval.
@@ -846,16 +1068,26 @@ impl CpuManagerMain {
         }
 
         let should_be_enabled = !inner.active_boosts.is_empty();
+        self.inspect.boost_enabled.set(should_be_enabled);
 
         if should_be_enabled == was_enabled {
             return Ok(MessageReturn::SetBoost);
         }
 
-        self.inspect.boost_enabled.set(should_be_enabled);
-
         if !should_be_enabled && std::mem::take(&mut inner.boot_min_opp_active) {
             for cluster in inner.clusters.iter_mut() {
                 cluster.boot_min_opp = None;
+            }
+        }
+
+        if let Some(topology) = &self.topology {
+            let mut handled_by_broker = false;
+            for cluster in &mut inner.clusters {
+                handled_by_broker |=
+                    cluster.update_boost_lease(topology, should_be_enabled).await?;
+            }
+            if handled_by_broker {
+                return Ok(MessageReturn::SetBoost);
             }
         }
 
@@ -925,23 +1157,56 @@ impl CpuManagerMain {
                 cluster_index
             )));
         };
+        cluster.prune_closed_leases();
 
-        Ok(MessageReturn::GetMaxFrequency(
-            *cluster.max_frequency_limit_opp_index.as_ref().unwrap_or(&0),
-        ))
+        Ok(MessageReturn::GetMaxFrequency(cluster.current_max_freq_cap_opp().unwrap_or(0)))
     }
 
+    /// Handles legacy `SetMaxFrequency` and `ClearMaxFrequency` requests (`frequency_index` is
+    /// `None` for clear). Among legacy calls this is last-one-wins: each call drops the previous
+    /// `legacy_max_freq_cap_lease` before acquiring the new one, while still arbitrating against
+    /// any active `LeaseMaxFrequency` client tokens.
     async fn handle_set_max_frequency(
         &self,
         cluster_index: u64,
         frequency_index: Option<u64>,
     ) -> Result<MessageReturn, CpuManagerError> {
+        self.set_or_lease_max_frequency(
+            cluster_index,
+            frequency_index,
+            "domain_controller_max_freq",
+            true,
+        )
+        .await?;
+        Ok(MessageReturn::SetMaxFrequency)
+    }
+
+    async fn handle_lease_max_frequency(
+        &self,
+        cluster_index: u64,
+        frequency_index: u64,
+        lease_name: &str,
+    ) -> Result<MessageReturn, CpuManagerError> {
+        let token = self
+            .set_or_lease_max_frequency(cluster_index, Some(frequency_index), lease_name, false)
+            .await?
+            .expect("lease token must be present when frequency_index is Some");
+        Ok(MessageReturn::LeaseMaxFrequency(token))
+    }
+
+    async fn set_or_lease_max_frequency(
+        &self,
+        cluster_index: u64,
+        frequency_index: Option<u64>,
+        lease_name: &str,
+        is_legacy_set: bool,
+    ) -> Result<Option<fbroker::LeaseToken>, CpuManagerError> {
+        self.init_done.wait().await;
         let mut inner = self.mutable_inner.lock().await;
         let thermal_limited_opps = inner.thermal_states
             [inner.current_thermal_state.unwrap_or_default()]
         .cluster_opps
         .clone();
-        let max_thermal_opp = thermal_limited_opps[cluster_index as usize];
 
         let Some(cluster) =
             inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_index as usize)
@@ -954,19 +1219,489 @@ impl CpuManagerMain {
 
         let Some(frequency_index) = frequency_index else {
             log::info!("Removing max frequency constraint for cluster {}", cluster_index);
-            cluster.max_frequency_limit_opp_index = None;
-            cluster.update_opp(&self.syscall_handler, max_thermal_opp).await?;
-            return Ok(MessageReturn::SetMaxFrequency);
+            if is_legacy_set {
+                cluster.legacy_max_freq_cap_lease = None;
+                cluster.prune_closed_leases();
+            }
+            cluster.max_frequency_limit_opp_index = cluster.current_max_freq_cap_opp();
+            if cluster.max_freq_cap_dep_token.is_none() {
+                let max_thermal_opp = thermal_limited_opps[cluster_index as usize];
+                cluster.update_opp(&self.syscall_handler, max_thermal_opp).await?;
+            }
+            return Ok(None);
         };
 
+        if frequency_index >= cluster.opps.len() as u64 {
+            return Err(CpuManagerError::InvalidArgument(format!(
+                "frequency_index {} is out of bounds for cluster {} (opp count {})",
+                frequency_index,
+                cluster_index,
+                cluster.opps.len()
+            )));
+        }
         log::info!(
             "Setting max frequency constraint to OPP index {} for cluster {}",
             frequency_index,
             cluster_index
         );
-        cluster.max_frequency_limit_opp_index = Some(frequency_index);
+        if is_legacy_set {
+            cluster.legacy_max_freq_cap_lease = None;
+            cluster.prune_closed_leases();
+        }
+
+        if let (Some(topology), Some(dep_token)) = (
+            &self.topology,
+            cluster
+                .max_freq_cap_dep_token
+                .as_ref()
+                .and_then(|t| t.duplicate_handle(zx::Rights::SAME_RIGHTS).ok()),
+        ) {
+            let level = opp_to_max_freq_cap_level(frequency_index as usize);
+            let (client_token, server_token, lease_fut) =
+                start_broker_lease(topology, dep_token, lease_name, level)?;
+            let watcher_token =
+                if !is_legacy_set {
+                    Some(server_token.duplicate_handle(zx::Rights::SAME_RIGHTS).map_err(|s| {
+                        CpuManagerError::GenericError(anyhow!("duplicate_handle: {s}"))
+                    })?)
+                } else {
+                    None
+                };
+            cluster.max_freq_cap_leases.push((frequency_index, server_token));
+            let ret_token = if is_legacy_set {
+                cluster.legacy_max_freq_cap_lease = Some(client_token);
+                None
+            } else {
+                Some(client_token)
+            };
+            cluster.max_frequency_limit_opp_index = cluster.current_max_freq_cap_opp();
+            // Drop `inner` before awaiting `Topology.Lease` so the `ElementRunner` task can
+            // lock `mutable_inner` when Power Broker updates the element's level.
+            drop(inner);
+            if let Some(watcher_token) = watcher_token {
+                self.spawn_lease_prune_watcher(cluster_index as usize, watcher_token);
+            }
+            lease_fut.await?;
+            return Ok(ret_token);
+        }
+
+        let (client_token, server_token) = fbroker::LeaseToken::create();
+        let watcher_token = server_token
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .map_err(|s| CpuManagerError::GenericError(anyhow!("duplicate_handle: {s}")))?;
+        cluster.max_freq_cap_leases.push((frequency_index, server_token));
+        let ret_token = if is_legacy_set {
+            cluster.legacy_max_freq_cap_lease = Some(client_token);
+            None
+        } else {
+            Some(client_token)
+        };
+        cluster.max_frequency_limit_opp_index = cluster.current_max_freq_cap_opp();
+        let max_thermal_opp = thermal_limited_opps[cluster_index as usize];
         cluster.update_opp(&self.syscall_handler, max_thermal_opp).await?;
-        Ok(MessageReturn::SetMaxFrequency)
+        drop(inner);
+
+        if !is_legacy_set {
+            self.spawn_fallback_max_lease_watcher(cluster_index as usize, watcher_token);
+        }
+        Ok(ret_token)
+    }
+
+    fn spawn_lease_prune_watcher(&self, cluster_idx: usize, watcher_token: fbroker::LeaseToken) {
+        let mutable_inner = Rc::downgrade(&self.mutable_inner);
+        self.scope.spawn_local(async move {
+            let _ =
+                fasync::OnSignals::new(&watcher_token, zx::Signals::EVENTPAIR_PEER_CLOSED).await;
+            if let Some(mutable_inner) = mutable_inner.upgrade() {
+                let mut inner = mutable_inner.lock().await;
+                if let Some(cluster) =
+                    inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_idx)
+                {
+                    cluster.prune_closed_leases();
+                }
+            }
+        });
+    }
+
+    fn spawn_fallback_max_lease_watcher(
+        &self,
+        cluster_idx: usize,
+        watcher_token: fbroker::LeaseToken,
+    ) {
+        let mutable_inner = Rc::downgrade(&self.mutable_inner);
+        let syscall_handler = Rc::downgrade(&self.syscall_handler);
+        self.scope.spawn_local(async move {
+            let _ =
+                fasync::OnSignals::new(&watcher_token, zx::Signals::EVENTPAIR_PEER_CLOSED).await;
+            if let (Some(mutable_inner), Some(syscall_handler)) =
+                (mutable_inner.upgrade(), syscall_handler.upgrade())
+            {
+                let mut inner = mutable_inner.lock().await;
+                let max_thermal_opp = inner.thermal_states
+                    [inner.current_thermal_state.unwrap_or_default()]
+                .cluster_opps[cluster_idx];
+                if let Some(cluster) =
+                    inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_idx)
+                {
+                    cluster.prune_closed_leases();
+                    cluster.max_frequency_limit_opp_index = cluster.current_max_freq_cap_opp();
+                    let _ = cluster.update_opp(&syscall_handler, max_thermal_opp).await;
+                }
+            }
+        });
+    }
+
+    async fn handle_get_min_frequency(
+        &self,
+        cluster_index: u64,
+    ) -> Result<MessageReturn, CpuManagerError> {
+        self.init_done.wait().await;
+        let mut inner = self.mutable_inner.lock().await;
+        let Some(cluster) =
+            inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_index as usize)
+        else {
+            return Err(CpuManagerError::InvalidArgument(format!(
+                "cluster with index {} not found",
+                cluster_index
+            )));
+        };
+        cluster.prune_closed_leases();
+
+        Ok(MessageReturn::GetMinFrequency(cluster.configured_domain_min_opp()))
+    }
+
+    async fn handle_lease_min_frequency(
+        &self,
+        cluster_index: u64,
+        frequency_index: u64,
+        lease_name: &str,
+    ) -> Result<MessageReturn, CpuManagerError> {
+        self.init_done.wait().await;
+        let mut inner = self.mutable_inner.lock().await;
+        let boost_enabled = !inner.active_boosts.is_empty();
+
+        let Some(cluster) =
+            inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_index as usize)
+        else {
+            return Err(CpuManagerError::InvalidArgument(format!(
+                "cluster with index {} not found",
+                cluster_index
+            )));
+        };
+
+        if frequency_index >= cluster.opps.len() as u64 {
+            return Err(CpuManagerError::InvalidArgument(format!(
+                "frequency_index {} is out of bounds for cluster {} (opp count {})",
+                frequency_index,
+                cluster_index,
+                cluster.opps.len()
+            )));
+        }
+        log::info!(
+            "Leasing min frequency constraint at OPP index {} ({}) for cluster {}",
+            frequency_index,
+            lease_name,
+            cluster_index
+        );
+
+        if let (Some(topology), Some(dep_token)) = (
+            &self.topology,
+            cluster
+                .min_freq_dep_token
+                .as_ref()
+                .and_then(|t| t.duplicate_handle(zx::Rights::SAME_RIGHTS).ok()),
+        ) {
+            let level = opp_to_min_freq_level(frequency_index as usize, cluster.opps.len());
+            let (client_token, server_token, lease_fut) =
+                start_broker_lease(topology, dep_token, lease_name, level)?;
+            let watcher_token = server_token
+                .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                .map_err(|s| CpuManagerError::GenericError(anyhow!("duplicate_handle: {s}")))?;
+            cluster.min_freq_leases.push((frequency_index, server_token));
+            drop(inner);
+            self.spawn_lease_prune_watcher(cluster_index as usize, watcher_token);
+            lease_fut.await?;
+            return Ok(MessageReturn::LeaseMinFrequency(client_token));
+        }
+
+        let (client_token, server_token) = fbroker::LeaseToken::create();
+        let watcher_token = server_token
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .map_err(|s| CpuManagerError::GenericError(anyhow!("duplicate_handle: {s}")))?;
+        cluster.min_freq_leases.push((frequency_index, server_token));
+        let min_opp = cluster.min_opp(boost_enabled);
+        match cluster
+            .handler
+            .handle_message(&Message::SetMinimumOperatingPointLimit(min_opp as u32))
+            .await
+        {
+            Ok(MessageReturn::SetMinimumOperatingPointLimit) => {}
+            Ok(other) => panic!("Unexpected SetMinimumOperatingPointLimit result: {:?}", other),
+            Err(e) => return Err(e),
+        }
+        drop(inner);
+
+        self.spawn_fallback_min_lease_watcher(cluster_index as usize, watcher_token);
+        Ok(MessageReturn::LeaseMinFrequency(client_token))
+    }
+
+    fn spawn_fallback_min_lease_watcher(
+        &self,
+        cluster_idx: usize,
+        watcher_token: fbroker::LeaseToken,
+    ) {
+        let mutable_inner = Rc::downgrade(&self.mutable_inner);
+        self.scope.spawn_local(async move {
+            let _ =
+                fasync::OnSignals::new(&watcher_token, zx::Signals::EVENTPAIR_PEER_CLOSED).await;
+            if let Some(mutable_inner) = mutable_inner.upgrade() {
+                let mut inner = mutable_inner.lock().await;
+                let boost_enabled = !inner.active_boosts.is_empty();
+                if let Some(cluster) =
+                    inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_idx)
+                {
+                    cluster.prune_closed_leases();
+                    let min_opp = cluster.min_opp(boost_enabled);
+                    let _ = cluster
+                        .handler
+                        .handle_message(&Message::SetMinimumOperatingPointLimit(min_opp as u32))
+                        .await;
+                }
+            }
+        });
+    }
+
+    /// Registers per-domain floor (`cpu_cluster_{i}_min_freq`) and ceiling
+    /// (`cpu_cluster_{i}_max_freq_cap`) power elements with Power Broker and spawns their
+    /// `ElementRunner` tasks.
+    async fn register_power_elements(&self) {
+        let Some(topology) = &self.topology else {
+            return;
+        };
+        let clusters_to_register: Vec<_> = {
+            let inner = self.mutable_inner.lock().await;
+            let boost_enabled = !inner.active_boosts.is_empty();
+            inner
+                .clusters
+                .iter()
+                .map(|cluster| {
+                    let max_server_token = cluster
+                        .max_freq_cap_leases
+                        .first()
+                        .and_then(|(_, t)| t.duplicate_handle(zx::Rights::SAME_RIGHTS).ok());
+                    (
+                        cluster.cluster_index,
+                        cluster.name.clone(),
+                        cluster.opps.len(),
+                        Rc::downgrade(&cluster.handler),
+                        cluster.min_opp(boost_enabled),
+                        cluster.max_frequency_limit_opp_index.filter(|&opp| opp > 0),
+                        max_server_token,
+                    )
+                })
+                .collect()
+        };
+
+        for (
+            cluster_idx,
+            cluster_name,
+            opp_count,
+            handler,
+            initial_min_opp,
+            initial_max_opp,
+            max_server_token,
+        ) in clusters_to_register
+        {
+            let valid_levels: Vec<fbroker::PowerLevel> =
+                (0..opp_count as fbroker::PowerLevel).collect();
+            let min_name = format!("cpu_cluster_{cluster_idx}_min_freq");
+            let max_name = format!("cpu_cluster_{cluster_idx}_max_freq_cap");
+
+            // When a cluster starts with an initial floor (`boot_min_opp` or an early boost) or
+            // ceiling (`boot_max_opp`), pass `initial_current_level` and `initial_lease_token` to
+            // `Topology.AddElement` so Power Broker suppresses the initial `SetLevel(0)` and
+            // starts the element directly at its leased boot level.
+            let initial_min_level = opp_to_min_freq_level(initial_min_opp, opp_count);
+            let (min_client_token, min_server_token) = if initial_min_level > 0 {
+                let (client, server) = fbroker::LeaseToken::create();
+                (Some(client), Some(server))
+            } else {
+                (None, None)
+            };
+
+            let initial_max_level =
+                initial_max_opp.map_or(0, |opp| opp_to_max_freq_cap_level(opp as usize));
+
+            let (min_runner_client, min_runner_stream) =
+                create_request_stream::<fbroker::ElementRunnerMarker>();
+            let (max_runner_client, max_runner_stream) =
+                create_request_stream::<fbroker::ElementRunnerMarker>();
+            self.spawn_min_freq_runner(cluster_idx, opp_count, handler, min_runner_stream);
+            self.spawn_max_freq_cap_runner(cluster_idx, max_runner_stream);
+
+            let min_res = register_power_element(
+                topology,
+                &min_name,
+                initial_min_level,
+                valid_levels.clone(),
+                min_runner_client,
+                min_server_token,
+            )
+            .await;
+            let max_res = register_power_element(
+                topology,
+                &max_name,
+                initial_max_level,
+                valid_levels,
+                max_runner_client,
+                max_server_token,
+            )
+            .await;
+
+            match (min_res, max_res) {
+                (Ok((min_control, min_token)), Ok((max_control, max_token))) => {
+                    let mut inner = self.mutable_inner.lock().await;
+                    if let Some(cluster) =
+                        inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_idx)
+                    {
+                        cluster.element_controls = vec![min_control, max_control];
+                        cluster.min_freq_dep_token = Some(min_token);
+                        cluster.max_freq_cap_dep_token = Some(max_token);
+                        cluster.boost_lease = min_client_token;
+                    }
+                }
+                (min_err, max_err) => {
+                    log::info!(
+                        "Power Broker unavailable for cluster '{}' (min={:?}, max={:?}); using local fallback",
+                        cluster_name,
+                        min_err.err(),
+                        max_err.err()
+                    );
+                }
+            }
+        }
+    }
+
+    fn spawn_min_freq_runner(
+        &self,
+        cluster_idx: usize,
+        opp_count: usize,
+        handler: std::rc::Weak<dyn Node>,
+        mut min_runner_stream: fbroker::ElementRunnerRequestStream,
+    ) {
+        self.scope.spawn_local(async move {
+            while let Ok(Some(fbroker::ElementRunnerRequest::SetLevel { level, responder })) =
+                min_runner_stream.try_next().await
+            {
+                if let Some(handler) = handler.upgrade() {
+                    let opp_index = min_freq_level_to_opp(level, opp_count);
+                    match handler
+                        .handle_message(&Message::SetMinimumOperatingPointLimit(opp_index as u32))
+                        .await
+                    {
+                        Ok(MessageReturn::SetMinimumOperatingPointLimit)
+                        | Err(CpuManagerError::Unsupported) => {}
+                        other => {
+                            log::warn!(
+                                "SetMinimumOperatingPointLimit failed for cluster {}: {:?}",
+                                cluster_idx,
+                                other
+                            );
+                        }
+                    }
+                }
+                let _ = responder.send();
+            }
+        });
+    }
+
+    fn spawn_max_freq_cap_runner(
+        &self,
+        cluster_idx: usize,
+        mut max_runner_stream: fbroker::ElementRunnerRequestStream,
+    ) {
+        let mutable_inner = Rc::downgrade(&self.mutable_inner);
+        let syscall_handler = Rc::downgrade(&self.syscall_handler);
+        self.scope.spawn_local(async move {
+            while let Ok(Some(fbroker::ElementRunnerRequest::SetLevel { level, responder })) =
+                max_runner_stream.try_next().await
+            {
+                if let (Some(mutable_inner), Some(syscall_handler)) =
+                    (mutable_inner.upgrade(), syscall_handler.upgrade())
+                {
+                    let mut inner = mutable_inner.lock().await;
+                    let max_thermal_opp = inner.thermal_states
+                        [inner.current_thermal_state.unwrap_or_default()]
+                    .cluster_opps[cluster_idx];
+                    if let Some(cluster) =
+                        inner.clusters.iter_mut().find(|c| c.cluster_index == cluster_idx)
+                    {
+                        cluster.max_frequency_limit_opp_index =
+                            if level == 0 { None } else { Some(level as u64) };
+                        if let Err(e) = cluster.update_opp(&syscall_handler, max_thermal_opp).await
+                        {
+                            log::error!(
+                                "Failed to update max freq cap on cluster {}: {:?}",
+                                cluster_idx,
+                                e
+                            );
+                        }
+                    }
+                }
+                let _ = responder.send();
+            }
+        });
+    }
+
+    async fn handle_update_powercap_domain_opps(
+        &self,
+        domain_opps: &[u64],
+    ) -> Result<MessageReturn, CpuManagerError> {
+        self.init_done.wait().await;
+        let mut inner = self.mutable_inner.lock().await;
+        let thermal_limited_opps = inner.thermal_states
+            [inner.current_thermal_state.unwrap_or_default()]
+        .cluster_opps
+        .clone();
+
+        for cluster in inner.clusters.iter_mut() {
+            cluster.powercap_max_frequency_limit_opp_index =
+                domain_opps.get(cluster.cluster_index).copied().filter(|&opp| opp > 0);
+        }
+        for (cluster_index, &opp_index) in domain_opps.iter().enumerate() {
+            if !inner.clusters.iter().any(|c| c.cluster_index == cluster_index) {
+                log::warn!(
+                    "Ignoring powercap OPP ceiling {} for unknown cluster index {}",
+                    opp_index,
+                    cluster_index
+                );
+            }
+        }
+
+        let cluster_update_futures: Vec<_> = inner
+            .clusters
+            .iter()
+            .map(|cluster| {
+                cluster
+                    .update_opp(&self.syscall_handler, thermal_limited_opps[cluster.cluster_index])
+            })
+            .collect();
+
+        let errors: Vec<_> = futures::future::join_all(cluster_update_futures)
+            .await
+            .into_iter()
+            .filter_map(|r| r.err())
+            .collect();
+
+        if !errors.is_empty() {
+            return Err(CpuManagerError::GenericError(anyhow!(
+                "Failed to update powercap opp(s) ({:?}): {:?}",
+                domain_opps,
+                errors
+            )));
+        }
+
+        Ok(MessageReturn::UpdatePowercapDomainOpps)
     }
 
     async fn update_cluster_opps(
@@ -1182,6 +1917,15 @@ impl Node for CpuManagerMain {
             let opp_range = Range { lower: 0, upper: opps.len() - 1 };
             let current_opp = Cell::new(RangedValue::InRange(opp_range));
 
+            let boot_max_opp = cluster_config.boot_max_opp.filter(|&opp| opp > 0);
+            let (legacy_max_freq_cap_lease, max_freq_cap_leases) =
+                if let Some(max_opp) = boot_max_opp {
+                    let (client_token, server_token) = fbroker::LeaseToken::create();
+                    (Some(client_token), vec![(max_opp, server_token)])
+                } else {
+                    (None, Vec::new())
+                };
+
             clusters.push(CpuCluster {
                 name: cluster_config.name,
                 cluster_index: cluster_config.cluster_index,
@@ -1190,9 +1934,17 @@ impl Node for CpuManagerMain {
                 performance_per_ghz: NormPerfs(cluster_config.normperfs_per_ghz),
                 opps,
                 current_opp,
-                max_frequency_limit_opp_index: cluster_config.boot_max_opp,
+                max_frequency_limit_opp_index: boot_max_opp,
+                powercap_max_frequency_limit_opp_index: None,
                 boot_min_opp: cluster_config.boot_min_opp,
                 boost_opp,
+                element_controls: Vec::new(),
+                min_freq_dep_token: None,
+                max_freq_cap_dep_token: None,
+                boost_lease: None,
+                legacy_max_freq_cap_lease,
+                min_freq_leases: Vec::new(),
+                max_freq_cap_leases,
             });
         }
 
@@ -1238,28 +1990,40 @@ impl Node for CpuManagerMain {
         // Update cluster opps to match the normal power operating condition.
         self.update_thermal_state(0).await?;
 
+        self.register_power_elements().await;
+
         // Initialize the minimum operating point limit on each cluster to match the initial boost
         // state, releasing any early-boot minimum frequency lock once userspace takes over. This is
         // best-effort: non-RPPM drivers that do not support operating point limits return
         // Unsupported, which is ignored, and any other error is logged without failing init.
         {
+            // When Power Broker is active, `AddElement`'s initial `SetLevel` on
+            // `cpu_cluster_{i}_min_freq` (backed by `initial_lease_token` when a boot floor or
+            // early boost is present) already initializes `SetMinimumOperatingPointLimit`. Only
+            // send `SetMinimumOperatingPointLimit` directly for clusters where Power Broker is
+            // unavailable.
             let inner = self.mutable_inner.lock().await;
             let boost_enabled = !inner.active_boosts.is_empty();
-            let messages: Vec<_> = inner
+            let unleased_clusters: Vec<_> = inner
                 .clusters
                 .iter()
+                .filter(|cluster| cluster.min_freq_dep_token.is_none())
                 .map(|cluster| {
-                    Message::SetMinimumOperatingPointLimit(cluster.min_opp(boost_enabled) as u32)
+                    (
+                        cluster.name.clone(),
+                        cluster.handler.clone(),
+                        Message::SetMinimumOperatingPointLimit(
+                            cluster.min_opp(boost_enabled) as u32
+                        ),
+                    )
                 })
                 .collect();
-            let futures: Vec<_> = inner
-                .clusters
+            let futures: Vec<_> = unleased_clusters
                 .iter()
-                .zip(messages.iter())
-                .map(|(cluster, msg)| cluster.handler.handle_message(msg))
+                .map(|(_, handler, msg)| handler.handle_message(msg))
                 .collect();
             let results = futures::future::join_all(futures).await;
-            for (cluster, result) in inner.clusters.iter().zip(results) {
+            for ((cluster_name, _, _), result) in unleased_clusters.iter().zip(results) {
                 match result {
                     Ok(MessageReturn::SetMinimumOperatingPointLimit)
                     | Err(CpuManagerError::Unsupported) => {}
@@ -1268,7 +2032,7 @@ impl Node for CpuManagerMain {
                     }
                     Err(e) => log::warn!(
                         "Failed to initialize minimum operating point limit for cluster '{}': {:?}",
-                        cluster.name,
+                        cluster_name,
                         e
                     ),
                 }
@@ -1290,8 +2054,20 @@ impl Node for CpuManagerMain {
             Message::SetMaxFrequency(cluster_index, frequency_index) => {
                 self.handle_set_max_frequency(*cluster_index, *frequency_index).await
             }
+            Message::GetMinFrequency(cluster_index) => {
+                self.handle_get_min_frequency(*cluster_index).await
+            }
+            Message::LeaseMaxFrequency(cluster_index, frequency_index, lease_name) => {
+                self.handle_lease_max_frequency(*cluster_index, *frequency_index, lease_name).await
+            }
+            Message::LeaseMinFrequency(cluster_index, frequency_index, lease_name) => {
+                self.handle_lease_min_frequency(*cluster_index, *frequency_index, lease_name).await
+            }
             Message::UpdateThermalLoad(thermal_load) => {
                 self.handle_update_thermal_load(*thermal_load).await
+            }
+            Message::UpdatePowercapDomainOpps(domain_opps) => {
+                self.handle_update_powercap_domain_opps(domain_opps).await
             }
             _ => Err(CpuManagerError::Unsupported),
         }
@@ -1391,6 +2167,8 @@ mod tests {
     use crate::{msg_eq, msg_ok_return};
     use assert_matches::assert_matches;
     use diagnostics_assertions::assert_data_tree;
+    use futures::TryStreamExt;
+    use std::cell::RefCell;
     use test_util::assert_lt;
 
     // Common test configurations for big and little clusters.
@@ -2708,5 +3486,934 @@ mod tests {
             let err = node.init().await.unwrap_err();
             assert!(format!("{err:#}").contains(expected_err), "Unexpected error: {err:#}");
         }
+    }
+
+    #[fuchsia::test]
+    async fn test_lease_min_frequency() {
+        let handlers = Handlers::new();
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers
+            .builder(make_default_cluster_configs(), thermal_state_configs)
+            .build_and_init()
+            .await;
+
+        let default_big_min = (BIG_OPPS.len() - 1) as u64;
+        let default_little_min = (LITTLE_OPPS.len() - 1) as u64;
+
+        // Before LeaseMinFrequency is called, GetMinFrequency returns the lowest-frequency opp
+        // index.
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == default_big_min
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == default_little_min
+        );
+
+        // Lease floor on big cluster only; little cluster is unaffected.
+        handlers.expect_big_min_opp(1);
+        let big_lease = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                1,
+                "test_big_min".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(1))
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == default_little_min
+        );
+
+        // Lease floor on little cluster only; big cluster is unaffected.
+        handlers.expect_little_min_opp(0);
+        let little_lease = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                LITTLE_CLUSTER_INDEX as u64,
+                0,
+                "test_little_min".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(0))
+        );
+
+        // Drop floor lease on each cluster independently, restoring the lowest-frequency opp index.
+        handlers.expect_big_min_opp(default_big_min as u32);
+        drop(big_lease);
+        fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == default_big_min
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(0))
+        );
+
+        handlers.expect_little_min_opp(default_little_min as u32);
+        drop(little_lease);
+        fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == default_little_min
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_min_frequency_and_boost_interaction() {
+        let handlers = Handlers::new();
+
+        let mut cluster_configs = make_default_cluster_configs();
+        cluster_configs[0].boost_opp = Some(1);
+        cluster_configs[1].boost_opp = Some(1);
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers.builder(cluster_configs, thermal_state_configs).build_and_init().await;
+
+        // Lease big cluster floor at 0 (stricter than boost_opp=1) and little cluster floor at 2
+        // (weaker than boost_opp=1).
+        handlers.expect_big_min_opp(0);
+        let big_lease = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                0,
+                "test_big_min".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+        handlers.expect_little_min_opp(2);
+        let _little_lease_weak = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                LITTLE_CLUSTER_INDEX as u64,
+                2,
+                "test_little_min_weak".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        // Enabling boost selects the stricter (lower OPP index) floor per cluster:
+        // big stays at min(0, 1) = 0, little moves to min(2, 1) = 1.
+        handlers.expect_big_min_opp(0);
+        handlers.expect_little_min_opp(1);
+        node.handle_message(&Message::SetBoost(true, 0)).await.unwrap();
+
+        // GetMinFrequency still reports the domain's configured floor.
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(0))
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(2))
+        );
+
+        // Dropping the big cluster's domain floor lease while boost is still active falls back to
+        // boost_opp (1), not the unboosted default (2).
+        handlers.expect_big_min_opp(1);
+        drop(big_lease);
+        fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+
+        // Leasing the little cluster's domain floor at 0 while boost is active raises it above
+        // boost_opp (min(0, 1) = 0).
+        handlers.expect_little_min_opp(0);
+        let _little_lease_strict = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                LITTLE_CLUSTER_INDEX as u64,
+                0,
+                "test_little_min_strict".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        // Disabling boost restores the unboosted floor on big (2) and keeps the remaining domain
+        // floor on little (0).
+        handlers.expect_big_min_opp((BIG_OPPS.len() - 1) as u32);
+        handlers.expect_little_min_opp(0);
+        node.handle_message(&Message::SetBoost(false, 0)).await.unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn test_max_and_min_frequency_invalid_arguments() {
+        let handlers = Handlers::new();
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers
+            .builder(make_default_cluster_configs(), thermal_state_configs)
+            .build_and_init()
+            .await;
+
+        let invalid_cluster_index = 99;
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(invalid_cluster_index)).await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::SetMaxFrequency(invalid_cluster_index, Some(0))).await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::SetMaxFrequency(invalid_cluster_index, None)).await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::LeaseMaxFrequency(
+                invalid_cluster_index,
+                0,
+                "test_max".to_string(),
+            ))
+            .await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(invalid_cluster_index)).await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::LeaseMinFrequency(
+                invalid_cluster_index,
+                0,
+                "test_min".to_string(),
+            ))
+            .await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+
+        // Out-of-bounds frequency_index must return InvalidArgument without panicking or mutating
+        // the stored limit.
+        assert_matches!(
+            node.handle_message(&Message::SetMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                Some(BIG_OPPS.len() as u64),
+            ))
+            .await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::LeaseMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                BIG_OPPS.len() as u64,
+                "test_max".to_string(),
+            ))
+            .await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(0))
+        );
+
+        assert_matches!(
+            node.handle_message(&Message::LeaseMinFrequency(
+                LITTLE_CLUSTER_INDEX as u64,
+                LITTLE_OPPS.len() as u64,
+                "test_min".to_string(),
+            ))
+            .await,
+            Err(CpuManagerError::InvalidArgument(_))
+        );
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(LITTLE_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == (LITTLE_OPPS.len() - 1) as u64
+        );
+    }
+
+    struct RegisteredElement {
+        valid_levels: Vec<fbroker::PowerLevel>,
+        initial_level: fbroker::PowerLevel,
+        current_level: fbroker::PowerLevel,
+        dep_token_koid: zx::Koid,
+        runner: fbroker::ElementRunnerProxy,
+        active_leases: Vec<(String, fbroker::PowerLevel, fbroker::LeaseToken)>,
+        _control_stream: fbroker::ElementControlRequestStream,
+    }
+
+    struct FakeTopology {
+        elements: Rc<RefCell<HashMap<String, RegisteredElement>>>,
+        _scope: fasync::Scope,
+    }
+
+    impl FakeTopology {
+        async fn wait_for_level(&self, elem_name: &str, expected_level: fbroker::PowerLevel) {
+            while self.elements.borrow()[elem_name].current_level != expected_level {
+                fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+            }
+        }
+
+        fn spawn_lease_watcher(
+            scope_handle: &fasync::ScopeHandle,
+            elems_watch: Rc<RefCell<HashMap<String, RegisteredElement>>>,
+            elem_name: String,
+            peer_wait: fbroker::LeaseToken,
+        ) {
+            scope_handle.spawn_local(async move {
+                let _ =
+                    fasync::OnSignals::new(&peer_wait, zx::Signals::EVENTPAIR_PEER_CLOSED).await;
+                let maybe_update = {
+                    let mut elems = elems_watch.borrow_mut();
+                    let Some(elem) = elems.get_mut(&elem_name) else {
+                        return;
+                    };
+                    elem.active_leases.retain(|(_, _, t)| is_lease_open(t));
+                    let max_level =
+                        elem.active_leases.iter().map(|(_, l, _)| *l).max().unwrap_or(0);
+                    (max_level != elem.current_level).then(|| (elem.runner.clone(), max_level))
+                };
+                if let Some((runner, max_level)) = maybe_update {
+                    let _ = runner.set_level(max_level).await;
+                    if let Some(elem) = elems_watch.borrow_mut().get_mut(&elem_name) {
+                        elem.current_level = max_level;
+                    }
+                }
+            });
+        }
+
+        fn spawn() -> (Self, fbroker::TopologyProxy) {
+            let elements: Rc<RefCell<HashMap<String, RegisteredElement>>> =
+                Rc::new(RefCell::new(HashMap::new()));
+            let (proxy, mut stream) =
+                fidl::endpoints::create_proxy_and_stream::<fbroker::TopologyMarker>();
+            let scope = fasync::Scope::new();
+            let scope_handle = scope.to_handle();
+            let elements_clone = elements.clone();
+            scope.spawn_local(async move {
+                while let Ok(Some(req)) = stream.try_next().await {
+                    match req {
+                        fbroker::TopologyRequest::AddElement { payload, responder } => {
+                            let name = payload.element_name.unwrap();
+                            let valid_levels = payload.valid_levels.unwrap();
+                            let initial_level = payload.initial_current_level.unwrap();
+                            let initial_lease_token = payload.initial_lease_token;
+                            let runner = payload.element_runner.unwrap().into_proxy();
+                            let mut control_stream = payload.element_control.unwrap().into_stream();
+                            let mut active_leases = Vec::new();
+                            let mut peer_wait = None;
+                            if let Some(lease_token) = initial_lease_token {
+                                peer_wait = Some(
+                                    lease_token.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                                );
+                                active_leases.push((String::new(), initial_level, lease_token));
+                            }
+                            responder.send(Ok(())).unwrap();
+                            if let Ok(Some(
+                                fbroker::ElementControlRequest::RegisterDependencyToken {
+                                    token,
+                                    responder,
+                                },
+                            )) = control_stream.try_next().await
+                            {
+                                let koid = token.koid().unwrap();
+                                runner.set_level(initial_level).await.unwrap();
+                                elements_clone.borrow_mut().insert(
+                                    name.clone(),
+                                    RegisteredElement {
+                                        valid_levels,
+                                        initial_level,
+                                        current_level: initial_level,
+                                        dep_token_koid: koid,
+                                        runner,
+                                        active_leases,
+                                        _control_stream: control_stream,
+                                    },
+                                );
+                                responder.send(Ok(())).unwrap();
+                                if let Some(peer_wait) = peer_wait {
+                                    Self::spawn_lease_watcher(
+                                        &scope_handle,
+                                        elements_clone.clone(),
+                                        name,
+                                        peer_wait,
+                                    );
+                                }
+                            }
+                        }
+                        fbroker::TopologyRequest::Lease { payload, responder } => {
+                            let lease_name = payload.lease_name.unwrap();
+                            let lease_token = payload.lease_token.unwrap();
+                            let dep = &payload.dependencies.unwrap()[0];
+                            let koid = dep.requires_token.as_ref().unwrap().koid().unwrap();
+                            let level = dep.requires_level.unwrap();
+
+                            let (elem_name, maybe_update) = {
+                                let mut elems = elements_clone.borrow_mut();
+                                let (elem_name, elem) = elems
+                                    .iter_mut()
+                                    .find(|(_, e)| e.dep_token_koid == koid)
+                                    .expect("matching element for dependency token");
+                                elem.active_leases.retain(|(_, _, t)| is_lease_open(t));
+                                elem.active_leases.push((lease_name, level, lease_token));
+                                let max_level = elem
+                                    .active_leases
+                                    .iter()
+                                    .map(|(_, l, _)| *l)
+                                    .max()
+                                    .unwrap_or(0);
+                                let changed = max_level != elem.current_level;
+                                elem.current_level = max_level;
+                                (
+                                    elem_name.clone(),
+                                    changed.then(|| (elem.runner.clone(), max_level)),
+                                )
+                            };
+                            if let Some((runner, max_level)) = maybe_update {
+                                runner.set_level(max_level).await.unwrap();
+                            }
+                            responder.send(Ok(())).unwrap();
+
+                            // Monitor lease closure so dropping a lease updates required level.
+                            let peer_wait = {
+                                let elems = elements_clone.borrow();
+                                let elem = elems.get(&elem_name).unwrap();
+                                elem.active_leases
+                                    .last()
+                                    .unwrap()
+                                    .2
+                                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                                    .unwrap()
+                            };
+                            Self::spawn_lease_watcher(
+                                &scope_handle,
+                                elements_clone.clone(),
+                                elem_name,
+                                peer_wait,
+                            );
+                        }
+                        fbroker::TopologyRequest::_UnknownMethod { .. } => unreachable!(),
+                    }
+                }
+            });
+            (Self { elements, _scope: scope }, proxy)
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_power_elements_registration_and_arbitration() {
+        let (fake_topology, topology_proxy) = FakeTopology::spawn();
+        let handlers = Handlers::new();
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers
+            .builder(make_default_cluster_configs(), thermal_state_configs)
+            .with_topology(topology_proxy)
+            .build_and_init()
+            .await;
+
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(elems.len(), 4);
+            assert_eq!(
+                elems["cpu_cluster_0_min_freq"].valid_levels,
+                (0..BIG_OPPS.len() as u8).collect::<Vec<_>>()
+            );
+            assert_eq!(elems["cpu_cluster_0_min_freq"].initial_level, 0);
+            assert_eq!(
+                elems["cpu_cluster_0_max_freq_cap"].valid_levels,
+                (0..BIG_OPPS.len() as u8).collect::<Vec<_>>()
+            );
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].initial_level, 0);
+            assert_eq!(
+                elems["cpu_cluster_1_min_freq"].valid_levels,
+                (0..LITTLE_OPPS.len() as u8).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                elems["cpu_cluster_1_max_freq_cap"].valid_levels,
+                (0..LITTLE_OPPS.len() as u8).collect::<Vec<_>>()
+            );
+        }
+
+        // Enabling boost acquires a "boost" lease on each cluster's min_freq element at
+        // boost_opp (0 -> highest level) and drives SetMinimumOperatingPointLimit(0) via
+        // ElementRunner.
+        handlers.expect_big_min_opp(0);
+        handlers.expect_little_min_opp(0);
+        node.handle_message(&Message::SetBoost(true, 0)).await.unwrap();
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(elems["cpu_cluster_0_min_freq"].active_leases.len(), 1);
+            assert_eq!(elems["cpu_cluster_0_min_freq"].active_leases[0].0, "boost");
+            assert_eq!(
+                elems["cpu_cluster_0_min_freq"].active_leases[0].1,
+                opp_to_min_freq_level(0, BIG_OPPS.len())
+            );
+        }
+
+        // Setting max frequency on big cluster to OPP 2 acquires a named lease at level 2 and
+        // drives SetOperatingPoint(2) via ElementRunner.
+        handlers.expect_big_opp(2);
+        node.handle_message(&Message::SetMaxFrequency(BIG_CLUSTER_INDEX as u64, Some(2)))
+            .await
+            .unwrap();
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].active_leases.len(), 1);
+            assert_eq!(
+                elems["cpu_cluster_0_max_freq_cap"].active_leases[0].0,
+                "domain_controller_max_freq"
+            );
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].active_leases[0].1, 2);
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_multi_client_named_frequency_leases() {
+        let handlers = Handlers::new();
+        let (fake_topology, topology_proxy) = FakeTopology::spawn();
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = CpuManagerMainBuilder::new(
+            DEFAULT_SUSTAINABLE_POWER,
+            DEFAULT_POWER_GAIN,
+            make_default_cluster_configs(),
+            vec![handlers.big_cluster.clone(), handlers.little_cluster.clone()],
+            thermal_state_configs,
+            handlers.syscall.clone(),
+            handlers.cpu_stats.clone(),
+        )
+        .with_topology(topology_proxy)
+        .build_and_init()
+        .await;
+
+        // Client A caps big cluster to OPP 1; Client B caps big cluster to stricter OPP 2.
+        handlers.expect_big_opp(1);
+        let max_lease_a = match node
+            .handle_message(&Message::LeaseMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                1,
+                "starnix:powerhint_max_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMaxFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        handlers.expect_big_opp(2);
+        let max_lease_b = match node
+            .handle_message(&Message::LeaseMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                2,
+                "starnix:thermal_max_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMaxFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        // Effective ceiling must be OPP 2 while both leases are held.
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(2))
+        );
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].active_leases.len(), 2);
+        }
+
+        // Dropping Client B's stricter lease relaxes ceiling to Client A's OPP 1 (NOT uncapped 0).
+        handlers.expect_big_opp(1);
+        drop(max_lease_b);
+        fake_topology.wait_for_level("cpu_cluster_0_max_freq_cap", 1).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(1))
+        );
+
+        // Dropping Client A's lease restores uncapped OPP 0.
+        handlers.expect_big_opp(0);
+        drop(max_lease_a);
+        fake_topology.wait_for_level("cpu_cluster_0_max_freq_cap", 0).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(0))
+        );
+
+        // Concurrent floor leases: Client A requests floor OPP 1, Client B requests higher floor OPP 0.
+        handlers.big_cluster.add_msg_response_pair((
+            msg_eq!(SetMinimumOperatingPointLimit(1)),
+            msg_ok_return!(SetMinimumOperatingPointLimit),
+        ));
+        let min_lease_a = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                1,
+                "starnix:powerhint_min_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        handlers.big_cluster.add_msg_response_pair((
+            msg_eq!(SetMinimumOperatingPointLimit(0)),
+            msg_ok_return!(SetMinimumOperatingPointLimit),
+        ));
+        let min_lease_b = match node
+            .handle_message(&Message::LeaseMinFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                0,
+                "starnix:debug_min_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMinFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(0))
+        );
+
+        // Dropping Client B relaxes floor to Client A's OPP 1.
+        handlers.expect_big_min_opp(1);
+        drop(min_lease_b);
+        fake_topology
+            .wait_for_level("cpu_cluster_0_min_freq", opp_to_min_freq_level(1, BIG_OPPS.len()))
+            .await;
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(1))
+        );
+
+        // Dropping Client A restores lowest OPP 2.
+        handlers.expect_big_min_opp(2);
+        drop(min_lease_a);
+        fake_topology.wait_for_level("cpu_cluster_0_min_freq", 0).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(2))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_boot_max_opp_lease_handoff() {
+        let handlers = Handlers::new_with_highest_opp([1, 0]);
+        let (fake_topology, topology_proxy) = FakeTopology::spawn();
+
+        let mut cluster_configs = make_default_cluster_configs();
+        cluster_configs[0].boot_max_opp = Some(1);
+        cluster_configs[1].boot_max_opp = Some(0);
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers
+            .builder(cluster_configs, thermal_state_configs)
+            .with_topology(topology_proxy)
+            .build_and_init()
+            .await;
+
+        // Big cluster starts with an initial lease token at OPP 1 via `Topology.AddElement`;
+        // little cluster has boot_max_opp = 0 (uncapped) and holds no ceiling lease.
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].initial_level, 1);
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].active_leases.len(), 1);
+            assert_eq!(elems["cpu_cluster_0_max_freq_cap"].active_leases[0].1, 1);
+            assert_eq!(elems["cpu_cluster_1_max_freq_cap"].initial_level, 0);
+            assert!(elems["cpu_cluster_1_max_freq_cap"].active_leases.is_empty());
+        }
+
+        // Simulate Starnix boot handoff: query GetMaxFrequency, acquire a named
+        // "starnix:soft_max_freq" lease at OPP 1, then ClearMaxFrequency (SetMaxFrequency(None)).
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(1))
+        );
+        let soft_max_lease = match node
+            .handle_message(&Message::LeaseMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                1,
+                "starnix:soft_max_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMaxFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+        node.handle_message(&Message::SetMaxFrequency(BIG_CLUSTER_INDEX as u64, None))
+            .await
+            .unwrap();
+        while fake_topology.elements.borrow()["cpu_cluster_0_max_freq_cap"].active_leases.len() != 1
+        {
+            fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+        }
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(1))
+        );
+
+        // A stricter thermal lease (OPP 2) lowers the ceiling to OPP 2.
+        handlers.expect_big_opp(2);
+        let thermal_lease = match node
+            .handle_message(&Message::LeaseMaxFrequency(
+                BIG_CLUSTER_INDEX as u64,
+                2,
+                "starnix:thermal_max_freq".to_string(),
+            ))
+            .await
+            .unwrap()
+        {
+            MessageReturn::LeaseMaxFrequency(token) => token,
+            other => panic!("unexpected return: {:?}", other),
+        };
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(2))
+        );
+
+        // Releasing the boot cap (dropping `soft_max_lease` on `sys.boot_completed=1`) while
+        // `starnix:thermal_max_freq` is active preserves the stricter thermal ceiling at OPP 2.
+        drop(soft_max_lease);
+        while fake_topology.elements.borrow()["cpu_cluster_0_max_freq_cap"].active_leases.len() != 1
+        {
+            fasync::Timer::new(zx::MonotonicDuration::from_millis(5)).await;
+        }
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(2))
+        );
+
+        // Dropping the remaining thermal lease restores uncapped OPP 0.
+        handlers.expect_big_opp(0);
+        drop(thermal_lease);
+        fake_topology.wait_for_level("cpu_cluster_0_max_freq_cap", 0).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(0))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_boot_min_opp_power_broker_lease() {
+        let handlers = Handlers::new_base();
+        let (fake_topology, topology_proxy) = FakeTopology::spawn();
+        handlers.expect_big_opp(0);
+        handlers.expect_little_opp(0);
+        handlers.expect_big_min_opp(1);
+        handlers.expect_little_min_opp(2);
+
+        let mut cluster_configs = make_default_cluster_configs();
+        cluster_configs[0].boot_min_opp = Some(1);
+        cluster_configs[0].boost_opp = Some(2);
+        cluster_configs[1].boot_min_opp = Some(2);
+        cluster_configs[1].boost_opp = Some(1);
+
+        let thermal_state_configs = vec![ThermalStateConfig {
+            cluster_opps: vec![0, 0],
+            min_performance_normperfs: 0.0,
+            static_power_w: 2.0,
+            dynamic_power_per_normperf_w: 1.0,
+        }];
+
+        let node = handlers
+            .builder(cluster_configs, thermal_state_configs)
+            .with_topology(topology_proxy)
+            .build_and_init()
+            .await;
+
+        // Big cluster starts with an initial lease token at boot_min_opp (1) via
+        // `Topology.AddElement`, and GetMinFrequency reports boot_min_opp.
+        {
+            let elems = fake_topology.elements.borrow();
+            assert_eq!(
+                elems["cpu_cluster_0_min_freq"].initial_level,
+                opp_to_min_freq_level(1, BIG_OPPS.len())
+            );
+            assert_eq!(elems["cpu_cluster_0_min_freq"].active_leases.len(), 1);
+            assert_eq!(
+                elems["cpu_cluster_0_min_freq"].active_leases[0].1,
+                opp_to_min_freq_level(1, BIG_OPPS.len())
+            );
+        }
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(1))
+        );
+
+        // Enabling boost transitions to a "boost" lease at boost_opp.min(boot_min_opp).
+        // Big cluster stays at OPP 1 (no SetLevel change), while little cluster raises to OPP 1.
+        handlers.expect_little_min_opp(1);
+        node.handle_message(&Message::SetBoost(true, 0)).await.unwrap();
+
+        // Disabling boost clears boot_min_opp and drops the floor lease, restoring opps.len() - 1.
+        handlers.expect_big_min_opp((BIG_OPPS.len() - 1) as u32);
+        handlers.expect_little_min_opp((LITTLE_OPPS.len() - 1) as u32);
+        node.handle_message(&Message::SetBoost(false, 0)).await.unwrap();
+        fake_topology.wait_for_level("cpu_cluster_0_min_freq", 0).await;
+        fake_topology.wait_for_level("cpu_cluster_1_min_freq", 0).await;
+        assert_matches!(
+            node.handle_message(&Message::GetMinFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMinFrequency(opp)) if opp == (BIG_OPPS.len() - 1) as u64
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_update_powercap_domain_opps() {
+        let handlers = Handlers::new();
+        let cluster_configs = make_default_cluster_configs();
+        let thermal_state_configs = vec![
+            ThermalStateConfig {
+                cluster_opps: vec![0, 0],
+                min_performance_normperfs: 0.0,
+                static_power_w: 2.0,
+                dynamic_power_per_normperf_w: 1.0,
+            },
+            ThermalStateConfig {
+                cluster_opps: vec![0, 1],
+                min_performance_normperfs: 0.2,
+                static_power_w: 1.5,
+                dynamic_power_per_normperf_w: 0.8,
+            },
+            ThermalStateConfig {
+                cluster_opps: vec![2, 2],
+                min_performance_normperfs: 0.4,
+                static_power_w: 1.0,
+                dynamic_power_per_normperf_w: 0.6,
+            },
+        ];
+
+        let node = handlers.builder(cluster_configs, thermal_state_configs).build_and_init().await;
+
+        // Apply powercap ceiling [1, 2] -> both clusters throttle to [1, 2].
+        handlers.expect_big_opp(1);
+        handlers.expect_little_opp(2);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![1, 2])).await.unwrap();
+
+        // Enabling boost sends SetMinimumOperatingPointLimit(0) without overriding the active
+        // powercap operating point ceiling [1, 2] (clamped by the CPU driver).
+        handlers.expect_big_min_opp(0);
+        handlers.expect_little_min_opp(0);
+        node.handle_message(&Message::SetBoost(true, 0)).await.unwrap();
+        handlers.expect_big_min_opp((BIG_OPPS.len() - 1) as u32);
+        handlers.expect_little_min_opp((LITTLE_OPPS.len() - 1) as u32);
+        node.handle_message(&Message::SetBoost(false, 0)).await.unwrap();
+
+        // Transition to thermal state 1 ([0, 1]), which is looser than the active powercap ceiling
+        // ([1, 2]) on both clusters -> neither cluster changes OPP.
+        handlers.enqueue_cpu_loads(vec![0.25; 4]);
+        node.handle_message(&Message::UpdateThermalLoad(ThermalLoad(52))).await.unwrap();
+
+        // Transition to thermal state 2 ([2, 2]), which is stricter than the powercap ceiling on
+        // the big cluster (max(2, 1) = 2) -> big cluster throttles to OPP 2.
+        handlers.enqueue_cpu_loads(vec![0.25; 4]);
+        handlers.expect_big_opp(2);
+        node.handle_message(&Message::UpdateThermalLoad(ThermalLoad(70))).await.unwrap();
+
+        // Returning to thermal state 0 ([0, 0]) relaxes the big cluster back to the active
+        // powercap ceiling (OPP 1).
+        handlers.enqueue_cpu_loads(vec![0.0; 4]);
+        handlers.expect_big_opp(1);
+        node.handle_message(&Message::UpdateThermalLoad(ThermalLoad(0))).await.unwrap();
+
+        // Set a stricter DomainController ceiling on big cluster (2 > 1) -> big cluster throttles to 2.
+        handlers.expect_big_opp(2);
+        node.handle_message(&Message::SetMaxFrequency(BIG_CLUSTER_INDEX as u64, Some(2)))
+            .await
+            .unwrap();
+
+        // Clearing DomainController ceiling on big cluster keeps the active powercap ceiling (1).
+        handlers.expect_big_opp(1);
+        node.handle_message(&Message::SetMaxFrequency(BIG_CLUSTER_INDEX as u64, None))
+            .await
+            .unwrap();
+
+        // Passing a shorter `domain_opps` slice (`vec![1]`) clears the powercap ceiling (`None`)
+        // for clusters with `cluster_index >= domain_opps.len()` -> little cluster restores OPP 0.
+        handlers.expect_little_opp(0);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![1])).await.unwrap();
+
+        // Clearing powercap ceilings ([0, 0]) restores big cluster to 0.
+        handlers.expect_big_opp(0);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![0, 0])).await.unwrap();
+
+        // Out-of-bounds OPP index (>= opps.len()) clamps to the lowest-frequency OPP (opps.len() - 1 = 2),
+        // while GetMaxFrequency still reports the unthrottled DomainController ceiling (0).
+        handlers.expect_big_opp((BIG_OPPS.len() - 1) as u32);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![99, 0])).await.unwrap();
+        assert_matches!(
+            node.handle_message(&Message::GetMaxFrequency(BIG_CLUSTER_INDEX as u64)).await,
+            Ok(MessageReturn::GetMaxFrequency(0))
+        );
+
+        // Unknown cluster index (domain_opps.len() > clusters.len()) logs a warning and still
+        // applies ceilings to known clusters.
+        handlers.expect_big_opp(1);
+        handlers.expect_little_opp(2);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![1, 2, 3])).await.unwrap();
+
+        // Reset powercap ceilings to [0, 0].
+        handlers.expect_big_opp(0);
+        handlers.expect_little_opp(0);
+        node.handle_message(&Message::UpdatePowercapDomainOpps(vec![0, 0])).await.unwrap();
     }
 }

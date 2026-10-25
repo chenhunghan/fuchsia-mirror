@@ -41,19 +41,24 @@ const OPP_BANK_SIZE: usize = 0x20;
 
 static OPP_REG_BASE: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
 
-const UNCACHED_OPP: u64 = u64::MAX;
+const NO_REQUESTED_OPP: u64 = u64::MAX;
 
-static CURRENT_OPPS: [AtomicU64; POWER_DOMAIN_COUNT] = [
-    AtomicU64::new(UNCACHED_OPP),
-    AtomicU64::new(UNCACHED_OPP),
-    AtomicU64::new(UNCACHED_OPP),
-    AtomicU64::new(UNCACHED_OPP),
+// The last OPP the kernel requested for each domain, or `NO_REQUESTED_OPP` if none has been
+// requested yet. This is a record of the kernel's intent, not a cache of the hardware state: the
+// PERF_STATE registers can be changed behind the kernel's back (e.g. CAP firmware re-initializes
+// them when leaving S3), so every OPP set or get goes to the hardware and this value is only used
+// to re-apply the kernel's intent after such events. See b/576640818.
+static REQUESTED_OPPS: [AtomicU64; POWER_DOMAIN_COUNT] = [
+    AtomicU64::new(NO_REQUESTED_OPP),
+    AtomicU64::new(NO_REQUESTED_OPP),
+    AtomicU64::new(NO_REQUESTED_OPP),
+    AtomicU64::new(NO_REQUESTED_OPP),
 ];
 
 #[cfg(ktest)]
-fn reset_cached_opps_for_test() {
-    for opp in &CURRENT_OPPS {
-        opp.store(UNCACHED_OPP, Ordering::SeqCst);
+fn reset_requested_opps_for_test() {
+    for opp in &REQUESTED_OPPS {
+        opp.store(NO_REQUESTED_OPP, Ordering::SeqCst);
     }
 }
 
@@ -214,17 +219,12 @@ extern "C" fn iris_opp_set(domain_id: u32, opp: u64) -> Result<(), Status> {
     // Clamp the requested OPP to the hardware floor OPP as driver-level defense in depth.
     let opp = opp.min(info.floor_opp);
 
-    // Fast path: if the requested OPP is already cached as active for this domain, return
-    // immediately without acquiring the domain spinlock or writing to MMIO.
-    if CURRENT_OPPS[domain_index].load(Ordering::Acquire) == opp {
-        return Ok(());
-    }
-
+    // Always write the hardware, even if the requested OPP matches the last request. The
+    // PERF_STATE register is not exclusively owned by the kernel (see `REQUESTED_OPPS`), so
+    // skipping writes based on remembered state can silently leave the domain at the wrong OPP.
+    // Redundant writes are cheap: the GIA only interrupts the CAP firmware when PERF_STATE
+    // differs from the current DVFS state.
     with_domain_lock(domain_index, || {
-        if CURRENT_OPPS[domain_index].load(Ordering::Relaxed) == opp {
-            return Ok(());
-        }
-
         let Some(bank) = get_opp_bank() else {
             return Err(Status::BAD_STATE);
         };
@@ -233,7 +233,7 @@ extern "C" fn iris_opp_set(domain_id: u32, opp: u64) -> Result<(), Status> {
         // SAFETY: `info.reg_offset` is within `OPP_BANK_SIZE` (0x20) and aligned to 4 bytes.
         let reg = unsafe { bank.at(info.reg_offset) };
         reg.write(mmio_opp);
-        CURRENT_OPPS[domain_index].store(opp, Ordering::Release);
+        REQUESTED_OPPS[domain_index].store(opp, Ordering::Release);
         Ok(())
     })
 }
@@ -250,15 +250,7 @@ extern "C" fn iris_opp_get(domain_id: u32, out_opp: *mut u64) -> Result<(), Stat
         return Err(Status::INVALID_ARGS);
     };
 
-    let cached = CURRENT_OPPS[domain_index].load(Ordering::Acquire);
-    if cached != UNCACHED_OPP {
-        // SAFETY: `out_opp` was checked non-null above.
-        unsafe {
-            *out_opp = cached;
-        }
-        return Ok(());
-    }
-
+    // Always read the hardware rather than remembered state; see `iris_opp_set`.
     with_domain_lock(domain_index, || {
         let Some(bank) = get_opp_bank() else {
             return Err(Status::BAD_STATE);
@@ -268,7 +260,6 @@ extern "C" fn iris_opp_get(domain_id: u32, out_opp: *mut u64) -> Result<(), Stat
         let reg = unsafe { bank.at(info.reg_offset) };
         let raw_val = reg.read();
         let opp = raw_val.saturating_sub(info.mmio_offset) as u64;
-        CURRENT_OPPS[domain_index].store(opp, Ordering::Release);
         // SAFETY: `out_opp` was checked non-null above.
         unsafe {
             *out_opp = opp;
@@ -289,6 +280,41 @@ extern "C" fn iris_opp_get_domain_count(out_count: *mut usize) -> Result<(), Sta
     Ok(())
 }
 
+/// Re-applies the kernel's last requested OPP to every domain after returning from system
+/// suspend.
+///
+/// Leaving S3 cold-boots SSWRP_CPU, and the CAP M0 firmware's `cpu_dvfs_init()` rewrites the
+/// PERF_STATE registers with its own initial OPPs. The kernel scheduler's power level bookkeeping
+/// still reflects the OPPs it requested before suspend and will not issue a new request until
+/// demand crosses a level boundary, so without this the domains would run at the firmware OPPs
+/// for an unbounded time. Rewriting the requested OPPs brings the hardware back in line with the
+/// scheduler's bookkeeping.
+///
+/// Domains that have never had an OPP requested are left alone.
+extern "C" fn iris_system_resume() -> Result<(), Status> {
+    let mut result = Ok(());
+    for (domain_index, requested) in REQUESTED_OPPS.iter().enumerate() {
+        let opp = requested.load(Ordering::Acquire);
+        if opp == NO_REQUESTED_OPP {
+            continue;
+        }
+        if let Err(status) = iris_opp_set(domain_index as u32, opp) {
+            dprintf!(
+                CRITICAL,
+                "POWER: Failed to restore iris domain {} OPP {} on resume: {}\n",
+                domain_index,
+                opp,
+                status.into_raw()
+            );
+            // Keep going so the remaining domains are still restored; report the first error.
+            if result.is_ok() {
+                result = Err(status);
+            }
+        }
+    }
+    result
+}
+
 static IRIS_POWER_OPS: PdevPowerOps = PdevPowerOps {
     reboot: Some(iris_reboot),
     shutdown: Some(iris_shutdown),
@@ -298,6 +324,7 @@ static IRIS_POWER_OPS: PdevPowerOps = PdevPowerOps {
     opp_set: Some(iris_opp_set),
     opp_get: Some(iris_opp_get),
     opp_get_domain_count: Some(iris_opp_get_domain_count),
+    system_resume: Some(iris_system_resume),
 };
 
 /// Early initialization hook for Iris power management and OPP register bank.
@@ -592,29 +619,39 @@ mod tests {
         assert_eq!(count, 4);
     }
 
-    /// Tests opp_get and opp_set with mock backing memory and verifies cached OPP behavior.
+    /// Tests opp_get and opp_set with mock backing memory, verifying the hardware is the source of truth.
     #[test]
     fn test_iris_opp_get_set() {
-        super::reset_cached_opps_for_test();
+        super::reset_requested_opps_for_test();
         let mut mock_reg_bank = [0u32; 8];
         let old_base = OPP_REG_BASE.swap(mock_reg_bank.as_mut_ptr(), Ordering::SeqCst);
 
         // Test Domain 0 (mmio_offset = 2)
         assert_ok!(super::iris_opp_set(0, 5));
         assert_eq!(mock_reg_bank[0], 7); // 5 + 2
+        assert_eq!(super::REQUESTED_OPPS[0].load(Ordering::SeqCst), 5);
 
         let mut opp = 0u64;
         assert_ok!(super::iris_opp_get(0, &mut opp));
         assert_eq!(opp, 5);
 
-        // Setting the same OPP should hit the cache and skip MMIO write.
+        // Setting the same OPP again must still write the hardware, so that an out-of-band
+        // change to the register (e.g. firmware re-initialization on resume) is corrected.
         mock_reg_bank[0] = 0xbeef;
         assert_ok!(super::iris_opp_set(0, 5));
-        assert_eq!(mock_reg_bank[0], 0xbeef); // Untouched due to cache hit
+        assert_eq!(mock_reg_bank[0], 7); // Rewritten despite matching the last request.
 
-        // Setting a different OPP writes to MMIO and updates cache.
+        // Getting the OPP must reflect an out-of-band change to the register.
+        mock_reg_bank[0] = 9; // OPP 7 + mmio_offset 2
+        assert_ok!(super::iris_opp_get(0, &mut opp));
+        assert_eq!(opp, 7);
+        // The last request is unaffected by reads.
+        assert_eq!(super::REQUESTED_OPPS[0].load(Ordering::SeqCst), 5);
+
+        // Setting a different OPP writes to MMIO and records the request.
         assert_ok!(super::iris_opp_set(0, 6));
         assert_eq!(mock_reg_bank[0], 8); // 6 + 2
+        assert_eq!(super::REQUESTED_OPPS[0].load(Ordering::SeqCst), 6);
 
         // Test Domain 3 (mmio_offset = 1, reg offset 0x18 -> index 6)
         assert_ok!(super::iris_opp_set(3, 10));
@@ -630,9 +667,47 @@ mod tests {
         // Test Out of bounds opp
         assert_err!(super::iris_opp_set(0, 22), Status::INVALID_ARGS);
 
-        // Restore original base pointer and reset cache
+        // Restore original base pointer and reset the requested OPPs.
         OPP_REG_BASE.store(old_base, Ordering::SeqCst);
-        super::reset_cached_opps_for_test();
+        super::reset_requested_opps_for_test();
+    }
+
+    /// Tests that system_resume rewrites the last requested OPP for every domain that has one.
+    #[test]
+    fn test_iris_system_resume_restores_requested_opps() {
+        super::reset_requested_opps_for_test();
+        let mut mock_reg_bank = [0u32; 8];
+        let old_base = OPP_REG_BASE.swap(mock_reg_bank.as_mut_ptr(), Ordering::SeqCst);
+
+        // With nothing requested yet, resume is a no-op.
+        assert_ok!(super::iris_system_resume());
+        for reg in mock_reg_bank {
+            assert_eq!(reg, 0);
+        }
+
+        // Request OPPs on domains 0 and 3 only.
+        assert_ok!(super::iris_opp_set(0, 5)); // reg index 0 = 5 + 2
+        assert_ok!(super::iris_opp_set(3, 10)); // reg index 6 = 10 + 1
+        assert_eq!(mock_reg_bank[0], 7);
+        assert_eq!(mock_reg_bank[6], 11);
+
+        // Simulate firmware re-initializing the registers while suspended.
+        mock_reg_bank[0] = 0xa + 2;
+        mock_reg_bank[2] = 0xb; // domain 1, never requested
+        mock_reg_bank[4] = 0xb; // domain 2, never requested
+        mock_reg_bank[6] = 0xa + 1;
+
+        assert_ok!(super::iris_system_resume());
+
+        // Requested domains are restored; untouched domains keep the firmware value.
+        assert_eq!(mock_reg_bank[0], 7);
+        assert_eq!(mock_reg_bank[2], 0xb);
+        assert_eq!(mock_reg_bank[4], 0xb);
+        assert_eq!(mock_reg_bank[6], 11);
+
+        // Restore original base pointer and reset the requested OPPs.
+        OPP_REG_BASE.store(old_base, Ordering::SeqCst);
+        super::reset_requested_opps_for_test();
     }
 
     /// Tests that passing a null or empty config to iris_power_init returns gracefully without panicking.

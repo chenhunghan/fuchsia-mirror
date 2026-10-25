@@ -490,7 +490,32 @@ void SdmmcBlockDevice::DisableCqhci(fdf::Arena& arena, DisableCqhciCompleter::Sy
   // partition.
   current_partition_ = UNKNOWN;
 
-  zx_status_t status = MmcDoSwitch(MMC_EXT_CSD_CMDQ_MODE_EN, 0);
+  // Ensure any interrupted transfer is stopped and the card is in the TRAN state before discarding
+  // queued tasks and disabling command queueing (JESD84-B51A Section 6.6.39.2 and Annex B.2.8).
+  zx_status_t status = WaitForTran();
+  if (status != ZX_OK) {
+    completer.buffer(arena).ReplyError(status);
+    return;
+  }
+
+  const sdmmc_req_t discard_queue = {
+      .cmd_idx = MMC_CMDQ_TASK_MGMT,
+      .cmd_flags = MMC_CMDQ_TASK_MGMT_FLAGS,
+      .arg = MMC_CMDQ_TASK_MGMT_DISCARD_QUEUE_ARG,
+  };
+  uint32_t unused_response[4] = {};
+  if ((status = sdmmc_->Request(&discard_queue, unused_response)) != ZX_OK) {
+    fdf::error("failed to discard CQHCI task queue (CMD48): {}", zx_status_get_string(status));
+    completer.buffer(arena).ReplyError(status);
+    return;
+  }
+
+  if ((status = WaitForTran()) != ZX_OK) {
+    completer.buffer(arena).ReplyError(status);
+    return;
+  }
+
+  status = MmcDoSwitch(MMC_EXT_CSD_CMDQ_MODE_EN, 0);
   if (status != ZX_OK) {
     completer.buffer(arena).ReplyError(status);
     return;
@@ -1277,7 +1302,8 @@ zx_status_t SdmmcBlockDevice::WaitForState(uint32_t state) {
     }
 
     current_state = MMC_STATUS_CURRENT_STATE(response);
-    if (current_state == MMC_STATUS_CURRENT_STATE_RECV) {
+    if (current_state == MMC_STATUS_CURRENT_STATE_RECV ||
+        current_state == MMC_STATUS_CURRENT_STATE_DATA) {
       st = sdmmc_->SdmmcStopTransmission();
       continue;
     } else if (current_state == state) {
@@ -1386,17 +1412,38 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
     zx::result<> Flush(bool split_last = false) TA_NO_THREAD_SAFETY_ANALYSIS {
       if (requests_.empty())
         return zx::ok();
-      TRACE_DURATION(
-          "sdmmc",
-          requests_[0].operation.tag == block_server::Operation::Tag::Read ? "read" : "write",
-          "count", requests_.size(),
-          // The total number of bytes that will be read or written excluding the packed command
-          // header.
-          "size", total_bytes_ - zx_system_get_page_size());
+      const bool is_read = requests_[0].operation.tag == block_server::Operation::Tag::Read;
+      TRACE_DURATION("sdmmc", is_read ? "read" : "write", "count", requests_.size(),
+                     // The total number of bytes that will be read or written excluding the packed
+                     // command header.
+                     "size", total_bytes_ - zx_system_get_page_size());
       zx::result<> result =
           zx::make_result(device_.ReadWriteWithRetries(requests_, partition_.partition()));
-      if (split_last && result.is_ok())
-        requests_.pop_back();
+      if (result.is_ok()) {
+        uint64_t new_split_bytes = 0;
+        if (split_last) {
+          new_split_bytes = uint64_t{requests_.back().operation.read.block_count} * block_size_;
+          requests_.pop_back();
+        }
+        if (requests_.empty()) {
+          pending_split_bytes_ += new_split_bytes;
+        } else {
+          uint64_t completed_bytes = pending_split_bytes_;
+          for (const block_server::Request& request : requests_) {
+            completed_bytes += uint64_t{request.operation.read.block_count} * block_size_;
+          }
+          pending_split_bytes_ = new_split_bytes;
+          if (is_read) {
+            device_.properties_.read_ops_.Add(requests_.size());
+            device_.properties_.read_bytes_.Add(completed_bytes);
+          } else {
+            device_.properties_.write_ops_.Add(requests_.size());
+            device_.properties_.write_bytes_.Add(completed_bytes);
+          }
+        }
+      } else {
+        pending_split_bytes_ = 0;
+      }
       for (const block_server::Request& request : requests_) {
         partition_.SendReply(request.request_id, result);
       }
@@ -1413,6 +1460,7 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
     const uint32_t block_size_;
     std::vector<block_server::Request> requests_;
     uint64_t total_bytes_ = 0;
+    uint64_t pending_split_bytes_ = 0;
   };
 
   zx_status_t status;
@@ -1451,15 +1499,9 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
     }
     switch (request.operation.tag) {
       case block_server::Operation::Tag::Read:
-        properties_.read_ops_.Add(1);
-        properties_.read_bytes_.Add(uint64_t{request.operation.read.block_count} *
-                                    block_info_.block_size);
         read_packer.Push(request);
         break;
       case block_server::Operation::Tag::Write:
-        properties_.write_ops_.Add(1);
-        properties_.write_bytes_.Add(uint64_t{request.operation.write.block_count} *
-                                     block_info_.block_size);
         if (request.operation.write.options.flags.is_pre_barrier()) {
           TRACE_DURATION_BEGIN("sdmmc", "barrier");
 
@@ -1478,7 +1520,6 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
 
       case block_server::Operation::Tag::Flush:
         TRACE_DURATION_BEGIN("sdmmc", "flush");
-        properties_.flush_ops_.Add(1);
 
         // Technically, we might not need to do this, because there's no guarantee regarding the
         // ordering of requests, but it's arguably safer for us to flush preceding write requests
@@ -1486,6 +1527,9 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
         unused_result = write_packer.Flush();
 
         status = Flush();
+        if (status == ZX_OK) {
+          properties_.flush_ops_.Add(1);
+        }
 
         partition.SendReply(request.request_id, zx::make_result(status));
 
@@ -1496,12 +1540,14 @@ void SdmmcBlockDevice::OnRequests(PartitionDevice& partition,
 
       case block_server::Operation::Tag::Trim:
         TRACE_DURATION_BEGIN("sdmmc", "trim");
-        properties_.trim_ops_.Add(1);
-        properties_.trim_bytes_.Add(uint64_t{request.operation.trim.block_count} *
-                                    block_info_.block_size);
 
         status = Trim(request.operation.trim.device_block_offset,
                       request.operation.trim.block_count, partition.partition());
+        if (status == ZX_OK) {
+          properties_.trim_ops_.Add(1);
+          properties_.trim_bytes_.Add(uint64_t{request.operation.trim.block_count} *
+                                      block_info_.block_size);
+        }
         partition.SendReply(request.request_id, zx::make_result(status));
 
         TRACE_DURATION_END(

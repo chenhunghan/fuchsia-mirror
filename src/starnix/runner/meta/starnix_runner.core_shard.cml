@@ -11,6 +11,7 @@
                 "fuchsia.ui.display.singleton.DisplayPower",
                 "fuchsia.ui.display.singleton.Info",
                 "fuchsia.ui.input.DeviceListenerRegistry",
+                "fuchsia.ui.input.internal.InputOwnership",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",
@@ -81,7 +82,7 @@
             source_availability: "unknown",
         },
         {
-            protocol: [ "fuchsia.net.policy.socketproxy.NetworkRegistry" ],
+            protocol: [ "fuchsia.net.policy.properties.NetworkRegistry" ],
             from: "#network",
             to: "#starnix_runner",
             availability: "optional",
@@ -99,6 +100,7 @@
                 "fuchsia.kernel.Stats",
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.scheduler.RoleManager",
+                "fuchsia.storage.mapping.FileMapper",
                 "fuchsia.sys2.BootController",
                 "fuchsia.sysinfo.SysInfo",
                 "fuchsia.thermal.SensorManager",
@@ -135,7 +137,7 @@
             source_availability: "unknown",
         },
         {
-            protocol: [ "fuchsia.memory.attribution.PageRefaultSink" ],
+            protocol: [ "fuchsia.memory.attribution.PagerStatsSink" ],
             from: "#memory_monitor2",
             to: "#starnix_runner",
             availability: "optional",
@@ -221,12 +223,20 @@
             to: [ "#starnix_runner" ],
         },
         {
+            service: "fuchsia.gpu.magma.PowerService",
+            from: "parent",
+            to: [ "#starnix_runner" ],
+            availability: "optional",
+        },
+        {
             service: [
                 "fuchsia.hardware.adb.Service",
                 "fuchsia.hardware.cpu.ctrl.Service",
                 "fuchsia.hardware.google.nanohub.StarnixDataChannelService",
                 "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.power.stats.Service",
+                "fuchsia.hardware.usb.UsbService",
+                "fuchsia.input.report.Service",
             ],
             from: "parent",
             to: [ "#starnix_runner" ],
@@ -235,6 +245,7 @@
             protocol: [
                 "fuchsia.power.broker.Topology",
                 "fuchsia.power.cpu.DomainController",
+                "fuchsia.power.powercap.Client",
                 "fuchsia.power.suspend.Stats",
                 "fuchsia.power.system.ActivityGovernor",
                 "fuchsia.power.system.BootControl",
@@ -307,6 +318,16 @@
             config: "fuchsia.starnix.config.Prefetch",
             from: "parent",
             to: "#starnix_runner",
+        },
+        {
+            config: [
+                "fuchsia.kernel.oom.CriticalMb",
+                "fuchsia.kernel.oom.OutOfMemoryMb",
+                "fuchsia.kernel.oom.WarningMb",
+            ],
+            from: "parent",
+            to: "#starnix_runner",
+            availability: "optional",
         },
         {
             config: "fuchsia.starnix.runner.EnableDataCollection",

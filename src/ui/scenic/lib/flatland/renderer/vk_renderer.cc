@@ -12,7 +12,6 @@
 #include <zircon/types.h>
 
 #include <array>
-#include <memory_resource>
 
 #include "src/lib/fidl/contrib/fpromise/client.h"
 #include "src/ui/lib/escher/escher.h"
@@ -29,6 +28,7 @@
 #include "src/ui/lib/escher/util/image_utils.h"
 #include "src/ui/lib/escher/vk/impl/framebuffer.h"
 #include "src/ui/scenic/lib/flatland/image_formats.h"
+#include "src/ui/scenic/lib/utils/pmr_stack_arena.h"
 #include "src/ui/scenic/lib/utils/shader_warmup.h"
 
 #include <glm/glm.hpp>
@@ -272,8 +272,18 @@ VkRenderer::SetConstraintsAndCreateVulkanBufferCollection(
 
   vk::BufferCollectionCreateInfoFUCHSIA bc_create_info;
   bc_create_info.collectionToken = token.TakeChannel().release();
-  const vk::BufferCollectionFUCHSIA vk_collection = escher::ESCHER_CHECKED_VK_RESULT(
-      vk_device.createBufferCollectionFUCHSIA(bc_create_info, nullptr, vk_loader));
+  vk::BufferCollectionFUCHSIA vk_collection;
+  {
+    const auto vk_result =
+        vk_device.createBufferCollectionFUCHSIA(bc_create_info, nullptr, vk_loader);
+    if (vk_result.result != vk::Result::eSuccess) {
+      FX_LOGS(ERROR) << "Cannot create vulkan buffer collection: "
+                     << vk::to_string(vk_result.result)
+                     << "; The client may have invalidated the token.";
+      return std::nullopt;
+    }
+    vk_collection = vk_result.value;
+  }
 
   vk::ImageConstraintsInfoFUCHSIA vk_image_constraints;
   const auto image_format_constraints = GetVulkanImageFormatConstraints(usage, size);
@@ -806,14 +816,14 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   TRACE_DURATION("gfx", "VkRenderer::Render");
 
   // Minimize time that `lock_` is held by making local copies of collections.
-  alignas(std::max_align_t) std::array<std::byte, 8192> stack_buffer;
-  std::pmr::monotonic_buffer_resource resource(stack_buffer.data(), stack_buffer.size());
+  utils::PmrStackArena<8192> arena;
 
-  std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> local_texture_map(&resource);
-  std::pmr::unordered_map<GlobalImageId, RenderTarget> local_render_target_map(&resource);
-  std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> local_readback_image_map(&resource);
-  std::pmr::set<GlobalImageId> local_pending_textures(&resource);
-  std::pmr::set<GlobalImageId> local_pending_render_targets(&resource);
+  std::pmr::unordered_map<GlobalImageId, escher::TexturePtr> local_texture_map(arena.resource());
+  std::pmr::unordered_map<GlobalImageId, RenderTarget> local_render_target_map(arena.resource());
+  std::pmr::unordered_map<GlobalImageId, escher::ImagePtr> local_readback_image_map(
+      arena.resource());
+  std::pmr::set<GlobalImageId> local_pending_textures(arena.resource());
+  std::pmr::set<GlobalImageId> local_pending_render_targets(arena.resource());
   {
     TRACE_DURATION("gfx", "LockAndCopyDataStructs");
     std::scoped_lock lock(lock_);
@@ -893,9 +903,9 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   }
 
   TRACE_DURATION_BEGIN("gfx", "VkRenderer::Render[transform_display_list]");
-  std::pmr::vector<escher::Rectangle2D> normalized_rects(&resource);
-  std::pmr::vector<escher::TexturePtr> textures(&resource);
-  std::pmr::vector<escher::RectangleCompositor::ColorData> color_data(&resource);
+  std::pmr::vector<escher::Rectangle2D> normalized_rects(arena.resource());
+  std::pmr::vector<escher::TexturePtr> textures(arena.resource());
+  std::pmr::vector<escher::RectangleCompositor::ColorData> color_data(arena.resource());
   normalized_rects.reserve(layers.size());
   textures.reserve(layers.size());
   color_data.reserve(layers.size());
@@ -1023,10 +1033,7 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
 
     // Create a flow event that ends in the magma system driver.
     if (TRACE_ENABLED()) {
-      zx_info_handle_basic_t koid_info;
-      fence_original.get_info(ZX_INFO_HANDLE_BASIC, &koid_info, sizeof(koid_info), nullptr,
-                              nullptr);
-      TRACE_FLOW_BEGIN("gfx", "semaphore", koid_info.koid);
+      TRACE_FLOW_BEGIN("gfx", "semaphore", sema->koid());
     }
 
     // TODO(https://fxbug.dev/42174813): Semaphore lifetime should be guaranteed by Escher. This

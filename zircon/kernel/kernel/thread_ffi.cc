@@ -8,9 +8,11 @@
 #include <lib/fxt/interned_string.h>
 #include <lib/kconcurrent/chainlock.h>
 #include <lib/kconcurrent/chainlock_transaction.h>
+#include <lib/object-constants.h>
 #include <lib/stall.h>
 #include <zircon/types.h>
 
+#include <arch/ops.h>
 #include <arch/regs.h>
 #include <kernel/auto_preempt_disabler.h>
 #include <kernel/deadline.h>
@@ -19,10 +21,12 @@
 #include <kernel/restricted.h>
 #include <kernel/restricted_state.h>
 #include <kernel/scheduler.h>
+#include <kernel/task_runtime_stats.h>
 #include <kernel/thread.h>
 #include <kernel/thread_ffi.h>
 #include <ktl/memory.h>
 #include <ktl/string_view.h>
+#include <ktl/type_traits.h>
 #include <vm/vm_object_paged.h>
 
 extern "C" {
@@ -57,8 +61,8 @@ static_assert(static_cast<int>(ThreadStallState::Progressing) == 2);
 static_assert(static_cast<int>(ThreadStallState::Stalling) == 3);
 // LINT.ThenChange(//zircon/kernel/kernel/thread.rs:ThreadStallState)
 
-// `cpp_thread_get_lock` hands the C++ `ChainLock` to Rust as a `kconcurrent::ChainLock`, which is
-// a 16-byte pair of atomics (lock token and contention state) with 8-byte alignment.
+// Rust `ChainLock` is a 16-byte pair of atomics (lock token and contention state) with 8-byte
+// alignment; the layout must match because Rust accesses it directly.
 static_assert(sizeof(ChainLock) == 16);
 static_assert(alignof(ChainLock) == 8);
 
@@ -79,7 +83,6 @@ static_assert(offsetof(SchedulerState::WaitQueueInheritedSchedulerState, time_sl
 
 ThreadStallState cpp_thread_memory_stall_state(const Thread* thread);
 void cpp_thread_set_memory_stall_state(Thread* thread, ThreadStallState value);
-const SchedulerState* cpp_thread_scheduler_state(const Thread* thread);
 
 Thread* cpp_thread_create_default(const char* name, thread_start_routine entry, void* arg);
 Thread* cpp_thread_create_with_priority(const char* name, thread_start_routine entry, void* arg,
@@ -91,6 +94,7 @@ Thread* cpp_thread_create_with_profile(const char* name_ptr, size_t name_len,
                                        const SchedulerState::BaseProfile* profile);
 void cpp_thread_resume(Thread* thread);
 zx_status_t cpp_thread_join(Thread* thread, int* out_retcode, zx_instant_mono_t deadline);
+void cpp_thread_forget(Thread* thread);
 void cpp_thread_current_yield();
 void cpp_thread_kill(Thread* thread);
 zx_status_t cpp_thread_suspend(Thread* thread);
@@ -119,7 +123,6 @@ void* cpp_thread_get_arch(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS;
 vaddr_t cpp_thread_get_stack_top(Thread* thread);
 vaddr_t cpp_thread_get_shadow_call_base(Thread* thread);
 void cpp_thread_dump_current_stack();
-bool cpp_thread_is_user_state_saved_locked(Thread* thread);
 bool cpp_thread_is_running(const Thread* thread);
 const char* cpp_thread_name(const Thread* thread);
 bool cpp_thread_is_user_thread(const Thread* thread);
@@ -160,6 +163,22 @@ FFI_ALWAYS_INLINE void cpp_scheduler_state_base_profile_init_fair(
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_scheduler_state_base_profile_init_deadline(
+    ffi::Uninitialized<SchedulerState::BaseProfile>* out_profile, zx_duration_mono_t capacity_ns,
+    zx_duration_mono_t deadline_ns) {
+  out_profile->Initialize(SchedulerState::BaseProfile{
+      SchedDeadlineParams{SchedDuration{capacity_ns}, SchedDuration{deadline_ns}}});
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_set_base_profile(Thread* thread,
+                                                   const SchedulerState::BaseProfile* profile) {
+  DEBUG_ASSERT(thread != nullptr);
+  DEBUG_ASSERT(profile != nullptr);
+  thread->SetBaseProfile(*profile);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE Thread* cpp_thread_create_with_profile(
     const char* name_ptr, size_t name_len, thread_start_routine entry, void* arg,
     const SchedulerState::BaseProfile* profile) {
@@ -176,6 +195,12 @@ FFI_ALWAYS_INLINE void cpp_thread_resume(Thread* thread) {
 zx_status_t cpp_thread_join(Thread* thread, int* out_retcode, zx_instant_mono_t deadline) {
   DEBUG_ASSERT(thread != nullptr);
   return thread->Join(out_retcode, deadline);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_forget(Thread* thread) {
+  DEBUG_ASSERT(thread != nullptr);
+  thread->Forget();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -356,12 +381,6 @@ FFI_ALWAYS_INLINE void cpp_thread_dump_current_stack() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_thread_is_user_state_saved_locked(Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return thread->IsUserStateSavedLocked();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE bool cpp_thread_is_running(const Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
   return thread->state() == THREAD_RUNNING;
 }
@@ -386,12 +405,6 @@ FFI_ALWAYS_INLINE ThreadStallState cpp_thread_memory_stall_state(const Thread* t
 FFI_ALWAYS_INLINE void cpp_thread_set_memory_stall_state(Thread* thread, ThreadStallState value)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   thread->set_memory_stall_state(value);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const SchedulerState* cpp_thread_scheduler_state(const Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &thread->scheduler_state();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -478,17 +491,6 @@ FFI_ALWAYS_INLINE cpu_mask_t cpp_thread_set_cpu_affinity(Thread* thread, cpu_mas
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_thread_current_migrate_to_cpu(cpu_num_t target_cpu) {
   Thread::Current::MigrateToCpu(target_cpu);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE ChainLock* cpp_thread_get_lock(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &thread->get_lock();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_thread_wait_queue_state_blocked_status_locked(
-    const Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return thread->wait_queue_state().BlockedStatus();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -597,5 +599,102 @@ FFI_ALWAYS_INLINE void cpp_thread_get_backtrace(Thread* thread, Backtrace* out_b
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_thread_dump(const Thread* thread, bool full) { thread->Dump(full); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_duration_mono_t cpp_thread_runtime(const Thread* thread) {
+  return thread->Runtime();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void* cpp_thread_get_list_lock() TA_NO_THREAD_SAFETY_ANALYSIS {
+  return &Thread::get_list_lock();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE Thread* cpp_thread_id_to_thread_slow(zx_koid_t tid) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return thread_id_to_thread_slow(tid);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_dump_tid(zx_koid_t tid, bool full) { Thread::DumpTid(tid, full); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_dump_tid_during_panic(zx_koid_t tid,
+                                                        bool full) TA_NO_THREAD_SAFETY_ANALYSIS {
+  Thread::DumpTidDuringPanic(tid, full);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_dump_all(const char* match_owner, bool full) {
+  Thread::DumpAll(match_owner, full);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_dump_all_during_panic(const char* match_owner,
+                                                        bool full) TA_NO_THREAD_SAFETY_ANALYSIS {
+  Thread::DumpAllDuringPanic(match_owner, full);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_current_reschedule() { Thread::Current::Reschedule(); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_thread_detach_and_resume(Thread* thread) {
+  DEBUG_ASSERT(thread != nullptr);
+  return thread->DetachAndResume();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_runtime_stats_init(void* storage) {
+  new (storage) ThreadRuntimeStats();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_runtime_stats_update(void* storage, thread_state new_state) {
+  DEBUG_ASSERT(arch_ints_disabled());
+  static_cast<ThreadRuntimeStats*>(storage)->Update(new_state, ThreadRuntimeStats::NoIrqSave);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_runtime_stats_add_page_fault_ticks(
+    void* storage, zx_duration_mono_ticks_t ticks) {
+  static_cast<ThreadRuntimeStats*>(storage)->AddPageFaultTicks(ticks);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_runtime_stats_add_lock_contention_ticks(
+    void* storage, zx_duration_mono_ticks_t ticks) {
+  static_cast<ThreadRuntimeStats*>(storage)->AddLockContentionTicks(ticks);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_thread_runtime_stats_get_compensated(
+    void* storage, ffi::Uninitialized<zx_info_task_runtime_t>* out_stats) {
+  TaskRuntimeStats stats =
+      static_cast<ThreadRuntimeStats*>(storage)->GetCompensatedTaskRuntimeStats();
+  out_stats->Initialize(stats);
+}
+
+static_assert(sizeof(ThreadRuntimeStats) == kThreadRuntimeStatsStorageSize);
+static_assert(alignof(ThreadRuntimeStats) == kThreadRuntimeStatsStorageAlign);
+// The Rust ThreadRuntimeStatsStorage that holds this object has no drop hook, so nothing ever
+// runs a destructor on it.
+static_assert(ktl::is_trivially_destructible_v<ThreadRuntimeStats>);
+
+static_assert(sizeof(SchedulerState::BaseProfile) == kSchedulerStateBaseProfileSize);
+static_assert(alignof(SchedulerState::BaseProfile) == kSchedulerStateBaseProfileAlign);
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE cpu_mask_t cpp_thread_set_soft_cpu_affinity(Thread* thread, cpu_mask_t affinity) {
+  return thread->SetSoftCpuAffinity(affinity);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE cpu_mask_t cpp_thread_get_soft_cpu_affinity(const Thread* thread) {
+  return thread->GetSoftCpuAffinity();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE cpu_num_t cpp_thread_last_cpu(const Thread* thread) { return thread->LastCpu(); }
 
 }  // extern "C"

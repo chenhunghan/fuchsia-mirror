@@ -13,12 +13,6 @@ import os
 import sys
 import tempfile
 import unittest
-
-# Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
-_FUCHSIA_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-if _FUCHSIA_DIR not in sys.path:
-    sys.path.insert(0, _FUCHSIA_DIR)
-
 from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
@@ -29,6 +23,7 @@ import fuchsia
 import output_leak_scanner
 import remote_action
 import remotetool
+import textpb
 from build.rbe import rbe_profile
 
 _temp_dir = None
@@ -108,7 +103,7 @@ def _paths(items: Collection[Any]) -> Collection[Path]:
 
 def _fake_download_output(
     packed_args: tuple[
-        remote_action.DownloadStubInfo,
+        remote_action.Ext4DownloadStubInfo,
         remotetool.RemoteTool,
         Path,
         bool,
@@ -124,7 +119,7 @@ def _fake_download_output(
 
 def _fake_download_output_fail(
     packed_args: tuple[
-        remote_action.DownloadStubInfo,
+        remote_action.Ext4DownloadStubInfo,
         remotetool.RemoteTool,
         Path,
         bool,
@@ -173,7 +168,7 @@ def _fake_download_input_fail(
 class PathToDownloadStubTests(unittest.TestCase):
     def test_is_stub(self) -> None:
         path = Path("obj/stubby.stub")
-        fake_stub_info = remote_action.DownloadStubInfo(
+        fake_stub_info = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="0a97a6sbed/7711",
@@ -184,7 +179,7 @@ class PathToDownloadStubTests(unittest.TestCase):
             remote_action, "is_download_stub_file", return_value=True
         ) as mock_check_stub:
             with mock.patch.object(
-                remote_action.DownloadStubInfo,
+                remote_action.Ext4DownloadStubInfo,
                 "read_from_file",
                 return_value=fake_stub_info,
             ) as mock_read_stub:
@@ -208,7 +203,7 @@ class DownloadFileToPathTests(unittest.TestCase):
     def test_download(self) -> None:
         curdir = Path(os.curdir)
         with mock.patch.object(
-            remote_action.DownloadStubInfo,
+            remote_action.Ext4DownloadStubInfo,
             "download",
             return_value=cl_utils.SubprocessResult(0),
         ) as mock_download:
@@ -247,7 +242,7 @@ class DownloadFromStubPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
             stub_path = tdp / "foo.exe"
-            stub_info = remote_action.DownloadStubInfo(
+            stub_info = remote_action.Ext4DownloadStubInfo(
                 path=Path("some/where/else"),
                 type="file",
                 blob_digest="8712fed1/44",
@@ -259,7 +254,7 @@ class DownloadFromStubPathTests(unittest.TestCase):
                 dest=stub_path,
             )
             with mock.patch.object(
-                remote_action.DownloadStubInfo,
+                remote_action.Ext4DownloadStubInfo,
                 "download",
                 return_value=cl_utils.SubprocessResult(0),
             ) as mock_download:
@@ -291,7 +286,7 @@ class DownloadFromStubPathTests(unittest.TestCase):
                 os, "access", return_value=False
             ) as mock_access:
                 with mock.patch.object(
-                    remote_action.DownloadStubInfo,
+                    remote_action.Ext4DownloadStubInfo,
                     "download",
                 ) as mock_download:
                     subprocess_result = remote_action.download_from_stub_path(
@@ -334,7 +329,7 @@ class UndownloadTests(unittest.TestCase):
 
     def test_undownload_restored(self) -> None:
         path = Path("foo/barf.baz")
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="82828abf872/453",
@@ -396,7 +391,7 @@ class DownloadOutputStubInfosBatchTests(unittest.TestCase):
 
     def test_one_download_stub_downloaded_success(self) -> None:
         path = Path("foo/bar.o")
-        fake_stub_info = remote_action.DownloadStubInfo(
+        fake_stub_info = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="1112313123/912",
@@ -416,7 +411,7 @@ class DownloadOutputStubInfosBatchTests(unittest.TestCase):
 
     def test_one_download_stub_downloaded_failure(self) -> None:
         path = Path("foo/bar.o")
-        fake_stub_info = remote_action.DownloadStubInfo(
+        fake_stub_info = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="1112313123/912",
@@ -440,14 +435,14 @@ class DownloadOutputStubInfosBatchTests(unittest.TestCase):
         path1 = Path("foo/bar.o")
         path2 = Path("baz/quux.o")
         fake_stub_infos = [
-            remote_action.DownloadStubInfo(
+            remote_action.Ext4DownloadStubInfo(
                 path=path1,
                 type="file",
                 blob_digest="767676767a767/912",
                 action_digest="a7a77ed7f98/332",
                 build_id="random-id0010129",
             ),
-            remote_action.DownloadStubInfo(
+            remote_action.Ext4DownloadStubInfo(
                 path=path2,
                 type="file",
                 blob_digest="3e3e3e3e3e/712",
@@ -469,7 +464,7 @@ class DownloadOutputStubInfosBatchTests(unittest.TestCase):
 
     def test_single_stub_info_skips_multiprocessing_pool(self) -> None:
         path = Path("foo/bar.o")
-        fake_stub_info = remote_action.DownloadStubInfo(
+        fake_stub_info = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="1112313123/912",
@@ -595,13 +590,12 @@ class FakeReproxyLogEntry(remote_action.ReproxyLogEntry):
     """Mimic a ReproxyLogEntry by setting properties without parsing."""
 
     def __init__(self, **kwargs: Any):
+        super().__init__("")
         self._execution_id: str
         self._action_digest: str
         self._output_file_digests: dict[Path, str]
         self._output_directory_digests: dict[Path, str]
         self._completion_status: str
-        # intentionally does not call super().__init__(), but instead
-        # sets property attributes.
         for k, v in kwargs.items():
             setattr(self, "_" + k, v)
         # init the dict members to empty dicts if not set.
@@ -1051,6 +1045,8 @@ class RemoteActionMainParserTests(unittest.TestCase):
         self.assertFalse(main_args.diagnose_nonzero)
         self.assertEqual(main_args.command, ["echo", "hello"])
         self.assertIsNone(main_args.remote_debug_command)
+        self.assertTrue(main_args.download_outputs)
+        self.assertIsNone(main_args.download_regex)
 
     def test_cfg(self) -> None:
         p = self._make_main_parser()
@@ -3276,10 +3272,10 @@ remote_metadata: {{
             stub_file = Path(td) / "testing.stub"
             _write_file_contents(stub_file, "#!/bin/sh\nnot a stub file\n")
             with self.assertRaises(remote_action.DownloadStubFormatError):
-                remote_action.DownloadStubInfo.read_from_file(stub_file)
+                remote_action.Ext4DownloadStubInfo.read_from_file(stub_file)
 
     def test_stub_write_read_match(self) -> None:
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=Path("foo/bar.baz"),
             type="file",
             blob_digest="abc00101ef/240",
@@ -3289,13 +3285,15 @@ remote_metadata: {{
         with tempfile.TemporaryDirectory() as td:
             stub_file = Path(td) / "identity.stub"
             stub._write(stub_file)
-            new_stub = remote_action.DownloadStubInfo.read_from_file(stub_file)
+            new_stub = remote_action.Ext4DownloadStubInfo.read_from_file(
+                stub_file
+            )
 
         self.assertEqual(stub, new_stub)
 
     def test_create(self) -> None:
         path = Path("foo/goes/deeper/bar.baz")
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=path,
             type="file",
             blob_digest="abc00101ef/240",
@@ -3306,12 +3304,14 @@ remote_metadata: {{
             full_path = td / path
             stub.create(working_dir_abs=Path(td))
             self.assertTrue(remote_action.is_download_stub_file(full_path))
-            read_back = remote_action.DownloadStubInfo.read_from_file(full_path)
+            read_back = remote_action.Ext4DownloadStubInfo.read_from_file(
+                full_path
+            )
             self.assertEqual(read_back, stub)
 
     def test_download_to_alt_dest(self) -> None:
         blob_digest = "00111ddeee000aa/24"
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=Path("foo/bar.baz"),
             type="file",
             blob_digest=blob_digest,
@@ -3352,7 +3352,7 @@ remote_metadata: {{
 
     def test_download_to_alt_dest_preserving_backup_stub(self) -> None:
         blob_digest = "00111ddeee000aa/24"
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=Path("foo/bar.baz"),
             type="file",
             blob_digest=blob_digest,
@@ -3402,7 +3402,7 @@ remote_metadata: {{
         )
 
     def test_download_fail(self) -> None:
-        stub = remote_action.DownloadStubInfo(
+        stub = remote_action.Ext4DownloadStubInfo(
             path=Path("foo/bar.baz"),
             type="file",
             blob_digest="abcef8712/24",
@@ -3611,7 +3611,7 @@ remote_metadata: {{
         )
         self.assertEqual(action.local_only_command, command)
 
-        fake_stub_info = remote_action.DownloadStubInfo(
+        fake_stub_info = remote_action.Ext4DownloadStubInfo(
             path=input_file,
             type="file",
             blob_digest="8760ad0b/992",
@@ -3881,7 +3881,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 action._update_stub(old_stub_info)
 
@@ -3908,7 +3908,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 action._update_stub(new_stub_info)
 
@@ -3942,7 +3942,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 with mock.patch.object(Path, "unlink") as mock_remove:
                     action._update_stub(old_stub_info)
@@ -3968,7 +3968,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 with mock.patch.object(Path, "unlink") as mock_remove:
                     action._update_stub(old_stub_info)
@@ -4017,7 +4017,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 with mock.patch.object(Path, "unlink") as mock_remove:
                     action._update_stub(new_stub_info)
@@ -4045,7 +4045,7 @@ remote_metadata: {{
 
             # bypass the remote action running
             with mock.patch.object(
-                remote_action.DownloadStubInfo, "create"
+                remote_action.Ext4DownloadStubInfo, "create"
             ) as mock_create_stub:
                 with mock.patch.object(Path, "unlink") as mock_remove:
                     action._update_stub(new_stub_info)
@@ -4212,7 +4212,7 @@ class RbeDiagnosticsTests(unittest.TestCase):
         action_digest = "2afd98ae7274456b2bfc208e10f4cbe75fca88c2c41e352e57cb6b9ad840bf64/144"
         output_path = Path("obj/sub/lib/foo.o")
         output_digest = "345324aefg983bc0/531"
-        log_lines = f"""
+        log_record = f"""
 command:  {{
         identifiers:  {{
                 command_id:  "8ea55c85-0ae36078"
@@ -4229,13 +4229,76 @@ remote_metadata:  {{
                 value: "{output_digest}"
         }}
 }}
-        """.splitlines()
-        log_entry = remote_action.ReproxyLogEntry._parse_lines(log_lines)
+        """
+        log_entry = remote_action.ReproxyLogEntry(log_record)
         self.assertEqual(log_entry.execution_id, exec_id)
         self.assertEqual(log_entry.action_digest, action_digest)
         self.assertEqual(
             log_entry.output_file_digests[output_path], output_digest
         )
+
+    def test_reproxy_log_entry_lazy_command_parsing(self) -> None:
+        exec_id = "lazy-exec-id"
+        action_digest = "deadbeef/123"
+        output_path = Path("obj/foo.o")
+        output_digest = "cafef00d/456"
+        # Starts with "command:" at index 0 (no leading newline), matching real
+        # rewrapper .rrpl files, with nested blocks inside `command: { ... }`.
+        log_record = f"""command: {{
+  identifiers: {{
+    execution_id: "{exec_id}"
+  }}
+  output: {{
+    output_files: "{output_path}"
+  }}
+}}
+remote_metadata: {{
+  action_digest: "{action_digest}"
+  output_file_digests: {{
+    key: "{output_path}"
+    value: "{output_digest}"
+  }}
+}}
+completion_status: STATUS_REMOTE_EXECUTION
+"""
+        with mock.patch.object(
+            textpb, "parse_lazy", wraps=textpb.parse_lazy
+        ) as mock_parse_lazy:
+            log_entry = remote_action.ReproxyLogEntry(log_record)
+            self.assertEqual(mock_parse_lazy.call_count, 1)
+            self.assertIsInstance(log_entry._raw, textpb.LazyMapping)
+            self.assertNotIn("command", log_entry._raw._cache)
+
+            # Accessing non-command properties does not materialize `command: { ... }`.
+            self.assertEqual(log_entry.action_digest, action_digest)
+            self.assertEqual(
+                log_entry.output_file_digests, {output_path: output_digest}
+            )
+            self.assertEqual(log_entry.output_directory_digests, {})
+            self.assertEqual(
+                log_entry.completion_status, "STATUS_REMOTE_EXECUTION"
+            )
+            self.assertNotIn("command", log_entry._raw._cache)
+
+            # Accessing execution_id triggers lazy parsing of `command` once.
+            self.assertEqual(log_entry.execution_id, exec_id)
+            self.assertIn("command", log_entry._raw._cache)
+
+            # Subsequent accesses use the cached submessage.
+            self.assertEqual(log_entry.execution_id, exec_id)
+            self.assertIn("output", log_entry.command)
+            self.assertEqual(mock_parse_lazy.call_count, 1)
+
+    def test_reproxy_log_entry_missing_command(self) -> None:
+        log_record = """remote_metadata: {
+  action_digest: "12345678/90"
+}
+completion_status: STATUS_CACHE_HIT
+"""
+        log_entry = remote_action.ReproxyLogEntry(log_record)
+        self.assertEqual(log_entry.action_digest, "12345678/90")
+        self.assertEqual(log_entry.completion_status, "STATUS_CACHE_HIT")
+        self.assertEqual(log_entry.command, {})
 
     def test_diagnose_uninteresting_log_line(self) -> None:
         line = "This diagnostic does not appear interesting."

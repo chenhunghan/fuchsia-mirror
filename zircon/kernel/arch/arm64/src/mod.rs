@@ -4,19 +4,30 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+mod asid_allocator;
+mod asid_allocator_ffi;
 pub mod cache;
+mod crashlog;
+mod feature;
+mod fpu;
+mod mp;
+mod periphmap;
+mod registers;
 pub mod restricted;
+pub mod smccc;
+mod spinlock;
 #[cfg(console_enabled)]
 mod sysreg;
+mod thread;
+mod uarch;
+mod user_copy;
 pub mod vm;
 
-use crate::kernel::types::{PAddr, VAddr, cpu_num_t};
+use crate::kernel::types::cpu_num_t;
 use arch_arm64_aspace_bindings as aspace_bindings;
 
 unsafe extern "C" {
-    static arm64_isa_features: u32;
     fn cpp_arm64_cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64;
-    fn cpp_arm64_periph_paddr_to_vaddr(paddr: u64) -> usize;
 }
 
 /// The maximum cache line seen on any known ARM hardware.
@@ -36,18 +47,12 @@ pub fn cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64 {
     unsafe { cpp_arm64_cpu_num_to_mpidr(cpu_num) }
 }
 
-/// Translates an arm64 peripheral physical address to a virtual address in the kernel periphmap.
-///
-/// Returns `None` if `paddr` is not in the peripheral mappings.
-#[inline]
-pub fn periph_paddr_to_vaddr(paddr: PAddr) -> Option<VAddr> {
-    // SAFETY: `cpp_arm64_periph_paddr_to_vaddr` is a read-only lookup into the arm64
-    // peripheral mapping table initialized at boot.
-    let vaddr = unsafe { cpp_arm64_periph_paddr_to_vaddr(paddr.0 as u64) };
-    if vaddr == 0 { None } else { Some(VAddr(vaddr)) }
-}
-
 pub use libarch::arm64::{device_memory_barrier, isb, thread_memory_barrier, wfi};
+pub use periphmap::periph_paddr_to_vaddr;
+pub use user_copy::{
+    arch_copy_from_user, arch_copy_from_user_capture_faults, arch_copy_to_user,
+    arch_copy_to_user_capture_faults,
+};
 
 // [arm/v8]: C5.2.19 CPSR / D13.2.112 SPSR_EL1
 pub const ARM_NCZV_FLAGS: u32 = 0xf000_0000;
@@ -69,8 +74,9 @@ pub const ARM32_BIT_MODE_REGISTER_COUNT: usize = 15;
 
 #[inline]
 fn arm64_feature_test(feature: u32) -> bool {
-    // SAFETY: Reads global read-only hardware feature mask initialized at boot.
-    unsafe { (arm64_isa_features & feature) != 0 }
+    // SAFETY: Only the boot CPU's `arm64_feature_init` writes the mask, before any other CPU
+    // starts, so no write races with this read.
+    unsafe { (feature::arm64_isa_features & feature) != 0 }
 }
 
 /// Architectural interrupt frame for aarch64 user space entry/exit.

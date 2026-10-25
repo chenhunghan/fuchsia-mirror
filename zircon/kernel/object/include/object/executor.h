@@ -36,17 +36,7 @@ class Executor {
 
   const Handle& GetRootJobHandle() { return *root_job_handle_; }
 
-  fbl::RefPtr<EventDispatcher> GetMemPressureEvent(uint32_t kind) {
-    return memory_watchdog_.GetMemPressureEvent(kind);
-  }
-
   MemoryWatchdog& GetMemoryWatchdog() { return memory_watchdog_; }
-
-  // Start watching the root job, taking a system-level action (such as restart) if
-  // all its children are removed.
-  //
-  // This must be called after the root job has at least one child process or child job.
-  void StartRootJobObserver();
 
  private:
   // All jobs and processes of this Executor are rooted at this job.

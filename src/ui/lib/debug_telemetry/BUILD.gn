@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_library.gni")
+import("//tools/cmc/build/expect_includes.gni")
+
+expect_includes("kernel_includes") {
+  includes = [ "meta/kernel.shard.cml" ]
+}
+
+expect_includes("all_includes") {
+  includes = [ "meta/client.shard.cml" ]
+}
+
+rustc_library("debug_telemetry") {
+  edition = "2024"
+  with_unit_tests = true
+
+  deps = [
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
+  ]
+
+  test_deps = [
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+  ]
+
+  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
+
+  sources = [
+    "src/cpu.rs",
+    "src/lib.rs",
+    "src/memory.rs",
+  ]
+}
+
+group("kernel") {
+  public_deps = [ ":debug_telemetry" ]
+  deps = [ ":kernel_includes" ]
+}
+
+group("all") {
+  public_deps = [ ":debug_telemetry" ]
+  deps = [ ":all_includes" ]
+}
+
+fuchsia_unittest_package("debug_telemetry_tests") {
+  deps = [ ":debug_telemetry_test" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":debug_telemetry_tests" ]
+}

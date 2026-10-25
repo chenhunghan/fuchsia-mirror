@@ -31,7 +31,7 @@ aes-gcm = "0.11.1"
 aes-gcm-siv = "0.12.1"
 ansi_term = "0.12.0"
 anyhow = "1.0.104"
-arbitrary = { version = "1.4.2", features = ["derive"] }
+arbitrary = { version = "1.5.0", features = ["derive"] }
 arc-swap = { version = "1.9.1", features = ["weak"] }
 argh = "0.1.19"
 argh_complete = "0.1.19"
@@ -41,7 +41,7 @@ ash = { version = "0.38.0", features = ["linked"], default-features = false }
 assert_matches = "1.5.0"
 async-channel = "2.5.0"
 async-lock = "3.4.2"
-async-ringbuf = "0.3.8"
+async-ringbuf = "0.3.9"
 async-stream = "0.3.6"
 async-trait = "0.1.92"
 base64 = "0.22.1"
@@ -63,7 +63,7 @@ byteorder = "1.5.0"
 bytes = "1.12.1"
 camino = { version = "1.2.6", features = ["proptest1", "serde1"] }
 cbc = "0.2.1"
-cfg-if = "1.0.4"
+cfg-if = "1.0.5"
 chacha20 = { version = "0.10.2", features = ["rng"] }
 # NB: morally we'd like to default-features = false here, but we have
 # transitive dependencies on this crate that *do* enable default features.
@@ -104,7 +104,7 @@ digest = "0.11.3"
 downcast-rs = "2.0.2"
 dyn-clone = "1.0.20"
 ecb = "0.2"
-either = "1.18.0"
+either = "1.19.0"
 emboss_runtime = "0.1.0"
 enumn = "0.1.14"
 eui48 = { version = "1.1.0", default-features = false, features = ["serde", "disp_hexstring"] }
@@ -122,7 +122,7 @@ futures-lite = "2.6.1"
 futures-test = "=0.3.34"
 futures-util = "=0.3.34"
 glob = "0.3.4"
-googletest = "0.14.2"
+googletest = "0.14.3"
 gpt = "4.1.0"
 half = "2.7.1"
 handlebars = "6.4.4"
@@ -149,7 +149,7 @@ iota = "0.2.3"
 itertools = "0.14"
 itoa = "1.0"
 json5format = "0.2.6"
-libc = { version = "0.2.189", features = ["extra_traits"] }
+libc = { version = "0.2.190", features = ["extra_traits"] }
 libm = "0.2.16"
 linked-hash-map = "0.5.6"
 lock_api = { version = "0.4.14", features = ["serde"] }
@@ -204,16 +204,16 @@ range-alloc = "0.1.5"
 # values to change. We rely on this crate for stable hashes.
 rapidhash = { version = "1.4.0", features = ["unsafe"] }
 rayon = "1.12.0"
-ref-cast = "1.0.26"
+ref-cast = "1.0.27"
 regex = "1.13.1"
 regex-lite = "0.1.9"
 ring = "0.17.14"
 rkyv = { version = "0.8.18", features = ["little_endian", "unaligned", "pointer_width_32"] }
 rsa = { version = "0.9.10", default-features = false }
 rustc-hash = "2.1.3"
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-pemfile = "2"
-rustls-webpki = "0.102"
+rustls-webpki = { version = "0.103.16", features = ["ring", "std"] }
 rustyline = "18.0.1"
 rutabaga_gfx = { version = "0.1.75", features = ["gfxstream"] }
 sapphire-async = { version = "0.1.0", features = ["std", "testing"] }
@@ -244,7 +244,7 @@ simplelog = { version = "0.12.2", default-features = false }
 siphasher = "1.0.3"
 slab = "0.4.12"
 smallvec = {version= "1.15.2", features = ["const_generics", "const_new", "union"]}
-socket2 = { version = "=0.6.4", features = ["all"] }
+socket2 = { version = "=0.6.5", features = ["all"] }
 splines = "5.0.0"
 static_assertions = "1.1.0"
 strsim = "0.11.1"
@@ -255,7 +255,7 @@ termcolor = "1.4.1"
 termion = "4.0.6"
 test-case = "3.3.1"
 textwrap = { version = "0.16.2", default-features = false }
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 toml = "1.1.6"
 toml_edit = "0.24.0"
@@ -267,7 +267,7 @@ typed-builder = "0.23.2"
 unic-char-range = "0.9"
 unic-ucd-block = "0.9"
 unicase = "2.9.0"
-unicode-segmentation = "1.13.2"
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
 unicode-xid = "0.2.6"
 untrusted = "0.9"
@@ -279,7 +279,7 @@ valico = "4.0.0"
 vt100 = "0.16.2"
 vte = "0.15"
 walkdir = "2.5.0"
-which = "8.0.4"
+which = "8.0.6"
 winnow = "1.0.4"
 xml = "1.4.0"
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
@@ -331,7 +331,7 @@ rust_icu_uloc = { version = "5.8.0", default-features = false, features = ["rena
 rust_icu_ustring = { version = "5.8.0", default-features = false, features = ["renaming", "icu_version_in_env"] }
 sec1 = { version = "0.8.1", features = ["alloc", "der", "zeroize"] }
 sec1-0_7_3 = { package = "sec1", version = "0.7.3", features = ["alloc", "der", "pkcs8", "zeroize"] }
-spki = { version = "0.8.0", features = ["alloc"] }
+spki = { version = "0.8.1", features = ["alloc"] }
 spki-0_7_3 = { package = "spki", version = "0.7.3", features = ["alloc"] }
 tokio = { version = "=1.53.1", default-features = false }
 trust-dns-proto = { version = "0.22.0", default-features = false, features = ["testing"] }
@@ -350,7 +350,7 @@ zeroize = "1.9.0"
 askama = "0.15.6"
 async-fs = "2.2.0"
 cargo_metadata = "0.23.1"
-crossterm = "0.19"
+crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
 fuse3 = { version = "0.9.0", features = ["tokio-runtime", "unprivileged"] }
 home = "0.5.12"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "rustls-native-certs", "ring", "tls12"] }
@@ -371,13 +371,13 @@ petgraph = { version = "0.6.2" }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 pulldown-cmark = { version = "0.13.4", features = ["serde"] }
 quote = "1.0.47"
-rustfix = "0.9.7"
+rustfix = "0.9.8"
 rustls-native-certs = "0.8.4"
 semver = "1.0.28"
 serde_yaml = "0.9.34+deprecated" # To use on Fuchsia, serde_yaml and unsafe-libyaml will need to be re-audited.
 serial_test = "4.0.1" # Not for use on Fuchsia, only for a single process.
-shared_child = { version = "1.1.1", default-features = false }
-signal-hook = "0.4.4"
+shared_child = { version = "1.1.2", default-features = false }
+signal-hook = "0.4.5"
 syn = { version = "3.0.6", features = ["full", "visit", "visit-mut", "extra-traits"] }
 synstructure = "0.14.0"
 tar = "0.4.46"
@@ -387,7 +387,7 @@ term_grid = "0.2.0"
 tokio = { version = "=1.53.1", default-features = false }
 tokio-stream = "0.1.19"
 xattr = "1.6.1"
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 # keep-sorted end
 
 # For crates we don't want to vendor, follow instructions at
@@ -434,14 +434,12 @@ clipboard-win = { path = "empty/clipboard-win" }
 core-foundation-sys = { path = "empty/core-foundation-sys" }
 # TODO(https://fxbug.dev/42084779): Remove when hickory-proto is upgraded to >= 0.26.4.
 critical-section = { path = "empty/critical-section" }
-crossterm_winapi = { path = "empty/crossterm_winapi" }
+document-features = { path = "empty/document-features" }
 hermit-abi = { path = "empty/hermit-abi" }
 iana-time-zone-haiku = { path = "empty/iana-time-zone-haiku" }
 jni = { path = "empty/jni" }
 js-sys-102 = { package = "js-sys", path = "empty/js-sys-102" }
 kqueue = { path = "empty/kqueue" }
-miow = { path = "empty/miow" }
-ntapi = { path = "empty/ntapi" }
 pkg-config = { path = "empty/pkg-config" }
 portable-atomic = { path = "empty/portable-atomic" }
 portable-atomic-util = { path = "empty/portable-atomic-util" }
@@ -476,7 +474,7 @@ bt-vcs = { path = "forks/bluetooth/bt-vcs" }
 errno = { path = "forks/errno-0.3.14" }
 fatfs = { path = "forks/fatfs" }
 fuse3 = { path = "forks/fuse3" }
-libc = { path = "forks/libc-0.2.189" }
+libc = { path = "forks/libc-0.2.190" }
 nix_0_29_0 = { package = "nix", path = "forks/nix-0.29.0" }
 nom-language = { package = "nom-language", path = "forks/nom-language-0.1.0" }
 notify = { path = "forks/notify" }
@@ -588,7 +586,7 @@ rustflags = [
 ]
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.arbitrary."1.4.2"]
+[gn.package.arbitrary."1.5.0"]
 license_files = ["LICENSE-APACHE"]
 
 [gn.package.ash."0.38.0+1.3.281"]
@@ -597,7 +595,7 @@ rustflags = []
 [gn.package.async-trait."0.1.92"]
 rustflags = []
 
-[gn.package.async-ringbuf."0.3.8"]
+[gn.package.async-ringbuf."0.3.9"]
 configs = [
   "//third_party/rust_crates/configs/release:optimize_speed",
   "//third_party/rust_crates/configs/balanced:optimize_moderate"
@@ -789,7 +787,7 @@ rustflags = [
 [gn.package.indexmap."1.9.2"]
 rustflags = ["--cfg=has_std"]
 
-[gn.package.libc."0.2.189"]
+[gn.package.libc."0.2.190"]
 rustflags = [
   "--cfg=libc_priv_mod_use",
   "--cfg=libc_union",
@@ -806,7 +804,7 @@ rustflags = [
   "--cfg=libc_const_extern_fn",
  ]
 
-[gn.package.libc."0.2.189".platform."cfg(target_os = \"freebsd\")"]
+[gn.package.libc."0.2.190".platform."cfg(target_os = \"freebsd\")"]
 rustflags = ["--cfg=freebsd11"]
 
 [gn.package.libm."0.2.16"]
@@ -1031,17 +1029,17 @@ license_files = ["LICENSE-APACHE"]
 [gn.package.rayon-core."1.13.0"]
 # Has build script but no config needed.
 
-[gn.package.ref-cast."1.0.26"]
+[gn.package.ref-cast."1.0.27"]
 rustflags = []
 env_vars = [
-  "CARGO_PKG_VERSION_PATCH=26",
+  "CARGO_PKG_VERSION_PATCH=27",
   "OUT_DIR=../../../compat/ref-cast",
 ]
 
-[gn.package.ref-cast-impl."1.0.26"]
+[gn.package.ref-cast-impl."1.0.27"]
 rustflags = []
 env_vars = [
-  "CARGO_PKG_VERSION_PATCH=26",
+  "CARGO_PKG_VERSION_PATCH=27",
 ]
 
 [gn.package.regex."1.13.1"]
@@ -1064,21 +1062,16 @@ visibility = [
   ":hickory-proto-v0_26_3.actual.rust_compilation_deps",
   ":ring",
   ":ring-0.17.14",
-  ":rustls-v0_23_45.actual",
-  ":rustls-v0_23_45.rustdoc",
-  ":rustls-v0_23_45.aux.deps.deps",
-  ":rustls-v0_23_45.aux.deps.transdeps",
-  ":rustls-v0_23_45.actual.rust_compilation_deps",
-  ":rustls-webpki-v0_102_8.actual",
-  ":rustls-webpki-v0_102_8.rustdoc",
-  ":rustls-webpki-v0_102_8.aux.deps.deps",
-  ":rustls-webpki-v0_102_8.aux.deps.transdeps",
-  ":rustls-webpki-v0_102_8.actual.rust_compilation_deps",
-  ":rustls-webpki-v0_103_15.actual",
-  ":rustls-webpki-v0_103_15.rustdoc",
-  ":rustls-webpki-v0_103_15.aux.deps.deps",
-  ":rustls-webpki-v0_103_15.aux.deps.transdeps",
-  ":rustls-webpki-v0_103_15.actual.rust_compilation_deps",
+  ":rustls-v0_23_46.actual",
+  ":rustls-v0_23_46.rustdoc",
+  ":rustls-v0_23_46.aux.deps.deps",
+  ":rustls-v0_23_46.aux.deps.transdeps",
+  ":rustls-v0_23_46.actual.rust_compilation_deps",
+  ":rustls-webpki-v0_103_16.actual",
+  ":rustls-webpki-v0_103_16.rustdoc",
+  ":rustls-webpki-v0_103_16.aux.deps.deps",
+  ":rustls-webpki-v0_103_16.aux.deps.transdeps",
+  ":rustls-webpki-v0_103_16.actual.rust_compilation_deps",
   ":tuf-v0_3_0-beta14.actual",
   ":tuf-v0_3_0-beta14.rustdoc",
   ":tuf-v0_3_0-beta14.aux.deps.deps",
@@ -1107,7 +1100,7 @@ env_vars = [
   "RING_CORE_PREFIX=ring_core_0_17_14_",
 ]
 
-[gn.package.ringbuf."0.5.1"]
+[gn.package.ringbuf."0.5.2"]
 configs = [
   "//third_party/rust_crates/configs/release:optimize_speed",
   "//third_party/rust_crates/configs/balanced:optimize_moderate"
@@ -1175,16 +1168,16 @@ visibility = [
 configs = [ "//src/lib/icu:version" ]
 target_renaming = { import = "//build/icu/icu_rustc_library.gni", rule_name = "icu_rustc_library" }
 
-[gn.package.rustix."1.1.4"]
+[gn.package.rustix."1.1.5"]
 rustflags = []
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.rustix."1.1.4".platform."cfg(target_os = \"fuchsia\")"]
+[gn.package.rustix."1.1.5".platform."cfg(target_os = \"fuchsia\")"]
 rustflags = [
   "--cfg=libc",
 ]
 
-[gn.package.rustix."1.1.4".platform."cfg(target_os = \"linux\")"]
+[gn.package.rustix."1.1.5".platform."cfg(target_os = \"linux\")"]
 rustflags = [
   "--cfg=linux_raw",
   "--cfg=linux_raw_dep",
@@ -1192,14 +1185,14 @@ rustflags = [
   "--cfg=linux_kernel",
 ]
 
-[gn.package.rustix."1.1.4".platform."cfg(target_os = \"macos\")"]
+[gn.package.rustix."1.1.5".platform."cfg(target_os = \"macos\")"]
 rustflags = [
   "--cfg=libc",
   "--cfg=apple",
   "--cfg=bsd",
 ]
 
-[gn.package.rustls."0.23.45"]
+[gn.package.rustls."0.23.46"]
 rustflags = []
 
 [gn.package.rutabaga_gfx."0.1.75"]
@@ -1274,7 +1267,10 @@ group_visibility = { import = "//third_party/rust_crates/visibility.gni", variab
 [gn.package.sha2."0.10.9"]
 groups = [ { name = "sha2-0.10", visibility = [ ":*", "//src/microfuchsia/tee/runtime/api_impl:*", "//vendor/*" ] } ]
 
-[gn.package.signal-hook."0.4.4"]
+[gn.package.signal-hook."0.3.18"]
+rustflags = []
+
+[gn.package.signal-hook."0.4.5"]
 rustflags = []
 
 [gn.package.slab."0.4.12"]
@@ -1299,7 +1295,6 @@ visibility = [
   "//src/connectivity/lib/net-declare:*",
   "//src/connectivity/lib/net-types:*",
   "//src/connectivity/lowpan/lib/spinel_pack/spinel_pack_macros:*",
-  "//src/connectivity/network/lib/todo_unused:*",
   "//src/connectivity/network/netstack3/core/macros:*",
   "//src/connectivity/network/tests/integration/macros:*",
   "//src/connectivity/network/tests/integration/multicast-forwarding/macros:*",
@@ -1332,18 +1327,18 @@ visibility = [
   "//tools/lib/reference_doc/macro:*",
 ]
 
-[gn.package.thiserror."2.0.20"]
+[gn.package.thiserror."2.0.21"]
 env_vars = [
-  "CARGO_PKG_VERSION_PATCH=20",
+  "CARGO_PKG_VERSION_PATCH=21",
   "OUT_DIR=../../../compat/thiserror",
 ]
 
 [gn.package.thiserror."1.0.69"]
 # Has build script but no config needed.
 
-[gn.package.thiserror-impl."2.0.20"]
+[gn.package.thiserror-impl."2.0.21"]
 env_vars = [
-  "CARGO_PKG_VERSION_PATCH=20",
+  "CARGO_PKG_VERSION_PATCH=21",
   "OUT_DIR=../../../compat/thiserror",
 ]
 
@@ -1375,12 +1370,12 @@ reviewed_features = [
 [gn.package.tokio."1.53.1".platform."cfg(not(target_os = \"fuchsia\"))"]
 deps = [
   ":bytes-v1_12_1",
-  ":libc-v0_2_189",
+  ":libc-v0_2_190",
   ":memchr-v2_8_3",
   ":mio-v1_2_1",
   ":num_cpus-v1_17_0",
   ":signal-hook-registry-v1_4_8",
-  ":socket2-v0_6_4",
+  ":socket2-v0_6_5",
 ]
 rustflags = [
   "--cfg=feature=\\\"bytes\\\"",
@@ -1434,7 +1429,7 @@ license_files = ["LICENSE-APACHE"]
 [gn.package.unicode-normalization."0.1.25"]
 license_files = ["LICENSE-APACHE"]
 
-[gn.package.unicode-segmentation."1.13.2"]
+[gn.package.unicode-segmentation."1.13.3"]
 license_files = ["LICENSE-APACHE"]
 
 [gn.package.unicode-width."0.1.14"]
@@ -1476,8 +1471,8 @@ rustflags = [ "--cfg=zerocopy_derive_union_into_bytes" ]
 [gn.package.zeroize."1.9.0"]
 group_visibility = { import = "//third_party/rust_crates/visibility.gni", variable = "zeroize_visibility" }
 
-[gn.package.zip."8.6.0"]
-env_vars = [ "CARGO_PKG_VERSION=8.6.0" ]
+[gn.package.zip."9.0.5"]
+env_vars = [ "CARGO_PKG_VERSION=9.0.5" ]
 
 [gn.package.zmij."1.0.21"]
 rustflags = []

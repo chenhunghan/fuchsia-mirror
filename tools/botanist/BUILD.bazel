@@ -92,6 +92,8 @@ go_library(
     ],
 )
 
+# The botanist binary is only built in Bazel.
+# @bazel2gn:skip
 go_library(
     name = "main",
     srcs = [
@@ -143,6 +145,8 @@ go_binary_host_tool(
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
+# The botanist binary is only built in Bazel.
+# @bazel2gn:skip
 host_go_test(
     name = "botanist_cmd_tests",
     srcs = ["cmd/run_test.go"],

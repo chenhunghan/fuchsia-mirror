@@ -23,7 +23,12 @@ ffx_plugin(
     ],
     args_srcs = ["src/args.rs"],
     edition = "2024",
-    plugin_deps = ["//src/developer/ffx/plugins/completion:ffx_completion"],
+    plugin_deps = [
+        "//src/developer/ffx/plugins/completion:ffx_completion",
+        "//src/developer/ffx/plugins/config:ffx_config_plugin",
+        "//src/developer/ffx/plugins/sdk:ffx_sdk",
+        "//src/developer/ffx/plugins/version:ffx_version",
+    ],
     sdk_category = "not-yet-specified",
     version = "0.1.0",
     deps = [

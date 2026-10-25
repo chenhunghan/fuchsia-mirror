@@ -89,20 +89,13 @@ template("sanitizer_rustflags") {
 variant("cfi") {
   c_family_flags = [ "-fsanitize=cfi" ]
   configs = [ ":cfi.rustflags" ]
-
-  # The phys environment has a custom cross-DSO runtime implementation.  The
-  # kernel proper doesn't need to enable the cross-DSO instrumentation (though
-  # it participates in the dynamic symbol export scheme for it) because it's
-  # only a cross-DSO _callee_, never a cross-DSO _caller_.
-  if (toolchain_environment == "kernel.phys") {
-    c_family_flags += [ "-fsanitize-cfi-cross-dso" ]
-  }
 }
 
 sanitizer_rustflags("cfi.rustflags") {
   variant = "cfi"
 }
 
+# LINT.IfChange(asan)
 variant("asan") {
   c_family_flags = [ "-fsanitize=address" ]
 
@@ -131,6 +124,9 @@ variant("asan") {
     # adding the equivalent frontend flag and we switch back to the frontend
     # flags for rust and clang, then we'll need this again.
     "-asan-use-private-alias=1",
+
+    # Enable ASan runtime checks for __builtin_assume_dereferenceable.
+    "-asan-instrument-assume-dereferenceable=1",
   ]
 
   # Instrumented C++ and Rust code shares the same LLVM instrumentation ->
@@ -170,6 +166,8 @@ variant("asan") {
 
   executable_deps = [ ":asan_default_options" ]
 }
+
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:asan)
 
 # Disable "stack malloc" code generation.
 compiler_config("asan-use-after-return-never") {
@@ -300,6 +298,7 @@ variant("rust-asan") {
 # TODO(https://fxbug.dev/42120045): Building with this variant alone can still lead to
 # some build errors, but this is still needed for lsan tests (see
 # //sdk/lib/c/test/sanitizer:lsan-test).
+# LINT.IfChange(lsan)
 variant("lsan") {
   ldflags = [ "-fsanitize=leak" ]
 
@@ -315,6 +314,9 @@ variant("lsan") {
   executable_deps = [ ":lsan_default_options" ]
 }
 
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:lsan)
+
+# LINT.IfChange(ubsan)
 variant("ubsan") {
   c_family_flags = []
   configs = []
@@ -352,6 +354,8 @@ variant("ubsan") {
   }
 }
 
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:ubsan)
+
 sanitizer_rustflags("ubsan.rustflags") {
   variant = "ubsan"
   shared_runtime = is_fuchsia
@@ -364,6 +368,7 @@ variant("sancov") {
   c_family_flags = [ "-fsanitize-coverage=trace-pc-guard" ]
 }
 
+# LINT.IfChange(tsan)
 variant("tsan") {
   c_family_flags = [ "-fsanitize=thread" ]
   configs = [
@@ -371,6 +376,8 @@ variant("tsan") {
     ":tsan.rustflags",
   ]
 }
+
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:tsan)
 
 sanitizer_rustflags("tsan.rustflags") {
   variant = "tsan"
@@ -380,6 +387,7 @@ sanitizer_rustflags("tsan.rustflags") {
 sanitizer_default_options("tsan_default_options") {
 }
 
+# LINT.IfChange(hwasan)
 variant("hwasan") {
   c_family_flags = [ "-fsanitize=hwaddress" ]
   configs = [
@@ -388,6 +396,8 @@ variant("hwasan") {
   ]
   executable_deps = [ ":hwasan_default_options" ]
 }
+
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:hwasan)
 
 sanitizer_rustflags("hwasan.rustflags") {
   variant = "hwasan"

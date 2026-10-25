@@ -1,0 +1,40 @@
+// Copyright 2023 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "driver_component/driver.shard.cml",
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "driver",
+        binary: "driver/virt.so",
+        bind: "meta/bind/virt_bind.bindbc",
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        colocate: "true",
+    },
+    capabilities: [
+        { service: "fuchsia.driver.compat.Service" },
+    ],
+    use: [
+        {
+            protocol: [
+                "fuchsia.kernel.IommuResource",
+                "fuchsia.kernel.IoportResource",
+                "fuchsia.kernel.IrqResource",
+                "fuchsia.kernel.MmioResource",
+                "fuchsia.kernel.MsiResource",
+            ],
+        },
+        {
+            service: [ "fuchsia.hardware.platform.bus.Service" ],
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.driver.compat.Service",
+            from: "self",
+        },
+    ],
+}

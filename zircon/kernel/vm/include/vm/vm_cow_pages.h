@@ -21,6 +21,7 @@
 #include <fbl/macros.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
+#include <kernel/ffi.h>
 #include <kernel/mutex.h>
 #include <vm/compressor.h>
 #include <vm/continuous_attribution_tracker.h>
@@ -31,6 +32,7 @@
 #include <vm/stream_size_manager.h>
 #include <vm/vm.h>
 #include <vm/vm_aspace.h>
+#include <vm/vm_constants.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page_list.h>
 
@@ -64,6 +66,8 @@ enum class VmCowPagesOptions : uint32_t {
 };
 FBL_ENABLE_ENUM_BITS(VmCowPagesOptions)
 
+// The Rust `VmCowRange` in vm_cow_pages.rs is a `#[repr(C)]` layout-compatible mirror
+// of this struct. Do not change its size or layout without updating both sides.
 struct VmCowRange {
   uint64_t offset;
   uint64_t len;
@@ -79,7 +83,6 @@ struct VmCowRange {
     return VmCowRange(start, RoundUpPageSize(end()) - start);
   }
 
-  VmCowRange OffsetBy(uint64_t delta) const { return VmCowRange(offset + delta, len); }
   VmCowRange TrimmedFromStart(uint64_t amount) const {
     return VmCowRange(offset + amount, len - amount);
   }
@@ -145,7 +148,8 @@ class PageCache;
 
 class ScopedPageFreedList;
 
-extern "C" void cpp_vm_cow_pages_free(VmCowPages*);
+extern "C" void cpp_vm_cow_pages_free(VmCowPages* cow);
+extern "C" void* cpp_vm_cow_pages_state(VmCowPages* cow);
 
 // Implements a copy-on-write hierarchy of pages in a VmPageList.
 // VmCowPages have a life cycle where they start in an Init state to allow them to have
@@ -249,21 +253,21 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // This should only be used to report to user mode whether a VMO is user-pager backed, not for any
   // other purpose.
   bool is_root_source_user_pager_backed() const {
-    return !!(options_ & VmCowPagesOptions::kUserPagerBackedRoot);
+    return !!(options() & VmCowPagesOptions::kUserPagerBackedRoot);
   }
 
   // Returns whether the root of the cow pages hierarchy has non-null page_source_.
-  bool root_has_page_source() const { return !!(options_ & VmCowPagesOptions::kPageSourceRoot); }
+  bool root_has_page_source() const { return !!(options() & VmCowPagesOptions::kPageSourceRoot); }
 
   // Helper function for CowPage cloning methods. Returns any options that should be passed down to
   // the child.
   VmCowPagesOptions inheritable_options() const {
-    return VmCowPagesOptions::kNone | (options_ & (VmCowPagesOptions::kUserPagerBackedRoot |
-                                                   VmCowPagesOptions::kPageSourceRoot));
+    return VmCowPagesOptions::kNone | (options() & (VmCowPagesOptions::kUserPagerBackedRoot |
+                                                    VmCowPagesOptions::kPageSourceRoot));
   }
 
   bool is_root_source_preserving_page_content() const {
-    return !!(options_ & VmCowPagesOptions::kUserPagerBackedRoot);
+    return !!(options() & VmCowPagesOptions::kUserPagerBackedRoot);
   }
 
   bool is_parent_hidden_locked() const TA_REQ(lock()) { return parent_ && parent_->is_hidden(); }
@@ -523,7 +527,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   // Query pager VMO |stats|, and reset them too if |reset| is set to true.
   zx_status_t QueryPagerVmoStatsLocked(bool reset, zx_pager_vmo_stats_t* stats) TA_REQ(lock()) {
-    canary_.Assert();
+    AssertCanary();
     DEBUG_ASSERT(stats);
     // The modified state should only be set for VMOs directly backed by a pager.
     DEBUG_ASSERT(!pager_stats_modified_ || page_source_type() == PageSourceType::UserPager);
@@ -930,6 +934,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   friend class LockedParentWalker;
   friend class PriorityChanger;
   friend void ::cpp_vm_cow_pages_free(VmCowPages*);
+  friend void* ::cpp_vm_cow_pages_state(VmCowPages* cow);
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmCowPages);
 
@@ -1027,9 +1032,9 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
       TA_REQ(lock());
 
   // A hidden VmCowPages has no associated VMO.
-  bool is_hidden() const { return !!(options_ & VmCowPagesOptions::kHidden); }
+  bool is_hidden() const { return !!(options() & VmCowPagesOptions::kHidden); }
   bool can_decommit_zero_pages() const {
-    return !(options_ & VmCowPagesOptions::kCannotDecommitZeroPages);
+    return !(options() & VmCowPagesOptions::kCannotDecommitZeroPages);
   }
 
   PageSourceType page_source_type() const {
@@ -1144,11 +1149,11 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
       TA_REQ(self->lock());
 
   // Changes a Reference in the provided VmPageOrMarker into a real vm_page_t. The allocated page
-  // is assumed to be for this VmCowPages, and so uses the pmm_alloc_flags_, but it is not assumed
+  // is assumed to be for this VmCowPages, and so uses the |pmm_alloc_flags|, but it is not assumed
   // that the page_or_mark is actually yet in this page_list_, and so the allocated page is not
   // added to the page queues. It is the responsibility of the caller to add to the page queues if
   // the page_or_mark is not stack owned.
-  // The |page_request| must be non-null if the |pmm_alloc_flags_| allow for delayed allocation, in
+  // The |page_request| must be non-null if the |pmm_alloc_flags| allow for delayed allocation, in
   // which case this may return ZX_ERR_SHOULD_WAIT if the page_request is filled out.
   zx_status_t MakePageFromReference(VmPageOrMarkerRef page_or_mark,
                                     AnonymousPageRequest* page_request);
@@ -1283,16 +1288,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   // internal check if any pages in a range are pinned
   bool AnyPagesPinnedLocked(uint64_t offset, size_t len) TA_REQ(lock());
-
-  // Helper function for ::GetAttributedMemoryInRangeLocked. Counts the number of bytes in
-  // ancestor's vmos that should be attributed to this vmo for the specified range. It is an error
-  // to pass in a range that does not need attributing (i.e. offset must be < parent_limit_),
-  // although |len| is permitted to be sized such that the range exceeds parent_limit_. The return
-  // value is the length of the processed region, which will be <= |size| and is guaranteed to be >
-  // 0. The |count| is the number of bytes in this region that should be attributed to this vmo,
-  // versus some other vmo.
-  uint64_t CountAttributedAncestorBytesLocked(uint64_t offset, uint64_t size,
-                                              AttributionCounts* count) const TA_REQ(lock());
 
   // Searches for the content for the page in |this| at |offset|. If the offset is already
   // populated in |this| then that page is returned with the |owner| unset, otherwise the
@@ -1588,12 +1583,10 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // Takes ownership, and will drop, the lock for this object as children are iterated.
   static void RangeChangeUpdateCowChildren(LockedPtr self, VmCowRange range, RangeChangeOp op);
 
-  // magic value
-  fbl::Canary<fbl::magic("VMCP")> canary_;
-
-  const uint32_t pmm_alloc_flags_;
-
-  const VmCowPagesOptions options_;
+  uint32_t pmm_alloc_flags() const;
+  VmCowPagesOptions options() const;
+  void AssertCanary() const;
+  OpaqueStorage<kVmCowPagesStateSize, kVmCowPagesStateAlign> opaque_storage_;
 
   // length of children_list_
   uint32_t children_list_len_ TA_GUARDED(lock()) = 0;
@@ -2333,4 +2326,19 @@ class PriorityChanger {
   ktl::optional<VmCowPages::DeferredOps> root_deferred_;
 };
 
+extern "C" {
+void rust_vm_cow_pages_state_init(void* storage, uint32_t pmm_alloc_flags, uint32_t options);
+void rust_vm_cow_pages_destruct(void* storage);
+void rust_vm_cow_pages_assert_canary(const VmCowPages* cow);
+__PURE uint32_t rust_vm_cow_pages_pmm_alloc_flags(const VmCowPages* cow);
+__PURE uint32_t rust_vm_cow_pages_options(const VmCowPages* cow);
+}
+
+inline void VmCowPages::AssertCanary() const { rust_vm_cow_pages_assert_canary(this); }
+inline uint32_t VmCowPages::pmm_alloc_flags() const {
+  return rust_vm_cow_pages_pmm_alloc_flags(this);
+}
+inline VmCowPagesOptions VmCowPages::options() const {
+  return static_cast<VmCowPagesOptions>(rust_vm_cow_pages_options(this));
+}
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_COW_PAGES_H_

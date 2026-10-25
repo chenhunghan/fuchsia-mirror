@@ -13,7 +13,7 @@ group("tests") {
     "analytics:tests",
     "android:tests",
     "async-utils:tests",
-    "atomic-storage:tests",
+    "backoff:backoff_tests",
     "bitrs:tests",
     "buf-read-ext:tests",
     "captive-thread:tests",
@@ -24,7 +24,6 @@ group("tests") {
     "collections/sorted-vec-map:tests",
     "containers/cpp:containers_cpp_unittests($host_toolchain)",
     "containers/cpp:tests",
-    "cstringify:tests",
     "ddk:tests",
     "ddktl:tests",
     "debug:tests",
@@ -56,10 +55,8 @@ group("tests") {
     "fuchsia-component:tests",
     "fuchsia-component-test:tests",
     "fuchsia-cprng:tests",
-    "fuchsia-emulated-handle:tests",
     "fuchsia-fs:tests",
     "fuchsia-hyper:tests",
-    "fuchsia-image-format:tests",
     "fuchsia-lockfile:tests",
     "fuchsia-rcu:tests",
     "fuchsia-rcu-collections:tests",
@@ -73,7 +70,6 @@ group("tests") {
     "http-uri-ext:tests",
     "icu:tests",
     "icu_data:tests",
-    "inet:tests",
     "injectable-time:tests",
     "intl:tests",
     "json_parser:tests",
@@ -85,7 +81,6 @@ group("tests") {
     "libdoc:tests($host_toolchain)",
     "line-editor:tests",
     "line_input:tests",
-    "listnode:tests",
     "llvm-profdata:tests",
     "loader_service:tests",
     "lockdep:tests",
@@ -111,7 +106,6 @@ group("tests") {
     "stdbind:tests",
     "structured_ui:tests",
     "symbolizer-markup:tests",
-    "syslog:tests",
     "tcp-stream-ext:tests",
     "tempfile-ext:tests",
     "test_diagnostics:tests",
@@ -139,16 +133,6 @@ group("tests") {
     "zxc:tests",
     "zxdump:tests",
   ]
-
-  if (current_cpu != "riscv64") {
-    deps += [
-      # The Go toolchain does not support RISC-V.
-      # TODO(https://fxbug.dev/42080326): Rename `components` to indicate that it is
-      # specific to Go.
-      "component:tests",
-      "go-benchmarking:tests",
-    ]
-  }
 }
 
 group("boot_tests") {
@@ -158,5 +142,6 @@ group("boot_tests") {
 }
 
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/lib:host_tests" ]
   target_tests = [ "//src/lib:target_tests" ]
 }

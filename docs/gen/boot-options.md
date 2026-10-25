@@ -383,12 +383,6 @@ Setting this value to 0 will disable the imminent-out-of-memory event.
 This option controls whether potentially user-visible PMM allocation failures due to running out of
 memory trigger an OOM response.
 
-### kernel.phys.next=\<string>
-
-**Default:** `physboot`
-
-The name of the file within the kernel storage filesystem physload will load.
-
 ### kernel.phys.verbose=\<bool>
 
 **Default:** `true`
@@ -1097,17 +1091,6 @@ be set from the debugger attached to the kernel (e.g. via QEMU's -s) for boot to
 continue.  This makes it easy to let the virtual boot CPU run through the boot
 loader and early boot code with the debugger attached and then interrupt the
 spin interactively in the debugger to set breakpoints or step through boot code.
-
-### kernel.allow_debug_uart_suspend=\<bool>
-
-**Default:** `false`
-
-This option enables feature which manages suspending and resuming the UART
-hardware and its clocks when entering deeper suspend states on HW which needs
-assistance from the kernel to suspend and resume the debug UART.  By default, it
-is disabled, but may be enabled in the build configuration for hardware which
-both needs the behavior, and for which the feature is sufficiently stable to
-enable it.
 
 
 ## Options available only on arm64 machines

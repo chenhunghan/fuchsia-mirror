@@ -7,7 +7,6 @@ use crate::device::kobject::{Bus, Class, Device, DeviceMetadata, Subsystem};
 use crate::fs::sysfs::{build_device_directory, get_sysfs, register_cpu_devices};
 use crate::task::Kernel;
 use crate::vfs::pseudo::simple_directory::{SimpleDirectory, SimpleDirectoryMutator};
-use crate::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use crate::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use crate::vfs::{FileSystemHandle, FsStr, FsString};
 use starnix_logging::bug_ref;
@@ -49,6 +48,7 @@ impl KObjectStore {
 
         // Generic Linux device and class registrations.
         register_cpu_devices(kernel);
+        let _ = self.power_supply_class();
 
         // TODO(https://fxbug.dev/452096300): Register backing_dev_info devices from actual
         // superblocks instead of a hardcoded 0:80 stub.
@@ -62,171 +62,10 @@ impl KObjectStore {
             },
         );
 
-        // TODO(https://fxbug.dev/452096300): Populate or remove stub powercap and udc classes.
-        self.get_or_create_class("powercap".into());
-        self.get_or_create_class("udc".into());
-
-        // Board / SoC-specific stub device registrations.
         // TODO(https://fxbug.dev/452096300): Replace hardcoded board/SoC stub devices with dynamic
         // device configuration.
-        let platform_bus = self.platform_bus();
-        let soc = self.soc_device();
-
-        // TODO(https://fxbug.dev/452096300): Stub Qualcomm SPMI PMIC and battery gauge IIO device.
-        let spmi = registry.add_bus_device(
-            "1c40000.qcom,spmi".into(),
-            Some(soc.clone()),
-            platform_bus.clone(),
-            build_device_directory,
-        );
-        let spmi_bus = self.get_or_create_bus("spmi".into());
-        let spmi_0 = registry.add_bus_device(
-            "spmi-0".into(),
-            Some(spmi),
-            spmi_bus.clone(),
-            build_device_directory,
-        );
-        let spmi_0_00 =
-            registry.add_bus_device("0-00".into(), Some(spmi_0), spmi_bus, build_device_directory);
-        let qbg = registry.add_bus_device(
-            "1c40000.qcom,spmi:qcom,pm5100@0:qpnp,qbg@4f00".into(),
-            Some(spmi_0_00),
-            platform_bus.clone(),
-            build_device_directory,
-        );
-        let iio_bus = self.get_or_create_bus("iio".into());
-        registry.add_bus_device("iio:device3".into(), Some(qbg), iio_bus, |device, dir| {
-            build_device_directory(device, dir);
-            add_stub_attributes(dir, &["in_resistance_resistance_id_input"]);
-        });
-
-        // TODO(https://fxbug.dev/452096300): Stub Qualcomm MDSS display controller and DRM
-        // connector.
-        let mdss_mdp = registry.add_bus_device(
-            "5e00000.qcom,mdss_mdp".into(),
-            Some(soc),
-            platform_bus,
-            build_device_directory,
-        );
-        let drm_class = self.get_or_create_class("drm".into());
-        let card0 = registry.add_numberless_device(
-            "card0".into(),
-            Some(mdss_mdp.clone()),
-            drm_class.clone(),
-            build_device_directory,
-        );
-        registry.add_numberless_device(
-            "sde-conn-0-DSI-1".into(),
-            Some(card0.clone()),
-            drm_class.clone(),
-            |device, dir| {
-                build_device_directory(device, dir);
-                dir.entry(
-                    "display_power_state",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o644),
-                );
-                dir.entry(
-                    "panel_power_state",
-                    StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                    mode!(IFREG, 0o644),
-                );
-            },
-        );
-        registry.add_numberless_device(
-            "card0-DSI-1".into(),
-            Some(card0),
-            drm_class,
-            |device, dir| {
-                build_device_directory(device, dir);
-                dir.subdir("panel", 0o755, |dir| {
-                    dir.entry(
-                        "panel_name",
-                        StubBytesFile::new_node_with_data(
-                            bug_ref!("https://fxbug.dev/560212202"),
-                            b"Placeholder",
-                        ),
-                        mode!(IFREG, 0o444),
-                    );
-                });
-            },
-        );
-
-        // TODO(https://fxbug.dev/452096300): Stub panel backlight device parented by the display
-        // controller.
-        registry.add_numberless_device(
-            "panel0-backlight".into(),
-            Some(mdss_mdp),
-            self.get_or_create_class("backlight".into()),
-            |device, dir| {
-                build_device_directory(device, dir);
-                add_stub_attributes(dir, &["brightness"]);
-            },
-        );
-
-        registry.add_numberless_device(
-            "battery".into(),
-            /* parent = */ None,
-            self.get_or_create_class("power_supply".into()),
-            |device, dir| {
-                build_device_directory(device, dir);
-                dir.entry(
-                    "capacity",
-                    StubBytesFile::new_node_with_data(
-                        bug_ref!("https://fxbug.dev/573313995"),
-                        b"0",
-                    ),
-                    mode!(IFREG, 0o644),
-                );
-            },
-        );
-
-        registry.add_subsystemless_device(
-            "goog-chip-info".into(),
-            Some(self.system_device()),
-            |device, dir| {
-                build_device_directory(device, dir);
-                for name in ["device_table", "dvfs_table", "ids_table"] {
-                    dir.entry(
-                        name,
-                        StubBytesFile::new_node_with_data(
-                            bug_ref!("https://fxbug.dev/560212202"),
-                            b"Placeholder",
-                        ),
-                        mode!(IFREG, 0o444),
-                    );
-                }
-            },
-        );
-
-        // TODO(https://fxbug.dev/452096300): Stub eMMC host, card, and block device. The card's
-        // `block/mmcblk0` directory is left as a plain stub rather than a `block` class device,
-        // since there is no backing block device.
-        // TODO(https://fxbug.dev/425942145): Parent `mmc0` under the SoC's SDHCI controller
-        // platform device, once the product-specific controller address is known.
-        let mmc0 = registry.add_numberless_device(
-            "mmc0".into(),
-            /* parent = */ None,
-            self.get_or_create_class("mmc_host".into()),
-            build_device_directory,
-        );
-        registry.add_bus_device(
-            "mmc0:0001".into(),
-            Some(mmc0),
-            self.get_or_create_bus("mmc".into()),
-            |device, dir| {
-                build_device_directory(device, dir);
-                add_stub_attributes(
-                    dir,
-                    &["fwrev", "hwrev", "life_time", "manfid", "pre_eol_info", "serial"],
-                );
-                dir.subdir("block", 0o755, |dir| {
-                    dir.subdir("mmcblk0", 0o755, |dir| {
-                        add_stub_attributes(dir, &["size"]);
-                    });
-                });
-            },
-        );
+        // Eagerly create `/sys/devices/platform/soc` and `/sys/bus/platform/devices/soc`.
+        let _ = self.soc_device();
 
         // TODO(https://fxbug.dev/452096300): Stub SoC identification device (`/sys/devices/soc0`),
         // attached to the `soc` bus.
@@ -322,6 +161,16 @@ impl KObjectStore {
     /// Device class used for thermal devices.
     pub fn thermal_class(&self) -> Class {
         self.get_or_create_class("thermal".into())
+    }
+
+    /// Device class used for powercap devices.
+    pub fn powercap_class(&self) -> Class {
+        self.get_or_create_class("powercap".into())
+    }
+
+    /// Device class used for power-supply devices (`/sys/class/power_supply`).
+    pub fn power_supply_class(&self) -> Class {
+        self.get_or_create_class("power_supply".into())
     }
 
     /// Device class used for graphics devices.

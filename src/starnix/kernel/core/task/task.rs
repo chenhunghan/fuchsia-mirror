@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::mm::{MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor};
+use crate::mm::{
+    MappingAccess, MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor,
+};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::ptrace::{AtomicStopState, PtraceEventData, PtraceState, PtraceStatus, StopState};
 use crate::signals::{KernelSignal, SignalDetail, SignalInfo, SignalState};
@@ -15,7 +17,7 @@ use crate::task::{
     SchedulingPolicy, SeccompFilterContainer, SeccompState, SeccompStateValue, TaskRunningState,
     ThreadGroup, ThreadState, UtsNamespaceHandle, WaitCanceler, Waiter, ZombieProcess, ZombieState,
 };
-use crate::vfs::{FdTable, FsContext, FsString, SharedFdTable};
+use crate::vfs::{FdTable, FsContext, FsString, SharedFdTable, SharedFsContext};
 use atomic_bitflags::atomic_bitflags;
 use fuchsia_rcu::{RcuArc, RcuDroppable, RcuDroppableArc, RcuReadGuard, RcuReadScope};
 use macro_rules_attribute::apply;
@@ -28,6 +30,7 @@ use starnix_sync::{
 use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
 use starnix_types::stats::TaskTimeStats;
+use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials, FsCred};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::{SIGCHLD, SIGKILL, SigSet, Signal, sigaltstack_contains_pointer};
@@ -58,6 +61,20 @@ atomic_bitflags! {
         const KERNEL_SIGNALS_AVAILABLE = 1 << 4;
         /// Whether the executor has successfully spawned a thread for this task.
         const SPAWNED                  = 1 << 5;
+        /// Whether the current unit of work executing on this task has been cancelled.
+        ///
+        /// Used by reusable kernel worker threads (such as AIO workers) to abort blocking
+        /// operations with `EINTR`.
+        const WORK_CANCELLED           = 1 << 6;
+        /// Whether this task is running a userspace handler for a signal whose default action is to
+        /// dump core, delivered during shutdown. Cleared on `rt_sigreturn`. Shutdown lets such
+        /// tasks run until the deferred shutdown deadline; see `ThreadGroup::shut_down()`. Known
+        /// limitations, all bounded by that deadline:
+        /// - A handler that isn't writing a crash dump (e.g. one that blocks) gets the time too.
+        /// - It's a single bit, so returning from a nested handler clears it for the outer one.
+        /// - A handler that leaves via `siglongjmp` keeps it set.
+        /// - It isn't set for crashes that started before shutdown.
+        const IN_CORE_DUMP_SIGNAL_HANDLER = 1 << 7;
     }
 }
 
@@ -154,10 +171,6 @@ pub struct TaskMutableState {
 
     /// The exit status that this task exited with.
     exit_status: Option<ExitStatus>,
-
-    /// Desired scheduler state for the task. This may not reflect the actual committed Zircon
-    /// priority, which can be confirmed via SchedulerState::applied_role_name.
-    pub scheduler_state: SchedulerState,
 
     /// The UTS namespace assigned to this thread.
     ///
@@ -960,6 +973,11 @@ pub struct Task {
     mutable_state:
         starnix_sync::LockDepRwLock<TaskMutableState, starnix_sync::TaskMutableStateLock>,
 
+    /// Desired scheduler state for the task. This may not reflect the actual committed Zircon
+    /// priority, which is not applied until [`SchedulerManager::commit_thread_role`] is invoked.
+    pub scheduler_state:
+        starnix_sync::LockDepMutex<SchedulerState, starnix_sync::TaskSchedulerStateLock>,
+
     /// The information of the task that needs to be available to the `ThreadGroup` while computing
     /// which process a wait can target.
     /// Contains the command line, the task credentials and the exit signal.
@@ -1021,10 +1039,7 @@ impl Task {
             return;
         }
 
-        let (pgid, exit_signal) = {
-            let tg = self.thread_group().read();
-            (tg.process_group.clone(), tg.exit_signal.clone())
-        };
+        let exit_signal = self.thread_group().read().exit_signal.clone();
         let mut state = self.write();
         state.set_stopped(StopState::ForceAwake, None, None, None);
         if let Some(ptrace) = &mut state.ptrace {
@@ -1049,7 +1064,6 @@ impl Task {
                         .weak_self
                         .upgrade()
                         .expect("Task strong reference must exist while &self is held"),
-                    pgid,
                     state: ZombieState {
                         exit_status,
                         // ptrace doesn't need this.
@@ -1138,7 +1152,7 @@ impl Task {
                     thread: Default::default(),
                     files: Some(files).into(),
                     mm: RcuArc::new(mm),
-                    fs: RcuArc::new(Some(fs)),
+                    fs: SharedFsContext::new(fs),
                     abstract_socket_namespace,
                     abstract_vsock_namespace,
                     proc_pid_directory_cache: Default::default(),
@@ -1152,7 +1166,6 @@ impl Task {
                     run_state: RunState::default(),
                     kernel_signals,
                     exit_status: None,
-                    scheduler_state,
                     uts_ns,
                     no_new_privs,
                     oom_score_adj: Default::default(),
@@ -1166,6 +1179,7 @@ impl Task {
                     cpuset_path: "/".to_string(),
                 }
                 .into(),
+                scheduler_state: LockDepMutex::new(scheduler_state),
                 persistent_info: TaskPersistentInfoState::new(tid, pid, command, creds),
                 seccomp_filter_state,
                 trace_syscalls: AtomicBool::new(false),
@@ -1175,8 +1189,9 @@ impl Task {
             {
                 // Note that `Kernel::pids` is already locked by the caller of `Task::new()`.
                 let _l1 = task.persistent_info.lock_creds();
-                let _l2 = task.read();
-                let _l3 = task.persistent_info.command_guard();
+                let _l2 = task.scheduler_state.lock();
+                let _l3 = task.read();
+                let _l4 = task.persistent_info.command_guard();
             }
             task
         })
@@ -1282,14 +1297,14 @@ impl Task {
     /// Modify the scheduler state's priority and update the task's thread's role.
     pub(crate) fn set_scheduler_priority(&self, priority: RealtimePriority) -> Result<(), Errno> {
         self.update_scheduler_state_then_role(|scheduler_state| {
-            scheduler_state.realtime_priority = priority
+            scheduler_state.realtime_priority = priority;
         })
     }
 
     /// Modify the scheduler state's nice and update the task's thread's role.
     pub(crate) fn set_scheduler_nice(&self, nice: NormalPriority) -> Result<(), Errno> {
         self.update_scheduler_state_then_role(|scheduler_state| {
-            scheduler_state.normal_priority = nice
+            scheduler_state.normal_priority = nice;
         })
     }
 
@@ -1305,32 +1320,28 @@ impl Task {
         &self,
         updater: impl FnOnce(&mut SchedulerState),
     ) -> Result<(), Errno> {
-        let process_name = self.thread_group().read().leader_command();
-        let thread_name = self.command();
-
-        let (new_scheduler_state, cpuset_path) = {
-            let mut state = self.write();
-            updater(&mut state.scheduler_state);
-            (state.scheduler_state.clone(), state.cpuset_path.clone())
-        };
-
-        let scheduler = &self.thread_group().kernel.scheduler;
-        let role_name = scheduler.resolve_role_name(
-            &process_name,
-            &thread_name,
-            &cpuset_path,
-            &new_scheduler_state,
+        let mut scheduler_state = self.scheduler_state.lock();
+        let prev = (
+            scheduler_state.policy,
+            scheduler_state.normal_priority,
+            scheduler_state.realtime_priority,
+            scheduler_state.reset_on_fork,
         );
-        if new_scheduler_state.applied_role_name.as_deref() == Some(role_name) {
-            return Ok(());
-        }
-        scheduler.set_thread_role(self, role_name)?;
-        // Note: Re-acquiring the lock here to update `applied_role_name` has a minor race if
-        // concurrent state updates execute `set_thread_role` out of order relative to cache writes.
-        // Dropping the lock across `set_thread_role` avoids holding `Task` write lock over FIDL RPCs,
-        // and any cache mismatch will self-correct on the next scheduler state or cgroup change.
-        self.write().scheduler_state.applied_role_name = Some(role_name.to_string());
-        Ok(())
+        updater(&mut scheduler_state);
+        let result = if !scheduler_state.policy.is_valid_priority(scheduler_state.realtime_priority)
+        {
+            error!(EINVAL)
+        } else {
+            self.thread_group().kernel.scheduler.commit_thread_role(self, &mut scheduler_state)
+        };
+        result.inspect_err(|_| {
+            (
+                scheduler_state.policy,
+                scheduler_state.normal_priority,
+                scheduler_state.realtime_priority,
+                scheduler_state.reset_on_fork,
+            ) = prev;
+        })
     }
 
     /// Signals the vfork event, if any, to unblock waiters.
@@ -1483,13 +1494,17 @@ impl Task {
             return;
         };
 
+        let is_leader = self.is_leader();
+
         // If we're going to update the process name, see if we can get a longer one than normally
         // provided in the Linux uapi. Only choose the argv0-based name if it's a superset of the
         // uapi-provided name to avoid clobbering the name provided by the user.
-        if let Ok(argv0) = self.read_argv0() {
-            let argv0 = TaskCommand::from_path_bytes(&argv0);
-            if let Some(embedded_name) = argv0.try_embed(&new_name) {
-                new_name = embedded_name;
+        if is_leader {
+            if let Ok(argv0) = self.read_argv0() {
+                let argv0 = TaskCommand::from_path_bytes(&argv0);
+                if let Some(embedded_name) = argv0.try_embed(&new_name) {
+                    new_name = embedded_name;
+                }
             }
         }
 
@@ -1498,13 +1513,14 @@ impl Task {
         // cycles with SELinux checks.
         let mut command_guard = self.persistent_info.command_guard();
 
-        // Set the name on the Linux thread.
+        // Set the name on the Linux thread. If the thread has already exited concurrently in
+        // Zircon, `set_zx_name` safely ignores `ZX_ERR_BAD_STATE`.
         if let Some(thread) = running_state.thread.get() {
             set_zx_name(thread.thread.as_ref(), new_name.as_bytes());
         }
 
         // If this is the thread group leader, use this name for the process too.
-        if self.is_leader() {
+        if is_leader {
             set_zx_name(&*self.thread_group().process, new_name.as_bytes());
             let _ = zx::Thread::raise_user_exception(
                 zx::RaiseExceptionOptions::TARGET_JOB_DEBUGGER,
@@ -1518,13 +1534,21 @@ impl Task {
         *command_guard = new_name;
         drop(command_guard);
 
-        if self.is_leader() {
-            if let Some(notifier) = &self.thread_group().read().notifier {
-                let _ = notifier.send(MemoryAttributionLifecycleEvent::name_change(self.tid.id));
+        if is_leader {
+            let tasks = {
+                let thread_group = self.thread_group().read();
+                if let Some(notifier) = &thread_group.notifier {
+                    let _ =
+                        notifier.send(MemoryAttributionLifecycleEvent::name_change(self.tid.id));
+                }
+                thread_group.tasks()
+            };
+            for task in tasks {
+                if let Err(err) = task.sync_scheduler_state_to_role() {
+                    log_warn!(err:?; "Failed to update scheduler role after process name change.");
+                }
             }
-        }
-
-        if let Err(err) = self.sync_scheduler_state_to_role() {
+        } else if let Err(err) = self.sync_scheduler_state_to_role() {
             log_warn!(err:?; "Failed to update scheduler role after thread name change.");
         }
     }
@@ -1666,6 +1690,18 @@ impl TaskMemoryAccessor for Task {
     fn maximum_valid_address(&self) -> Option<UserAddress> {
         self.mm().map(|mm| mm.maximum_valid_user_address).ok()
     }
+
+    fn ensure_buffers_mapped_in_user_vmar(
+        &self,
+        _buffers: &[UserBuffer],
+        _access: MappingAccess,
+    ) -> Result<(), Errno> {
+        // Using `Task` rather than `CurrentTask` indicates that the target address space is not
+        // mapped in the current thread, so buffers cannot be mapped for direct user-VMAR access.
+        // Returning `ENOTSUP` lets callers of `peek_each_segment` (like `with_iovec_segments`)
+        // fall back to `InputBuffer` / `OutputBuffer` read/write methods.
+        error!(ENOTSUP)
+    }
 }
 
 impl fmt::Debug for Task {
@@ -1687,6 +1723,7 @@ impl cmp::Eq for Task {}
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::mm::PAGE_SIZE;
     use crate::security;
     use crate::testing::*;
     use starnix_uapi::auth::{CAP_SYS_ADMIN, Capabilities};
@@ -1805,15 +1842,80 @@ mod test {
             let scheduler = &current_task.thread_group().kernel.scheduler;
 
             // Before rename, check task's role name.
-            let initial_role = scheduler.role_name(current_task).unwrap();
+            let initial_state = current_task.scheduler_state.lock().clone();
+            let initial_role = scheduler.role_name(current_task, &initial_state).unwrap();
             assert_ne!(initial_role, "test-role");
 
             // Rename the task's thread to renamed-thread.
             current_task
                 .set_command_name(starnix_task_command::TaskCommand::new(b"renamed-thread"));
 
-            let renamed_role = scheduler.role_name(current_task).unwrap();
+            let renamed_state = current_task.scheduler_state.lock().clone();
+            let renamed_role = scheduler.role_name(current_task, &renamed_state).unwrap();
             assert_eq!(renamed_role, "test-role");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_set_command_name_on_leader_syncs_sibling_scheduler_roles() {
+        use crate::task::{RoleOverrides, SchedulerManager};
+        use fidl_fuchsia_scheduler::{
+            RoleManagerMarker, RoleManagerRequest, RoleManagerSetRoleResponse,
+        };
+        use futures::StreamExt as _;
+        use starnix_sync::Mutex;
+
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let committed_roles = Arc::new(Mutex::new(Vec::<String>::new()));
+        let committed_roles_server = committed_roles.clone();
+        std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream();
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { responder, .. } => {
+                            let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                        }
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            committed_roles_server.lock().push(payload.role.unwrap().role);
+                            let _ = responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            });
+        });
+
+        let mut builder = RoleOverrides::new();
+        builder.add("my-app", "my-app", None, "leader-role");
+        builder.add("my-app", "RenderThread", None, "render-role");
+        let overrides = builder.build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, move |current_task| {
+            let sibling = current_task.clone_task_for_test(
+                (CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64,
+                Some(SIGCHLD),
+            );
+            assert!(!sibling.is_leader());
+            let leader_thread = current_task.running_state().thread.get().unwrap().clone();
+            sibling.running_state().thread.set(leader_thread).unwrap();
+
+            // Rename the sibling thread before the leader renames the process. Because the leader's
+            // command name is still "test-task", the sibling does not match "my-app" yet.
+            sibling.set_command_name(TaskCommand::new(b"RenderThread"));
+            assert!(!committed_roles.lock().contains(&"render-role".to_string()));
+
+            committed_roles.lock().clear();
+
+            // Renaming the thread group leader updates the process name and re-evaluates scheduler
+            // roles for all sibling threads in the thread group.
+            current_task.set_command_name(TaskCommand::new(b"my-app"));
+            let roles = committed_roles.lock().clone();
+            assert!(roles.contains(&"leader-role".to_string()), "roles: {roles:?}");
+            assert!(roles.contains(&"render-role".to_string()), "roles: {roles:?}");
         })
         .await;
     }
@@ -1835,15 +1937,140 @@ mod test {
             let scheduler = &current_task.thread_group().kernel.scheduler;
 
             // Before rename, check child's role name.
-            let initial_role = scheduler.role_name(&child).unwrap();
+            let initial_state = child.scheduler_state.lock().clone();
+            let initial_role = scheduler.role_name(&child, &initial_state).unwrap();
             assert_ne!(initial_role, "test-role");
 
             // Rename the child's thread to renamed-thread. Since did_exec is false on the child,
             // this should NOT map to "test-role" from the overrides.
             child.set_command_name(starnix_task_command::TaskCommand::new(b"renamed-thread"));
 
-            let renamed_role = scheduler.role_name(&child).unwrap();
+            let renamed_state = child.scheduler_state.lock().clone();
+            let renamed_role = scheduler.role_name(&child, &renamed_state).unwrap();
             assert_ne!(renamed_role, "test-role");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_set_command_name_only_embeds_argv0_on_leader() {
+        spawn_kernel_and_run(async |current_task| {
+            let argv0_bytes = b"/bin/my_long_command_name\0";
+            let addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(addr, argv0_bytes).expect("write argv0");
+            {
+                let mm = current_task.mm().expect("mm");
+                let mut mm_state = mm.state.write();
+                mm_state.argv_start = addr;
+                mm_state.argv_end = (addr + argv0_bytes.len()).expect("argv_end");
+            }
+
+            // Updating the leader task's command name embeds argv[0] when the truncated name is a
+            // substring of argv[0].
+            current_task.set_command_name(TaskCommand::new(b"my_long_command"));
+            let cmd = current_task.command();
+            assert_eq!(cmd.as_bytes(), b"my_long_command_name");
+            assert_eq!(cmd.comm_name(), b"my_long_command");
+
+            // Updating a non-leader thread's command name does not embed the process-wide argv[0].
+            let thread = current_task.clone_task_for_test(
+                (CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64,
+                Some(SIGCHLD),
+            );
+            assert!(!thread.is_leader());
+            thread.set_command_name(TaskCommand::new(b"my_long_command"));
+            let cmd = thread.command();
+            assert_eq!(cmd.as_bytes(), b"my_long_command");
+            assert_eq!(cmd.comm_name(), b"my_long_command");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_set_scheduler_priority_validates_policy() {
+        spawn_kernel_and_run(async |current_task| {
+            let non_realtime = SchedulingPolicy::Normal.realtime_priority_from(0).unwrap();
+            let realtime_10 = SchedulingPolicy::Fifo.realtime_priority_from(10).unwrap();
+            let realtime_20 = SchedulingPolicy::Fifo.realtime_priority_from(20).unwrap();
+
+            assert!(SchedulingPolicy::Normal.is_valid_priority(non_realtime));
+            assert!(!SchedulingPolicy::Normal.is_valid_priority(realtime_10));
+            assert!(SchedulingPolicy::Fifo.is_valid_priority(realtime_10));
+            assert!(!SchedulingPolicy::Fifo.is_valid_priority(non_realtime));
+
+            assert_eq!(current_task.scheduler_state.lock().policy, SchedulingPolicy::Normal);
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, non_realtime);
+
+            // Passing a non-zero real-time priority while `SchedulingPolicy::Normal` returns
+            // `EINVAL` without mutating `realtime_priority`.
+            assert_eq!(current_task.set_scheduler_priority(realtime_10), error!(EINVAL));
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, non_realtime);
+
+            current_task
+                .set_scheduler_policy_priority_and_reset_on_fork(
+                    SchedulingPolicy::Fifo,
+                    realtime_10,
+                    false,
+                )
+                .expect("set_scheduler_policy_priority_and_reset_on_fork");
+            assert_eq!(current_task.scheduler_state.lock().policy, SchedulingPolicy::Fifo);
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_10);
+
+            current_task.set_scheduler_priority(realtime_20).expect("set_scheduler_priority");
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_20);
+
+            // Passing `NON_REAL_TIME` while `SchedulingPolicy::Fifo` returns `EINVAL` without
+            // mutating `realtime_priority`.
+            assert_eq!(current_task.set_scheduler_priority(non_realtime), error!(EINVAL));
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_20);
+
+            // Setting policy and priority together also validates their combination and rolls back
+            // on mismatch.
+            assert_eq!(
+                current_task.set_scheduler_policy_priority_and_reset_on_fork(
+                    SchedulingPolicy::Normal,
+                    realtime_10,
+                    true,
+                ),
+                error!(EINVAL)
+            );
+            assert_eq!(current_task.scheduler_state.lock().policy, SchedulingPolicy::Fifo);
+            assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_20);
+            assert!(!current_task.scheduler_state.lock().reset_on_fork);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_update_scheduler_state_rolls_back_on_commit_error() {
+        use crate::task::{RoleOverrides, SchedulerManager};
+        use fidl_fuchsia_scheduler::RoleManagerMarker;
+
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        // Drop the server endpoint so RoleManager FIDL calls fail and `commit_thread_role`
+        // returns `Err(EINVAL)`.
+        drop(server_end);
+
+        let overrides = RoleOverrides::new().build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, |current_task| {
+            let initial_state = current_task.scheduler_state.lock().clone();
+            let realtime_10 = SchedulingPolicy::Fifo.realtime_priority_from(10).unwrap();
+
+            assert_eq!(
+                current_task.set_scheduler_policy_priority_and_reset_on_fork(
+                    SchedulingPolicy::Fifo,
+                    realtime_10,
+                    true,
+                ),
+                error!(EINVAL)
+            );
+            assert_eq!(*current_task.scheduler_state.lock(), initial_state);
+
+            let nicer = NormalPriority::from_setpriority_syscall(-5);
+            assert_eq!(current_task.set_scheduler_nice(nicer), error!(EINVAL));
+            assert_eq!(*current_task.scheduler_state.lock(), initial_state);
         })
         .await;
     }

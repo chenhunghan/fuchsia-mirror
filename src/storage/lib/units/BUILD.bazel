@@ -23,8 +23,6 @@ rustc_library(
     }),
 )
 
-# The tests run through Bazel only, via the //src/storage test suites.
-# @bazel2gn:skip
 rustc_test(
     name = "units_test",
     crate = ":units",
@@ -32,7 +30,6 @@ rustc_test(
     deps = ["//src/lib/fuchsia"],
 )
 
-# @bazel2gn:skip
 wrap_host_rust_test(
     name = "units_host_test",
     binary_name = "units_test",

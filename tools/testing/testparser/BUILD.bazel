@@ -29,6 +29,8 @@ go_library(
     ],
 )
 
+# The testparser binary is only built in Bazel.
+# @bazel2gn:skip
 go_library(
     name = "main",
     srcs = [
@@ -61,6 +63,8 @@ host_go_test(
     ],
 )
 
+# The testparser binary is only built in Bazel.
+# @bazel2gn:skip
 host_go_test(
     name = "testparser_cmd_test",
     srcs = ["cmd/main_test.go"],

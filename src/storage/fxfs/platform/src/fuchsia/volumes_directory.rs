@@ -2,28 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::fuchsia::RemoteCrypt;
 use crate::fuchsia::component::map_to_raw_status;
 use crate::fuchsia::directory::FxDirectory;
 use crate::fuchsia::errors::map_to_status;
 use crate::fuchsia::fxblob::{BlobDirectory, Identifier};
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
 use crate::fuchsia::profile::new_profile_state;
+use crate::fuchsia::remote_volume::UnmountFn;
 use crate::fuchsia::volume::{FxVolume, FxVolumeAndRoot, MemoryPressureConfig, RootDir};
+use crate::fuchsia::{FxRemoteVolume, RemoteCrypt};
 use anyhow::{Context, Error, anyhow, ensure};
 use fidl::endpoints::{DiscoverableProtocolMarker, ServerEnd};
 use fidl_fuchsia_fs::{AdminMarker, AdminRequest, AdminRequestStream};
 use fidl_fuchsia_fs_startup::{
     CheckOptions, CreateOptions, MountOptions, VolumeRequest, VolumeRequestStream,
 };
-use fidl_fuchsia_fxfs::{DebugMarker, FileBackedVolumeProviderMarker, ProjectIdMarker};
+use fidl_fuchsia_fxfs::{
+    self as ffxfs, DebugMarker, FileBackedVolumeProviderMarker, ProjectIdMarker,
+};
 use fidl_fuchsia_io as fio;
 use fs_inspect::{FsInspectTree, FsInspectVolume};
 use fuchsia_async as fasync;
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
 use fxfs::errors::FxfsError;
-use fxfs::filesystem::FxFilesystem;
+use fxfs::filesystem::{FlushReason, ForceMajor, FxFilesystem};
 use fxfs::fsck;
 use fxfs::log::*;
 use fxfs::object_store::transaction::{LockKey, Options, ReservationOptions, lock_keys};
@@ -33,7 +36,7 @@ use fxfs::object_store::{
 };
 use fxfs_crypto::Crypt;
 use fxfs_trace::{TraceFutureExt, trace_future_args};
-use refaults_vmo::PageRefaultCounter;
+use refaults_vmo::PageFaultCounter;
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -58,7 +61,7 @@ pub struct VolumesDirectory {
     mounted_volumes: futures::lock::Mutex<HashMap<u64, MountedVolume>>,
     inspect_tree: Weak<FsInspectTree>,
     mem_monitor: Option<MemoryPressureMonitor>,
-    blob_resupplied_count: Arc<PageRefaultCounter>,
+    page_fault_counter: Arc<PageFaultCounter>,
     // The state of profile recordings. Should be locked *after* mounted_volumes.
     profiling_state: futures::lock::Mutex<Option<ProfileState>>,
 
@@ -89,12 +92,10 @@ pub struct MountedVolumesGuard<'a> {
 struct MountedVolume {
     sequence: u64,
     volume: FxVolumeAndRoot,
+    remote_volume: Option<Arc<FxRemoteVolume>>,
 
     // True if the volume was forcibly locked.
     locked: bool,
-
-    // True if blob page requests for this volume are handled in the block driver.
-    use_driver_blob_paging: bool,
 }
 
 pub(crate) enum Mode {
@@ -142,6 +143,7 @@ impl MountedVolumesGuard<'_> {
                 name,
                 store,
                 self.volumes_directory.memory_pressure_config,
+                use_driver_blob_paging,
             )
             .await?
         } else {
@@ -149,16 +151,10 @@ impl MountedVolumesGuard<'_> {
                 name,
                 store,
                 self.volumes_directory.memory_pressure_config,
+                false,
             )
             .await?
         };
-        if use_driver_blob_paging {
-            if let Some(mounted) =
-                self.mounted_volumes.get_mut(&volume.volume().store().store_object_id())
-            {
-                mounted.use_driver_blob_paging = true;
-            }
-        }
         // If there is an ongoing startup profile activity across all volumes, apply it to the
         // mounted volume unless this is a blob volume using driver blob paging (where pkg-cache
         // drives blob profiling).
@@ -184,6 +180,96 @@ impl MountedVolumesGuard<'_> {
             self.volumes_directory.add_directory_entry(name, store_object_id);
         }
         Ok(volume)
+    }
+
+    pub(crate) async fn mount_remote_volume(
+        &mut self,
+        name: &str,
+        crypt: Option<Arc<dyn Crypt>>,
+        server_end: ServerEnd<ffxfs::RemoteVolumeMarker>,
+    ) -> Result<(ffxfs::VolumeInfo, ffxfs::LayerSet, [u8; 16]), Error> {
+        let store = self.volumes_directory.root_volume.volume(name, StoreOptions { crypt }).await?;
+
+        let store_object_id = store.store_object_id();
+        ensure!(!self.mounted_volumes.contains_key(&store_object_id), FxfsError::AlreadyBound);
+
+        // Wait for any initial graveyard reaping queued on volume unlock or filesystem open to
+        // finish before flushing the store, so the background reaper task cannot mutate the
+        // mutable layer concurrently with or after the flush.
+        self.volumes_directory.root_volume.filesystem().graveyard().flush().await;
+
+        // The remote volume client only receives the immutable persistent layer files via
+        // `get_layer_set()`, not the in-memory mutable layer. Flush the store first so that any
+        // mutations in the mutable layer (e.g. from journal replay on unlock or graveyard reaping)
+        // are written to a persistent layer.
+        store
+            .flush_with_reason(FlushReason::Journal(ForceMajor::False))
+            .await
+            .context("failed to flush volume")?;
+        assert_eq!(store.tree().mutable_layer().len(), 0, "Mutable layer should be empty");
+
+        let guid = store.guid();
+        let root_dir_id = store.root_directory_object_id();
+
+        let fx_volume_and_root = self
+            .mount_store::<FxDirectory>(
+                name,
+                store.clone(),
+                self.volumes_directory.memory_pressure_config,
+                false,
+            )
+            .await?;
+        let fx_volume = fx_volume_and_root.volume().clone();
+        let sequence = self.mounted_volumes.get(&store_object_id).unwrap().sequence;
+
+        let volumes_dir_weak = Arc::downgrade(&self.volumes_directory);
+        let unmount_fn: UnmountFn = Box::new(move || {
+            Box::pin(async move {
+                if let Some(volumes_dir) = volumes_dir_weak.upgrade() {
+                    let mut mounted_volumes = volumes_dir.lock().await;
+                    match mounted_volumes.mounted_volumes.get(&store_object_id) {
+                        Some(m) if m.sequence == sequence => {}
+                        _ => return Ok(()),
+                    }
+                    let root_store = volumes_dir.root_volume.volume_directory().store();
+                    let fs = root_store.filesystem();
+                    let _guard = fs
+                        .lock_manager()
+                        .txn_lock(lock_keys![LockKey::object(
+                            root_store.store_object_id(),
+                            volumes_dir.root_volume.volume_directory().object_id(),
+                        )])
+                        .await;
+                    if let Ok(volume) = mounted_volumes.unmount(store_object_id).await {
+                        volume.admin_scope().shutdown();
+                    }
+                }
+                Ok(())
+            })
+        });
+
+        let remote_vol = FxRemoteVolume::new(store.clone(), Some(fx_volume), Some(unmount_fn));
+        let initial_layers = match remote_vol.get_layer_set().await {
+            Ok(layers) => layers,
+            Err(e) => {
+                let _ = self.unmount(store_object_id).await;
+                return Err(e);
+            }
+        };
+
+        if let Some(mounted_volume) = self.mounted_volumes.get_mut(&store_object_id) {
+            mounted_volume.remote_volume = Some(remote_vol.clone());
+        }
+
+        remote_vol.serve(server_end.into_stream());
+
+        let info = ffxfs::VolumeInfo {
+            store_object_id,
+            root_directory_object_id: root_dir_id,
+            block_size: store.filesystem().block_size().get(),
+        };
+
+        Ok((info, initial_layers, guid))
     }
 
     /// Returns the volume if it is found and unlocked, along with a bool to indicate that it is or
@@ -234,6 +320,7 @@ impl MountedVolumesGuard<'_> {
         name: &str,
         store: Arc<ObjectStore>,
         flush_task_config: MemoryPressureConfig,
+        use_driver_blob_paging: bool,
     ) -> Result<FxVolumeAndRoot, Error> {
         let unique_id = zx::Event::create();
         let volume = FxVolumeAndRoot::new::<T>(
@@ -241,10 +328,13 @@ impl MountedVolumesGuard<'_> {
             store,
             unique_id.koid().unwrap().raw_koid(),
             name.to_owned(),
-            self.volumes_directory.blob_resupplied_count.clone(),
+            self.volumes_directory.page_fault_counter.clone(),
             self.volumes_directory.memory_pressure_config,
         )
         .await?;
+        if use_driver_blob_paging {
+            volume.volume().set_use_driver_blob_paging(true);
+        }
         volume
             .volume()
             .start_background_task(flush_task_config, self.volumes_directory.mem_monitor.as_ref());
@@ -258,12 +348,7 @@ impl MountedVolumesGuard<'_> {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         self.mounted_volumes.insert(
             volume.volume().store().store_object_id(),
-            MountedVolume {
-                sequence,
-                volume: volume.clone(),
-                locked: false,
-                use_driver_blob_paging: false,
-            },
+            MountedVolume { sequence, volume: volume.clone(), remote_volume: None, locked: false },
         );
         if let Some(inspect) = self.volumes_directory.inspect_tree.upgrade() {
             inspect.register_volume(
@@ -308,7 +393,7 @@ impl MountedVolumesGuard<'_> {
                 name,
                 [],
                 false,
-                Options { reservation: ReservationOptions::BorrowedMetadata, ..Default::default() },
+                Options { reservation: ReservationOptions::Borrowed, ..Default::default() },
             )
             .await?;
 
@@ -328,6 +413,10 @@ impl MountedVolumesGuard<'_> {
     async fn terminate(&mut self) {
         let mut volumes = std::mem::take(&mut *self.mounted_volumes);
         for mounted_volume in volumes.values_mut() {
+            if let Some(remote_volume) = &mounted_volume.remote_volume {
+                remote_volume.shutdown();
+                remote_volume.wait().await;
+            }
             let admin_scope = mounted_volume.volume.admin_scope();
             admin_scope.shutdown();
             admin_scope.wait().await;
@@ -397,7 +486,7 @@ impl VolumesDirectory {
         root_volume: RootVolume,
         inspect_tree: Weak<FsInspectTree>,
         mem_monitor: Option<MemoryPressureMonitor>,
-        blob_resupplied_count: Arc<PageRefaultCounter>,
+        page_fault_counter: Arc<PageFaultCounter>,
         memory_pressure_config: MemoryPressureConfig,
     ) -> Result<Arc<Self>, Error> {
         let layer_set = root_volume.volume_directory().store().tree().layer_set();
@@ -408,7 +497,7 @@ impl VolumesDirectory {
             mounted_volumes: futures::lock::Mutex::new(HashMap::default()),
             inspect_tree,
             mem_monitor,
-            blob_resupplied_count,
+            page_fault_counter,
             profiling_state: futures::lock::Mutex::new(None),
             pager_dirty_bytes_count: PagerDirtyByteCount::new(),
             max_dirty_bytes_when_critical: AtomicU64::new(zx::system_get_physmem() / 100),
@@ -521,6 +610,9 @@ impl VolumesDirectory {
         match volume_name.as_ref() {
             Some(volume_name) => {
                 let (volume, is_blob) = volumes.get_unlocked_volume_by_name(&volume_name).await?;
+                if is_blob && volume.volume().use_driver_blob_paging() {
+                    return Err(zx::Status::NOT_SUPPORTED);
+                }
                 if let Err(error) = volume
                     .volume()
                     .record_and_replay_profile(new_profile_state(is_blob), &profile_name)
@@ -536,12 +628,10 @@ impl VolumesDirectory {
                 }
             }
             None => {
-                for MountedVolume { volume, use_driver_blob_paging, .. } in
-                    volumes.mounted_volumes.values()
-                {
+                for MountedVolume { volume, .. } in volumes.mounted_volumes.values() {
                     let is_blob =
                         volume.root().clone().into_any().downcast::<BlobDirectory>().is_ok();
-                    if is_blob && *use_driver_blob_paging {
+                    if is_blob && volume.volume().use_driver_blob_paging() {
                         continue;
                     }
                     // Just log the errors, don't stop half-way.
@@ -584,6 +674,9 @@ impl VolumesDirectory {
             return Err(zx::Status::SHOULD_WAIT);
         }
         let (volume, is_blob) = volumes.get_unlocked_volume_by_name(&volume_name).await?;
+        if is_blob && volume.volume().use_driver_blob_paging() {
+            return Err(zx::Status::NOT_SUPPORTED);
+        }
 
         let (opened_node, profile_name) = match identifier {
             fidl_fuchsia_fxfs::ProfileIdentifier::BlobHash(hash) => {
@@ -876,6 +969,15 @@ impl VolumesDirectory {
         Ok(())
     }
 
+    pub async fn mount_remote_volume(
+        self: &Arc<Self>,
+        name: &str,
+        crypt: Option<Arc<dyn Crypt>>,
+        server_end: ServerEnd<ffxfs::RemoteVolumeMarker>,
+    ) -> Result<(ffxfs::VolumeInfo, ffxfs::LayerSet, [u8; 16]), Error> {
+        self.lock().await.mount_remote_volume(name, crypt, server_end).await
+    }
+
     async fn handle_volume_requests(
         self: &Arc<Self>,
         name: &str,
@@ -943,6 +1045,23 @@ impl VolumesDirectory {
                         }
                     }
                     .trace(trace_future_args!("Volume::GetInfo"))
+                    .await?;
+                }
+                VolumeRequest::MountRemote { responder, options, volume } => {
+                    async move {
+                        let result =
+                            self.handle_mount_remote(name, store_id, options, volume).await;
+                        match result {
+                            Ok((info, initial_layers, guid)) => {
+                                responder.send(Ok((info, initial_layers, &guid)))
+                            }
+                            Err(error) => {
+                                error!(error:?, name, store_id; "Failed to mount remote volume");
+                                responder.send(Err(map_to_raw_status(error)))
+                            }
+                        }
+                    }
+                    .trace(trace_future_args!("Volume::MountRemote"))
                     .await?;
                 }
             }
@@ -1095,6 +1214,21 @@ impl VolumesDirectory {
             .context("failed to serve volume")?;
         guard.auto_unmount(volume.volume().store().store_object_id());
         Ok(())
+    }
+
+    async fn handle_mount_remote(
+        self: &Arc<Self>,
+        name: &str,
+        store_id: u64,
+        options: MountOptions,
+        volume: ServerEnd<ffxfs::RemoteVolumeMarker>,
+    ) -> Result<(ffxfs::VolumeInfo, ffxfs::LayerSet, [u8; 16]), Error> {
+        info!(name:%, store_id:%, options:?; "Received mount remote request");
+        let device = self.root_volume.filesystem().device();
+        let crypt = options
+            .crypt
+            .map(|crypt| Arc::new(RemoteCrypt::new_with_device(crypt, device)) as Arc<dyn Crypt>);
+        self.mount_remote_volume(name, crypt, volume).await
     }
 
     async fn handle_admin_requests(
@@ -1256,6 +1390,7 @@ mod tests {
     use fidl::endpoints::{DiscoverableProtocolMarker, create_proxy, create_request_stream};
     use fidl_fuchsia_fs::AdminMarker;
     use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions, VolumeProxy};
+    use fidl_fuchsia_fxfs as ffxfs;
     use fidl_fuchsia_fxfs::{
         CryptRequest, DebugMarker, FxfsKey, KeyPurpose, ProfileIdentifier, WrappedKey,
     };
@@ -1266,17 +1401,22 @@ mod tests {
     use fuchsia_fs::file;
     use futures::{TryStreamExt, join};
     use fxfs::errors::FxfsError;
-    use fxfs::filesystem::{FlushReason, ForceMajor, FxFilesystem};
+    use fxfs::filesystem::{
+        FlushReason, ForceMajor, FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem,
+    };
     use fxfs::fsck::{FsckOptions, fsck, fsck_volume_with_options, fsck_with_options};
     use fxfs::lock_keys;
     use fxfs::object_handle::ObjectHandle;
     use fxfs::object_store::allocator::Allocator;
     use fxfs::object_store::transaction::{LockKey, Options};
     use fxfs::object_store::volume::root_volume;
-    use fxfs::object_store::{AttributeId, AttributeKey, ObjectDescriptor, ObjectKey, ObjectValue};
+    use fxfs::object_store::{
+        AttributeId, AttributeKey, NewChildStoreOptions, ObjectDescriptor, ObjectKey, ObjectStore,
+        ObjectValue,
+    };
     use fxfs_crypto::Crypt;
     use fxfs_insecure_crypto::new_insecure_crypt;
-    use refaults_vmo::PageRefaultCounter;
+    use refaults_vmo::PageFaultCounter;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Weak};
     use std::time::Duration;
@@ -1321,13 +1461,13 @@ mod tests {
     async fn test_volume_creation() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1353,13 +1493,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1382,13 +1522,13 @@ mod tests {
     async fn test_dirty_pages_accumulate_in_parent() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1436,13 +1576,13 @@ mod tests {
     async fn test_volume_reopen() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1468,13 +1608,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1497,13 +1637,13 @@ mod tests {
     async fn test_volume_creation_unencrypted() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1523,13 +1663,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1551,13 +1691,13 @@ mod tests {
     async fn test_volume_reopen_unencrypted() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1577,13 +1717,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1606,13 +1746,13 @@ mod tests {
     async fn test_volume_enumeration() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1646,13 +1786,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1696,13 +1836,13 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
         let root_volume = root_volume(filesystem.clone()).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume,
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1733,13 +1873,13 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
         let crypt = Arc::new(new_insecure_crypt()) as Arc<dyn Crypt>;
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1772,13 +1912,13 @@ mod tests {
     async fn test_mount_volume_using_volume_protocol() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -1890,13 +2030,13 @@ mod tests {
     async fn test_volume_dir_races() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2045,19 +2185,20 @@ mod tests {
         // may still be outstanding. As both the background task and VolumesDirectory::terminate()
         // hold the write lock, we use that to block until the background task has completed.
         volumes_directory.terminate().await;
+        filesystem.close().await.expect("close filesystem failed");
     }
 
     #[fuchsia::test]
     async fn test_shutdown_volume() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2090,13 +2231,13 @@ mod tests {
     async fn test_volume_debug_clear_caches() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2198,13 +2339,13 @@ mod tests {
         let mut device = DeviceHolder::new(FakeDevice::new(8192, 512));
         {
             let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -2242,13 +2383,13 @@ mod tests {
         {
             let filesystem = FxFilesystem::open(device as DeviceHolder).await.unwrap();
             fsck(filesystem.clone()).await.expect("Fsck");
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -2328,13 +2469,13 @@ mod tests {
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         let device = DeviceHolder::new(FakeDevice::new(8192, BLOCK_SIZE.get() as u32));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2414,13 +2555,13 @@ mod tests {
         const BLOCK_COUNT: u64 = 8192;
         let device = DeviceHolder::new(FakeDevice::new(BLOCK_COUNT, BLOCK_SIZE.get() as u32));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2519,13 +2660,13 @@ mod tests {
         let device = {
             let device = DeviceHolder::new(FakeDevice::new(8192, 512));
             let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -2565,13 +2706,13 @@ mod tests {
         device.reopen(false);
         let device = {
             let filesystem = FxFilesystem::open(device as DeviceHolder).await.unwrap();
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -2628,13 +2769,13 @@ mod tests {
         device.reopen(false);
         let filesystem = FxFilesystem::open(device as DeviceHolder).await.unwrap();
         {
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -2705,13 +2846,13 @@ mod tests {
     async fn test_profile_stop() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -2743,13 +2884,13 @@ mod tests {
     async fn test_delete_profile() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -3351,13 +3492,13 @@ mod tests {
     async fn test_delete_volume_while_flushing() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -3505,13 +3646,13 @@ mod tests {
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
         let store_id;
         {
-            let blob_resupplied_count =
-                Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+            let page_fault_counter =
+                Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -3732,15 +3873,15 @@ mod tests {
     async fn test_create_with_low_32_bit_ids() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
 
         {
             let volumes_directory = VolumesDirectory::new(
                 root_volume(filesystem.clone()).await.unwrap(),
                 Weak::new(),
                 None,
-                blob_resupplied_count,
+                page_fault_counter,
                 MemoryPressureConfig::default(),
             )
             .await
@@ -3792,13 +3933,13 @@ mod tests {
         let device = filesystem.take_device().await;
         device.reopen(false);
         let filesystem = FxFilesystem::open(device).await.unwrap();
-        let blob_resupplied_count =
-            Arc::new(PageRefaultCounter::new().expect("Failed to create PageRefaultCounter"));
+        let page_fault_counter =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -3846,12 +3987,12 @@ mod tests {
     async fn test_race_unmount_and_flush_with_crypt_error() {
         let device = DeviceHolder::new(FakeDevice::new(8192, 512));
         let filesystem = FxFilesystem::new_empty(device).await.unwrap();
-        let blob_resupplied_count = Arc::new(PageRefaultCounter::new().unwrap());
+        let page_fault_counter = Arc::new(PageFaultCounter::new().unwrap());
         let volumes_directory = VolumesDirectory::new(
             root_volume(filesystem.clone()).await.unwrap(),
             Weak::new(),
             None,
-            blob_resupplied_count,
+            page_fault_counter,
             MemoryPressureConfig::default(),
         )
         .await
@@ -3970,5 +4111,517 @@ mod tests {
         }
         volumes_directory.terminate().await;
         filesystem.close().await.expect("close filesystem failed");
+    }
+
+    async fn test_setup() -> (OpenFxFilesystem, Arc<VolumesDirectory>) {
+        let device = DeviceHolder::new(FakeDevice::new(8192, 512));
+        let filesystem = FxFilesystemBuilder::new().format(true).open(device).await.unwrap();
+        let blob_resupplied_count =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
+        let volumes_directory = VolumesDirectory::new(
+            root_volume(filesystem.clone()).await.unwrap(),
+            Weak::new(),
+            None,
+            blob_resupplied_count,
+            MemoryPressureConfig::default(),
+        )
+        .await
+        .unwrap();
+        (filesystem, volumes_directory)
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_mounts_and_serves_remote_volume() {
+        let (filesystem, volumes_directory) = test_setup().await;
+
+        volumes_directory
+            .root_volume
+            .new_volume("remote_vol_test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+
+        let (info, initial_layers, _guid) = volumes_directory
+            .mount_remote_volume("remote_vol_test", None, remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        assert_ne!(info.root_directory_object_id, 0);
+        assert_eq!(info.block_size, filesystem.block_size().get());
+
+        // Even for a newly created volume, flushing the initial root and graveyard directory
+        // mutations produces a persistent layer.
+        assert!(!initial_layers.layers.is_empty());
+
+        // Close remote volume.
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_prevents_duplicate_mounts() {
+        let (filesystem, volumes_directory) = test_setup().await;
+
+        volumes_directory
+            .root_volume
+            .new_volume("dup_vol_test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let (_remote_proxy1, remote_server_end1) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+        let (_remote_proxy2, remote_server_end2) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+
+        // First mount succeeds.
+        volumes_directory
+            .mount_remote_volume("dup_vol_test", None, remote_server_end1)
+            .await
+            .expect("first mount should succeed");
+
+        // Second mount for the same volume while mounted must fail with AlreadyBound.
+        let err = volumes_directory
+            .mount_remote_volume("dup_vol_test", None, remote_server_end2)
+            .await
+            .expect_err("second mount must fail");
+        assert!(FxfsError::AlreadyBound.matches(&err));
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_via_volume_request_mount_remote() {
+        let (filesystem, volumes_directory) = test_setup().await;
+
+        // Create volume through volumes_directory so it has an entry.
+        {
+            let (dir_proxy, dir_server_end) =
+                fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+            volumes_directory
+                .create_and_serve_volume(
+                    "vol_fidl_test",
+                    dir_server_end,
+                    MountOptions::default(),
+                    CreateOptions::default(),
+                )
+                .await
+                .expect("create_and_serve_volume failed");
+            drop(dir_proxy);
+        }
+
+        // Wait for it to unmount.
+        loop {
+            {
+                let guard = volumes_directory.lock().await;
+                if guard.mounted_volumes.is_empty() {
+                    break;
+                }
+            }
+            fasync::Timer::new(Duration::from_millis(10)).await;
+        }
+
+        // Open volume directory node to send MountRemote.
+        let (vol_proxy, vol_server_end) =
+            fidl::endpoints::create_proxy::<fidl_fuchsia_fs_startup::VolumeMarker>();
+        let (store_id, _, _) = volumes_directory
+            .root_volume
+            .volume_directory()
+            .lookup("vol_fidl_test")
+            .await
+            .unwrap()
+            .unwrap();
+        let volumes_dir_clone = volumes_directory.clone();
+        let _task = fasync::Task::spawn(async move {
+            let _ = volumes_dir_clone
+                .handle_volume_requests("vol_fidl_test", vol_server_end.into_stream(), store_id)
+                .await;
+        });
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+        let res = vol_proxy
+            .mount_remote(MountOptions::default(), remote_server_end)
+            .await
+            .expect("mount_remote FIDL failed");
+        assert!(res.is_ok());
+
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        drop(vol_proxy);
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_unmount_on_close() {
+        let (filesystem, volumes_directory) = test_setup().await;
+
+        volumes_directory
+            .root_volume
+            .new_volume("unmount_test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+
+        let _ = volumes_directory
+            .mount_remote_volume("unmount_test", None, remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        let (store_id, _, _) = volumes_directory
+            .root_volume
+            .volume_directory()
+            .lookup("unmount_test")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Volume is currently mounted.
+        assert!(volumes_directory.lock().await.mounted_volumes.contains_key(&store_id));
+
+        // Call close on RemoteVolume proxy.
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        // Wait for unmount to complete in VolumesDirectory.
+        loop {
+            {
+                let guard = volumes_directory.lock().await;
+                if !guard.mounted_volumes.contains_key(&store_id) {
+                    break;
+                }
+            }
+            fasync::Timer::new(Duration::from_millis(10)).await;
+        }
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_unmount_on_client_channel_drop() {
+        let (filesystem, volumes_directory) = test_setup().await;
+
+        volumes_directory
+            .root_volume
+            .new_volume("drop_test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+
+        let _ = volumes_directory
+            .mount_remote_volume("drop_test", None, remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        let (store_id, _, _) = volumes_directory
+            .root_volume
+            .volume_directory()
+            .lookup("drop_test")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Volume is currently mounted.
+        assert!(volumes_directory.lock().await.mounted_volumes.contains_key(&store_id));
+
+        // Drop the client proxy (simulates client disconnect / crash).
+        drop(remote_proxy);
+
+        // Wait for unmount to complete in VolumesDirectory.
+        loop {
+            {
+                let guard = volumes_directory.lock().await;
+                if !guard.mounted_volumes.contains_key(&store_id) {
+                    break;
+                }
+            }
+            fasync::Timer::new(Duration::from_millis(10)).await;
+        }
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_encrypted_lifecycle() {
+        use fxfs_insecure_crypto::new_insecure_crypt;
+        let (filesystem, volumes_directory) = test_setup().await;
+        let crypt = Arc::new(new_insecure_crypt());
+
+        let store_id = {
+            let volume = volumes_directory
+                .create_and_mount_volume(
+                    "enc_remote_vol",
+                    Some(crypt.clone()),
+                    false,
+                    CreateOptions::default(),
+                )
+                .await
+                .expect("create_and_mount_volume failed");
+            let store_id = volume.volume().store().store_object_id();
+            volumes_directory.lock().await.unmount(store_id).await.expect("unmount failed");
+            store_id
+        };
+
+        let store = filesystem.object_manager().store(store_id).unwrap();
+        assert!(!store.is_unlocked());
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+
+        let (info, _initial_layers, _guid) = volumes_directory
+            .mount_remote_volume("enc_remote_vol", Some(crypt.clone()), remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        assert_ne!(info.root_directory_object_id, 0);
+        assert!(store.is_unlocked());
+
+        // Close remote volume.
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        // Wait for unmount.
+        loop {
+            {
+                let guard = volumes_directory.lock().await;
+                if !guard.mounted_volumes.contains_key(&store_id) {
+                    break;
+                }
+            }
+            fasync::Timer::new(Duration::from_millis(10)).await;
+        }
+
+        // Store should be locked after close.
+        assert!(!store.is_unlocked());
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_mount_remote_volume_flushes_journaled_mutations() {
+        use crate::fuchsia::layer_pager::VmoLayerObject;
+        use fxfs::lsm_tree::persistent_layer::SyncPersistentLayer;
+        use fxfs::lsm_tree::types::Layer;
+        use fxfs::object_store::{DirType, ObjectKey, ObjectValue};
+        use fxfs_insecure_crypto::new_insecure_crypt;
+        use std::ops::Bound;
+
+        let crypt = Arc::new(new_insecure_crypt());
+        let device = {
+            let (filesystem, volumes_directory) = test_setup().await;
+            {
+                let volume = volumes_directory
+                    .create_and_mount_volume(
+                        "dirty_vol",
+                        Some(crypt.clone()),
+                        false,
+                        CreateOptions::default(),
+                    )
+                    .await
+                    .expect("create_and_mount_volume failed");
+
+                let store_id = volume.volume().store().store_object_id();
+                let root_dir_node = volume.root_dir();
+                let root_dir = root_dir_node.directory();
+                let mut transaction = filesystem
+                    .root_store()
+                    .new_transaction(
+                        lock_keys![LockKey::object(store_id, root_dir.object_id())],
+                        Options::default(),
+                    )
+                    .await
+                    .expect("new_transaction failed");
+                root_dir
+                    .create_child_file(&mut transaction, "dirty_file")
+                    .await
+                    .expect("create_child_file failed");
+                transaction.commit().await.expect("commit failed");
+            }
+
+            volumes_directory.terminate().await;
+            std::mem::drop(volumes_directory);
+            filesystem.close().await.expect("close failed");
+            filesystem.take_device().await
+        };
+
+        // Reopen the filesystem; "dirty_file" is in the journal and not yet in a persistent layer.
+        device.reopen(false);
+        let filesystem = FxFilesystemBuilder::new().open(device).await.expect("open failed");
+        let blob_resupplied_count =
+            Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
+        let volumes_directory = VolumesDirectory::new(
+            root_volume(filesystem.clone()).await.unwrap(),
+            Weak::new(),
+            None,
+            blob_resupplied_count,
+            MemoryPressureConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let (store_id, _, _) = volumes_directory
+            .root_volume
+            .volume_directory()
+            .lookup("dirty_vol")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(filesystem.object_manager().needs_flush(store_id));
+
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+        let (info, initial_layers, _guid) = volumes_directory
+            .mount_remote_volume("dirty_vol", Some(crypt), remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        assert!(!filesystem.object_manager().needs_flush(store_id));
+        assert!(!initial_layers.layers.is_empty());
+
+        // Verify that "dirty_file" is present in the returned persistent layers.
+        let key = ObjectKey::child(info.root_directory_object_id, "dirty_file", DirType::Normal);
+        let mut found = false;
+        for layer_file in initial_layers.layers {
+            let vmo_obj = Arc::new(
+                VmoLayerObject::new(layer_file.vmo, layer_file.object_id, filesystem.block_size())
+                    .expect("VmoLayerObject::new failed"),
+            );
+            let layer: Arc<SyncPersistentLayer<ObjectKey, ObjectValue>> =
+                SyncPersistentLayer::open(vmo_obj).expect("SyncPersistentLayer::open failed");
+            let iter = layer.seek(Bound::Included(&key)).await.expect("seek failed");
+            if let Some(item) = iter.get() {
+                if item.key == &key && matches!(item.value, ObjectValue::Child(_)) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "dirty_file not found in initial_layers");
+
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test(threads = 2)]
+    async fn test_mount_remote_volume_flushes_graveyard_reap() {
+        use crate::fuchsia::layer_pager::VmoLayerObject;
+        use fxfs::lsm_tree::persistent_layer::SyncPersistentLayer;
+        use fxfs::lsm_tree::types::Layer;
+        use fxfs::object_store::{HandleOptions, ObjectKey, ObjectValue};
+        use fxfs_insecure_crypto::new_insecure_crypt;
+        use std::ops::Bound;
+
+        let (filesystem, volumes_directory) = test_setup().await;
+        let crypt = Arc::new(new_insecure_crypt());
+
+        let (store_id, graveyard_obj_id) = {
+            let volume = volumes_directory
+                .create_and_mount_volume(
+                    "graveyard_vol",
+                    Some(crypt.clone()),
+                    false,
+                    CreateOptions::default(),
+                )
+                .await
+                .expect("create_and_mount_volume failed");
+
+            let store = volume.volume().store();
+            let store_id = store.store_object_id();
+            let mut transaction = store
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("new_transaction failed");
+            let handle = ObjectStore::create_object(
+                volume.volume(),
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            let object_id = handle.object_id();
+            store.add_to_graveyard(&mut transaction, object_id);
+            transaction.commit().await.expect("commit failed");
+            std::mem::drop(handle);
+
+            // Flush the store before unmounting so the object and its graveyard entry are in a
+            // persistent layer and `needs_flush` is false prior to `mount_remote_volume`.
+            store
+                .flush_with_reason(FlushReason::Journal(ForceMajor::False))
+                .await
+                .expect("flush failed");
+            assert!(
+                store
+                    .tree()
+                    .find(&ObjectKey::object(object_id))
+                    .await
+                    .expect("find failed")
+                    .is_some(),
+                "graveyard object should exist in persistent layer before unmount"
+            );
+            volumes_directory.lock().await.unmount(store_id).await.expect("unmount failed");
+            (store_id, object_id)
+        };
+
+        let store = filesystem.object_manager().store(store_id).unwrap();
+        assert!(!store.is_unlocked());
+        assert!(!filesystem.object_manager().needs_flush(store_id));
+
+        // Mount remotely: unlocking the encrypted store queues `graveyard_obj_id` onto the
+        // background graveyard reaper task. `mount_remote_volume` must wait for the reaper to
+        // finish before flushing the mutable layer to persistent layers.
+        let (remote_proxy, remote_server_end) =
+            fidl::endpoints::create_proxy::<ffxfs::RemoteVolumeMarker>();
+        let (_info, initial_layers, _guid) = volumes_directory
+            .mount_remote_volume("graveyard_vol", Some(crypt), remote_server_end)
+            .await
+            .expect("mount_remote_volume failed");
+
+        filesystem.graveyard().flush().await;
+        assert_eq!(store.tree().mutable_layer().len(), 0);
+        assert!(!filesystem.object_manager().needs_flush(store_id));
+
+        // Verify that the graveyard object was reaped and compacted out of `initial_layers`.
+        let key = ObjectKey::object(graveyard_obj_id);
+        for layer_file in initial_layers.layers {
+            let vmo_obj = Arc::new(
+                VmoLayerObject::new(layer_file.vmo, layer_file.object_id, filesystem.block_size())
+                    .expect("VmoLayerObject::new failed"),
+            );
+            let layer: Arc<SyncPersistentLayer<ObjectKey, ObjectValue>> =
+                SyncPersistentLayer::open(vmo_obj).expect("SyncPersistentLayer::open failed");
+            let iter = layer.seek(Bound::Included(&key)).await.expect("seek failed");
+            if let Some(item) = iter.get() {
+                assert!(
+                    item.key != &key || matches!(item.value, ObjectValue::None),
+                    "graveyard object was not reaped before flushing initial_layers: {:?}",
+                    item.value
+                );
+            }
+        }
+
+        let close_res = remote_proxy.close().await.expect("close FIDL failed");
+        assert!(close_res.is_ok());
+
+        volumes_directory.terminate().await;
+        filesystem.close().await.expect("close failed");
     }
 }

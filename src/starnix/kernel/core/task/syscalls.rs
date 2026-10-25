@@ -51,8 +51,8 @@ use starnix_uapi::{
     SECCOMP_FILTER_FLAG_NEW_LISTENER, SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_TSYNC,
     SECCOMP_FILTER_FLAG_TSYNC_ESRCH, SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES,
     SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT, SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT,
-    c_char, c_int, clone_args, errno, error, gid_t, pid_t, rlimit, rusage, sched_param,
-    sock_filter, uapi, uid_t,
+    c_char, c_int, clone_args, errno, error, gid_t, pid_t, rusage, sched_param, sock_filter, uapi,
+    uid_t,
 };
 use static_assertions::const_assert;
 use std::cmp;
@@ -105,7 +105,6 @@ pub fn do_clone(current_task: &mut CurrentTask, args: &clone_args) -> Result<pid
     // Set the result register to 0 for the return value from clone in the
     // cloned process.
     new_task.thread_state.registers.set_return_register(0);
-    let (trace_kind, ptrace_state) = current_task.get_ptrace_core_state_for_clone(args);
 
     if args.stack != 0 {
         // In clone() the `stack` argument points to the top of the stack, while in clone3()
@@ -123,13 +122,14 @@ pub fn do_clone(current_task: &mut CurrentTask, args: &clone_args) -> Result<pid
 
     let tid = new_task.task.tid.id;
     let task_ref = Arc::downgrade(&new_task.task);
-    execute_task(new_task, |_| Ok(()), |_| {}, ptrace_state)?;
+    let trace_kind = current_task.ptrace().on_clone(args, &new_task.task);
+    execute_task(new_task, |_| Ok(()), |_| {})?;
 
-    current_task.ptrace_event(trace_kind, tid as u64);
+    current_task.ptrace().on_event(trace_kind, tid as u64);
 
     if args.flags & (CLONE_VFORK as u64) != 0 {
         current_task.wait_for_execve(task_ref)?;
-        current_task.ptrace_event(PtraceOptions::TRACEVFORKDONE, tid as u64);
+        current_task.ptrace().on_event(PtraceOptions::TRACEVFORKDONE, tid as u64);
     }
 
     Ok(tid)
@@ -205,12 +205,13 @@ pub fn sys_execveat(
         return error!(EINVAL);
     }
 
-    // Calculate the limit for argv and environ size as 1/4 of the stack size, floored at 32 pages.
+    // Calculate the limit for argv and environ size as 1/4 of the stack size, floored at 32 pages
+    // and capped at 3/4 of _STK_LIM.
     // See the Limits sections in https://man7.org/linux/man-pages/man2/execve.2.html
     const PAGE_LIMIT: usize = 32;
     let page_limit_size: usize = PAGE_LIMIT * *PAGE_SIZE as usize;
     let rlimit = current_task.thread_group().get_rlimit(Resource::STACK);
-    let stack_limit = rlimit / 4;
+    let stack_limit = cmp::min(rlimit / 4, uapi::_STK_LIM as u64 / 4 * 3);
     let argv_env_limit = cmp::max(page_limit_size, stack_limit as usize);
 
     // The limit per argument or environment variable is 32 pages.
@@ -338,8 +339,7 @@ pub fn sys_getpgid(current_task: &CurrentTask, pid: pid_t) -> Result<pid_t, Errn
     let task = get_task_or_current(current_task, pid)?;
 
     security::check_getpgid_access(current_task, &task)?;
-    let pgid = task.thread_group().read().process_group.id;
-    Ok(pgid)
+    Ok(task.thread_group().pgid().id)
 }
 
 pub fn sys_setpgid(current_task: &CurrentTask, pid: pid_t, pgid: pid_t) -> Result<(), Errno> {
@@ -671,7 +671,7 @@ pub fn sys_sched_getscheduler(current_task: &CurrentTask, pid: pid_t) -> Result<
 
     let target_task = get_task_or_current(current_task, pid)?;
     security::check_task_getscheduler_access(current_task, target_task.as_ref())?;
-    Ok(target_task.read().scheduler_state.policy_for_sched_getscheduler())
+    Ok(target_task.scheduler_state.lock().policy_for_sched_getscheduler())
 }
 
 pub fn sys_sched_setscheduler(
@@ -694,19 +694,20 @@ pub fn sys_sched_setscheduler(
         policy.realtime_priority_from(current_task.read_object(param)?.sched_priority)?;
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state.clone();
+    let (current_policy, current_realtime_priority, current_normal_priority, current_reset_on_fork) = {
+        let state = target_task.scheduler_state.lock();
+        (state.policy, state.realtime_priority, state.normal_priority, state.reset_on_fork)
+    };
 
     // Check capabilities and permissions, if required, for the operation.
     let euid_friendly = current_task.is_euid_friendly_with(&target_task);
-    let strengthening = current_state.realtime_priority < realtime_priority;
+    let strengthening = current_realtime_priority < realtime_priority;
     let rlimited = strengthening
         && realtime_priority.exceeds(target_task.thread_group().get_rlimit(Resource::RTPRIO));
-    let clearing_reset_on_fork = current_state.reset_on_fork && !reset_on_fork;
-    let caught_in_idle_trap = current_state.policy == SchedulingPolicy::Idle
+    let clearing_reset_on_fork = current_reset_on_fork && !reset_on_fork;
+    let caught_in_idle_trap = current_policy == SchedulingPolicy::Idle
         && policy != SchedulingPolicy::Idle
-        && current_state
-            .normal_priority
-            .exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
+        && current_normal_priority.exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
     if !euid_friendly || rlimited || clearing_reset_on_fork || caught_in_idle_trap {
         security::check_task_capable(current_task, CAP_SYS_NICE)?;
     }
@@ -837,7 +838,7 @@ pub fn sys_sched_getparam(
     }
 
     let target_task = get_task_or_current(current_task, pid)?;
-    let param_value = target_task.read().scheduler_state.get_sched_param();
+    let param_value = target_task.scheduler_state.lock().get_sched_param();
     current_task.write_object(param, &param_value)?;
     Ok(())
 }
@@ -852,17 +853,19 @@ pub fn sys_sched_setparam(
         return error!(EINVAL);
     }
     let target_task = get_task_or_current(current_task, pid)?;
+    let param = current_task.read_object(param)?;
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state.clone();
+    let (policy, current_priority) = {
+        let state = target_task.scheduler_state.lock();
+        (state.policy, state.realtime_priority)
+    };
 
-    let realtime_priority = current_state
-        .policy
-        .realtime_priority_from(current_task.read_object(param)?.sched_priority)?;
+    let realtime_priority = policy.realtime_priority_from(param.sched_priority)?;
 
     // Check capabilities and permissions, if required, for the operation.
     let euid_friendly = current_task.is_euid_friendly_with(&target_task);
-    let strengthening = current_state.realtime_priority < realtime_priority;
+    let strengthening = current_priority < realtime_priority;
     let rlimited = strengthening
         && realtime_priority.exceeds(target_task.thread_group().get_rlimit(Resource::RTPRIO));
     if !euid_friendly || rlimited {
@@ -1160,11 +1163,64 @@ pub fn sys_prctl(
                 error!(EINVAL)
             }
         },
+        #[cfg(target_arch = "aarch64")]
+        starnix_uapi::PR_SVE_GET_VL => {
+            // Like Linux, ignore `arg2`..`arg5`: `prctl` is variadic, so callers leave the unused
+            // arguments uninitialized.
+            if !current_task.thread_state.extended_pstate.has_sve() {
+                return error!(EINVAL);
+            }
+            Ok((sve_prctl_status(current_task) as usize).into())
+        }
+        #[cfg(target_arch = "aarch64")]
+        starnix_uapi::PR_SVE_SET_VL => {
+            // Like Linux, ignore `arg3`..`arg5`.
+            if !current_task.thread_state.extended_pstate.has_sve() {
+                return error!(EINVAL);
+            }
+            let arg = u32::try_from(arg2).map_err(|_| errno!(EINVAL))?;
+            let valid_mask = starnix_uapi::PR_SVE_VL_LEN_MASK
+                | starnix_uapi::PR_SVE_VL_INHERIT
+                | starnix_uapi::PR_SVE_SET_VL_ONEXEC;
+            if (arg & !valid_mask) != 0 {
+                return error!(EINVAL);
+            }
+            let vl = arg & starnix_uapi::PR_SVE_VL_LEN_MASK;
+            if vl < starnix_uapi::SVE_VL_MIN
+                || vl > starnix_uapi::SVE_VL_MAX
+                || vl % starnix_uapi::SVE_VQ_BYTES != 0
+            {
+                return error!(EINVAL);
+            }
+            // The only supported vector length is 128 bits (`SVE_VL_MIN`), so every valid request,
+            // whether immediate or deferred with `PR_SVE_SET_VL_ONEXEC`, clamps to the thread's
+            // current vector length. As in Linux's `vec_set_vector_length()`, setting the current
+            // vector length leaves the SVE register state untouched, while the `PR_SVE_VL_INHERIT`
+            // setting is always updated.
+            current_task
+                .thread_state
+                .extended_pstate
+                .set_sve_vl_inherit((arg & starnix_uapi::PR_SVE_VL_INHERIT) != 0);
+            Ok((sve_prctl_status(current_task) as usize).into())
+        }
         _ => {
             track_stub!(TODO("https://fxbug.dev/322874733"), "prctl fallthrough", option);
             error!(ENOSYS)
         }
     }
+}
+
+/// Returns the value reported by `prctl(PR_SVE_GET_VL)` and `prctl(PR_SVE_SET_VL)`: the thread's
+/// SVE vector length in bytes, which is always 128 bits (`SVE_VL_MIN`) on Starnix, OR-ed with
+/// `PR_SVE_VL_INHERIT` when the vector length is inherited across `execve`.
+#[cfg(target_arch = "aarch64")]
+fn sve_prctl_status(current_task: &CurrentTask) -> u32 {
+    let inherit = if current_task.thread_state.extended_pstate.sve_vl_inherit() {
+        starnix_uapi::PR_SVE_VL_INHERIT
+    } else {
+        0
+    };
+    starnix_uapi::SVE_VL_MIN | inherit
 }
 
 pub fn sys_ptrace(
@@ -1289,36 +1345,26 @@ where
 
     let resource = Resource::from_raw(user_resource)?;
 
-    let old_limit = match resource {
-        // TODO: Integrate Resource::STACK with generic ResourceLimits machinery.
-        Resource::STACK => {
-            if !new_limit_ref.is_null() {
-                track_stub!(
-                    TODO("https://fxbug.dev/322874791"),
-                    "prlimit64 cannot set RLIMIT_STACK"
-                );
-            }
-            // The stack size is fixed at the moment, but
-            // if MAP_GROWSDOWN is implemented this should
-            // report the limit that it can be grown.
-            let mm = target_task.mm()?;
-            let mm_state = mm.state.read();
-            let stack_size = mm_state.stack_size as u64;
-            rlimit { rlim_cur: stack_size, rlim_max: stack_size }
+    let new_limit = if new_limit_ref.is_null() {
+        None
+    } else {
+        let new_limit = current_task.read_multi_arch_object(new_limit_ref)?;
+        if new_limit.rlim_cur > new_limit.rlim_max {
+            return error!(EINVAL);
         }
-        _ => {
-            let new_limit = if new_limit_ref.is_null() {
-                None
-            } else {
-                let new_limit = current_task.read_multi_arch_object(new_limit_ref)?;
-                if new_limit.rlim_cur > new_limit.rlim_max {
-                    return error!(EINVAL);
-                }
-                Some(new_limit)
-            };
-            ThreadGroup::adjust_rlimits(current_task, &target_task, resource, new_limit)?
-        }
+        Some(new_limit)
     };
+    let old_limit = ThreadGroup::adjust_rlimits(current_task, &target_task, resource, new_limit)?;
+    // Note: Routing `Resource::STACK` through `ThreadGroup::adjust_rlimits` updates the stored
+    // limit (visible via `getrlimit`/`prlimit64`, `/proc/[pid]/limits`, and `execve` argument size
+    // checks), but Starnix does not yet enforce `RLIMIT_STACK` when creating or growing stack
+    // mappings.
+    if resource == Resource::STACK && new_limit.is_some() {
+        track_stub!(
+            TODO("https://fxbug.dev/571982693"),
+            "prlimit64 does not enforce RLIMIT_STACK on stack growth"
+        );
+    }
     if !old_limit_ref.is_null() {
         current_task.write_multi_arch_object(old_limit_ref, old_limit)?;
     }
@@ -1600,8 +1646,7 @@ pub fn sys_getpriority(current_task: &CurrentTask, which: u32, who: i32) -> Resu
     }
     track_stub!(TODO("https://fxbug.dev/322893809"), "getpriority permissions");
     let target_task = get_task_or_current(current_task, who)?;
-    let state = target_task.read();
-    Ok(state.scheduler_state.normal_priority.raw_priority())
+    Ok(target_task.scheduler_state.lock().normal_priority.raw_priority())
 }
 
 // Note the asymmetry with sys_getpriority: this call's `priority` parameter is a
@@ -1626,11 +1671,11 @@ pub fn sys_setpriority(
     let normal_priority = NormalPriority::from_setpriority_syscall(priority);
 
     // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let current_state = target_task.read().scheduler_state.clone();
+    let current_priority = target_task.scheduler_state.lock().normal_priority;
 
     // Check capabilities and permissions, if required, for the operation.
     let euid_friendly = current_task.is_euid_friendly_with(&target_task);
-    let strengthening = current_state.normal_priority < normal_priority;
+    let strengthening = current_priority < normal_priority;
     let rlimited = strengthening
         && normal_priority.exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
     if !euid_friendly {
@@ -2154,6 +2199,500 @@ mod tests {
         .await;
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[::fuchsia::test]
+    async fn test_prctl_sve_vl() {
+        use crate::task::ArchExtendedPstateStorage;
+        use extended_pstate::ExtendedPstateState;
+        use starnix_uapi::{
+            PR_SVE_GET_VL, PR_SVE_SET_VL, PR_SVE_SET_VL_ONEXEC, PR_SVE_VL_INHERIT, SVE_VL_MAX,
+            SVE_VL_MIN,
+        };
+
+        fn vl_result(value: u32) -> Result<SyscallResult, Errno> {
+            Ok((value as usize).into())
+        }
+
+        fn assert_sve_regs(current_task: &CurrentTask, p_regs: &[u16; 16], ffr: u16) {
+            let ArchExtendedPstateStorage::State64(state) =
+                &current_task.thread_state.extended_pstate
+            else {
+                unreachable!()
+            };
+            assert_eq!(state.get_arm64_p_regs(), p_regs);
+            assert_eq!(state.get_arm64_ffr(), ffr);
+        }
+
+        spawn_kernel_and_run(async |current_task| {
+            // When SVE is not supported (`with_sve(false)`), both PR_SVE_GET_VL and PR_SVE_SET_VL
+            // must fail with EINVAL.
+            current_task.thread_state.extended_pstate =
+                ArchExtendedPstateStorage::State64(Box::new(ExtendedPstateState::with_sve(false)));
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), error!(EINVAL));
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                error!(EINVAL)
+            );
+
+            // On a 32-bit compat task (`State32`), both must fail with EINVAL.
+            current_task.thread_state.extended_pstate =
+                ArchExtendedPstateStorage::State32(Box::default());
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), error!(EINVAL));
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                error!(EINVAL)
+            );
+
+            // Enable SVE with initial predicate and FFR values.
+            let pregs = [0x5a5au16; 16];
+            let mut pstate = ExtendedPstateState::with_sve(true);
+            pstate.set_arm64_sve_state(&pregs, 0x00ff);
+            current_task.thread_state.extended_pstate =
+                ArchExtendedPstateStorage::State64(Box::new(pstate));
+
+            // PR_SVE_GET_VL returns 16 (SVE_VL_MIN) without PR_SVE_VL_INHERIT. Like Linux, the
+            // unused trailing arguments are ignored: `prctl` is variadic and callers leave them
+            // uninitialized.
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), vl_result(SVE_VL_MIN));
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 1, 2, 3, 4), vl_result(SVE_VL_MIN));
+
+            // PR_SVE_SET_VL rejects unknown flags and out-of-range/unaligned VLs.
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, (SVE_VL_MIN | (1 << 20)) as u64, 0, 0, 0),
+                error!(EINVAL)
+            );
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, (SVE_VL_MIN as u64) | (1 << 32), 0, 0, 0),
+                error!(EINVAL)
+            );
+            for bad_vl in [0u32, 8, 24, SVE_VL_MAX + 16] {
+                assert_eq!(
+                    sys_prctl(current_task, PR_SVE_SET_VL, bad_vl as u64, 0, 0, 0),
+                    error!(EINVAL),
+                    "bad_vl={} should fail",
+                    bad_vl
+                );
+            }
+            // Rejected requests leave the SVE registers and PR_SVE_VL_INHERIT untouched.
+            assert_sve_regs(current_task, &pregs, 0x00ff);
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), vl_result(SVE_VL_MIN));
+
+            // An immediate PR_SVE_SET_VL clamps the VL to 16, which is already the thread's
+            // current vector length, so, as on Linux, P0-P15 and FFR are preserved. The unused
+            // trailing arguments are ignored.
+            assert_eq!(sys_prctl(current_task, PR_SVE_SET_VL, 64, 1, 2, 3), vl_result(SVE_VL_MIN));
+            assert_sve_regs(current_task, &pregs, 0x00ff);
+
+            // PR_SVE_VL_INHERIT is recorded, echoed back by PR_SVE_SET_VL, reported by
+            // PR_SVE_GET_VL, and preserved across `reset` (execve).
+            assert_eq!(
+                sys_prctl(
+                    current_task,
+                    PR_SVE_SET_VL,
+                    (SVE_VL_MAX | PR_SVE_VL_INHERIT) as u64,
+                    0,
+                    0,
+                    0
+                ),
+                vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            assert_sve_regs(current_task, &pregs, 0x00ff);
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0),
+                vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            current_task.thread_state.extended_pstate.reset();
+            assert_sve_regs(current_task, &[0u16; 16], 0);
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0),
+                vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+
+            // PR_SVE_SET_VL_ONEXEC defers the (unchanged) vector length to the next execve, but
+            // still updates PR_SVE_VL_INHERIT immediately, as on Linux.
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, (32 | PR_SVE_SET_VL_ONEXEC) as u64, 0, 0, 0),
+                vl_result(SVE_VL_MIN)
+            );
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), vl_result(SVE_VL_MIN));
+            assert_eq!(
+                sys_prctl(
+                    current_task,
+                    PR_SVE_SET_VL,
+                    (32 | PR_SVE_SET_VL_ONEXEC | PR_SVE_VL_INHERIT) as u64,
+                    0,
+                    0,
+                    0
+                ),
+                vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0),
+                vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+
+            // A PR_SVE_SET_VL without PR_SVE_VL_INHERIT clears the setting again.
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                vl_result(SVE_VL_MIN)
+            );
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), vl_result(SVE_VL_MIN));
+        })
+        .await;
+    }
+
+    /// The live register state used by the `PR_SVE_*` tests below.
+    #[cfg(target_arch = "aarch64")]
+    struct SveTestRegs {
+        qregs: [u128; 32],
+        fpsr: u32,
+        fpcr: u32,
+        pregs: [u16; 16],
+        ffr: u16,
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    impl SveTestRegs {
+        fn sample() -> Self {
+            let mut qregs = [0u128; 32];
+            for (i, q) in qregs.iter_mut().enumerate() {
+                *q = (i as u128 + 1) * 0x0102030405060708_u128;
+            }
+            let mut pregs = [0u16; 16];
+            for (i, p) in pregs.iter_mut().enumerate() {
+                *p = 0x5a00 | (i as u16 + 1);
+            }
+            Self { qregs, fpsr: 0x10, fpcr: 0x20, pregs, ffr: 0x00ff }
+        }
+
+        fn install(&self, current_task: &mut CurrentTask, has_sve: bool) {
+            use crate::task::ArchExtendedPstateStorage;
+            use extended_pstate::ExtendedPstateState;
+            let mut pstate = ExtendedPstateState::with_sve(has_sve);
+            pstate.set_arm64_state(&self.qregs, self.fpsr, self.fpcr);
+            pstate.set_arm64_sve_state(&self.pregs, self.ffr);
+            current_task.thread_state.extended_pstate =
+                ArchExtendedPstateStorage::State64(Box::new(pstate));
+        }
+
+        fn assert_live(&self, current_task: &CurrentTask, context: &str) {
+            use crate::task::ArchExtendedPstateStorage;
+            let ArchExtendedPstateStorage::State64(state) =
+                &current_task.thread_state.extended_pstate
+            else {
+                panic!("{context}: not 64-bit state");
+            };
+            assert_eq!(state.get_arm64_qregs(), &self.qregs, "{context}");
+            assert_eq!(state.get_arm64_fpsr(), self.fpsr, "{context}");
+            assert_eq!(state.get_arm64_fpcr(), self.fpcr, "{context}");
+            assert_eq!(state.get_arm64_p_regs(), &self.pregs, "{context}");
+            assert_eq!(state.get_arm64_ffr(), self.ffr, "{context}");
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn sve_vl_result(value: u32) -> Result<SyscallResult, Errno> {
+        Ok((value as usize).into())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[::fuchsia::test]
+    async fn test_prctl_sve_vl_ignores_trailing_args_and_preserves_registers() {
+        use starnix_uapi::{
+            PR_SVE_GET_VL, PR_SVE_SET_VL, PR_SVE_SET_VL_ONEXEC, PR_SVE_VL_INHERIT, SVE_VL_MAX,
+            SVE_VL_MIN,
+        };
+        const INHERIT: u32 = PR_SVE_VL_INHERIT;
+        const ONEXEC: u32 = PR_SVE_SET_VL_ONEXEC;
+
+        spawn_kernel_and_run(async |current_task| {
+            let regs = SveTestRegs::sample();
+            regs.install(current_task, true);
+
+            // `prctl` is variadic, so Linux's `PR_SVE_GET_VL` ignores `arg2`..`arg5` (and
+            // `PR_SVE_SET_VL` ignores `arg3`..`arg5`) entirely: any garbage left in the unused
+            // argument registers by the caller must not make the call fail.
+            let junk_args: [[u64; 4]; 5] = [
+                [0, 0, 0, 0],
+                [u64::MAX, u64::MAX, u64::MAX, u64::MAX],
+                [1 << 63, 0, 0, 0],
+                [0, 0, 0, u64::MAX],
+                [0xdead_beef, 0xcafe_babe, 0xfeed_face, 0xbaad_f00d],
+            ];
+            for [arg2, arg3, arg4, arg5] in junk_args {
+                assert_eq!(
+                    sys_prctl(current_task, PR_SVE_GET_VL, arg2, arg3, arg4, arg5),
+                    sve_vl_result(SVE_VL_MIN),
+                    "PR_SVE_GET_VL({arg2:#x}, {arg3:#x}, {arg4:#x}, {arg5:#x})"
+                );
+            }
+            regs.assert_live(current_task, "after PR_SVE_GET_VL");
+
+            // Every valid `PR_SVE_SET_VL` request clamps to the thread's current (and only)
+            // 128-bit vector length. As on Linux, setting the current vector length, whether
+            // immediately or deferred with `PR_SVE_SET_VL_ONEXEC`, never touches the live
+            // Q0-Q31/FPSR/FPCR/P0-P15/FFR state, while `PR_SVE_VL_INHERIT` is always updated
+            // immediately and reported by both the call itself and `PR_SVE_GET_VL`.
+            let set_vl_cases: [(u32, [u64; 3], u32); 9] = [
+                (SVE_VL_MIN, [0, 0, 0], SVE_VL_MIN),
+                (SVE_VL_MIN, [u64::MAX, u64::MAX, u64::MAX], SVE_VL_MIN),
+                (SVE_VL_MAX | INHERIT, [u64::MAX, 1, 0], SVE_VL_MIN | INHERIT),
+                (32 | ONEXEC, [u64::MAX, u64::MAX, u64::MAX], SVE_VL_MIN),
+                (
+                    SVE_VL_MIN | ONEXEC | INHERIT,
+                    [u64::MAX, u64::MAX, u64::MAX],
+                    SVE_VL_MIN | INHERIT,
+                ),
+                (4096 | ONEXEC | INHERIT, [7, 8, 9], SVE_VL_MIN | INHERIT),
+                (SVE_VL_MIN | ONEXEC, [0, 0, 0], SVE_VL_MIN),
+                (256 | INHERIT, [0, 0, 1 << 63], SVE_VL_MIN | INHERIT),
+                (SVE_VL_MIN, [1, 2, 3], SVE_VL_MIN),
+            ];
+            for (arg2, [arg3, arg4, arg5], expected) in set_vl_cases {
+                let context = format!("PR_SVE_SET_VL({arg2:#x}, {arg3:#x}, {arg4:#x}, {arg5:#x})");
+                assert_eq!(
+                    sys_prctl(current_task, PR_SVE_SET_VL, arg2 as u64, arg3, arg4, arg5),
+                    sve_vl_result(expected),
+                    "{context}"
+                );
+                regs.assert_live(current_task, &context);
+                assert_eq!(
+                    current_task.thread_state.extended_pstate.sve_vl_inherit(),
+                    (arg2 & INHERIT) != 0,
+                    "{context}"
+                );
+                for [garg2, garg3, garg4, garg5] in junk_args {
+                    assert_eq!(
+                        sys_prctl(current_task, PR_SVE_GET_VL, garg2, garg3, garg4, garg5),
+                        sve_vl_result(expected),
+                        "{context}"
+                    );
+                }
+            }
+
+            // Invalid `arg2` values fail with EINVAL regardless of the trailing arguments, and
+            // leave both the registers and the `PR_SVE_VL_INHERIT` setting untouched.
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, (SVE_VL_MIN | INHERIT) as u64, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN | INHERIT)
+            );
+            let invalid_arg2: [u64; 7] = [
+                u64::MAX,
+                (SVE_VL_MIN as u64) | (1 << 32),
+                0,
+                8,
+                (SVE_VL_MAX + 16) as u64,
+                (SVE_VL_MIN | ONEXEC | INHERIT | (1 << 16)) as u64,
+                (SVE_VL_MIN | (1 << 31)) as u64,
+            ];
+            for arg2 in invalid_arg2 {
+                for [_, arg3, arg4, arg5] in junk_args {
+                    let context =
+                        format!("PR_SVE_SET_VL({arg2:#x}, {arg3:#x}, {arg4:#x}, {arg5:#x})");
+                    assert_eq!(
+                        sys_prctl(current_task, PR_SVE_SET_VL, arg2, arg3, arg4, arg5),
+                        error!(EINVAL),
+                        "{context}"
+                    );
+                    regs.assert_live(current_task, &context);
+                    assert!(
+                        current_task.thread_state.extended_pstate.sve_vl_inherit(),
+                        "{context}"
+                    );
+                }
+            }
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+                sve_vl_result(SVE_VL_MIN | INHERIT)
+            );
+        })
+        .await;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[::fuchsia::test]
+    async fn test_prctl_sve_vl_arch32() {
+        use crate::task::ArchExtendedPstateStorage;
+        use starnix_uapi::{
+            PR_SVE_GET_VL, PR_SVE_SET_VL, PR_SVE_SET_VL_ONEXEC, PR_SVE_VL_INHERIT, SVE_VL_MAX,
+            SVE_VL_MIN,
+        };
+
+        spawn_kernel_and_run(async |current_task| {
+            // Start from a 64-bit task with SVE and `PR_SVE_VL_INHERIT` set, then `execve` a
+            // 32-bit binary following the `finish_exec` sequence: `registers.load(regs)` followed
+            // by `extended_pstate.reset_with_arch(arch_width())`, which switches the storage to
+            // `State32`.
+            SveTestRegs::sample().install(current_task, true);
+            assert_eq!(
+                sys_prctl(
+                    current_task,
+                    PR_SVE_SET_VL,
+                    (SVE_VL_MIN | PR_SVE_VL_INHERIT) as u64,
+                    0,
+                    0,
+                    0
+                ),
+                sve_vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            let mut regs32 = zx::sys::zx_restricted_state_t::default();
+            regs32.cpsr = zx::sys::ZX_REG_CPSR_ARCH_32_MASK as u32;
+            current_task.thread_state.registers.load(regs32);
+            let arch_width = current_task.thread_state.arch_width();
+            current_task.thread_state.extended_pstate.reset_with_arch(arch_width);
+            assert!(current_task.is_arch32());
+            assert!(matches!(
+                current_task.thread_state.extended_pstate,
+                ArchExtendedPstateStorage::State32(_)
+            ));
+            assert!(!current_task.thread_state.extended_pstate.has_sve());
+            assert!(!current_task.thread_state.extended_pstate.sve_vl_inherit());
+
+            // Like Linux (where compat tasks have no SVE prctls), both `PR_SVE_GET_VL` and
+            // `PR_SVE_SET_VL` fail with EINVAL on a 32-bit task, regardless of the arguments.
+            let args: [[u64; 4]; 7] = [
+                [0, 0, 0, 0],
+                [SVE_VL_MIN as u64, 0, 0, 0],
+                [(SVE_VL_MIN | PR_SVE_VL_INHERIT) as u64, 0, 0, 0],
+                [(SVE_VL_MAX | PR_SVE_SET_VL_ONEXEC | PR_SVE_VL_INHERIT) as u64, 0, 0, 0],
+                [SVE_VL_MIN as u64, u64::MAX, u64::MAX, u64::MAX],
+                [u64::MAX, u64::MAX, u64::MAX, u64::MAX],
+                [1, 2, 3, 4],
+            ];
+            for [arg2, arg3, arg4, arg5] in args {
+                let context = format!("({arg2:#x}, {arg3:#x}, {arg4:#x}, {arg5:#x})");
+                assert_eq!(
+                    sys_prctl(current_task, PR_SVE_GET_VL, arg2, arg3, arg4, arg5),
+                    error!(EINVAL),
+                    "PR_SVE_GET_VL{context}"
+                );
+                assert_eq!(
+                    sys_prctl(current_task, PR_SVE_SET_VL, arg2, arg3, arg4, arg5),
+                    error!(EINVAL),
+                    "PR_SVE_SET_VL{context}"
+                );
+            }
+            // The 32-bit state is left untouched.
+            let ArchExtendedPstateStorage::State32(state32) =
+                &current_task.thread_state.extended_pstate
+            else {
+                unreachable!()
+            };
+            assert_eq!(state32.get_arm32_qregs(), &[0u128; 16]);
+            assert_eq!(state32.get_arm32_fpsr(), 0);
+            assert_eq!(state32.get_arm32_fpcr(), 0);
+            assert!(!current_task.thread_state.extended_pstate.sve_vl_inherit());
+
+            // `execve` back into a 64-bit binary creates fresh 64-bit storage: the earlier
+            // `PR_SVE_VL_INHERIT` setting did not survive the trip through the 32-bit task.
+            current_task.thread_state.registers.load(zx::sys::zx_restricted_state_t::default());
+            let arch_width = current_task.thread_state.arch_width();
+            current_task.thread_state.extended_pstate.reset_with_arch(arch_width);
+            assert!(!current_task.is_arch32());
+            assert!(matches!(
+                current_task.thread_state.extended_pstate,
+                ArchExtendedPstateStorage::State64(_)
+            ));
+            assert!(!current_task.thread_state.extended_pstate.sve_vl_inherit());
+            let expected = if current_task.thread_state.extended_pstate.has_sve() {
+                sve_vl_result(SVE_VL_MIN)
+            } else {
+                error!(EINVAL)
+            };
+            assert_eq!(sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0), expected);
+        })
+        .await;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[::fuchsia::test]
+    async fn test_prctl_sve_vl_inherited_by_clone() {
+        use crate::task::ArchExtendedPstateStorage;
+        use extended_pstate::ExtendedPstateState;
+        use starnix_uapi::{PR_SVE_GET_VL, PR_SVE_SET_VL, PR_SVE_VL_INHERIT, SVE_VL_MIN};
+
+        spawn_kernel_and_run(async |current_task| {
+            let regs = SveTestRegs::sample();
+            regs.install(current_task, true);
+            assert_eq!(
+                sys_prctl(
+                    current_task,
+                    PR_SVE_SET_VL,
+                    (SVE_VL_MIN | PR_SVE_VL_INHERIT) as u64,
+                    0,
+                    0,
+                    0
+                ),
+                sve_vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+
+            // fork/clone copies the parent's thread state (`ThreadState::snapshot`): the child
+            // inherits `has_sve`, the `PR_SVE_VL_INHERIT` setting, and the live Q0-Q31/FPSR/FPCR
+            // and P0-P15/FFR registers, as on Linux.
+            let mut child = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            assert!(child.thread_state.extended_pstate.has_sve());
+            assert!(child.thread_state.extended_pstate.sve_vl_inherit());
+            regs.assert_live(&child, "child after clone");
+            assert_eq!(
+                sys_prctl(&mut child, PR_SVE_GET_VL, 0, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            let (
+                ArchExtendedPstateStorage::State64(parent_state),
+                ArchExtendedPstateStorage::State64(child_state),
+            ) = (&current_task.thread_state.extended_pstate, &child.thread_state.extended_pstate)
+            else {
+                unreachable!()
+            };
+            assert!(!std::ptr::eq(parent_state.as_ref(), child_state.as_ref()));
+
+            // The child's `PR_SVE_SET_VL` does not affect the parent, and the parent's `execve`
+            // (`reset`) does not affect the child.
+            assert_eq!(
+                sys_prctl(&mut child, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN)
+            );
+            assert_eq!(sys_prctl(&mut child, PR_SVE_GET_VL, 0, 0, 0, 0), sve_vl_result(SVE_VL_MIN));
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+            regs.assert_live(current_task, "parent after child's PR_SVE_SET_VL");
+            current_task.thread_state.extended_pstate.reset();
+            regs.assert_live(&child, "child after parent's reset");
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_GET_VL, 0, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN | PR_SVE_VL_INHERIT)
+            );
+
+            // A child cloned after `PR_SVE_SET_VL` without `PR_SVE_VL_INHERIT` does not inherit
+            // the setting either.
+            assert_eq!(
+                sys_prctl(current_task, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN)
+            );
+            let mut child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            assert!(child2.thread_state.extended_pstate.has_sve());
+            assert!(!child2.thread_state.extended_pstate.sve_vl_inherit());
+            assert_eq!(
+                sys_prctl(&mut child2, PR_SVE_GET_VL, 0, 0, 0, 0),
+                sve_vl_result(SVE_VL_MIN)
+            );
+
+            // A parent without SVE support forks a child without SVE support.
+            current_task.thread_state.extended_pstate =
+                ArchExtendedPstateStorage::State64(Box::new(ExtendedPstateState::with_sve(false)));
+            let mut child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            assert!(!child3.thread_state.extended_pstate.has_sve());
+            assert_eq!(sys_prctl(&mut child3, PR_SVE_GET_VL, 0, 0, 0, 0), error!(EINVAL));
+            assert_eq!(
+                sys_prctl(&mut child3, PR_SVE_SET_VL, SVE_VL_MIN as u64, 0, 0, 0),
+                error!(EINVAL)
+            );
+        })
+        .await;
+    }
+
     #[::fuchsia::test]
     async fn test_sys_getsid() {
         spawn_kernel_and_run(async |current_task| {
@@ -2277,7 +2816,7 @@ mod tests {
                 .thread_group()
                 .limits
                 .lock()
-                .set(Resource::RTPRIO, rlimit { rlim_cur: 255, rlim_max: 255 });
+                .set(Resource::RTPRIO, uapi::rlimit { rlim_cur: 255, rlim_max: 255 });
 
             let scheduler = sys_sched_getscheduler(&current_task, 0).unwrap();
             assert_eq!(scheduler, SCHED_NORMAL, "tasks should have normal scheduler by default");
@@ -2358,6 +2897,101 @@ mod tests {
             assert_eq!(current_task.current_creds().euid, 43);
             assert_eq!(current_task.current_creds().uid, 41);
             assert_eq!(current_task.current_creds().saved_uid, 43);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_prlimit64_stack() {
+        spawn_kernel_and_run(async |current_task| {
+            let mapped_address = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+            let old_limit_ref = UserRef::<uapi::rlimit>::new(mapped_address);
+            let new_limit_ref = UserRef::<uapi::rlimit>::new(
+                (mapped_address + std::mem::size_of::<uapi::rlimit>()).unwrap(),
+            );
+
+            sys_prlimit64(current_task, 0, uapi::RLIMIT_STACK, UserRef::default(), old_limit_ref)
+                .expect("prlimit64 get RLIMIT_STACK");
+            let initial_limit: uapi::rlimit =
+                current_task.read_object(old_limit_ref).expect("read initial limit");
+            assert_eq!(
+                (initial_limit.rlim_cur, initial_limit.rlim_max),
+                (uapi::_STK_LIM as u64, uapi::RLIM_INFINITY as u64)
+            );
+
+            let updated_limit =
+                uapi::rlimit { rlim_cur: 4 * 1024 * 1024, rlim_max: 16 * 1024 * 1024 };
+            current_task.write_object(new_limit_ref, &updated_limit).expect("write new limit");
+            sys_prlimit64(current_task, 0, uapi::RLIMIT_STACK, new_limit_ref, old_limit_ref)
+                .expect("prlimit64 set RLIMIT_STACK");
+            let prev_limit: uapi::rlimit =
+                current_task.read_object(old_limit_ref).expect("read previous limit");
+            assert_eq!(
+                (prev_limit.rlim_cur, prev_limit.rlim_max),
+                (initial_limit.rlim_cur, initial_limit.rlim_max)
+            );
+            let current_limit = current_task.thread_group().limits.lock().get(Resource::STACK);
+            assert_eq!(
+                (current_limit.rlim_cur, current_limit.rlim_max),
+                (updated_limit.rlim_cur, updated_limit.rlim_max)
+            );
+
+            // Setting rlim_cur > rlim_max must fail with EINVAL without changing the limit.
+            let invalid_limit =
+                uapi::rlimit { rlim_cur: 32 * 1024 * 1024, rlim_max: 16 * 1024 * 1024 };
+            current_task.write_object(new_limit_ref, &invalid_limit).expect("write invalid limit");
+            assert_eq!(
+                sys_prlimit64(
+                    current_task,
+                    0,
+                    uapi::RLIMIT_STACK,
+                    new_limit_ref,
+                    UserRef::default()
+                ),
+                error!(EINVAL)
+            );
+            let current_limit = current_task.thread_group().limits.lock().get(Resource::STACK);
+            assert_eq!(
+                (current_limit.rlim_cur, current_limit.rlim_max),
+                (updated_limit.rlim_cur, updated_limit.rlim_max)
+            );
+
+            // Setting rlim_cur = 0 and invoking execve with a non-empty argv must not fail with
+            // E2BIG, because sys_execveat floors argv_env_limit at 32 * PAGE_SIZE.
+            let zero_soft_limit = uapi::rlimit { rlim_cur: 0, rlim_max: 16 * 1024 * 1024 };
+            current_task
+                .write_object(new_limit_ref, &zero_soft_limit)
+                .expect("write zero soft limit");
+            sys_prlimit64(current_task, 0, uapi::RLIMIT_STACK, new_limit_ref, UserRef::default())
+                .expect("prlimit64 set zero RLIMIT_STACK");
+            assert_eq!(current_task.thread_group().get_rlimit(Resource::STACK), 0);
+
+            let arg_addr = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+            current_task.write_memory(arg_addr, b"test-arg\0").expect("write test arg");
+            let empty_path_addr = (arg_addr + 16usize).unwrap();
+            current_task.write_memory(empty_path_addr, b"\0").expect("write empty path");
+            let argv_addr = UserCStringPtr::new(
+                current_task,
+                map_memory(&current_task, UserAddress::default(), *PAGE_SIZE),
+            );
+            current_task
+                .write_multi_arch_ptr(argv_addr.addr(), UserCString::new(current_task, arg_addr))
+                .expect("write argv[0]");
+            current_task
+                .write_multi_arch_ptr(
+                    argv_addr.next().unwrap().addr(),
+                    UserCString::null(current_task),
+                )
+                .expect("write argv[1]");
+            assert_eq!(
+                sys_execve(
+                    current_task,
+                    UserCString::new(current_task, empty_path_addr),
+                    argv_addr,
+                    UserCStringPtr::null(current_task),
+                ),
+                error!(ENOENT)
+            );
         })
         .await;
     }

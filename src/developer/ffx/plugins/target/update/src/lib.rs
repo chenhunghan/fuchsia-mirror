@@ -4,7 +4,6 @@
 
 //! A tool to update the target device.
 
-use async_trait::async_trait;
 use errors;
 use fdomain_client::AsHandleRef;
 use fdomain_client::fidl::Proxy as _;
@@ -161,7 +160,6 @@ pub struct UpdateTool {
 
 fho::embedded_plugin!(UpdateTool, UpdateError);
 
-#[async_trait(?Send)]
 impl FfxMain for UpdateTool {
     type Writer = SimpleWriter;
     type Error = UpdateError;
@@ -519,7 +517,7 @@ impl UpdateTool {
                 "Progress reporting is based on the fraction of packages resolved, so if one package is much
 larger than the others, then the reported progress could appear to stall near the end.
 Until the update process is improved to have more granular reporting, try using
-    ffx inspect show 'core/pkg-resolver'
+    ffx inspect show 'bootstrap/pkg-cache'
 for more detail on the progress of update-related downloads.\n"
             )?;
         }
@@ -1198,7 +1196,7 @@ mod tests {
             Progress reporting is based on the fraction of packages resolved, so if one package is much\n\
             larger than the others, then the reported progress could appear to stall near the end.\n\
             Until the update process is improved to have more granular reporting, try using\
-            \n    ffx inspect show 'core/pkg-resolver'\n\
+            \n    ffx inspect show 'bootstrap/pkg-cache'\n\
             for more detail on the progress of update-related downloads.\n\n\n\
             Starting install\
             \n  0.00% Preparing\

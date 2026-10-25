@@ -6,11 +6,15 @@ from typing import Any, Protocol
 
 from pydantic import Field, model_validator
 from pydap.dap_types import DapBaseModel, Thread
-from pydap.models import Response, StackTraceArguments, StackTraceResponse
+from pydap.models import Response, StackTraceArguments
 from zxdb_dap.models import (
+    UnwinderType,
     ZxdbAsyncBacktraceArguments,
     ZxdbAsyncBacktraceResponse,
+    ZxdbConsoleCommandArguments,
+    ZxdbConsoleCommandResponse,
     ZxdbPauseArguments,
+    ZxdbStackTraceResponse,
     ZxdbThreadsResponse,
 )
 
@@ -20,9 +24,11 @@ class ZxdbStackTraceArguments(StackTraceArguments):
 
     Attributes:
         remote_unwind: Force remote unwind on the target.
+        unwinder: Force a specific unwinder implementation.
     """
 
     remote_unwind: bool | None = None
+    unwinder: UnwinderType | None = None
 
 
 class ZxdbDetachArguments(DapBaseModel):
@@ -116,10 +122,10 @@ class ZxdbDapMixin:
     async def zxdb_stack_trace(
         self: SupportsSendRequest,
         args: ZxdbStackTraceArguments,
-    ) -> StackTraceResponse:
+    ) -> ZxdbStackTraceResponse:
         """Sends a custom zxdb stackTrace request."""
         resp = await self._send_request("stackTrace", args)
-        return StackTraceResponse.model_validate(resp)
+        return ZxdbStackTraceResponse.model_validate(resp)
 
     async def zxdb_threads(
         self: SupportsSendRequest,
@@ -154,3 +160,18 @@ class ZxdbDapMixin:
         """
         resp = await self._send_request("zxdb.AsyncBacktrace", args)
         return ZxdbAsyncBacktraceResponse.model_validate(resp)
+
+    async def zxdb_console_command(
+        self: SupportsSendRequest,
+        args: ZxdbConsoleCommandArguments,
+    ) -> ZxdbConsoleCommandResponse:
+        """Sends a custom zxdb consoleCommand request.
+
+        Args:
+            args: Arguments containing command and optional frameId.
+
+        Returns:
+            ZxdbConsoleCommandResponse: Response containing console output.
+        """
+        resp = await self._send_request("zxdb.ConsoleCommand", args)
+        return ZxdbConsoleCommandResponse.model_validate(resp)

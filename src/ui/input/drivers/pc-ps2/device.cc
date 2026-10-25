@@ -147,6 +147,17 @@ zx_status_t I8042Device::Bind() {
   zx_status_t status;
 #endif
 
+  zx::result<> add_service_result = DdkAddService<fuchsia_input_report::Service>(
+      fuchsia_input_report::Service::InstanceHandler({
+          .input_device = bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure),
+      }),
+      kPortInfo[port_].devname);
+  if (add_service_result.is_error()) {
+    zxlogf(ERROR, "Failed to add service for %s: %s", kPortInfo[port_].devname,
+           add_service_result.status_string());
+    return add_service_result.status_value();
+  }
+
   status = DdkAdd(ddk::DeviceAddArgs(kPortInfo[port_].devname));
   if (status != ZX_OK) {
     return status;
@@ -327,13 +338,13 @@ void I8042Device::GetDescriptor(GetDescriptorCompleter::Sync& completer) {
     buttons[1] = 0x02;
     buttons[2] = 0x03;
 
-    constexpr fuchsia_input_report::wire::Axis movement_x{
+    constexpr fuchsia_input::wire::Axis movement_x{
         .range = {.min = -127, .max = 127},
-        .unit = {.type = fuchsia_input_report::wire::UnitType::kNone, .exponent = 0},
+        .unit = {.type = fuchsia_input::wire::UnitType::kNone, .exponent = 0},
     };
-    constexpr fuchsia_input_report::wire::Axis movement_y{
+    constexpr fuchsia_input::wire::Axis movement_y{
         .range = {.min = -127, .max = 127},
-        .unit = {.type = fuchsia_input_report::wire::UnitType::kNone, .exponent = 0},
+        .unit = {.type = fuchsia_input::wire::UnitType::kNone, .exponent = 0},
     };
 
     auto mouse_in_desc = fuchsia_input_report::wire::MouseInputDescriptor::Builder(allocator);

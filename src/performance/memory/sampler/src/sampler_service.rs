@@ -203,6 +203,7 @@ async fn process_sampler_requests(
                 address,
                 stack_trace,
                 size,
+                sampling_interval_bytes,
                 ..
             }) => {
                 let address = address.ok_or_else(|| {
@@ -221,7 +222,7 @@ async fn process_sampler_requests(
                 let size = size.ok_or_else(|| {
                     anyhow::anyhow!("Unsupported record allocation request: missing size")
                 })?;
-                profile_builder.allocate(address, stack_frames, size);
+                profile_builder.allocate(address, stack_frames, size, sampling_interval_bytes);
             }
             ClientEvent::RecordDeallocation(RecordDeallocationEvent {
                 address,
@@ -286,7 +287,7 @@ async fn run_sampler_service(
     mut tx: mpsc::Sender<ProfileReport>,
 ) -> Result<(), Error> {
     let profile = process_sampler_requests(stream, &mut tx).await?;
-    let process_name = profile.get_process_name().to_string();
+    let process_name = profile.process_name().to_string();
     log::debug!("Profiling for {} done, queuing final report", process_name);
     {
         let res = tx.try_send(profile);
@@ -418,7 +419,7 @@ mod test {
         })?;
         drop(client);
 
-        if let ProfileReport::Final { process_name, size, profile } = profile_future.await? {
+        if let ProfileReport::Final { process_name, size, profile, .. } = profile_future.await? {
             assert_eq!("test process", process_name);
             let profile = deserialize_profile(profile, size);
             assert_eq!(3, profile.mapping.len());
@@ -444,7 +445,7 @@ mod test {
         builder.set_process_info(Some(TEST_NAME.to_string()), vec![].into_iter());
         {
             (0..RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD as u64).for_each(|i| {
-                builder.allocate(i, (i..i + 4).collect(), 10);
+                builder.allocate(i, (i..i + 4).collect(), 10, None);
                 builder.deallocate(i, (i..i + 4).collect());
             });
         }
@@ -455,6 +456,7 @@ mod test {
             RECLAIMABLE_STACK_TRACES_PROFILE_THRESHOLD as u64,
             stack_trace.stack_frames.unwrap(),
             10,
+            None,
         );
         let profile_future =
             maybe_emit_partial_profile(&mut builder, &mut tx, TEST_INDEX, Instant::now(), &None);
@@ -462,7 +464,7 @@ mod test {
         let (_, report) = join!(profile_future, rx.next());
         let report = report.unwrap();
         match report {
-            ProfileReport::Partial { process_name, iteration, profile, size } => {
+            ProfileReport::Partial { process_name, iteration, profile, size, .. } => {
                 assert_eq!(process_name, TEST_NAME.to_string());
                 assert_eq!(iteration, TEST_INDEX);
                 // This test assumes that every single allocation ends
@@ -485,7 +487,7 @@ mod test {
 
         let stack_trace = StackTrace { stack_frames: Some(vec![1000, 1500]), ..Default::default() };
         const TEST_INDEX: usize = 42;
-        builder.allocate(1, stack_trace.stack_frames.unwrap(), 10);
+        builder.allocate(1, stack_trace.stack_frames.unwrap(), 10, None);
         let profile_future = maybe_emit_partial_profile(
             &mut builder,
             &mut tx,
@@ -497,7 +499,7 @@ mod test {
         let (_, report) = join!(profile_future, rx.next());
         let report = report.unwrap();
         match report {
-            ProfileReport::Partial { process_name, iteration, profile, size } => {
+            ProfileReport::Partial { process_name, iteration, profile, size, .. } => {
                 assert_eq!(process_name, TEST_NAME.to_string());
                 assert_eq!(iteration, TEST_INDEX);
                 // This test assumes that every single allocation ends
@@ -554,7 +556,7 @@ mod test {
         })?;
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!("test process", process_name);
             let profile = deserialize_profile(profile, size);
             assert_eq!(3, profile.mapping.len());
@@ -614,7 +616,7 @@ mod test {
         })?;
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!("other test process", process_name);
             let profile = deserialize_profile(profile, size);
             assert_eq!(6, profile.mapping.len());
@@ -643,7 +645,7 @@ mod test {
         })?;
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!(String::default(), process_name);
             let profile = deserialize_profile(profile, size);
             let locations = profile.location.into_iter().map(|Location { address, .. }| address);
@@ -669,7 +671,7 @@ mod test {
         })?;
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!(String::default(), process_name);
             let profile = deserialize_profile(profile, size);
             assert_eq!(Vec::<Mapping>::new(), profile.mapping);
@@ -705,6 +707,7 @@ mod test {
                     stack_frames: Some(vec![1000, 1500]),
                     ..Default::default()
                 }),
+                sampling_interval_bytes: Some(1048576),
                 ..Default::default()
             });
         let alloc_bytes = fidl::persist(&alloc)?;
@@ -727,11 +730,23 @@ mod test {
         drop(client_sock);
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!("socket test process", process_name);
             let profile = deserialize_profile(profile, size);
             let locations = profile.location.into_iter().map(|Location { address, .. }| address);
             assert_equal(vec![1000, 1500, 3000].into_iter(), sorted(locations));
+
+            // Verify the unsampled math used the provided 1MB rate.
+            // P(S) = 1 - e^(-200 / 1048576)
+            // scale = 1 / P(S) ≈ 5243.38
+            // scale.round() = 5243
+            // total_size = (200 * scale) = 1048676.2 => round() = 1048676
+            // The sample from dead_allocations (because it was deallocated)
+            // has value: [0, 0, count, total_size, 0, 0]
+            let alloc_sample =
+                profile.sample.iter().find(|s| s.value[2] > 0).expect("Missing allocation sample");
+            assert_eq!(alloc_sample.value[2], 5243);
+            assert_eq!(alloc_sample.value[3], 1048676);
         } else {
             panic!("Expected complete report, got partial report instead.");
         };
@@ -760,7 +775,7 @@ mod test {
         drop(client_sock);
         drop(client);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!("socket lossy process [TAINTED: BUFFER OVERFLOW]", process_name);
             let profile = deserialize_profile(profile, size);
             assert_eq!(1, profile.comment.len());
@@ -807,7 +822,7 @@ mod test {
         // Closing the socket peer (even while the FIDL channel remains open) terminates the stream.
         drop(client_sock);
 
-        if let ProfileReport::Final { process_name, profile, size } = profile_future.await? {
+        if let ProfileReport::Final { process_name, profile, size, .. } = profile_future.await? {
             assert_eq!("empty datagram test", process_name);
             let profile = deserialize_profile(profile, size);
             let locations = profile.location.into_iter().map(|Location { address, .. }| address);

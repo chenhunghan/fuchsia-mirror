@@ -467,6 +467,9 @@ done:
   return err;
 }
 
+static zx_status_t brcmf_cfg80211_del_ap_iface(struct brcmf_cfg80211_info* cfg,
+                                               struct wireless_dev* wdev);
+
 /**
  * brcmf_ap_add_vif() - create a new AP virtual interface for multiple BSS
  *
@@ -537,7 +540,6 @@ static zx_status_t brcmf_ap_add_vif(struct brcmf_cfg80211_info* cfg, const char*
   err = brcmf_net_attach(ifp, true);
   if (err != ZX_OK) {
     BRCMF_ERR("Registering netdevice failed");
-    brcmf_free_net_device(ifp->ndev);
     goto fail;
   }
 
@@ -553,7 +555,13 @@ static zx_status_t brcmf_ap_add_vif(struct brcmf_cfg80211_info* cfg, const char*
   return ZX_OK;
 
 fail:
-  brcmf_free_vif(vif);
+  if (vif->ifp != nullptr) {
+    // The firmware already created a new iface for this vif, and the IF event handler added it to
+    // drvr->iflist. Tear it down the same way an AP iface is deleted.
+    brcmf_cfg80211_del_ap_iface(cfg, &vif->wdev);
+  } else {
+    brcmf_free_vif(vif);
+  }
   if (dev_out) {
     *dev_out = nullptr;
   }
@@ -607,12 +615,9 @@ zx_status_t brcmf_cfg80211_add_iface(brcmf_pub* drvr, const char* name, struct v
   }
 
   struct brcmf_if* ifp;
-  const char* iface_role_name;
 
   switch (role) {
     case fuchsia_wlan_common::WlanMacRole::kAp:
-      iface_role_name = "ap";
-
       if (mac_addr && brcmf_is_existing_macaddr(drvr, mac_addr->byte, true)) {
         return ZX_ERR_ALREADY_EXISTS;
       }
@@ -635,8 +640,6 @@ zx_status_t brcmf_cfg80211_add_iface(brcmf_pub* drvr, const char* name, struct v
 
       break;
     case fuchsia_wlan_common::WlanMacRole::kClient: {
-      iface_role_name = "client";
-
       if (mac_addr && brcmf_is_existing_macaddr(drvr, mac_addr->byte, false)) {
         return ZX_ERR_ALREADY_EXISTS;
       }
@@ -6945,10 +6948,43 @@ static fuchsia_wlan_ieee80211_wire::StatusCode brcmf_status_code_from_event_reas
     const brcmf_event_msg* e) {
   if (e->reason > std::numeric_limits<uint16_t>::max()) {
     BRCMF_ERR("Reason code %u is beyond reason", e->reason);
-    return fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedReasonUnspecified;
+    return fuchsia_wlan_ieee80211_wire::StatusCode::kInternalFailure;
   }
 
-  return static_cast<fuchsia_wlan_ieee80211_wire::StatusCode>(static_cast<uint16_t>(e->reason));
+  auto reason_code =
+      static_cast<fuchsia_wlan_ieee80211_wire::StatusCode>(static_cast<uint16_t>(e->reason));
+
+  // Vendor confirmed the firmware can return reason_code 0 while status_code > 0. See
+  // http://b/201803254#comment12. This is a design that they would like to not change in the
+  // firmware.
+  if ((BRCMF_E_STATUS_SUCCESS != e->status) &&
+      (fuchsia_wlan_ieee80211_wire::StatusCode::kSuccess == reason_code)) {
+    switch (e->status) {
+      case BRCMF_E_STATUS_NO_ACK:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kNoAckFromPeer;
+        break;
+      case BRCMF_E_STATUS_TIMEOUT:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kResponseTimeout;
+        break;
+      case BRCMF_E_STATUS_UNSOLICITED:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kUnexpectedResponse;
+        break;
+      case BRCMF_E_STATUS_ABORT:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kCanceled;
+        break;
+      case BRCMF_E_STATUS_NO_NETWORKS:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kJoinFailure;
+        break;
+      default:
+        reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kInternalFailure;
+        break;
+    }
+    BRCMF_INFO("Reason is SUCCESS(%u) while status indicates error: %u. Overriding reason to %u.",
+               fidl::ToUnderlying(fuchsia_wlan_ieee80211_wire::StatusCode::kSuccess), e->status,
+               fidl::ToUnderlying(reason_code));
+  }
+
+  return reason_code;
 }
 
 static fuchsia_wlan_ieee80211_wire::ReasonCode brcmf_reason_code_from_event_reason(
@@ -6969,19 +7005,6 @@ static zx_status_t brcmf_handle_assoc_event(struct brcmf_if* ifp, const struct b
 
   // For this event, the event reason is in the fuchsia_wlan_ieee80211_wire::StatusCode enum space.
   fuchsia_wlan_ieee80211_wire::StatusCode reason_code = brcmf_status_code_from_event_reason(e);
-
-  // Vendor confirmed the firmware can return reason_code 0 while status_code > 0. See
-  // http://b/201803254#comment12. This is a design that they would like to not change in the
-  // firmware.
-  if ((BRCMF_E_STATUS_SUCCESS != e->status) &&
-      (fuchsia_wlan_ieee80211_wire::StatusCode::kSuccess == reason_code)) {
-    BRCMF_INFO(
-        "Reason is SUCCESS(%u) while status indicates error: %u. Overriding reason to "
-        "REFUSED_REASON_UNSPECIFIED(%u).",
-        fidl::ToUnderlying(fuchsia_wlan_ieee80211_wire::StatusCode::kSuccess), e->status,
-        fidl::ToUnderlying(fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedReasonUnspecified));
-    reason_code = fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedReasonUnspecified;
-  }
 
   return brcmf_bss_connect_done(ifp,
                                 (e->status == BRCMF_E_STATUS_SUCCESS)
@@ -7228,15 +7251,9 @@ static void brcmf_print_auth_event_details(const struct brcmf_event_msg* e) {
       BRCMF_WARN("Received an unexpected or out-of-sequence auth response from AP");
       break;
     case BRCMF_E_STATUS_FAIL:
-      // Vendor informed us that when e->event_code is 16, the e->reason corresponds to 802.11
-      // deauth reason codes.
-      if (e->event_code == 16) {
-        BRCMF_WARN("AP rejected auth attempt, reference reason code against 802.11 deauth reasons");
-      } else {
-        BRCMF_ERR(
-            "Unexpected event code for BRCMF_E_STATUS_FAIL, follow up with vendor for more "
-            "information");
-      }
+      // For BRCMF_E_AUTH with BRCMF_E_STATUS_FAIL, e->reason is an 802.11 status code from the
+      // AP's authentication response frame.
+      BRCMF_INFO("AP rejected auth attempt with 802.11 status code %u", e->reason);
       break;
     case BRCMF_E_STATUS_ABORT:
       // This status occurs very rarely and transiently. We haven't confirmed the meaning with
@@ -7263,10 +7280,6 @@ static zx_status_t brcmf_process_auth_event(struct brcmf_if* ifp, const struct b
                static_cast<unsigned long>(e->event_code));
     brcmf_print_auth_event_details(e);
 
-    // It appears FW continues to be busy with authentication when this event is received
-    // specifically with WEP. Attempt to shutdown the IF.
-    brcmf_bss_reset(ifp);
-
     if (brcmf_test_bit(brcmf_vif_status_bit_t::SAE_AUTHENTICATING, &ifp->vif->sme_state)) {
       // Issue assoc_mgr_cmd to resume firmware from waiting for the success of SAE authentication.
       bcme_status_t fwerr = BCME_OK;
@@ -7287,15 +7300,13 @@ static zx_status_t brcmf_process_auth_event(struct brcmf_if* ifp, const struct b
       }
       brcmf_clear_bit(brcmf_vif_status_bit_t::SAE_AUTHENTICATING, &ifp->vif->sme_state);
     }
+
+    const fuchsia_wlan_ieee80211_wire::StatusCode status_code =
+        brcmf_status_code_from_event_reason(e);
     if (brcmf_test_bit(brcmf_vif_status_bit_t::ROAMING, &ifp->vif->sme_state)) {
-      brcmf_bss_roam_done(
-          ifp, brcmf_connect_status_t::AUTHENTICATION_FAILED,
-          fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedUnauthenticatedAccessNotSupported);
-    } else {
-      brcmf_bss_connect_done(
-          ifp, brcmf_connect_status_t::AUTHENTICATION_FAILED,
-          fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedUnauthenticatedAccessNotSupported);
+      return brcmf_bss_roam_done(ifp, brcmf_connect_status_t::AUTHENTICATION_FAILED, status_code);
     }
+    return brcmf_bss_connect_done(ifp, brcmf_connect_status_t::AUTHENTICATION_FAILED, status_code);
   }
 
   // Only care about the authentication frames during SAE process.
@@ -7362,10 +7373,10 @@ static void brcmf_indicate_no_network(struct brcmf_if* ifp) {
   BRCMF_DBG(CONN, "No network\n");
   if (brcmf_test_bit(brcmf_vif_status_bit_t::ROAMING, &ifp->vif->sme_state)) {
     brcmf_bss_roam_done(ifp, brcmf_connect_status_t::NO_NETWORK,
-                        fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedExternalReason);
+                        fuchsia_wlan_ieee80211_wire::StatusCode::kJoinFailure);
   } else {
     brcmf_bss_connect_done(ifp, brcmf_connect_status_t::NO_NETWORK,
-                           fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedExternalReason);
+                           fuchsia_wlan_ieee80211_wire::StatusCode::kJoinFailure);
   }
   brcmf_disconnect_done(cfg);
 }
@@ -7397,16 +7408,8 @@ static zx_status_t brcmf_indicate_client_disconnect(struct brcmf_if* ifp,
     brcmf_bss_roam_done(ifp, brcmf_connect_status_t::ROAM_INTERRUPTED,
                         fuchsia_wlan_ieee80211_wire::StatusCode::kCanceled);
   } else if (brcmf_test_bit(brcmf_vif_status_bit_t::CONNECTING, &ifp->vif->sme_state)) {
-    // Default assoc_result for disconnections.
-    auto assoc_result = fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedReasonUnspecified;
-    // Some connect_status values get a specific assoc_result.
-    if (connect_status == brcmf_connect_status_t::AUTHENTICATION_FAILED) {
-      assoc_result =
-          fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedUnauthenticatedAccessNotSupported;
-    } else if (connect_status == brcmf_connect_status_t::NO_NETWORK) {
-      assoc_result = fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedExternalReason;
-    }
-    brcmf_bss_connect_done(ifp, connect_status, assoc_result);
+    brcmf_bss_connect_done(ifp, connect_status,
+                           fuchsia_wlan_ieee80211_wire::StatusCode::kRefusedReasonUnspecified);
   } else {
     brcmf_set_bit(brcmf_vif_status_bit_t::DISCONNECTING, &ifp->vif->sme_state);
   }

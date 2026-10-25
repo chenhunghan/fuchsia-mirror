@@ -14,6 +14,7 @@ use zip::ZipArchive;
 
 /// Creates new snapshot at given directory path and unzips it.
 pub async fn create_snapshot(
+    context: &EnvironmentContext,
     data_provider_proxy: DataProviderProxy,
     directory: &Path,
 ) -> Result<()> {
@@ -22,7 +23,7 @@ pub async fn create_snapshot(
         output_file: Some(directory.to_string_lossy().into()),
         upload: false,
     };
-    snapshot_impl(data_provider_proxy, cmd, EnvironmentContext::default())
+    snapshot_impl(data_provider_proxy, cmd, context.clone())
         .await
         .context("Unable to take snapshot of target.")?;
 
@@ -38,7 +39,7 @@ fn unzip_file(zip_file: &Path, extract_dir: &Path) -> Result<()> {
 
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).context("Unable to get file by index from archive.")?;
-        let outpath = file.mangled_name();
+        let outpath = file.mangled_name().context("Unable to get mangled name from archive.")?;
         let mut dest = PathBuf::from(extract_dir);
         dest.push(outpath);
         let mut outfile = File::create(&dest).context("Unable to create output file.")?;

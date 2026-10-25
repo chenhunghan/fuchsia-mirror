@@ -51,13 +51,10 @@ zx_status_t power_cpu_off();
 zx_status_t power_cpu_on(uint64_t hw_cpu_id, paddr_t entry, uint64_t context);
 zx::result<power_cpu_state> power_get_cpu_state(uint64_t hw_cpu_id);
 
-// Gets/sets the opp for the given domain, if supported.
-zx_status_t power_opp_set(uint32_t domain_id, uint64_t opp);
-zx::result<uint64_t> power_opp_get(uint32_t domain_id);
-
-// Gets the number of supported opp control domains, if supported. If this
-// returns zero or an error it generally means that in-kernel OPP control is not
-// supported.
-zx::result<size_t> power_opp_get_domain_count();
+// Restores platform power state that firmware may have altered while the system was suspended
+// (e.g. CPU OPP registers re-initialized by firmware on resume). Must be called on the boot CPU,
+// with interrupts disabled, immediately after returning from system suspend. Platforms without
+// such state treat this as a no-op and return ZX_OK.
+zx_status_t power_system_resume();
 
 #endif  // ZIRCON_KERNEL_INCLUDE_DEV_POWER_H_

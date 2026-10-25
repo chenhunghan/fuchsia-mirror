@@ -25,8 +25,7 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 # - `LibraryCommand::TargetWait` in
 #   //src/developer/fuchsia-controller/src/commands.rs, which returns
 #   `FC_ERR_INTERNAL` when the target wait fails.
-_CONTROLLER_ERRORS: tuple[type[Exception], ...] = (
-    fuchsia_controller.FcTransportStatus,
+_CONTROLLER_ERRORS: tuple[type[Exception], ...] = errors.FIDL_ERRORS + (
     RuntimeError,
     errors.HoneydewError,
 )
@@ -94,10 +93,6 @@ class FuchsiaController:
             FuchsiaControllerConnectionError: If target is not ready.
         """
         try:
-            # To run Fuchsia-Controller in isolation
-            isolate_dir: fuchsia_controller.IsolateDir | None = (
-                self._ffx_config_data.isolate_dir
-            )
             config: dict[str, str] = {}
             if self._ffx_config_data.logs_level:
                 level = self._ffx_config_data.logs_level
@@ -158,11 +153,9 @@ class FuchsiaController:
                 f"Creating Fuchsia-Controller Context with "
                 f"target='{self._target}', config='{config}'"
             )
-            if isolate_dir:
-                msg = f"{msg}, isolate_dir={isolate_dir.directory()}"
             _LOGGER.debug(msg)
             self.ctx = fuchsia_controller.Context(
-                config=config, isolate_dir=isolate_dir, target=self._target
+                config=config, target=self._target
             )
         except _CONTROLLER_ERRORS as err:
             raise fc_errors.FuchsiaControllerError(

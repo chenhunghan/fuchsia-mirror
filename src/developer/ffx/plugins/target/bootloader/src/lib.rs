@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use discovery::TargetState;
 use errors::ffx_bail;
@@ -84,7 +83,6 @@ pub struct BootloaderToolMessage {
     info_message: InfoMessage,
 }
 
-#[async_trait(?Send)]
 impl FfxMain for BootloaderTool {
     type Writer = VerifiedMachineWriter<BootloaderToolMessage>;
 
@@ -466,7 +464,7 @@ pub async fn bootloader_impl(
 
     let (client, server) = mpsc::channel(1);
     try_join!(
-        from_manifest(ctx, client, cmd, &mut fastboot_proxy).map_err(anyhow::Error::from),
+        Box::pin(from_manifest(ctx, client, cmd, &mut fastboot_proxy)).map_err(anyhow::Error::from),
         handle_events(writer, server)
     )
     .map_err(fho::Error::from)?;
@@ -495,7 +493,7 @@ mod test {
         let vbmeta_file_name = vbmeta_file.path().to_string_lossy().to_string();
         let (state, proxy) = setup();
         let mut w = VerifiedMachineWriter::<BootloaderToolMessage>::new(Some(Format::Json));
-        bootloader_impl(
+        Box::pin(bootloader_impl(
             &test_env.context,
             proxy,
             BootloaderCommand {
@@ -510,7 +508,7 @@ mod test {
                 }),
             },
             &mut w,
-        )
+        ))
         .await?;
         let state = state.lock().unwrap();
         assert_eq!(1, state.staged_files.len());
@@ -525,7 +523,7 @@ mod test {
         let zbi_file_name = zbi_file.path().to_string_lossy().to_string();
         let (state, proxy) = setup();
         let mut w = VerifiedMachineWriter::<BootloaderToolMessage>::new(Some(Format::Json));
-        bootloader_impl(
+        Box::pin(bootloader_impl(
             &test_env.context,
             proxy,
             BootloaderCommand {
@@ -540,7 +538,7 @@ mod test {
                 }),
             },
             &mut w,
-        )
+        ))
         .await?;
         let state = state.lock().unwrap();
         assert_eq!(1, state.staged_files.len());
@@ -556,7 +554,7 @@ mod test {
         let (_, proxy) = setup();
         let mut w = VerifiedMachineWriter::<BootloaderToolMessage>::new(Some(Format::Json));
         assert!(
-            bootloader_impl(
+            Box::pin(bootloader_impl(
                 &test_env.context,
                 proxy,
                 BootloaderCommand {
@@ -571,7 +569,7 @@ mod test {
                     }),
                 },
                 &mut w,
-            )
+            ))
             .await
             .is_err()
         );
@@ -588,7 +586,7 @@ mod test {
             state.set_var("vx-unlockable".to_string(), "no".to_string());
         }
         let mut w = VerifiedMachineWriter::<BootloaderToolMessage>::new(Some(Format::Json));
-        bootloader_impl(
+        Box::pin(bootloader_impl(
             &test_env.context,
             proxy,
             BootloaderCommand {
@@ -599,7 +597,7 @@ mod test {
                 subcommand: Lock(LockCommand {}),
             },
             &mut w,
-        )
+        ))
         .await?;
         let state = state.lock().unwrap();
         assert_eq!(1, state.oem_commands.len());

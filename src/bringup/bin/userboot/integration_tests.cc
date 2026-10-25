@@ -73,10 +73,10 @@ zx::vmo CreateBootfsVmo(const std::vector<std::pair<std::string, std::vector<uin
 }
 
 zx::vmo CreateZbiVmo(const std::string& cmdline, const zx::vmo& bootfs_vmo) {
-  zx::vmo zbi_vmo;
-  EXPECT_EQ(zx::vmo::create(0, ZX_VMO_RESIZABLE, &zbi_vmo), ZX_OK);
+  zx::vmo resizable_zbi_vmo;
+  EXPECT_EQ(zx::vmo::create(0, ZX_VMO_RESIZABLE, &resizable_zbi_vmo), ZX_OK);
 
-  zbitl::Image image(zx::unowned_vmo{zbi_vmo});
+  zbitl::Image image(zx::unowned_vmo{resizable_zbi_vmo});
   EXPECT_TRUE(image.clear().is_ok());
 
   if (!cmdline.empty()) {
@@ -94,6 +94,11 @@ zx::vmo CreateZbiVmo(const std::string& cmdline, const zx::vmo& bootfs_vmo) {
       image.Append(zbi_header_t{.type = ZBI_TYPE_STORAGE_BOOTFS}, zbitl::AsBytes(bootfs_data));
   EXPECT_TRUE(res.is_ok());
 
+  uint64_t zbi_size = 0;
+  EXPECT_EQ(resizable_zbi_vmo.get_size(&zbi_size), ZX_OK);
+
+  zx::vmo zbi_vmo;
+  EXPECT_EQ(resizable_zbi_vmo.create_child(ZX_VMO_CHILD_SNAPSHOT, 0, zbi_size, &zbi_vmo), ZX_OK);
   return zbi_vmo;
 }
 
@@ -130,7 +135,7 @@ std::vector<zx::handle> CreateUserbootHandles(zx::job root_job, const zx::vmo& z
   return handles;
 }
 
-TEST_F(UserbootTests, UserbootRust) {
+TEST_F(UserbootTests, Userboot) {
   auto child_vmo = userboot::testing::GetExecutable("/pkg/test/userboot-lib-static-pie-test");
   ASSERT_TRUE(child_vmo.is_ok()) << child_vmo.status_string();
 
@@ -147,7 +152,7 @@ TEST_F(UserbootTests, UserbootRust) {
 
   std::vector<zx::handle> handles = CreateUserbootHandles(test_job.Get(), zbi_vmo);
 
-  ASSERT_NO_FATAL_FAILURE(Launch("/pkg/bin/userboot_rust", std::move(handles)));
+  ASSERT_NO_FATAL_FAILURE(Launch("/pkg/bin/userboot", std::move(handles)));
 
   auto result = Wait();
   ASSERT_TRUE(result.is_ok());
@@ -158,7 +163,7 @@ TEST_F(UserbootTests, UserbootRust) {
   EXPECT_THAT(log, HasSubstr("Hello from userland!")) << log;
 }
 
-TEST_F(UserbootTests, UserbootRustTest) {
+TEST_F(UserbootTests, UserbootTest) {
   auto child_vmo = userboot::testing::GetExecutable("/pkg/test/userboot-lib-static-pie-test");
   ASSERT_TRUE(child_vmo.is_ok()) << child_vmo.status_string();
 
@@ -175,7 +180,7 @@ TEST_F(UserbootTests, UserbootRustTest) {
 
   std::vector<zx::handle> handles = CreateUserbootHandles(test_job.Get(), zbi_vmo);
 
-  ASSERT_NO_FATAL_FAILURE(Launch("/pkg/bin/userboot_test_rust", std::move(handles)));
+  ASSERT_NO_FATAL_FAILURE(Launch("/pkg/bin/userboot_test", std::move(handles)));
 
   auto result = Wait();
   ASSERT_TRUE(result.is_ok());

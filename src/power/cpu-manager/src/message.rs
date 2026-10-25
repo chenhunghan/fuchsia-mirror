@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::types::{OperatingPoint, ThermalLoad};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_cpu as fcpu;
 use zx::sys;
 
@@ -43,6 +44,9 @@ pub enum Message {
     /// Communicate a thermal load value
     UpdateThermalLoad(ThermalLoad),
 
+    /// Update per-cluster maximum operating point limits from PowercapController.
+    UpdatePowercapDomainOpps(Vec<u64>),
+
     /// Whether or not to enable cpu boost.
     /// Args:
     ///     - enable: true to enable boost, false to disable.
@@ -53,7 +57,7 @@ pub enum Message {
     GetDomainInfos,
 
     /// Gets the max frequency of the CPU cluster.
-    /// Arg: the index of the CPU cluster to set the max frequency of.
+    /// Arg: the index of the CPU cluster to get the max frequency of.
     GetMaxFrequency(u64),
 
     /// Sets the max frequency of the CPU cluster.
@@ -63,6 +67,24 @@ pub enum Message {
     ///       by the node via GetCpuClusterInfos. If None, clears the max
     ///       frequency.
     SetMaxFrequency(u64, Option<u64>),
+
+    /// Gets the min frequency of the CPU cluster.
+    /// Arg: the index of the CPU cluster to get the min frequency of.
+    GetMinFrequency(u64),
+
+    /// Acquires a ceiling lease on the CPU cluster.
+    /// Args:
+    ///     - The index of the CPU cluster.
+    ///     - The operating point index capping the maximum frequency.
+    ///     - The human-readable lease name for diagnostics.
+    LeaseMaxFrequency(u64, u64, String),
+
+    /// Acquires a floor lease on the CPU cluster.
+    /// Args:
+    ///     - The index of the CPU cluster.
+    ///     - The operating point index raising the minimum frequency.
+    ///     - The human-readable lease name for diagnostics.
+    LeaseMinFrequency(u64, u64, String),
 }
 
 /// Defines the return values for each of the Message types from above
@@ -99,6 +121,9 @@ pub enum MessageReturn {
     UpdateThermalLoad,
 
     /// There is no arg in this MessageReturn type. It only serves as an ACK.
+    UpdatePowercapDomainOpps,
+
+    /// There is no arg in this MessageReturn type. It only serves as an ACK.
     SetBoost,
 
     /// Arg: list of information about each CPU cluster.
@@ -109,6 +134,15 @@ pub enum MessageReturn {
 
     /// There is no arg in this MessageReturn type. It only serves as an ACK.
     SetMaxFrequency,
+
+    /// Arg: the frequency index of the CPU cluster.
+    GetMinFrequency(u64),
+
+    /// Arg: lease token whose peer closure releases the max-frequency lease.
+    LeaseMaxFrequency(fbroker::LeaseToken),
+
+    /// Arg: lease token whose peer closure releases the min-frequency lease.
+    LeaseMinFrequency(fbroker::LeaseToken),
 }
 
 pub type MessageResult = Result<MessageReturn, crate::error::CpuManagerError>;

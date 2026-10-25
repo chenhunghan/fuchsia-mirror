@@ -7,7 +7,7 @@ use itertools::Itertools;
 use regex_lite::Regex;
 use starnix_core::mm::{
     MemoryAccessor, MemoryAccessorExt, MemoryManager, MemoryStats, PAGE_SIZE, ProcMapsFile,
-    ProcPagemapFile, ProcSmapsFile, ProcSmapsRollupFile,
+    ProcPagemapFile, ProcSmapsFile, ProcSmapsRollupFile, SelfStatsCacheMode,
 };
 use starnix_core::security;
 use starnix_core::task::{
@@ -1204,10 +1204,13 @@ impl FileOps for MemFile {
 const STUBBED_MEM_BYTES: usize = 4096;
 
 // Workaround for b/525059309: Zircon VMAR walks (`ZX_INFO_VMAR_MAPS`) are extremely
-// slow and cause Perfetto's `traced_probes` watchdog timeouts when sweeping thread status
-// files. We bypass them when the reader is `traced_probes` by returning a 1 page/KB stub.
+// slow and cause Perfetto's `traced_probes` watchdog timeouts and `lmkd` `cmd_procs_prio`
+// VMAR lock contention when sweeping thread status files. We bypass them when the reader
+// is `traced_probes` or `lmkd` by returning a 1 page/KB stub.
 fn should_skip_memory_stats(current_task: &CurrentTask) -> bool {
-    current_task.persistent_info.command_guard().comm_name() == b"traced_probes"
+    let comm = current_task.persistent_info.command_guard();
+    let name = comm.comm_name();
+    name == b"traced_probes" || name == b"lmkd"
 }
 fn stub_memory_stats() -> MemoryStats {
     MemoryStats {
@@ -1262,7 +1265,7 @@ impl DynamicFileSource for StatFile {
         let stime: i64; // 15
         let cutime: i64;
         let cstime: i64;
-        let priority: i64 = 0;
+        let mut priority: i64;
         let nice: i64;
         let num_threads: i64; // 20
         let itrealvalue: i64 = 0;
@@ -1301,25 +1304,35 @@ impl DynamicFileSource for StatFile {
         pid = self.target.tid.id;
         comm = task.command();
         state = task.state_code().code_char();
-        nice = task.read().scheduler_state.normal_priority().as_nice() as i64;
+        {
+            let scheduler_state = task.scheduler_state.lock();
+            priority = scheduler_state.task_priority();
+            nice = scheduler_state.normal_priority().as_nice() as i64;
+        }
+        if let Some(boost) =
+            task.kernel().shared_futexes.get_rt_mutex_priority_boost(task.get_tid() as u32)
+        {
+            priority = std::cmp::min(priority, boost);
+        }
 
         {
-            let thread_group = task.thread_group().read();
-            ppid = thread_group.get_ppid();
-            pgrp = thread_group.process_group.id;
-            session = thread_group.session.id;
+            let thread_group = task.thread_group();
+            let tg_state = thread_group.read();
+            ppid = tg_state.get_ppid();
+            pgrp = thread_group.pgid().id;
+            session = tg_state.session.id;
 
             // TTY device ID.
-            tty_nr = thread_group
+            tty_nr = tg_state
                 .controlling_terminal
                 .as_ref()
                 .map(|t| t.terminal.device().bits())
                 .unwrap_or(0) as i32;
 
-            cutime = duration_to_scheduler_clock(thread_group.children_time_stats.user_time);
-            cstime = duration_to_scheduler_clock(thread_group.children_time_stats.system_time);
+            cutime = duration_to_scheduler_clock(tg_state.children_time_stats.user_time);
+            cstime = duration_to_scheduler_clock(tg_state.children_time_stats.system_time);
 
-            num_threads = std::cmp::max(1, thread_group.tasks_count()) as i64;
+            num_threads = std::cmp::max(1, tg_state.tasks_count()) as i64;
         }
 
         let time_stats = match self.target.scope {
@@ -1329,9 +1342,10 @@ impl DynamicFileSource for StatFile {
         utime = duration_to_scheduler_clock(time_stats.user_time);
         stime = duration_to_scheduler_clock(time_stats.system_time);
 
-        if let Ok(info) = task.thread_group().process.info() {
-            starttime =
-                duration_to_scheduler_clock(info.start_time - zx::MonotonicInstant::ZERO) as u64;
+        if !task.thread_group().process.is_invalid() {
+            starttime = duration_to_scheduler_clock(
+                task.thread_group().start_time - zx::MonotonicInstant::ZERO,
+            ) as u64;
         }
 
         if let Ok(mm) = task.mm() {
@@ -1339,7 +1353,7 @@ impl DynamicFileSource for StatFile {
             let mem_stats = if should_skip_memory_stats(current_task) {
                 stub_memory_stats()
             } else {
-                mm.get_stats(current_task)
+                mm.get_stats(current_task, SelfStatsCacheMode::BypassCache)
             };
             let page_size = *PAGE_SIZE as usize;
             vsize = mem_stats.vm_size;
@@ -1379,9 +1393,11 @@ impl DynamicFileSource for StatFile {
             exit_code = 0;
         }
 
+        write!(sink, "{pid} (")?;
+        sink.write(comm.comm_name());
         writeln!(
             sink,
-            "{pid} ({comm}) {state} {ppid} {pgrp} {session} {tty_nr} {tpgid} {flags} {minflt} {cminflt} {majflt} {cmajflt} {utime} {stime} {cutime} {cstime} {priority} {nice} {num_threads} {itrealvalue} {starttime} {vsize} {rss} {rsslim} {startcode} {endcode} {startstack} {kstkesp} {kstkeip} {signal} {blocked} {siginore} {sigcatch} {wchan} {nswap} {cnswap} {exit_signal} {processor} {rt_priority} {policy} {delayacct_blkio_ticks} {guest_time} {cguest_time} {start_data} {end_data} {start_brk} {arg_start} {arg_end} {env_start} {env_end} {exit_code}"
+            ") {state} {ppid} {pgrp} {session} {tty_nr} {tpgid} {flags} {minflt} {cminflt} {majflt} {cmajflt} {utime} {stime} {cutime} {cstime} {priority} {nice} {num_threads} {itrealvalue} {starttime} {vsize} {rss} {rsslim} {startcode} {endcode} {startstack} {kstkesp} {kstkeip} {signal} {blocked} {siginore} {sigcatch} {wchan} {nswap} {cnswap} {exit_signal} {processor} {rt_priority} {policy} {delayacct_blkio_ticks} {guest_time} {cguest_time} {start_data} {end_data} {start_brk} {arg_start} {arg_end} {env_start} {env_end} {exit_code}"
         )?;
 
         Ok(())
@@ -1406,7 +1422,7 @@ impl DynamicFileSource for StatmFile {
             stub_memory_stats()
         } else {
             match task.mm() {
-                Ok(mm) => mm.get_stats(current_task),
+                Ok(mm) => mm.get_stats(current_task, SelfStatsCacheMode::BypassCache),
                 Err(_) => Default::default(),
             }
         };
@@ -1472,9 +1488,14 @@ impl DynamicFileSource for StatusFile {
             writeln!(sink, "SigPnd:\t{:016x}", task_state.task_specific_pending_signals().0)?;
             writeln!(
                 sink,
-                "ShdPnd:\t{:x}",
+                "ShdPnd:\t{:016x}",
                 task.thread_group().pending_signals.lock().pending().0
             )?;
+
+            let (sigign, sigcgt) = task.thread_group().signal_actions.ignored_and_caught();
+            writeln!(sink, "SigIgn:\t{:016x}", sigign.0)?;
+            writeln!(sink, "SigCgt:\t{:016x}", sigcgt.0)?;
+
             writeln!(sink, "NoNewPrivs:\t{}", task_state.no_new_privs() as u8)?;
         }
 
@@ -1509,7 +1530,7 @@ impl DynamicFileSource for StatusFile {
             let mem_stats = if should_skip_memory_stats(current_task) {
                 stub_memory_stats()
             } else {
-                mm.get_stats(current_task)
+                mm.get_stats(current_task, SelfStatsCacheMode::AllowCached)
             };
             writeln!(sink, "VmSize:\t{} kB", mem_stats.vm_size / 1024)?;
             writeln!(sink, "VmLck:\t{} kB", mem_stats.vm_lck / 1024)?;

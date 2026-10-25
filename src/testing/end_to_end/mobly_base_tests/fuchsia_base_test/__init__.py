@@ -21,7 +21,6 @@ from honeydew.auxiliary_devices.power_switch import (
     power_switch_using_dmc,
 )
 from honeydew.auxiliary_devices.usb_power_hub import (
-    linux_virtual_usb_hub,
     usb_power_hub,
     usb_power_hub_using_dmc,
 )
@@ -44,6 +43,11 @@ HEALTH_CHECK_FAILURE_MESSAGE = (
     "teardown_test. So failing the test case..."
 )
 # LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
+
+# How long to wait for FFX to reach a device before considering it unreachable
+# in teardown_class. A reachable device responds well within a second; this
+# bound only matters for devices that are actually powered off or wedged.
+_DEVICE_REACHABLE_TIMEOUT_SEC: int = 10
 
 
 class SnapshotOn(enum.StrEnum):
@@ -284,8 +288,10 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             * Stops, terminates and downloads the trace data for all devices and stores
               it under "<log_path>/teardown_class<_on_fail>" directory if `tracing_on`
               test param is set to "teardown_class" or "teardown_class_on_fail".
-            * Powers on any configured power switch outlets and USB power hub ports
-              for all Fuchsia devices.
+            * Powers on the configured power switch outlet and USB power hub
+              port of any Fuchsia device that is no longer reachable, so that
+              a test which leaves a device powered off does not poison the
+              rest of the shard.
         """
         for device in self.fuchsia_devices:
             if (
@@ -319,26 +325,61 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             )
 
         for device in self.fuchsia_devices:
-            switch, outlet = self._lookup_power_switch(device)
-            if switch is not None:
-                try:
-                    switch.power_on(outlet=outlet)
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Failed to power on power switch for %s with error: %s",
-                        device.device_name,
-                        err,
-                    )
-            usb_power_hub, port = self._lookup_usb_power_hub(device)
-            if usb_power_hub is not None:
-                try:
-                    usb_power_hub.power_on(port=port)
-                except Exception as err:
-                    _LOGGER.warning(
-                        "Failed to power on USB power hub for %s with error: %s",
-                        device.device_name,
-                        err,
-                    )
+            await self._power_on_aux_devices_if_unreachable(device)
+
+    async def _power_on_aux_devices_if_unreachable(
+        self, device: fuchsia_device.FuchsiaDevice
+    ) -> None:
+        """Power on the device's power switch outlet and USB power hub port
+        if, and only if, the device is not reachable from the host.
+
+        Power commands are deliberately skipped for reachable devices: the
+        lab PDUs are single threaded and shared across host controllers, so
+        every redundant `power_on()` adds contention that makes concurrent
+        power commands from other tests fail with "load is not in idle state"
+        (see b/576068519).
+
+        Args:
+            device: FuchsiaDevice object.
+        """
+        switch, outlet = self._lookup_power_switch(device)
+        usb_power_hub, port = self._lookup_usb_power_hub(device)
+        if switch is None and usb_power_hub is None:
+            return
+
+        # Host-side check only; does not touch any auxiliary device.
+        try:
+            device.ffx.check_connection(timeout=_DEVICE_REACHABLE_TIMEOUT_SEC)
+            _LOGGER.debug(
+                "%s is reachable, skipping power on of auxiliary devices.",
+                device.device_name,
+            )
+            return
+        except errors.HoneydewError as err:
+            _LOGGER.warning(
+                "%s is not reachable (%s), powering on its auxiliary devices...",
+                device.device_name,
+                err,
+            )
+
+        if switch is not None:
+            try:
+                switch.power_on(outlet=outlet)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Failed to power on power switch for %s with error: %s",
+                    device.device_name,
+                    err,
+                )
+        if usb_power_hub is not None:
+            try:
+                usb_power_hub.power_on(port=port)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Failed to power on USB power hub for %s with error: %s",
+                    device.device_name,
+                    err,
+                )
 
     async def on_fail(self, record: TestResultRecord) -> None:
         """on_fail is called once when a test case fails.
@@ -556,16 +597,17 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
     ) -> tuple[usb_power_hub.UsbPowerHub | None, int | None]:
         """Returns the USB power hub and port to use for the given device.
 
+        LinuxVirtualUsbPowerHub is only used by USB E2E users now, so it
+        lives in usb_lib rather than Honeydew until wider demand (see
+        discussion on fxr/1876367). The `use_virtual_usb_hub` branch of
+        FuchsiaBaseTest._lookup_usb_power_hub() moves into an override in
+        UsbPowerHubBaseTest, handling the virtual hub when no physical hub
+        (`usb_power_hub_hw` + `usb_power_hub_impl`) configured.
+
         Selected in this order:
           1. The hub described by `usb_power_hub_hw` + `usb_power_hub_impl`
              in the testbed config, when both are present.
-          2. The host side virtual hub, when the `use_virtual_usb_hub` param
-             is set. It toggles the device USB `authorized` attribute instead
-             of cutting power, so it needs no testbed config nor physical
-             hub. Intended for at-desk runs; see
-             //src/tests/end_to_end/usb/lib/disconnect/udev.sh for the host
-             permissions it requires.
-          3. DMC, for devices power cycled in infra.
+          2. DMC, for devices power cycled in infra.
 
         Returns:
             The USB power hub and its port, or `(None, None)` if none apply.
@@ -592,27 +634,6 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             return (
                 usb_power_hub_class(**usb_power_hub_hw),
                 usb_power_hub_port,
-            )
-        elif self.user_params.get("use_virtual_usb_hub"):
-            # Disambiguates discovery when more than one Fuchsia USB device is
-            # attached to the same host.
-            target_serial = typing.cast(
-                Union[str, None], device_config.get("device_serial", None)
-            )
-            return (
-                linux_virtual_usb_hub.LinuxVirtualUsbPowerHub(
-                    target_serial=target_serial,
-                    # Retry settings for the bus ID lookup in power_off().
-                    bus_id_lookup_attempts=self.user_params.get(
-                        "bus_id_lookup_attempts",
-                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_ATTEMPTS,
-                    ),
-                    bus_id_lookup_timeout_sec=self.user_params.get(
-                        "bus_id_lookup_timeout_sec",
-                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_TIMEOUT_SEC,
-                    ),
-                ),
-                None,
             )
         elif usb_power_hub_using_dmc.DMC_PATH_KEY in os.environ:
             return (

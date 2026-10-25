@@ -35,8 +35,6 @@ FFI_ALWAYS_INLINE bool cpp_vm_object_is_resizable(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_discardable(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_contiguous(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_stream_compatible(const VmObject* vmo);
-FFI_ALWAYS_INLINE bool cpp_vm_object_user_stream_size_locked(VmObjectPaged* vmo,
-                                                             uint64_t* out_stream_size);
 FFI_ALWAYS_INLINE void* cpp_vm_object_lock(const VmObject* vmo);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_resize(VmObject* vmo, uint64_t size);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_write(VmObject* vmo, const void* ptr, uint64_t offset,
@@ -49,8 +47,12 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_commit_range_pinned(VmObject* vmo, u
                                                                 uint64_t len, bool write);
 FFI_ALWAYS_INLINE void cpp_vm_object_unpin(VmObject* vmo, uint64_t offset, uint64_t len);
 FFI_ALWAYS_INLINE arch_mmu_flags_t cpp_vm_object_get_mapping_cache_policy(const VmObject* vmo);
+FFI_ALWAYS_INLINE arch_mmu_flags_t
+cpp_vm_object_get_mapping_cache_policy_locked(const VmObject* vmo);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_set_mapping_cache_policy(VmObject* vmo,
                                                                      arch_mmu_flags_t cache_policy);
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_add_mapping_locked(VmObject* vmo, VmMapping* mapping);
+FFI_ALWAYS_INLINE void cpp_vm_object_remove_mapping_locked(VmObject* vmo, VmMapping* mapping);
 FFI_ALWAYS_INLINE VmObject* cpp_vm_object_create_clone(VmObject* vmo, Resizability resizable,
                                                        SnapshotType snapshot_type, uint64_t offset,
                                                        uint64_t size, bool copy_name,

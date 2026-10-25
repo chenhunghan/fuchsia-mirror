@@ -447,6 +447,8 @@ struct Driver {
   bool host_restart_on_crash = false;
   bool use_next_vdso = false;
   bool use_dynamic_linker = false;
+  bool suspend_enabled = false;
+  bool power_managed_dispatchers_enabled = false;
   // The driver to load under the compatibility shim.
   std::string compat;
 };
@@ -467,9 +469,24 @@ class TestDriver : public fidl::testing::TestBase<fdh::Driver> {
   using StopHandler = fit::function<void()>;
   void SetStopHandler(StopHandler handler) { stop_handler_ = std::move(handler); }
 
+  using HealthCheckHandler =
+      fit::function<fit::result<fdfw::HealthCheckError, fdfw::HealthCheckResponse>(
+          const fdfw::HealthCheckRequest&)>;
+  void SetHealthCheckHandler(HealthCheckHandler handler) {
+    health_check_handler_ = std::move(handler);
+  }
+
   void SetDontCloseBindingInStop() { dont_close_binding_in_stop_ = true; }
 
   void Stop(StopCompleter::Sync& completer) override;
+
+  void HealthCheck(HealthCheckRequest& request, HealthCheckCompleter::Sync& completer) override {
+    if (health_check_handler_) {
+      completer.Reply(health_check_handler_(request.request()));
+      return;
+    }
+    completer.Reply(fit::ok(fdfw::HealthCheckResponse{}));
+  }
 
   void DropNode() { node_ = {}; }
   void CloseBinding() { driver_binding_.Close(ZX_OK); }
@@ -483,6 +500,7 @@ class TestDriver : public fidl::testing::TestBase<fdh::Driver> {
  private:
   async_dispatcher_t* dispatcher_;
   StopHandler stop_handler_;
+  HealthCheckHandler health_check_handler_;
   fidl::Client<fdfw::Node> node_;
   std::optional<zx::event> node_token_;
   fidl::ServerBinding<fdh::Driver> driver_binding_;
@@ -629,15 +647,17 @@ class DriverRunnerTestBase : public gtest::TestLoopFixture {
       test_utils::TestPkg::Config driver_host_config = kDefaultDriverHostPkgConfig,
       fidl::ClientEnd<fuchsia_io::Directory> ns_svc = fidl::ClientEnd<fuchsia_io::Directory>());
 
-  zx::result<StartDriverResult> StartRootDriver();
+  zx::result<StartDriverResult> StartRootDriver(bool suspend_enabled = false);
   zx::result<StartDriverResult> StartRootDriverDynamicLinking(
       test_utils::TestPkg::Config driver_host_config = kDefaultDriverHostPkgConfig,
-      test_utils::TestPkg::Config driver_config = kDefaultRootDriverPkgConfig);
+      test_utils::TestPkg::Config driver_config = kDefaultRootDriverPkgConfig,
+      bool suspend_enabled = false);
 
   StartDriverResult StartSecondDriver(
       std::string_view moniker, bool colocate = false, bool host_restart_on_crash = false,
       bool use_next_vdso = false, bool use_dynamic_linker = false,
-      fidl::ClientEnd<fuchsia_io::Directory> ns_svc = fidl::ClientEnd<fuchsia_io::Directory>());
+      fidl::ClientEnd<fuchsia_io::Directory> ns_svc = fidl::ClientEnd<fuchsia_io::Directory>(),
+      bool suspend_enabled = false);
 
   void Unbind();
 

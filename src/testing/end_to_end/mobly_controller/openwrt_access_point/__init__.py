@@ -79,10 +79,11 @@ def destroy(objects: List[OpenWrtAP]) -> None:
         ap.stop_wifi()
         ap.reset_wifi_config()
         ap.dhcp.reset_dhcp_config()
-        ap.iperf_server.stop()
-        # iperf_server.stop() only terminates the remote iperf3 process and does
-        # not close IPerfServerOverSsh's SSH connection, so close it explicitly.
-        ap.iperf_server.close_ssh()
+        if ap._iperf_server is not None:
+            ap._iperf_server.stop()
+            # iperf_server.stop() only terminates the remote iperf3 process and does
+            # not close IPerfServerOverSsh's SSH connection, so close it explicitly.
+            ap._iperf_server.close_ssh()
         ap.ssh.close()
 
 
@@ -334,23 +335,33 @@ class OpenWrtAP:
         self.ssh_settings = settings.from_config(c.get(dict, "ssh_config"))
         self.ssh = connection.SshConnection(self.ssh_settings)
         self.dhcp = DhcpController(self.ssh)
+        self._tcpdump: LinuxTcpdumpCommand | None = None
+        self._iperf_server: IPerfServerOverSsh | None = None
         self.dhcp.reset_dhcp_config()
         self.reset_wifi_config()
 
-        # Check for tcpdump
-        try:
-            self.ssh.run("which tcpdump")
-        except Exception:
-            _LOGGER.error("tcpdump command not found on OpenWrt AP")
+    @property
+    def tcpdump(self) -> LinuxTcpdumpCommand:
+        """Lazily initializes and returns the LinuxTcpdumpCommand instance."""
+        if self._tcpdump is None:
+            try:
+                self.ssh.run("which tcpdump")
+            except Exception:
+                _LOGGER.error("tcpdump command not found on OpenWrt AP")
+            self._tcpdump = LinuxTcpdumpCommand(self.ssh)
+        return self._tcpdump
 
-        self.tcpdump = LinuxTcpdumpCommand(self.ssh)
-
-        self.iperf_server = IPerfServerOverSsh(
-            ssh_settings=self.ssh_settings,
-            port=5201,
-            test_interface=InterfaceName.lan,
-            use_killall=True,
-        )
+    @property
+    def iperf_server(self) -> IPerfServerOverSsh:
+        """Lazily initializes and returns the IPerfServerOverSsh instance."""
+        if self._iperf_server is None:
+            self._iperf_server = IPerfServerOverSsh(
+                ssh_settings=self.ssh_settings,
+                port=5201,
+                test_interface=InterfaceName.lan,
+                use_killall=True,
+            )
+        return self._iperf_server
 
     @property
     def default_subnet(self) -> str:

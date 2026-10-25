@@ -181,8 +181,8 @@ _BAZEL_EXTRA_ARGS=(
 
 # LINT.IfChange(resultstore_bazel_env_vars)
 # Enable ResultStore reporting if requested by the orchestrator.
-# FX_INTERNAL_RESULTSTORE_BAZEL (set by build/scripts/main_build.py)
-# can be set to "resultstore" or "resultstore_infra"
+# FX_INTERNAL_RESULTSTORE_BAZEL (set by build/scripts/main_build.py based on
+# resultstore_auth_type) can be set to "resultstore" or "resultstore_infra"
 # (configs defined in build/bazel/templates/template.remote_services.gni).
 case "${FX_INTERNAL_RESULTSTORE_BAZEL:-0}" in
   "" | "0")
@@ -223,9 +223,7 @@ function cleanup {
   return "$exit_code"
 }
 trap cleanup EXIT
-"${_GENERATE_INVOCATION_BAZELRC}" \
-  --sub_builds_link="$RESULTSTORE_SUB_BUILDS_LINK" \
-  > "${_INVOCATION_BAZELRC}"
+"${_PREBUILT_PYTHON3}" -S "${_GENERATE_INVOCATION_BAZELRC}" > "${_INVOCATION_BAZELRC}" || die "Failed to generate ${_INVOCATION_BAZELRC}"
 
 # Save per-invocation logs.
 # Log directories are generated dynamically per fx-build invocation,
@@ -287,16 +285,9 @@ done
 
 # In Corp environments with valid gcert credentials, use the credential helper
 # to automatically exchange LOAS for OAuth (Google Cloud Platform) tokens.
-# This requires less interaction from the user than 'gcloud auth ...'.
-#
-# Note: --config=gcertauth is only appended when FX_BUILD_AUTH_TYPE is
-# "loas". When running on GCE bots or other machine-based environments
-# where FX_BUILD_AUTH_TYPE is "machine" or absent, --config=gcertauth is omitted,
-# and Bazel automatically falls back to using GCE VM Metadata Server credentials
-# (via --google_default_credentials=true defined in remote_services.bazelrc).
-use_gcert_auth=()
-if [[ "$FX_BUILD_AUTH_TYPE" == "loas" ]]; then
-  use_gcert_auth=(--config=gcertauth)
+# Note: --config=gcertauth is generated into _INVOCATION_BAZELRC when
+# FX_BUILD_RBE_AUTH_TYPE or FX_BUILD_RS_AUTH_TYPE is "loas".
+if [[ "${FX_BUILD_RBE_AUTH_TYPE:-}" == "loas" || "${FX_BUILD_RS_AUTH_TYPE:-}" == "loas" ]]; then
   # Don't set this, otherwise bazel will look for it
   # (and fail if it doesn't exist).
   unset GOOGLE_APPLICATION_CREDENTIALS
@@ -368,7 +359,6 @@ fi
 # caution.
 [[ -n "${bazel_command_does_configuration}" ]] &&
   _BAZEL_EXTRA_ARGS+=(
-    "${use_gcert_auth[@]}"
     --config=_profiling
   )
 

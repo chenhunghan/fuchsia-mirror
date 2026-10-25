@@ -49,7 +49,6 @@ shared_library("driver") {
     "//src/connectivity/ethernet/drivers/asix-88772b:*",
     "//src/connectivity/ethernet/drivers/dwmac:*",
     "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:*",
-    "//src/connectivity/ethernet/drivers/gvnic:*",
     "//src/connectivity/ethernet/drivers/realtek-8111:*",
     "//src/connectivity/ethernet/drivers/realtek-8211f:*",
     "//src/connectivity/ethernet/drivers/rndis-function:*",
@@ -83,7 +82,6 @@ shared_library("driver") {
     "//src/devices/board/drivers/integration-test:*",
     "//src/devices/board/drivers/nelson:*",
     "//src/devices/board/drivers/qemu-arm64:*",
-    "//src/devices/board/drivers/qemu-riscv64:*",
     "//src/devices/board/drivers/sherlock:*",
     "//src/devices/board/drivers/vim3:*",
     "//src/devices/board/drivers/x86:*",
@@ -251,9 +249,12 @@ shared_library("driver") {
   ]
 }
 
+# LINT.IfChange
 ifs_shared_library("driver_runtime") {
   abi = "//src/devices/bin/driver_runtime/libdriver_runtime.ifs"
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 group("tests") {
   testonly = true

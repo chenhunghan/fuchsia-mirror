@@ -26,8 +26,10 @@
 #include <zircon/dlfcn.h>
 
 #include <cstdarg>
+#include <thread>
 #include <unordered_set>
 
+#include <ddktl/device.h>
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 
@@ -1094,4 +1096,109 @@ TEST_F(GlobalLoggerListTest, TestWithNodeNames) {
   // Make sure we can still log with the zx_drivers that we got even when it is emptied out.
   log(zx_driver_3, FUCHSIA_LOG_INFO, nullptr, __FILE__, __LINE__, "Done with test: %s",
       "TestWithNodeNames");
+}
+
+TEST_F(DriverTest, CompatDriverServerHealthCheckByLevel) {
+  auto [client_end, server_end] = fdf::Endpoints<fuchsia_driver_framework::Driver>::Create();
+  void* token = compat::CompatDriverServer::initialize(server_end.TakeChannel().release());
+  ASSERT_NE(nullptr, token);
+
+  fdf::WireClient<fuchsia_driver_framework::Driver> client(std::move(client_end),
+                                                           fdf::Dispatcher::GetCurrent()->get());
+  fdf::Arena arena('TEST');
+
+  // PING replies OK: the reply itself proves the shim's dispatcher is alive.
+  bool ping_called = false;
+  client.buffer(arena)
+      ->HealthCheck(fuchsia_driver_framework::wire::HealthCheckRequest::kPing)
+      .Then([&ping_called](
+                fdf::WireUnownedResult<fuchsia_driver_framework::Driver::HealthCheck>& result) {
+        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result->is_ok());
+        EXPECT_FALSE(result->value()->has_conditions());
+        ping_called = true;
+      });
+  fdf_testing_run_until_idle();
+  EXPECT_TRUE(ping_called);
+
+  // FAST (and DEEP) are not supported by legacy DFv1 drivers.
+  bool called = false;
+  client.buffer(arena)
+      ->HealthCheck(fuchsia_driver_framework::wire::HealthCheckRequest::kFast)
+      .Then(
+          [&called](fdf::WireUnownedResult<fuchsia_driver_framework::Driver::HealthCheck>& result) {
+            ASSERT_TRUE(result.ok());
+            ASSERT_TRUE(result->is_error());
+            EXPECT_EQ(fuchsia_driver_framework::wire::HealthCheckError::kNotSupported,
+                      result->error_value());
+            called = true;
+          });
+  fdf_testing_run_until_idle();
+  EXPECT_TRUE(called);
+
+  client = {};
+  fdf_testing_run_until_idle();
+  compat::CompatDriverServer::destroy(token);
+}
+
+namespace {
+
+class TestDdkDevice : public ddk::Device<TestDdkDevice> {
+ public:
+  explicit TestDdkDevice(zx_device_t* parent) : ddk::Device<TestDdkDevice>(parent) {}
+  void DdkRelease() {}
+};
+
+}  // namespace
+
+TEST_F(DriverTest, DdkAddServiceCustomInstanceAndOffDispatcher) {
+  auto driver = StartDriver({
+      .v1_driver_path = "/pkg/driver/v1_test.so",
+      .ops =
+          {
+              .get_protocol = [](void*, uint32_t, void*) { return ZX_OK; },
+          },
+  });
+  WaitForChildDeviceAdded();
+
+  std::unique_ptr<V1Test> v1_test(static_cast<V1Test*>(driver->Context()));
+  ASSERT_NE(nullptr, v1_test.get());
+
+  TestDdkDevice ddk_dev(v1_test->zxdev);
+
+  // Registering with the default instance ("default") on the driver dispatcher should succeed.
+  zx::result<> default_result = ddk_dev.DdkAddService<fuchsia_driver_compat::Service>(
+      fuchsia_driver_compat::Service::InstanceHandler({
+          .device = [](fidl::ServerEnd<fuchsia_driver_compat::Device>) {},
+      }));
+  EXPECT_EQ(ZX_OK, default_result.status_value());
+
+  // Registering a distinct instance name from a non-dispatcher background thread should marshal
+  // onto the driver dispatcher and succeed without colliding with "default".
+  libsync::Completion thread_done;
+  zx::result<> off_dispatcher_result = zx::error(ZX_ERR_INTERNAL);
+  std::thread background_thread([&] {
+    off_dispatcher_result = ddk_dev.DdkAddService<fuchsia_driver_compat::Service>(
+        fuchsia_driver_compat::Service::InstanceHandler({
+            .device = [](fidl::ServerEnd<fuchsia_driver_compat::Device>) {},
+        }),
+        "custom-instance");
+    thread_done.Signal();
+  });
+  while (!thread_done.signaled()) {
+    fdf_testing_run_until_idle();
+  }
+  background_thread.join();
+  EXPECT_EQ(ZX_OK, off_dispatcher_result.status_value());
+
+  // Registering the same custom instance name again should fail with ZX_ERR_ALREADY_EXISTS,
+  // confirming that "custom-instance" was registered in the outgoing directory.
+  zx::result<> duplicate_result = ddk_dev.DdkAddService<fuchsia_driver_compat::Service>(
+      fuchsia_driver_compat::Service::InstanceHandler({
+          .device = [](fidl::ServerEnd<fuchsia_driver_compat::Device>) {},
+      }),
+      "custom-instance");
+  EXPECT_EQ(ZX_ERR_ALREADY_EXISTS, duplicate_result.status_value());
+
+  UnbindAndFreeDriver(std::move(driver));
 }

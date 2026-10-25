@@ -72,13 +72,15 @@ VmAddressRegion::VmAddressRegion(VmAspace& kernel_aspace)
 
 VmAddressRegion::~VmAddressRegion() { rust_vm_address_region_destruct(&opaque_storage_); }
 
+void VmAddressRegion::fbl_recycle() { rust_vm_address_region_recycle(this); }
+
 zx_status_t VmAddressRegion::CreateRootLocked(VmAspace& aspace, uint32_t vmar_flags,
                                               fbl::RefPtr<VmAddressRegion>* out) {
   DEBUG_ASSERT(out);
 
-  fbl::AllocChecker ac;
-  auto vmar = new (&ac) VmAddressRegion(aspace, aspace.base(), aspace.size(), vmar_flags);
-  if (!ac.check()) {
+  VmAddressRegion* vmar =
+      rust_vm_address_region_create_root(&aspace, aspace.base(), aspace.size(), vmar_flags);
+  if (!vmar) {
     return ZX_ERR_NO_MEMORY;
   }
 
@@ -86,7 +88,7 @@ zx_status_t VmAddressRegion::CreateRootLocked(VmAspace& aspace, uint32_t vmar_fl
   AssertHeld(vmar->region_lock_ref());
 
   vmar->set_state_locked(LifeCycleState::ALIVE);
-  *out = fbl::AdoptRef(vmar);
+  *out = fbl::ImportFromRawPtr(vmar);
   return ZX_OK;
 }
 
@@ -206,27 +208,26 @@ zx_status_t VmAddressRegion::CreateSubVmarInner(size_t offset, size_t size, uint
     }
 
     // Notice if this is an executable mapping from the vDSO VMO
-    // before we lose the VMO reference via ktl::move(vmo).
+    // before we lose the VMO reference via fbl::ExportToRawPtr(&vmo).
     const bool is_vdso_code =
         (vmo && (arch_mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) && VDso::vmo_is_vdso(vmo));
 
-    fbl::AllocChecker ac;
     if (vmo) {
       // Check that VMOs that back kernel mappings start of with their pages pinned, unless the
       // dynamic flag has been set to opt out of this specific check.
       DEBUG_ASSERT(aspace()->is_user() || aspace()->is_guest_physical() ||
                    vmar_flags & VMAR_FLAG_DEBUG_DYNAMIC_KERNEL_MAPPING ||
                    vmo->DebugIsRangePinned(vmo_offset, size));
-      vmar = fbl::AdoptRef<VmAddressRegionOrMapping>(new (&ac) VmMapping(
-          *this, false, new_base, size, vmar_flags, ktl::move(vmo), is_upper_bound ? 0 : vmo_offset,
-          arch_mmu_flags, VmMapping::Mergeable::NO));
+      vmar = fbl::ImportFromRawPtr<VmAddressRegionOrMapping>(rust_vm_mapping_create(
+          this, false, new_base, size, vmar_flags, fbl::ExportToRawPtr(&vmo),
+          is_upper_bound ? 0 : vmo_offset, arch_mmu_flags, VmMapping::Mergeable::NO));
     } else {
-      vmar = fbl::AdoptRef<VmAddressRegionOrMapping>(
-          new (&ac) VmAddressRegion(*this, new_base, size, vmar_flags, name));
+      vmar = fbl::ImportFromRawPtr<VmAddressRegionOrMapping>(
+          rust_vm_address_region_create_child(this, new_base, size, vmar_flags, name));
     }
 
     Guard<CriticalMutex> guard{lock()};
-    if (!ac.check()) {
+    if (!vmar) {
       return ZX_ERR_NO_MEMORY;
     }
 
@@ -377,11 +378,10 @@ zx_status_t VmAddressRegion::OverwriteVmMappingLocked(
   AssertCanary();
   DEBUG_ASSERT(vmo);
 
-  fbl::AllocChecker ac;
-  fbl::RefPtr<VmMapping> vmar;
-  vmar = fbl::AdoptRef(new (&ac) VmMapping(*this, false, base, size, vmar_flags, ktl::move(vmo),
-                                           vmo_offset, arch_mmu_flags, VmMapping::Mergeable::NO));
-  if (!ac.check()) {
+  fbl::RefPtr<VmMapping> vmar = fbl::ImportFromRawPtr(
+      rust_vm_mapping_create(this, false, base, size, vmar_flags, fbl::ExportToRawPtr(&vmo),
+                             vmo_offset, arch_mmu_flags, VmMapping::Mergeable::NO));
+  if (!vmar) {
     return ZX_ERR_NO_MEMORY;
   }
 
@@ -392,7 +392,7 @@ zx_status_t VmAddressRegion::OverwriteVmMappingLocked(
 
   AssertHeld(vmar->lock_ref());
   AssertHeld(vmar->region_lock_ref());
-  status = vmar->ActivateImpl();
+  status = vmar->Activate();
   if (status != ZX_OK) {
     // Activation can fail if an allocation needed to happen. Nothing can be done to rollback here
     // so the only option is to propagate the ZX_ERR_NO_MEMORY up. If this is happening in response
@@ -410,67 +410,8 @@ zx_status_t VmAddressRegion::OverwriteVmMappingLocked(
   return ZX_OK;
 }
 
-zx_status_t VmAddressRegion::DestroyLockedImpl() {
-  AssertCanary();
-  LTRACEF("%p '%s'\n", this, name());
-
-  // Remove any applied memory priority.
-  zx_status_t status = SetMemoryPriorityLocked(MemoryPriority::DEFAULT);
-  DEBUG_ASSERT(status == ZX_OK);
-
-  // The cur reference prevents regions from being destructed after dropping
-  // the last reference to them when removing from their parent.
-  fbl::RefPtr<VmAddressRegion> cur(this);
-  AssertHeld(cur->lock_ref());
-  AssertHeld(cur->region_lock_ref());
-  while (cur) {
-    // Iterate through children destroying mappings. If we find a
-    // subregion, stop so we can traverse down.
-    fbl::RefPtr<VmAddressRegion> child_region = nullptr;
-    while (!cur->subregions_.IsEmpty() && !child_region) {
-      VmAddressRegionOrMapping* child = &cur->subregions_.front();
-      if (child->is_mapping()) {
-        AssertHeld(child->lock_ref());
-        AssertHeld(child->region_lock_ref());
-        // DestroyLocked should remove this child from our list on success.
-        status = child->DestroyLocked();
-        if (status != ZX_OK) {
-          // TODO(teisenbe): Do we want to handle this case differently?
-          return status;
-        }
-      } else {
-        child_region = child->as_vm_address_region();
-      }
-    }
-
-    if (child_region) {
-      // If we found a child region, traverse down the tree.
-      cur = child_region;
-    } else {
-      // All children are destroyed, so now destroy the current node.
-      if (cur->parent_locked()) {
-        AssertHeld(cur->parent_locked()->lock_ref());
-        AssertHeld(cur->parent_locked()->region_lock_ref());
-        cur->parent_locked()->subregions_.RemoveRegion(cur.get());
-      }
-      cur->set_state_locked(LifeCycleState::DEAD);
-      VmAddressRegion* cur_parent = cur->parent_locked();
-      cur->set_parent_locked(nullptr);
-
-      // If we destroyed the original node, stop. Otherwise traverse
-      // up the tree and keep destroying.
-      cur.reset((cur.get() == this) ? nullptr : cur_parent);
-    }
-  }
-  return ZX_OK;
-}
-
 fbl::RefPtr<VmAddressRegionOrMapping> VmAddressRegion::FindRegion(vaddr_t addr) {
   return fbl::ImportFromRawPtr(rust_vm_address_region_find_region(this, addr));
-}
-
-fbl::RefPtr<VmAddressRegionOrMapping> VmAddressRegion::FindRegionLocked(vaddr_t addr) {
-  return fbl::ImportFromRawPtr(rust_vm_address_region_find_region_locked(this, addr));
 }
 
 VmObject::AttributionCounts VmAddressRegion::GetAttributedMemory() const {
@@ -609,12 +550,6 @@ zx_status_t VmAddressRegion::EnumerateChildren(VmEnumerator* ve) {
   }
   return ZX_OK;
 }
-
-void VmAddressRegion::DumpLockedImpl(uint depth, bool verbose) const {
-  rust_vm_address_region_dump_locked(this, depth, verbose);
-}
-
-zx_status_t VmAddressRegion::ActivateImpl() { return rust_vm_address_region_activate(this); }
 
 zx_status_t VmAddressRegion::RangeOp(RangeOpType op, vaddr_t base, size_t len,
                                      VmAddressRegionOpChildren op_children,
@@ -1230,7 +1165,7 @@ void VmAddressRegion::CommitHighMemoryPriorityImpl() {
     }
     enumerator.pause();
     guard.CallUnlocked(
-        [mapping = ktl::move(mapping)]() mutable { mapping->CommitHighMemoryPriorityImpl(); });
+        [mapping = ktl::move(mapping)]() mutable { mapping->CommitHighMemoryPriority(); });
     // Since the lock was dropped we must re-validate before doing anything else.
     if (!validate()) {
       return;

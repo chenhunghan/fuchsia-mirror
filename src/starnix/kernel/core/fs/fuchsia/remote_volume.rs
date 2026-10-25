@@ -18,6 +18,7 @@ use starnix_logging::{Level, log, log_error};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{errno, error, from_status_like_fdio, statfs};
 use std::sync::Arc;
+use sync_io_client::SyncIo;
 use thiserror::Error;
 
 const CRYPT_THREAD_ROLE: &str = "fuchsia.starnix.remotevol.crypt";
@@ -25,19 +26,19 @@ const CRYPT_THREAD_ROLE: &str = "fuchsia.starnix.remotevol.crypt";
 // container's data storage capability.
 const KEY_FILE_PATH: &str = "key_file";
 
-pub struct RemoteVolume {
-    remotefs: RemoteFs,
+pub struct RemoteVolume<I> {
+    remotefs: RemoteFs<I>,
     exposed_dir_proxy: fio::DirectorySynchronousProxy,
     crypt_service: Arc<CryptService>,
 }
 
-impl RemoteVolume {
-    pub fn remotefs(&self) -> &RemoteFs {
+impl<I> RemoteVolume<I> {
+    pub fn remotefs(&self) -> &RemoteFs<I> {
         &self.remotefs
     }
 }
 
-impl FileSystemOps for RemoteVolume {
+impl<I: SyncIo> FileSystemOps for RemoteVolume<I> {
     fn statfs(&self, fs: &FileSystem, current_task: &CurrentTask) -> Result<statfs, Errno> {
         self.remotefs.statfs(fs, current_task)
     }
@@ -63,6 +64,10 @@ impl FileSystemOps for RemoteVolume {
         new_name: &FsStr,
     ) -> Result<(), Errno> {
         self.remotefs.rename(fs, current_task, context, old_name, new_name)
+    }
+
+    fn sync(&self, fs: &FileSystem, current_task: &CurrentTask) -> Result<(), Errno> {
+        self.remotefs.sync(fs, current_task)
     }
 
     fn unmount(&self) {
@@ -419,4 +424,66 @@ pub fn new_remote_vol(
     }
 
     Ok(fs)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::testing::spawn_kernel_and_run;
+    use crate::vfs::Namespace;
+    use crate::vfs::buffers::VecInputBuffer;
+    use fxfs_testing::TestFixture;
+    use starnix_uapi::device_id::DeviceId;
+    use starnix_uapi::file_mode::mode;
+    use starnix_uapi::open_flags::OpenFlags;
+
+    #[::fuchsia::test(threads = 2)]
+    async fn test_sync_flushes_open_file() {
+        let fixture = TestFixture::new().await;
+        let (server, client) = zx::Channel::create();
+        fixture.root().clone(server.into()).expect("clone failed");
+        let device = fixture.fs().device();
+
+        let crashed_device = spawn_kernel_and_run(async move |current_task| {
+            let (remotefs, root_node, info, node_id) =
+                RemoteFs::new(client, fio::PERM_READABLE | fio::PERM_WRITABLE, "remotevol")
+                    .expect("RemoteFs::new failed");
+            let remotevol = RemoteVolume {
+                remotefs,
+                exposed_dir_proxy: fio::DirectorySynchronousProxy::new(zx::Channel::create().0),
+                crypt_service: Arc::new(CryptService::new(&[0; 32], &[1; 32], None)),
+            };
+            let fs = FileSystem::new(
+                current_task.kernel(),
+                CacheMode::Uncached,
+                remotevol,
+                Default::default(),
+            )
+            .expect("FileSystem::new failed");
+            fs.create_root_with_info(node_id, root_node, info);
+            let ns = Namespace::new(fs.clone());
+            let file = ns
+                .root()
+                .create_node(&current_task, "file".into(), mode!(IFREG, 0o666), DeviceId::NONE)
+                .expect("create_node failed")
+                .open(&current_task, OpenFlags::RDWR)
+                .expect("open failed");
+            file.write(&current_task, &mut VecInputBuffer::new(b"hello")).expect("write failed");
+
+            // Sync without closing or fsyncing the file, then simulate a crash.
+            fs.sync(&current_task).expect("sync failed");
+            device.snapshot().expect("snapshot failed")
+        })
+        .await;
+        fixture.close().await;
+
+        let fixture = TestFixture::new_with_device(crashed_device).await;
+        assert_eq!(
+            fuchsia_fs::directory::read_file(fixture.root(), "file")
+                .await
+                .expect("read_file failed"),
+            b"hello"
+        );
+        fixture.close().await;
+    }
 }

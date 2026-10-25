@@ -163,6 +163,24 @@ impl From<fnet_resources::WakeGroupToken> for WakeGroupId {
     }
 }
 
+/// Asserts [`GROUP_WAKEUP_SIGNAL`] on a wake group's token for as long as it is
+/// held.
+struct WakeSignalGuard<'a>(&'a zx::Event);
+
+impl<'a> WakeSignalGuard<'a> {
+    fn raise(token: &'a zx::Event) -> Self {
+        token.signal(zx::Signals::NONE, GROUP_WAKEUP_SIGNAL).expect("signal doesn't fail");
+        Self(token)
+    }
+}
+
+impl Drop for WakeSignalGuard<'_> {
+    fn drop(&mut self) {
+        let Self(token) = self;
+        token.signal(GROUP_WAKEUP_SIGNAL, zx::Signals::NONE).expect("signal doesn't fail");
+    }
+}
+
 #[derive(Debug)]
 struct WakeGroup {
     name: String,
@@ -228,8 +246,17 @@ impl WakeGroup {
         let Self { name, id, data_watcher, wake_watcher } = self;
         let WakeGroupId { token, koid: _ } = &id;
 
+        enum WakeGroupState<'a> {
+            Awake,
+            Asleep,
+            Waking(WakeSignalGuard<'a>),
+        }
+
+        // Start by assuming the client is awake. If they're asleep we'll catch
+        // it immediately during the loop.
+        let mut state = WakeGroupState::Awake;
+
         let _cleanup = scopeguard::guard((wake_groups, &id), |(wake_groups, id)| {
-            let _ = id.token.signal(GROUP_WAKEUP_SIGNAL, zx::Signals::NONE);
             // Note that sockets that were attached to this wake group still
             // hold onto their DataNotifiers, but without a data watcher, those
             // notifications are no-ops.
@@ -238,38 +265,51 @@ impl WakeGroup {
         });
 
         loop {
-            // Other side is (probably) running. There's nothing for us to do
-            // except wait for them to suspend.
-            debug!("wake group '{name}' {id:?} waiting for suspend");
-            wait_for_client_state(&wake_watcher, ClientState::Asleep).await?;
+            state = match state {
+                WakeGroupState::Awake => {
+                    // Other side is (probably) running. There's nothing for us
+                    // to do except wait for them to suspend.
+                    debug!("wake group '{name}' {id:?} waiting for suspend");
+                    wait_for_client_state(&wake_watcher, ClientState::Asleep).await?;
 
-            data_watcher.reset();
+                    data_watcher.reset();
 
-            // Bias in favor of client wakeup. In that case, raising the
-            // wake signal is pointless.
-            futures::select_biased! {
-                res = wait_for_client_state(&wake_watcher, ClientState::Awake).fuse() => {
-                    res?;
-                    // The other side woke up without us. Nothing left to do here.
-                    continue;
+                    WakeGroupState::Asleep
                 }
-                () = data_watcher.wait().fuse() => (),
+                WakeGroupState::Asleep => {
+                    // Bias in favor of client wakeup. In that case, raising the
+                    // wake signal is pointless.
+                    futures::select_biased! {
+                        res = wait_for_client_state(&wake_watcher, ClientState::Awake).fuse() => {
+                            res?;
+
+                            // The other side woke up without us. Nothing left to do here.
+                            WakeGroupState::Awake
+                        }
+                        () = data_watcher.wait().fuse() => {
+                            // Assert the wake signal to wake up the other side.
+                            let signal = WakeSignalGuard::raise(token);
+                            debug!("notified wake group '{name}' {id:?} of incoming data");
+
+                            WakeGroupState::Waking(signal)
+                        }
+                    }
+                }
+                WakeGroupState::Waking(signal) => {
+                    wait_for_client_state(&wake_watcher, ClientState::Awake).await?;
+
+                    // TODO(https://fxbug.dev/538164589): Hold delegated wake
+                    // leases from netdevice until the client is awake.
+
+                    // Deassert wake signal. When the other side is awake, we
+                    // assume they're capable of staying awake until they're
+                    // done processing the incoming data.
+                    drop(signal);
+                    debug!("deasserted wake signal on '{name}' {id:?}");
+
+                    WakeGroupState::Awake
+                }
             }
-
-            // Assert the wake signal to wake up the other side.
-            token.signal(zx::Signals::NONE, GROUP_WAKEUP_SIGNAL).expect("signal doesn't fail");
-            debug!("notified wake group '{name}' {id:?} of incoming data");
-
-            wait_for_client_state(&wake_watcher, ClientState::Awake).await?;
-
-            // TODO(https://fxbug.dev/538164589): Hold delegated wake leases
-            // from netdevice until the client is awake.
-
-            // Deassert wake signal. When the other side is awake, we assume
-            // they're capable of staying awake until they're done processing
-            // the incoming data.
-            token.signal(GROUP_WAKEUP_SIGNAL, zx::Signals::NONE).expect("signal doesn't fail");
-            debug!("deasserted wake signal on '{name}' {id:?}");
         }
     }
 }

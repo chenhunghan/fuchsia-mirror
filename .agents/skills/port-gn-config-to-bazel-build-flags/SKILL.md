@@ -4,10 +4,12 @@ description: >
   Guides porting Fuchsia GN config() and compiler_config() targets to Bazel
   build_flags() targets (both default toolchain configs and non-default
   configs across //build/config/**/BUILD.gn and other packages). Use when
-  creating build_flags() definitions, exposing global GN build variables via
-  gn_build_variables_for_bazel or //build/bazel/config/derived/*.bzl, mapping
-  OS/CPU conditions to Bazel select() expressions, or auditing config()
-  definitions for GN/Ninja-specific limitations.
+  creating build_flags() definitions, updating corresponding out-of-tree (OOT)
+  flags in cc_features.bzl / default_flag_values.bzl, exposing global GN build
+  variables via gn_build_variables_for_bazel or
+  //build/bazel/config/derived/*.bzl, mapping OS/CPU conditions to Bazel
+  select() expressions, or auditing config() definitions for GN/Ninja-specific
+  limitations.
 ---
 
 # Porting GN `config()` Definitions to Bazel `build_flags()`
@@ -49,6 +51,25 @@ Defined in `//build/bazel_sdk/fuchsia_rules_common/build_flags/build_flags.bzl`,
 
 *(Note: `cflags_objc`, `cflags_objcc`, and `asmflags` are not separate
 attributes on `build_flags()`.)*
+
+### The `extra_linker_flags()` Rule
+Defined in
+`//build/bazel_sdk/fuchsia_rules_common/build_flags/extra_linker_flags.bzl`,
+`extra_linker_flags()` provides `BuildFlagsInfo` for targets that require
+linker-specific flags, linker action inputs (e.g. linker scripts or stub files),
+or linker library dependencies (`CcInfo`):
+
+| GN `config()` / `variant()` Attribute / Need | Bazel `extra_linker_flags()` Attribute | Notes |
+|---|---|---|
+| `ldflags` | `ldflags` | Linker flags |
+| `inputs` (for linker action) | `link_inputs` | Additional linker input files |
+| Library dependency (e.g. `-lc`, `-lm`, `libs = [...]`, `deps = [...]`) | `link_deps` | Linked into all linking targets (executables and shared libraries) |
+| Variant `executable_deps` (e.g. `:asan_default_options`, `:autobind`) | `executable_link_deps` | Linked into executables only (ignored for shared libraries) |
+
+`extra_linker_flags()` only accepts `ldflags`, `link_inputs`, `link_deps`, and
+`executable_link_deps`. It can be referenced directly in `build_flags = [...]`
+on `fx_cc_*()` targets or included via `subflags = [...]` in `build_flags()` and
+`compiler_build_flags()` targets.
 
 ### Default Toolchain Config Discovery
 During `fx gen` / `fx build`, `//build/bazel/config:bazel_default_configs_json`
@@ -110,8 +131,8 @@ exposed as Starlark constants via `@fuchsia_build_info//:args.bzl` or
 ### Category 3: Target Platform, OS, and CPU Variables (Port via `select()`)
 
 When a `config()` branches on target OS or CPU variables (`current_os`,
-`current_cpu`, `is_fuchsia`, `is_linux`, `is_host`, `rust_target`), use Bazel
-`select()` expressions on `build_flags()` attributes:
+`current_cpu`, `is_fuchsia`, `is_linux`, `is_host`, `current_target_tuple`), use
+Bazel `select()` expressions on `build_flags()` attributes:
 
 1.  **OS Conditions (`current_os`, `is_fuchsia`, `is_linux`, `is_host`)**:
     - `is_fuchsia` or `current_os == "fuchsia"`:
@@ -149,7 +170,8 @@ When a `config()` branches on target OS or CPU variables (`current_os`,
     - `current_cpu == "arm64"` -> `"@platforms//cpu:arm64"`
     - `current_cpu == "riscv64"` -> `"@platforms//cpu:riscv64"`
 
-3.  **Combined `(current_os, current_cpu)` Conditions (e.g., `rust_target`)**:
+3.  **Combined `(current_os, current_cpu)` Conditions (e.g.,
+    `current_target_tuple`)**:
     - `//build/bazel/platforms/BUILD.bazel` provides composite `config_setting`
       targets for every `(os, cpu)` pair:
       - `//build/bazel/platforms:is_fuchsia_x64`
@@ -168,24 +190,25 @@ When a `config()` branches on target OS or CPU variables (`current_os`,
       dictionary value should be a flag list:
 
      ```python
-     # //build/bazel/config/derived/rust_target.bzl
-     rust_target_flags__select_args = {
-         "//build/bazel/platforms:is_fuchsia_x64": ["--target", "x86_64-unknown-fuchsia"],
-         "//build/bazel/platforms:is_fuchsia_arm64": ["--target", "aarch64-unknown-fuchsia"],
-         "//build/bazel/platforms:is_fuchsia_riscv64": ["--target", "riscv64gc-unknown-fuchsia"],
-         "//build/bazel/platforms:is_linux_x64": ["--target", "x86_64-unknown-linux-gnu"],
-         "//build/bazel/platforms:is_linux_arm64": ["--target", "aarch64-unknown-linux-gnu"],
+     # //build/bazel/config/derived/current_target_tuple.bzl
+     current_target_tuple_flags__select_args = {
+         "//build/bazel/platforms:is_fuchsia_x64": ["--target=x86_64-unknown-fuchsia"],
+         "//build/bazel/platforms:is_fuchsia_arm64": ["--target=aarch64-unknown-fuchsia"],
+         "//build/bazel/platforms:is_fuchsia_riscv64": ["--target=riscv64-unknown-fuchsia"],
+         "//build/bazel/platforms:is_linux_x64": ["--target=x86_64-unknown-linux-gnu"],
+         "//build/bazel/platforms:is_linux_arm64": ["--target=aarch64-unknown-linux-gnu"],
      }
      ```
 
       Then pass the dictionary to `select()` in `BUILD.bazel`:
 
      ```python
-     load("//build/bazel/config/derived:rust_target.bzl", "rust_target_flags__select_args")
+     load("//build/bazel/config/derived:current_target_tuple.bzl", "current_target_tuple_flags__select_args")
 
      build_flags(
-         name = "target",
-         rustflags = select(rust_target_flags__select_args),
+         name = "compiler_target",
+         cflags = select(current_target_tuple_flags__select_args),
+         ldflags = select(current_target_tuple_flags__select_args),
          visibility = ["//visibility:public"],
      )
      ```
@@ -244,6 +267,29 @@ no direct Bazel equivalent and require a distinct Bazel-specific design:
       ["//", root_gen_dir]`) or `//build/config/linux:sysroot`
       (`rebase_path(sysroot, root_build_dir)`) depend on Ninja's output
       directory layout and cannot be ported 1-to-1 to `build_flags()`.
+3.  **Bazel Toolchain-Intrinsic or Unsupported Configs (Port as Empty No-Op
+    `build_flags()`)**:
+    - Some GN `config()` targets control flags that are intrinsically managed by
+      the Bazel toolchain rules or are incompatible with Bazel's execution
+      model. Port these as empty `build_flags(name = "<name>", ...)` targets
+      with an explanatory comment so default config discovery remains 1-to-1
+      between GN and Bazel:
+      - `//build/config/rust:target`: In Bazel, `@rules_rust`'s
+        `rust_toolchain()` unconditionally emits `--target=<triple>`, and
+        `rustc` rejects duplicate `--target` flags (`error: Option 'target'
+        given more than once`).
+      - `//build/config/rust:error_format_human`: `@rules_rust` controls
+        `--error-format` via its `error_format` setting and process wrapper.
+      - `//build/config/rust:incremental`: Rust incremental compilation
+        (`-Cincremental=...`) is incompatible with Bazel's sandboxed and remote
+        execution model.
+4.  **GN `inputs` and implicit `libs` in configs**:
+    - Compiler-side action inputs are not supported in `build_flags()`.
+    - Linker action inputs (such as linker scripts) and library dependencies
+      (`CcInfo`) can be ported using `extra_linker_flags(ldflags = [...],
+      link_inputs = [...], link_deps = [...], executable_link_deps = [...])`,
+      which can be referenced directly or included via `subflags` of a
+      `build_flags()` target.
 
 ---
 
@@ -337,7 +383,54 @@ build_flags(
 
 ---
 
-## 5. Step 4: Verification Workflow
+## 5. Step 4: Update Out-of-Tree (OOT) Toolchain Flags for Default Configs
+
+When porting a **default toolchain config** (one that becomes active in
+`@fuchsia_build_info//default_build_flags/BUILD.bazel`), you **must** also
+update the out-of-tree C++ toolchain flag definitions in
+`//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl`
+(and, when applicable, `toolchain_utils.bzl` or
+`//build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl`):
+
+1.  **Dual-Mode Architecture (`use_default_build_flags`)**:
+    - In-tree platform and host builds (`--config=fuchsia_platform`,
+      `--config=host`) set
+      `@fuchsia_rules_common//build_flags:use_default_build_flags = True` and
+      receive default flags from `@fuchsia_build_info//default_build_flags`.
+    - Out-of-tree (OOT) workspaces and SDK target builds
+      (`--config=fuchsia_sdk`) use `@fuchsia_clang` or have
+      `use_default_build_flags = False`, relying on
+      `get_default_compile_flags_feature()` in `cc_features.bzl`.
+    - Inside `get_default_compile_flags_feature()`, default flags are
+      partitioned into:
+      - `in_tree_remaining_{cflags,conlyflags,ccflags,ldflags}`: Flags not yet
+        in `@fuchsia_build_info//default_build_flags` (applied unconditionally).
+      - `oot_only_{cflags,conlyflags,ccflags,ldflags}`: Flags already in
+        `@fuchsia_build_info//default_build_flags` (applied only when `not
+        use_default_build_flags`).
+
+2.  **Required Updates in `cc_features.bzl` When Adding a Default
+    `build_flags()`**:
+    - **Move existing flags from `in_tree_remaining_*` to `oot_only_*`** (or
+      gate mode-specific flag sets on `not use_default_build_flags`) so they are
+      not duplicated in-tree and can be removed via `disable_build_flags =
+      [...]` on `fx_cc_*` targets.
+    - **Add or update the OOT flag config in `_flag_configs` and `oot_only_*` to
+      match the `//build/config/` equivalent evaluated for the `fuchsia_sdk`
+      platform (`target_os == "fuchsia"`).** If the newly ported `build_flags()`
+      was previously missing or outdated in `cc_features.bzl`, define or update
+      its entry in `_flag_configs` and include it in the appropriate
+      `oot_only_{cflags,conlyflags,ccflags,ldflags}` list.
+    - **Share multi-flag lists via `default_flag_values.bzl`**: For configs with
+      larger flag lists (such as `default_warnings` or
+      `thread_safety_annotations`), define shared constants in
+      `//build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl`
+      and load them in both `//build/config/BUILD.bazel` and `cc_features.bzl`,
+      guarded by `LINT.IfChange` / `LINT.ThenChange` comments.
+
+---
+
+## 6. Step 5: Verification Workflow
 
 1.  **Format modified GN and Bazel files**:
 
@@ -353,4 +446,4 @@ build_flags(
 
     - Regenerates `@fuchsia_build_info//default_build_flags/BUILD.bazel` and
       verifies that normalized compiler/linker command lines match between GN
-      and Bazel.
+      and Bazel across `host`, `fuchsia_platform`, and `fuchsia_sdk` (OOT).

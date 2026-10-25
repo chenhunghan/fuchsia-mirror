@@ -4,19 +4,20 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::channel_dispatcher::MessageWaiter;
+use super::exception_dispatcher::ExceptionDispatcher;
 use super::handle::KernelHandle;
 use super::process_dispatcher::ProcessDispatcher;
-use super::thread_dispatcher::{CoreThreadObservation, ThreadDispatcher, ThreadDispatcherState};
-use super::thread_state::{Exception, Lifecycle};
+use super::thread_dispatcher::{
+    Blocked, CoreThreadObservation, ThreadDispatcher, ThreadDispatcherState,
+};
 use crate::arch_rs::UserEntryState;
+use crate::kernel::scheduler_state::ThreadStateKind;
 use core::mem::MaybeUninit;
 use fbl::RefPtr;
-use ksync::LockToken;
 use zx_status::Status;
 use zx_types::{
-    zx_exception_context_t, zx_excp_type_t, zx_info_task_runtime_t, zx_info_thread_stats_t,
-    zx_info_thread_t, zx_koid_t, zx_rights_t, zx_status_t,
+    zx_exception_context_t, zx_excp_type_t, zx_info_task_runtime_t, zx_koid_t, zx_rights_t,
+    zx_status_t,
 };
 
 unsafe extern "C" {
@@ -126,6 +127,71 @@ unsafe extern "C" {
     /// `thread` must point to a valid `ThreadDispatcher`.
     pub(crate) fn cpp_thread_start_routine_entry(thread: *mut core::ffi::c_void) -> i32;
 
+    /// Sends the `ZX_EXCP_THREAD_EXITING` single-shot exception to the process debugger.
+    ///
+    /// TRANSITIONAL: while `HandleSingleShotException` remains a C++ method.
+    ///
+    /// # Safety
+    ///
+    /// `process` and `thread` must be valid `ProcessDispatcher` and `ThreadDispatcher` pointers.
+    pub(crate) fn cpp_thread_handle_single_shot_exiting(
+        process: *mut ProcessDispatcher,
+        thread: *mut ThreadDispatcher,
+    );
+    /// Takes the core thread spinlock and clears the linked core thread.
+    ///
+    /// TRANSITIONAL: while `core_thread_` remains a C++ field.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be a valid `ThreadDispatcher` pointer, and the caller must hold the
+    /// dispatcher's state lock (`ThreadDispatcherState::lock`).
+    pub(crate) fn cpp_thread_dispatcher_reset_core_thread(thread: *mut ThreadDispatcher);
+    /// Initializes the given opaque runtime stats storage.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must be suitably aligned and sized.
+    pub(crate) fn cpp_thread_runtime_stats_init(storage: *mut core::ffi::c_void);
+
+    /// Updates the thread runtime stats.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must point to initialized ThreadRuntimeStats, and interrupts must be disabled.
+    pub(crate) fn cpp_thread_runtime_stats_update(
+        storage: *mut core::ffi::c_void,
+        new_state: ThreadStateKind,
+    );
+    /// Adds page fault ticks to runtime stats.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must point to initialized ThreadRuntimeStats.
+    pub(crate) fn cpp_thread_runtime_stats_add_page_fault_ticks(
+        storage: *mut core::ffi::c_void,
+        ticks: i64,
+    );
+    /// Adds lock contention ticks to runtime stats.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must point to initialized ThreadRuntimeStats.
+    pub(crate) fn cpp_thread_runtime_stats_add_lock_contention_ticks(
+        storage: *mut core::ffi::c_void,
+        ticks: i64,
+    );
+    /// Gets compensated runtime stats.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must point to initialized ThreadRuntimeStats. `out_stats` must point to
+    /// valid uninitialized memory for `zx_info_task_runtime_t`.
+    pub(crate) fn cpp_thread_runtime_stats_get_compensated(
+        storage: *mut core::ffi::c_void,
+        out_stats: *mut core::mem::MaybeUninit<zx_info_task_runtime_t>,
+    );
+
     /// Reads thread architectural state.
     ///
     /// # Safety
@@ -152,60 +218,6 @@ unsafe extern "C" {
         buffer_size: usize,
     ) -> zx_status_t;
 
-    /// Calls into C++ implementation to set the base profile of a thread.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `profile` must point to a valid `SchedulerStateBaseProfile`.
-    pub(crate) fn cpp_thread_dispatcher_set_base_profile(
-        thread: *mut ThreadDispatcher,
-        profile: *const crate::kernel::scheduler_state::SchedulerStateBaseProfile,
-    ) -> zx_status_t;
-
-    /// Calls into C++ implementation to set the soft affinity of a thread.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    pub(crate) fn cpp_thread_dispatcher_set_soft_affinity(
-        thread: *mut ThreadDispatcher,
-        mask: crate::kernel::types::cpu_mask_t,
-    ) -> zx_status_t;
-
-    /// Gets info struct for userspace.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `out_info` must point to valid uninitialized memory for `zx_info_thread_t`.
-    pub(crate) fn cpp_thread_dispatcher_get_info_for_userspace(
-        thread: *const ThreadDispatcher,
-        out_info: *mut zx_info_thread_t,
-    );
-
-    /// Gets stats struct for userspace.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `out_info` must point to valid uninitialized memory for `zx_info_thread_stats_t`.
-    pub(crate) fn cpp_thread_dispatcher_get_stats_for_userspace(
-        thread: *mut ThreadDispatcher,
-        out_info: *mut zx_info_thread_stats_t,
-    ) -> zx_status_t;
-
-    /// Gets runtime stats struct.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `out_info` must point to valid uninitialized memory for `zx_info_task_runtime_t`.
-    pub(crate) fn cpp_thread_dispatcher_get_runtime_stats(
-        thread: *const ThreadDispatcher,
-        out_info: *mut zx_info_task_runtime_t,
-    );
-
     /// Raises an exception for job debugger.
     ///
     /// # Safety
@@ -223,10 +235,6 @@ unsafe extern "C" {
     ///
     /// Yields execution of the current thread to the scheduler.
     pub(crate) fn cpp_sys_thread_legacy_yield(options: u32) -> zx_status_t;
-    /// Sets the thread blocked reason and returns the previous blocked reason.
-    pub(crate) fn cpp_thread_dispatcher_set_blocked_reason(
-        reason: super::thread_dispatcher::Blocked,
-    ) -> super::thread_dispatcher::Blocked;
 
     /// Retrieves exception report from thread.
     ///
@@ -238,23 +246,6 @@ unsafe extern "C" {
         thread: *const ThreadDispatcher,
         out_report: *mut zx_types::zx_exception_report_t,
     ) -> zx_status_t;
-
-    /// Returns the current thread's `MessageWaiter`.
-    ///
-    /// # Safety
-    ///
-    /// The current thread must be an active thread with an initialized `MessageWaiter`.
-    #[allow(improper_ctypes)]
-    pub fn cpp_thread_dispatcher_get_current_message_waiter() -> *mut MessageWaiter;
-
-    /// Returns a pointer to the thread's `Exceptionate`.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    pub(crate) fn cpp_thread_dispatcher_exceptionate(
-        thread: *mut ThreadDispatcher,
-    ) -> *mut super::exceptionate::Exceptionate;
 }
 
 // Exported FFI functions for C++ callers:
@@ -378,12 +369,6 @@ pub extern "C" fn rust_thread_dispatcher_resume(thread: &ThreadDispatcher) {
     thread.resume();
 }
 
-/// Kicks this thread out of restricted mode.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_thread_dispatcher_restricted_kick(thread: &ThreadDispatcher) -> zx_status_t {
-    Status::result_into_raw(thread.restricted_kick())
-}
-
 /// Callback from the kernel when the thread is suspending.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_thread_dispatcher_suspending(thread: &ThreadDispatcher) {
@@ -401,121 +386,131 @@ pub extern "C" fn rust_thread_dispatcher_is_dying_or_dead(thread: &ThreadDispatc
     thread.is_dying_or_dead()
 }
 
-/// Returns whether the thread is dying or dead, with the state lock already held.
+/// Returns a pointer to the thread's runtime stats storage.
+///
+/// TRANSITIONAL: while `ThreadRuntimeStats` remains a C++ type, the `ThreadDispatcher` C++
+/// inlines (`UpdateRuntimeStats`, `AddPageFaultTicks`, `AddLockContentionTicks`,
+/// `GetCompensatedTaskRuntimeStats`) resolve the object through this entry and call its methods
+/// directly. The canary check the C++ methods performed lives here.
 ///
 /// # Safety
 ///
-/// The caller must either hold the thread's state lock, which C++ does through
-/// `Guard<CriticalMutex>{get_lock()}`, or otherwise guarantee that no other thread can touch
-/// the state for the duration of the call.
-///
-/// `~ThreadDispatcher()` calls this with no lock held. That is sound because destruction
-/// implies the last reference is gone, so there is no concurrent access to race with.
+/// `thread` must be a valid reference.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_is_dying_or_dead_locked(
+pub unsafe extern "C" fn rust_thread_dispatcher_get_runtime_stats(
+    thread: &ThreadDispatcher,
+) -> *mut core::ffi::c_void {
+    thread.assert_canary();
+    thread.state().runtime_stats.as_void_ptr()
+}
+
+/// Called when the current thread is exiting.
+///
+/// # Safety
+///
+/// Must only be called on the current running thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_dispatcher_exiting_current(thread: &ThreadDispatcher) {
+    thread.exiting_current();
+}
+
+/// Sets the blocked reason of the current thread and returns the previous one.
+///
+/// # Safety
+///
+/// The calling thread must be a user thread, so that `Thread::Current::Get()->user_thread()` is
+/// its live `ThreadDispatcher`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_dispatcher_set_blocked_reason(reason: u32) -> u32 {
+    let reason = Blocked::from_raw(reason).expect("invalid ThreadDispatcher::Blocked");
+    ThreadDispatcher::set_blocked_reason(reason).0
+}
+
+/// Sets the exception dispatcher on the thread.
+///
+/// # Safety
+///
+/// `exception` must be a valid `ExceptionDispatcher` reference, and the caller must hold
+/// `thread`'s state lock (`get_lock()`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_dispatcher_set_exception_locked(
+    thread: &ThreadDispatcher,
+    exception: &ExceptionDispatcher,
+    exceptionate_type: u32,
+) {
+    let exception = RefPtr::from_ref(exception);
+    // SAFETY: The caller holds `thread`'s state lock.
+    unsafe {
+        let mut token = ksync::LockToken::new();
+        thread.set_exception_dispatcher_locked(&mut token, exception, exceptionate_type);
+    }
+}
+
+/// Clears the exception dispatcher on the thread and returns whether the thread is dying or dead.
+///
+/// # Safety
+///
+/// The caller must hold `thread`'s state lock (`get_lock()`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_dispatcher_clear_exception_locked(
     thread: &ThreadDispatcher,
 ) -> bool {
-    // SAFETY: The caller guarantees exclusive access to the state, by holding the lock or by
-    // being the last reference. See this function's `# Safety` section.
-    let token = unsafe { LockToken::new() };
-    thread.is_dying_or_dead_locked(&token)
+    // SAFETY: The caller holds `thread`'s state lock.
+    unsafe {
+        let mut token = ksync::LockToken::new();
+        thread.clear_exception_locked(&mut token)
+    }
 }
 
-/// Returns whether the thread has ever started.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_thread_dispatcher_has_started(thread: &ThreadDispatcher) -> bool {
-    thread.has_started()
-}
-
-/// Returns whether the thread has ever started, with the state lock already held.
+/// Returns true if suspended or in exception.
 ///
 /// # Safety
 ///
-/// The caller must either hold the thread's state lock, which C++ does through
-/// `Guard<CriticalMutex>{get_lock()}`, or otherwise guarantee that no other thread can touch
-/// the state for the duration of the call. Both of this function's current callers are in
-/// `~ThreadDispatcher()` and rely on the second case; see
-/// `rust_thread_dispatcher_is_dying_or_dead_locked`.
+/// The caller must hold `thread`'s state lock (`get_lock()`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_has_started_locked(
+pub unsafe extern "C" fn rust_thread_dispatcher_suspended_or_in_exception_locked(
     thread: &ThreadDispatcher,
 ) -> bool {
-    // SAFETY: The caller guarantees exclusive access to the state, by holding the lock or by
-    // being the last reference. See this function's `# Safety` section.
-    let token = unsafe { LockToken::new() };
-    thread.has_started_locked(&token)
+    // SAFETY: The caller holds `thread`'s state lock.
+    unsafe {
+        let token = ksync::LockToken::new();
+        thread.suspended_or_in_exception_locked(&token)
+    }
 }
 
-/// Returns the thread's current lifecycle as a raw discriminant.
-///
-/// TRANSITIONAL. This exists only for the `ThreadDispatcher` methods that still read the
-/// lifecycle from C++: `~ThreadDispatcher()`, `SuspendedOrInExceptionLocked()`,
-/// `GetInfoForUserspace()`, `SetBaseProfile()` and `SetSoftAffinity()`. It is removed once
-/// those move to Rust; do not add callers. `SuspendedOrInExceptionLocked()` also reads
-/// `exception_`, so this is expected to outlive `rust_thread_dispatcher_set_state_locked`.
-///
-/// `Lifecycle` is `#[repr(u32)]` with discriminants matching `ThreadState::Lifecycle`; the
-/// `static_assert`s in `thread_dispatcher_ffi.cc` pin the two enumerations together.
-///
-/// # Safety
-///
-/// The caller must either hold the thread's state lock, which C++ does through
-/// `Guard<CriticalMutex>{get_lock()}`, or otherwise guarantee that no other thread can touch
-/// the state for the duration of the call. `~ThreadDispatcher()` relies on the second case;
-/// see `rust_thread_dispatcher_is_dying_or_dead_locked`.
+/// Returns a pointer to the thread's core thread spinlock, as a C++ `Lock<SpinLock>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_lifecycle_locked(thread: &ThreadDispatcher) -> u32 {
-    // SAFETY: The caller guarantees exclusive access to the state, by holding the lock or by
-    // being the last reference. See this function's `# Safety` section.
-    let token = unsafe { LockToken::new() };
-    thread.lifecycle_locked(&token) as u32
-}
-
-/// Transitions the thread's lifecycle, taking the target as a raw discriminant.
-///
-/// TRANSITIONAL. This is the write-side counterpart of
-/// `rust_thread_dispatcher_lifecycle_locked`, and `ThreadDispatcher::ExitingCurrent()` is its
-/// only remaining caller. `ExitingCurrent()` cannot move to Rust until `runtime_stats_` does,
-/// so this is expected to be removed alongside that field. Do not add callers.
-///
-/// # Safety
-///
-/// The caller must hold the thread's state lock, which C++ does through
-/// `Guard<CriticalMutex>{get_lock()}`. That is the only obligation: `lifecycle` is a raw
-/// discriminant crossing in from C++, so it is validated by `Lifecycle::from_raw` and an
-/// out-of-range value panics unconditionally rather than being converted into an invalid
-/// `Lifecycle` variant.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_set_state_locked(
+pub extern "C" fn rust_thread_dispatcher_get_core_thread_lock(
     thread: &ThreadDispatcher,
-    lifecycle: u32,
-) {
-    let lifecycle = Lifecycle::from_raw(lifecycle).expect("invalid ThreadState::Lifecycle");
-    // SAFETY: The caller guarantees the state lock is held for the duration of this call.
-    let mut token = unsafe { LockToken::new() };
-    thread.set_state_locked(&mut token, lifecycle);
+) -> *mut core::ffi::c_void {
+    core::ptr::from_ref(thread.state().core_thread_lock.raw_mutex()).cast_mut().cast()
 }
 
-/// Transitions the thread's exception state, taking the target as a raw discriminant.
-///
-/// TRANSITIONAL. `exception_` and `exceptionate_type_` are still C++ fields, so the exception
-/// handling that writes this axis has not been ported yet. Removed with those fields; do not add
-/// callers.
+/// Returns a pointer to the thread's exceptionate storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_dispatcher_get_exceptionate(
+    thread: &ThreadDispatcher,
+) -> *mut core::ffi::c_void {
+    thread.state().exceptionate.as_void_ptr()
+}
+
+/// Retrieves the thread's current exception dispatcher, or null if not in an exception.
 ///
 /// # Safety
 ///
-/// The caller must hold the thread's state lock, which C++ does through
-/// `Guard<CriticalMutex>{get_lock()}`. That is the only obligation: `exception` is a raw
-/// discriminant crossing in from C++, so it is validated by `Exception::from_raw` and an
-/// out-of-range value panics unconditionally rather than being converted into an invalid
-/// `Exception` variant.
+/// The caller must hold `thread`'s state lock (`get_lock()`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_set_exception_state_locked(
+pub unsafe extern "C" fn rust_thread_dispatcher_get_exception_locked(
     thread: &ThreadDispatcher,
-    exception: u32,
-) {
-    let exception = Exception::from_raw(exception).expect("invalid ThreadState::Exception");
-    // SAFETY: The caller guarantees the state lock is held for the duration of this call.
-    let mut token = unsafe { LockToken::new() };
-    thread.set_exception_locked(&mut token, exception);
+) -> *mut ExceptionDispatcher {
+    // SAFETY: The caller holds `thread`'s state lock.
+    unsafe {
+        let token = ksync::LockToken::new();
+        thread
+            .state()
+            .exception
+            .get(&token)
+            .as_ref()
+            .map_or(core::ptr::null_mut(), |e| core::ptr::from_ref(&**e).cast_mut())
+    }
 }

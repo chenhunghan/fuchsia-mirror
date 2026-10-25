@@ -14,10 +14,10 @@ use crate::{
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian, NativeEndian};
 use linux_uapi::{bpf_map_type, bpf_map_type_BPF_MAP_TYPE_ARRAY};
-#[cfg(target_os = "fuchsia")]
-use starnix_sync::{EbpfVerifierDependenciesLock, LockDepMutex};
+use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 use zerocopy::IntoBytes;
 
@@ -68,7 +68,7 @@ pub enum Namespace {
 pub struct MemoryId {
     namespace: Namespace,
     id: u64,
-    parent: Option<Box<MemoryId>>,
+    parent: Option<Arc<MemoryId>>,
 }
 
 impl MemoryId {
@@ -110,12 +110,12 @@ impl MemoryId {
     fn prepended(&self, other: MemoryId) -> Self {
         match &self.parent {
             None => {
-                MemoryId { namespace: self.namespace, id: self.id, parent: Some(Box::new(other)) }
+                MemoryId { namespace: self.namespace, id: self.id, parent: Some(Arc::new(other)) }
             }
             Some(parent) => MemoryId {
                 namespace: self.namespace,
                 id: self.id,
-                parent: Some(Box::new(parent.prepended(other))),
+                parent: Some(Arc::new(parent.prepended(other))),
             },
         }
     }
@@ -346,10 +346,10 @@ pub enum Type {
     /// `PtrToArray` with the same `id`.
     PtrToEndArray { id: MemoryId },
     /// A pointer that might be null and must be validated before being referenced.
-    NullOr { id: MemoryId, inner: Box<Type> },
+    NullOr { id: MemoryId, inner: Arc<Type> },
     /// An object that must be passed to a method with an associated `ReleaseParameter` before the
     /// end of the program.
-    Releasable { id: MemoryId, inner: Box<Type> },
+    Releasable { id: MemoryId, inner: Arc<Type> },
     /// A function parameter that must be a `ScalarValue` when called.
     ScalarValueParameter,
     /// A function parameter that must be a `ConstPtrToMap` when called.
@@ -518,6 +518,27 @@ impl Type {
         }
     }
 
+    /// Returns a copy of this pointer with its offset replaced by `offset`, looking through
+    /// `Releasable` so that the resource stays tracked. Other types are returned unchanged.
+    fn with_offset(&self, offset: ScalarValueData) -> Self {
+        match self {
+            Self::Releasable { id, inner } => {
+                Self::Releasable { id: id.clone(), inner: Arc::new(inner.with_offset(offset)) }
+            }
+            Self::PtrToMemory { id, buffer_size, origin, .. } => Self::PtrToMemory {
+                id: id.clone(),
+                offset,
+                buffer_size: *buffer_size,
+                origin: *origin,
+            },
+            Self::PtrToStruct { id, descriptor, .. } => {
+                Self::PtrToStruct { id: id.clone(), offset, descriptor: descriptor.clone() }
+            }
+            Self::PtrToArray { id, .. } => Self::PtrToArray { id: id.clone(), offset },
+            _ => self.clone(),
+        }
+    }
+
     /// Constraints `type1` and `type2` for a conditional jump with the specified `jump_type` and
     /// `jump_width`.
     fn constraint(
@@ -582,7 +603,7 @@ impl Type {
                 if jump_type.is_strict() && data.is_zero() =>
             {
                 context.set_null(id, false);
-                let inner = *inner.clone();
+                let inner = (**inner).clone();
                 inner.register_resource(context);
                 (inner, type2)
             }
@@ -590,7 +611,7 @@ impl Type {
                 if jump_type.is_strict() && data.is_zero() =>
             {
                 context.set_null(id, false);
-                let inner = *inner.clone();
+                let inner = (**inner).clone();
                 inner.register_resource(context);
                 (type1, inner)
             }
@@ -672,6 +693,40 @@ impl Type {
             ) if id1 == id2 => {
                 context.update_array_bounds(id1.clone(), *offset + 1);
                 (type1, type2)
+            }
+            (
+                JumpWidth::W64,
+                JumpType::Eq,
+                Type::PtrToMemory { id: id1, offset: offset1, .. },
+                Type::PtrToMemory { id: id2, offset: offset2, .. },
+            )
+            | (
+                JumpWidth::W64,
+                JumpType::Eq,
+                Type::PtrToStruct { id: id1, offset: offset1, .. },
+                Type::PtrToStruct { id: id2, offset: offset2, .. },
+            )
+            | (
+                JumpWidth::W64,
+                JumpType::Eq,
+                Type::PtrToArray { id: id1, offset: offset1 },
+                Type::PtrToArray { id: id2, offset: offset2 },
+            ) if id1 == id2 => {
+                // Both pointers share the same base, so they are equal iff their offsets are
+                // equal. Constrain the offsets, and keep the rest of each type (including any
+                // `Releasable` wrapper) so that neither pointer loses information.
+                let (offset, _) = Self::constraint(
+                    context,
+                    JumpType::Eq,
+                    JumpWidth::W64,
+                    Type::ScalarValue(*offset1),
+                    Type::ScalarValue(*offset2),
+                )?;
+                let offset = match offset {
+                    Type::ScalarValue(offset) => offset,
+                    _ => *offset1,
+                };
+                (type1.with_offset(offset), type2.with_offset(offset))
             }
             (JumpWidth::W64, JumpType::Eq, _, _) => (type1.clone(), type1),
             _ => (type1, type2),
@@ -807,9 +862,17 @@ impl Type {
                     Err(VerifierErrorKind::ExpectedProgramArgument(*parameter_index))
                 }
             }
-            (Type::ReleaseParameter { id: id1 }, Type::Releasable { id: id2, .. })
+            (Type::ReleaseParameter { id: id1 }, Type::Releasable { id: id2, inner })
                 if id2.has_parent(id1) =>
             {
+                // Only the unmodified base pointer of a releasable resource may be released.
+                let base_offset = match inner.as_ref() {
+                    Type::PtrToMemory { offset, .. } | Type::PtrToStruct { offset, .. } => offset,
+                    _ => return Err(VerifierErrorKind::HelperArgumentTypeMismatch(index)),
+                };
+                if !base_offset.is_zero() {
+                    return Err(VerifierErrorKind::HelperArgumentTypeMismatch(index));
+                }
                 if next.resources.remove(id2) {
                     Ok(())
                 } else {
@@ -843,7 +906,7 @@ impl Type {
                 if is_null {
                     *self = Type::from(0);
                 } else {
-                    *self = *inner.clone();
+                    *self = (**inner).clone();
                 }
             }
             _ => {}
@@ -1058,8 +1121,8 @@ pub fn verify_program(
                 // If the context has a parent, register the data dependencies and try to terminate
                 // it.
                 if let Some(parent) = context.parent.take() {
-                    parent.dependencies.lock().merge(ending_context.dependencies);
-                    if let Some(parent) = Arc::into_inner(parent) {
+                    parent.dependencies.update(|d| d.merge(ending_context.dependencies));
+                    if let Some(parent) = Rc::into_inner(parent) {
                         parent.terminate(&mut verification_context)?;
                     }
                 }
@@ -1078,13 +1141,25 @@ pub fn verify_program(
                 VerifierError { kind: VerifierErrorKind::FellOffProgramEnd, pc: Some(context.pc) },
             );
         }
-        if let Err(kind) = context.visit(&mut verification_context, code[context.pc]) {
+        let first_successor = verification_context.states.len();
+        if let Err(kind) = (&context).visit(&mut verification_context, code[context.pc]) {
             return error_and_log(
                 verification_context.logger,
                 VerifierError { kind, pc: Some(context.pc) },
             );
         }
-        if context.terminated {
+        // All the contexts pushed while visiting `&context` are its successors, and are created
+        // without a parent. Register `context` as their shared parent, or terminate it now if it
+        // has no successors (i.e. `exit`).
+        if let Some((last, rest)) = verification_context.states[first_successor..].split_last_mut()
+        {
+            let parent = Rc::new(context);
+            for successor in rest {
+                successor.parent = Some(Rc::clone(&parent));
+            }
+            last.parent = Some(parent);
+        } else {
+            debug_assert_eq!(code[context.pc].code(), BPF_JMP | BPF_EXIT);
             context.terminate(&mut verification_context)?;
         }
         verification_context.iteration += 1;
@@ -1547,24 +1622,6 @@ macro_rules! bpf_log {
     };
 }
 
-#[cfg(target_os = "fuchsia")]
-type DependenciesMutex = LockDepMutex<DataDependencies, EbpfVerifierDependenciesLock>;
-
-#[cfg(not(target_os = "fuchsia"))]
-#[derive(Debug, Default)]
-struct DependenciesMutex(std::sync::Mutex<DataDependencies>);
-
-#[cfg(not(target_os = "fuchsia"))]
-impl DependenciesMutex {
-    fn lock(&self) -> std::sync::MutexGuard<'_, DataDependencies> {
-        self.0.lock().unwrap()
-    }
-
-    fn get_mut(&mut self) -> &mut DataDependencies {
-        self.0.get_mut().unwrap()
-    }
-}
-
 /// The state of the computation as known by the verifier at a given point in time.
 #[derive(Debug, Default)]
 struct ComputationContext {
@@ -1577,18 +1634,16 @@ struct ComputationContext {
     /// The dynamically known bounds of buffers indexed by their ids.
     array_bounds: BTreeMap<MemoryId, u64>,
     /// The currently allocated resources.
-    resources: HashSet<MemoryId>,
+    resources: BTreeSet<MemoryId>,
     /// The previous context in the computation.
-    parent: Option<Arc<ComputationContext>>,
+    parent: Option<Rc<ComputationContext>>,
     /// The data dependencies of this context. This is used to broaden a known ending context to
-    /// help cutting computation branches.
-    dependencies: DependenciesMutex,
-    /// Whether this context has reached an exit instruction. The main loop uses this flag to
-    /// call terminate() on the owned context, avoiding the extra Arc reference that would be
-    /// created by cloning self in the exit handler.
-    terminated: bool,
+    /// help cutting computation branches. The verification is single-threaded, and the successors
+    /// holding a reference to their parent add their dependencies to it.
+    dependencies: Cell<DataDependencies>,
 }
 
+#[cfg(test)]
 impl Clone for ComputationContext {
     fn clone(&self) -> Self {
         Self {
@@ -1597,11 +1652,10 @@ impl Clone for ComputationContext {
             stack: self.stack.clone(),
             array_bounds: self.array_bounds.clone(),
             resources: self.resources.clone(),
-            parent: self.parent.clone(),
+            parent: None,
             // dependencies are erased as they must always be used on the same instance of the
             // context.
             dependencies: Default::default(),
-            terminated: false,
         }
     }
 }
@@ -1664,7 +1718,7 @@ impl ComputationContext {
     }
 
     fn next(&self) -> Result<Self, VerifierErrorKind> {
-        self.jump_with_offset(0, Arc::new(self.clone()))
+        self.jump_with_offset(0)
     }
 
     /// Returns a new `ComputationContext` where the pc has jump by `offset + 1`. In particular,
@@ -1673,7 +1727,11 @@ impl ComputationContext {
     /// This does not check that the target is inside the program: falling off the end of the
     /// program is reported by the main verification loop. Use `checked_jump_with_offset` for
     /// explicit jumps.
-    fn jump_with_offset(&self, offset: i16, parent: Arc<Self>) -> Result<Self, VerifierErrorKind> {
+    ///
+    /// The returned context has no parent. The parent is set by `verify_program` once the
+    /// current instruction has been fully visited, by moving `self` into an `Rc` shared by all
+    /// its successors, instead of cloning it.
+    fn jump_with_offset(&self, offset: i16) -> Result<Self, VerifierErrorKind> {
         let pc = self
             .pc
             .checked_add_signed(offset.into())
@@ -1685,9 +1743,8 @@ impl ComputationContext {
             stack: self.stack.clone(),
             array_bounds: self.array_bounds.clone(),
             resources: self.resources.clone(),
-            parent: Some(parent),
+            parent: None,
             dependencies: Default::default(),
-            terminated: false,
         };
         Ok(result)
     }
@@ -1698,9 +1755,8 @@ impl ComputationContext {
         &self,
         verification_context: &VerificationContext<'_>,
         offset: i16,
-        parent: Arc<Self>,
     ) -> Result<Self, VerifierErrorKind> {
-        let result = self.jump_with_offset(offset, parent)?;
+        let result = self.jump_with_offset(offset)?;
         if result.pc >= verification_context.code.len() {
             return Err(VerifierErrorKind::JumpOutOfBounds);
         }
@@ -1848,7 +1904,7 @@ impl ComputationContext {
                         (
                             Type::NullOr {
                                 id: id.clone(),
-                                inner: Box::new(Type::PtrToMemory {
+                                inner: Arc::new(Type::PtrToMemory {
                                     id,
                                     offset: 0.into(),
                                     buffer_size: *buffer_size as u64,
@@ -1904,7 +1960,7 @@ impl ComputationContext {
                 }
                 Ok(Type::Releasable {
                     id,
-                    inner: Box::new(self.resolve_return_value(
+                    inner: Arc::new(self.resolve_return_value(
                         verification_context,
                         inner,
                         next,
@@ -1916,7 +1972,7 @@ impl ComputationContext {
                 let id = verification_context.next_id();
                 Ok(Type::NullOr {
                     id,
-                    inner: Box::new(self.resolve_return_value(
+                    inner: Arc::new(self.resolve_return_value(
                         verification_context,
                         t,
                         next,
@@ -2012,34 +2068,18 @@ impl ComputationContext {
             }
             (
                 alu_type,
-                Type::PtrToMemory { id, offset: x, buffer_size, origin },
+                Type::PtrToMemory { offset: x, .. } | Type::PtrToStruct { offset: x, .. },
                 Type::ScalarValue(data),
-            ) if alu_type.is_ptr_compatible() => {
-                let offset = op(*x, *data);
-                Type::PtrToMemory {
-                    id: id.clone(),
-                    offset,
-                    buffer_size: *buffer_size,
-                    origin: *origin,
-                }
-            }
-            (
-                alu_type,
-                Type::PtrToStruct { id, offset: x, descriptor },
-                Type::ScalarValue(data),
-            ) if alu_type.is_ptr_compatible() => {
-                let offset = op(*x, *data);
-                Type::PtrToStruct { id: id.clone(), offset, descriptor: descriptor.clone() }
-            }
-            (AluType::Add, Type::PtrToArray { id, offset: x }, Type::ScalarValue(data)) => {
+            ) if alu_type.is_ptr_compatible() => op1.with_offset(op(*x, *data)),
+            (AluType::Add, Type::PtrToArray { offset: x, .. }, Type::ScalarValue(data)) => {
                 let offset =
                     x.checked_add(*data).ok_or(VerifierErrorKind::PointerOffsetOverflow)?;
-                Type::PtrToArray { id: id.clone(), offset }
+                op1.with_offset(offset)
             }
-            (AluType::Sub, Type::PtrToArray { id, offset: x }, Type::ScalarValue(data)) => {
+            (AluType::Sub, Type::PtrToArray { offset: x, .. }, Type::ScalarValue(data)) => {
                 let offset =
                     x.checked_sub(*data).ok_or(VerifierErrorKind::PointerOffsetOverflow)?;
-                Type::PtrToArray { id: id.clone(), offset }
+                op1.with_offset(offset)
             }
             (
                 AluType::Sub,
@@ -2075,7 +2115,7 @@ impl ComputationContext {
     }
 
     fn alu(
-        &mut self,
+        &self,
         op_name: Option<&str>,
         verification_context: &mut VerificationContext<'_>,
         dst: Register,
@@ -2102,7 +2142,7 @@ impl ComputationContext {
     }
 
     fn log_atomic_operation(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         fetch: bool,
@@ -2123,7 +2163,7 @@ impl ComputationContext {
     }
 
     fn raw_atomic_operation(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         width: DataWidth,
@@ -2150,7 +2190,7 @@ impl ComputationContext {
     }
 
     fn atomic_operation(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         width: DataWidth,
@@ -2176,7 +2216,7 @@ impl ComputationContext {
     }
 
     fn raw_atomic_cmpxchg(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         dst: Register,
@@ -2218,7 +2258,7 @@ impl ComputationContext {
         Ok(())
     }
     fn endianness<BO: ByteOrder>(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         dst: Register,
@@ -2256,7 +2296,9 @@ impl ComputationContext {
         op2: &Type,
         op: impl Fn(ScalarValueData, ScalarValueData) -> Result<Option<bool>, ()>,
     ) -> Result<Option<bool>, VerifierErrorKind> {
-        match (jump_width, op1, op2) {
+        // Unwrap Releasable operands (verifying they have not been released) so
+        // pointer comparisons work on their underlying pointer types.
+        match (jump_width, op1.inner(self)?, op2.inner(self)?) {
             (_, Type::ScalarValue(data1), Type::ScalarValue(data2)) => op(*data1, *data2),
             (JumpWidth::W64, Type::ScalarValue(data), Type::NullOr { .. })
             | (JumpWidth::W64, Type::NullOr { .. }, Type::ScalarValue(data))
@@ -2310,7 +2352,7 @@ impl ComputationContext {
     }
 
     fn conditional_jump(
-        &mut self,
+        &self,
         op_name: &str,
         verification_context: &mut VerificationContext<'_>,
         dst: Register,
@@ -2326,7 +2368,7 @@ impl ComputationContext {
             "{op_name} {}, {}, {}",
             display_register(dst),
             display_source(src),
-            if offset == 0 { format!("0") } else { print_offset(offset) },
+            print_jump_offset(offset),
         );
         let op1 = self.reg(dst)?;
         let op2 = self.compute_source(src.clone())?;
@@ -2351,18 +2393,17 @@ impl ComputationContext {
             Ok(next)
         };
         let branch = self.compute_branch(jump_width, &op1, &op2, op)?;
-        let parent = Arc::new(self.clone());
         if branch.unwrap_or(true) {
             // Do the jump
             verification_context.states.push(apply_constraints_and_register(
-                self.checked_jump_with_offset(verification_context, offset, parent.clone())?,
+                self.checked_jump_with_offset(verification_context, offset)?,
                 jump_type,
             )?);
         }
         if !branch.unwrap_or(false) {
             // Skip the jump
             verification_context.states.push(apply_constraints_and_register(
-                self.jump_with_offset(0, parent)?,
+                self.jump_with_offset(0)?,
                 jump_type.invert(),
             )?);
         }
@@ -2399,7 +2440,7 @@ impl ComputationContext {
 
             // 1. Compute the dependencies of the context using the dependencies of its children
             //    and the actual operation.
-            let mut dependencies = *current.dependencies.get_mut();
+            let mut dependencies = current.dependencies.get();
 
             dependencies
                 .visit(
@@ -2431,10 +2472,10 @@ impl ComputationContext {
             // 4. Register the computed dependencies in our parent, and terminate it if all
             //    dependencies has been computed.
             if let Some(parent) = parent {
-                parent.dependencies.lock().merge(dependencies);
+                parent.dependencies.update(|d| d.merge(dependencies));
                 // To check whether all dependencies have been computed, rely on the fact that the
-                // Arc count of the parent keep track of how many dependencies are left.
-                next = Arc::into_inner(parent);
+                // Rc count of the parent keep track of how many dependencies are left.
+                next = Rc::into_inner(parent);
             }
         }
         Ok(())
@@ -2443,10 +2484,10 @@ impl ComputationContext {
 
 impl Drop for ComputationContext {
     fn drop(&mut self) {
-        let mut next = self.parent.take().and_then(Arc::into_inner);
+        let mut next = self.parent.take().and_then(Rc::into_inner);
         // Because of the potential length of the parent chain, do not use recursion.
         while let Some(mut current) = next {
-            next = current.parent.take().and_then(Arc::into_inner);
+            next = current.parent.take().and_then(Rc::into_inner);
         }
     }
 }
@@ -2559,9 +2600,8 @@ impl DataDependencies {
         }
     }
 
-    fn merge(&mut self, other: Self) {
-        self.registers |= other.registers;
-        self.stack |= other.stack;
+    fn merge(self, other: Self) -> Self {
+        Self { registers: self.registers | other.registers, stack: self.stack | other.stack }
     }
 
     fn alu(&mut self, dst: Register, src: Source) -> Result<(), VerifierErrorKind> {
@@ -3486,18 +3526,37 @@ impl JumpType {
     }
 }
 
-fn display_register(register: Register) -> String {
-    format!("%r{register}")
-}
+#[derive(Clone, Copy)]
+struct DisplayRegister(Register);
 
-fn display_source(src: Source) -> String {
-    match src {
-        Source::Reg(r) => display_register(r),
-        Source::Value(v) => format!("0x{v:x}"),
+impl std::fmt::Display for DisplayRegister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "%r{}", self.0)
     }
 }
 
-impl BpfVisitor for ComputationContext {
+fn display_register(register: Register) -> DisplayRegister {
+    DisplayRegister(register)
+}
+
+#[derive(Clone, Copy)]
+struct DisplaySource(Source);
+
+impl std::fmt::Display for DisplaySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Source::Reg(r) => display_register(r).fmt(f),
+            Source::Value(v) => write!(f, "0x{v:x}"),
+        }
+    }
+}
+
+fn display_source(src: Source) -> DisplaySource {
+    DisplaySource(src)
+}
+
+/// Visiting an instruction pushes the successors of `self` to `VerificationContext::states`.
+impl BpfVisitor for &ComputationContext {
     type Context<'a> = VerificationContext<'a>;
     type Error = VerifierErrorKind;
 
@@ -3795,7 +3854,6 @@ impl BpfVisitor for ComputationContext {
         if !self.resources.is_empty() {
             return Err(VerifierErrorKind::ResourceLeak);
         }
-        self.terminated = true;
         Ok(())
     }
 
@@ -3805,8 +3863,7 @@ impl BpfVisitor for ComputationContext {
         offset: i16,
     ) -> Result<(), VerifierErrorKind> {
         bpf_log!(self, context, "ja {}", offset);
-        let parent = Arc::new(self.clone());
-        let next = self.checked_jump_with_offset(context, offset, parent)?;
+        let next = self.checked_jump_with_offset(context, offset)?;
         context.states.push(next);
         Ok(())
     }
@@ -4708,8 +4765,7 @@ impl BpfVisitor for ComputationContext {
             }
         };
 
-        let parent = Arc::new(self.clone());
-        let mut next = self.jump_with_offset(1, parent)?;
+        let mut next = self.jump_with_offset(1)?;
         next.set_reg(dst, value.into())?;
 
         context.states.push(next);
@@ -4725,14 +4781,18 @@ impl BpfVisitor for ComputationContext {
         register_offset: Option<Register>,
         width: DataWidth,
     ) -> Result<(), VerifierErrorKind> {
-        bpf_log!(
-            self,
-            context,
-            "ldp{} {}{}",
-            width.str(),
-            register_offset.map(display_register).unwrap_or_else(Default::default),
-            print_offset(offset)
-        );
+        if let Some(reg) = register_offset {
+            bpf_log!(
+                self,
+                context,
+                "ldp{} {}{}",
+                width.str(),
+                display_register(reg),
+                print_offset(offset)
+            );
+        } else {
+            bpf_log!(self, context, "ldp{} {}", width.str(), print_offset(offset));
+        }
 
         // Verify that `src` refers to a packet.
         let src_type = self.reg(src)?;
@@ -4757,8 +4817,8 @@ impl BpfVisitor for ComputationContext {
         if !self.resources.is_empty() {
             return Err(VerifierErrorKind::ResourceLeak);
         }
-        // `self` is not terminated here: a copy of it is the parent of `next`, and terminates with
-        // the dependencies of both paths once `next` terminates. Terminating `self` would record
+        // `self` is not terminated here: it becomes the parent of `next`, and terminates with the
+        // dependencies of both paths once `next` terminates. Terminating `self` here would record
         // it as a terminating context with the dependencies of the exit path only.
 
         // Handle the case where the load succeed.
@@ -4875,15 +4935,30 @@ fn scomp32(
     Ok(Some(op(x.value as i32, y.value as i32)))
 }
 
-fn print_offset<T: Into<i32>>(offset: T) -> String {
-    let offset: i32 = offset.into();
-    if offset == 0 {
-        String::new()
-    } else if offset > 0 {
-        format!("+{offset}")
-    } else {
-        format!("{offset}")
+#[derive(Clone, Copy)]
+struct DisplayOffset {
+    offset: i32,
+    show_zero: bool,
+}
+
+impl std::fmt::Display for DisplayOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.offset > 0 {
+            write!(f, "+{}", self.offset)
+        } else if self.offset < 0 || self.show_zero {
+            write!(f, "{}", self.offset)
+        } else {
+            Ok(())
+        }
     }
+}
+
+fn print_offset<T: Into<i32>>(offset: T) -> DisplayOffset {
+    DisplayOffset { offset: offset.into(), show_zero: false }
+}
+
+fn print_jump_offset<T: Into<i32>>(offset: T) -> DisplayOffset {
+    DisplayOffset { offset: offset.into(), show_zero: true }
 }
 
 fn run_on_stack_offset<F>(v: StackOffset, f: F) -> StackOffset
@@ -4913,7 +4988,6 @@ fn associate_orderings(o1: Ordering, o2: Ordering) -> Option<Ordering> {
 mod tests {
     use super::*;
     use crate::{BPF_ADD, BPF_ALU64, BPF_K, BPF_LDX, BPF_MEM, BPF_MOV, BPF_ST};
-    use std::collections::BTreeSet;
     use test_util::{assert_geq, assert_leq};
 
     #[test]
@@ -5341,7 +5415,7 @@ mod tests {
     fn test_type_constraint_null_or() {
         let mut context = ComputationContext::default();
         let id = MemoryId::new();
-        let null_or = Type::NullOr { id: id.clone(), inner: Box::new(Type::UNKNOWN_SCALAR) };
+        let null_or = Type::NullOr { id: id.clone(), inner: Arc::new(Type::UNKNOWN_SCALAR) };
         let (new_lhs, _) =
             Type::constraint(&mut context, JumpType::Eq, JumpWidth::W64, null_or, Type::from(0))
                 .unwrap();

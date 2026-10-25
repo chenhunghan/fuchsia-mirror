@@ -9,14 +9,24 @@
 
   Then fetch the packages:
   `jiri fetch-packages -local-manifest-project=fuchsia`
+
+  NOTE: Even though macOS is no longer a supported host platform to build
+  Fuchsia, macOS toolchain packages (`mac-amd64`, `mac-arm64`, and
+  `*-apple-darwin` Rust targets) are still required in this manifest and in
+  `//tools/devshell/contrib/roll-compiler`. The toolchain team uses Fuchsia pins
+  for CIPD tagging and downstream integration needs (such as Pigweed). Do not
+  remove macOS entries from this file or `roll-compiler` without coordinating
+  with the toolchain team (see https://fxrev.dev/1414198,
+  https://fxbug.dev/458061496, and https://fxbug.dev/458075605).
   -->
   <packages>
 
     <!-- Clang
          TODO(mcgrathr): repo/bot link about provenance
     -->
+    <!-- mac platforms added to support CIPD tagging (https://fxbug.dev/458061496) -->
     <package name="fuchsia/third_party/clang/${platform}"
-             version="git_revision:32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revision:61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64,windows-amd64"
              path="prebuilt/third_party/clang/{{.OS}}-{{.Arch}}"/>
     <!-- The linux-arm64 version is needed for running on arm64 bots, but the build
@@ -24,7 +34,7 @@
          from `fx roll-compiler` first.
     -->
     <package name="fuchsia/third_party/clang/linux-arm64"
-             version="git_revision:32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revision:61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64"
              attributes="clang-arm64"
              path="prebuilt/third_party/clang/linux-arm64"/>
@@ -68,7 +78,7 @@
     -->
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/host/${platform}"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64,windows-amd64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
 
@@ -77,21 +87,21 @@
     -->
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/fuchsia"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/aarch64-apple-darwin"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/aarch64-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <package name="fuchsia/third_party/rust/target/riscv64gc-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
@@ -101,17 +111,16 @@
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/x86_64-apple-darwin"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/x86_64-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
 
      <!-- rust-bindgen, used for generating rust bindings to c/c++ headers -->
-     <!-- mac platforms added to support CIPD tagging -->
      <package name="fuchsia/third_party/rust_bindgen/${platform}"
               version="git_revisions:6bbde80a916cd0591f452b1a061ed8f12281f277,5e63f2ce42db2c42f1d0012a3b5fa9c6113f750a-patch"
               platforms="linux-amd64,linux-arm64"
@@ -120,7 +129,7 @@
      <!-- rust-analyzer, used for rust editor support -->
      <!-- mac platforms added to support CIPD tagging -->
      <package name="fuchsia/third_party/rust-analyzer/${platform}"
-              version="git_revision:71fbb7faf489656947a03566b32556d93c312c36"
+              version="git_revision:0c4d74686b21f2b3bd8872b6d3cf36ad2e740d49"
               platforms="linux-amd64,mac-amd64"
               path="prebuilt/third_party/rust-analyzer"/>
 
@@ -200,19 +209,19 @@
     <!--   LLVM libraries -->
     <!--   For Linux, download both arm64 and amd64 versions. -->
     <package name="fuchsia/third_party/llvm/linux-arm64"
-             version="git_revision:32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revision:61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/llvm/linux-arm64"/>
     <package name="fuchsia/third_party/llvm/linux-amd64"
-             version="git_revision:32e6b5082d000a0da4a5af148d63f30d29e95a18"
+             version="git_revision:61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/llvm/linux-x64"/>
     <package name="fuchsia/third_party/llvm/fuchsia-amd64"
-             version="git_revision:5891d2c6e70db348cd7fab759bc03e85939a4601,33.20261013.1.1"
+             version="git_revision:5891d2c6e70db348cd7fab759bc03e85939a4601,33.20261016.4.1"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/llvm/fuchsia-x64"/>
     <package name="fuchsia/third_party/llvm/fuchsia-arm64"
-             version="git_revision:5891d2c6e70db348cd7fab759bc03e85939a4601,33.20261013.1.1"
+             version="git_revision:5891d2c6e70db348cd7fab759bc03e85939a4601,33.20261016.4.1"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/llvm/fuchsia-arm64"/>
 

@@ -40,7 +40,7 @@ if (toolchain_environment == "kernel.phys" ||
       "-aes",
       "-sha2",
     ]
-    if (toolchain_environment == "kernel") {
+    if (rust_custom_target) {
       rust_target_edits = [
         {
           key = "abi"
@@ -90,7 +90,6 @@ if (toolchain_environment == "kernel.phys" ||
     sources = [
       "arch.cc",
       "arm64_ffi.cc",
-      "asid_allocator.cc",
       "asm.S",
       "cache-ops.S",
       "coresight.cc",
@@ -99,26 +98,22 @@ if (toolchain_environment == "kernel.phys" ||
       "debugger.cc",
       "exceptions.S",
       "exceptions_c.cc",
-      "feature.cc",
-      "fpu.cc",
+      "fpu_asm.S",
       "handoff.cc",
       "mmu.cc",
       "mp.cc",
       "perf_mon.cc",
-      "periphmap.cc",
       "registers.cc",
       "secondary.S",
       "secondary.cc",
       "smccc.S",
       "spinlock.cc",
       "thread.cc",
-      "uarch.cc",
       "uspace_entry.S",
     ]
     deps = [
       "user-copy",
       "//sdk/lib/fit",
-      "//src/lib/lazy_init",
       "//zircon/kernel/dev/coresight",
       "//zircon/kernel/dev/interrupt/gic/common",
       "//zircon/kernel/dev/iommu/arm_smmu",
@@ -144,7 +139,6 @@ if (toolchain_environment == "kernel.phys" ||
       "//zircon/kernel/phys/handoff",
       "//zircon/kernel/platform:headers",
       "//zircon/kernel/vm",
-      "//zircon/system/ulib/bitmap",
       "//zircon/system/ulib/fbl",
       "//zircon/system/ulib/pretty",
       "//zircon/system/ulib/zx",
@@ -190,12 +184,72 @@ if (toolchain_environment == "kernel.phys" ||
     var_allowlist = [
       "KERNEL_ASPACE_BASE",
       "KERNEL_ASPACE_SIZE",
+      "MMU_ARM64_FIRST_USER_ASID",
+      "MMU_ARM64_MAX_USER_ASID_16",
+      "MMU_ARM64_MAX_USER_ASID_8",
       "MMU_GUEST_SIZE_SHIFT",
       "USER_ASPACE_BASE",
       "USER_ASPACE_SIZE",
       "USER_RESTRICTED_ASPACE_SIZE",
     ]
     notice_year = 2026
+  }
+
+  kernel_bindgen_crate("arm64-crashlog-bindings") {
+    headers = [ "include/arch/crashlog_regs.h" ]
+    cpp = true
+    non_rust_deps = [ ":headers" ]
+    notice_year = 2026
+    raw_lines = [ "#![no_std]" ]
+    type_allowlist = [ "crashlog_regs_t" ]
+    opaque_types = [ "iframe_t" ]
+    explicit_padding = false
+  }
+
+  kernel_bindgen_crate("arm64-feature-bindings") {
+    headers = [ "include/arch/arm64/feature.h" ]
+    cpp = true
+    non_rust_deps = [
+      ":headers",
+      "//zircon/kernel/lib/ktl:headers",
+    ]
+    notice_year = 2026
+    raw_lines = [ "#![no_std]" ]
+    type_allowlist = [
+      "arm64_asid_width",
+      "arm64_cache_features",
+      "arm64_microarch",
+      "arm64_mmu_features",
+    ]
+
+    # Every value of these types that Rust reads was produced by Rust: the
+    # width fields of arm64_mmu_features, and the arm64_microarch that
+    # midr_to_microarch returns. C++ never stores into a location Rust reads
+    # as these enums.
+    rustified_enum = [
+      "arm64_asid_width",
+      "arm64_microarch",
+    ]
+    explicit_padding = false
+    expect_lints = [ "non_camel_case_types" ]
+  }
+
+  kernel_bindgen_crate("arm64-mp-bindings") {
+    headers = [ "include/arch/arm64/mp.h" ]
+    cpp = true
+    non_rust_deps = [
+      ":headers",
+      "//zircon/kernel/lib/ktl:headers",
+    ]
+    notice_year = 2026
+    raw_lines = [ "#![no_std]" ]
+    explicit_padding = false
+    type_allowlist = [ "arm64_percpu" ]
+    var_allowlist = [ "PERCPU_IN_RESTRICTED_MODE" ]
+    expect_lints = [
+      "non_camel_case_types",
+      "non_upper_case_globals",
+    ]
   }
 
   kernel_bindgen_crate("arm64-restricted-bindings") {
@@ -214,43 +268,113 @@ if (toolchain_environment == "kernel.phys" ||
     expect_lints = []
   }
 
+  kernel_bindgen_crate("arm64-thread-bindings") {
+    headers = [ "include/arch/arch_thread.h" ]
+    cpp = true
+    non_rust_deps = [ ":headers" ]
+    notice_year = 2026
+    raw_lines = [ "#![no_std]" ]
+    type_allowlist = [ "arch_thread" ]
+    var_allowlist = [
+      "ARM64_DFR_RUN_ACCESS_FAULT_HANDLER_BIT",
+      "ARM64_DFR_RUN_FAULT_HANDLER_BIT",
+      "ARM64_MAX_HW_BREAKPOINTS",
+      "ARM64_MAX_HW_WATCHPOINTS",
+      "CURRENT_MDSCR_OFFSET",
+      "CURRENT_PERCPU_PTR_OFFSET",
+      "FPSTATE_FFR_OFFSET",
+      "FPSTATE_FPCR_OFFSET",
+      "FPSTATE_FPSR_OFFSET",
+      "FPSTATE_P_REGS_OFFSET",
+      "FPSTATE_REGS_OFFSET",
+    ]
+    explicit_padding = false
+    expect_lints = [ "non_camel_case_types" ]
+  }
+
+  kernel_bindgen_crate("arm64-user-copy-bindings") {
+    headers = [ "user-copy/user-copy.h" ]
+    cpp = true
+    non_rust_deps = [ ":headers" ]
+    deps = [ "//sdk/rust/zx-types" ]
+    notice_year = 2026
+    raw_lines = [
+      "#![no_std]",
+      "pub type zx_status_t = zx_types::zx_status_t;",
+      "pub type zx_vaddr_t = zx_types::zx_vaddr_t;",
+    ]
+    type_blocklist = [ "zx_.*" ]
+    type_allowlist = [
+      "Arm64UserCopyCaptureFaultsRet",
+      "Arm64UserCopyRet",
+    ]
+    explicit_padding = false
+    expect_lints = [ "non_camel_case_types" ]
+  }
+
   kernel_rust_mod("arch-arm64-rs") {
     output_name = "arch_arm64"
     source_root = "src/mod.rs"
     sources = [
+      "src/asid_allocator.rs",
+      "src/asid_allocator_ffi.rs",
       "src/cache.rs",
+      "src/crashlog.rs",
+      "src/feature.rs",
+      "src/fpu.rs",
       "src/mod.rs",
+      "src/mp.rs",
+      "src/periphmap.rs",
+      "src/registers.rs",
       "src/restricted.rs",
+      "src/smccc.rs",
+      "src/spinlock.rs",
       "src/sysreg.rs",
+      "src/thread.rs",
+      "src/uarch.rs",
+      "src/user_copy.rs",
       "src/vm.rs",
     ]
     deps = [
       ":arch-arm64-aspace-bindings",
       ":arch-arm64-vm-bindings",
+      ":arm64-crashlog-bindings",
+      ":arm64-feature-bindings",
+      ":arm64-mp-bindings",
       ":arm64-restricted-bindings",
+      ":arm64-thread-bindings",
+      ":arm64-user-copy-bindings",
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
       "//src/lib/kprint",
+      "//src/lib/lazy_init:lazy_init_rs",
+      "//src/lib/lockdep/rust:lockdep",
       "//src/lib/regio",
+      "//third_party/rust_crates:pin-init",
       "//zircon/kernel/arch:arch-types-bindings",
       "//zircon/kernel/lib/arch:arch-rs",
       "//zircon/kernel/lib/debug",
+      "//zircon/kernel/lib/id_allocator:id-allocator-rs",
+      "//zircon/kernel/lib/init:init_rust",
+      "//zircon/kernel/lib/libc:rust",
+      "//zircon/kernel/lib/user_copy",
+      "//zircon/kernel/phys/handoff:handoff-rs",
+      "//zircon/system/ulib/mmio-ptr:mmio-ptr-rs",
     ]
-    test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
+    test_deps = [
+      "//src/lib/kalloc",
+      "//zircon/kernel/lib/unittest:unittest-rs",
+    ]
   }
 
   source_set("tests") {
     testonly = true
-    sources = [
-      "asid_allocator_tests.cc",
-      "mmu_tests.cc",
-    ]
+    sources = [ "mmu_tests.cc" ]
     deps = [
       "//zircon/kernel/lib/arch",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/unittest",
       "//zircon/kernel/vm",
-      "//zircon/system/ulib/bitmap",
     ]
   }
 

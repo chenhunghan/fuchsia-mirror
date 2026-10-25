@@ -29,7 +29,6 @@ rustc_library(
     ],
 )
 
-# @bazel2gn:skip
 rustc_test(
     name = "config_value_file_test",
     crate = ":config_value_file",
@@ -39,7 +38,6 @@ rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 wrap_host_rust_test(
     name = "config_value_file_host_test",
     binary_name = "config_value_file_test",

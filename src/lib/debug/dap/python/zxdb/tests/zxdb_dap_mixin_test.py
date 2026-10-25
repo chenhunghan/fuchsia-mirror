@@ -14,6 +14,7 @@ from zxdb_dap import (
     AsyncBacktraceUpdate,
     ThreadEvent,
     ZxdbAsyncBacktraceArguments,
+    ZxdbConsoleCommandArguments,
     ZxdbDapClient,
     ZxdbDetachArguments,
     ZxdbPauseArguments,
@@ -240,7 +241,9 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
     async def test_zxdb_stack_trace(self) -> None:
         client = ZxdbDapClient()
         reader, writer = self._start_client(client)
-        args = ZxdbStackTraceArguments(thread_id=5678, remote_unwind=True)
+        args = ZxdbStackTraceArguments(
+            thread_id=5678, remote_unwind=True, unwinder="fp"
+        )
 
         send_task = asyncio.create_task(client.zxdb_stack_trace(args))
 
@@ -258,8 +261,16 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
             "success": True,
             "command": "stackTrace",
             "body": {
-                "stackFrames": [],
-                "totalFrames": 0,
+                "stackFrames": [
+                    {
+                        "id": 1,
+                        "name": "main",
+                        "line": 10,
+                        "column": 1,
+                        "trust": "FP",
+                    }
+                ],
+                "totalFrames": 1,
             },
         }
 
@@ -270,6 +281,13 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req_val["command"], "stackTrace")
         self.assertEqual(req_val["arguments"]["threadId"], 5678)
         self.assertTrue(req_val["arguments"]["remoteUnwind"])
+        self.assertEqual(req_val["arguments"]["unwinder"], "fp")
+        self.assertEqual(len(resp.body.stack_frames), 1)
+        self.assertEqual(resp.body.stack_frames[0].trust, "FP")
+
+    def test_zxdb_stack_trace_invalid_unwinder(self) -> None:
+        with self.assertRaises(ValidationError):
+            ZxdbStackTraceArguments(thread_id=5678, unwinder="invalid")
 
     async def test_threads_response_process_id(self) -> None:
         client = ZxdbDapClient()
@@ -676,6 +694,104 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DapError) as ctx:
             await send_task
         self.assertIn("All threads must be stopped", str(ctx.exception))
+
+    async def test_zxdb_console_command_without_frame_id(self) -> None:
+        """Tests sending zxdb.ConsoleCommand without frameId."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbConsoleCommandArguments(command="sym-stat")
+
+        send_task = asyncio.create_task(client.zxdb_console_command(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        self.assertEqual(req_val["command"], "zxdb.ConsoleCommand")
+        self.assertEqual(req_val["arguments"]["command"], "sym-stat")
+        self.assertNotIn("frameId", req_val["arguments"])
+
+        response = {
+            "seq": 13,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.ConsoleCommand",
+            "body": {"output": "Process 1 symbol status\n"},
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.body.output, "Process 1 symbol status\n")
+
+    async def test_zxdb_console_command_with_frame_id(self) -> None:
+        """Tests sending zxdb.ConsoleCommand with frameId."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbConsoleCommandArguments(command="regs", frame_id=42)
+
+        send_task = asyncio.create_task(client.zxdb_console_command(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        self.assertEqual(req_val["command"], "zxdb.ConsoleCommand")
+        self.assertEqual(req_val["arguments"]["command"], "regs")
+        self.assertEqual(req_val["arguments"]["frameId"], 42)
+
+        response = {
+            "seq": 14,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.ConsoleCommand",
+            "body": {"output": "rax = 0x0\n"},
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.body.output, "rax = 0x0\n")
+
+    async def test_zxdb_console_command_failure(self) -> None:
+        """Tests sending zxdb.ConsoleCommand when server returns error."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbConsoleCommandArguments(command="invalid_cmd")
+
+        send_task = asyncio.create_task(client.zxdb_console_command(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        response = {
+            "seq": 15,
+            "type": "response",
+            "request_seq": seq,
+            "success": False,
+            "command": "zxdb.ConsoleCommand",
+            "message": 'The string "invalid_cmd" is not a valid verb.',
+        }
+
+        feed_dap_response(reader, response)
+
+        with self.assertRaises(DapError) as ctx:
+            await send_task
+        self.assertIn("not a valid verb", str(ctx.exception))
 
 
 if __name__ == "__main__":

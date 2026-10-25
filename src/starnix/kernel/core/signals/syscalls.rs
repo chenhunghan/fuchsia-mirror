@@ -435,20 +435,16 @@ fn send_unchecked_signal(
     )
 }
 
+/// Sends `siginfo` to `target`, a single task.
+///
+/// The caller must have already validated `siginfo` with `UncheckedSignalInfo::check_code`.
 #[track_caller]
 fn send_unchecked_signal_info(
     current_task: &CurrentTask,
     target: &Task,
     unchecked_signal: UncheckedSignal,
-    siginfo_ref: UserAddress,
+    siginfo: UncheckedSignalInfo,
 ) -> Result<(), Errno> {
-    let siginfo = UncheckedSignalInfo::read_from_siginfo(current_task, siginfo_ref)?;
-    if target.get_pid() != current_task.get_pid()
-        && (siginfo.code() >= 0 || siginfo.code() == SI_TKILL)
-    {
-        return error!(EINVAL);
-    }
-
     current_task.can_signal(&target, unchecked_signal)?;
 
     // 0 is a sentinel value used to do permission checks.
@@ -529,7 +525,7 @@ pub fn sys_kill(
             // "If pid is less than -1, then sig is sent to every process in the
             // process group whose ID is -pid."
             let pid = match pid {
-                0 => current_task.thread_group().read().process_group.clone(),
+                0 => current_task.thread_group().pgid(),
                 _ => pids.get(negate_pid(pid)?)?,
             };
 
@@ -629,11 +625,26 @@ pub fn sys_rt_sigqueueinfo(
     unchecked_signal: UncheckedSignal,
     siginfo_ref: UserAddress,
 ) -> Result<(), Errno> {
-    let task = current_task.get_task(tgid)?;
-    task.thread_group().send_signal_unchecked_with_info(
+    let siginfo = UncheckedSignalInfo::read_from_siginfo(current_task, siginfo_ref)?;
+    if tgid != current_task.get_pid() {
+        siginfo.check_code()?;
+    }
+
+    let target_thread_group = {
+        let pid_entry = current_task.kernel().pids.get(tgid)?;
+        match pid_entry.get_process() {
+            Some(ProcessEntryRef::Process(process)) => process,
+            Some(ProcessEntryRef::Zombie) => return Ok(()),
+            None => {
+                let task = pid_entry.get_task()?;
+                task.thread_group().clone()
+            }
+        }
+    };
+    target_thread_group.send_signal_unchecked_with_info(
         current_task,
         unchecked_signal,
-        siginfo_ref,
+        siginfo,
         IntoSignalInfoOptions::None,
     )
 }
@@ -655,12 +666,23 @@ pub fn sys_rt_tgsigqueueinfo(
     unchecked_signal: UncheckedSignal,
     siginfo_ref: UserAddress,
 ) -> Result<(), Errno> {
+    let siginfo = UncheckedSignalInfo::read_from_siginfo(current_task, siginfo_ref)?;
+    // Linux returns EINVAL when the tgid or tid <= 0.
+    if tgid <= 0 || tid <= 0 {
+        return error!(EINVAL);
+    }
+    // Unlike `rt_sigqueueinfo`, the target must be the calling thread, not merely the calling
+    // process.
+    if tid != current_task.get_tid() {
+        siginfo.check_code()?;
+    }
+
     let pids = &current_task.kernel().pids;
 
     let task = pids.get(tid)?.get_task()?;
-    let tgid = pids.get(tgid)?;
-    verify_tgid_for_task(&task, &tgid)?;
-    send_unchecked_signal_info(current_task, &task, unchecked_signal, siginfo_ref)
+    let tgid_entry = pids.get(tgid)?;
+    verify_tgid_for_task(&task, &tgid_entry)?;
+    send_unchecked_signal_info(current_task, &task, unchecked_signal, siginfo)
 }
 
 /// The `pause` syscall causes the calling process sleep until it receives a signal or terminates.
@@ -704,10 +726,14 @@ pub fn sys_pidfd_send_signal(
     if siginfo_ref.is_null() {
         target.send_signal_unchecked(current_task, unchecked_signal)
     } else {
+        let siginfo = UncheckedSignalInfo::read_from_siginfo(current_task, siginfo_ref)?;
+        if target.leader.id != current_task.get_pid() {
+            siginfo.check_code()?;
+        }
         target.send_signal_unchecked_with_info(
             current_task,
             unchecked_signal,
-            siginfo_ref,
+            siginfo,
             IntoSignalInfoOptions::CheckSigno,
         )
     }
@@ -915,7 +941,7 @@ pub fn sys_waitid(
         P_ALL => ProcessSelector::Any,
         P_PGID => {
             let pid = if id == 0 {
-                current_task.thread_group().read().process_group.clone()
+                current_task.thread_group().pgid()
             } else {
                 current_task.kernel().pids.get(id).map_err(|_| errno!(ECHILD))?
             };
@@ -999,7 +1025,7 @@ pub fn sys_wait4(
     let waiting_options = WaitingOptions::new_for_wait4(options)?;
 
     let selector = if raw_selector == 0 {
-        ProcessSelector::Pgid(current_task.thread_group().read().process_group.clone())
+        ProcessSelector::Pgid(current_task.thread_group().pgid())
     } else if raw_selector == -1 {
         ProcessSelector::Any
     } else if raw_selector > 0 {

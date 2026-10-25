@@ -4,13 +4,12 @@
 
 use fidl_fuchsia_buildinfo as buildinfo;
 use fuchsia_component::client::connect_to_protocol_sync;
-use fuchsia_rcu::RcuReadScope;
 use starnix_core::arch::{ARCH_NAME, ARCH_NAME32};
 use starnix_core::mm::{MemoryAccessor, MemoryAccessorExt, PAGE_SIZE};
 use starnix_core::security;
 use starnix_core::task::CurrentTask;
 use starnix_core::vfs::FsString;
-use starnix_logging::{log_error, track_stub};
+use starnix_logging::{log_warn, track_stub};
 use starnix_syscalls::decls::SyscallDecl;
 use starnix_syscalls::{SUCCESS, SyscallResult};
 use starnix_types::user_buffer::MAX_RW_COUNT;
@@ -51,15 +50,18 @@ pub fn do_uname(current_task: &CurrentTask, result: &mut utsname) -> Result<(), 
         init_array(&mut result.release, KERNEL_RELEASE.as_bytes());
     }
 
-    let version = current_task.kernel().build_version.get_or_try_init(|| {
-        let proxy =
-            connect_to_protocol_sync::<buildinfo::ProviderMarker>().map_err(|_| errno!(ENOENT))?;
-        let buildinfo = proxy.get_build_info(zx::MonotonicInstant::INFINITE).map_err(|e| {
-            log_error!("FIDL error getting build info: {e}");
-            errno!(EIO)
-        })?;
-        Ok(buildinfo.version.unwrap_or_else(|| "starnix".to_string()))
-    })?;
+    let version = current_task.kernel().build_version.get_or_init(|| {
+        connect_to_protocol_sync::<buildinfo::ProviderMarker>()
+            .ok()
+            .and_then(|proxy| {
+                proxy
+                    .get_build_info(zx::MonotonicInstant::INFINITE)
+                    .inspect_err(|e| log_warn!("FIDL error getting build info: {e}"))
+                    .ok()
+            })
+            .and_then(|buildinfo| buildinfo.version)
+            .unwrap_or_else(|| "starnix".to_string())
+    });
 
     init_array(&mut result.version, version.as_bytes());
 
@@ -100,7 +102,7 @@ pub fn sys_sysinfo(
     info: MultiArchUserRef<uapi::sysinfo, uapi::arch32::sysinfo>,
 ) -> Result<(), Errno> {
     let total_ram = zx::system_get_physmem();
-    let num_procs = current_task.kernel().pids.get_thread_groups(&RcuReadScope::new()).count();
+    let num_procs = current_task.kernel().pids.num_tasks();
 
     track_stub!(TODO("https://fxbug.dev/297374270"), "compute system load");
     let loads = [0; 3];

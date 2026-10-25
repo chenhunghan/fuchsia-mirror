@@ -126,7 +126,7 @@ fn create_lazy_inspect_node(
             if let Some(state_arc) = state_weak.upgrade() {
                 let (
                     is_online,
-                    num_control_file_objects,
+                    num_open_file_objects,
                     event_queue_depth,
                     has_input_output_endpoints,
                     control_resets,
@@ -135,7 +135,7 @@ fn create_lazy_inspect_node(
                     let state = state_arc.lock();
                     (
                         state.is_online,
-                        state.num_control_file_objects as u64,
+                        state.num_open_file_objects as u64,
                         state.event_queue.len() as u64,
                         state.has_input_output_endpoints,
                         state.control_resets,
@@ -144,7 +144,7 @@ fn create_lazy_inspect_node(
                 };
 
                 root.record_bool("is_online", is_online);
-                root.record_uint("num_control_file_objects", num_control_file_objects);
+                root.record_uint("num_open_file_objects", num_open_file_objects);
                 root.record_uint("event_queue_depth", event_queue_depth);
                 root.record_bool("has_input_output_endpoints", has_input_output_endpoints);
                 root.record_uint("control_resets", control_resets);
@@ -262,6 +262,7 @@ async fn handle_adb(
 
         let mut state_locked = state.lock();
         if state_locked.session_id == session_id {
+            let _ = state_locked.device_proxy.take();
             state_locked.is_online = false;
             state_locked.has_input_output_endpoints = false;
             state_locked.adb_read_channel = None;
@@ -324,11 +325,12 @@ async fn handle_adb(
                     Err(err) => {
                         if err.is_closed() {
                             log_info!("Receive failed due to connection shutdown: {err}");
+                            error!(ESHUTDOWN)
                         } else {
                             log_warn!("Failed to call UsbAdbImpl.Receive: {err}");
                             stats.ep1_read_errors.fetch_add(1, Ordering::Relaxed);
+                            error!(EINVAL)
                         }
-                        error!(EINVAL)
                     }
                     Ok(Err(err)) => {
                         let status = zx::Status::err_from_raw(err);
@@ -337,13 +339,12 @@ async fn handle_adb(
                             zx::Status::BAD_STATE | zx::Status::CANCELED | zx::Status::PEER_CLOSED
                         ) {
                             log_info!("Receive failed due to connection shutdown: {status}");
+                            error!(ESHUTDOWN)
                         } else {
                             log_warn!("Failed to receive data from adb driver: {status}");
                             stats.ep1_read_errors.fetch_add(1, Ordering::Relaxed);
+                            error!(EINVAL)
                         }
-                        // TODO(b/536021189): Fix POSIX error mapping. We should return ESHUTDOWN
-                        // on endpoint disable.
-                        error!(EINVAL)
                     }
                     Ok(Ok(payload)) => {
                         stats
@@ -373,11 +374,12 @@ async fn handle_adb(
                     Err(err) => {
                         if err.is_closed() {
                             log_info!("QueueTx failed due to connection shutdown: {err}");
+                            error!(ESHUTDOWN)
                         } else {
                             log_warn!("Failed to call UsbAdbImpl.QueueTx: {err}");
                             stats.ep2_write_errors.fetch_add(1, Ordering::Relaxed);
+                            error!(EINVAL)
                         }
-                        error!(EINVAL)
                     }
                     Ok(Err(err)) => {
                         let status = zx::Status::err_from_raw(err);
@@ -386,11 +388,12 @@ async fn handle_adb(
                             zx::Status::BAD_STATE | zx::Status::CANCELED | zx::Status::PEER_CLOSED
                         ) {
                             log_info!("QueueTx failed due to connection shutdown: {status}");
+                            error!(ESHUTDOWN)
                         } else {
                             log_warn!("Failed to queue data to adb driver: {status}");
                             stats.ep2_write_errors.fetch_add(1, Ordering::Relaxed);
+                            error!(EINVAL)
                         }
-                        error!(EINVAL)
                     }
                     Ok(Ok(_)) => {
                         stats
@@ -481,10 +484,10 @@ impl FileSystemOps for FunctionFs {
 
 #[derive(Default)]
 struct FunctionFsState {
-    // Keeps track of the number of FileObject's created for the control endpoint.
-    // When all FileObjects are closed, the filesystem resets to its initial state.
+    // Keeps track of the number of open FileObjects across FunctionFS endpoints (ep0, ep1, ep2).
+    // When all FileObjects are closed, the filesystem resets to its initial state (`ffs->opened`).
     // See https://docs.kernel.org/usb/functionfs.html.
-    num_control_file_objects: usize,
+    num_open_file_objects: usize,
 
     // Monotonically increasing session ID to prevent stale async event streams from
     // injecting FUNCTIONFS_UNBIND/DISABLE into a newly opened control session.
@@ -607,7 +610,7 @@ async fn manage_adb_connection(
             let state_locked = state.lock();
             if state_locked.session_id != session_id
                 || !state_locked.has_input_output_endpoints
-                || state_locked.num_control_file_objects == 0
+                || state_locked.num_open_file_objects == 0
             {
                 return;
             }
@@ -643,7 +646,9 @@ async fn manage_adb_connection(
 
             {
                 let mut state_locked = state.lock();
-                let _ = state_locked.device_proxy.take();
+                if state_locked.session_id == session_id {
+                    let _ = state_locked.device_proxy.take();
+                }
             }
         } else {
             // Sleep 500ms unconditionally when retrying a failed connection.
@@ -655,7 +660,7 @@ async fn manage_adb_connection(
             let state_locked = state.lock();
             if state_locked.session_id != session_id
                 || !state_locked.has_input_output_endpoints
-                || state_locked.num_control_file_objects == 0
+                || state_locked.num_open_file_objects == 0
             {
                 return;
             }
@@ -772,17 +777,32 @@ impl FunctionFsRootDir {
 
     fn on_control_opened(&self) {
         let mut state = self.state.lock();
-        state.num_control_file_objects += 1;
+        state.num_open_file_objects += 1;
         state.record_event("CONTROL_OPENED");
     }
 
-    fn on_control_closed(&self) {
+    fn on_endpoint_opened(&self) {
         let mut state = self.state.lock();
-        state.num_control_file_objects -= 1;
-        state.record_event("CONTROL_CLOSED");
-        if state.num_control_file_objects == 0 {
+        state.num_open_file_objects += 1;
+        state.record_event("ENDPOINT_OPENED");
+    }
+
+    fn on_control_closed(&self) {
+        self.on_file_closed("CONTROL_CLOSED");
+    }
+
+    fn on_endpoint_closed(&self) {
+        self.on_file_closed("ENDPOINT_CLOSED");
+    }
+
+    fn on_file_closed(&self, event: &'static str) {
+        let mut state = self.state.lock();
+        state.num_open_file_objects -= 1;
+        state.record_event(event);
+        if state.num_open_file_objects == 0 {
             state.session_id = state.session_id.wrapping_add(1);
-            // When all control endpoints are closed, the filesystem resets to its initial state.
+            // When all open endpoint file objects are closed (`ffs->opened == 0`), the filesystem
+            // resets to its initial state.
             if let Some(device_proxy) = state.device_proxy.take() {
                 // Use a bounded 5-second deadline to prevent close_control_file / adbd exit
                 // from hanging indefinitely if the ADB driver daemon or FIDL channel is hung
@@ -1084,10 +1104,11 @@ impl FsNodeOps for FunctionFsInputEndpoint {
 
     fn create_file_ops(
         &self,
-        _node: &FsNode,
+        node: &FsNode,
         _current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
+        FunctionFsRootDir::from_fs(&node.fs()).on_endpoint_opened();
         Ok(Box::new(FunctionFsInputEndpoint))
     }
 }
@@ -1095,6 +1116,10 @@ impl FsNodeOps for FunctionFsInputEndpoint {
 impl FileOps for FunctionFsInputEndpoint {
     fileops_impl_seekless!();
     fileops_impl_noop_sync!();
+
+    fn close(self: Box<Self>, file: &FileObjectState, _current_task: &CurrentTask) {
+        FunctionFsRootDir::from_fs(&file.fs).on_endpoint_closed();
+    }
 
     fn read(
         &self,
@@ -1134,10 +1159,11 @@ impl FsNodeOps for FunctionFsOutputEndpoint {
 
     fn create_file_ops(
         &self,
-        _node: &FsNode,
+        node: &FsNode,
         _current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
+        FunctionFsRootDir::from_fs(&node.fs()).on_endpoint_opened();
         Ok(Box::new(FunctionFsOutputFileObject))
     }
 }
@@ -1147,6 +1173,10 @@ struct FunctionFsOutputFileObject;
 impl FileOps for FunctionFsOutputFileObject {
     fileops_impl_seekless!();
     fileops_impl_noop_sync!();
+
+    fn close(self: Box<Self>, file: &FileObjectState, _current_task: &CurrentTask) {
+        FunctionFsRootDir::from_fs(&file.fs).on_endpoint_closed();
+    }
 
     fn read(
         &self,
@@ -1207,7 +1237,7 @@ mod tests {
         assert_data_tree!(inspector, root: {
             "usb-functionfs": {
                 is_online: false,
-                num_control_file_objects: 0u64,
+                num_open_file_objects: 0u64,
                 event_queue_depth: 0u64,
                 has_input_output_endpoints: false,
                 control_resets: 0u64,
@@ -1246,7 +1276,7 @@ mod tests {
 
         assert_data_tree!(inspector, root: {
             "usb-functionfs": contains {
-                num_control_file_objects: 2u64,
+                num_open_file_objects: 2u64,
                 has_input_output_endpoints: true,
                 is_online: true,
                 event_queue_depth: 1u64,
@@ -1268,7 +1298,7 @@ mod tests {
         rootdir.on_control_closed();
         {
             let state_locked = rootdir.state.lock();
-            assert_eq!(state_locked.num_control_file_objects, 1);
+            assert_eq!(state_locked.num_open_file_objects, 1);
             assert!(state_locked.has_input_output_endpoints);
             assert!(state_locked.is_online);
             assert_eq!(state_locked.event_queue.len(), 1);
@@ -1276,7 +1306,7 @@ mod tests {
 
         assert_data_tree!(inspector, root: {
             "usb-functionfs": contains {
-                num_control_file_objects: 1u64,
+                num_open_file_objects: 1u64,
                 has_input_output_endpoints: true,
                 is_online: true,
                 event_queue_depth: 1u64,
@@ -1302,7 +1332,7 @@ mod tests {
         rootdir.on_control_closed();
         {
             let state_locked = rootdir.state.lock();
-            assert_eq!(state_locked.num_control_file_objects, 0);
+            assert_eq!(state_locked.num_open_file_objects, 0);
             assert!(!state_locked.has_input_output_endpoints);
             assert!(!state_locked.is_online);
             assert!(state_locked.event_queue.is_empty());
@@ -1310,7 +1340,7 @@ mod tests {
 
         assert_data_tree!(inspector, root: {
             "usb-functionfs": contains {
-                num_control_file_objects: 0u64,
+                num_open_file_objects: 0u64,
                 has_input_output_endpoints: false,
                 is_online: false,
                 event_queue_depth: 0u64,
@@ -1437,11 +1467,17 @@ mod tests {
                     other => panic!("Unexpected request: {other:?}"),
                 }
 
-                // 3. Expected shutdown errors on Receive -> must NOT increment read_errors.
+                // 3. Expected shutdown errors on Receive -> must return ESHUTDOWN and NOT
+                // increment read_errors.
+                let mut read_shutdown_errs = Vec::new();
                 for status in [zx::Status::BAD_STATE, zx::Status::CANCELED, zx::Status::PEER_CLOSED]
                 {
                     let pending = Arc::<PendingResult<Vec<u8>>>::default();
-                    read_sender.send(ReadCommand { pending }).await.expect("send read command");
+                    read_sender
+                        .send(ReadCommand { pending: pending.clone() })
+                        .await
+                        .expect("send read command");
+                    read_shutdown_errs.push(pending);
                     match stream.next().await.expect("stream item").expect("fidl request") {
                         fadb::UsbAdbImpl_Request::Receive { responder } => {
                             responder
@@ -1484,14 +1520,17 @@ mod tests {
                     other => panic!("Unexpected request: {other:?}"),
                 }
 
-                // 6. Expected shutdown errors on QueueTx -> must NOT increment write_errors.
+                // 6. Expected shutdown errors on QueueTx -> must return ESHUTDOWN and NOT
+                // increment write_errors.
+                let mut write_shutdown_errs = Vec::new();
                 for status in [zx::Status::BAD_STATE, zx::Status::CANCELED, zx::Status::PEER_CLOSED]
                 {
                     let pending = Arc::<PendingResult<usize>>::default();
                     write_sender
-                        .send(WriteCommand { data: vec![1], pending })
+                        .send(WriteCommand { data: vec![1], pending: pending.clone() })
                         .await
                         .expect("send write command");
+                    write_shutdown_errs.push(pending);
                     match stream.next().await.expect("stream item").expect("fidl request") {
                         fadb::UsbAdbImpl_Request::QueueTx { responder, .. } => {
                             responder
@@ -1511,7 +1550,8 @@ mod tests {
                 // Drop the FIDL request stream to close the server channel.
                 drop(stream);
 
-                // 7. Closed FIDL channel on Receive and QueueTx -> must NOT increment error counters.
+                // 7. Closed FIDL channel on Receive and QueueTx -> must return ESHUTDOWN and NOT
+                // increment error counters.
                 let read_closed = Arc::<PendingResult<Vec<u8>>>::default();
                 read_sender
                     .send(ReadCommand { pending: read_closed.clone() })
@@ -1526,23 +1566,49 @@ mod tests {
                 drop(read_sender);
                 drop(write_sender);
 
-                (read_ok, read_io_err, write_ok, write_io_err, read_closed, write_closed)
+                (
+                    read_ok,
+                    read_io_err,
+                    read_shutdown_errs,
+                    write_ok,
+                    write_io_err,
+                    write_shutdown_errs,
+                    read_closed,
+                    write_closed,
+                )
             };
 
-            let ((), (read_ok, read_io_err, write_ok, write_io_err, read_closed, write_closed)) =
-                futures::join!(adb_fut, driver_fut);
+            let (
+                (),
+                (
+                    read_ok,
+                    read_io_err,
+                    read_shutdown_errs,
+                    write_ok,
+                    write_io_err,
+                    write_shutdown_errs,
+                    read_closed,
+                    write_closed,
+                ),
+            ) = futures::join!(adb_fut, driver_fut);
 
             assert_eq!(read_ok.result.lock().take(), Some(Ok(vec![1, 2, 3, 4])));
             assert_eq!(read_io_err.result.lock().take(), Some(error!(EINVAL)));
+            for pending in read_shutdown_errs {
+                assert_eq!(pending.result.lock().take(), Some(error!(ESHUTDOWN)));
+            }
             assert_eq!(write_ok.result.lock().take(), Some(Ok(5)));
             assert_eq!(write_io_err.result.lock().take(), Some(error!(EINVAL)));
-            assert_eq!(read_closed.result.lock().take(), Some(error!(EINVAL)));
-            assert_eq!(write_closed.result.lock().take(), Some(error!(EINVAL)));
+            for pending in write_shutdown_errs {
+                assert_eq!(pending.result.lock().take(), Some(error!(ESHUTDOWN)));
+            }
+            assert_eq!(read_closed.result.lock().take(), Some(error!(ESHUTDOWN)));
+            assert_eq!(write_closed.result.lock().take(), Some(error!(ESHUTDOWN)));
 
             assert_data_tree!(inspector, root: {
                 "usb-functionfs": {
                     is_online: false,
-                    num_control_file_objects: 0u64,
+                    num_open_file_objects: 0u64,
                     event_queue_depth: 4u64,
                     has_input_output_endpoints: false,
                     control_resets: 0u64,
@@ -1613,10 +1679,12 @@ mod tests {
 
             // Simulate opening session 2 while session 1's async task is still running.
             // The session ID is incremented and active state is updated.
+            let (client_channel2, _server_channel2) = zx::Channel::create();
             {
                 let mut state = rootdir.state.lock();
                 state.session_id = 2;
                 state.is_online = true;
+                state.device_proxy = Some(fadb::DeviceSynchronousProxy::new(client_channel2));
                 state.event_queue.clear();
             }
 
@@ -1628,10 +1696,14 @@ mod tests {
             // Run adb_fut1 to completion.
             adb_fut1.await;
 
-            // Verify that the stale stream1 did NOT set is_online to false or push UNBIND
-            // into session 2's event queue.
+            // Verify that the stale stream1 did NOT set is_online to false, steal session 2's
+            // device_proxy, or push UNBIND into session 2's event queue.
             let state = rootdir.state.lock();
             assert!(state.is_online, "Stale session termination must not set is_online to false");
+            assert!(
+                state.device_proxy.is_some(),
+                "Stale session termination must not take the active session's device_proxy"
+            );
             assert!(
                 state.event_queue.is_empty(),
                 "Stale session termination must not push UNBIND into the active session queue"
@@ -1718,10 +1790,12 @@ mod tests {
             let (write_sender, write_receiver) = async_channel::unbounded();
 
             // Simulate state established by create_endpoints() for session 1.
+            let (client_channel, _server_channel) = zx::Channel::create();
             {
                 let mut state = rootdir.state.lock();
                 state.session_id = 1;
                 state.has_input_output_endpoints = true;
+                state.device_proxy = Some(fadb::DeviceSynchronousProxy::new(client_channel));
                 state.adb_read_channel = Some(read_sender);
                 state.adb_write_channel = Some(write_sender);
                 state.event_queue.push_back(usb_functionfs_event {
@@ -1747,6 +1821,10 @@ mod tests {
 
             let state = rootdir.state.lock();
             assert!(!state.is_online);
+            assert!(
+                state.device_proxy.is_none(),
+                "UNBIND must clear device_proxy for the active session"
+            );
             assert!(
                 !state.has_input_output_endpoints,
                 "UNBIND must clear has_input_output_endpoints so wait_until_online aborts"
@@ -1809,14 +1887,14 @@ mod tests {
         let device_proxy = fadb::DeviceSynchronousProxy::new(client_channel);
         {
             let mut state = rootdir.state.lock();
-            state.num_control_file_objects = 1;
+            state.num_open_file_objects = 1;
             state.device_proxy = Some(device_proxy);
         }
 
         rootdir.on_control_closed();
 
         let state = rootdir.state.lock();
-        assert_eq!(state.num_control_file_objects, 0);
+        assert_eq!(state.num_open_file_objects, 0);
         assert!(state.device_proxy.is_none(), "device_proxy should be taken by on_control_closed");
     }
 
@@ -1858,5 +1936,38 @@ mod tests {
             other => panic!("Expected StopAdb request, got {other:?}"),
         }
         assert!(rootdir.state.lock().device_proxy.is_none());
+    }
+
+    #[::fuchsia::test]
+    fn test_functionfs_reset_waits_for_all_endpoint_file_objects() {
+        let inspector = inspect::Inspector::default();
+        let rootdir = FunctionFsRootDir::new(inspector.root());
+
+        // Open ep0, ep1, and ep2 as adbd does after writing descriptors.
+        rootdir.on_control_opened();
+        {
+            let mut state = rootdir.state.lock();
+            state.has_input_output_endpoints = true;
+            state.is_online = true;
+        }
+        rootdir.on_endpoint_opened(); // ep1 (bulk OUT)
+        rootdir.on_endpoint_opened(); // ep2 (bulk IN)
+
+        // Closing ep0 while ep1 and ep2 remain open must NOT tear down active endpoints
+        // (matching Linux drivers/usb/gadget/function/f_fs.c `ffs->opened`).
+        rootdir.on_control_closed();
+        assert!(rootdir.state.lock().has_input_output_endpoints);
+        assert_eq!(rootdir.state.lock().control_resets, 0);
+
+        // Closing ep1 still leaves ep2 open (e.g. an in-flight AIO write holding FileHandle).
+        rootdir.on_endpoint_closed();
+        assert!(rootdir.state.lock().has_input_output_endpoints);
+        assert_eq!(rootdir.state.lock().control_resets, 0);
+
+        // Closing the final open FileObject (`ffs->opened == 0`) resets FunctionFS.
+        rootdir.on_endpoint_closed();
+        assert!(!rootdir.state.lock().has_input_output_endpoints);
+        assert!(!rootdir.state.lock().is_online);
+        assert_eq!(rootdir.state.lock().control_resets, 1);
     }
 }

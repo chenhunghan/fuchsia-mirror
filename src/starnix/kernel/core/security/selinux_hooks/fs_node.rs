@@ -55,16 +55,15 @@ pub(in crate::security) fn fs_node_notify_security_context(
     security_server: &SecurityServer,
     fs_node: NonPrivateFsNode<'_>,
     security_context: &FsStr,
-) -> Result<(), Errno> {
+) {
     let fs = fs_node.fs();
     if !fs.security_state.state.supports_xattr() {
-        return error!(ENOTSUP);
+        return;
     }
     let sid = security_server
         .security_context_to_sid(security_context.into())
-        .map_err(|_| errno!(EINVAL))?;
+        .unwrap_or_else(|_| InitialSid::Unlabeled.into());
     set_cached_sid(fs_node, sid);
-    Ok(())
 }
 
 /// Called by the VFS to initialize the security state for an `FsNode` that
@@ -143,7 +142,7 @@ pub(in crate::security) fn fs_node_init_with_dentry(
                     let maybe_sid = match attr {
                         Ok(ValueOrSize::Value(security_context)) => Some(
                             security_server
-                                .security_context_to_sid((&security_context).into())
+                                .security_context_to_sid(security_context.as_ref().into())
                                 .unwrap_or_else(|_| InitialSid::Unlabeled.into()),
                         ),
                         Ok(ValueOrSize::Size(_)) => None,
@@ -202,7 +201,7 @@ pub(in crate::security) fn fs_node_init_with_dentry(
                     // Ephemeral nodes are then labeled by applying SID computation between their
                     // SID of the task that created them, and their parent file node's label (or
                     // the filesystem sid if they don't have a parent node).
-                    // TODO: https://fxbug.dev/381275592 - Use the SID from the creating task,
+                    // TODO: https://fxbug.dev/393086830 - Use the SID from the creating task,
                     // rather than current_task!
                     let scope = RcuReadScope::new();
                     let parent_node = parent
@@ -243,16 +242,6 @@ pub(in crate::security) fn fs_node_init_with_dentry(
     set_cached_sid(fs_node, sid);
 
     Ok(())
-}
-
-// TODO: https://fxbug.dev/455771186 - Clean up with-DirEntry initialization and remove this.
-pub(in crate::security) fn fs_node_init_with_dentry_deferred(dir_entry: NonPrivateDirEntry<'_>) {
-    // This API is only for use when creating artificial file-system nodes prior to policy-load /
-    // filesystem label initialization.
-    let fs = dir_entry.node().fs();
-    assert!(fs.security_state.state.label().is_none());
-    log_debug!("Queuing FsNode for {:?} for labeling", dir_entry);
-    fs.security_state.state.pending_entries.lock().insert(WeakKey::from(dir_entry.as_dir_entry()));
 }
 
 /// Returns an [`FsNodeSecurityXattr`] for the security context of `sid`.
@@ -300,8 +289,8 @@ fn compute_new_socket_sid(
         return Ok(sid);
     }
 
-    // TODO: https://fxbug.dev/377915452 - is EPERM right here? What does it mean
-    // for compute_new_fs_node_sid to have failed?
+    // `compute_create_sid` fails if the computed security context is invalid under the policy
+    // (for example, an unauthorized role/type combination or a non-overlapping `glblub` range).
     let permission_check = build_permission_check(current_task, security_server);
     permission_check
         .compute_create_sid(current_sid, current_sid, new_socket_class.into(), name.as_ref())
@@ -373,8 +362,8 @@ fn compute_new_file_sid(
         fs_label.sid
     };
 
-    // TODO: https://fxbug.dev/377915452 - is EPERM right here? What does it mean
-    // for compute_new_fs_node_sid to have failed?
+    // `compute_create_sid` fails if the computed security context is invalid under the policy
+    // (for example, an unauthorized role/type combination or a non-overlapping `glblub` range).
     let permission_check = build_permission_check(current_task, security_server);
     permission_check
         .compute_create_sid(current_sid, target_sid, new_file_class.into(), name.as_ref())
@@ -410,6 +399,36 @@ pub(in crate::security) fn compute_new_fs_node_sid(
     })
 }
 
+/// Returns the `FsNodeSecurityXattr` with which a new `FsNode` of `mode` and `name` created under
+/// `parent` should be labeled, or `None` if no policy has yet been loaded or the file-system does
+/// not persist labels as extended attributes.
+pub(in crate::security) fn dentry_init_security(
+    security_server: &SecurityServer,
+    current_task: &CurrentTask,
+    parent: NonPrivateFsNode<'_>,
+    mode: FileMode,
+    name: &FsStr,
+) -> Result<Option<FsNodeSecurityXattr>, Errno> {
+    let fs = parent.fs();
+    if !fs.security_state.state.supports_xattr() {
+        return Ok(None);
+    }
+    let Some(fs_label) = fs.security_state.state.label() else {
+        return Ok(None);
+    };
+
+    let new_node_class = file_class_from_file_mode(mode)?.into();
+    let sid = compute_new_fs_node_sid(
+        security_server,
+        current_task,
+        fs_label,
+        Some(parent),
+        new_node_class,
+        name.into(),
+    )?;
+    Ok(Some(make_fs_node_security_xattr(security_server, sid)?))
+}
+
 /// Called by file-system implementations when creating the `FsNode` for a new file.
 pub(in crate::security) fn fs_node_init_on_create(
     security_server: &SecurityServer,
@@ -418,19 +437,24 @@ pub(in crate::security) fn fs_node_init_on_create(
     parent: Option<NonPrivateFsNode<'_>>,
     name: &FsStr,
 ) -> Result<Option<FsNodeSecurityXattr>, Errno> {
-    // By definition this is a new `FsNode` so should not have already been labeled.
-    let label_class = new_node.selinux_state().read();
-    let is_uninitialized = matches!(label_class.label, FsNodeLabel::Uninitialized);
-    assert!(is_uninitialized, "init_on_create() for {:?} with label {:?}", new_node, *label_class);
-    if new_node.fs().name() == "overlay" {
-        // TODO: https://fxbug.dev/369067922 - Find a cleaner way to skip duplicate labeling of
-        // "overlay" filesystem nodes during creation.
-        return Ok(None);
-    }
-
     // If the `new_node` does not already have a specific security class selected then choose one
     // based on its file mode.
     let new_node_class = fs_node_ensure_class(new_node)?;
+
+    // By definition this is a new `FsNode` so should not have already been labeled, except by a
+    // file-system implementation that supplied the security context inline when creating the node
+    // remotely (see `dentry_init_security()`), which is only possible for xattr-labeled
+    // file-systems.
+    let label_class = new_node.selinux_state().read();
+    if !matches!(label_class.label, FsNodeLabel::Uninitialized) {
+        assert!(
+            new_node.fs().security_state.state.supports_xattr(),
+            "init_on_create() for {:?} with label {:?}",
+            new_node,
+            *label_class
+        );
+        return Ok(None);
+    }
 
     // If the file system is not yet labeled (i.e. no policy has been loaded) then no label can
     // be applied yet.
@@ -518,7 +542,6 @@ pub(in crate::security) fn fs_node_init_anon(
         (FileClass::AnonFsNode.into(), node_type)
     };
 
-    // TODO: https://fxbug.dev/405062002 - Fold this into the `fs_node_init_with_dentry*()` logic?
     let sid = if current_task.kernel().security_state.state.as_ref().unwrap().has_policy() {
         let task_sid = current_task_state(current_task).current_sid;
         let new_sid = build_permission_check(current_task, security_server)
@@ -1109,7 +1132,7 @@ pub(in crate::security) fn check_fs_node_setxattr_access(
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
     name: &FsStr,
-    value: &FsStr,
+    value: &[u8],
     _op: XattrOp,
 ) -> Result<(), Errno> {
     let current_sid = current_task_state(current_task).current_sid;
@@ -1263,7 +1286,7 @@ pub(in crate::security) fn fs_node_getsecurity(
     fs_node: NonPrivateFsNode<'_>,
     name: &FsStr,
     max_size: usize,
-) -> Result<Option<ValueOrSize<FsString>>, Errno> {
+) -> Result<Option<ValueOrSize<Box<[u8]>>>, Errno> {
     if name != XATTR_NAME_SELINUX.to_bytes() {
         return Ok(None);
     }
@@ -1296,7 +1319,7 @@ pub(in crate::security) fn fs_node_setsecurity(
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
     name: &FsStr,
-    value: &FsStr,
+    value: &[u8],
     op: XattrOp,
 ) -> Result<Option<()>, Errno> {
     if name != XATTR_NAME_SELINUX.to_bytes() {
@@ -1324,8 +1347,8 @@ pub(in crate::security) fn fs_node_copy_up(
     fs: &FileSystem,
     new_creds: &mut Credentials,
 ) {
-    // TODO: https://fxbug.dev/398696739 - Once this API is updated to accept the `OverlayFsNode`
-    // instead of the lower filesystem node, the `Mountpoint` special-case can be removed.
+    // If the overlay filesystem is mounted with `context=` (`Mountpoint` labeling) then use that
+    // SID; otherwise copy the effective SID of the lower `fs_node`.
     let new_sid = if let Some(FileSystemLabel {
         scheme: FileSystemLabelingScheme::Mountpoint { sid },
         ..
@@ -1345,11 +1368,15 @@ mod tests {
         self, TEST_FILE_NAME, spawn_kernel_with_selinux_hooks_test_policy_and_run,
     };
     use super::*;
-    use bstr::BStr;
-
+    use crate::fs::fuchsia::{create_file_from_handle, create_fuchsia_pipe, new_remote_file};
+    use crate::mm::PAGE_SIZE;
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::{FsNode, XattrOp};
+    use bstr::BStr;
+    use fidl_fuchsia_io as fio;
+    use selinux::SocketClass;
     use starnix_uapi::errno;
+    use starnix_uapi::open_flags::OpenFlags;
 
     const VALID_SECURITY_CONTEXT: &[u8] = b"u:object_r:test_valid_t:s0";
     const VALID_SECURITY_CONTEXT_WITH_NUL: &[u8] = b"u:object_r:test_valid_t:s0\0";
@@ -1572,6 +1599,166 @@ mod tests {
             .entry;
 
             assert_eq!(BStr::new(b"/foo/bar"), get_fs_relative_path(&dir_entry));
+        })
+        .await;
+    }
+
+    fn spawn_mock_fuchsia_file(selinux_context: Option<fio::SelinuxContext>) -> zx::Channel {
+        use fidl::endpoints::DiscoverableProtocolMarker as _;
+        use futures::StreamExt as _;
+
+        let (client, server) = zx::Channel::create();
+        std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream =
+                    fidl::endpoints::ServerEnd::<fio::FileMarker>::new(server).into_stream();
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        fio::FileRequest::Query { responder } => {
+                            let _ = responder.send(fio::FileMarker::PROTOCOL_NAME.as_bytes());
+                        }
+                        fio::FileRequest::Describe { responder } => {
+                            let _ = responder.send(fio::FileInfo::default());
+                        }
+                        fio::FileRequest::GetAttributes { responder, .. } => {
+                            let mutable = fio::MutableNodeAttributes {
+                                selinux_context: selinux_context.clone(),
+                                ..Default::default()
+                            };
+                            let immutable = fio::ImmutableNodeAttributes {
+                                protocols: Some(fio::NodeProtocolKinds::FILE),
+                                ..Default::default()
+                            };
+                            let _ = responder.send(Ok((&mutable, &immutable)));
+                        }
+                        fio::FileRequest::Close { responder } => {
+                            let _ = responder.send(Ok(()));
+                            break;
+                        }
+                        _ => panic!("Unexpected FileRequest: {request:?}"),
+                    }
+                }
+            });
+        });
+        client
+    }
+
+    #[fuchsia::test]
+    async fn remote_file_and_pipe_labeling() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            let task_sid = security_server
+                .security_context_to_sid(VALID_SECURITY_CONTEXT.into())
+                .expect("invalid security context");
+            testing::mutate_attrs_for_test(current_task, |attrs| attrs.current_sid = task_sid);
+
+            // Fuchsia stream socket wrapped via `create_fuchsia_pipe` is labeled as a `pipefs`
+            // `fifo_file` with the creating task's SID.
+            let (pipe_client, _pipe_server) = zx::Socket::create_stream();
+            let pipe_file = create_fuchsia_pipe(current_task, pipe_client, OpenFlags::RDWR)
+                .expect("create_fuchsia_pipe");
+            assert_eq!(
+                fs_node_effective_sid_and_class(NonPrivateFsNode::new(pipe_file.node()).unwrap()),
+                FsNodeSidAndClass { sid: task_sid, class: FsNodeClass::File(FileClass::FifoFile) }
+            );
+
+            // Fuchsia stream socket wrapped via `create_file_from_handle` (used for component
+            // startup handles such as stdio) is labeled as a `pipefs` `fifo_file` with the creating
+            // task's SID.
+            let (stdio_client, _stdio_server) = zx::Socket::create_stream();
+            let stdio_file = create_file_from_handle(current_task, stdio_client.into())
+                .expect("create_file_from_handle socket");
+            assert_eq!(
+                fs_node_effective_sid_and_class(NonPrivateFsNode::new(stdio_file.node()).unwrap()),
+                FsNodeSidAndClass { sid: task_sid, class: FsNodeClass::File(FileClass::FifoFile) }
+            );
+
+            // Fuchsia stream socket wrapped via `new_remote_file` is labeled as a `sockfs`
+            // `unix_stream_socket` with the creating task's SID.
+            let (sock_client, _sock_server) = zx::Socket::create_stream();
+            let sock_file = new_remote_file(current_task, sock_client.into(), OpenFlags::RDWR)
+                .expect("new_remote_file socket");
+            assert_eq!(
+                fs_node_effective_sid_and_class(NonPrivateFsNode::new(sock_file.node()).unwrap()),
+                FsNodeSidAndClass {
+                    sid: task_sid,
+                    class: FsNodeClass::Socket(SocketClass::UnixStreamSocket)
+                }
+            );
+
+            // Fuchsia `fuchsia.io/File` and `fuchsia.io/Directory` channels wrapped via
+            // `new_remote_file` are labeled on `remotefs` with `FileClass::File` / `FileClass::Dir`
+            // and the default `file` initial SID when no `selinux_context` attribute is present.
+            let (file_server, file_client) = zx::Channel::create();
+            fdio::open("/pkg/meta/contents", fio::PERM_READABLE, file_server)
+                .expect("open /pkg/meta/contents");
+            let remote_file = new_remote_file(current_task, file_client.into(), OpenFlags::RDONLY)
+                .expect("new_remote_file file");
+            assert_eq!(
+                fs_node_effective_sid_and_class(NonPrivateFsNode::new(remote_file.node()).unwrap()),
+                FsNodeSidAndClass {
+                    sid: InitialSid::File.into(),
+                    class: FsNodeClass::File(FileClass::File)
+                }
+            );
+
+            let (dir_server, dir_client) = zx::Channel::create();
+            fdio::open("/pkg", fio::PERM_READABLE | fio::PERM_EXECUTABLE, dir_server)
+                .expect("open /pkg");
+            let remote_dir = new_remote_file(current_task, dir_client.into(), OpenFlags::RDONLY)
+                .expect("new_remote_file directory");
+            assert_eq!(
+                fs_node_effective_sid_and_class(NonPrivateFsNode::new(remote_dir.node()).unwrap()),
+                FsNodeSidAndClass {
+                    sid: InitialSid::File.into(),
+                    class: FsNodeClass::File(FileClass::Dir)
+                }
+            );
+
+            // Fuchsia `fuchsia.io/File` channel reporting a valid `SELINUX_CONTEXT` attribute is
+            // labeled with the reported context.
+            let labeled_channel = spawn_mock_fuchsia_file(Some(fio::SelinuxContext::Data(
+                VALID_SECURITY_CONTEXT.to_vec(),
+            )));
+            let labeled_file =
+                new_remote_file(current_task, labeled_channel.into(), OpenFlags::RDONLY)
+                    .expect("new_remote_file labeled file");
+            assert_eq!(
+                fs_node_effective_sid_and_class(
+                    NonPrivateFsNode::new(labeled_file.node()).unwrap()
+                ),
+                FsNodeSidAndClass { sid: task_sid, class: FsNodeClass::File(FileClass::File) }
+            );
+
+            // Fuchsia `fuchsia.io/File` channel reporting an invalid `SELINUX_CONTEXT` attribute
+            // is labeled as `Unlabeled`.
+            let invalid_channel = spawn_mock_fuchsia_file(Some(fio::SelinuxContext::Data(
+                b"invalid_context".to_vec(),
+            )));
+            let invalid_file =
+                new_remote_file(current_task, invalid_channel.into(), OpenFlags::RDONLY)
+                    .expect("new_remote_file invalid context file");
+            assert_eq!(
+                fs_node_effective_sid_and_class(
+                    NonPrivateFsNode::new(invalid_file.node()).unwrap()
+                ),
+                FsNodeSidAndClass {
+                    sid: InitialSid::Unlabeled.into(),
+                    class: FsNodeClass::File(FileClass::File)
+                }
+            );
+
+            // VMO and Counter handles wrapped via `new_remote_file` use kernel-private nodes.
+            let vmo = zx::Vmo::create(*PAGE_SIZE).expect("Vmo::create");
+            let vmo_file =
+                new_remote_file(current_task, vmo.into(), OpenFlags::RDWR).expect("vmo file");
+            assert!(vmo_file.node().is_private());
+            assert!(vmo_file.node().is_reg());
+
+            let counter = zx::Counter::create();
+            let counter_file = new_remote_file(current_task, counter.into(), OpenFlags::RDONLY)
+                .expect("counter file");
+            assert!(counter_file.node().is_private());
         })
         .await;
     }

@@ -28,7 +28,6 @@ fuchsia_rust_driver("usb-zero-function-driver") {
     "src/tests.rs",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_rust",
     "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_rust",
     "//sdk/fidl/fuchsia.hardware.usb.function:fuchsia.hardware.usb.function_rust",
@@ -41,6 +40,7 @@ fuchsia_rust_driver("usb-zero-function-driver") {
     "//third_party/rust_crates:enumn",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
+    "//third_party/rust_crates:zerocopy",
   ]
   test_deps = [ "//src/lib/fuchsia" ]
 }

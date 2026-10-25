@@ -9,9 +9,10 @@ use crate::kconcurrent::{
     OwnerGuard, assert_lock_not_held, assert_no_transaction_active, assert_transaction_active,
 };
 use crate::kernel::deadline::Deadline;
+use crate::kernel::scheduler::WaitQueueInheritedSchedulerState;
+use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
 pub use crate::kernel::scheduler_state::SchedulerStateEffectiveProfile;
-use crate::kernel::scheduler_state::{SchedulerStateBaseProfile, WaitQueueInheritedSchedulerState};
-use crate::kernel::thread::{PreemptDisabledToken, Thread, ThreadPtr};
+use crate::kernel::thread::{PreemptDisabledToken, Thread, ThreadPtr, UnblockList};
 use crate::kernel::wait_queue::{
     ForceInheritance, Interruptible, ResourceOwnership, WaitQueueBase, WaitQueueCollection,
     WaitQueueLockClass,
@@ -353,14 +354,25 @@ impl From<WakeOption> for bindings::OwnedWaitQueue_WakeOption {
 /// (`(uintptr_t)this | 1`). Moving it by value in Rust (`memcpy`) without running the C++ move
 /// constructor would invalidate its sentinel. Consequently, `ThreadUnblockList` is pinned in place
 /// via [`ThreadUnblockList::init`].
+///
+/// `raw` is structurally pinned so that `ThreadUnblockList` is `!Unpin`. Otherwise
+/// `&mut ThreadUnblockList` would be `noalias`, and LLVM could assume that the C++ list's head is
+/// not modified through pointers recovered from its (self-referential) sentinel, caching stale
+/// list state across FFI calls that inline the C++ list operations.
 #[repr(C)]
 #[pin_data(PinnedDrop)]
 pub struct ThreadUnblockList {
+    #[pin]
     raw: zr::Opaque<bindings::Thread_UnblockList>,
 }
 
 static_assert!(size_of::<ThreadUnblockList>() == size_of::<bindings::Thread_UnblockList>());
 static_assert!(align_of::<ThreadUnblockList>() == align_of::<bindings::Thread_UnblockList>());
+// `Thread::UnblockList` and the Rust `UnblockList` are two views of one list: both are a single
+// sentinel-encoded head pointer over the same `unblock_list_node` of `Thread` (whose offset is
+// asserted in `thread.rs`), which is what lets `as_list` reinterpret the storage.
+static_assert!(size_of::<UnblockList>() == size_of::<bindings::Thread_UnblockList>());
+static_assert!(align_of::<UnblockList>() == align_of::<bindings::Thread_UnblockList>());
 
 impl ThreadUnblockList {
     /// Returns an in-place pinned initializer for a new, empty `ThreadUnblockList`.
@@ -375,6 +387,53 @@ impl ThreadUnblockList {
     #[inline]
     pub fn as_raw(&self) -> *mut bindings::Thread_UnblockList {
         self.raw.get()
+    }
+
+    /// Views the list as the Rust [`UnblockList`] over the same storage.
+    #[inline]
+    pub fn as_list(self: Pin<&mut Self>) -> Pin<&mut UnblockList> {
+        // SAFETY: `Self::init` constructed a valid `Thread::UnblockList` in `raw`, which shares
+        // its layout and sentinel encoding with `UnblockList` (asserted above); the projection
+        // keeps the list pinned and the `&mut` borrow of `self` makes it unique.
+        unsafe { self.map_unchecked_mut(|list| &mut *list.raw.get().cast::<UnblockList>()) }
+    }
+
+    /// Views the list as the Rust [`UnblockList`] over the same storage, shared.
+    #[inline]
+    pub fn as_list_ref(&self) -> &UnblockList {
+        // SAFETY: As in `as_list`; only shared access is handed out.
+        unsafe { &*self.raw.get().cast::<UnblockList>() }
+    }
+
+    /// Returns whether the list is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.as_list_ref().is_empty()
+    }
+
+    /// Adds `thread` to the back of the list.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `thread` is not currently a member of any unblock list, and
+    /// that it remains alive while it is a member of this list.
+    #[inline]
+    pub unsafe fn push_back(self: Pin<&mut Self>, thread: &Thread) {
+        // SAFETY: Forwarded from the caller.
+        unsafe { self.as_list().push_back_raw(NonNull::from(thread)) }
+    }
+
+    /// Removes and returns the [`Thread`] at the front of the list, if any.
+    #[inline]
+    pub fn pop_front(self: Pin<&mut Self>) -> Option<ThreadPtr> {
+        // SAFETY: Every member of the list is a live `Thread`.
+        self.as_list().pop_front().and_then(|p| unsafe { ThreadPtr::from_raw(p.as_ptr()) })
+    }
+
+    /// Returns an iterator over the [`Thread`]s in the list.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = ThreadPtr> + '_ {
+        self.as_list_ref().iter().map(ThreadPtr::from)
     }
 }
 
@@ -473,7 +532,10 @@ impl Deref for OwnedWaitQueue {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.base
+        // SAFETY: `OwnedWaitQueue` is `#[repr(C)]` with `base: WaitQueueBase` at offset 0.
+        // Casting from `self` rather than projecting `&self.base` preserves pointer provenance
+        // over the entire `OwnedWaitQueue` allocation for `downcast_to_owq`.
+        unsafe { &*core::ptr::from_ref(self).cast::<WaitQueueBase>() }
     }
 }
 
@@ -507,7 +569,7 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     /// Re-expresses this proof as one for the embedded [`WaitQueueBase`] (same lock instance).
     /// `self` is unusable while the returned proof lives.
     pub(crate) fn as_base(&mut self) -> ChainLockProof<'_, WaitQueueBase> {
-        let base = &self.owner().base;
+        let base: &WaitQueueBase = self.owner();
         self.retag(base)
     }
 
@@ -578,36 +640,45 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     /// Returns `true` if no threads are currently blocked in this wait queue.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        // SAFETY: `self` proves `self.owner().lock()` is held by the active transaction.
-        unsafe { wait_queue_bindings::cpp_wait_queue_base_is_empty(self.owner().base.as_raw()) }
+        self.collection().is_empty()
     }
 
     /// Returns the number of threads currently blocked in this wait queue.
     #[inline]
     pub fn count(&self) -> u32 {
-        // SAFETY: `self` proves `self.owner().lock()` is held by the active transaction.
-        unsafe { wait_queue_bindings::cpp_wait_queue_base_count(self.owner().base.as_raw()) }
+        self.collection().count()
     }
 
     /// Peeks at the first [`Thread`] in the wait queue collection.
     #[inline]
     pub fn peek_front(&self) -> Option<ThreadPtr> {
-        // SAFETY: `self` proves `self.owner().lock()` is held by the active transaction. If the
-        // returned pointer is non-null, it points to a live `Thread`.
-        unsafe {
-            ThreadPtr::from_raw(
-                wait_queue_bindings::cpp_wait_queue_base_peek_front(self.owner().base.as_raw())
-                    .cast(),
-            )
-        }
+        self.collection().peek_front()
     }
 
     /// Validates the internal invariants of this wait queue.
     #[inline]
     pub fn validate_queue(&self) {
-        // SAFETY: `self` proves `self.owner().lock()` is held by the active transaction.
+        self.owner().base.debug_assert_magic_check();
+        self.collection().validate();
+    }
+
+    /// Updates the inherited scheduler state storage after `t` has been removed from this queue.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `t.owner()` was just removed from `self.owner()`'s collection
+    /// and that `self.owner().inherited_scheduler_state_storage` is currently `Some(...)`.
+    pub(crate) unsafe fn update_sched_state_storage_thread_removed(
+        &mut self,
+        t: &mut ChainLockProof<'_, Thread>,
+    ) {
+        // SAFETY: `self` and `t` prove both locks are held, and the caller guarantees `t` was
+        // just removed from `self.owner()`'s collection.
         unsafe {
-            wait_queue_bindings::cpp_wait_queue_base_validate_queue(self.owner().base.as_raw());
+            bindings::cpp_owned_wait_queue_update_sched_state_storage_thread_removed(
+                self.owner().as_raw(),
+                t.owner().as_raw().cast(),
+            );
         }
     }
 
@@ -909,6 +980,86 @@ impl OwnedWaitQueue {
             bindings::cpp_owned_wait_queue_lock_pi_chain_queue(start.owner().as_raw().cast())
         };
         chain_lock_result_from_bindings(res)
+    }
+
+    /// Downcast from a [`WaitQueueBase`] to an [`OwnedWaitQueue`] if possible, using the magic
+    /// number to detect the underlying nature of the object. Returns `None` if the object is not
+    /// an [`OwnedWaitQueue`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that if `wq.magic() == OWNED_MAGIC`, `wq` is the `base` subobject
+    /// of a live [`OwnedWaitQueue`] and carries provenance over the enclosing [`OwnedWaitQueue`].
+    #[inline]
+    pub(crate) unsafe fn downcast_to_owq(wq: &WaitQueueBase) -> Option<&Self> {
+        if wq.magic() == OWNED_MAGIC {
+            // SAFETY: `base` is at offset 0 of `OwnedWaitQueue`, and the caller guarantees that
+            // when `wq.magic() == OWNED_MAGIC`, `wq` is the `base` subobject of a live
+            // `OwnedWaitQueue` with provenance over the enclosing `OwnedWaitQueue`.
+            Some(unsafe { &*(core::ptr::from_ref(wq).cast::<Self>()) })
+        } else {
+            None
+        }
+    }
+
+    /// Propagates the removal of a single edge between `upstream_node` and `downstream_node`
+    /// along the PI chain.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `upstream_node.owner()` was just removed from `downstream_node.owner()`.
+    /// - All `ChainLock`s downstream of `downstream_node.owner()` in its PI graph are held by the
+    ///   active transaction.
+    pub(crate) unsafe fn begin_propagate_remove_single_edge(
+        upstream_node: &mut ChainLockProof<'_, Thread>,
+        downstream_node: &mut ChainLockProof<'_, Self>,
+        force_inheritance: ForceInheritance,
+        old_target_ep: Option<&SchedulerStateEffectiveProfile>,
+        clt_token: &ChainLockTransactionToken,
+        preempt_disabled_token: &PreemptDisabledToken,
+    ) {
+        assert_transaction_active(clt_token);
+        preempt_disabled_token.assert_held();
+        let old_ep_ptr = old_target_ep.map_or(core::ptr::null(), |ep| {
+            core::ptr::from_ref(ep).cast::<bindings::SchedulerState_EffectiveProfile>()
+        });
+        // SAFETY: `upstream_node.owner()` and `downstream_node.owner()` are valid, both locks are
+        // held via their proofs, the transaction and preemption-disabled tokens are verified, and
+        // the caller upholds the PI-chain preconditions.
+        unsafe {
+            bindings::cpp_owned_wait_queue_begin_propagate_remove_single_edge(
+                upstream_node.owner().as_raw().cast(),
+                downstream_node.owner().as_raw(),
+                force_inheritance.into(),
+                old_ep_ptr,
+            );
+        }
+    }
+
+    /// Releases all PI chain locks starting from `start` (`include_start = true`).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `start`'s lock and all `ChainLock`s downstream of `start` in its PI graph are held by
+    ///   the active transaction and are not unlocked again by the caller after this call releases
+    ///   them.
+    /// - If `start.magic() == OWNED_MAGIC`, `start` is the `base` subobject of a live
+    ///   [`OwnedWaitQueue`] with provenance over the full [`OwnedWaitQueue`].
+    pub(crate) unsafe fn unlock_pi_chain_common_from_wait_queue(
+        start: &WaitQueueBase,
+        clt_token: &ChainLockTransactionToken,
+    ) {
+        assert_transaction_active(clt_token);
+        // SAFETY: `start.as_raw()` is valid, the active transaction is verified, and the caller
+        // upholds the PI-chain and `OwnedWaitQueue` provenance preconditions.
+        unsafe {
+            bindings::cpp_owned_wait_queue_unlock_pi_chain_common_wait_queue(
+                start.as_raw().cast(),
+                core::ptr::null(),
+            );
+        }
     }
 
     /// Debug assert wrapper which skips the thread analysis checks just to assert that a specific
@@ -2061,5 +2212,194 @@ mod tests {
         );
         expect_true!(locked_res_2 == WakeThreadsResult::default());
         expect_true!(owq_ref.lock().is_unlocked());
+    }
+}
+
+/// OwnedWaitQueue topology unit tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "owq_rust")]
+mod owq_tests {
+    use crate::kconcurrent::{IRQ_SAVE_OPTION, clt_tag, single_chain_lock_guard_owned};
+    use crate::kernel::event::Event;
+    use crate::kernel::mp;
+    use crate::kernel::thread::{self, DEFAULT_PRIORITY};
+    use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time, zx_msec};
+    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+    use kprint::kprintln;
+    use pin_init::stack_pin_init;
+    use unittest::{expect_ok, unwrap_ok};
+
+    /// bug 502179440 regression test
+    #[test]
+    fn b502179440_regression_test() {
+        // We need to have at least 2 online CPUs to run this test.  Skip it if we
+        // don't have at least that.
+        if mp::get_online_mask().count_ones() < 2 {
+            kprintln!("Need at least 2 online CPUs to run test. Skipping.");
+            return true;
+        }
+
+        // Force the test thread to run on CPU 0 for the duration of the test.  Be
+        // sure to restore the affinity after the test.
+        // SAFETY: Called from a running kernel thread.
+        let current = unsafe { ThreadPtr::current() };
+        // SAFETY: `current` is the valid running thread.
+        let old_affinity = unsafe { current.get_cpu_affinity() };
+        // SAFETY: `current` is the valid running thread.
+        unsafe { current.set_cpu_affinity(0x1) };
+        let _restore_affinity = zr::defer(|| {
+            // SAFETY: `current` is the valid running thread.
+            unsafe { current.set_cpu_affinity(old_affinity) };
+        });
+
+        stack_pin_init!(let q0 = OwnedWaitQueue::init());
+        stack_pin_init!(let q1 = OwnedWaitQueue::init());
+        let queues: [&OwnedWaitQueue; 2] = [&q0, &q1];
+        let mut threads: [Option<ThreadPtr>; 2] = [None, None];
+        stack_pin_init!(let quit_event = Event::init_unsignaled());
+
+        struct Args<'a> {
+            thread0: AtomicPtr<Thread>,
+            ready_threads: AtomicUsize,
+            quit_event: &'a Event,
+        }
+
+        extern "C" fn worker_thread_entry(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to a valid `Args` that outlives this thread.
+            let args = unsafe { &*arg.cast::<Args<'_>>() };
+            args.ready_threads.fetch_add(1, Ordering::SeqCst);
+            let _ = args.quit_event.wait_infinite();
+            0
+        }
+
+        extern "C" fn contesting_thread_entry(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to a valid `Args` that outlives this thread.
+            let args = unsafe { &*arg.cast::<Args<'_>>() };
+            {
+                // SAFETY: `thread0` was initialized before `contesting_thread` was created and
+                // remains alive until after `contesting_thread` is joined.
+                let t0 = unsafe { &*args.thread0.load(Ordering::Acquire) };
+                single_chain_lock_guard_owned!(
+                    _guard,
+                    t0,
+                    IRQ_SAVE_OPTION,
+                    clt_tag!("owq_topology_bug_502179440_regression_test")
+                );
+                args.ready_threads.fetch_add(1, Ordering::SeqCst);
+
+                let deadline = current_mono_time() + DurationMono(zx_msec(200));
+                while current_mono_time() < deadline {
+                    libarch::r#yield();
+                }
+            }
+            let _ = args.quit_event.wait_infinite();
+            0
+        }
+
+        let args = Args {
+            thread0: AtomicPtr::new(core::ptr::null_mut()),
+            ready_threads: AtomicUsize::new(0),
+            quit_event: &quit_event,
+        };
+        let args_ptr = (&raw const args).cast_mut().cast::<c_void>();
+
+        // Create two threads and wait for them to start.
+        for slot in &mut threads {
+            // SAFETY: `worker_thread_entry` and `args_ptr` are valid, and the thread is joined
+            // below before `args` or `quit_event` go out of scope.
+            let t = unwrap_ok!(unsafe {
+                thread::create_with_priority(
+                    c"owq_test_thread".as_ptr(),
+                    worker_thread_entry,
+                    args_ptr,
+                    DEFAULT_PRIORITY,
+                )
+            });
+            // SAFETY: `t` was just created and has not been resumed or joined yet.
+            unsafe { t.resume() };
+            *slot = Some(t);
+        }
+
+        while args.ready_threads.load(Ordering::SeqCst) != threads.len() {
+            let _ = thread::sleep_relative(DurationMono(zx_msec(1)));
+        }
+
+        // Assign thread N as the owner of queue N, forall N.
+        assert_eq!(queues.len(), threads.len());
+        for i in 0..threads.len() {
+            // SAFETY: `threads[i]` is alive until joined below.
+            let thread_ref = unsafe { threads[i].unwrap().as_ref() };
+            expect_ok!(queues[i].assign_owner(Some(thread_ref)));
+        }
+
+        args.thread0.store(threads[0].unwrap().as_raw(), Ordering::Release);
+
+        // Start another thread and have it hold T0's lock.  We need to be told to
+        // Backoff on locking when we attempt to obtain the wake_futex's OWQ's current
+        // owner lock to set up the original conditions of the bug.
+        //
+        // Sadly, it is very difficult to make this fully deterministic.  Once the
+        // requeue operation starts, it will continue to try until it finally
+        // completes.  We need to have T0's lock contested, but we also need to drop
+        // the lock after a certain period of time, or we will be deadlocked.
+        //
+        // Right now, we are hardcoding a timeout of 200mSec for holding the lock.
+        // There is a small chance of a false negative if the lock is dropped before
+        // the requeue operation starts, but automated tests should not be able to
+        // miss a regression forever.
+        //
+        // Also, use hard affinity make sure that the main test thread is not running
+        // on the same CPU as the contesting thread.  If the contesting thread makes
+        // it into the lock, disabling interrupts in the process, and the primary test
+        // thread ends up being scheduled on the same CPU as the contesting thread, it
+        // is possible that it will end up stuck there if there is so little activity
+        // in the system that the main thread does not get stolen by another scheduler
+        // when an unrelated thread goes idle.
+        // SAFETY: `contesting_thread_entry` and `args_ptr` are valid, and `contesting_thread` is
+        // joined below before `args` or `quit_event` go out of scope.
+        let contesting_thread = unwrap_ok!(unsafe {
+            thread::create_with_priority(
+                c"owq_test_thread".as_ptr(),
+                contesting_thread_entry,
+                args_ptr,
+                DEFAULT_PRIORITY,
+            )
+        });
+        // SAFETY: `contesting_thread` was just created and has not been joined yet.
+        unsafe {
+            contesting_thread.set_cpu_affinity(0x2);
+            contesting_thread.resume();
+        }
+
+        while args.ready_threads.load(Ordering::SeqCst) != threads.len() + 1 {
+            let _ = thread::sleep_relative(DurationMono(zx_msec(1)));
+        }
+
+        // Requeue from Q0 -> Q1, specifying T1 (who owns Q1 right now) as the new
+        // owner of Q1.
+        let mut wake_hook = DefaultWakeHooks;
+        let mut requeue_hook = DefaultWakeHooks;
+        // SAFETY: `threads[1]` is alive until joined below.
+        let t1_ref = unsafe { threads[1].unwrap().as_ref() };
+        queues[0].wake_and_requeue(
+            queues[1],
+            Some(t1_ref),
+            1,
+            0xFFFF_FFFF,
+            &mut wake_hook,
+            &mut requeue_hook,
+            WakeOption::None,
+        );
+
+        // If we didn't fail any asserts, then we passed!  Shutdown the threads and we are done.
+        args.quit_event.signal();
+        for slot in &mut threads {
+            if let Some(t) = slot.take() {
+                // SAFETY: `t` has not been joined yet.
+                let _ = unsafe { t.join(InstantMono::INFINITE) };
+            }
+        }
+        // SAFETY: `contesting_thread` has not been joined yet.
+        let _ = unsafe { contesting_thread.join(InstantMono::INFINITE) };
     }
 }

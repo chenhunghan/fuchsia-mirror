@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "fake_cobalt",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//sdk/fidl/fuchsia.metrics.test:fuchsia.metrics.test_rust",
+        "//src/lib/cobalt/rust/builders",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    edition = "2024",
+    deps = [
+        "//src/lib/async-utils",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fake_cobalt_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fake_cobalt",
+)
+
+fx_component_manifest(
+    name = "component_v2_manifest",
+    testonly = True,
+    component_name = "fake_cobalt",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake_cobalt.cml",
+)
+
+fx_component(
+    name = "component_v2",
+    testonly = True,
+    compiled_manifest = ":component_v2_manifest",
+    component_name = "fake_cobalt",
+    deps = [":fake_cobalt_packaged_bin"],
+)
+
+fx_unittest_package(
+    name = "fake-cobalt-tests",
+    unit_tests = [":bin_test"],
+)

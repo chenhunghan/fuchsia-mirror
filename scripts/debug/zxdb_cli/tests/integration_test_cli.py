@@ -195,6 +195,7 @@ class FakeDapServerMixin(unittest.IsolatedAsyncioTestCase):
                                         },
                                         "line": 10,
                                         "column": 1,
+                                        "trust": "CFI",
                                     }
                                 ],
                                 "totalFrames": 1,
@@ -289,6 +290,25 @@ class FakeDapServerMixin(unittest.IsolatedAsyncioTestCase):
                                 "result": "42",
                                 "type": "int",
                                 "variablesReference": 0,
+                            },
+                        }
+                        resp_body = json.dumps(resp).encode("utf-8")
+                        resp_header = (
+                            f"Content-Length: {len(resp_body)}\r\n\r\n".encode(
+                                "utf-8"
+                            )
+                        )
+                        writer.write(resp_header + resp_body)
+                        await writer.drain()
+                    elif req.get("command") == "zxdb.ConsoleCommand":
+                        resp = {
+                            "seq": req["seq"],
+                            "type": "response",
+                            "request_seq": req["seq"],
+                            "success": True,
+                            "command": "zxdb.ConsoleCommand",
+                            "body": {
+                                "output": "Console output OK\n",
                             },
                         }
                         resp_body = json.dumps(resp).encode("utf-8")
@@ -671,6 +691,29 @@ class TestCLIIntegration(FakeDapServerMixin):
             self.assertEqual(frames[0]["frame_index"], 0)
             self.assertEqual(frames[0]["name"], "main")
             self.assertEqual(frames[0]["source"]["name"], "main.cc")
+            self.assertEqual(frames[0]["trust"], "CFI")
+
+            # Verify unwinder and force-remote-unwind flags forward to DAP
+            f_unwinder = StringIO()
+            with contextlib.redirect_stdout(f_unwinder):
+                exit_code = await main(
+                    [
+                        "stack-trace",
+                        "-t",
+                        "1",
+                        "--force-remote-unwind",
+                        "--unwinder",
+                        "fp",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            last_stack_req = [
+                r
+                for r in self.received_dap_requests
+                if r.get("command") == "stackTrace"
+            ][-1]
+            self.assertTrue(last_stack_req["arguments"].get("remoteUnwind"))
+            self.assertEqual(last_stack_req["arguments"].get("unwinder"), "fp")
 
             # Stop via CLI
             exit_code = await main(["stop"])
@@ -983,6 +1026,82 @@ class TestCLIIntegration(FakeDapServerMixin):
             # Stop via CLI
             exit_code = await main(["stop"])
             self.assertEqual(exit_code, 0)
+
+        finally:
+            await _cleanup_process_group(proc)
+
+    async def test_console_command(self) -> None:
+        proc, _port = await self._setup_daemon_and_server()
+
+        try:
+            f = StringIO()
+            with contextlib.redirect_stdout(f):
+                exit_code = await main(["console", "sym-stat"])
+            self.assertEqual(exit_code, 0)
+
+            output = f.getvalue()
+            output_json = json.loads(output)
+            self.assertTrue(output_json.get("success"))
+            body = output_json.get("body")
+            self.assertIsNotNone(body)
+            self.assertEqual(body.get("output"), "Console output OK\n")
+
+            console_req = next(
+                (
+                    r
+                    for r in self.received_dap_requests
+                    if r.get("command") == "zxdb.ConsoleCommand"
+                ),
+                None,
+            )
+            self.assertIsNotNone(console_req)
+            assert console_req is not None
+            self.assertEqual(console_req["arguments"]["command"], "sym-stat")
+            self.assertNotIn("frameId", console_req["arguments"])
+
+            # Stop via CLI
+            exit_code = await main(["stop"])
+            self.assertEqual(exit_code, 0)
+
+        finally:
+            await _cleanup_process_group(proc)
+
+    async def test_daemon_sigterm(self) -> None:
+        proc, _port = await self._setup_daemon_and_server()
+
+        try:
+            proc.send_signal(signal.SIGTERM)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(proc.wait), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                self.fail("Daemon process did not exit after SIGTERM")
+
+            self.assertFalse(
+                UDS_PATH.exists(), "Socket file was not deleted after SIGTERM"
+            )
+
+        finally:
+            await _cleanup_process_group(proc)
+
+    async def test_daemon_sigint(self) -> None:
+        proc, _port = await self._setup_daemon_and_server()
+
+        try:
+            proc.send_signal(signal.SIGINT)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(proc.wait), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                self.fail("Daemon process did not exit after SIGINT")
+
+            self.assertFalse(
+                UDS_PATH.exists(), "Socket file was not deleted after SIGINT"
+            )
 
         finally:
             await _cleanup_process_group(proc)

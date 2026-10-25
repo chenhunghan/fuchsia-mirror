@@ -15,7 +15,7 @@ use starnix_sync::PidTableLock;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::Signal;
 use starnix_uapi::{errno, error, pid_t};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 #[derive(Debug, RcuDroppable)]
@@ -193,7 +193,7 @@ impl PidEntry {
                 if !parent_state.is_running() {
                     continue;
                 }
-                (parent_state.process_group.id, parent_state.session.id)
+                (parent_tg.pgid().id, parent_state.session.id)
             };
 
             // If a member has a parent in the same session but outside this process group,
@@ -439,6 +439,9 @@ pub struct PidTable {
     /// The most-recently allocated pid in this table.
     last_pid: AtomicI32,
 
+    /// The number of live tasks in this table.
+    num_tasks: AtomicUsize,
+
     /// The tasks in this table, organized by pid_t using an IDR radix tree.
     idr: Idr<PidEntry, PidTableLock>,
 
@@ -451,7 +454,12 @@ impl Default for PidTable {
         let idr = Idr::new_cyclic(Some(RESERVED_PIDS));
         idr.set_max(actual_pid_limit(PID_MAX_DEFAULT) as u32);
         idr.lock().reserve_id(0);
-        Self { last_pid: AtomicI32::new(0), idr, thread_group_notifier: Default::default() }
+        Self {
+            last_pid: AtomicI32::new(0),
+            num_tasks: AtomicUsize::new(0),
+            idr,
+            thread_group_notifier: Default::default(),
+        }
     }
 }
 
@@ -506,6 +514,7 @@ impl<'a> PidTableGuard<'a> {
                 .update(Some(ProcessEntry::ThreadGroup(Arc::downgrade(task.thread_group()))));
         }
         entry.task.update(Arc::downgrade(&task));
+        self.table.num_tasks.fetch_add(1, Ordering::Relaxed);
 
         if task.is_leader() {
             // Notify thread group changes.
@@ -530,6 +539,7 @@ impl<'a> PidTableGuard<'a> {
     }
 
     pub fn remove_task(&mut self, tid: &Pid) {
+        self.table.num_tasks.fetch_sub(1, Ordering::Relaxed);
         self.remove_item(tid, |entry| {
             let scope = RcuReadScope::new();
             assert!(entry.task.strong_count(&scope) > 0);
@@ -621,6 +631,11 @@ impl PidTable {
         })
     }
 
+    /// Returns the number of live tasks in this table.
+    pub fn num_tasks(&self) -> usize {
+        self.num_tasks.load(Ordering::Relaxed)
+    }
+
     /// Returns the process ids for all processes, including zombies.
     pub fn process_ids(&self) -> Vec<pid_t> {
         let scope = RcuReadScope::new();
@@ -659,9 +674,14 @@ impl PidTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::ExitStatus;
     use crate::testing::spawn_kernel_and_run;
-    use starnix_uapi::signals::SIGCHLD;
-    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+    use starnix_types::ownership::Releasable;
+    use starnix_uapi::signals::{SIGCHLD, SIGCONT};
+    use starnix_uapi::user_address::UserRef;
+    use starnix_uapi::{CLONE_CHILD_SETTID, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+    use std::collections::HashSet;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_pid_table_allocation() {
@@ -695,6 +715,7 @@ mod tests {
     fn test_pid_table_empty_state() {
         let table = PidTable::default();
         assert_eq!(table.last_pid(), 0);
+        assert_eq!(table.num_tasks(), 0);
         assert_eq!(table.process_ids().len(), 0);
         let scope = RcuReadScope::new();
         assert_eq!(table.running_task_ids(&scope).count(), 0);
@@ -787,6 +808,696 @@ mod tests {
             // Cloning a new process (thread group leader) must update last_pid.
             let child = current_task.clone_task_for_test(0, Some(SIGCHLD));
             assert_eq!(kernel.pids.last_pid(), child.get_pid());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_intrusive_lists() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            let scope = RcuReadScope::new();
+
+            assert!(!pid_entry.is_process_group(&scope));
+            assert!(!pid_entry.is_session(&scope));
+
+            // Detach from initial group/session and attach to pid_entry.
+            let guard = kernel.pids.lock();
+            current_pid.detach_pgid(&guard, current_task.thread_group());
+            current_pid.detach_sid(&guard, current_task.thread_group());
+            pid_entry.attach_pgid(&guard, current_task.thread_group());
+            pid_entry.attach_sid(&guard, current_task.thread_group());
+
+            // Verify PGID traversal.
+            let pgid_members: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(pgid_members, vec![current_task.get_pid()]);
+
+            // Verify SID traversal.
+            let sid_members: Vec<_> =
+                pid_entry.sid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(sid_members, vec![current_task.get_pid()]);
+
+            // Detach and restore to current_pid.
+            let pgid_empty = pid_entry.detach_pgid(&guard, current_task.thread_group());
+            assert!(pgid_empty);
+            let sid_empty = pid_entry.detach_sid(&guard, current_task.thread_group());
+            assert!(sid_empty);
+            current_pid.attach_pgid(&guard, current_task.thread_group());
+            current_pid.attach_sid(&guard, current_task.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_empty_traversal() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            // Verify empty traversals report no membership and return empty iterators.
+            assert!(!pid_entry.is_process_group(&scope));
+            assert!(!pid_entry.is_session(&scope));
+            assert!(pid_entry.pgid_thread_groups(&scope).next().is_none());
+            assert!(pid_entry.sid_thread_groups(&scope).next().is_none());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_multiple_tasks_ordered_and_reverse_detach() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+            current_pid.detach_pgid(&guard, child2.thread_group());
+            current_pid.detach_pgid(&guard, child3.thread_group());
+
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            pid_entry.attach_pgid(&guard, child2.thread_group());
+            pid_entry.attach_pgid(&guard, child3.thread_group());
+
+            let initial: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(initial, vec![child1.get_pid(), child2.get_pid(), child3.get_pid()]);
+
+            // Detach tail first (child3).
+            let is_empty = pid_entry.detach_pgid(&guard, child3.thread_group());
+            assert!(!is_empty);
+            let state1: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state1, vec![child1.get_pid(), child2.get_pid()]);
+
+            // Detach next tail (child2).
+            let is_empty = pid_entry.detach_pgid(&guard, child2.thread_group());
+            assert!(!is_empty);
+            let state2: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state2, vec![child1.get_pid()]);
+
+            // Detach final remaining member (child1).
+            let is_empty = pid_entry.detach_pgid(&guard, child1.thread_group());
+            assert!(is_empty);
+            assert!(pid_entry.pgid_thread_groups(&scope).next().is_none());
+
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_head_detach() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+            current_pid.detach_pgid(&guard, child2.thread_group());
+            current_pid.detach_pgid(&guard, child3.thread_group());
+
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            pid_entry.attach_pgid(&guard, child2.thread_group());
+            pid_entry.attach_pgid(&guard, child3.thread_group());
+
+            // Detach head (child1).
+            let is_empty = pid_entry.detach_pgid(&guard, child1.thread_group());
+            assert!(!is_empty);
+            let state1: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state1, vec![child2.get_pid(), child3.get_pid()]);
+
+            // Detach new head (child2).
+            let is_empty = pid_entry.detach_pgid(&guard, child2.thread_group());
+            assert!(!is_empty);
+            let state2: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state2, vec![child3.get_pid()]);
+
+            // Detach final head (child3).
+            let is_empty = pid_entry.detach_pgid(&guard, child3.thread_group());
+            assert!(is_empty);
+            assert!(pid_entry.pgid_thread_groups(&scope).next().is_none());
+
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_middle_detach() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+            current_pid.detach_pgid(&guard, child2.thread_group());
+            current_pid.detach_pgid(&guard, child3.thread_group());
+
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            pid_entry.attach_pgid(&guard, child2.thread_group());
+            pid_entry.attach_pgid(&guard, child3.thread_group());
+
+            // Detach middle element (child2).
+            let is_empty = pid_entry.detach_pgid(&guard, child2.thread_group());
+            assert!(!is_empty);
+            let state1: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state1, vec![child1.get_pid(), child3.get_pid()]);
+
+            // Detach child3.
+            let is_empty = pid_entry.detach_pgid(&guard, child3.thread_group());
+            assert!(!is_empty);
+            let state2: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state2, vec![child1.get_pid()]);
+
+            // Detach child1.
+            let is_empty = pid_entry.detach_pgid(&guard, child1.thread_group());
+            assert!(is_empty);
+            assert!(pid_entry.pgid_thread_groups(&scope).next().is_none());
+
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_table_reclaims_pid_when_last_pgid_and_sid_task_detaches() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+
+            // Create a session/process-group leader.
+            let leader = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            leader.thread_group().setsid().expect("setsid leader");
+            let leader_pid_id = leader.get_pid();
+
+            // Create a member process in the leader's session and process group.
+            let member = leader.clone_task_for_test(0, Some(SIGCHLD));
+
+            // Kill and drop the leader, then reap its zombie from current_task.
+            leader.thread_group().kill(ExitStatus::Exit(0), None);
+            drop(leader);
+            {
+                let mut pids = kernel.pids.lock();
+                let zombie = current_task
+                    .thread_group()
+                    .write()
+                    .zombie_children
+                    .pop()
+                    .expect("leader zombie");
+                zombie.release(&mut pids);
+            }
+
+            // Leader's PID must still exist in PidTable while member references it via pgid/sid.
+            assert!(kernel.pids.get(leader_pid_id).is_ok());
+
+            // Move member into its own session and process group.
+            member.thread_group().setsid().expect("setsid member");
+
+            // Now leader's PidEntry is completely empty and must be reclaimed from PidTable.
+            assert_eq!(kernel.pids.get(leader_pid_id), error!(ESRCH));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_reattach_after_detach() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+            current_pid.detach_pgid(&guard, child2.thread_group());
+            current_pid.detach_pgid(&guard, child3.thread_group());
+
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            pid_entry.attach_pgid(&guard, child2.thread_group());
+            pid_entry.attach_pgid(&guard, child3.thread_group());
+
+            // Detach middle member child2.
+            let is_empty = pid_entry.detach_pgid(&guard, child2.thread_group());
+            assert!(!is_empty);
+            let after_detach: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(after_detach, vec![child1.get_pid(), child3.get_pid()]);
+
+            // Re-attach child2 to the same pid_entry.
+            pid_entry.attach_pgid(&guard, child2.thread_group());
+
+            // Guard against cycle or infinite loop with take(10).
+            let reattached: Vec<_> =
+                pid_entry.pgid_thread_groups(&scope).take(10).map(|tg| tg.leader.id).collect();
+            assert_eq!(reattached, vec![child1.get_pid(), child3.get_pid(), child2.get_pid()]);
+
+            pid_entry.detach_pgid(&guard, child1.thread_group());
+            pid_entry.detach_pgid(&guard, child3.thread_group());
+            pid_entry.detach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_move_between_groups() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let (pid_entry1, pid_entry2) = {
+                let mut guard = kernel.pids.lock();
+                (guard.allocate_pid().unwrap(), guard.allocate_pid().unwrap())
+            };
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let scope = RcuReadScope::new();
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+            current_pid.detach_pgid(&guard, child2.thread_group());
+            current_pid.detach_pgid(&guard, child3.thread_group());
+
+            pid_entry1.attach_pgid(&guard, child1.thread_group());
+            pid_entry1.attach_pgid(&guard, child2.thread_group());
+            pid_entry1.attach_pgid(&guard, child3.thread_group());
+
+            // Move child2 from group 1 to group 2.
+            pid_entry1.detach_pgid(&guard, child2.thread_group());
+            pid_entry2.attach_pgid(&guard, child2.thread_group());
+
+            let group1_members: Vec<_> =
+                pid_entry1.pgid_thread_groups(&scope).take(10).map(|tg| tg.leader.id).collect();
+            assert_eq!(group1_members, vec![child1.get_pid(), child3.get_pid()]);
+
+            let group2_members: Vec<_> =
+                pid_entry2.pgid_thread_groups(&scope).take(10).map(|tg| tg.leader.id).collect();
+            assert_eq!(group2_members, vec![child2.get_pid()]);
+
+            pid_entry1.detach_pgid(&guard, child1.thread_group());
+            pid_entry1.detach_pgid(&guard, child3.thread_group());
+            pid_entry2.detach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_singleton_reattach_and_detach() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_pgid(&guard, child1.thread_group());
+
+            // Attach singleton.
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            assert_eq!(
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect::<Vec<_>>(),
+                vec![child1.get_pid()]
+            );
+
+            // Detach singleton.
+            let is_empty = pid_entry.detach_pgid(&guard, child1.thread_group());
+            assert!(is_empty);
+
+            // Re-attach singleton.
+            pid_entry.attach_pgid(&guard, child1.thread_group());
+            assert_eq!(
+                pid_entry.pgid_thread_groups(&scope).map(|tg| tg.leader.id).collect::<Vec<_>>(),
+                vec![child1.get_pid()]
+            );
+
+            // Detach singleton again and restore to current_pid.
+            let is_empty = pid_entry.detach_pgid(&guard, child1.thread_group());
+            assert!(is_empty);
+            current_pid.attach_pgid(&guard, child1.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_sid_tasks_adversarial() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let (pid_entry1, pid_entry2) = {
+                let mut guard = kernel.pids.lock();
+                (guard.allocate_pid().unwrap(), guard.allocate_pid().unwrap())
+            };
+            let scope = RcuReadScope::new();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.detach_sid(&guard, child1.thread_group());
+            current_pid.detach_sid(&guard, child2.thread_group());
+            current_pid.detach_sid(&guard, child3.thread_group());
+
+            pid_entry1.attach_sid(&guard, child1.thread_group());
+            pid_entry1.attach_sid(&guard, child2.thread_group());
+            pid_entry1.attach_sid(&guard, child3.thread_group());
+
+            // Verify ordered traversal.
+            let initial: Vec<_> =
+                pid_entry1.sid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(initial, vec![child1.get_pid(), child2.get_pid(), child3.get_pid()]);
+
+            // Detach middle element (child2).
+            let is_empty = pid_entry1.detach_sid(&guard, child2.thread_group());
+            assert!(!is_empty);
+            let state1: Vec<_> =
+                pid_entry1.sid_thread_groups(&scope).map(|tg| tg.leader.id).collect();
+            assert_eq!(state1, vec![child1.get_pid(), child3.get_pid()]);
+
+            // Re-attach child2 to pid_entry2 (move between sessions).
+            pid_entry2.attach_sid(&guard, child2.thread_group());
+            let session1_members: Vec<_> =
+                pid_entry1.sid_thread_groups(&scope).take(10).map(|tg| tg.leader.id).collect();
+            let session2_members: Vec<_> =
+                pid_entry2.sid_thread_groups(&scope).take(10).map(|tg| tg.leader.id).collect();
+            assert_eq!(session1_members, vec![child1.get_pid(), child3.get_pid()]);
+            assert_eq!(session2_members, vec![child2.get_pid()]);
+
+            // Detach remaining elements and restore to current_pid.
+            assert!(!pid_entry1.detach_sid(&guard, child3.thread_group()));
+            assert!(pid_entry1.detach_sid(&guard, child1.thread_group()));
+            assert!(pid_entry1.sid_thread_groups(&scope).next().is_none());
+            assert!(pid_entry2.detach_sid(&guard, child2.thread_group()));
+
+            current_pid.attach_sid(&guard, child1.thread_group());
+            current_pid.attach_sid(&guard, child2.thread_group());
+            current_pid.attach_sid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_signal_delivery_under_pid_table_lock() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            {
+                let guard = kernel.pids.lock();
+                let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+                current_pid.detach_pgid(&guard, child1.thread_group());
+                current_pid.detach_pgid(&guard, child2.thread_group());
+
+                pid_entry.attach_pgid(&guard, child1.thread_group());
+                pid_entry.attach_pgid(&guard, child2.thread_group());
+
+                // Send signals while holding PidTableLock to verify that lock acquisition
+                // order PidTableLock => ThreadGroupMutableStateLock succeeds without deadlock.
+                pid_entry.send_signals_to_pgid(&[SIGCONT]);
+            }
+
+            // Send signals without holding PidTableLock.
+            pid_entry.send_signals_to_pgid(&[SIGCONT]);
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            pid_entry.detach_pgid(&guard, child1.thread_group());
+            pid_entry.detach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_entry_concurrent_rcu_traversal_under_mutation() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let pid_entry = kernel.pids.lock().allocate_pid().unwrap();
+
+            let child1 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child2 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child3 = current_task.clone_task_for_test(0, Some(SIGCHLD));
+
+            {
+                let guard = kernel.pids.lock();
+                let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+                current_pid.detach_pgid(&guard, child1.thread_group());
+                current_pid.detach_pgid(&guard, child2.thread_group());
+                current_pid.detach_pgid(&guard, child3.thread_group());
+                current_pid.detach_sid(&guard, child1.thread_group());
+                current_pid.detach_sid(&guard, child2.thread_group());
+                current_pid.detach_sid(&guard, child3.thread_group());
+            }
+
+            let valid_pids: HashSet<i32> =
+                [child1.get_pid(), child2.get_pid(), child3.get_pid()].into_iter().collect();
+
+            let running = Arc::new(AtomicBool::new(true));
+
+            // Spawn concurrent reader thread 1: iterates pgid_thread_groups.
+            let r1_pid = pid_entry.clone();
+            let r1_running = Arc::clone(&running);
+            let r1_pids = valid_pids.clone();
+            let reader1 = std::thread::spawn(move || {
+                while r1_running.load(Ordering::Relaxed) {
+                    let scope = RcuReadScope::new();
+                    let mut count = 0;
+                    for tg in r1_pid.pgid_thread_groups(&scope) {
+                        count += 1;
+                        assert!(r1_pids.contains(&tg.leader.id));
+                        assert!(
+                            count <= 3,
+                            "Infinite loop or cycle detected in pgid_thread_groups"
+                        );
+                    }
+                }
+            });
+
+            // Spawn concurrent reader thread 2: iterates sid_thread_groups.
+            let r2_pid = pid_entry.clone();
+            let r2_running = Arc::clone(&running);
+            let r2_pids = valid_pids.clone();
+            let reader2 = std::thread::spawn(move || {
+                while r2_running.load(Ordering::Relaxed) {
+                    let scope = RcuReadScope::new();
+                    let tgs: Vec<_> = r2_pid.sid_thread_groups(&scope).take(10).collect();
+                    assert!(tgs.len() <= 3, "Infinite loop or cycle detected in sid_thread_groups");
+                    for tg in tgs {
+                        assert!(r2_pids.contains(&tg.leader.id));
+                    }
+                }
+            });
+
+            // Spawn concurrent signal delivery thread: delivers signals to process group.
+            let r3_pid = pid_entry.clone();
+            let r3_running = Arc::clone(&running);
+            let signal_thread = std::thread::spawn(move || {
+                while r3_running.load(Ordering::Relaxed) {
+                    r3_pid.send_signals_to_pgid(&[SIGCONT]);
+                }
+            });
+
+            // Writer thread mutates pgid_thread_groups and sid_thread_groups under PidTableLock.
+            for _ in 0..150 {
+                {
+                    let guard = kernel.pids.lock();
+                    pid_entry.attach_pgid(&guard, child1.thread_group());
+                    pid_entry.attach_pgid(&guard, child2.thread_group());
+                    pid_entry.attach_sid(&guard, child2.thread_group());
+                    pid_entry.attach_sid(&guard, child3.thread_group());
+                }
+
+                {
+                    let guard = kernel.pids.lock();
+                    pid_entry.detach_pgid(&guard, child2.thread_group());
+                    pid_entry.attach_pgid(&guard, child3.thread_group());
+                    pid_entry.detach_sid(&guard, child2.thread_group());
+                }
+
+                {
+                    let guard = kernel.pids.lock();
+                    pid_entry.detach_pgid(&guard, child1.thread_group());
+                    pid_entry.detach_pgid(&guard, child3.thread_group());
+                    pid_entry.detach_sid(&guard, child3.thread_group());
+                }
+            }
+
+            running.store(false, Ordering::Relaxed);
+            reader1.join().expect("Reader 1 join failed");
+            reader2.join().expect("Reader 2 join failed");
+            signal_thread.join().expect("Signal thread join failed");
+
+            // Final cleanup check and restore to current_pid.
+            let scope = RcuReadScope::new();
+            assert!(pid_entry.pgid_thread_groups(&scope).next().is_none());
+            assert!(pid_entry.sid_thread_groups(&scope).next().is_none());
+
+            let guard = kernel.pids.lock();
+            let current_pid = kernel.pids.get(current_task.get_pid()).unwrap();
+            current_pid.attach_pgid(&guard, child1.thread_group());
+            current_pid.attach_pgid(&guard, child2.thread_group());
+            current_pid.attach_pgid(&guard, child3.thread_group());
+            current_pid.attach_sid(&guard, child1.thread_group());
+            current_pid.attach_sid(&guard, child2.thread_group());
+            current_pid.attach_sid(&guard, child3.thread_group());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_table_num_tasks_tracks_live_tasks() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let scope = RcuReadScope::new();
+            let initial_tasks = kernel.pids.num_tasks();
+            let initial_processes = kernel.pids.process_ids().len();
+            assert!(initial_tasks >= 1);
+            assert_eq!(initial_tasks, kernel.pids.running_task_ids(&scope).count());
+
+            // Allocating a PID directly must not change num_tasks().
+            let _allocated = kernel.pids.lock().allocate_pid().unwrap();
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+
+            // Creating and dropping a thread in the same thread group must increment and
+            // decrement num_tasks().
+            let thread = current_task.clone_task_for_test(
+                (CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64,
+                Some(SIGCHLD),
+            );
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks + 1);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+            std::mem::drop(thread);
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+
+            // Creating a new process (thread group leader) must increment num_tasks().
+            let child = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks + 1);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+
+            // Releasing the child process calls remove_task() and kill_process(), transitioning it
+            // to a zombie and decrementing num_tasks(), while process_ids() still includes the
+            // zombie.
+            std::mem::drop(child);
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+            assert_eq!(kernel.pids.process_ids().len(), initial_processes + 1);
+
+            // Reaping the zombie via remove_zombie removes it from process_ids() without
+            // decrementing num_tasks() a second time.
+            let zombies: Vec<_> =
+                current_task.thread_group().write().zombie_children.drain(..).collect();
+            assert_eq!(zombies.len(), 1);
+            {
+                let mut pids = kernel.pids.lock();
+                for zombie in zombies {
+                    zombie.release(&mut pids);
+                }
+            }
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.process_ids().len(), initial_processes);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_pid_table_num_tasks_failed_clone_rollback() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let scope = RcuReadScope::new();
+            let initial_tasks = kernel.pids.num_tasks();
+            let initial_processes = kernel.pids.process_ids().len();
+            assert!(initial_tasks >= 1);
+            assert_eq!(initial_tasks, kernel.pids.running_task_ids(&scope).count());
+
+            // Passing CLONE_CHILD_SETTID with a null user_child_tid fails with EFAULT after
+            // PidTableGuard::add_task has already incremented num_tasks, exercising the
+            // release_on_error! rollback path for both process and thread clones.
+            let Err(err) = current_task.clone_task(
+                CLONE_CHILD_SETTID as u64,
+                Some(SIGCHLD),
+                UserRef::default(),
+                UserRef::default(),
+                UserRef::default(),
+            ) else {
+                panic!("clone_task with null user_child_tid should fail");
+            };
+            assert_eq!(err, errno!(EFAULT));
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+
+            let Err(err) = current_task.clone_task(
+                (CLONE_THREAD | CLONE_VM | CLONE_SIGHAND | CLONE_CHILD_SETTID) as u64,
+                Some(SIGCHLD),
+                UserRef::default(),
+                UserRef::default(),
+                UserRef::default(),
+            ) else {
+                panic!("thread clone_task with null user_child_tid should fail");
+            };
+            assert_eq!(err, errno!(EFAULT));
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.num_tasks(), kernel.pids.running_task_ids(&scope).count());
+
+            let zombies: Vec<_> =
+                current_task.thread_group().write().zombie_children.drain(..).collect();
+            {
+                let mut pids = kernel.pids.lock();
+                for zombie in zombies {
+                    zombie.release(&mut pids);
+                }
+            }
+            assert_eq!(kernel.pids.num_tasks(), initial_tasks);
+            assert_eq!(kernel.pids.process_ids().len(), initial_processes);
         })
         .await;
     }

@@ -111,6 +111,11 @@ fn send_signal_prio(
     let (signal_info, signal, is_masked, was_masked, is_real_time, sigaction, action) =
         match kernel_signal_info {
             KernelSignalInfo::User(ref user_signal_info) => {
+                if (!task_state.is_ptraced() || user_signal_info.signal == SIGKILL)
+                    && task.thread_group().ignores_signal(user_signal_info)
+                {
+                    return Ok(());
+                }
                 if user_signal_info.signal == SIGKILL {
                     drop(task_state);
                     // Synchronously transition the thread group to Exiting and interrupt all
@@ -327,6 +332,15 @@ fn deliver_signal(
     restricted_exception: Option<zx::ExceptionReport>,
 ) -> Option<ExitStatus> {
     loop {
+        // Ignore unforced signals that `init` (PID 1) does not handle, such as a `SIGSTOP` that
+        // was queued for signal-delivery-stop while `init` was ptraced and later dequeued after
+        // the tracer detached.
+        // Note: This differs from Linux, which only filters catchable signals at delivery time
+        // (because it does not retain whether a queued `SIGSTOP` was forced) and therefore stops
+        // `init` if a `SIGSTOP` queued while ptraced is dequeued after detach.
+        if task.thread_group().ignores_signal(&siginfo) {
+            return None;
+        }
         let signal = siginfo.signal;
         let mut sigaction = task.thread_group().signal_actions.get(signal);
         let masked_signals = task_state.signal_mask();
@@ -360,6 +374,9 @@ fn deliver_signal(
                     };
                     task.thread_group().signal_actions.set(signal, new_sigaction);
                 }
+                let core_dump_during_shutdown = task.kernel().is_shutting_down()
+                    && action_for_signal(&siginfo, sigaction_t::default())
+                        == DeliveryAction::CoreDump;
                 if let Err(err) = dispatch_signal_handler(
                     task,
                     arch_width,
@@ -375,6 +392,9 @@ fn deliver_signal(
                     }
                     siginfo = SignalInfo::forced(SIGSEGV);
                     continue;
+                }
+                if core_dump_during_shutdown {
+                    task_state.set_flags(TaskFlags::IN_CORE_DUMP_SIGNAL_HANDLER, true);
                 }
             }
             DeliveryAction::Terminate => {
@@ -564,9 +584,9 @@ pub fn restore_from_signal_handler(current_task: &mut CurrentTask) -> Result<(),
     restore_registers(current_task, &signal_stack_frame, signal_frame_address)?;
 
     // Restore the stored signal mask.
-    current_task
-        .write()
-        .set_signal_mask(signal_stack_frame.get_signal_mask(current_task.is_arch32()));
+    let mut task_state = current_task.write();
+    task_state.set_signal_mask(signal_stack_frame.get_signal_mask(current_task.is_arch32()));
+    task_state.set_flags(TaskFlags::IN_CORE_DUMP_SIGNAL_HANDLER, false);
 
     Ok(())
 }

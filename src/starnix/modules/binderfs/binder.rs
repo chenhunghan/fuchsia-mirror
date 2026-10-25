@@ -44,7 +44,6 @@ use starnix_core::vfs::{
     FdFlags, FdNumber, FileObject, FileObjectState, FileOps, FsStr, FsString, NamespaceNode,
     fileops_impl_nonseekable, fileops_impl_noop_sync,
 };
-use starnix_lifecycle::AtomicCounter;
 use starnix_logging::{log_error, log_trace, log_warn, track_stub, with_zx_name};
 use starnix_sync::{
     BinderContextManagerLevel, BinderProcsLevel, InterruptibleEvent, LockDepMutex, LockDepRwLock,
@@ -53,7 +52,8 @@ use starnix_sync::{
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
 use starnix_types::convert::IntoFidl as _;
 use starnix_types::ownership::{
-    OwnedRef, Releasable, Share, TempRef, release_after, release_iter_after, release_on_error,
+    OwnedRef, Releasable, Share, TempRef, WeakRef, release_after, release_iter_after,
+    release_on_error,
 };
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::auth::Credentials;
@@ -77,15 +77,15 @@ use starnix_uapi::{
     binder_driver_command_protocol_BC_REQUEST_DEATH_NOTIFICATION,
     binder_driver_command_protocol_BC_REQUEST_FREEZE_NOTIFICATION,
     binder_driver_command_protocol_BC_TRANSACTION,
-    binder_driver_command_protocol_BC_TRANSACTION_SG, binder_freeze_info,
-    binder_frozen_status_info, binder_transaction_data, binder_transaction_data_sg,
-    binder_uintptr_t, binder_version, binder_write_read, errno, error, flat_binder_object,
-    transaction_flags_TF_ONE_WAY, uapi,
+    binder_driver_command_protocol_BC_TRANSACTION_SG, binder_driver_return_protocol_BR_OK,
+    binder_extended_error, binder_freeze_info, binder_frozen_status_info, binder_transaction_data,
+    binder_transaction_data_sg, binder_uintptr_t, binder_version, binder_write_read, errno, error,
+    flat_binder_object, transaction_flags_TF_ONE_WAY, uapi,
 };
 use std::cell::Cell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -114,30 +114,50 @@ impl DeviceOps for BinderDevice {
         _node: &NamespaceNode,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        let identifier = self
+        let proc = self
             .create_local_process(current_task.pid.clone(), current_task.current_creds().clone());
-        log_trace!("opened new BinderConnection id={}", identifier);
-        Ok(Box::new(BinderConnection { identifier, device: self.clone() }))
+        let connection =
+            BinderConnection { proc, closed: AtomicBool::new(false), device: self.clone() };
+        log_trace!("opened new BinderConnection id={}", connection.identifier());
+        Ok(Box::new(connection))
     }
 }
 
 /// An instance of the binder driver, associated with the process that opened the binder device.
 #[derive(Debug)]
 pub struct BinderConnection {
-    /// The process that opened the binder device.
-    pub identifier: u64,
+    /// Weak reference to the associated binder process for direct lookup without locking `procs`.
+    proc: WeakRef<BinderProcess>,
+    /// Whether this connection has been closed.
+    ///
+    /// Local `FileOps` connections only run `close()` from `FileObject::release` after the last
+    /// `FileHandle` is dropped, when no other `FileOps` call can be in flight. However,
+    /// `RemoteBinderConnection` is shared via `Arc` and can call `close()` while another
+    /// `OwnedRef<BinderProcess>` (e.g. from `BINDER_FREEZE` or a racing remote call) keeps
+    /// `proc.re_own()` alive. Checking this flag ensures subsequent `proc()` lookups fail with
+    /// `ENOENT`, while any call that already passed `proc()` before `close()` is aborted via
+    /// `proc_state.closed`.
+    closed: AtomicBool,
     /// The implementation of the binder driver.
     device: BinderDevice,
 }
 
 impl BinderConnection {
-    pub fn proc(&self) -> Result<OwnedRef<BinderProcess>, Errno> {
-        self.device.find_process(self.identifier)
+    pub fn identifier(&self) -> u64 {
+        self.proc.as_ptr() as u64
     }
 
-    fn close(&self, kernel: &Kernel) {
-        log_trace!("closing BinderConnection id={}", self.identifier);
-        if let Some(binder_process) = self.device.procs.write().remove(&self.identifier) {
+    pub fn proc(&self) -> Result<OwnedRef<BinderProcess>, Errno> {
+        if self.closed.load(Ordering::Relaxed) {
+            return error!(ENOENT);
+        }
+        self.proc.re_own().ok_or_else(|| errno!(ENOENT))
+    }
+
+    pub fn close(&self, kernel: &Kernel) {
+        log_trace!("closing BinderConnection id={}", self.identifier());
+        self.closed.store(true, Ordering::Relaxed);
+        if let Some(binder_process) = self.device.procs.write().remove(&self.identifier()) {
             binder_process.close();
             binder_process.release(kernel);
         }
@@ -162,7 +182,7 @@ impl FileOps for BinderConnection {
             Ok(match &binder_process {
                 Ok(binder_process) => {
                     let binder_thread =
-                        binder_process.lock().find_or_register_thread(&current_task.task)?;
+                        binder_process.find_or_register_thread(&current_task.task)?;
                     release_after!(binder_thread, current_task.kernel(), {
                         let thread_state = binder_thread.lock();
                         if !thread_state.command_queue.is_empty() {
@@ -198,7 +218,7 @@ impl FileOps for BinderConnection {
         release_after!(binder_process, current_task.kernel(), {
             if let Ok(binder_process) = &binder_process {
                 if let Ok(binder_thread) =
-                    binder_process.lock().find_or_register_thread(&current_task.task)
+                    binder_process.find_or_register_thread(&current_task.task)
                 {
                     return release_after!(binder_thread, current_task.kernel(), {
                         Some(self.device.wait_async(
@@ -347,7 +367,7 @@ impl RemoteBinderConnection {
     pub fn unregister_current_thread(&self, current_task: &CurrentTask) {
         if let Ok(binder_process) = self.binder_connection.proc() {
             release_after!(binder_process, current_task.kernel(), {
-                binder_process.lock().unregister_thread(current_task, &current_task.tid);
+                binder_process.unregister_thread(current_task.kernel(), &current_task.tid);
             });
         }
     }
@@ -411,9 +431,6 @@ pub struct BinderDriver {
     /// per process. When the last file descriptor to the binder in the process is closed, the
     /// value is removed from the map.
     pub procs: LockDepRwLock<BTreeMap<u64, OwnedRef<BinderProcess>>, BinderProcsLevel>,
-
-    /// The identifier to use for the next created `BinderProcess`.
-    next_identifier: AtomicCounter<u64>,
 }
 
 impl Releasable for BinderDriver {
@@ -434,7 +451,6 @@ impl Default for BinderDriver {
             context_manager: Default::default(),
             context_manager_uid: AtomicU32::new(u32::MAX),
             procs: Default::default(),
-            next_identifier: Default::default(),
         }
     }
 }
@@ -450,6 +466,7 @@ enum RefcountDisposition {
 }
 
 impl BinderDriver {
+    #[cfg(test)]
     pub fn find_process(&self, identifier: u64) -> Result<OwnedRef<BinderProcess>, Errno> {
         self.procs.read().get(&identifier).map(OwnedRef::share).ok_or_else(|| errno!(ENOENT))
     }
@@ -464,12 +481,16 @@ impl BinderDriver {
     }
 
     /// Creates and register the binder process state to represent a local process with `key`.
-    fn create_local_process(&self, key: Pid, creds: Arc<Credentials>) -> u64 {
+    fn create_local_process(&self, key: Pid, creds: Arc<Credentials>) -> WeakRef<BinderProcess> {
         self.create_process(key, None, creds)
     }
 
     /// Creates and register the binder process state to represent a remote process with `key`.
-    fn create_remote_process(&self, key: Pid, resource_accessor: RemoteResourceAccessor) -> u64 {
+    fn create_remote_process(
+        &self,
+        key: Pid,
+        resource_accessor: RemoteResourceAccessor,
+    ) -> WeakRef<BinderProcess> {
         let creds = resource_accessor.remote_creds.clone();
         self.create_process(key, Some(Arc::new(resource_accessor)), creds)
     }
@@ -480,14 +501,14 @@ impl BinderDriver {
         key: Pid,
         resource_accessor: Option<Arc<RemoteResourceAccessor>>,
         creds: Arc<Credentials>,
-    ) -> u64 {
-        let identifier = self.next_identifier.next();
-        let binder_process = BinderProcess::new(identifier, key, resource_accessor, creds);
+    ) -> WeakRef<BinderProcess> {
+        let binder_process = BinderProcess::new(key, resource_accessor, creds);
+        let weak_proc = binder_process.weak_self.clone();
         assert!(
-            self.procs.write().insert(identifier, binder_process).is_none(),
+            self.procs.write().insert(binder_process.identifier(), binder_process).is_none(),
             "process with same identifier created"
         );
-        identifier
+        weak_proc
     }
 
     /// Creates the binder process and thread state to represent a process with `key` and one main
@@ -500,10 +521,10 @@ impl BinderDriver {
         key: Pid,
         task: &Task,
     ) -> (OwnedRef<BinderProcess>, OwnedRef<BinderThread>) {
-        let identifier = self.create_local_process(key.clone(), task.clone_creds());
-        let binder_process = self.find_process(identifier).expect("find_process");
+        let proc = self.create_local_process(key.clone(), task.clone_creds());
+        let binder_process = proc.re_own().expect("re_own");
         let binder_thread =
-            binder_process.lock().find_or_register_thread(task).expect("find_or_register_thread");
+            binder_process.find_or_register_thread(task).expect("find_or_register_thread");
         (binder_process, binder_thread)
     }
 
@@ -517,7 +538,7 @@ impl BinderDriver {
     ) -> Arc<RemoteBinderConnection> {
         let process_accessor =
             fbinder::ProcessAccessorSynchronousProxy::new(process_accessor.into_channel());
-        let identifier = this.create_remote_process(
+        let proc = this.create_remote_process(
             current_task.pid.clone(),
             RemoteResourceAccessor {
                 process_accessor,
@@ -527,7 +548,8 @@ impl BinderDriver {
         );
         Arc::new(RemoteBinderConnection {
             binder_connection: BinderConnection {
-                identifier,
+                proc,
+                closed: AtomicBool::new(false),
                 device: BinderDevice(Arc::clone(this)),
             },
         })
@@ -628,38 +650,37 @@ impl BinderDriver {
                         target_binder_procs.iter().map(|p| &p.state).collect::<Vec<_>>();
                     let target_binder_procs_state_locked = ordered_lock_vec(&state_locks);
 
-                    // Clone threads in the proc to lock them all until freeze is done.
-                    let threads: Vec<OwnedRef<BinderThread>> = target_binder_procs_state_locked
+                    let thread_pool_locks =
+                        target_binder_procs.iter().map(|p| &p.thread_pool).collect::<Vec<_>>();
+                    let target_binder_procs_thread_pool_locked =
+                        ordered_lock_vec(&thread_pool_locks);
+                    let threads_locks = target_binder_procs_thread_pool_locked
                         .iter()
-                        .map(|p| p.thread_pool.threads.values().map(|t| OwnedRef::share(t)))
-                        .flatten()
-                        .collect();
-                    release_iter_after!(threads, current_task.kernel(), {
-                        let threads_locks = threads.iter().map(|t| &t.state).collect::<Vec<_>>();
-                        let threads_locked = ordered_lock_vec(&threads_locks);
+                        .flat_map(|pool| pool.values().map(|t| &t.state))
+                        .collect::<Vec<_>>();
+                    let threads_locked = ordered_lock_vec(&threads_locks);
 
-                        // Avoid freezing the target procs if there is any pending transaction
-                        if target_binder_procs_state_locked
+                    // Avoid freezing the target procs if there is any pending transaction
+                    if target_binder_procs_state_locked
+                        .iter()
+                        .any(|binder_process| binder_process.has_pending_transactions())
+                        || threads_locked
                             .iter()
-                            .any(|binder_process| binder_process.has_pending_transactions())
-                            || threads_locked
-                                .iter()
-                                .any(|binder_thread| binder_thread.has_pending_transactions())
-                        {
-                            if timeout_ms > 0 {
-                                track_stub!(
-                                    TODO("https://fxbug.dev/391657004"),
-                                    "BINDER_FREEZE timeout"
-                                );
-                            }
-                            return error!(EAGAIN);
+                            .any(|binder_thread| binder_thread.has_pending_transactions())
+                    {
+                        if timeout_ms > 0 {
+                            track_stub!(
+                                TODO("https://fxbug.dev/391657004"),
+                                "BINDER_FREEZE timeout"
+                            );
                         }
+                        return error!(EAGAIN);
+                    }
 
-                        target_binder_procs_freeze_locked.iter_mut().for_each(|bp| {
-                            pending_notifications.extend(bp.freeze());
-                        });
-                        Ok(SUCCESS)
-                    })
+                    target_binder_procs_freeze_locked.iter_mut().for_each(|bp| {
+                        pending_notifications.extend(bp.freeze());
+                    });
+                    Ok(SUCCESS)
                 });
 
                 if res.is_ok() {
@@ -715,7 +736,7 @@ impl BinderDriver {
             }
             _ => {}
         }
-        let binder_thread = binder_proc.lock().find_or_register_thread(&current_task.task)?;
+        let binder_thread = binder_proc.find_or_register_thread(&current_task.task)?;
         release_after!(binder_thread, current_task.kernel(), {
             match request {
                 uapi::BINDER_VERSION => {
@@ -867,7 +888,24 @@ impl BinderDriver {
                 }
                 uapi::BINDER_THREAD_EXIT => {
                     log_trace!("binder thread {} exiting", binder_thread.tid);
-                    binder_proc.lock().unregister_thread(current_task, &binder_thread.tid);
+                    binder_proc.unregister_thread(current_task.kernel(), &binder_thread.tid);
+                    Ok(SUCCESS)
+                }
+                uapi::BINDER_GET_EXTENDED_ERROR => {
+                    if user_arg.is_null() {
+                        return error!(EINVAL);
+                    }
+                    // Report `BR_OK` when no error has been recorded since the last transaction.
+                    let ee = binder_thread.lock().take_extended_error().unwrap_or(
+                        binder_extended_error {
+                            id: 0,
+                            command: binder_driver_return_protocol_BR_OK,
+                            param: 0,
+                        },
+                    );
+                    binder_proc
+                        .get_memory_accessor(current_task, remote_memory_accessor)
+                        .write_object(UserRef::new(user_arg), &ee)?;
                     Ok(SUCCESS)
                 }
                 uapi::BINDER_GET_NODE_DEBUG_INFO => {
@@ -917,7 +955,7 @@ impl BinderDriver {
             binder_driver_command_protocol_BC_REGISTER_LOOPER => {
                 let (mut proc_state, mut thread_state) = context.lock();
                 thread_state
-                    .handle_looper_registration(&mut proc_state, RegistrationState::Auxilliary)
+                    .handle_looper_registration(&mut proc_state, RegistrationState::Auxiliary)
             }
             binder_driver_command_protocol_BC_INCREFS
             | binder_driver_command_protocol_BC_ACQUIRE
@@ -1024,6 +1062,7 @@ impl BinderDriver {
             "data_size" => data.transaction_data.data_size as u64,
             "offsets_size" => data.transaction_data.offsets_size as u64
         );
+        context.binder_thread.lock().reset_extended_error();
         // SAFETY: Transactions can only refer to handles.
         let handle = unsafe { data.transaction_data.target.handle }.into();
 
@@ -1034,8 +1073,10 @@ impl BinderDriver {
             }
             Handle::Object { index } => {
                 let binder_proc = context.binder_proc.lock();
-                let (object, guard) =
-                    binder_proc.handles.get(index).ok_or(TransactionError::Failure)?;
+                let (object, guard) = binder_proc
+                    .handles
+                    .get(index)
+                    .ok_or_else(|| TransactionError::Failure(errno!(EINVAL)))?;
                 let owner = object.owner.upgrade().map(TempRef::into_static);
                 (object, owner, Some(guard))
             }
@@ -1153,32 +1194,31 @@ impl BinderDriver {
                         trace_id,
                     ));
                 } else {
-                    let target_thread = match match context.binder_thread.lock().transactions.last()
-                    {
-                        Some(TransactionRole::Receiver { peer, .. }) => peer.upgrade(),
-                        _ => None,
-                    } {
-                        Some((proc, thread)) if proc.key == target_proc.key => Some(thread),
-                        _ => None,
-                    };
-
-                    let transaction_sender = TransactionSender {
-                        target_proc: target_proc.identifier,
-                        target_thread: target_thread.as_ref().map(|t| t.tid.clone()),
-                        is_alive: true,
-                        target_thread_handle: target_thread.as_ref().map(|t| t.thread.clone()),
-                        trace_id,
-                    };
-
                     // Make the sender thread part of the transaction so it doesn't get scheduled to handle
                     // any other transactions. `TwoWayTransactionComplete` is enqueued before the
                     // transaction is dispatched to the target, so that it is always read before
                     // the reply (or failure) for this transaction.
-                    let expected_len = {
+                    let (target_thread, expected_len) = {
                         let mut thread_state = context.binder_thread.lock();
+                        let target_thread = match match thread_state.transactions.last() {
+                            Some(TransactionRole::Receiver { peer, .. }) => peer.upgrade(),
+                            _ => None,
+                        } {
+                            Some((proc, thread)) if proc.key == target_proc.key => Some(thread),
+                            _ => None,
+                        };
+
+                        let transaction_sender = TransactionSender {
+                            target_proc: target_proc.identifier(),
+                            target_thread: target_thread.as_ref().map(|t| t.tid.clone()),
+                            is_alive: true,
+                            target_thread_handle: target_thread.as_ref().map(|t| t.thread.clone()),
+                            trace_id,
+                        };
+
                         thread_state.enqueue_command(Command::TwoWayTransactionComplete.into());
                         thread_state.transactions.push(TransactionRole::Sender(transaction_sender));
-                        thread_state.transactions.len()
+                        (target_thread, thread_state.transactions.len())
                     };
 
                     // Register the transaction buffer.
@@ -1219,7 +1259,7 @@ impl BinderDriver {
                                     target_thread_handle,
                                     ..
                                 })) = binder_thread_state.transactions.last_mut()
-                                    && *id == target_proc.identifier
+                                    && *id == target_proc.identifier()
                                 {
                                     *target_thread_handle = Some(thread.thread.clone());
                                 }
@@ -1254,7 +1294,11 @@ impl BinderDriver {
             "offsets_size" => data.transaction_data.offsets_size as u64
         );
         // Find the process and thread that initiated the transaction. This reply is for them.
-        let (peer, trace_id) = context.binder_thread.lock().pop_transaction_caller()?;
+        let (peer, trace_id) = {
+            let mut thread_state = context.binder_thread.lock();
+            thread_state.reset_extended_error();
+            thread_state.pop_transaction_caller()?
+        };
         let Some((target_proc, target_thread)) = peer.upgrade() else {
             // The thread that initiated the transaction is dead, so there is nobody to reply to.
             context.binder_thread.lock().enqueue_command(Command::TransactionComplete.into());
@@ -1315,7 +1359,7 @@ impl BinderDriver {
                         err
                     );
                 }
-                target_thread.deliver_failed_reply(context.binder_proc.identifier, &e, trace_id);
+                target_thread.deliver_failed_reply(context.binder_proc.identifier(), &e, trace_id);
             }
         }
         binder_thread.enqueue_command(Command::TransactionComplete.into());
@@ -1512,18 +1556,16 @@ impl BinderDriver {
             // a thread waiting for work. Once commands have been written, the read is waiting for
             // the outcome of a two-way transaction after its BR_TRANSACTION_COMPLETE, and must
             // return that outcome rather than a BR_SPAWN_LOOPER. The next read checks again.
-            if bytes_read == 0 {
-                let mut binder_proc_state = context.binder_proc.lock();
-                if binder_proc_state.should_request_thread(context.binder_thread) {
-                    let bytes_written = Command::SpawnLooper
-                        .write_to_memory(context.memory_accessor, &remaining_buffer)?;
-                    debug_assert_eq!(bytes_written, Command::SpawnLooper.required_buffer_size());
-                    binder_proc_state.did_request_thread();
-                    return Ok(bytes_written);
-                }
-            }
-
             let (mut proc_state, mut thread_state) = context.lock();
+
+            if bytes_read == 0 && proc_state.should_request_thread_locked(&thread_state) {
+                drop(thread_state);
+                let bytes_written = Command::SpawnLooper
+                    .write_to_memory(context.memory_accessor, &remaining_buffer)?;
+                debug_assert_eq!(bytes_written, Command::SpawnLooper.required_buffer_size());
+                proc_state.did_request_thread();
+                return Ok(bytes_written);
+            }
 
             if thread_state.request_kick {
                 thread_state.request_kick = false;
@@ -1712,6 +1754,24 @@ impl BinderDriver {
                 continue;
             }
 
+            // Ensure the file descriptor has not been closed before waiting. If some commands have
+            // already been written (e.g. the BR_TRANSACTION_COMPLETE of a two-way transaction whose
+            // reply is being waited for), return them rather than an error: they have already been
+            // dequeued, and on error `read_consumed` is not updated, so userspace would never see
+            // them.
+            if proc_state.closed {
+                return if bytes_read > 0 { Ok(bytes_read) } else { error!(EBADF) };
+            }
+            // `kick_all_threads` only locks `thread_pool` (not `proc_state`), so it can set
+            // `request_kick` and notify `command_queue_waiters` while `thread_state` is
+            // temporarily dropped in `try_cancel_transient_refcount` above, before
+            // `wait_async_simple` registers `waiter`. Re-check `request_kick` before setting up
+            // the waiter so the kick is not missed.
+            if thread_state.request_kick {
+                thread_state.request_kick = false;
+                return Ok(bytes_read);
+            }
+
             // No commands readily available to read. Wait for work. The thread will wait on both
             // the thread queue and the process queue, and loop back to check whether some work is
             // available.
@@ -1736,15 +1796,6 @@ impl BinderDriver {
             };
             let (mut waiter, guard) = SimpleWaiter::new(&event);
             thread_state.command_queue.wait_async_simple(&mut waiter);
-
-            // Ensure the file descriptor has not been closed, after registering for the waiters
-            // but before waiting. If some commands have already been written (e.g. the
-            // BR_TRANSACTION_COMPLETE of a two-way transaction whose reply is being waited for),
-            // return them rather than an error: they have already been dequeued, and on error
-            // `read_consumed` is not updated, so userspace would never see them.
-            if proc_state.closed {
-                return if bytes_read > 0 { Ok(bytes_read) } else { error!(EBADF) };
-            }
 
             // Drop locks before sleeping. Order matters: thread_state first, then proc_state
             // because dropping thread_state registers it in available_threads. If we drop
@@ -1930,7 +1981,7 @@ impl BinderDriver {
         release_on_error!(transaction_state, (), {
             let mut sg_remaining_buffer = sg_buffer.user_buffer();
             let mut sg_buffer_offset = 0;
-            let mut files = Vec::with_capacity(offsets.len());
+            let mut files = Vec::new();
             for (offset_idx, object_offset) in offsets.iter().map(|o| *o as usize).enumerate() {
                 // Bounds-check the offset.
                 if object_offset >= transaction_data.len() {
@@ -1955,12 +2006,13 @@ impl BinderDriver {
                                 // 1. Find the object and add a guard on it in the
                                 //    transaction to ensures the receiving process keep
                                 //    it alive until the transactions is finished
-                                let (proxy, guard) = source
-                                    .binder_proc
-                                    .lock()
-                                    .handles
-                                    .get(index)
-                                    .ok_or(TransactionError::Failure)?;
+                                let (proxy, guard) =
+                                    source
+                                        .binder_proc
+                                        .lock()
+                                        .handles
+                                        .get(index)
+                                        .ok_or_else(|| TransactionError::Failure(errno!(EINVAL)))?;
                                 if proxy.owner.as_ptr() == target_proc.weak_self.as_ptr() {
                                     // The binder object belongs to the receiving process.
 
@@ -2009,7 +2061,7 @@ impl BinderDriver {
                                 .binder_proc
                                 .lock()
                                 .find_or_register_object(source.binder_thread, local, flags)
-                                .map_err(|_| TransactionError::Failure)?;
+                                .map_err(TransactionError::Failure)?;
                             // Create a handle in the receiving process that references the binder object
                             // in the sender's process.
                             let handle =
@@ -2148,20 +2200,22 @@ impl BinderDriver {
                 translated_object.write_to(&mut transaction_data[object_offset..])?;
             }
 
-            let new_fds = Self::translate_files(
-                source,
-                source_files,
-                target_resource_accessor,
-                target_proc,
-                files.iter().map(|TransientFile { fd, .. }| *fd).collect(),
-                // Close this FD if the transaction fails.
-                &mut |fd| transaction_state.push_transient_fd(fd),
-            )?;
-            for (TransientFile { object_offset, cookie, .. }, new_fd) in
-                std::iter::zip(files, new_fds)
-            {
-                SerializedBinderObject::File { fd: new_fd, cookie }
-                    .write_to(&mut transaction_data[object_offset..])?;
+            if !files.is_empty() {
+                let new_fds = Self::translate_files(
+                    source,
+                    source_files,
+                    target_resource_accessor,
+                    target_proc,
+                    files.iter().map(|TransientFile { fd, .. }| *fd).collect(),
+                    // Close this FD if the transaction fails.
+                    &mut |fd| transaction_state.push_transient_fd(fd),
+                )?;
+                for (TransientFile { object_offset, cookie, .. }, new_fd) in
+                    std::iter::zip(files, new_fds)
+                {
+                    SerializedBinderObject::File { fd: new_fd, cookie }
+                        .write_to(&mut transaction_data[object_offset..])?;
+                }
             }
 
             Ok(())

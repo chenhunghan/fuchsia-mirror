@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use analytics::add_custom_event;
-use async_trait::async_trait;
 
 use ffx_config::EnvironmentContext;
 use ffx_list_args::ListCommand;
@@ -93,7 +92,6 @@ pub struct ListTool {
 
 fho::embedded_plugin!(ListTool, ListError);
 
-#[async_trait(?Send)]
 impl FfxMain for ListTool {
     type Error = ListError;
 
@@ -216,11 +214,16 @@ impl ListTool {
                 }
             }
             _ => {
+                let address_types = self.cmd.address_types();
+                let include_usb =
+                    !self.cmd.no_usb && address_types.contains(ffx_list_args::AddressTypes::USB);
+                let include_mdns =
+                    !self.cmd.no_mdns && address_types.intersects(ffx_list_args::AddressTypes::IP);
                 ffx_target::list_targets(
                     &self.context,
                     query.clone(),
-                    !self.cmd.no_usb,
-                    !self.cmd.no_mdns,
+                    include_usb,
+                    include_mdns,
                     connect_to_rcs,
                 )
                 .await?

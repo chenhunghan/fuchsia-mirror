@@ -141,10 +141,12 @@
                 "SocketTest.Permission",
                 "OpenModes/SocketOpenTest.Unix/0",
                 "OpenModes/SocketOpenTest.Unix/1",
+                "AllInetTests/RawSocketTest.ConnectOnIPv6Socket/*",
                 "AllInetTests/SimpleTcpSocketTest.CleanupOnConnectionRefused/*",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/0",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/1",
                 "AllInetTests/UdpSocketControlMessagesTest.SetAndReceivePktInfo/2",
+                "AllInetTests/UdpSocketTest.DisconnectAfterBindToUnspecAndConnect/1",
                 "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastIPPacketInfo/*",
                 "IPv4UDPSockets/IPv4UDPUnboundSocketTest.SendWithProtNoneBufEfaults/*",
             ],
@@ -619,6 +621,9 @@
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
 
+                // TODO(https://fxbug.dev/576397884): Emit FDSize in /proc/[pid]/status.
+                "ProcPidStatusTest.InvalidCloseDoesNotGrowFDTable",
+
                 // TODO(https://fxbug.dev/572923325): Report PF_EXITING in /proc/[pid]/stat flags for zombie tasks.
                 "ProcPidStatTest.ZombieIsExiting",
 
@@ -876,6 +881,7 @@
                 "NetlinkRouteTest.LinkMulticastGroupNamespaced",
                 "NetlinkRouteTest.LinkedToNetns",
                 "NetlinkRouteTest.VethAddShortPeerIfInfoMsg",
+                "NetlinkRouteTest.VethOperStateUpWhenBothEndsUp",
                 "NetlinkRouteTest.DeleteRouteRemovesFirstMatchOnly",
                 "NetlinkRouteTest.NewRouteFamilyMismatch",
                 "NetlinkRouteTest.NewRouteUnsupportedFamily",
@@ -1013,6 +1019,7 @@
 
                 // xattr_test
                 "XattrTest.SecurityCapacityXattr",
+                "XattrTest.UnknownPrefixRequiresReadPermission",
 
                 // fuse_test
                 "FuseTest.CloneDevice",
@@ -1289,26 +1296,15 @@
                 // TODO(https://fxbug.dev/353534690) deflake
                 "AllInetTests/RawPacketTest.SendFrom*/*",
 
-                // TODO(https://fxbug.dev/354049980) deflake
-                "RtSignalTest.InvalidCodes",
-
                 // TODO(https://fxbug.dev/358451956) deflake
                 "ChrootTest.ProcMountsMountinfoNoEscape",
 
                 // TODO(https://fxbug.dev/358452019) deflake
                 "SigstopTest.Correctness",
 
-                // TODO(https://fxbug.dev/358626000) deflake
-                "AllInetTests/SimpleTcpSocketTest.ListenConnectParallel/*",
-
                 // TODO(https://fxbug.dev/365094116): Investigate and re-enable
                 "ProcSysNetIpv4IpForward.CanReadAndWrite",
                 "ProcSysNetPortRange.CanReadAndWrite",
-
-                // TODO(https://fxbug.dev/366204314) deflake
-                "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastLoopbackAddr/1",
-                "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastLoopbackNic/0",
-                "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastLoopbackAddr/0",
 
                 // TODO(https://fxbug.dev/379127911): Investigate and re-enable
                 "TimerTest.RlimitCpuInheritedAcrossFork",
@@ -1366,9 +1362,6 @@
                 "AffinityTest.SetAffinityOtherUidRequiresCapSysNice",
                 "SetpriorityTest.OtherUidRequiresCapSysNice",
 
-                // TODO(https://fxbug.dev/566839951): Format ShdPnd as 16-digit hex and emit SigIgn/SigCgt in /proc/[pid]/status.
-                "ProcPidStatusTest.SignalMasks",
-
                 // TODO(https://fxbug.dev/566839792): Implement /proc/sys/user/max_user_namespaces and CLONE_NEWUSER.
                 "ProcSysUserMaxUserNamespaces.HasNumericValue",
                 "ProcSysUserMaxUserNamespaces.WriteUpdatesValue",
@@ -1387,6 +1380,27 @@
 
                 // TODO(https://fxbug.dev/568844571): Preserve x0 on arm64 SECCOMP_RET_TRAP (passes on x64, fails on arm64).
                 "SeccompTest.RetTrapCausesSIGSYS",
+
+                // TODO(https://fxbug.dev/575405588): These tests time out
+                "FuseCheckpointTest.SentRequest",
+                "FuseCheckpointTest.SentRequestMultipleCheckpoints",
+                "FuseCheckpointTest.UnsentRequest",
+                "FuseInterruptTest.FatalSignalDequeuesUnsentRequest",
+                "FuseInterruptTest.FatalSignalSentRequest",
+                "FuseInterruptTest.InterruptEAGAINRequeues",
+                "FuseInterruptTest.InterruptENOSYSDisablesInterrupts",
+                "FuseInterruptTest.InterruptIgnored",
+                "FuseInterruptTest.InterruptSentRequest",
+                "FuseInterruptTest.InterruptTakesPrecedence",
+                "FuseInterruptTest.InterruptUnsentRequest",
+                "FuseInterruptTest.InvalidInterruptReplies",
+                "FuseInterruptTest.UnhandledFatalSignalDequeuesUnsentRequest",
+                "FuseTest.AioRead",
+
+                // TODO(https://fxbug.dev/575406543): These tests time out
+                "PtraceTest.AccessVmUsesAttachCreds_CapDroppedAfterAttach",
+                "PtraceTest.AccessVmUsesAttachCreds_CapGainedAfterAttach",
+                "PtraceTest.TracemeNonDumpableInUserns",
             ],
         },
     ],

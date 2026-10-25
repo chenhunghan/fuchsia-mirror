@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use async_trait::async_trait;
 use ffx_config::EnvironmentContext;
 use ffx_fastboot::common::caching::CachingFastboot;
 use ffx_fastboot_interface::fastboot_interface::FastbootInterface;
@@ -14,6 +13,7 @@ use ffx_fastboot_transport_factory::usb::UsbFactory;
 use ffx_fastboot_transport_interface::tcp::TcpNetworkInterface;
 use ffx_fastboot_transport_interface::udp::UdpNetworkInterface;
 use netext::MultithreadedTokioAsyncWrapper;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -53,12 +53,11 @@ pub enum FastbootConnectionKind {
     Udp(String, SocketAddr),
 }
 
-#[async_trait(?Send)]
 pub trait FastbootConnectionFactory {
-    async fn build_interface(
+    fn build_interface(
         &self,
         connection: FastbootConnectionKind,
-    ) -> Result<Box<dyn FastbootInterface>, ConnectionFactoryError>;
+    ) -> impl Future<Output = Result<Box<dyn FastbootInterface>, ConnectionFactoryError>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +83,6 @@ impl ConnectionFactory {
     }
 }
 
-#[async_trait(?Send)]
 impl FastbootConnectionFactory for ConnectionFactory {
     async fn build_interface(
         &self,
@@ -358,7 +356,6 @@ pub mod test {
         state: Arc<Mutex<FakeServiceCommands>>,
     }
 
-    #[async_trait(?Send)]
     impl FastbootConnectionFactory for TestConnectionFactory {
         async fn build_interface(
             &self,
@@ -502,5 +499,49 @@ mod tests {
             TargetInfoQuery::NodenameOrId("node-a".into())
         );
         assert_eq!(rediscovery_query(None, Some(""), Some("")), TargetInfoQuery::First);
+    }
+
+    #[fuchsia::test]
+    fn test_fastboot_network_connection_config_defaults() {
+        let env = ffx_config::test_env().build().expect("test env");
+
+        let tcp_config = FastbootNetworkConnectionConfig::new_tcp(&env.context);
+        assert_eq!(tcp_config.retry_count, Some(TCP_RETRY_COUNT_DEFAULT));
+        assert_eq!(tcp_config.retry_wait_seconds, TCP_WAIT_SECONDS_DEFAULT);
+
+        let udp_config = FastbootNetworkConnectionConfig::new_udp(&env.context);
+        assert_eq!(udp_config.retry_count, Some(UDP_RETRY_COUNT_DEFAULT));
+        assert_eq!(udp_config.retry_wait_seconds, UDP_WAIT_SECONDS_DEFAULT);
+
+        assert_eq!(ffx_config::keys::FASTBOOT_FILE_PATH, "fastboot.devices_file.path");
+        if let Ok(devices_file_path) = env.context.get::<PathBuf, _>("fastboot.devices_file.path") {
+            assert!(devices_file_path.ends_with(".fastboot/devices"));
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_fastboot_network_connection_config_overrides() {
+        let env = ffx_config::test_env()
+            .user_config("fastboot.network.tcp.retry_count", 10)
+            .user_config("fastboot.network.tcp.retry_wait_seconds", 5)
+            .user_config("fastboot.network.udp.retry_count", 7)
+            .user_config("fastboot.network.udp.retry_wait_seconds", 4)
+            .user_config("fastboot.devices_file.path", "/custom/fastboot/devices")
+            .build()
+            .expect("test env");
+
+        let tcp_config = FastbootNetworkConnectionConfig::new_tcp(&env.context);
+        assert_eq!(tcp_config.retry_count, Some(10));
+        assert_eq!(tcp_config.retry_wait_seconds, 5);
+
+        let udp_config = FastbootNetworkConnectionConfig::new_udp(&env.context);
+        assert_eq!(udp_config.retry_count, Some(7));
+        assert_eq!(udp_config.retry_wait_seconds, 4);
+
+        let devices_file_path: PathBuf = env
+            .context
+            .get(ffx_config::keys::FASTBOOT_FILE_PATH)
+            .expect("custom fastboot.devices_file.path");
+        assert_eq!(devices_file_path, PathBuf::from("/custom/fastboot/devices"));
     }
 }

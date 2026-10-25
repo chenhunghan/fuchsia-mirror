@@ -95,7 +95,7 @@ graph TD
         KAlloc[kalloc: Fallible Allocator & Box]
         KSync[ksync: Ghost Token Synchronization & Guarded Macro]
         FBL[fbl: Intrusive Containers & RefCounting]
-        LTrace[ltrace: Zero-Cost Kernel Trace Logging]
+        LTrace[debug: Zero-Cost Kernel Trace Logging]
         ZXStatus[zx-status: Zircon Status Codes & Result]
     end
 
@@ -112,9 +112,9 @@ graph TD
 * **`fbl`**: Intrusive containers (`DoublyLinkedList`, `SinglyLinkedList`,
   `WavlTree`), reference counting (`#[ref_counted]`, `RefPtr`), and FFI
   recycling (`Recyclable`). Non-intrusive containers (`Array`, `InlineArray`,
-  `Vector`].
-* **`ltrace`**: Module-level conditional debug tracing (`LOCAL_TRACE`,
-  `ltracef!`, `ltrace_entry!`).
+  `Vector`).
+* **`debug`**: Module-level conditional debug tracing (`LOCAL_TRACE`,
+  `ltracef!`, `ltrace_entry!`) and `dprintf!`.
 * **`zx-status`**: Canonical `zx_status::Status` error types for `Result<T,
   Status>`.
 
@@ -123,6 +123,7 @@ graph TD
 ## 3. Detailed Guidelines & Technical Patterns
 
 ### 3.1. Memory Layout Matching & Verification
+
 - Mark FFI-shared structs with `#[repr(C)]`.
 - Do not heap-box (`kalloc::Box`) a ported Rust struct behind an extra pointer
   in the C++ wrapper when the C++ class stored its fields inline; match the
@@ -150,20 +151,25 @@ zr::static_assert!(core::mem::align_of::<PortedStruct>() == 8);
 ```
 
 ### 3.2. Fallible Allocation (`kalloc`)
+
 - Kernel code must **never** use standard `alloc::boxed::Box` or collections
   that panic on OOM.
 - Use `kalloc::Box::try_new(val)` for single values.
-- Use `kalloc::Box::<[T]>::try_new_zeroed_slice(len)` for slices.
+- Use `kalloc::Box::<[T]>::try_new_zeroed_slice(len)` for slices of `FromZeros`
+  types; the slice it returns is already initialized. Otherwise use
+  `try_new_uninit_slice(len)` and `assume_init()` once every element is written.
 - Use `try_grow(&mut slice, new_len)` and `unsafe { try_shrink(&mut slice,
   new_len) }` for resizing slices.
+- Allocation fails with `kalloc::AllocError`; map it to `Status::NO_MEMORY`.
 
 ```rust
-let my_box = kalloc::Box::try_new(42u32)?;
-let mut uninit_slice = kalloc::Box::<[u32]>::try_new_zeroed_slice(10)?;
-let mut slice = unsafe { uninit_slice.assume_init() };
+let my_box = kalloc::Box::try_new(42u32).map_err(|_| Status::NO_MEMORY)?;
+let slice =
+    kalloc::Box::<[u32]>::try_new_zeroed_slice(10).map_err(|_| Status::NO_MEMORY)?;
 ```
 
 ### 3.3. Pointer Safety, `NonNull`, & Strict Provenance
+
 - Avoid raw pointers (`*const T` or `*mut T`) in public or internal Rust APIs.
 - Use `NonNull<T>` for pointers that must never be null.
 - Use `Option<NonNull<T>>` for optional pointers (takes advantage of Null
@@ -174,22 +180,40 @@ let mut slice = unsafe { uninit_slice.assume_init() };
   back to pointers, use `core::ptr::with_exposed_provenance::<T>(addr)` or
   `with_exposed_provenance_mut` instead of raw `as *const T` / `as *mut T`
   casts.
+- Preserve Write Provenance: Never cast a shared reference to a mutable raw
+  pointer (`&T as *const T as *mut T`), which carries read-only provenance and
+  makes writing through it undefined behavior under Stacked/Tree Borrows. Derive
+  mutable raw pointers from `&mut T`, `UnsafeCell::get()`, `addr_of_mut!`, or
+  existing `*mut T` pointers (e.g. via `.wrapping_byte_add(...)`).
 
 ```rust
-pub fn get_slice(mapped_addr: usize, size: usize) -> &'static [u8] {
-    if mapped_addr == 0 {
-        &[]
-    } else {
-        // SAFETY: mapped_addr is valid memory mapped with `size` bytes.
-        unsafe {
-            let ptr = core::ptr::with_exposed_provenance::<u8>(mapped_addr);
-            core::slice::from_raw_parts(ptr, size)
+/// A read-only view of mapped memory.
+pub struct Mapping {
+    /// Address of `size` bytes that stay mapped, and are not written, for as
+    /// long as this `Mapping` exists. Zero if nothing is mapped.
+    base: usize,
+    size: usize,
+}
+
+impl Mapping {
+    /// Returns the mapped bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        if self.base == 0 {
+            &[]
+        } else {
+            // SAFETY: `base` addresses `size` mapped bytes that nothing writes
+            // while `self` is alive, and the slice borrows `self`.
+            unsafe {
+                let ptr = core::ptr::with_exposed_provenance::<u8>(self.base);
+                core::slice::from_raw_parts(ptr, self.size)
+            }
         }
     }
 }
 ```
 
 ### 3.4. Token-Based Concurrency (`ksync`)
+
 - Concurrency in Zircon separates lock state (`KMutex`, `BrwLockPi`) from data
   (`KCell<T, Class>`). Accessing data requires proving lock ownership via
   `LockToken<'a, Class>`.
@@ -223,6 +247,18 @@ pub fn get_slice(mapped_addr: usize, size: usize) -> &'static [u8] {
   `Guard::CallUnlocked` directly to `guard.as_mut().call_unlocked(|| { ... })`
   rather than splitting a single lock guard scope into separate `{
   ksync::lock!(...); }` blocks.
+- **Atomic Memory Ordering Parity**: When translating C++ atomic operations
+  (`ktl::atomic`), preserve the exact C++ memory ordering (`Ordering::Relaxed`,
+  `Acquire`, `Release`, `AcqRel`, `SeqCst`). Any memory ordering weaker than
+  `SeqCst` must have a comment justifying why it is sufficient (or preserve the
+  C++ rationale).
+- **Cross-CPU Contention**: Data structures used concurrently across CPUs must
+  preserve C++ cache-line alignment and padding to avoid introducing false
+  sharing.
+- **Spin-Wait Loops (`libarch::r#yield` vs. `core::hint::spin_loop`)**: Never
+  use `core::hint::spin_loop()` in kernel code. Always translate C++
+  `arch::Yield()` and spin-wait loop hints to `libarch::r#yield()` from
+  `//zircon/kernel/lib/arch:arch-rs`.
 
 ```rust
 #[guarded]
@@ -244,6 +280,7 @@ let fields = guard.as_mut().fields_mut();
 ```
 
 ### 3.5. Intrusive Containers & Reference Counting (`fbl`)
+
 - Ref-Counted Objects: Annotate structs with `#[fbl::ref_counted]` (requires
   `#[repr(C)]`). This injects `ref_count` at offset 0. Use `fbl::RefPtr<T>` and
   `fbl::make_ref_counted!`.
@@ -276,6 +313,7 @@ let fields = guard.as_mut().fields_mut();
   implementations.
 
 ### 3.6. Safe Initialization in `PinInit`
+
 - When initializing structs via `PinInit` (e.g. `pin_init!`), perform setup on
   `Move` fields *before* moving them into the struct using block expressions.
 - Avoid using `unsafe` in `pin_init!` post-initialization blocks (`_: { ... }`)
@@ -293,6 +331,7 @@ pin_init!(Self {
 ```
 
 ### 3.7. Zircon Status & Error Handling
+
 - Depend on `//sdk/rust/zx-status` (`zx_status::Status`).
 - Do **not** re-define `zx_status_t` or `ZX_ERR_*` constants locally.
 - Use `Result<T, Status>` as return type for fallible operations and leverage
@@ -302,6 +341,7 @@ pin_init!(Self {
   clocks instead of bare integers. Kernel durations are signed (`i64`).
 
 ### 3.8. Testing & Fuzz Testing Parity
+
 - **Kernel Mode (`zircon/kernel/`) vs Userspace**:
   - Kernel crates do **NOT** run standard `#[test]` / `#[cfg(test)]`. Use kernel
     in-tree `unittest-rs` (`#[cfg(ktest)]` + `#[unittest::suite]`) executed via
@@ -337,8 +377,9 @@ pin_init!(Self {
   fuzzer components to `BUILD.gn`.
 
 ### 3.9. Local Trace Logging (`ltrace`), `dprintf` and `printf`
+
 - Preserve all C++ `LOCAL_TRACE` / `LTRACE` statements.
-- Depend on `//zircon/kernel/lib/debugltrace`.
+- Depend on `//zircon/kernel/lib/debug` and `use debug::ltracef;`.
 - Define module-scoped `const LOCAL_TRACE: u32 = 0;` at the top of each file.
 - Use `ltracef!`, `ltrace_entry!`, `ltrace_exit!`, `ltrace_entry_obj!`, etc.
   When `LOCAL_TRACE` is `0`, dead-branch elimination eliminates all CPU and
@@ -347,6 +388,7 @@ pin_init!(Self {
 - Use `kprint` and `kprintln!` from `//src/lib/kprint` to replace `printf`.
 
 ### 3.10. Code Organization, Control Flow, Ergonomics, & Visibility
+
 - **File Structure Parity**: Organize Rust modules matching C++ header/source
   files. Re-export public types at root level (`pub use`) to preserve flat C++
   header APIs.
@@ -386,6 +428,7 @@ pin_init!(Self {
   backing array size.
 
 ### 3.11. Check existing Rust conversions
+
 - Before introducing FFI shims, or copying constants, check if there is already
   a Rust implementation. For any object, function, etc, you should
   1.  Go to the location of the C++ definition.
@@ -400,6 +443,7 @@ pin_init!(Self {
   already exists; use the facade.
 
 ### 3.12. Copyright Modernization & Preservation
+
 - Keep existing copyright headers and dates if the converted file is not
   meaningfully divergent. Do not automatically modernize the year to the current
   year when porting code that is largely a direct translation or maintains the
@@ -411,6 +455,7 @@ pin_init!(Self {
   directory.
 
 ### 3.13. FFI Interoperability & Facade Method Parity
+
 - Minimal Shims: Isolate FFI functions in `*_ffi.cc` / `*_ffi.rs`; they should
   be purely declarative with zero logic.
 - Shim Existing APIs: Expose the C++ methods the original code calls. Do not add
@@ -454,6 +499,7 @@ pin_init!(Self {
   `handle_out->Initialize(...)`.
 
 ### 3.14. RAII Deferred Cleanup (`zr::defer`)
+
 - **Translating `fit::defer`**: Translate C++ `fit::defer` /
   `fit::deferred_action` cleanup patterns into `zr::defer` / `zr::Deferred`.
 - **Automatic Error Cleanup**: `zr::defer` executes a closure upon being
@@ -483,9 +529,14 @@ Ok(())
 ```
 
 ### 3.15. In-Body Implementation & Inline Comment Parity
+
 - **Linter Blind Spot**: Automated tools (`clippy`, rustdoc `missing_docs`) only
   enforce outer documentation on public items; they cannot detect missing
-  in-body implementation comments.
+  in-body implementation comments or plain `//` comments above non-`pub` items.
+- **Doc Comments (`///`) Above Declarations**: Convert C++ declaration comments
+  above functions, types, fields, and constants (including `pub(crate)` and
+  private items) to `///` doc comments rather than leaving them as plain `//`
+  comments.
 - **Preserve Comments Documenting Behavior**: Preserve all inline comments (`//
   ...`) from C++ source and header files (`.cc` and `.h`) documenting behavior
   in the corresponding Rust code; it does not matter what behavior is being
@@ -512,6 +563,7 @@ Ok(())
   comparison with the old C++ in the commit message or the review thread.
 
 ### 3.16. Code Formatting & Line Length Limits
+
 - **100-Character Line Limit**: All lines in Rust (`.rs`) and C++ (`.cc`, `.h`)
   files MUST be 100 characters or fewer.
 - **`fx format-code` Limitations**: Note that `fx format-code` (`rustfmt`) does
@@ -525,6 +577,7 @@ Ok(())
   pass cleanly.
 
 ### 3.17. Behavior Parity
+
 - **Error Precedence**: Keep the C++ order of validation and error checks so the
   same input returns the same status. Do not hoist a length or argument check
   above a policy, rights or peer-state check.
@@ -540,6 +593,7 @@ Ok(())
   leak a reference.
 
 ### 3.18. Soundness at the FFI Boundary
+
 - **Shared Mutable State**: Memory that C++ code or another CPU can write must
   be reached through `UnsafeCell` or atomics, never through a plain `&T`.
 - **Exclusive References**: Never hold a `&mut` across a call that can reach the
@@ -607,7 +661,7 @@ Reviewers and Coders must audit code against this checklist:
 15.  [ ] **Redundant Custom Numeric Traits**: `num-traits` is used instead of
      creating custom numeric traits for generic templates.
 16.  [ ] **Unported Trace Statements**: C++ `LTRACE` statements are preserved
-     using `ltrace` crate and `const LOCAL_TRACE: u32 = 0;`.
+     with `const LOCAL_TRACE: u32 = 0;` and the `debug` crate's `ltrace` macros.
 17.  [ ] **Over-broad Visibility**: Helpers and internal structs are private or
      `pub(crate)`, not `pub`.
 18.  [ ] **Missing C++ FFI Header Declarations**: All `cpp_*` functions defined
@@ -710,40 +764,70 @@ Reviewers and Coders must audit code against this checklist:
      the C++ class, and `cpp_*` FFI shims are strict 1:1 single-call forwards
      without branching (`if`/`else`) or sub-object method chaining
      (`a->b()->c()`).
+51.  [ ] **Atomic Ordering Mismatch, Unjustified Non-`SeqCst`, or False
+     Sharing**: Atomic operations match the C++ memory ordering (`Ordering`),
+     any ordering weaker than `SeqCst` has a comment explaining why it is
+     sufficient, and cross-CPU data structures preserve cache-line alignment and
+     padding to avoid false sharing.
+52.  [ ] **Read-Only Provenance on Mutable Raw Pointers**: Mutable raw pointers
+     (`*mut T`) are derived from `&mut T`, `UnsafeCell::get()`, `addr_of_mut!`,
+     or existing `*mut T` pointers rather than cast from shared references (`&T
+     as *const T as *mut T`).
+53.  [ ] **Plain `//` Comments Above Item Declarations**: Declaration comments
+     above functions, types, fields, and constants (including `pub(crate)` and
+     private items not covered by `missing_docs`) use `///` doc comments rather
+     than plain `//` comments.
+54.  [ ] **Using `core::hint::spin_loop` Instead of `libarch::r#yield`**: Kernel
+     code never calls `core::hint::spin_loop()`; C++ `arch::Yield()` and
+     spin-wait loops use `libarch::r#yield()`
+     (`//zircon/kernel/lib/arch:arch-rs`) instead.
 
 ---
 
 ## 5. Subagent Workflow & Role Guidelines
 
 ### 5.1. Guidelines for Coder Subagent (`cpp-to-rust-coder`)
+
 1.  **Author In-Tree Files Directly**: You MUST create, update, and edit the
     actual source files in the Fuchsia checkout using `write_to_file` and
     `replace_file_content`. Writing code blocks in markdown reports, chat
     messages, or artifact scratchpads does NOT count as an implementation.
 2.  **Initial Audit**: Read all relevant C++ headers, source files, and
     unit/fuzz test files.
-3.  **Apply Rubric & Port In-Body Comments**: Implement the Rust port following
-    the patterns in Section 3 and avoiding anti-patterns in Section 4. You MUST
-    copy all in-body inline comments (`// ...`) from C++ source and header files
+3.  **Apply Rubric & Port Comments**: Implement the Rust port following the
+    patterns in Section 3 and avoiding anti-patterns in Section 4. You MUST copy
+    all in-body inline comments (`// ...`) from C++ source and header files
     (`.cc` and `.h`) documenting behavior into the corresponding `.rs` functions
     during implementation, updating identifiers that have changed names so the
-    comments make sense in the Rust code.
-4.  **Verify Build, Line Length, & Format**: Run `fx build` to confirm
-    compilation, and run `fx test` (or `k ut`) to verify test execution.
-    Manually wrap any comments, strings, or macro bodies exceeding 100
-    characters (since `fx format-code` does not format them), and then run `fx
-    format-code`. Run `fx format-code` and `fx clippy` on the files of every
-    commit in the change, not only the final state. Confirm that every function
-    declared in a Rust `extern` block has a C++ definition in the kernel. The
-    default build does not cover the `lk_debug_level` variant toolchains, CFI or
-    LTO, which caused many CQ failures and most reverts of port CLs. When a
-    change adds GN dependencies between kernel targets, C callbacks implemented
-    in Rust, or crate-level attributes, say so in the report so the first CQ dry
-    run includes those builders.
+    comments make sense in the Rust code, and convert C++ declaration comments
+    above functions, types, fields, and constants (including `pub(crate)` and
+    private items) to `///` doc comments.
+4.  **Verify Build, Tests, Line Length, & Format**:
+    * Always build and test `x86`, any architecture with modified arch-specific
+      files (touching shared code alone does not require additional
+      architectures), and any user-requested architectures.
+    * Check that related test targets are in the build configuration (adding any
+      missing ones), run `fx build` to confirm compilation, and run `fx test`
+      (or `k ut`) to verify test execution. If any files under `//zircon/kernel`
+      are modified, run the full `core-tests` suite. When builds and tests
+      finish, run `fx bazel shutdown` to release open file descriptors held by
+      the Bazel server.
+    * Manually wrap any comments, strings, or macro bodies exceeding 100
+      characters (since `fx format-code` does not format them), and then run `fx
+      format-code`. Run `fx format-code` and `fx clippy` on the files of every
+      commit in the change, not only the final state.
+    * Confirm that every function declared in a Rust `extern` block has a C++
+      definition in the kernel. The default build does not cover the
+      `lk_debug_level` variant toolchains, CFI or LTO, which caused many CQ
+      failures and most reverts of port CLs. When a change adds GN dependencies
+      between kernel targets, C callbacks implemented in Rust, or crate-level
+      attributes, say so in the report so the first CQ dry run includes those
+      builders.
 5.  **Self-Check**: Audit your implementation against Section 4 (Common
     Pitfalls) before reporting back, including a side-by-side verification of
-    inline implementation comments against C++ source and header files (`.cc`
-    and `.h`) and verifying that changed identifier names have been updated.
+    inline implementation comments and `///` doc comments against C++ source and
+    header files (`.cc` and `.h`) and verifying that changed identifier names
+    have been updated.
 6.  **Run `babeldiff`**: Build and run `babeldiff`
     (`zircon/skills/babeldiff/SKILL.md`) on your changes, starting with
     `--summary --issues-only` and following up with `--layout stacked
@@ -759,10 +843,14 @@ Reviewers and Coders must audit code against this checklist:
     not post them yourself.
 
 ### 5.2. Guidelines for Reviewer Subagent (`cpp-to-rust-reviewer`)
+
 1.  **Audit Real In-Tree Files**: You MUST inspect the actual modified files in
     the repository and check `git diff`. Do NOT review an implementation plan or
-    markdown report in lieu of real files. If the target files have not been
-    created or modified in the workspace, reject the review immediately.
+    markdown report in lieu of real files. If you were asked to review the
+    Coder's uncommitted changes and the target files have not been created or
+    modified in the workspace, reject the review immediately. When asked to
+    audit a port that is already committed, review the named commits and files
+    instead.
 2.  **Analyze C++ & Rust Implementations**: Conduct a side-by-side audit of
     APIs, data structures, safety, locking, test coverage, and fuzzing.
 3.  **Triage `babeldiff` Findings**: The review request includes `babeldiff`
@@ -772,15 +860,23 @@ Reviewers and Coders must audit code against this checklist:
     stated justification. Treat `babeldiff` as a starting point, not a
     substitute for the side-by-side audit. During the review, do not read or
     debug `babeldiff`'s source; note any finding that looks wrong in the report.
-4.  **Audit In-Body Inline Comment Parity**: Perform a side-by-side comparative
+4.  **Audit Comment Parity & Doc Comments**: Perform a side-by-side comparative
     audit of C++ source and header files (`.cc` and `.h`) against the
     corresponding `.rs` files to verify that all inline comments documenting
-    behavior are preserved and that identifiers that have changed names are
-    updated to match the Rust code. Public Rustdoc alone does NOT satisfy
-    comment parity.
-5.  **Scrutinize Unsafe**: Actively question every `unsafe` block. Insist on
-    safe Rust alternatives if possible. Ensure `// SAFETY:` comments are
-    complete and accurate.
+    behavior are preserved, identifiers that have changed names are updated to
+    match the Rust code, and declaration comments above functions, types,
+    fields, and constants (including `pub(crate)` and private items) use `///`
+    doc comments rather than plain `//` comments. Public Rustdoc alone does NOT
+    satisfy comment parity.
+5.  **Scrutinize Unsafe, Provenance, & Concurrency**: Actively question every
+    `unsafe` block, raw pointer conversion (checking that `*mut T` preserves
+    write provenance and is never cast from `&T`), lock acquisition, atomic
+    memory ordering (matching C++ and justifying any ordering weaker than
+    `SeqCst`), spin-wait loops (forbidding `core::hint::spin_loop()` in favor of
+    `libarch::r#yield()`), and cross-CPU data structure alignment (preserving
+    cache-line alignment and padding to avoid false sharing). Insist on safe
+    Rust alternatives if possible. Ensure `// SAFETY:` comments are complete and
+    accurate.
 6.  **Evaluate against Rubric & Formatting**: Verify every item in Section 3 and
     Section 4, including checking for lines exceeding 100 characters in
     comments, strings, or macros.

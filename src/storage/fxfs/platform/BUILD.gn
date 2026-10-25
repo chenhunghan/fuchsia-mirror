@@ -50,6 +50,7 @@ template("fxfs_platform_library") {
       "src/fuchsia/power.rs",
       "src/fuchsia/profile.rs",
       "src/fuchsia/remote_crypt.rs",
+      "src/fuchsia/remote_volume.rs",
       "src/fuchsia/symlink.rs",
       "src/fuchsia/testing.rs",
       "src/fuchsia/volume.rs",
@@ -183,6 +184,7 @@ rustc_library("fxfs-testing") {
   visibility = [
     "//sdk/lib/zxio/tests/*",
     "//src/starnix/kernel/*",
+    "//src/starnix/modules/overlayfs/*",
     "//src/storage/conformance/conformance_harness/fxfs/*",
     "//src/storage/fxfs/*",
   ]

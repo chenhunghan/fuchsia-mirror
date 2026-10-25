@@ -37,7 +37,7 @@ declare_args() {
 compiler_config("standalone") {
   compiler_configs = [ ":static-pic-link" ]
 
-  if (toolchain_environment == "kernel") {
+  if (rust_custom_target) {
     rust_linker = "$rebased_clang_prefix/lld"
     if (rust_rbe_enable) {
       rustflags = [ "--remote-inputs=$rust_linker" ]
@@ -59,8 +59,6 @@ compiler_config("standalone") {
       },
     ]
   }
-
-  c_family_flags = [ "-ffreestanding" ]
 
   configs = [
     "//build/config:no_exceptions",
@@ -84,7 +82,7 @@ compiler_config("static-pic-link") {
   ]
 
   rustflags = []
-  if (toolchain_environment == "kernel") {
+  if (rust_custom_target) {
     rust_target_edits = [
       {
         key = "no-default-libraries"
@@ -202,8 +200,8 @@ config("instrumented-stack-size") {
 
 # This is the "top" compiler_config().  Its $compiler_configs must reach all
 # other compiler_config()s that could be reached in any way as normal config()s
-# in this toolchain.  It's paired with //zircon/kernel/lib/rust:kernel-target
-# to roll up the compiler_config() instructions for the custom Rust target.
+# in this toolchain.  It's paired with //build/toolchain/rust:target to roll up
+# the compiler_config() instructions for the custom Rust target.
 compiler_config("abi") {
   # These always come first, so they can enable target features that need to be
   # disabled for ABI purposes later.
@@ -352,6 +350,9 @@ foreach(level,
     if (level > 0) {
       rustflags += [ "--cfg=console_enabled" ]
     }
+    if (level > 2) {
+      rustflags += [ "--cfg=lk_debuglevel_gt2" ]
+    }
   }
 }
 
@@ -419,6 +420,9 @@ config("scheduler") {
   if (scheduler_lock_spin_tracing_compressed) {
     rustflags += [ "--cfg=scheduler_lock_spin_tracing_compressed" ]
   }
+  if (wait_queue_depth_tracing_enabled) {
+    rustflags += [ "--cfg=wait_queue_depth_tracing_enabled" ]
+  }
 }
 
 config("persistent_ram_config") {
@@ -456,6 +460,9 @@ config("kernel_image_max_size") {
 config("kernel_memory_profiler") {
   visibility = [ ":*" ]
   defines = [ "KERNEL_MEMORY_PROFILER=$kernel_memory_profiler" ]
+  if (kernel_memory_profiler) {
+    rustflags = [ "--cfg=kernel_memory_profiler" ]
+  }
 }
 
 config("jtrace_config") {
@@ -463,7 +470,10 @@ config("jtrace_config") {
 
   if (jtrace_enabled == false) {
     defines = [ "JTRACE_TARGET_BUFFER_SIZE=0" ]
-    rustenv = [ "JTRACE_TARGET_BUFFER_SIZE=0" ]
+    rustenv = [
+      "JTRACE_TARGET_BUFFER_SIZE=0",
+      "JTRACE_LAST_ENTRY_STORAGE=0",
+    ]
   } else {
     if (jtrace_target_buffer_size == "auto") {
       if (jtrace_enabled == "persistent") {
@@ -487,11 +497,18 @@ config("jtrace_config") {
       "JTRACE_USE_LARGE_ENTRIES=$jtrace_use_large_entries",
       "JTRACE_USE_MONO_TIMESTAMPS=$jtrace_use_mono_timestamps",
     ]
-    rustenv = [ "JTRACE_TARGET_BUFFER_SIZE=$jtrace_target_buffer_size" ]
+    rustenv = [
+      "JTRACE_TARGET_BUFFER_SIZE=$jtrace_target_buffer_size",
+      "JTRACE_LAST_ENTRY_STORAGE=$jtrace_last_entry_storage",
+    ]
+    rustflags = []
+    if (jtrace_use_large_entries) {
+      rustflags += [ "--cfg=jtrace_use_large_entries" ]
+    }
 
     if (jtrace_enabled == "persistent") {
       defines += [ "JTRACE_IS_PERSISTENT=true" ]
-      rustflags = [ "--cfg=jtrace_persistent" ]
+      rustflags += [ "--cfg=jtrace_persistent" ]
     } else {
       defines += [ "JTRACE_IS_PERSISTENT=false" ]
     }

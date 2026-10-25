@@ -7,10 +7,12 @@
 //! Types and structures for kernel scheduler state (`include/kernel/scheduler_state.h`).
 
 use crate::kernel::types::{cpu_mask_t, cpu_num_t};
+use crate::platform_rs::timer::{DurationMono, InstantMono};
 use core::mem::{MaybeUninit, align_of, size_of};
 use object_constants_rs as object_constants;
 use wait_queue_bindings as bindings;
 use zr::OpaqueFacade;
+use zx_types::zx_instant_mono_t;
 
 /// The scheduling state of a thread matching C++ `enum thread_state : uint8_t`.
 // LINT.IfChange(ThreadStateKind)
@@ -41,8 +43,18 @@ zr::static_assert!(core::mem::size_of::<ThreadStateKind>() == 1);
 zr::static_assert!(core::mem::align_of::<ThreadStateKind>() == 1);
 
 /// Facade for the C++ `SchedulerState` class.
+///
+/// # Safety Invariant
+///
+/// Any `&SchedulerState` or `&mut SchedulerState` reference must point to a valid, initialized
+/// C++ `SchedulerState` instance guarded by its owning [`Thread`](crate::kernel::thread::Thread)'s
+/// lock.
 #[repr(C)]
 pub struct SchedulerState {
+    // Safety invariant: `_facade` is zero-sized and private so safe code cannot construct a
+    // `SchedulerState` by value; any reference points to a live, initialized `SchedulerState`
+    // guarded by its owning `Thread`'s lock, and `OpaqueFacade` marks `SchedulerState` as
+    // `!Freeze` and `!Unpin` for FFI mutation.
     _facade: OpaqueFacade,
 }
 
@@ -70,6 +82,50 @@ impl SchedulerState {
         // SAFETY: `self` is a valid `SchedulerState` reference.
         unsafe { cpp_scheduler_state_hard_affinity(self) }
     }
+
+    /// Raw place of the `effective_profile` field of this scheduler state without forming a
+    /// reference to the whole `crate::kernel::scheduler::SchedulerState`.
+    #[inline]
+    fn effective_profile_ptr(&self) -> *const crate::kernel::scheduler::EffectiveProfile {
+        let state = core::ptr::from_ref(self).cast::<crate::kernel::scheduler::SchedulerState>();
+        // SAFETY: `self` has the same address as the underlying `SchedulerState`, and `&raw const`
+        // projects the `effective_profile` field place without forming a reference to the whole
+        // struct.
+        unsafe { &raw const (*state).effective_profile }
+    }
+
+    /// Returns whether the effective profile is a deadline profile
+    /// (`effective_profile().IsDeadline()`).
+    #[inline]
+    pub fn effective_profile_is_deadline(&self) -> bool {
+        // SAFETY: By `SchedulerState`'s safety invariant, the caller excludes concurrent mutation
+        // of `effective_profile` (by holding the owning thread's lock or the wait queue lock of
+        // the queue the thread is blocked in), and only the `effective_profile` field is
+        // referenced.
+        unsafe { (*self.effective_profile_ptr()).is_deadline() }
+    }
+
+    /// Returns the relative deadline of the effective profile
+    /// (`effective_profile().deadline().deadline_ns`); only meaningful when
+    /// [`Self::effective_profile_is_deadline`] is `true`.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds will panic (`debug_assert!`) if the effective profile is not a deadline
+    /// profile. Callers must check [`Self::effective_profile_is_deadline`] first.
+    #[inline]
+    pub fn effective_profile_deadline_ns(&self) -> DurationMono {
+        // SAFETY: As in `effective_profile_is_deadline`.
+        let deadline = unsafe { (*self.effective_profile_ptr()).deadline() };
+        DurationMono(deadline.deadline_ns.raw_value())
+    }
+
+    /// Returns the virtual finish time of the thread (`finish_time()`).
+    #[inline]
+    pub fn finish_time(&self) -> InstantMono {
+        // SAFETY: `self` is a valid `SchedulerState` reference.
+        InstantMono(unsafe { cpp_scheduler_state_finish_time(self) })
+    }
 }
 
 /// Opaque wrapper around C++ `SchedulerState::BaseProfile`.
@@ -90,9 +146,15 @@ unsafe extern "C" {
         priority: i32,
         inheritable: bool,
     );
+    fn cpp_scheduler_state_base_profile_init_deadline(
+        out_profile: *mut MaybeUninit<SchedulerStateBaseProfile>,
+        capacity_ns: zx_types::zx_duration_mono_t,
+        deadline_ns: zx_types::zx_duration_mono_t,
+    );
     fn cpp_scheduler_state_curr_cpu(state: *const SchedulerState) -> cpu_num_t;
     fn cpp_scheduler_state_last_cpu(state: *const SchedulerState) -> cpu_num_t;
     fn cpp_scheduler_state_hard_affinity(state: *const SchedulerState) -> cpu_mask_t;
+    fn cpp_scheduler_state_finish_time(state: *const SchedulerState) -> zx_instant_mono_t;
 }
 
 // thread priority
@@ -131,27 +193,31 @@ impl SchedulerStateBaseProfile {
         }
     }
 
+    /// Creates a deadline `SchedulerStateBaseProfile` with the given capacity and deadline.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity.0 <= 0` or `capacity.0 > deadline.0`.
+    pub fn deadline(
+        capacity: crate::platform_rs::timer::DurationMono,
+        deadline: crate::platform_rs::timer::DurationMono,
+    ) -> Self {
+        assert!(capacity.0 > 0 && capacity.0 <= deadline.0);
+        let mut profile = MaybeUninit::uninit();
+        // SAFETY: `cpp_scheduler_state_base_profile_init_deadline` unconditionally initializes
+        // a deadline base profile into the provided storage, and `0 < capacity <= deadline` is
+        // verified above.
+        unsafe {
+            cpp_scheduler_state_base_profile_init_deadline(&mut profile, capacity.0, deadline.0);
+            profile.assume_init()
+        }
+    }
+
     /// Returns a raw pointer to the underlying byte storage.
     pub fn get(&self) -> *mut [u8; object_constants::kSchedulerStateBaseProfileSize] {
         self.0.get()
     }
 }
-
-/// An opaque type representing the C++ `SchedulerState::WaitQueueInheritedSchedulerState`
-/// struct.
-#[repr(C)]
-pub struct WaitQueueInheritedSchedulerState {
-    raw: zr::Opaque<bindings::SchedulerState_WaitQueueInheritedSchedulerState>,
-}
-
-zr::static_assert!(
-    size_of::<WaitQueueInheritedSchedulerState>()
-        == size_of::<bindings::SchedulerState_WaitQueueInheritedSchedulerState>()
-);
-zr::static_assert!(
-    align_of::<WaitQueueInheritedSchedulerState>()
-        == align_of::<bindings::SchedulerState_WaitQueueInheritedSchedulerState>()
-);
 
 /// An opaque type representing the C++ `SchedulerState::EffectiveProfile` struct.
 #[repr(C)]

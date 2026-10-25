@@ -8,8 +8,10 @@
 # Skills referenced without a "/" resolve under .agents/skills/<name>/SKILL.md.
 # Skills containing a "/" resolve relative to the fuchsia repository root.
 #
-# All entries must carry the "code-review-agent" tag and are currently scoped
-# to the vendor/google project while hosted agentic reviews are being evaluated.
+# All entries must carry the "code-review-agent" tag. Most entries are
+# currently scoped to the vendor/google project while hosted agentic reviews
+# are being evaluated; subsystem-owned entries may be scoped to the fuchsia
+# project for their own paths.
 
 configs: {
   id: "fuchsia-rust-best-practices"
@@ -172,15 +174,27 @@ configs: {
 }
 
 configs: {
-  id: "fuchsia-netstack3-core-and-unit-tests"
-  display_name: "Fuchsia Netstack3 Core & Unit Tests"
-  description: "Netstack3 architecture, Core/Bindings split, static typing, and unit testing principles."
+  id: "fuchsia-netstack3-review"
+  display_name: "Netstack3 Review"
+  description: "Netstack3 review rubric: Core/Bindings separation, lock ordering, panics, and Netstack Rust patterns."
   tags: "code-review-agent"
-  skills: "src/connectivity/network/.agents/skills/netstack3-docs"
+  skills: "src/connectivity/network/.agents/skills/netstack3-review"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "src/connectivity/network/(netstack3|lib|tests)/.*"
+    path_regex: "src/lib/network/.*"
+  }
+}
+
+configs: {
+  id: "fuchsia-netstack3-unit-tests"
+  display_name: "Fuchsia Netstack3 Unit Tests"
+  description: "Netstack3 unit and core functional test patterns."
+  tags: "code-review-agent"
   skills: "src/connectivity/network/.agents/skills/netstack3-unit-tests"
   include_filters: {
     project: "fuchsia"
-    path_regex: "src/connectivity/network/netstack3/.*\\.(rs|md)"
+    path_regex: "src/connectivity/network/netstack3/.*\\.rs"
   }
 }
 
@@ -234,6 +248,20 @@ configs: {
 }
 
 configs: {
+  id: "fuchsia-zircon-syscall-struct-versioning"
+  display_name: "Zircon Syscall Struct Versioning"
+  description: "Rules for evolving Zircon syscall ABI structs with versioned (_vN) structs and topics."
+  tags: "code-review-agent"
+  skills: "zircon-syscall-struct-versioning"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "zircon/system/public/zircon/.*\\.h"
+    path_regex: "zircon/vdso/.*\\.fidl"
+    path_regex: "sdk/rust/zx-types/.*\\.rs"
+  }
+}
+
+configs: {
   id: "fuchsia-zircon-cpp-to-rust"
   display_name: "Fuchsia Zircon C++ to Rust Porting"
   description: "Zircon C++ to Rust porting rubric and FBL intrusive container porting patterns."
@@ -243,5 +271,16 @@ configs: {
   include_filters: {
     project: "fuchsia"
     path_regex: "zircon/.*\\.(rs|cc|h)"
+  }
+}
+
+configs: {
+  id: "starnix-guidelines"
+  display_name: "Starnix Review Guidelines"
+  description: "Starnix kernel coding guidelines, UAPI/ABI conformance, MemoryAccessor safety, and LockDep ordering."
+  tags: "code-review-agent"
+  skills: "starnix-guidelines"
+  include_filters: {
+    path_regex: "(.*/)?starnix/.*"
   }
 }

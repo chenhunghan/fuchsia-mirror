@@ -229,18 +229,17 @@ TEST_F(PrettyTypeManagerTest, RustStringObject) {
   auto vec_type = MakeCollectionType(
       DwarfTag::kStructureType, "Vec<*>",
       {
-          {"buf",
-           MakeCollectionType(
-               DwarfTag::kStructureType, "RawVec",
-               {{"inner", MakeCollectionType(
-                              DwarfTag::kStructureType, "RawVecInner",
-                              {{"ptr", MakeCollectionType(
-                                           DwarfTag::kStructureType, "Pointer",
-                                           {{"pointer",
-                                             MakeCollectionType(
-                                                 DwarfTag::kStructureType, "core::ptr::Unique<u8>",
-                                                 {{"pointer", MakeRustCharPointerType()}})}})},
-                               {"cap", MakeUint64Type()}})}})},
+          {"buf", MakeCollectionType(
+                      DwarfTag::kStructureType, "RawVec",
+                      {{"inner",
+                        MakeCollectionType(
+                            DwarfTag::kStructureType, "RawVecInner",
+                            {{"ptr", MakeCollectionType(DwarfTag::kStructureType,
+                                                        "core::ptr::non_null::NonNull<u8>",
+                                                        {{"pointer", MakeRustCharPointerType()}})},
+                             {"cap", MakeCollectionType(DwarfTag::kStructureType,
+                                                        "core::num::niche_types::UsizeNoHighBit",
+                                                        {{"__0", MakeUint64Type()}})}})}})},
           {"len", MakeUint64Type()},
       });
   SymbolTestParentSetter vec_type_parent(vec_type, vec_namespace);
@@ -264,6 +263,23 @@ TEST_F(PrettyTypeManagerTest, RustStringObject) {
   EXPECT_EQ("\"Now is the time for all good men to come to the aid of their country.\"",
             node.description())
       << node.err().msg();
+}
+
+TEST_F(PrettyTypeManagerTest, RustArc) {
+  PrettyTypeManager manager;
+
+  auto alloc_namespace = fxl::MakeRefCounted<Namespace>("alloc");
+  auto rcs_namespace = fxl::MakeRefCounted<Namespace>("rcs");
+  auto arc_namespace = fxl::MakeRefCounted<Namespace>("arc");
+  SymbolTestParentSetter rcs_ns_parent(rcs_namespace, alloc_namespace);
+  SymbolTestParentSetter arc_ns_parent(arc_namespace, rcs_namespace);
+  SymbolTestParentSetter alloc_ns_parent(alloc_namespace, MakeRustUnit());
+
+  auto arc_type = MakeCollectionType(DwarfTag::kStructureType, "Arc<i32>", {});
+  SymbolTestParentSetter arc_type_parent(arc_type, arc_namespace);
+
+  PrettyType* pretty = manager.GetForType(arc_type.get());
+  ASSERT_TRUE(pretty);
 }
 
 TEST_F(PrettyTypeManagerTest, ZxStatusT) {

@@ -21,7 +21,9 @@ rustc_library(
         "src/lock_ordering.rs",
         "src/lock_traits.rs",
         "src/locks.rs",
+        "src/object_waiter.rs",
         "src/port_event.rs",
+        "src/rcu_lock.rs",
         "src/rw_seq_lock.rs",
         "src/thread_affinity.rs",
     ],
@@ -45,10 +47,12 @@ rustc_library(
         "//src/lib/diagnostics/inspect/derive",
         "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
         "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-rcu-collections",
         "//src/lib/fuchsia-sync",
         "//src/starnix/lib/starnix_stack",
         "//third_party/rust_crates/vendor:lock_api",
         "//third_party/rust_crates/vendor:scopeguard",
+        "//third_party/rust_crates/vendor:smallvec",
     ],
 )
 
@@ -66,7 +70,9 @@ rustc_test(
         "src/lock_ordering.rs",
         "src/lock_traits.rs",
         "src/locks.rs",
+        "src/object_waiter.rs",
         "src/port_event.rs",
+        "src/rcu_lock.rs",
         "src/rw_seq_lock.rs",
         "src/thread_affinity.rs",
     ],
@@ -83,11 +89,13 @@ rustc_test(
         "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-rcu",
+        "//src/lib/fuchsia-rcu-collections",
         "//src/lib/fuchsia-runtime",
         "//src/lib/fuchsia-sync",
         "//src/starnix/lib/starnix_stack",
         "//third_party/rust_crates/vendor:lock_api",
         "//third_party/rust_crates/vendor:scopeguard",
+        "//third_party/rust_crates/vendor:smallvec",
         "//third_party/rust_crates/vendor:test-case",
     ],
 )

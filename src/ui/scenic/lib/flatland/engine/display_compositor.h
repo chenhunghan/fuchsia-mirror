@@ -9,10 +9,12 @@
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
+#include <lib/inspect/cpp/inspect.h>
 #include <lib/zx/time.h>
 
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -87,7 +89,8 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
                     std::shared_ptr<display::CoordinatorProxy> coordinator_proxy,
                     const std::shared_ptr<Renderer>& renderer,
                     fidl::WireClient<fuchsia_sysmem2::Allocator> sysmem_allocator,
-                    const DisplayCompositorConfig& config);
+                    const DisplayCompositorConfig& config,
+                    inspect::Node inspect_node = inspect::Node());
 
   ~DisplayCompositor() override;
 
@@ -129,6 +132,13 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       scheduling::FramePresentedCallback callback,
       // Allows customization of behavior for tests.  Default values are used in production.
       RenderFrameTestArgs test_args = RenderFrameTestArgs::Default()) FXL_LOCKS_EXCLUDED(lock_);
+
+  // Notifies the compositor and `ReleaseFenceManager` that a frame was skipped without rendering.
+  // `frame_number` must exceed every frame number previously passed to `RenderFrame()` or
+  // `SkipFrame()`. Only called from the main thread.
+  void SkipFrame(uint64_t frame_number, std::vector<zx::event> release_fences,
+                 std::vector<zx::counter> release_counters, std::vector<zx::counter> present_fences,
+                 scheduling::FramePresentedCallback callback);
 
   // Register a new display to the `DisplayCompositor`, which also generates the render targets to
   // be presented on the display when compositing on the GPU. If `num_render_targets` is 0, this
@@ -173,6 +183,13 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // False for a display this compositor does not have. Only called from the main
   // thread.
   bool IsDisplayDark(display::DisplayId display_id) const;
+
+  // Runs any pending lazy GPU imports for image layers in `layers`. Used by screenshot /
+  // screen-capture paths that call `Renderer::Render()` directly via `Engine::GetRenderables()`.
+  //
+  // Must be called on the main thread (`main_dispatcher_`). Best-effort: if an import fails, the
+  // image stays unimported, is not retried on subsequent calls, and `Renderer::Render()` skips it.
+  void EnsureGpuImagesImported(std::span<const ResolvedLayer> layers) FXL_LOCKS_EXCLUDED(lock_);
 
   display::CoordinatorProxy* GetDisplayCoordinatorForTest() { return &display_coordinator_; }
 
@@ -285,6 +302,46 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
       const fuchsia_hardware_display_types::wire::ImageBufferUsage& image_buffer_usage)
       FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
+  // Returns whether `collection_id` is recorded in `buffer_collection_supports_display_` as
+  // supporting display composition.
+  bool IsDisplaySupported(allocation::GlobalBufferCollectionId collection_id) const
+      FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Resolves whether `collection_id` supports display composition by checking its sysmem buffer
+  // collection allocation status, caching the result and allocation metadata when allocated.
+  fpromise::result<> EnsureCollectionDisplaySupportDetermined(
+      allocation::GlobalBufferCollectionId collection_id) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Imports `metadata` into the display coordinator and returns its tiling type on success, or
+  // `std::nullopt` if the collection does not support display or the coordinator rejects the
+  // import.
+  std::optional<uint32_t> ImportBufferImageToDisplayCoordinator(
+      const allocation::ImageMetadata& metadata) FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Calls `renderer_->ImportBufferImage()` and logs an error if the import fails.
+  fpromise::promise<> ImportBufferImageToRenderer(const allocation::ImageMetadata& metadata,
+                                                  BufferCollectionUsage usage);
+
+  // Locked implementation of `EnsureGpuImagesImported()`, also called from
+  // `PerformGpuComposition()`.
+  void EnsureGpuImagesImportedLocked(std::span<const ResolvedLayer> layers)
+      FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Releases `collection_id` from the display coordinator and erases its display-side tracking
+  // map entries.
+  void ReleaseDisplayBufferCollection(allocation::GlobalBufferCollectionId collection_id)
+      FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Decrements `pending_display_imports` for `collection_id` (if `ReleaseBufferCollection()` was
+  // deferred) and releases the collection from the display coordinator when the count reaches zero.
+  void OnPendingDisplayImportResolved(allocation::GlobalBufferCollectionId collection_id)
+      FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
+  // Decrements `pending_gpu_imports` for `collection_id` (if `ReleaseBufferCollection()` was
+  // deferred) and returns true if the caller should now release the collection from `renderer_`.
+  bool OnPendingGpuImportResolved(allocation::GlobalBufferCollectionId collection_id)
+      FXL_EXCLUSIVE_LOCKS_REQUIRED(lock_);
+
   // Works around inconvenient `fuchsia.hardware.display.Coordinator` APIs.  We can't set the
   // display mode immediately when notified of a new display, because the API doesn't allow a
   // display config with no layers.  So we stash it and apply it the next time we have a config
@@ -323,20 +380,103 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   std::unordered_map<allocation::GlobalBufferCollectionId, bool> buffer_collection_supports_display_
       FXL_GUARDED_BY(lock_);
 
-  // Maps an image ID to its tiling type.
-  std::unordered_map<allocation::GlobalImageId, uint32_t> image_tiling_type_map_
-      FXL_GUARDED_BY(lock_);
-
   // Maps a buffer collection ID to a collection tiling type.
   // TODO(https://fxbug.dev/42150686): Delete after we don't need the tiling type anymore.
-  // TODO(https://fxbug.dev/406066267): We never clear values added to this map.  Until we can
-  // delete this, we might want to add them to a separate map scoped to individual images, rather
-  // than to the buffer collection.
   std::unordered_map<allocation::GlobalBufferCollectionId, uint32_t>
       buffer_collection_tiling_type_map_ FXL_GUARDED_BY(lock_);
 
+  // Allocation bounds from sysmem for a display-compatible buffer collection, used by
+  // `ImportBufferImage()` to synchronously validate `ImageMetadata` before deferring imports.
+  struct DisplayBufferCollectionMetadata {
+    uint32_t vmo_count = 0;
+    fuchsia_math::SizeU min_size = {0, 0};
+    fuchsia_math::SizeU max_size = {std::numeric_limits<uint32_t>::max(),
+                                    std::numeric_limits<uint32_t>::max()};
+  };
+
+  std::unordered_map<allocation::GlobalBufferCollectionId, DisplayBufferCollectionMetadata>
+      buffer_collection_metadata_map_ FXL_GUARDED_BY(lock_);
+
+  // Tracks per-image import state and any pending lazy imports for an image registered via
+  // `ImportBufferImage()`.
+  struct ImageImportData {
+    // Metadata passed to `ImportBufferImage()`, used when realizing a pending lazy display or
+    // GPU import.
+    allocation::ImageMetadata metadata;
+
+    // True while a lazy display coordinator import is still pending for this image. Cleared once
+    // `SetRenderDataOnDisplay()` attempts the import (whether it succeeds or fails).
+    bool pending_display_import = false;
+
+    // True while a lazy GPU renderer import is still pending for this image. Cleared once
+    // `EnsureGpuImagesImportedLocked()` attempts the import (whether it succeeds or fails).
+    bool pending_gpu_import = false;
+
+    // True if the image has been imported to `display_coordinator_` and must be released via
+    // `display_coordinator_.ReleaseImage()` in `ReleaseBufferImage()`.
+    bool imported_to_display = false;
+
+    // True if the image has been imported to `renderer_` and must be released via
+    // `renderer_->ReleaseBufferImage()` in `ReleaseBufferImage()`.
+    bool imported_to_gpu = false;
+
+    // True for client images (`BufferCollectionUsage::kClientImage`); false for compositor render
+    // targets (`BufferCollectionUsage::kRenderTarget`).
+    bool is_client_image = false;
+
+    // Image tiling type for `display_coordinator_.SetLayerPrimaryConfig()` when
+    // `imported_to_display` is true.
+    uint32_t tiling_type = fuchsia_hardware_display_types::kImageTilingTypeLinear;
+  };
+
+  // Tracks per-image import state and pending lazy imports.
+  std::unordered_map<allocation::GlobalImageId, ImageImportData> image_import_map_
+      FXL_GUARDED_BY(lock_);
+
+  // Classifies client images (`kClientImage`) by which backend(s) (`imported_to_display` and/or
+  // `imported_to_gpu`) they were imported into over their lifetime.
+  struct ClientImageUsageCounts {
+    uint64_t d2d_only = 0;
+    uint64_t gpu_only = 0;
+    uint64_t both = 0;
+    uint64_t unused = 0;
+
+    void Add(const ImageImportData& data) {
+      if (data.imported_to_display && data.imported_to_gpu) {
+        ++both;
+      } else if (data.imported_to_display) {
+        ++d2d_only;
+      } else if (data.imported_to_gpu) {
+        ++gpu_only;
+      } else {
+        ++unused;
+      }
+    }
+  };
+
+  // Cumulative backend-import counts of released client images (`kClientImage`). Combined on demand
+  // in `inspect_client_image_usage_node_` with the currently active entries in `image_import_map_`.
+  ClientImageUsageCounts released_client_image_counts_ FXL_GUARDED_BY(lock_);
+
+  // Counts remaining pending lazy imports for a client buffer collection after
+  // `ReleaseBufferCollection()` has been called.
+  struct PendingCollectionRelease {
+    // Number of images in this collection that still have `pending_display_import == true`.
+    // When this reaches 0, `ReleaseDisplayBufferCollection()` is called.
+    size_t pending_display_imports = 0;
+
+    // Number of images in this collection that still have `pending_gpu_import == true`.
+    // When this reaches 0, `renderer_->ReleaseBufferCollection()` is called.
+    size_t pending_gpu_imports = 0;
+  };
+
+  // Tracks buffer collections whose `ReleaseBufferCollection()` has been called while one or more
+  // of their images still have pending lazy imports.
+  std::unordered_map<allocation::GlobalBufferCollectionId, PendingCollectionRelease>
+      pending_collection_releases_ FXL_GUARDED_BY(lock_);
+
   /// The below members are either thread-safe or only manipulated from the main thread and
-  /// therefore don't need locks.
+  /// therefore don't need `lock_`.
 
   // Software renderer used when render data cannot be directly composited to the display.
   const std::shared_ptr<Renderer> renderer_;
@@ -360,8 +500,8 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
   // display device.
   std::deque<ApplyConfigInfo> pending_apply_configs_;
 
-  // The last frame number called in `RenderFrame()`, this number is use assert the frame number is
-  // strictly increasing.
+  // The last frame number passed to `RenderFrame()` or `SkipFrame()`, used to assert that the
+  // frame number is strictly increasing.
   std::optional<uint64_t> last_frame_number_;
 
   // Stores the `ConfigStamp` information of the latest frame shown on the display. If no frame
@@ -372,11 +512,14 @@ class DisplayCompositor final : public allocation::BufferCollectionImporter,
 
   ColorConversionStateMachine cc_state_machine_;
 
-  const async_dispatcher_t* const main_dispatcher_;
+  async_dispatcher_t* const main_dispatcher_;
 
   const DisplayCompositorConfig config_;
 
   inspect::Node inspect_node_;
+  // Reports client image counts classified by backend import state (`imported_to_display` and
+  // `imported_to_gpu`).
+  inspect::LazyNode inspect_client_image_usage_node_;
 };
 
 }  // namespace flatland

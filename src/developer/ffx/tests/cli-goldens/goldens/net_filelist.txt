@@ -175,13 +175,6 @@ ffx/net/dhcpd/start.golden
 ffx/net/dhcpd/stop.golden
 ffx/net/dns.golden
 ffx/net/dns/lookup.golden
-ffx/net/filter-deprecated.golden
-ffx/net/filter-deprecated/get-nat-rules.golden
-ffx/net/filter-deprecated/get-rdr-rules.golden
-ffx/net/filter-deprecated/get-rules.golden
-ffx/net/filter-deprecated/set-nat-rules.golden
-ffx/net/filter-deprecated/set-rdr-rules.golden
-ffx/net/filter-deprecated/set-rules.golden
 ffx/net/filter.golden
 ffx/net/filter/create.golden
 ffx/net/filter/create/namespace.golden
@@ -206,7 +199,6 @@ ffx/net/if/addr.golden
 ffx/net/if/addr/add.golden
 ffx/net/if/addr/del.golden
 ffx/net/if/addr/wait.golden
-ffx/net/if/bridge.golden
 ffx/net/if/config.golden
 ffx/net/if/config/get.golden
 ffx/net/if/config/set.golden

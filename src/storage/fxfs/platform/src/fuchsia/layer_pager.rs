@@ -15,7 +15,7 @@ use mapping::{
     Extent, Extents, MAPPING_VMO_SIZE, MappingCommand, PENDING_COMMANDS_CAPACITY, RawMappingCommand,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, MutableBufferRef};
 use storage_units::BlockSize;
 use vmo_fifo::AsyncSender;
@@ -70,6 +70,12 @@ impl MappedVmo {
             // `DONT_NEED` doesn't actually purge the data immediately; it only serves as a hint
             // to the kernel, which is the best we can do here.
             let _ = self.vmo.op_range(zx::VmoOp::DONT_NEED, 0, self.len as u64);
+        }
+    }
+
+    fn prefetch(&self, range: std::ops::Range<u64>) {
+        if range.end > range.start {
+            let _ = self.vmo.op_range(zx::VmoOp::PREFETCH, range.start, range.end - range.start);
         }
     }
 }
@@ -139,11 +145,19 @@ impl LayerObject for PagedLayerObject {
         self.mapped.purge_cached_data();
     }
 
+    fn prefetch(&self, range: std::ops::Range<u64>) {
+        self.mapped.prefetch(range);
+    }
+
     async fn close(&self) {
         if !self.closed.swap(true, Ordering::Relaxed) {
             let mut sender = self.sender.lock().await;
             let _ = sender.push(MappingCommand::CloseBlob { key: self.key }.into()).await;
         }
+    }
+
+    fn get_vmo(&self) -> Option<&zx::Vmo> {
+        Some(&self.mapped.vmo)
     }
 }
 
@@ -162,12 +176,78 @@ impl Drop for PagedLayerObject {
     }
 }
 
+/// A read-only `LayerObject` backed by a `zx::Vmo` mapped into the current process's address
+/// space. Used by remote volume clients to read layer files synchronously via
+/// `SyncPersistentLayer`.
+pub struct VmoLayerObject {
+    mapped: MappedVmo,
+    object_id: u64,
+    block_size: BlockSize,
+}
+
+impl VmoLayerObject {
+    pub fn new(vmo: zx::Vmo, object_id: u64, block_size: BlockSize) -> Result<Self, Error> {
+        let len = vmo.get_content_size().context("Failed to get VMO content size")? as usize;
+        let mapped = MappedVmo::new(vmo, len).context("Failed to map layer VMO")?;
+        Ok(Self { mapped, object_id, block_size })
+    }
+}
+
+impl ObjectHandle for VmoLayerObject {
+    fn object_id(&self) -> u64 {
+        self.object_id
+    }
+
+    fn block_size(&self) -> BlockSize {
+        self.block_size
+    }
+
+    fn allocate_buffer(&self, _size: usize) -> BufferFuture<'_> {
+        unreachable!("VmoLayerObject is slice-backed and does not allocate buffers")
+    }
+}
+
+#[async_trait]
+impl ReadObjectHandle for VmoLayerObject {
+    async fn read_aligned(&self, _offset: u64, _buf: MutableBufferRef<'_>) -> Result<usize, Error> {
+        unreachable!("VmoLayerObject is slice-backed and does not support read_aligned")
+    }
+
+    fn get_size(&self) -> u64 {
+        self.mapped.len as u64
+    }
+}
+
+#[async_trait]
+impl LayerObject for VmoLayerObject {
+    fn as_slice(&self) -> Option<&[u8]> {
+        Some(self.mapped.as_slice())
+    }
+
+    fn has_io_error(&self) -> bool {
+        self.mapped.has_io_error()
+    }
+
+    fn purge_cached_data(&self) {
+        self.mapped.purge_cached_data();
+    }
+
+    fn prefetch(&self, range: std::ops::Range<u64>) {
+        self.mapped.prefetch(range);
+    }
+
+    async fn close(&self) {}
+
+    fn get_vmo(&self) -> Option<&zx::Vmo> {
+        Some(&self.mapped.vmo)
+    }
+}
+
 /// Services registration of layer files with a pager backed by the block mapping driver.
 pub struct LayerPagerImpl {
     mapper_session: fblock::MapperSessionProxy,
     sender: Arc<AsyncMutex<AsyncSender<RawMappingCommand>>>,
     scope: fasync::Scope,
-    next_key: AtomicU64,
 }
 
 impl LayerPagerImpl {
@@ -191,7 +271,6 @@ impl LayerPagerImpl {
             mapper_session,
             sender: Arc::new(AsyncMutex::new(sender)),
             scope: fasync::Scope::new_with_name("layer_pager"),
-            next_key: AtomicU64::new(1),
         })
     }
 
@@ -201,8 +280,6 @@ impl LayerPagerImpl {
         extents: &[FileExtent],
         raw_key: Option<&[u8]>,
     ) -> Result<(u64, zx::Vmo), Error> {
-        let key = self.next_key.fetch_add(1, Ordering::Relaxed);
-
         let mut mapping_extents = Vec::with_capacity(extents.len());
         let mut current_offset = 0u64;
         for ext in extents {
@@ -222,6 +299,14 @@ impl LayerPagerImpl {
         let encrypted = raw_key.is_some();
         let key_bytes_len = if encrypted { 32 } else { 0 };
         let allocation_size = (extent_count as usize * 8) + key_bytes_len;
+
+        let (key, vmo) = self
+            .mapper_session
+            .create_vmo(size, fblock::CreateVmoOptions::SUPPLY_ZEROES_ON_ERROR)
+            .await
+            .context("FIDL error calling MapperSession.CreateVmo")?
+            .map_err(zx::Status::err_from_raw)
+            .context("MapperSession.CreateVmo returned error")?;
 
         if allocation_size > 0 {
             let mut sender = self.sender.lock().await;
@@ -253,14 +338,6 @@ impl LayerPagerImpl {
             };
             payload.commit(command.into()).await?;
         }
-
-        let vmo = self
-            .mapper_session
-            .create_vmo(key, size, fblock::CreateVmoOptions::SUPPLY_ZEROES_ON_ERROR)
-            .await
-            .context("FIDL error calling MapperSession.CreateVmo")?
-            .map_err(zx::Status::err_from_raw)
-            .context("MapperSession.CreateVmo returned error")?;
 
         Ok((key, vmo))
     }
@@ -351,7 +428,7 @@ mod tests {
                 panic!("Expected CreateVmo");
             };
             let vmo = zx::Vmo::create(4096).unwrap();
-            responder.send(Ok(vmo)).unwrap();
+            responder.send(Ok((1, vmo))).unwrap();
 
             fasync::unblock(move || {
                 let mut receiver =

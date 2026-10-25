@@ -57,15 +57,6 @@
         {
             type: "expect_failure",
             matchers: [
-                // TODO(https://fxbug.dev/567514429): Removing or replacing a loop device does not
-                // evict its cached sysfs dentry.
-                "LoopTest.SysfsDeviceDirectoryRemovalAndReplacement",
-
-                // TODO(https://fxbug.dev/567514429): `loop` sysfs attribute group is created on
-                // device creation rather than when a backing file is attached, and not removed on
-                // LOOP_CLR_FD.
-                "LoopTest.SysfsLoopDirectoryLifecycle",
-
                 // TODO(https://fxbug.dev/351037863)
                 "AshmemTest.SetNameOverflow",
 
@@ -109,6 +100,9 @@
 
                 // TODO(https://fxbug.dev/423010702)
                 "Task.KillZombieEPERM",
+
+                // TODO(https://fxbug.dev/297440106)
+                "ZombieTest.Setpgid",
 
                 // TODO(https://fxbug.dev/439058791)
                 "DumpableTest.DumpableDropsOnUserChange",
@@ -178,8 +172,10 @@
                 // DirEntryHandle in InotifyState::watches.
                 "InotifyTest.UnlinkWatchedHardLinkFirstEmitsDeleteSelfOnLastUnlink",
 
-                // TODO(https://fxbug.dev/322874791): Integrate RLIMIT_STACK with ResourceLimits.
-                "KernelDefaults/RLimitDefaultTest.CurAndMaxDefaults/STACK",
+                // TODO(https://fxbug.dev/391599171): Starnix cannot currently mprotect
+                // userfaultfd-registered ranges due to how it implements userfaultfd page fault
+                // interception by removing VMAR protections.
+                "UffdTest.MprotectRegisteredRange",
             ],
         },
     ],

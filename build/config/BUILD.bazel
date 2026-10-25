@@ -5,6 +5,11 @@
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load(
+    "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "THREAD_SAFETY_CFLAGS",
+    "THREAD_SAFETY_DEFINES",
+)
+load(
     "//build/bazel/config/derived:fuchsia_cxx_version.bzl",
     "fuchsia_cxx_version",
     "fuchsia_sdk_cxx_supported_versions",
@@ -13,6 +18,56 @@ load(":compress_debuginfo.bzl", "compress_debuginfo_build_flags")
 load(":dwarf_version.bzl", "dwarf_version_build_flags")
 
 package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(relative_paths)
+# NOTE: This assumes is_gcc=false && is_pecoff=false in Bazel.
+compiler_build_flags(
+    name = "relative_paths",
+    c_family_flags = [
+        # Make builds independent of the absolute file path. -ffile-prefix-map= can
+        # be used to the same effect, but it requires putting the absolute path to
+        # the build directory in the compile command, thus making it dependent on
+        # the absolute path of build directory. -ffile-compilation-dir is designed
+        # to address this issue, making both debug info and coverage mapping
+        # independent of the absolute path of the build directory.
+        "-ffile-compilation-dir=.",
+
+        # This makes sure that include directories in the toolchain are represented
+        # as relative to the build directory (because that's how we invoke the
+        # compiler), rather than absolute.  This can affect __FILE__ expansions
+        # (e.g. assertions in system headers).  We normally run a compiler that's
+        # someplace within the source tree, so its absolute installation path will
+        # have a prefix matching `absolute_path` and hence be mapped to
+        # `relative_path` in the debugging information, so this should actually be
+        # superfluous for purposes of the debugging information.
+        "-no-canonical-prefixes",
+    ],
+    # `-Zremap-cwd-prefix` ensures that absolute paths do not leak into
+    # outputs for universal reproducibility while keeping the command line
+    # free of absolute paths for remote caching benefit.
+    # Available since: https://github.com/rust-lang/rust/pull/87320
+    rustflags = ["-Zremap-cwd-prefix=."],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:relative_paths)
+
+# LINT.IfChange(libcxx_include)
+# This is separate from :compiler so it can be removed from configs when also
+# adding :no-libc++-include.
+# NOTE: This assumes zircon_toolchain=false in Bazel.
+build_flags(
+    name = "libc++-include",
+    visibility = ["//visibility:public"],
+)
+
+# Adding this must always be paired with removing :libc++-include.
+# NOTE: This assumes is_gcc=false in Bazel.
+build_flags(
+    name = "no-libc++-include",
+    cflags_cc = ["-nostdinc++"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:libcxx_include)
 
 # LINT.IfChange(debug)
 build_flags(
@@ -95,6 +150,29 @@ compiler_build_flags(
 )
 # LINT.ThenChange(BUILD.gn:icf)
 
+# LINT.IfChange(auto_var_init)
+# NOTE: This assumes is_gcc=false in Bazel.
+build_flags(
+    name = "auto_var_init",
+    # Automatically initialize variables with a pattern.
+    cflags = ["-ftrivial-auto-var-init=pattern"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:auto_var_init)
+
+# LINT.IfChange(thread_safety_annotations)
+# NOTE: This assumes is_gcc=false in Bazel.
+build_flags(
+    name = "thread_safety_annotations",
+    cflags = THREAD_SAFETY_CFLAGS,
+    defines = THREAD_SAFETY_DEFINES,
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(
+#     BUILD.gn:thread_safety_annotations,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:thread_safety_annotations,
+# )
+
 # LINT.IfChange(libcpp_remove_transitive_includes)
 build_flags(
     name = "libcpp_remove_transitive_includes",
@@ -130,6 +208,56 @@ dwarf_version_build_flags(
 )
 # LINT.ThenChange(BUILD.gn:dwarf_version)
 
+# LINT.IfChange(debuginfo_configs)
+
+# Each of the debuginfo_<level> configs below corresponds to a single setting
+# that controls the amount of debugging information used and is controlled by
+# the debuginfo argument. The default_debuginfo level is set to
+# debuginfo_{debuginfo} for convenience, but individual targets can override
+# their debuginfo level by manually applying one of the configs below.
+
+build_flags(
+    name = "debuginfo_none",
+    cflags = ["-g0"],
+    # NOTE: asmflags is not supported. Bazel uses cflags.
+    # asmflags = [ "-g0" ],
+    ldflags = ["-g0"],
+    rustflags = ["-Cdebuginfo=0"],
+    visibility = ["//visibility:public"],
+)
+
+build_flags(
+    name = "debuginfo_backtrace",
+    cflags = ["-g1"],
+    # NOTE: asmflags is not supported. Bazel uses cflags.
+    # asmflags = [ "-g1" ],
+    ldflags = ["-g1"],
+    rustflags = ["-Cdebuginfo=1"],
+    visibility = ["//visibility:public"],
+)
+
+build_flags(
+    name = "debuginfo_debug",
+    cflags = [
+        "-g3",
+
+        # Add command-line details to each TU's DW_AT_producer to aid build
+        # diagnosis working backwards from debug files.  Clang aliases this switch
+        # to -grecord-command-line, but both compilers accept this spelling for it.
+        "-grecord-gcc-switches",
+    ],
+    # NOTE: asmflags is not supported. Bazel uses cflags.
+    # asmflags = [ "-g3", "-grecord-gcc-switches" ],
+    ldflags = [
+        "-g3",
+        "-grecord-gcc-switches",
+    ],
+    rustflags = ["-Cdebuginfo=2"],
+    visibility = ["//visibility:public"],
+)
+
+# LINT.ThenChange(BUILD.gn:debuginfo_configs)
+
 # LINT.IfChange(compress_debuginfo)
 # Use a custom rule which produces a BuildFlagsInfo value that
 # depends on the toolchain-specific compress_debuginfo variable.
@@ -138,3 +266,51 @@ compress_debuginfo_build_flags(
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:compress_debuginfo)
+
+# LINT.IfChange(default_debuginfo)
+build_flags(
+    name = "default_debuginfo",
+    # Assume is_gcc == false && is_pecoff == false && is_dwarf == true in Bazel.
+    cflags = [
+        # This option forces Clang to only emit class type information when
+        # constructors are emitted which can significantly reduce debug info
+        # size. Eventually, this option will enabled by default in Clang when
+        # -fno-standalone-debug is used.
+        "-Xclang",
+        "-debug-info-kind=constructor",
+    ],
+    subflags = select({
+        "//build/bazel/config/select/debuginfo:none": [":debuginfo_none"],
+        "//build/bazel/config/select/debuginfo:backtrace": [":debuginfo_backtrace"],
+        "//build/bazel/config/select/debuginfo:debug": [":debuginfo_debug"],
+    }) + [
+        ":dwarf_version",
+        ":compress_debuginfo",
+    ],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:default_debuginfo)
+
+# LINT.IfChange(standalone)
+# This should be used by executables that avoid the normal libc dependencies.
+# These must also omit toolchain-provided instrumentation runtimes that will
+# themselves depend on libc.
+# NOTE: This assumes is_gcc=false in Bazel.
+build_flags(
+    name = "standalone",
+    ldflags = [
+        # The sanitizer runtimes need libc ABIs that aren't provided here.
+        "-fno-sanitize-link-runtime",
+
+        # The standard profiling runtime can't be used in standalone contexts.  The
+        # instrumentation works fine to collect data, and //src/lib/llvm-profdata
+        # can be used to wire up a custom runtime if possible in context.
+        "-noprofilelib",
+
+        # Make sure the unwinder isn't implicitly brought in for any reason.
+        "-unwindlib=none",
+    ],
+    subflags = ["//build/config/zircon:nolibc"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:standalone)

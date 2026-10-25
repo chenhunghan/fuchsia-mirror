@@ -28,6 +28,9 @@ FFI_ALWAYS_INLINE zx_instant_mono_t cpp_current_mono_time() { return current_mon
 FFI_ALWAYS_INLINE zx_instant_boot_t cpp_current_boot_time() { return current_boot_time(); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_ticks_t cpp_ticks_per_second() { return ticks_per_second(); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE CppRatio cpp_timer_get_ticks_to_time_ratio() {
   const affine::Ratio& r = timer_get_ticks_to_time_ratio();
   return {r.numerator(), r.denominator()};
@@ -36,6 +39,11 @@ FFI_ALWAYS_INLINE CppRatio cpp_timer_get_ticks_to_time_ratio() {
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_ticks_t cpp_timer_get_mono_ticks_offset() {
   return timer_get_mono_ticks_offset();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_ticks_t cpp_timer_get_boot_ticks_offset() {
+  return timer_get_boot_ticks_offset();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -54,5 +62,24 @@ FFI_ALWAYS_INLINE void cpp_timer_set_ticks_to_time_ratio(CppRatio ticks_to_time)
 FFI_ALWAYS_INLINE void cpp_timer_set_initial_ticks(uint64_t ticks) {
   timer_set_initial_ticks(ticks);
 }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_timer_convert_mono_to_raw_ticks(zx_instant_mono_ticks_t mono_ticks,
+                                                           zx_ticks_t* out_raw_ticks) {
+  const ktl::optional<zx_ticks_t> raw_ticks = timer_convert_mono_to_raw_ticks(mono_ticks);
+  if (!raw_ticks.has_value()) {
+    return false;
+  }
+  *out_raw_ticks = raw_ticks.value();
+  return true;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_platform_set_oneshot_timer(zx_ticks_t deadline) {
+  return platform_set_oneshot_timer(deadline);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_platform_stop_timer() { platform_stop_timer(); }
 
 }  // extern "C"

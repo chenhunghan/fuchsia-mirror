@@ -13,6 +13,7 @@ load(
     "fuchsia_devicetree_toolchain_info",
 )
 load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load(
     "//build/bazel/toolchains:linux_sysroot.bzl",
     "linux_sysroot_headers",
@@ -118,6 +119,11 @@ exports_files(
         "fuchsia_build_generated/fuchsia_in_tree_idk.hash",
     ] +
 
+    # ICU git commit info, compiled into //src/lib/assembly/config_schema.
+    [
+        "fuchsia_build_generated/icu_build_config.json",
+    ] +
+
     # Format files for FIDL/Zither
     [
         ".clang-format",
@@ -166,6 +172,71 @@ filegroup(
     name = "cobalt_config_files",
     srcs = glob(["third_party/cobalt_config/**"]),
     visibility = ["//visibility:public"],
+)
+
+# AVB test key, compiled into //src/lib/assembly/test_keys with include_str!().
+# third_party/android/platform/external/avb has no BUILD.bazel file, so this
+# target gives Bazel packages a root package label without a slash.
+filegroup(
+    name = "avb_testkey_atx_psk",
+    srcs = ["third_party/android/platform/external/avb/test/data/testkey_atx_psk.pem"],
+    visibility = ["//src/lib/assembly/test_keys:__pkg__"],
+)
+
+# Bionic kernel UAPI headers used by //src/lib/android/bionic_compat.
+# third_party/android/platform/bionic has no BUILD.bazel file, so this target
+# is defined in the root package.
+fx_cc_library(
+    name = "bionic_uapi",
+    hdrs = glob([
+        "third_party/android/platform/bionic/libc/kernel/android/uapi/**/*.h",
+        "third_party/android/platform/bionic/libc/kernel/uapi/**/*.h",
+    ]),
+    includes = [
+        "third_party/android/platform/bionic/libc/kernel/android/uapi",
+        "third_party/android/platform/bionic/libc/kernel/uapi",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/lib/android/bionic_compat:__pkg__"],
+)
+
+# Perfetto .proto files used by //src/starnix/modules/perfetto_consumer/lib/perfetto.
+# third_party/perfetto has no Fuchsia BUILD.bazel file, so these filegroups give
+# Bazel packages root package labels without a slash.
+filegroup(
+    name = "perfetto_ipc_consumer_port_proto",
+    srcs = ["third_party/perfetto/protos/perfetto/ipc/consumer_port.proto"],
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
+)
+
+filegroup(
+    name = "perfetto_ipc_producer_port_proto",
+    srcs = ["third_party/perfetto/protos/perfetto/ipc/producer_port.proto"],
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
+)
+
+filegroup(
+    name = "perfetto_ipc_wire_protocol_proto",
+    srcs = ["third_party/perfetto/protos/perfetto/ipc/wire_protocol.proto"],
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
+)
+
+filegroup(
+    name = "perfetto_trace_proto",
+    srcs = ["third_party/perfetto/protos/perfetto/trace/perfetto_trace.proto"],
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
+)
+
+filegroup(
+    name = "frameworks_native_trace_packet_proto",
+    srcs = ["third_party/perfetto/protos/third_party/android/frameworks/native/tracing/frameworks_native_trace_packet.proto"],
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
+)
+
+filegroup(
+    name = "perfetto_proto_files",
+    srcs = glob(["third_party/perfetto/protos/**/*.proto"]),
+    visibility = ["//src/starnix/modules/perfetto_consumer/lib/perfetto:__pkg__"],
 )
 
 fuchsia_devicetree_toolchain_info(

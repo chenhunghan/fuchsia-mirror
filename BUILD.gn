@@ -471,7 +471,7 @@ build_api_module("bazel_build_events_logs") {
 #     Type: string
 #
 #   os
-#     Required: OS the binary is for, e.g. "fuchsia", "linux", or "mac".
+#     Required: OS the binary is for, e.g. "fuchsia" or "linux".
 #     Type: string
 #
 #   environment
@@ -597,7 +597,7 @@ build_api_module("binaries") {
 #     Type: string
 #
 #   os
-#     Required: OS the binary is for, e.g. "fuchsia", "linux", or "mac".
+#     Required: OS the binary is for, e.g. "fuchsia" or "linux".
 #     Type: string
 #
 #   debug
@@ -664,7 +664,6 @@ build_api_module("debug_symbols") {
   deps = [
     ":default",
     "//:bazel_host_test_suites",
-    "//:prebuilt_binaries",
   ]
 }
 
@@ -1200,7 +1199,6 @@ build_api_module("prebuilt_binaries") {
   data_keys = [ "prebuilt_binaries" ]
   deps = [
     "//build/images/updates:packages",
-    "//build/prebuilt",
     "//sdk",
   ]
 }
@@ -2534,12 +2532,9 @@ group("root_targets") {
   testonly = true
   visibility = [ ":*" ]
   deps = [
-    # These are only required by the
-    # core.x64-sdk_source_sets_and_shlibs-apiXX-build_only
-    # builders. TODO(https://fxbug.dev/42082833): Remove these lines once these builders are
-    # removed since they seem no longer necessary.
-    "//build/sdk:sdk_versioned_shared_libraries",
-    "//build/sdk:sdk_versioned_source_sets",
+    # This group ensures all targets in the IDK cc allowlists are processed.
+    # Ensure it and its dependencies are not pruned.
+    "//build/sdk:_idk_versioned_cc_libraries",
 
     # The Fuchsia Bazel SDK generated from the Fuchsia IDK, and the associated
     # tests.

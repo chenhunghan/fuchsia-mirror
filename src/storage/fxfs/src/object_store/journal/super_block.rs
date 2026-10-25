@@ -34,7 +34,7 @@ use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::{ObjectItem, ObjectItemV56, ObjectItemV59};
+use crate::object_store::object_record::{ObjectItem, ObjectItemV56, ObjectItemV59, ObjectItemV62};
 use crate::object_store::transaction::{AssocObj, Options, ReservationOptions};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
@@ -248,20 +248,30 @@ impl<'de> Deserialize<'de> for UuidWrapper {
     }
 }
 
-pub type SuperBlockRecord = SuperBlockRecordV59;
+pub type SuperBlockRecord = SuperBlockRecordV62;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-pub enum SuperBlockRecordV59 {
+pub enum SuperBlockRecordV62 {
     // When reading the super-block we know the initial extent, but not subsequent extents, so these
     // records need to exist to allow us to completely read the super-block.
     Extent(Range<u64>),
 
     // Following the super-block header are ObjectItem records that are to be replayed into the root
     // parent object store.
-    ObjectItem(ObjectItemV59),
+    ObjectItem(ObjectItemV62),
 
     // Marks the end of the full super-block.
+    End,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Migrate, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(SuperBlockRecordV62)]
+#[migrate_nodefault]
+pub enum SuperBlockRecordV59 {
+    Extent(Range<u64>),
+    ObjectItem(ObjectItemV59),
     End,
 }
 
@@ -640,7 +650,7 @@ impl<S: HandleOwner> SuperBlockWriter<S> {
                 .handle
                 .new_transaction_with_options(Options {
                     skip_journal_checks: true,
-                    reservation: ReservationOptions::BorrowedMetadataAndData,
+                    reservation: ReservationOptions::Borrowed,
                     ..Default::default()
                 })
                 .await?;
@@ -674,13 +684,13 @@ impl<S: HandleOwner> SuperBlockWriter<S> {
                 + SUPER_BLOCK_CHUNK_SIZE;
 
         // The super-block handle lives in `root_store` (a system store) and its extents are
-        // allocated using `BorrowedMetadataAndData`, so truncating excess extents must also use
-        // `BorrowedMetadataAndData` to return freed space to `metadata_reservation`.
+        // allocated using `Borrowed`, so truncating excess extents also uses `Borrowed` to return
+        // freed space to `metadata_reservation`.
         self.handle
             .truncate_with_options(
                 Options {
                     skip_journal_checks: true,
-                    reservation: ReservationOptions::BorrowedMetadataAndData,
+                    reservation: ReservationOptions::Borrowed,
                     ..Default::default()
                 },
                 len,

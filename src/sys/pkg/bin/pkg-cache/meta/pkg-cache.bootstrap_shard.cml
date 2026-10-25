@@ -29,20 +29,17 @@
             to: "#pkg-cache",
         },
         {
+            config: [ "fuchsia.fshost.StartupProfilingSeconds" ],
+            from: "parent",
+            to: "#pkg-cache",
+            availability: "optional",
+        },
+        {
             config: [
                 "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 "fuchsia.pkgcache.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgcache.BlobNetworkHeaderTimeoutSeconds",
-            ],
-            from: "void",
-            to: "#pkg-cache",
-            availability: "optional",
-        },
-        {
-            protocol: [
-                "fuchsia.pkg.Authority",
-                "fuchsia.pkg.http.Client",
             ],
             from: "void",
             to: "#pkg-cache",
@@ -72,6 +69,8 @@
         {
             protocol: [
                 "fuchsia.metrics.MetricEventLoggerFactory",
+                "fuchsia.pkg.Authority",
+                "fuchsia.pkg.http.Client",
                 "fuchsia.update.CommitStatusProvider",
             ],
             from: "parent",
@@ -133,8 +132,16 @@
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.PackageCache",
+                "fuchsia.pkg.resolution.PackageResolver",
             ],
             from: "#pkg-cache",
+            to: "self/toolbox",
+            target_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.pkg.PackageResolver-full",
+            from: "#pkg-cache",
+            as: "fuchsia.pkg.PackageResolver",
             to: "self/toolbox",
             target_availability: "unknown",
         },
@@ -142,6 +149,10 @@
     expose: [
         {
             resolver: "base_resolver",
+            from: "#pkg-cache",
+        },
+        {
+            resolver: "full_resolver",
             from: "#pkg-cache",
         },
         {
@@ -163,12 +174,17 @@
         {
             protocol: [
                 "fuchsia.component.resolution.Resolver-base",
+                "fuchsia.component.resolution.Resolver-full",
                 "fuchsia.fxfs.BlobReader",
                 "fuchsia.pkg.garbagecollector.Manager",
+                "fuchsia.pkg.internal.OtaDownloader",
                 "fuchsia.pkg.PackageCache",
                 "fuchsia.pkg.PackageResolver-base",
+                "fuchsia.pkg.PackageResolver-full",
+                "fuchsia.pkg.PackageResolver-ota",
                 "fuchsia.pkg.RetainedBlobs",
                 "fuchsia.pkg.RetainedPackages",
+                "fuchsia.storage.mapping.FileMapper",
             ],
             from: "#pkg-cache",
         },

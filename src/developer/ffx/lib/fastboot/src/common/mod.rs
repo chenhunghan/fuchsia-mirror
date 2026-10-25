@@ -15,7 +15,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 type Result<T> = std::result::Result<T, FfxFastbootError>;
 use assembly_partitions_config::UploadMethod;
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ffx_config::EnvironmentContext;
 use ffx_fastboot_interface::fastboot_interface::{FastbootInterface, RebootEvent, UploadProgress};
@@ -60,47 +59,44 @@ pub trait Product<P> {
     fn oem_files(&self) -> &Vec<OemFile>;
 }
 
-#[async_trait]
 pub trait Flash {
-    async fn flash<F, T>(
+    fn flash<F, T>(
         &self,
         messenger: &Sender<Event>,
         file_resolver: &mut F,
         fastboot_interface: &mut T,
         cmd: ManifestParams,
         ssh_key_upload_method: Option<&UploadMethod>,
-    ) -> Result<()>
+    ) -> impl Future<Output = Result<()>>
     where
         F: FileResolver + Sync + Send,
         T: FastbootInterface;
 }
 
-#[async_trait]
 pub trait Unlock {
-    async fn unlock<F, T>(
+    fn unlock<F, T>(
         &self,
         _messenger: &Sender<Event>,
         _file_resolver: &mut F,
         _fastboot_interface: &mut T,
-    ) -> Result<()>
+    ) -> impl Future<Output = Result<()>>
     where
         F: FileResolver + Sync + Send,
         T: FastbootInterface,
     {
-        return Err(FfxFastbootError::UnlockNotSupported);
+        async { Err(FfxFastbootError::UnlockNotSupported) }
     }
 }
 
-#[async_trait]
 pub trait Boot {
-    async fn boot<F, T>(
+    fn boot<F, T>(
         &self,
         messenger: Sender<Event>,
         file_resolver: &mut F,
         slot: String,
         fastboot_interface: &mut T,
         cmd: ManifestParams,
-    ) -> Result<()>
+    ) -> impl Future<Output = Result<()>>
     where
         F: FileResolver + Sync + Send,
         T: FastbootInterface;
@@ -630,6 +626,7 @@ pub async fn flash_partition_impl<T: FastbootInterface>(
     min_timeout_secs: u64,
     flash_timeout_rate_mb_per_second: f64,
     override_max_download_size: Option<NonZeroU64>,
+    streaming_flash: bool,
 ) -> Result<()> {
     let mut try_flash_stream = async || {
         if let Ok(segment_size) = get_hex_int::<u32>(STREAM_SEGMENT_SIZE, fb_intf).await
@@ -657,8 +654,7 @@ pub async fn flash_partition_impl<T: FastbootInterface>(
         }
     };
 
-    // Temporarily disable streaming flash to unbrick devices (see b/571125224).
-    if false && let Ok(true) = try_flash_stream().await {
+    if streaming_flash && let Ok(true) = try_flash_stream().await {
         return Ok(());
     }
 
@@ -871,9 +867,9 @@ pub async fn flash_partitions<F: FileResolver + Sync, P: Partition, T: FastbootI
     fastboot_interface: &mut T,
     min_timeout_secs: u64,
     flash_timeout_rate_mb_per_second: f64,
+    streaming_flash: bool,
 ) -> Result<()> {
-    // Temporarily disable streaming flash to unbrick devices (see b/571125224).
-    if false
+    if streaming_flash
         && let Ok(segment_size) =
             get_hex_int::<u32>(STREAM_SEGMENT_SIZE, fastboot_interface).await.map(u64::from)
     {
@@ -892,8 +888,8 @@ pub async fn flash_partitions<F: FileResolver + Sync, P: Partition, T: FastbootI
 
         // Flash all pre-resolved partitions
         for (name, file_to_upload) in resolved_partitions {
-            flash_partition_impl(
-                messenger.clone(),
+            flash_basic_impl(
+                messenger,
                 &name,
                 &file_to_upload,
                 fastboot_interface,
@@ -1064,6 +1060,7 @@ where
         fastboot_interface,
         cmd.flash_min_timeout_seconds,
         cmd.flash_timeout_rate_mb_per_second,
+        cmd.streaming_flash,
     )
     .await?;
     if product.bootloader_partitions().len() > 0
@@ -1099,6 +1096,7 @@ where
         fastboot_interface,
         cmd.flash_min_timeout_seconds,
         cmd.flash_timeout_rate_mb_per_second,
+        cmd.streaming_flash,
     )
     .await?;
     if !cmd.no_bootloader_reboot && is_userspace_fastboot(fastboot_interface).await? {
@@ -1228,6 +1226,7 @@ mod test {
     use std::io::{Seek, SeekFrom, Write};
     use tempfile::NamedTempFile;
     use tokio::sync::mpsc;
+    use async_trait::async_trait;
 
     #[derive(Default, Debug, Clone)]
     struct TestTransportFactory {}
@@ -1266,6 +1265,7 @@ mod test {
             min_timeout_secs,
             flash_timeout_rate_mb_per_second,
             None,
+            true,
         )
         .await
     }
@@ -1488,8 +1488,9 @@ mod test {
             None,
         )
         .await?;
-        // There are four partitions, and it's easier to check for each one.
-        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (false, 0));
+
+        // Checked once for bootloader_partitions and once for product partitions.
+        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (false, 2));
         server.close();
         let mut messages = vec![];
         while let Some(m) = server.recv().await {
@@ -1970,6 +1971,162 @@ mod test {
         .await?;
 
         assert_eq!(state.lock().unwrap().get_var_call_count(MAX_DOWNLOAD_SIZE_VAR), (false, 0));
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_flash_partition_impl_streaming_disabled() -> Result<()> {
+        let (mut file, tmp_path) = NamedTempFile::new().unwrap().into_parts();
+        file.write_all(&[0u8; 0x1000]).unwrap();
+        file.flush().unwrap();
+        let path_str = tmp_path.to_str().unwrap();
+
+        let (state, mut mock) = setup();
+        {
+            let mut state = state.lock().unwrap();
+            state.set_multiple_vars([
+                (STREAM_SEGMENT_SIZE, "0x1000"),
+                (MAX_DOWNLOAD_SIZE_VAR, "0x2000"),
+                ("partition-size:zircon_a", "0x10000"),
+                ("partition-start:zircon_a", "0x2000"),
+            ]);
+        }
+
+        let (messenger, mut rx) = mpsc::channel(20);
+        flash_partition_impl(messenger, "zircon_a", path_str, &mut mock, 360, 1000.0, None, false)
+            .await?;
+
+        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (true, 0));
+
+        let mut basic_flashed = vec![];
+        while let Some(ev) = rx.recv().await {
+            if let Event::FlashPartition { partition_name } = ev {
+                basic_flashed.push(partition_name);
+            }
+        }
+        assert_eq!(basic_flashed, vec!["zircon_a".to_string()]);
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_flash_partitions_streaming_disabled() -> Result<()> {
+        struct TestPartition {
+            name: String,
+            file: String,
+        }
+        impl Partition for TestPartition {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn file(&self) -> &str {
+                &self.file
+            }
+            fn variable(&self) -> Option<&str> {
+                None
+            }
+            fn variable_value(&self) -> Option<&str> {
+                None
+            }
+        }
+
+        let buf = vec![0u8; 0x1000];
+        let (mut file_a, path_a) = NamedTempFile::new().unwrap().into_parts();
+        file_a.write_all(&buf).unwrap();
+        file_a.flush().unwrap();
+
+        let (mut file_b, path_b) = NamedTempFile::new().unwrap().into_parts();
+        file_b.write_all(&buf).unwrap();
+        file_b.flush().unwrap();
+
+        let partitions = vec![
+            TestPartition {
+                name: "zircon_a".to_owned(),
+                file: path_a.to_str().unwrap().to_owned(),
+            },
+            TestPartition {
+                name: "zircon_b".to_owned(),
+                file: path_b.to_str().unwrap().to_owned(),
+            },
+        ];
+
+        let (state, mut mock) = setup();
+        {
+            let mut state = state.lock().unwrap();
+            state.set_multiple_vars([
+                (STREAM_SEGMENT_SIZE, "0x1000"),
+                (MAX_DOWNLOAD_SIZE_VAR, "0x2000"),
+                ("partition-size:zircon_a", "0x1000000"),
+                ("partition-start:zircon_a", "0x2000"),
+                ("partition-size:zircon_b", "0x1000000"),
+                ("partition-start:zircon_b", "0x4000"),
+            ]);
+        }
+
+        let (messenger, mut rx) = mpsc::channel(50);
+        let mut resolver = TestResolver::new();
+        flash_partitions(&messenger, &mut resolver, &partitions, &mut mock, 360, 1000.0, false)
+            .await?;
+        drop(messenger);
+
+        assert_eq!(state.lock().unwrap().get_var_call_count(STREAM_SEGMENT_SIZE), (true, 0));
+
+        let mut basic_flashed = vec![];
+        while let Some(ev) = rx.recv().await {
+            if let Event::FlashPartition { partition_name } = ev {
+                basic_flashed.push(partition_name);
+            }
+        }
+        assert_eq!(basic_flashed, vec!["zircon_a".to_string(), "zircon_b".to_string()]);
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_flash_partitions_streaming_missing_partition_vars_fails() -> Result<()> {
+        struct TestPartition {
+            name: String,
+            file: String,
+        }
+        impl Partition for TestPartition {
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn file(&self) -> &str {
+                &self.file
+            }
+            fn variable(&self) -> Option<&str> {
+                None
+            }
+            fn variable_value(&self) -> Option<&str> {
+                None
+            }
+        }
+
+        let buf = vec![0u8; 0x1000];
+        let (mut file_a, path_a) = NamedTempFile::new().unwrap().into_parts();
+        file_a.write_all(&buf).unwrap();
+        file_a.flush().unwrap();
+
+        let partitions = vec![TestPartition {
+            name: "zircon_a".to_owned(),
+            file: path_a.to_str().unwrap().to_owned(),
+        }];
+
+        let (state, mut mock) = setup();
+        {
+            let mut state = state.lock().unwrap();
+            state.set_multiple_vars([
+                (STREAM_SEGMENT_SIZE, "0x1000"),
+                (MAX_DOWNLOAD_SIZE_VAR, "0x2000"),
+                // Missing partition-size:zircon_a and partition-start:zircon_a
+            ]);
+        }
+
+        let (messenger, _rx) = mpsc::channel(20);
+        let mut resolver = TestResolver::new();
+        let res =
+            flash_partitions(&messenger, &mut resolver, &partitions, &mut mock, 360, 1000.0, true)
+                .await;
+        assert!(res.is_err());
         Ok(())
     }
 }

@@ -13,6 +13,7 @@ from tp_shell import PerfettoTraceProcessor
 from trace_processing import (
     trace_importing_fxt,
     trace_model,
+    trace_time,
 )
 
 
@@ -149,6 +150,171 @@ class QueriesTest(unittest.TestCase):
         self.assertGreater(len(scheduling.records[0]), 0)
         first_switch = scheduling.records[0][0]
         self.assertIsInstance(first_switch, trace_model.ContextSwitch)
+
+    def test_get_scheduling_records_end_states(self) -> None:
+        # Columns: ts, cpu, dur, end_state, priority, tid, state
+        mock_rows = [
+            ["1000", "0", "100", "R", "3122", "101", "Running"],
+            ["1100", "0", "100", "S", "3122", "102", "Running"],
+            ["1200", "0", "100", "D", "3122", "103", "Running"],
+            ["1300", "0", "100", "T", "3122", "104", "Running"],
+            ["1400", "0", "100", "Z", "3122", "105", "Running"],
+            # Gap from 1500 to 1600 exercises outgoing_state across an idle gap.
+            ["1600", "0", "100", "X", "3122", "106", "Running"],
+            ["1700", "0", "100", "R", "3122", "107", "Running"],
+        ]
+        with mock.patch.object(self.importer, "_query", return_value=mock_rows):
+            scheduling = self.importer.get_scheduling_records()
+
+        switches = [
+            r
+            for r in scheduling.records[0]
+            if isinstance(r, trace_model.ContextSwitch)
+        ]
+        outgoing = [(r.outgoing_tid, r.outgoing_state) for r in switches]
+        self.assertEqual(
+            outgoing,
+            [
+                (0, trace_model.ThreadState.ZX_THREAD_STATE_RUNNING),
+                (101, trace_model.ThreadState.ZX_THREAD_STATE_RUNNING),
+                (102, trace_model.ThreadState.ZX_THREAD_STATE_BLOCKED),
+                (103, trace_model.ThreadState.ZX_THREAD_STATE_BLOCKED),
+                (104, trace_model.ThreadState.ZX_THREAD_STATE_SUSPENDED),
+                (105, trace_model.ThreadState.ZX_THREAD_STATE_DYING),
+                (0, trace_model.ThreadState.ZX_THREAD_STATE_RUNNING),
+                (106, trace_model.ThreadState.ZX_THREAD_STATE_DEAD),
+                (107, trace_model.ThreadState.ZX_THREAD_STATE_RUNNING),
+            ],
+        )
+
+    def test_get_scheduling_records_waking_during_idle_gap(self) -> None:
+        # Columns: ts, cpu, dur, end_state, priority, tid, state
+        mock_rows = [
+            ["1000", "0", "500", "S", "3122", "101", "Running"],
+            ["2000", "0", "0", "", "0", "102", "W"],
+            ["2500", "0", "500", "R", "3122", "102", "Running"],
+        ]
+        with mock.patch.object(self.importer, "_query", return_value=mock_rows):
+            scheduling = self.importer.get_scheduling_records()
+
+        records = scheduling.records[0]
+        self.assertEqual(len(records), 5)
+
+        self.assertIsInstance(records[0], trace_model.ContextSwitch)
+        assert isinstance(records[0], trace_model.ContextSwitch)
+        self.assertEqual(
+            records[0].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(1000.0)
+            ),
+        )
+        self.assertEqual(records[0].tid, 101)
+        self.assertEqual(records[0].outgoing_tid, 0)
+        self.assertEqual(records[0].prio, 3122)
+        self.assertIsNone(records[0].outgoing_prio)
+        self.assertEqual(
+            records[0].outgoing_state,
+            trace_model.ThreadState.ZX_THREAD_STATE_RUNNING,
+        )
+
+        self.assertIsInstance(records[1], trace_model.ContextSwitch)
+        assert isinstance(records[1], trace_model.ContextSwitch)
+        self.assertEqual(
+            records[1].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(1500.0)
+            ),
+        )
+        self.assertEqual(records[1].tid, 0)
+        self.assertEqual(records[1].outgoing_tid, 101)
+        self.assertEqual(records[1].prio, trace_model.INT32_MIN)
+        self.assertEqual(records[1].outgoing_prio, 3122)
+        self.assertEqual(
+            records[1].outgoing_state,
+            trace_model.ThreadState.ZX_THREAD_STATE_BLOCKED,
+        )
+
+        self.assertIsInstance(records[2], trace_model.Waking)
+        self.assertEqual(
+            records[2].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(2000.0)
+            ),
+        )
+        self.assertEqual(records[2].tid, 102)
+        self.assertEqual(records[2].prio, 0)
+
+        self.assertIsInstance(records[3], trace_model.ContextSwitch)
+        assert isinstance(records[3], trace_model.ContextSwitch)
+        self.assertEqual(
+            records[3].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(2500.0)
+            ),
+        )
+        self.assertEqual(records[3].tid, 102)
+        self.assertEqual(records[3].outgoing_tid, 0)
+        self.assertEqual(records[3].prio, 3122)
+        self.assertEqual(records[3].outgoing_prio, trace_model.INT32_MIN)
+        self.assertEqual(
+            records[3].outgoing_state,
+            trace_model.ThreadState.ZX_THREAD_STATE_RUNNING,
+        )
+
+        self.assertIsInstance(records[4], trace_model.ContextSwitch)
+        assert isinstance(records[4], trace_model.ContextSwitch)
+        self.assertEqual(
+            records[4].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(3000.0)
+            ),
+        )
+        self.assertEqual(records[4].tid, 0)
+        self.assertEqual(records[4].outgoing_tid, 102)
+        self.assertEqual(records[4].prio, trace_model.INT32_MIN)
+        self.assertEqual(records[4].outgoing_prio, 3122)
+        self.assertEqual(
+            records[4].outgoing_state,
+            trace_model.ThreadState.ZX_THREAD_STATE_RUNNING,
+        )
+
+    def test_get_scheduling_records_final_outgoing_switch(self) -> None:
+        # Columns: ts, cpu, dur, end_state, priority, tid, state
+        # CPU 0 ends with a closed slice (dur=500, end_state="S") and should
+        # emit a trailing ContextSwitch into IDLE_TID at ts=1500.
+        # CPU 1 ends with an unclosed slice (dur=-1, end_state="") and should
+        # NOT emit a trailing ContextSwitch into IDLE_TID.
+        mock_rows = [
+            ["1000", "0", "500", "S", "3122", "101", "Running"],
+            ["1000", "1", "-1", "", "3122", "201", "Running"],
+        ]
+        with mock.patch.object(self.importer, "_query", return_value=mock_rows):
+            scheduling = self.importer.get_scheduling_records()
+
+        cpu0_records = scheduling.records[0]
+        self.assertEqual(len(cpu0_records), 2)
+        self.assertIsInstance(cpu0_records[1], trace_model.ContextSwitch)
+        assert isinstance(cpu0_records[1], trace_model.ContextSwitch)
+        self.assertEqual(
+            cpu0_records[1].start,
+            trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_nanoseconds(1500.0)
+            ),
+        )
+        self.assertEqual(cpu0_records[1].tid, 0)
+        self.assertEqual(cpu0_records[1].outgoing_tid, 101)
+        self.assertEqual(cpu0_records[1].prio, trace_model.INT32_MIN)
+        self.assertEqual(cpu0_records[1].outgoing_prio, 3122)
+        self.assertEqual(
+            cpu0_records[1].outgoing_state,
+            trace_model.ThreadState.ZX_THREAD_STATE_BLOCKED,
+        )
+
+        cpu1_records = scheduling.records[1]
+        self.assertEqual(len(cpu1_records), 1)
+        self.assertIsInstance(cpu1_records[0], trace_model.ContextSwitch)
+        assert isinstance(cpu1_records[0], trace_model.ContextSwitch)
+        self.assertEqual(cpu1_records[0].tid, 201)
 
     def test_get_flow_events(self) -> None:
         (

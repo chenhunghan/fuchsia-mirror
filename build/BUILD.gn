@@ -33,6 +33,7 @@ group("tests") {
     "bazel/scripts:type_checked_scripts($host_toolchain)",
     "bazel_sdk:type_checked_scripts($host_toolchain)",
     "beads:tests",
+    "devicetree:tests",
     "dist:tests",
     "fidl:tests",
     "go:tests",
@@ -98,7 +99,10 @@ if (is_host) {
 
     # This target only exists for type checking; depending on it would package
     # a grab-bag of unrelated scripts.
-    visibility = [ ":*" ]
+    visibility = [
+      ":*",
+      "//:*",  # So it can go into args.gn target_labels.
+    ]
     library_deps = [
       # For packages/generate_package_debug_symbols_manifest.py.
       "//build/api:debug_symbols",
@@ -195,6 +199,7 @@ if (is_host) {
       "testing/verify_files_match.py",
       "testing/verify_golden_files.py",
       "toolchain/get_concurrent_jobs.py",
+      "toolchain/rust/rust-custom-target.py",
       "toolchain/verify-undefined-symbols.py",
       "toolchain/verify_depfile.py",
       "tools/json_validator/test/json_validator_valico_test_runner.py",
@@ -508,9 +513,6 @@ group("non_hermetic_deps") {
     "//src/ui/backlight/drivers:chromebook-keyboard-backlight.package",
   ]
 
-  # TODO(https://fxbug.dev/454618550): Remove this
-  visibility += [ "//build/prebuilt" ]
-
   # TODO(https://fxbug.dev/42165766): License analysis uses the output of 'fx gn gen', which
   # can potentially touch every file in the repository. Remove this entry when
   # license management becomes a hermetic process.
@@ -559,8 +561,8 @@ group("non_hermetic_deps") {
 
   # distribution_manifest_copy() uses.
   visibility += [
+    "//build/toolchain/rust/*",
     "//sdk/lib/ld/test/modules/*",
-    "//zircon/kernel/lib/rust/*",
   ]
 }
 

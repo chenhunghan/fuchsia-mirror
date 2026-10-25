@@ -7,6 +7,7 @@
 See README.md file for full technical details.
 """
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_cc//cc:action_names.bzl", "ACTION_NAMES")
 load(
     "@rules_cc//cc:cc_toolchain_config_lib.bzl",
@@ -71,8 +72,11 @@ CC_ACTION_KINDS = [
 def _final_cc_build_flags_impl(ctx):
     # Compute the default build_flags + the target-specific ones first.
     build_flags_infos = []
+    use_default_build_flags = ctx.attr._use_default_build_flags[BuildSettingInfo].value
     toolchain = ctx.toolchains["@fuchsia_rules_common//build_flags:toolchain_type"]
-    if toolchain:
+    if use_default_build_flags:
+        if not toolchain:
+            fail("@fuchsia_rules_common//build_flags:use_default_build_flags is True, but no @fuchsia_rules_common//build_flags:toolchain_type toolchain is registered.")
         target_type = ctx.attr.target_type
         if target_type == "cxx_common":
             build_flags_infos.extend(toolchain.default_flags.cxx_common_infos)
@@ -98,13 +102,43 @@ def _final_cc_build_flags_impl(ctx):
             known_labels.add(info.label)
             final_infos.append(info)
 
-    return [BuildFlagsListInfo(infos = final_infos)]
+    if ctx.attr.target_type != "cxx_common":
+        link_inputs = depset([
+            f
+            for info in final_infos
+            for f in info.link_inputs
+        ])
+        cc_infos = [
+            cc_info
+            for info in final_infos
+            for cc_info in info.link_deps
+        ]
+        if ctx.attr.target_type == "cxx_executable":
+            cc_infos.extend([
+                cc_info
+                for info in final_infos
+                for cc_info in info.executable_link_deps
+            ])
+        merged_cc_info = cc_common.merge_cc_infos(
+            direct_cc_infos = cc_infos,
+            cc_infos = cc_infos,
+        )
+        cc_info = CcInfo(linking_context = merged_cc_info.linking_context)
+    else:
+        link_inputs = depset()
+        cc_info = CcInfo()
+
+    return [
+        DefaultInfo(files = link_inputs),
+        BuildFlagsListInfo(infos = final_infos),
+        cc_info,
+    ]
 
 _final_cc_build_flags = rule(
     implementation = _final_cc_build_flags_impl,
     doc = "Provides the final ordered list of BuildFlagsInfo values. This is used " +
           "to generate response files for different C++ action types.",
-    provides = [BuildFlagsListInfo],
+    provides = [BuildFlagsListInfo, CcInfo],
     attrs = {
         "build_flags": attr.label_list(
             doc = "List of `build_flags()` targets.",
@@ -120,6 +154,10 @@ _final_cc_build_flags = rule(
             doc = "The type of target being wrapped.",
             mandatory = True,
             values = list(BUILD_FLAGS_CC_TARGET_TYPES),
+        ),
+        "_use_default_build_flags": attr.label(
+            default = "@fuchsia_rules_common//build_flags:use_default_build_flags",
+            providers = [BuildSettingInfo],
         ),
     },
 
@@ -379,6 +417,10 @@ def wrap_cc_macro_args_with_build_flags(
         result["linkopts"] = ["@$(location {})".format(link_response_name)] + (kwargs.get("linkopts") or [])
         result["additional_linker_inputs"] = (kwargs.get("additional_linker_inputs") or []) + [
             ":" + link_response_name,
+            ":" + final_build_flags_name,
+        ]
+        result["deps"] = result["deps"] + [
+            ":" + final_build_flags_name,
         ]
 
     return result

@@ -17,7 +17,7 @@ use fidl_fuchsia_bluetooth_sys::{
     self as sys, InputCapability, OutputCapability, PairingDelegateProxy,
 };
 use fuchsia_async::{self as fasync, DurationExt, TimeoutExt};
-use fuchsia_bluetooth::inspect::{DebugExt, Inspectable, ToProperty};
+use fuchsia_bluetooth::inspect::{DebugExt, Inspectable};
 use fuchsia_bluetooth::types::pairing_options::PairingOptions;
 use fuchsia_bluetooth::types::{
     Address, BondingData, HostData, HostId, HostInfo, Identity, Peer, PeerId,
@@ -25,6 +25,7 @@ use fuchsia_bluetooth::types::{
 use fuchsia_inspect::{self as inspect, NumericProperty, Property, unique_name};
 use fuchsia_inspect_contrib::inspect_log;
 use fuchsia_inspect_contrib::nodes::BoundedListNode;
+use fuchsia_inspect_derive::Inspect;
 use fuchsia_sync::RwLock;
 use futures::FutureExt;
 use futures::channel::{mpsc, oneshot};
@@ -36,7 +37,7 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use zx::{AsHandleRef, MonotonicDuration};
 
-use crate::host_device::{HostDevice, HostDiscoverableSession, HostListener};
+use crate::host_device::{HostDevice, HostListener};
 use crate::services::pairing::pairing_dispatcher::{PairingDispatcher, PairingDispatcherHandle};
 use crate::store::stash::Stash;
 use crate::watch_peers::PeerWatcher;
@@ -327,6 +328,134 @@ impl Drop for SuppressConnectionsSession {
     }
 }
 
+enum DiscoverableState {
+    NotDiscoverable,
+    Pending {
+        session: Weak<DiscoverableSession>,
+        // Additional client requests for discoverable made while discoverable is
+        // asynchronously starting.
+        session_receiver: Shared<oneshot::Receiver<Arc<DiscoverableSession>>>,
+        session_sender: oneshot::Sender<Arc<DiscoverableSession>>,
+        _start_discoverable_task: fasync::Task<()>,
+    },
+    Discoverable {
+        session: Weak<DiscoverableSession>,
+        host_id: HostId,
+    },
+}
+
+impl DiscoverableState {
+    // Idempotently end the discoverable session if no active references remain.
+    // Returns the HostId of the discoverable host if discoverable was ended.
+    fn stop_discoverable_session(&mut self) -> Option<HostId> {
+        if matches!(
+            self,
+            DiscoverableState::Discoverable { session, .. } if session.strong_count() == 0
+        ) {
+            if let DiscoverableState::Discoverable { host_id, .. } =
+                std::mem::replace(self, DiscoverableState::NotDiscoverable)
+            {
+                return Some(host_id);
+            }
+        }
+        None
+    }
+
+    fn clear_pending_if_matching(
+        &mut self,
+        target_session: &Arc<DiscoverableSession>,
+    ) -> Option<DiscoverableState> {
+        if matches!(
+            self,
+            DiscoverableState::Pending { session, .. }
+                if std::ptr::eq(session.as_ptr(), Arc::as_ptr(target_session))
+        ) {
+            Some(std::mem::replace(self, DiscoverableState::NotDiscoverable))
+        } else {
+            None
+        }
+    }
+
+    fn set_discoverable(
+        &mut self,
+        host_id: HostId,
+        target_session: &Arc<DiscoverableSession>,
+    ) -> Option<oneshot::Sender<Arc<DiscoverableSession>>> {
+        if matches!(
+            self,
+            DiscoverableState::Pending { session, .. }
+                if std::ptr::eq(session.as_ptr(), Arc::as_ptr(target_session))
+        ) {
+            if let DiscoverableState::Pending { session, session_sender, .. } =
+                std::mem::replace(self, DiscoverableState::NotDiscoverable)
+            {
+                *self = DiscoverableState::Discoverable { session, host_id };
+                return Some(session_sender);
+            }
+        }
+        None
+    }
+
+    fn active_session_future(
+        &self,
+    ) -> Option<BoxFuture<'static, Result<Arc<DiscoverableSession>, oneshot::Canceled>>> {
+        match self {
+            DiscoverableState::NotDiscoverable => None,
+            DiscoverableState::Pending { session_receiver, .. } => {
+                Some(session_receiver.clone().boxed())
+            }
+            DiscoverableState::Discoverable { session, .. } => {
+                session.upgrade().map(|s| future::ready(Ok(s)).boxed())
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for DiscoverableState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoverableState::NotDiscoverable => {
+                write!(f, "DiscoverableState::NotDiscoverable")
+            }
+            DiscoverableState::Pending { .. } => {
+                write!(f, "DiscoverableState::Pending")
+            }
+            DiscoverableState::Discoverable { .. } => {
+                write!(f, "DiscoverableState::Discoverable")
+            }
+        }
+    }
+}
+
+/// A dispatcher discoverable session, which persists as long as at least one client
+/// holds an Arc<> to it.
+pub(crate) struct DiscoverableSession {
+    dispatcher_state: Arc<RwLock<HostDispatcherState>>,
+}
+
+impl std::fmt::Debug for DiscoverableSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscoverableSession").finish_non_exhaustive()
+    }
+}
+
+impl Drop for DiscoverableSession {
+    fn drop(&mut self) {
+        let mut write = self.dispatcher_state.write();
+        if let Some(host_id) = write.discoverable.stop_discoverable_session() {
+            if let Some(host) = write.host_devices.get(&host_id).cloned() {
+                let fut = host.set_discoverable(false);
+                fasync::Task::spawn(async move {
+                    if let Err(e) = fut.await {
+                        warn!("Unexpected error response when disabling discoverable: {:?}", e);
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+}
+
 static RECENTLY_REMOVED_PEERS_COUNT: usize = 15;
 static RECENT_DISCOVERY_SESSIONS_COUNT: usize = 5;
 
@@ -337,9 +466,6 @@ struct HostDispatcherInspect {
     host_count: inspect::UintProperty,
     device_class: inspect::StringProperty,
     peer_count: inspect::UintProperty,
-    input_capability: inspect::StringProperty,
-    output_capability: inspect::StringProperty,
-    has_pairing_delegate: inspect::UintProperty,
     evicted_peers: BoundedListNode,
     discovery_sessions: inspect::UintProperty,
     discovery_history: BoundedListNode,
@@ -351,9 +477,6 @@ impl HostDispatcherInspect {
             host_count: inspect.create_uint("host_count", 0),
             peer_count: inspect.create_uint("peer_count", 0),
             device_class: inspect.create_string("device_class", "default"),
-            input_capability: inspect.create_string("input_capability", "unknown"),
-            output_capability: inspect.create_string("output_capability", "unknown"),
-            has_pairing_delegate: inspect.create_uint("has_pairing_delegate", 0),
             peers: inspect.create_child("peers"),
             hosts: inspect.create_child("hosts"),
             discovery_sessions: inspect.create_uint("discovery_sessions", 0),
@@ -394,7 +517,7 @@ struct HostDispatcherState {
     name: Option<String>,
     appearance: Appearance,
     discovery: DiscoveryState,
-    discoverable: Option<Weak<HostDiscoverableSession>>,
+    discoverable: DiscoverableState,
     suppress_connections: SuppressConnectionsState,
     config_settings: build_config::Config,
     peers: HashMap<PeerId, Inspectable<Peer>>,
@@ -455,10 +578,8 @@ impl HostDispatcherState {
                 Err(format_err!("Another Delegate is active"))?
             }
             _ => {
-                self.inspect.input_capability.set(&input.debug());
-                self.inspect.output_capability.set(&output.debug());
-                self.inspect.has_pairing_delegate.set(true.to_property());
-                let (dispatcher, handle) = PairingDispatcher::new(delegate, input, output);
+                let (mut dispatcher, handle) = PairingDispatcher::new(delegate, input, output);
+                let _ = dispatcher.iattach(&self.inspect._inspect, "pairing_delegate");
                 for host in self.host_devices.values() {
                     handle.add_host(host.id(), host.proxy().clone());
                 }
@@ -608,7 +729,7 @@ impl HostDispatcher {
             gas_channel_sender,
             stash,
             discovery: DiscoveryState::NotDiscovering,
-            discoverable: None,
+            discoverable: DiscoverableState::NotDiscoverable,
             suppress_connections: SuppressConnectionsState::NotSuppressed,
             pairing_dispatcher: None,
             watch_peers_publisher,
@@ -829,23 +950,72 @@ impl HostDispatcher {
             .map_err(|_| format_err!("Pending discovery client channel closed").into())
     }
 
-    // TODO(https://fxbug.dev/42139629) - This is susceptible to the same ToCtoToU race condition as
-    // start_discovery. We can fix with the same tri-state pattern as for discovery
-    pub async fn set_discoverable(&self) -> types::Result<Arc<HostDiscoverableSession>> {
-        let strong_current_token =
-            self.state.read().discoverable.as_ref().and_then(|token| token.upgrade());
-        if let Some(token) = strong_current_token {
-            return Ok(Arc::clone(&token));
-        }
+    fn make_set_discoverable_task(&self, session: Arc<DiscoverableSession>) -> fasync::Task<()> {
+        let hd = self.clone();
+        fasync::Task::spawn(async move {
+            debug!("set_discoverable_task: waiting for set_discoverable_on_active_host");
+            let Ok(host) = hd.set_discoverable_on_active_host().await else {
+                // On failure (host init timeout), revert state to NotDiscoverable if still in the
+                // Pending state for this session, and drop Pending state outside the write lock to
+                // notify Receivers.
+                let _old_state = hd.state.write().discoverable.clear_pending_if_matching(&session);
+                return;
+            };
+            debug!("set_discoverable_task: established discoverable session on host successfully");
 
+            if let Some(sender) =
+                hd.state.write().discoverable.set_discoverable(host.id(), &session)
+            {
+                let _ = sender.send(session);
+            }
+            trace!("set_discoverable_task: completed");
+        })
+    }
+
+    async fn set_discoverable_on_active_host(&self) -> types::Result<HostDevice> {
         match self.active_host().await {
             Some(host) => {
-                let token = Arc::new(host.establish_discoverable_session().await?);
-                self.state.write().discoverable = Some(Arc::downgrade(&token));
-                Ok(token)
+                host.set_discoverable(true).await?;
+                Ok(host)
             }
             None => Err(types::Error::no_host()),
         }
+    }
+
+    pub(crate) async fn set_discoverable(&self) -> types::Result<Arc<DiscoverableSession>> {
+        let session_fut = self.state.read().discoverable.active_session_future();
+        if let Some(session_fut) = session_fut {
+            debug!(
+                "set_discoverable: awaiting DiscoverableSession (state: {:?})",
+                self.state.read().discoverable
+            );
+            return session_fut
+                .await
+                .map_err(|_| format_err!("Pending discoverable client channel closed").into());
+        }
+
+        let session = Arc::new(DiscoverableSession { dispatcher_state: self.state.clone() });
+        let weak_session = Arc::downgrade(&session);
+        let (session_sender, session_receiver) = oneshot::channel();
+        let session_receiver = session_receiver.shared();
+        let start_discoverable_task = self.make_set_discoverable_task(session);
+
+        // Immediately mark the state as pending to indicate to other requests to wait on
+        // this discoverable session initialization
+        self.state.write().discoverable = DiscoverableState::Pending {
+            session: weak_session,
+            session_receiver: session_receiver.clone(),
+            session_sender,
+            _start_discoverable_task: start_discoverable_task,
+        };
+
+        debug!(
+            "set_discoverable: awaiting DiscoverableSession for first client (state: {:?})",
+            self.state.read().discoverable
+        );
+        session_receiver
+            .await
+            .map_err(|_| format_err!("Pending discoverable client channel closed").into())
     }
 
     fn make_suppress_connections_task(
@@ -916,7 +1086,7 @@ impl HostDispatcher {
             .map_err(|_| format_err!("Pending connection suppression client channel closed").into())
     }
 
-    fn stash(&self) -> Stash {
+    pub(crate) fn stash(&self) -> Stash {
         self.state.read().stash.clone()
     }
 
@@ -1171,9 +1341,9 @@ impl HostDispatcher {
         assign_host_data(host_device.clone(), self.clone(), &address)
             .await
             .context(format!("{:?}: failed to assign identity to bt-host", dbg_ids))?;
-        try_restore_bonds(host_device.clone(), self.clone(), &address)
-            .await
-            .map_err(|e| e.as_failure())?;
+        if let Err(e) = try_restore_bonds(host_device.clone(), self.clone(), &address).await {
+            error!("{:?}: failed to restore persisted bonds to bt-host: {}", dbg_ids, e);
+        }
 
         let config = self.state.read().config_settings.clone();
         host_device
@@ -1351,6 +1521,58 @@ impl HostDispatcher {
         }
     }
 
+    fn migrate_discoverable_to_active_host(&self) {
+        let old_state = std::mem::replace(
+            &mut self.state.write().discoverable,
+            DiscoverableState::NotDiscoverable,
+        );
+        match old_state {
+            DiscoverableState::NotDiscoverable => {}
+            DiscoverableState::Pending {
+                session,
+                session_receiver,
+                session_sender,
+                _start_discoverable_task,
+            } => {
+                info!("migrating Pending discoverable to new host");
+                // Stop the old discoverable task, and restart on the new host.
+                let session = session.upgrade().unwrap_or_else(|| {
+                    Arc::new(DiscoverableSession { dispatcher_state: self.state.clone() })
+                });
+                drop(_start_discoverable_task);
+                let weak_session = Arc::downgrade(&session);
+                let start_discoverable_task = self.make_set_discoverable_task(session);
+                self.state.write().discoverable = DiscoverableState::Pending {
+                    session: weak_session,
+                    session_receiver,
+                    session_sender,
+                    _start_discoverable_task: start_discoverable_task,
+                };
+            }
+            DiscoverableState::Discoverable { session, host_id } => {
+                let mut write = self.state.write();
+                if write.active_id == Some(host_id) {
+                    write.discoverable = DiscoverableState::Discoverable { session, host_id };
+                    return;
+                }
+                info!("migrating Discoverable state to new host");
+                let Some(strong_session) = session.upgrade() else {
+                    return;
+                };
+
+                let (session_sender, session_receiver) = oneshot::channel();
+                let session_receiver = session_receiver.shared();
+                let start_discoverable_task = self.make_set_discoverable_task(strong_session);
+                write.discoverable = DiscoverableState::Pending {
+                    session,
+                    session_receiver,
+                    session_sender,
+                    _start_discoverable_task: start_discoverable_task,
+                };
+            }
+        }
+    }
+
     fn migrate_suppress_connections_to_active_host(&self) {
         let mut write = self.state.write();
         let old_state = std::mem::replace(
@@ -1402,6 +1624,7 @@ impl HostDispatcher {
     /// Configure a newly active adapter with the correct behavior for an active adapter.
     async fn configure_newly_active_adapter(&self) -> types::Result<()> {
         self.migrate_discovery_to_active_host().await;
+        self.migrate_discoverable_to_active_host();
         self.migrate_suppress_connections_to_active_host();
         Ok(())
     }
@@ -1538,7 +1761,7 @@ impl Future for WhenHostsFound {
     }
 }
 
-async fn try_restore_bonds(
+pub(crate) async fn try_restore_bonds(
     host_device: HostDevice,
     hd: HostDispatcher,
     address: &Address,
@@ -1558,9 +1781,11 @@ async fn try_restore_bonds(
             if errors.is_empty() {
                 Ok(())
             } else {
-                let msg =
-                    errors.into_iter().fold("".to_string(), |acc, b| format!("{}, {:?}", acc, b));
-                let msg = format!("failed to restore bonding data: {}", msg);
+                // Do not Debug-format `sys::BondingData`: doing so recursively formats
+                // secret LTK, IRK, CSRK, and BR/EDR link-key bytes into logs.
+                let peers: Vec<Option<PeerId>> =
+                    errors.iter().map(|b| b.identifier.map(PeerId::from)).collect();
+                let msg = format!("failed to restore bonding data for peers: {:?}", peers);
                 error!("{}", msg);
                 Err(anyhow!(msg).into())
             }
@@ -1609,10 +1834,16 @@ pub(crate) mod test {
         LocalServiceProxy, Server_Request, Server_RequestStream as GattServerRequestStream,
     };
     use fidl_fuchsia_bluetooth_host::{
-        BondingDelegateRequestStream, HostRequest, HostRequestStream,
+        BondingDelegateRequest, BondingDelegateRequestStream, HostRequest, HostRequestStream,
     };
     use futures::StreamExt;
     use futures::future::join;
+    use std::collections::HashSet;
+
+    pub(crate) enum RestoreBondsBehavior {
+        AcceptAll,
+        RejectPeers(HashSet<PeerId>),
+    }
 
     pub(crate) fn make_test_dispatcher(
         watch_peers_publisher: hanging_get::Publisher<HashMap<PeerId, Peer>>,
@@ -1664,51 +1895,78 @@ pub(crate) mod test {
         service: Option<LocalServiceProxy>,
     }
 
-    async fn handle_standard_host_server_init(
+    async fn handle_host_server_init(
         mut host_server: HostRequestStream,
+        restore_bonds_behavior: RestoreBondsBehavior,
     ) -> (HostRequestStream, GasEndpoints, BondingDelegateRequestStream) {
         let mut gas_endpoints = GasEndpoints::default();
         let mut bonding_delegate: Option<BondingDelegateRequestStream> = None;
         while gas_endpoints.gatt_server.is_none() || bonding_delegate.is_none() {
-            match host_server.next().await {
-                Some(Ok(HostRequest::SetLocalName { responder, .. })) => {
-                    info!("Setting Local Name");
-                    let _ = responder.send(Ok(()));
-                }
-                Some(Ok(HostRequest::SetDeviceClass { responder, .. })) => {
-                    info!("Setting Device Class");
-                    let _ = responder.send(Ok(()));
-                }
-                Some(Ok(HostRequest::RequestProtocol {
-                    payload: ProtocolRequest::Gatt2Server(server),
-                    ..
-                })) => {
-                    // don't respond at all on the server side.
-                    info!("Storing Gatt Server");
-                    let mut gatt_server = server.into_stream();
-                    info!("GAS Server was started, waiting for publish");
-                    // The Generic Access Service now publishes itself.
-                    match gatt_server.next().await {
-                        Some(Ok(Server_Request::PublishService { info, service, responder })) => {
-                            info!("Captured publish of GAS Service: {:?}", info);
-                            gas_endpoints.service = Some(service.into_proxy());
-                            let _ = responder.send(Ok(()));
-                        }
-                        x => error!("Got unexpected GAS Server request: {:?}", x),
+            let mut restore_bonds_fut = bonding_delegate
+                .as_mut()
+                .map(|stream| stream.next().fuse())
+                .unwrap_or_else(futures::future::Fuse::terminated);
+            futures::select! {
+                host_req = host_server.next() => match host_req {
+                    Some(Ok(HostRequest::SetLocalData { .. })) => {
+                        info!("Setting Local Data");
                     }
-                    gas_endpoints.gatt_server = Some(gatt_server);
-                }
-                Some(Ok(HostRequest::SetConnectable { responder, .. })) => {
-                    info!("Setting connectable");
-                    let _ = responder.send(Ok(()));
-                }
-                Some(Ok(HostRequest::SetBondingDelegate { delegate, .. })) => {
-                    info!("Storing Bonding Delegate");
-                    bonding_delegate = Some(delegate.into_stream());
-                }
-                Some(Ok(req)) => info!("Unhandled Host Request in add: {:?}", req),
-                Some(Err(e)) => error!("Error in host server: {:?}", e),
-                None => break,
+                    Some(Ok(HostRequest::SetLocalName { responder, .. })) => {
+                        info!("Setting Local Name");
+                        let _ = responder.send(Ok(()));
+                    }
+                    Some(Ok(HostRequest::SetDeviceClass { responder, .. })) => {
+                        info!("Setting Device Class");
+                        let _ = responder.send(Ok(()));
+                    }
+                    Some(Ok(HostRequest::RequestProtocol {
+                        payload: ProtocolRequest::Gatt2Server(server),
+                        ..
+                    })) => {
+                        // don't respond at all on the server side.
+                        info!("Storing Gatt Server");
+                        let mut gatt_server = server.into_stream();
+                        info!("GAS Server was started, waiting for publish");
+                        // The Generic Access Service now publishes itself.
+                        match gatt_server.next().await {
+                            Some(Ok(Server_Request::PublishService { info, service, responder })) => {
+                                info!("Captured publish of GAS Service: {:?}", info);
+                                gas_endpoints.service = Some(service.into_proxy());
+                                let _ = responder.send(Ok(()));
+                            }
+                            x => error!("Got unexpected GAS Server request: {:?}", x),
+                        }
+                        gas_endpoints.gatt_server = Some(gatt_server);
+                    }
+                    Some(Ok(HostRequest::SetConnectable { responder, .. })) => {
+                        info!("Setting connectable");
+                        let _ = responder.send(Ok(()));
+                    }
+                    Some(Ok(HostRequest::SetBondingDelegate { delegate, .. })) => {
+                        info!("Storing Bonding Delegate");
+                        bonding_delegate = Some(delegate.into_stream());
+                    }
+                    Some(Ok(req)) => info!("Unhandled Host Request in add: {:?}", req),
+                    Some(Err(e)) => error!("Error in host server: {:?}", e),
+                    None => break,
+                },
+                bond_req = restore_bonds_fut => match bond_req {
+                    Some(Ok(BondingDelegateRequest::RestoreBonds { bonds, responder })) => {
+                        let rejected: Vec<sys::BondingData> = match &restore_bonds_behavior {
+                            RestoreBondsBehavior::AcceptAll => Vec::new(),
+                            RestoreBondsBehavior::RejectPeers(rejected_peers) => bonds
+                                .into_iter()
+                                .filter(|bond: &sys::BondingData| {
+                                    bond.identifier
+                                        .map(PeerId::from)
+                                        .is_some_and(|id| rejected_peers.contains(&id))
+                                })
+                                .collect(),
+                        };
+                        responder.send(&rejected).expect("send RestoreBonds response");
+                    }
+                    other => panic!("expected RestoreBonds request, got: {other:?}"),
+                },
             }
         }
         info!("Finishing host_device mocking for add host");
@@ -1720,8 +1978,18 @@ pub(crate) mod test {
         dispatcher: &HostDispatcher,
     ) -> types::Result<(HostRequestStream, HostDevice, GasEndpoints, BondingDelegateRequestStream)>
     {
+        create_and_add_test_host_with_bond_behavior(id, dispatcher, RestoreBondsBehavior::AcceptAll)
+            .await
+    }
+
+    pub(crate) async fn create_and_add_test_host_with_bond_behavior(
+        id: HostId,
+        dispatcher: &HostDispatcher,
+        restore_bonds_behavior: RestoreBondsBehavior,
+    ) -> types::Result<(HostRequestStream, HostDevice, GasEndpoints, BondingDelegateRequestStream)>
+    {
         let (host_server, host_device) = HostDevice::mock_from_id(id);
-        let host_server_init_handler = handle_standard_host_server_init(host_server);
+        let host_server_init_handler = handle_host_server_init(host_server, restore_bonds_behavior);
         let (res, (host_server, gas_endpoints, bonding_delegate)) =
             join(dispatcher.add_host_device(&host_device), host_server_init_handler).await;
         res?;

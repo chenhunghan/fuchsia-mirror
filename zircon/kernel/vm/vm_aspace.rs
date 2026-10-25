@@ -4,7 +4,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::arch_vm_aspace::{ArchMmuFlags, ArchVmAspace, NonTerminalAction, TerminalAction};
+use super::arch_vm_aspace::{
+    ArchMmuFlags, ArchUnmapOptions, ArchVmAspace, NonTerminalAction, TerminalAction,
+};
 use super::name::name_to_c_buf;
 use super::vm_address_region::VmAddressRegion;
 use super::vm_mapping::VmMapping;
@@ -12,9 +14,11 @@ use super::vm_object::VmObject;
 use crate::kernel::thread::ThreadPtr;
 use crate::kernel::types::PAddr;
 use core::ffi::{CStr, c_void};
+use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use fbl::RefPtr;
 use ksync::{KMutex, LockClass, LockToken, RawCriticalMutex};
+use lazy_init::{LazyInit, NoCheck};
 use vm_aspace_bindings as bindings;
 use zx_status::Status;
 
@@ -110,7 +114,8 @@ impl fbl::HasRefCount for VmAspace {
 
 // SAFETY: `VmAspace` represents a C++ `fbl::RefCounted` object.
 unsafe impl fbl::Recyclable for VmAspace {
-    #[inline]
+    #[cold]
+    #[inline(never)]
     unsafe fn recycle(ptr: NonNull<Self>) {
         // SAFETY: Caller attests to preconditions.
         unsafe {
@@ -137,7 +142,7 @@ impl VmAspace {
         }
     }
 
-    fn as_ffi_ptr(&self) -> *mut bindings::VmAspace {
+    pub(super) fn as_ffi_ptr(&self) -> *mut bindings::VmAspace {
         ptr::from_ref(self).cast_mut().cast()
     }
 
@@ -282,6 +287,42 @@ impl VmAspace {
     pub fn is_user(&self) -> bool {
         // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
         unsafe { bindings::cpp_vm_aspace_is_user(self.as_ffi_ptr()) }
+    }
+
+    /// Encodes the idea that we can always unmap from user aspaces.
+    pub(super) fn enlarge_arch_unmap(&self) -> ArchUnmapOptions {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
+        unsafe { bindings::cpp_vm_aspace_enlarge_arch_unmap(self.as_ffi_ptr()) }
+    }
+
+    /// Keep a cache of the `VmMapping` of the last page fault that occurred. On a page fault this
+    /// can be checked to see if it matches more quickly than walking the full vmar tree. Mappings
+    /// that are stored here must be in the `Alive` state, implying that they are in the VMAR tree.
+    /// It is then the responsibility of the `VmMapping` to remove itself from here should it
+    /// transition out of `Alive`, and remove itself from the VMAR tree. A raw pointer is stored
+    /// here since the `VmMapping` must be alive and in tree anyway and if it were a `RefPtr` we
+    /// would not be able to handle being the one to drop the last ref and perform destruction.
+    pub(super) fn last_fault_locked(
+        &self,
+        _token: &LockToken<'_, VmAspaceLockClass>,
+    ) -> *const VmMapping {
+        // SAFETY: The aspace lock is held, proven by `_token`.
+        unsafe { bindings::cpp_vm_aspace_last_fault_locked(self.as_ffi_ptr()).cast() }
+    }
+
+    pub(super) fn clear_last_fault_locked(&self, _token: &mut LockToken<'_, VmAspaceLockClass>) {
+        // SAFETY: The aspace lock is held, proven by `_token`.
+        unsafe {
+            bindings::cpp_vm_aspace_clear_last_fault_locked(self.as_ffi_ptr());
+        }
+    }
+
+    pub(super) fn vdso_code_mapping_locked(
+        &self,
+        _token: &LockToken<'_, VmAspaceLockClass>,
+    ) -> *const VmMapping {
+        // SAFETY: The aspace lock is held, proven by `_token`.
+        unsafe { bindings::cpp_vm_aspace_vdso_code_mapping_locked(self.as_ffi_ptr()).cast() }
     }
 
     pub fn is_aslr_enabled(&self) -> bool {
@@ -572,4 +613,22 @@ impl VmAspace {
         // SAFETY: `ptr` is null or points to a live `VmMapping` with an acquired refcount.
         unsafe { RefPtr::try_from_raw(ptr.cast()) }
     }
+}
+
+static KERNEL_ROOT_VMAR: LazyInit<VmAddressRegion, NoCheck> = LazyInit::uninit();
+
+/// # Safety
+///
+/// `kernel_aspace` is the kernel aspace. Must be called at most once, before any other use of
+/// the kernel root region. The last reference to the returned region must never be released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_address_region_kernel_root_init(
+    kernel_aspace: &VmAspace,
+) -> &'static VmAddressRegion {
+    // SAFETY: `kernel_aspace` is the kernel aspace, and this is its only root region.
+    let init = unsafe { VmAddressRegion::new_kernel_root(kernel_aspace) };
+    // SAFETY: `KERNEL_ROOT_VMAR` is initialized at most once, before any other use.
+    let Ok(()) = unsafe { Pin::static_ref(&KERNEL_ROOT_VMAR).init_pin(init) };
+    // SAFETY: `KERNEL_ROOT_VMAR` is initialized.
+    unsafe { KERNEL_ROOT_VMAR.get_unchecked() }
 }

@@ -40,6 +40,10 @@ const pathOverwriteAnnotationPrefix = "# @bazel2gn:path_overwrite:"
 // overwritten with a raw GN expression.
 const rawOverwriteAnnotationPrefix = "# @bazel2gn:raw_overwrite:"
 
+// rawAttributeAnnotationPrefix is a comment annotation prefix that indicates a
+// raw GN attribute or statement should be emitted inside the annotated target.
+const rawAttributeAnnotationPrefix = "# @bazel2gn:raw_attribute:"
+
 // valueOverwriteAnnotationPrefix is a comment annotation prefix that indicates a value of a
 // dictionary entry should be overwritten in GN. In this case bazel2gn will ignore the value set
 // in the BUILD.bazel file and use the value specified in the annotation in the BUILD.gn file
@@ -77,15 +81,16 @@ var bazelRuleToGNTemplate = map[string]string{
 	"py_binary":  "python_binary",
 
 	// Rust
-	"rust_binary":        "rustc_binary",
-	"rust_library":       "rustc_library",
-	"rustc_binary":       "rustc_binary",
-	"rustc_dylib":        "rustc_dylib",
-	"rustc_library":      "rustc_library",
-	"rustc_proc_macro":   "rustc_macro",
-	"rustc_test":         "rustc_test",
-	"rust_proc_macro":    "rustc_macro",
-	"rust_proto_library": "rust_proto_library",
+	"rust_binary":          "rustc_binary",
+	"rust_library":         "rustc_library",
+	"rustc_binary":         "rustc_binary",
+	"rustc_dylib":          "rustc_dylib",
+	"rustc_library":        "rustc_library",
+	"rustc_proc_macro":     "rustc_macro",
+	"rustc_test":           "rustc_test",
+	"rust_proc_macro":      "rustc_macro",
+	"rust_proto_library":   "rust_proto_library",
+	"rustc_bindgen_golden": "rustc_bindgen_golden",
 
 	// C++
 	"cc_library":            "static_library",
@@ -107,13 +112,14 @@ var bazelRuleToGNTemplate = map[string]string{
 	// Components
 	"expect_includes":                    "expect_includes",
 	"fuchsia_structured_config_rust_lib": "fuchsia_structured_config_rust_lib",
+	"fx_component":                       "fuchsia_component",
+	"fx_component_manifest":              "fuchsia_component_manifest",
 
 	// Host tools
 	"cc_binary_host_tool": "executable",
 	"ffx_tool":            "ffx_tool",
 	"ffx_plugin":          "ffx_plugin",
 	"go_binary_host_tool": "go_binary",
-	"install_host_tools":  "install_host_tools",
 
 	// IDK
 	"idk_cc_shared_library":      "sdk_shared_library",
@@ -141,24 +147,35 @@ var bazelRuleToGNTemplate = map[string]string{
 	// Bazel-only Fuchsia component, package, and test rules. Any GN wrapper
 	// targets (such as `bazel_fuchsia_package()` or `bazel_test_suite()`) are
 	// maintained by hand above the bazel2gn sentinel in BUILD.gn.
-	"fx_component":          noGNEquivalent,
-	"fx_component_manifest": noGNEquivalent,
+	"cml_shard":             noGNEquivalent,
 	"fx_package":            noGNEquivalent,
 	"fx_packaged_binary":    noGNEquivalent,
 	"fx_runner_shard":       noGNEquivalent,
 	"fx_test":               noGNEquivalent,
 	"fx_test_component":     noGNEquivalent,
 	"fx_unittest_component": noGNEquivalent,
-	"fx_unittest_package":   noGNEquivalent,
 
-	// Bazel host test rules. Migrated host tests are only defined in Bazel and
-	// reach GN through `bazel_test_suite()`, so they should never get a GN twin.
-	"host_cc_test":    noGNEquivalent,
-	"host_go_test":    noGNEquivalent,
-	"host_py_test":    noGNEquivalent,
-	"host_rustc_test": noGNEquivalent,
-	"host_shac_test":  noGNEquivalent,
-	"host_test":       noGNEquivalent,
+	// Tests of a library run in both build systems while the library has
+	// users in both, so these test rules get a GN copy. See
+	// https://fuchsia.dev/fuchsia-src/development/build/bazel_concepts/tests#tests-in-both-build-systems
+	//
+	// The GN copy of an `fx_unittest_package()` gets a different package name,
+	// see `fxUnittestPackageToGN()`.
+	"fx_unittest_package": "fuchsia_unittest_package",
+	"host_go_test":        "go_test",
+	"host_rustc_test":     "rustc_test",
+
+	// `wrap_host_rust_test()` wraps an existing `rustc_test()`, which bazel2gn
+	// translates to a GN `rustc_test()` that already runs as a host test.
+	"wrap_host_rust_test": noGNEquivalent,
+
+	// TODO(https://fxbug.dev/574121341): Translate these host test rules too.
+	// Until then, keep hand-written GN copies of these tests above the
+	// sentinel.
+	"host_cc_test":   noGNEquivalent,
+	"host_py_test":   noGNEquivalent,
+	"host_shac_test": noGNEquivalent,
+	"host_test":      noGNEquivalent,
 
 	// Runtime data for Bazel host tests, so it's only consumed by the rules
 	// above.
@@ -204,10 +221,6 @@ var attrsToOmitByRules = map[string]map[string]bool{
 	"fx_cc_library":            {"includes": true},
 	"idk_cc_source_library":    {"includes": true},
 	"idk_cc_shared_library_zx": {"version_script": true},
-	// In Bazel, `include_deps` on `expect_includes` lists transitive
-	// `.shard.cml` file labels needed in the Bazel action sandbox. GN runs `cmc`
-	// outside a sandbox and does not accept file labels in `deps`.
-	"expect_includes": {"include_deps": true},
 	// We do not need to include the "stamp" destination in GN because it is implicitly created by
 	// the rule.
 	"stamp_group": {"stamp": true},
@@ -218,6 +231,31 @@ var attrsToOmitByRules = map[string]map[string]bool{
 	// sandboxed. The GN rust_proto_library() template discovers imports through a
 	// depfile instead.
 	"rust_proto_library": {"proto_deps": true},
+	// `binary_name` names the inner Bazel test binary that the host test
+	// wraps. GN has no such wrapper.
+	"host_go_test":    {"size": true, "binary_name": true},
+	"host_rustc_test": {"size": true, "binary_name": true},
+	// `includes` lists `.cml` shard targets and files needed in the Bazel
+	// action sandbox. GN runs `cmc` with global include paths and a depfile
+	// instead, and `fuchsia_component_manifest()` does not accept `includes`.
+	"fx_component_manifest": {"includes": true},
+}
+
+// unsupportedAttrsByRules lists attributes that bazel2gn can't translate yet.
+// Dropping them would give the GN copy of a test different behavior, so
+// bazel2gn fails instead and the test needs `# @bazel2gn:skip`.
+var unsupportedAttrsByRules = map[string]map[string]bool{
+	"host_go_test":    {"data": true, "test_data": true},
+	"host_rustc_test": {"test_data": true, "test_label": true},
+}
+
+// implicitConditionsByRules maps Bazel rules that are only compatible with
+// some platforms, without setting `target_compatible_with` explicitly, to the
+// GN condition that the generated target is wrapped in.
+var implicitConditionsByRules = map[string]string{
+	// GN's `go_test()` asserts that `args` and `timeout` are only set on host.
+	"host_go_test":    "is_host",
+	"host_rustc_test": "is_host",
 }
 
 // Common Bazel attributes that use different names in GN.
@@ -281,7 +319,7 @@ var rustCommonAttrMap = map[string]string{
 	"build_flags": "configs",
 }
 
-// rustBinAttrMap maps from attribute name in Bazel Rust binary rules to GN parameter names.
+// rustBinAttrMap maps from attribute name in Bazel Rust binary and test rules to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
 var rustBinAttrMap = mustMergeMaps(rustCommonAttrMap, map[string]string{
 	"binary_name": "output_name",
@@ -294,6 +332,16 @@ var ffxPluginAttrMap = mustMergeMaps(rustCommonAttrMap, map[string]string{
 	"args_srcs":       "args_sources",
 	"args_crate_root": "args_source_root",
 })
+
+// hostTestAttrMap maps from attribute names in Bazel host test rules to GN
+// parameter names.
+var hostTestAttrMap = map[string]string{
+	"test_args": "args",
+}
+
+// hostRustTestAttrMap maps from attribute names in `host_rustc_test()` to GN
+// `rustc_test()` parameter names.
+var hostRustTestAttrMap = mustMergeMaps(rustBinAttrMap, hostTestAttrMap)
 
 // fidlAttrMap maps from attribute names in Bazel FIDL rules to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
@@ -344,12 +392,6 @@ var zxInIDKAttrMap = map[string]string{
 	"category": "sdk_publishable",
 }
 
-// installHostToolAttrMap maps from attribute name in Bazel install host tool rules to GN parameter names.
-var installHostToolAttrMap = map[string]string{
-	"implementation_deps": "deps",
-	"tool_output_names":   "outputs",
-}
-
 // genruleAttrMap maps from attribute name in Bazel genrule to GN parameter names.
 var genruleAttrMap = map[string]string{
 	"outs": "outputs",
@@ -386,6 +428,12 @@ var structuredConfigRustLibAttrMap = map[string]string{
 	"crate_name": "name",
 }
 
+// fxComponentAttrMap maps from attribute names in Bazel `fx_component()` to GN
+// `fuchsia_component()` parameter names.
+var fxComponentAttrMap = map[string]string{
+	"compiled_manifest": "cm_label",
+}
+
 // pythonBinAttrMap maps from attribute name in Bazel Python binary rules to GN parameter names.
 var pythonBinAttrMap = map[string]string{
 	"main": "main_source",
@@ -419,7 +467,11 @@ var attrMapsByRules = map[string]map[string]string{
 	"rustc_dylib":      rustCommonAttrMap,
 	"rustc_library":    rustCommonAttrMap,
 	"rustc_proc_macro": rustCommonAttrMap,
-	"rustc_test":       rustCommonAttrMap,
+	"rustc_test":       rustBinAttrMap,
+	"host_rustc_test":  hostRustTestAttrMap,
+
+	// Go
+	"host_go_test": hostTestAttrMap,
 
 	// FIDL
 	"fidl_library":        idkFIDLAttrMap,
@@ -438,11 +490,11 @@ var attrMapsByRules = map[string]map[string]string{
 
 	// Components
 	"fuchsia_structured_config_rust_lib": structuredConfigRustLibAttrMap,
+	"fx_component":                       fxComponentAttrMap,
 
 	// Tools
-	"ffx_tool":           rustBinAttrMap,
-	"ffx_plugin":         ffxPluginAttrMap,
-	"install_host_tools": installHostToolAttrMap,
+	"ffx_tool":   rustBinAttrMap,
+	"ffx_plugin": ffxPluginAttrMap,
 
 	// Others
 	"compiled_action": compiledActionAttrMap,

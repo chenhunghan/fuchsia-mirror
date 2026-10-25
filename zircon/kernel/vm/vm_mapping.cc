@@ -40,7 +40,6 @@ namespace {
 KCOUNTER(vm_mapping_attribution_queries, "vm.attributed_memory.mapping.queries")
 KCOUNTER(vm_mappings_merged, "vm.aspace.mapping.merged_neighbors")
 KCOUNTER(vm_mappings_protect_no_write, "vm.aspace.mapping.protect_without_write")
-KCOUNTER(vm_mappings_state_dead, "vm.aspace.mapping.state.dead")
 
 }  // namespace
 
@@ -131,16 +130,12 @@ VmMapping::VmMapping(VmAddressRegion& parent, bool private_clone, vaddr_t base, 
 VmMapping::VmMapping(VmAddressRegion& parent, bool private_clone, vaddr_t base, size_t size,
                      uint32_t vmar_flags, fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset,
                      arch_mmu_flags_t arch_mmu_flags, Mergeable mergeable)
-    : VmMapping(parent, private_clone, base, size, vmar_flags, vmo, vmo_offset, arch_mmu_flags,
-                btree::BTree<vaddr_t, arch_mmu_flags_t>(), mergeable) {}
+    : VmMapping(parent, private_clone, base, size, vmar_flags, ktl::move(vmo), vmo_offset,
+                arch_mmu_flags, btree::BTree<vaddr_t, arch_mmu_flags_t>(), mergeable) {}
 
-VmMapping::~VmMapping() {
-  AssertCanary();
-  LTRACEF("%p aspace %p base %#" PRIxPTR " size %#zx\n", this, aspace().get(), this->base(),
-          this->size());
-  vm_mappings_state_dead.Add(-1);
-  rust_vm_mapping_destruct(&opaque_storage_);
-}
+VmMapping::~VmMapping() { rust_vm_mapping_destruct(this); }
+
+void VmMapping::fbl_recycle() { rust_vm_mapping_recycle(this); }
 
 fbl::RefPtr<VmObject> VmMapping::vmo() const {
   return fbl::ImportFromRawPtr(rust_vm_mapping_vmo(this));
@@ -169,10 +164,6 @@ VmMapping::AttributionCounts VmMapping::GetAttributedMemory() const {
 
   Guard<CriticalMutex> guard{lock()};
   return GetAttributedMemoryLocked(guard);
-}
-
-void VmMapping::DumpLockedImpl(uint depth, bool verbose) const {
-  rust_vm_mapping_dump_locked(this, depth, verbose);
 }
 
 using ArchUnmapOptions = ArchVmAspaceInterface::ArchUnmapOptions;
@@ -441,14 +432,14 @@ zx_status_t VmMapping::UnmapLocked(vaddr_t base, size_t size) {
   // an end or the middle.
   fbl::RefPtr<VmMapping> left, right;
   if (this->base() != base) {
+    fbl::RefPtr<VmObject> vmo = object_locked();
     // Insert empty protection ranges for now as we will transform the existing protection_ranges_
     // tree into the target.
-    fbl::AllocChecker ac;
-    left = fbl::AdoptRef(
-        new (&ac) VmMapping(*parent_locked(), private_clone(), this->base(), base - this->base(),
-                            flags(), object_locked(), object_offset(), 0,
-                            btree::BTree<vaddr_t, arch_mmu_flags_t>(), Mergeable::YES));
-    if (!ac.check()) {
+    btree::BTree<vaddr_t, arch_mmu_flags_t> left_prot_ranges;
+    left = fbl::ImportFromRawPtr(rust_vm_mapping_create_with_ranges(
+        parent_locked(), private_clone(), this->base(), base - this->base(), flags(),
+        fbl::ExportToRawPtr(&vmo), object_offset(), 0, &left_prot_ranges, Mergeable::YES));
+    if (!left) {
       return ZX_ERR_NO_MEMORY;
       AssertHeld(parent_locked()->region_lock_ref());
     }
@@ -467,12 +458,12 @@ zx_status_t VmMapping::UnmapLocked(vaddr_t base, size_t size) {
         return status;
       }
     }
-    fbl::AllocChecker ac;
-    right = fbl::AdoptRef(new (&ac) VmMapping(
-        *parent_locked(), private_clone(), this->base() + offset, this->size() - offset, flags(),
-        object_locked(), object_offset() + offset, right_first_mmu_flags,
-        ktl::move(right_prot_ranges), Mergeable::YES));
-    if (!ac.check()) {
+    fbl::RefPtr<VmObject> vmo = object_locked();
+    right = fbl::ImportFromRawPtr(rust_vm_mapping_create_with_ranges(
+        parent_locked(), private_clone(), this->base() + offset, this->size() - offset, flags(),
+        fbl::ExportToRawPtr(&vmo), object_offset() + offset, right_first_mmu_flags,
+        &right_prot_ranges, Mergeable::YES));
+    if (!right) {
       return ZX_ERR_NO_MEMORY;
     }
   }
@@ -1041,67 +1032,9 @@ zx_status_t VmMapping::DecommitRange(size_t offset, size_t len) {
   return rust_vm_mapping_decommit_range(this, offset, len);
 }
 
-zx_status_t VmMapping::DestroyLockedImpl() {
-  AssertCanary();
-  // Keep a refptr to the object so we know our lock remains valid.
-  fbl::RefPtr<VmObject> object(object_locked());
-  Guard<CriticalMutex> guard{object_locked()->lock()};
-  return DestroyLockedObject(DestroyUnmap::Yes, DestroyRemoveFromParent::Yes);
-}
-
 zx_status_t VmMapping::DestroyLockedObject(DestroyUnmap unmap,
                                            DestroyRemoveFromParent remove_region) {
-  // Take a reference to ourself, so that we do not get destructed after
-  // dropping our last reference in this method (e.g. when calling
-  // subregions_.erase below).
-  fbl::RefPtr<VmMapping> self(this);
-
-  // If this is the last_fault_ then clear it before removing from the VMAR tree. Even if this
-  // destroy fails, it's always safe to clear last_fault_, so we preference doing it upfront for
-  // clarity.
-  if (aspace()->last_fault_ == this) {
-    aspace()->last_fault_ = nullptr;
-  }
-
-  // The vDSO code mapping can never be unmapped, not even
-  // by VMAR destruction (except for process exit, of course).
-  // TODO(mcgrathr): Turn this into a policy-driven process-fatal case
-  // at some point.  teisenbe@ wants to eventually make zx_vmar_destroy
-  // never fail.
-  if (aspace()->vdso_code_mapping_ == self) {
-    return ZX_ERR_ACCESS_DENIED;
-  }
-
-  if (unmap == DestroyUnmap::Yes) {
-    zx_status_t status =
-        aspace()->arch_aspace().Unmap(base(), size() / kPageSize, aspace()->EnlargeArchUnmap());
-    if (status != ZX_OK) {
-      return status;
-    }
-  }
-
-  // Remove any priority.
-  SetMemoryPriorityDefaultLockedObject();
-
-  rest_protection_ranges_.clear();
-  object_locked()->RemoveMappingLocked(this);
-
-  // Detach the region from the parent.
-  if (parent_locked() && remove_region == DestroyRemoveFromParent::Yes) {
-    AssertHeld(parent_locked()->lock_ref());
-    AssertHeld(parent_locked()->region_lock_ref());
-    parent_locked()->subregions_.RemoveRegion(this);
-  }
-
-  // detach from any object we have mapped. Note that we are holding the aspace()->lock() so we
-  // will not race with other threads calling vmo()
-  reset_object_locked();
-
-  // mark ourself as dead
-  set_parent_locked(nullptr);
-  set_state_locked(LifeCycleState::DEAD);
-  vm_mappings_state_dead.Add(1);
-  return ZX_OK;
+  return rust_vm_mapping_destroy_locked_object(this, unmap, remove_region);
 }
 
 template <typename T>
@@ -1353,59 +1286,7 @@ ktl::pair<zx_status_t, uint32_t> VmMapping::PageFaultLocked(vaddr_t va, const ui
   return PageFault(va, pf_flags, additional_pages, object_locked().get(), page_request);
 }
 
-zx_status_t VmMapping::ActivateLocked(ActivateInsertRegions insert_region) {
-  DEBUG_ASSERT(state_locked() == LifeCycleState::NOT_READY);
-  DEBUG_ASSERT(parent_locked());
-
-  AssertHeld(parent_locked()->lock_ref());
-  AssertHeld(parent_locked()->region_lock_ref());
-  // If inserting into the regions attempt that first before modifying any state, as it can fail.
-  if (insert_region == ActivateInsertRegions::Yes) {
-    zx_status_t status =
-        parent_locked()->subregions_.InsertRegion(fbl::RefPtr<VmAddressRegionOrMapping>(this));
-    if (status != ZX_OK) {
-      return status;
-    }
-    status = object_locked()->AddMappingLocked(this);
-    if (status != ZX_OK) {
-      parent_locked()->subregions_.RemoveRegion(this);
-      return status;
-    }
-  }
-
-  set_state_locked(LifeCycleState::ALIVE);
-
-  // Now that we have added a mapping to the VMO it's cache policy becomes fixed, and we can read it
-  // and augment our arch_mmu_flags.
-  arch_mmu_flags_t cache_policy = object_locked()->GetMappingCachePolicyLocked();
-  arch_mmu_flags_t arch_mmu_flags = first_region_arch_mmu_flags_locked();
-  if ((arch_mmu_flags & ARCH_MMU_FLAG_CACHE_MASK) != cache_policy) {
-    // Warn in the event that we somehow receive a VMO that has a cache
-    // policy set while also holding cache policy flags within the arch
-    // flags. The only path that should be able to achieve this is if
-    // something in the kernel maps into their aspace incorrectly.
-    if ((arch_mmu_flags & ARCH_MMU_FLAG_CACHE_MASK) != 0) {
-      TRACEF(
-          "warning: mapping has conflicting cache policies: vmo %#02x "
-          "arch_mmu_flags %#02x.\n",
-          cache_policy, arch_mmu_flags & ARCH_MMU_FLAG_CACHE_MASK);
-      // Clear the existing cache policy and use the new one.
-      arch_mmu_flags &= ~ARCH_MMU_FLAG_CACHE_MASK;
-    }
-    // If we are changing the cache policy then this can only happen if this is a new mapping region
-    // and not a new mapping occurring as a result of an unmap split. In the case of a new mapping
-    // region we know there cannot yet be any protection ranges.
-    DEBUG_ASSERT(rest_protection_ranges_.is_empty());
-    arch_mmu_flags |= cache_policy;
-    set_first_region_arch_mmu_flags_locked(arch_mmu_flags);
-  }
-  return ZX_OK;
-}
-
-zx_status_t VmMapping::ActivateImpl() {
-  Guard<CriticalMutex> guard{object_locked()->lock()};
-  return ActivateLocked(ActivateInsertRegions::Yes);
-}
+void VmMapping::ActivateNoInsertLocked() { rust_vm_mapping_activate_no_insert_locked(this); }
 
 fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_candidate)
     TA_NO_THREAD_SAFETY_ANALYSIS {
@@ -1466,12 +1347,12 @@ fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_c
     return nullptr;
   }
 
-  fbl::AllocChecker ac;
-  fbl::RefPtr<VmMapping> new_mapping = fbl::AdoptRef(new (&ac) VmMapping(
-      *parent_locked(), private_clone(), base(), size() + right_candidate->size(), flags(),
-      object_locked(), object_offset(), 0, btree::BTree<vaddr_t, arch_mmu_flags_t>(),
-      Mergeable::YES));
-  if (!ac.check()) {
+  fbl::RefPtr<VmObject> vmo = object_locked();
+  btree::BTree<vaddr_t, arch_mmu_flags_t> prot_ranges;
+  fbl::RefPtr<VmMapping> new_mapping = fbl::ImportFromRawPtr(rust_vm_mapping_create_with_ranges(
+      parent_locked(), private_clone(), base(), size() + right_candidate->size(), flags(),
+      fbl::ExportToRawPtr(&vmo), object_offset(), 0, &prot_ranges, Mergeable::YES));
+  if (!new_mapping) {
     return nullptr;
   }
   AssertHeld(new_mapping->lock_ref());
@@ -1496,6 +1377,10 @@ fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_c
     // If it fails we can still abort with a fairly minor roll-back procedure.
     if (MergeProtectionRangesLocked(*right_candidate) != ZX_OK) {
       new_mapping->object_locked()->RemoveMappingLocked(new_mapping.get());
+      // On failure roll back any protection ranges that might have been inserted. Erase cannot
+      // fail.
+      ClearProtectionRangeTransitionsLocked(base() + size(),
+                                            base() + size() + right_candidate->size());
       return true;
     }
 
@@ -1510,7 +1395,7 @@ fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_c
     ASSERT(status == ZX_OK);
     AssertHeld(parent_locked()->lock_ref());
     AssertHeld(parent_locked()->region_lock_ref());
-    // To avoid ActivateLocked from failing we use ReplaceRegion to swap the left mapping for
+    // To avoid activate_locked from failing we use ReplaceRegion to swap the left mapping for
     // the new mapping in the subregions_ list. This temporarily results in the subregions_
     // list having overlapping mappings and an unactivated mapping, but as we hold both the main
     // lock and subregion lock over the entire operation this state cannot be observed.
@@ -1523,9 +1408,6 @@ fbl::RefPtr<VmMapping> VmMapping::TryMergeRightNeighborLocked(VmMapping* right_c
     return false;
   }();
   if (failure) {
-    // On failure roll back any protection ranges that might have been inserted. Erase cannot fail.
-    ClearProtectionRangeTransitionsLocked(base() + size(),
-                                          base() + size() + right_candidate->size());
     return nullptr;
   }
 
@@ -1626,10 +1508,6 @@ void VmMapping::SetMemoryPriorityHighAlreadyPositiveLockedObject() {
 template void VmMapping::SetMemoryPriorityHighAlreadyPositiveLockedObject<false>();
 template void VmMapping::SetMemoryPriorityHighAlreadyPositiveLockedObject<true>();
 
-void VmMapping::CommitHighMemoryPriorityImpl() {
-  rust_vm_mapping_commit_high_memory_priority(this);
-}
-
 zx::result<fbl::RefPtr<VmMapping>> VmMapping::ForceWritable() {
   AssertCanary();
   // Take a ref to ourselves in case we drop the last one when removing from our parent.
@@ -1698,13 +1576,12 @@ zx::result<fbl::RefPtr<VmMapping>> VmMapping::ForceWritable() {
       }
     }
 
-    fbl::AllocChecker ac;
     // We created the clone starting at our object offset in the old object, so that makes the
     // equivalent start offset be 0 in the clone.
-    writable = fbl::AdoptRef(new (&ac) VmMapping(
-        *parent_locked(), true, base(), size(), flags(), ktl::move(clone), 0,
-        first_region_arch_mmu_flags_locked(), ktl::move(protection_ranges), mergeable_locked()));
-    if (!ac.check()) {
+    writable = fbl::ImportFromRawPtr(rust_vm_mapping_create_with_ranges(
+        parent_locked(), true, base(), size(), flags(), fbl::ExportToRawPtr(&clone), 0,
+        first_region_arch_mmu_flags_locked(), &protection_ranges, mergeable_locked()));
+    if (!writable) {
       return zx::error(ZX_ERR_NO_MEMORY);
     }
     // First transfer any memory priority from the current mapping to the new mapping.

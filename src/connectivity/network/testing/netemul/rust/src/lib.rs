@@ -6,9 +6,6 @@
 
 //! Netemul utilities.
 
-/// Methods for creating and interacting with virtualized guests in netemul tests.
-pub mod guest;
-
 use fuchsia_sync::Mutex;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -27,7 +24,6 @@ use fidl_fuchsia_net_interfaces_ext::{self as fnet_interfaces_ext};
 use fnet_ext::{FromExt as _, IntoExt as _};
 
 use fidl_fuchsia_hardware_network as fnetwork;
-use fidl_fuchsia_io as fio;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_dhcp as fnet_dhcp;
 use fidl_fuchsia_net_interfaces as fnet_interfaces;
@@ -453,15 +449,6 @@ impl<'a> TestRealm<'a> {
             Result::Ok(proxy)
         })()
         .with_context(|| format!("{} from {child}", S::DEBUG_NAME))
-    }
-
-    /// Opens the diagnostics directory of a component.
-    pub fn open_diagnostics_directory(&self, child_name: &str) -> Result<fio::DirectoryProxy> {
-        let (proxy, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
-        self.realm()
-            .open_diagnostics_directory(child_name, server_end)
-            .context("open diagnostics dir")?;
-        Ok(proxy)
     }
 
     /// Connects to a protocol within the realm.
@@ -1048,20 +1035,6 @@ impl<'a> TestNetwork<'a> {
     pub fn into_proxy(self) -> fnetemul_network::NetworkProxy {
         let Self { network, name: _, sandbox: _ } = self;
         network
-    }
-
-    /// Gets a FIDL client for the backing network.
-    async fn get_client_end_clone(
-        &self,
-    ) -> Result<fidl::endpoints::ClientEnd<fnetemul_network::NetworkMarker>> {
-        let network_manager =
-            self.sandbox.get_network_manager().context("get_network_manager failed")?;
-        let client = network_manager
-            .get_network(&self.name)
-            .await
-            .context("get_network failed")?
-            .with_context(|| format!("no network found with name {}", self.name))?;
-        Ok(client)
     }
 
     /// Sets the configuration for this network to `config`.

@@ -19,10 +19,6 @@ for _ in range(5):
         break
     fuchsia_root = fuchsia_root.parent
 
-# Append fuchsia_root to sys.path so we can import tools.integration.fint.proto
-if fuchsia_root.exists() and str(fuchsia_root) not in sys.path:
-    sys.path.insert(0, str(fuchsia_root))
-
 protobuf_wheel = fuchsia_root / "prebuilt" / "third_party" / "protobuf-py3"
 if protobuf_wheel.exists() and str(protobuf_wheel) not in sys.path:
     sys.path.insert(0, str(protobuf_wheel))
@@ -47,10 +43,14 @@ from typing import Any, Generator
 from unittest import mock
 from unittest.mock import MagicMock
 
-import fint_build
 from build.scripts import signal_utils
-from google.protobuf import text_format
-from tools.integration.fint.proto import context_pb2, static_pb2
+from google.protobuf import json_format, text_format
+from tools.integration.fint import fint_build
+from tools.integration.fint.proto import (
+    build_artifacts_pb2,
+    context_pb2,
+    static_pb2,
+)
 
 
 class SpecificationsParserTest(unittest.TestCase):
@@ -989,7 +989,7 @@ class ExportDebugSymbolsTest(unittest.TestCase):
             mock_proc.returncode = 0
             mock_run.return_value = mock_proc
 
-            ctx._export_debug_symbols()
+            ctx._export_debug_symbols(targets=["default"])
 
             mock_run.assert_called_once_with(
                 [
@@ -1002,6 +1002,39 @@ class ExportDebugSymbolsTest(unittest.TestCase):
                 ]
             )
             self.assertTrue((build_dir / "debug_symbols").is_dir())
+
+    @mock.patch.object(subprocess, "run")
+    def test_export_debug_symbols_empty_targets(
+        self, mock_run: mock.Mock
+    ) -> None:
+        """Verifies _export_debug_symbols writes empty manifests without subprocess when targets is empty."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
+            build_dir = temp_path / "build"
+            checkout_dir = temp_path / "checkout"
+            build_dir.mkdir()
+            checkout_dir.mkdir()
+
+            static_spec = static_pb2.Static()
+            context_spec = context_pb2.Context(
+                build_dir=str(build_dir),
+                checkout_dir=str(checkout_dir),
+            )
+            host = fint_build.HostProperties(os="linux", cpu="x64")
+            ctx = fint_build.BuildContext(
+                static_spec, context_spec, host, verbose=False
+            )
+
+            ctx._export_debug_symbols(targets=[])
+
+            mock_run.assert_not_called()
+            debug_dir = build_dir / "debug_symbols"
+            self.assertTrue(debug_dir.is_dir())
+            self.assertEqual((debug_dir / "build-ids.json").read_text(), "{}\n")
+            self.assertEqual((debug_dir / "build-ids.txt").read_text(), "")
+            self.assertEqual(
+                (debug_dir / "debug_symbols.json").read_text(), "[]\n"
+            )
 
 
 class ParseNinjaFailuresTest(unittest.TestCase):
@@ -1542,6 +1575,34 @@ class NinjaBuildWrapTest(unittest.TestCase):
             ctx = fint_build.BuildContext(static_spec, context_spec, host)
             self.assertEqual(ctx._get_targets(), ["prebuilt_binaries.manifest"])
 
+    def test_wrap_ninja_empty_targets_skips_ninja(self) -> None:
+        """Verifies wrap_ninja runs no-op python command when targets is empty and default ninja target is disabled."""
+        static_spec = static_pb2.Static(include_default_ninja_target=False)
+        context_spec = context_pb2.Context(
+            checkout_dir="fake_checkout", build_dir="fake_dir"
+        )
+        host = fint_build.HostProperties(os="linux", cpu="x64")
+        ctx = fint_build.BuildContext(static_spec, context_spec, host)
+        self.assertTrue(ctx.ninja_skipped)
+        with ctx.wrap_ninja(["ninja", "-C", "out/default"]) as run:
+            self.assertEqual(run.command, [sys.executable, "-c", ""])
+            run.exit_code = 1  # prevent post-build checks in mock dir
+
+    def test_wrap_ninja_with_targets(self) -> None:
+        """Verifies wrap_ninja appends resolved targets to base command."""
+        static_spec = static_pb2.Static(include_default_ninja_target=True)
+        context_spec = context_pb2.Context(
+            checkout_dir="fake_checkout", build_dir="fake_dir"
+        )
+        host = fint_build.HostProperties(os="linux", cpu="x64")
+        ctx = fint_build.BuildContext(static_spec, context_spec, host)
+        self.assertFalse(ctx.ninja_skipped)
+        with ctx.wrap_ninja(["ninja", "-C", "out/default"]) as run:
+            self.assertEqual(
+                run.command, ["ninja", "-C", "out/default", ":default"]
+            )
+            run.exit_code = 1  # prevent post-build checks in mock dir
+
     def test_clippy_target_spec_from_dict_pure(self) -> None:
         """Verifies ClippyTargetSpec.from_dict safely parses dictionaries."""
         valid_dict: fint_build.JSONObject = {
@@ -1995,7 +2056,9 @@ class MainExecutionTest(unittest.TestCase):
         """Verifies that a post-build ninja no-op failure propagates its summary to build_artifacts.json."""
         with tempfile.TemporaryDirectory() as artifact_dir, tempfile.TemporaryDirectory() as build_dir:
             static_path = os.path.join(build_dir, "static.textproto")
-            pathlib.Path(static_path).write_text("incremental: true")
+            pathlib.Path(static_path).write_text(
+                "incremental: true\ninclude_default_ninja_target: true\n"
+            )
             context_path = os.path.join(build_dir, "context.textproto")
             pathlib.Path(context_path).write_text(
                 f'checkout_dir: "fake_checkout"\nartifact_dir: "{artifact_dir}"\nbuild_dir: "{build_dir}"'
@@ -2622,6 +2685,110 @@ class BuildDirResolutionTest(unittest.TestCase):
                 with mock.patch.object(fint_build, "fuchsia_root", fake_root):
                     resolved = fint_build.resolve_fallback_build_dir()
                     self.assertEqual(resolved, default_out.resolve())
+
+    def test_ingest_timeout_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            artifact_dir = tmp_path / "artifacts"
+            artifact_dir.mkdir(parents=True)
+
+            context_path = tmp_path / "context.textproto"
+            context_path.write_text(
+                f'artifact_dir: "{artifact_dir}"\n', encoding="utf-8"
+            )
+
+            artifacts_path = artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+            initial_artifacts = build_artifacts_pb2.BuildArtifacts(
+                failure_summary="Build failed: exit status 124"
+            )
+            artifacts_path.write_text(
+                json_format.MessageToJson(initial_artifacts), encoding="utf-8"
+            )
+
+            metadata_path = tmp_path / "output_metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "timeout": {
+                            "log_dir": "/path/to/timeout_logs",
+                            "snapshots": ["pstree_stop.json"],
+                            "active_processes": [
+                                "[CPU] rustc foo.rs (pid 1001)",
+                                "[DISK-WAIT] clang++ bar.cc (pid 1002)",
+                            ],
+                            "total_matching_processes": 3,
+                            "total_leaf_processes": 5,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ret = fint_build.ingest_timeout_metadata(
+                context_path, metadata_path
+            )
+            self.assertEqual(ret, 0)
+
+            # Verify build_artifacts.json was updated with active processes
+            updated_artifacts = build_artifacts_pb2.BuildArtifacts()
+            json_format.Parse(
+                artifacts_path.read_text(encoding="utf-8"), updated_artifacts
+            )
+            summary = updated_artifacts.failure_summary
+            self.assertIn("Build failed: exit status 124", summary)
+            self.assertIn("Active processes at timeout:", summary)
+            self.assertIn("* [CPU] rustc foo.rs (pid 1001)", summary)
+            self.assertIn("* [DISK-WAIT] clang++ bar.cc (pid 1002)", summary)
+            self.assertIn("... and 1 more (see pstree_stop.json)", summary)
+
+    def test_ingest_timeout_metadata_initializes_fresh_artifacts_when_absent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            artifact_dir = tmp_path / "artifacts"
+            artifact_dir.mkdir(parents=True)
+
+            context_path = tmp_path / "context.textproto"
+            context_path.write_text(
+                f'artifact_dir: "{artifact_dir}"\n', encoding="utf-8"
+            )
+
+            # Note: build_artifacts.json does NOT exist yet!
+            artifacts_path = artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+
+            metadata_path = tmp_path / "output_metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "timeout": {
+                            "log_dir": "/path/to/timeout_logs",
+                            "snapshots": ["pstree_stop.json"],
+                            "active_processes": [
+                                "[CPU] rustc foo.rs (pid 1001)",
+                            ],
+                            "total_matching_processes": 1,
+                            "total_leaf_processes": 1,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ret = fint_build.ingest_timeout_metadata(
+                context_path, metadata_path
+            )
+            self.assertEqual(ret, 0)
+
+            # Verify build_artifacts.json was created with active processes
+            self.assertTrue(artifacts_path.exists())
+            updated_artifacts = build_artifacts_pb2.BuildArtifacts()
+            json_format.Parse(
+                artifacts_path.read_text(encoding="utf-8"), updated_artifacts
+            )
+            summary = updated_artifacts.failure_summary
+            self.assertIn("Active processes at timeout:", summary)
+            self.assertIn("* [CPU] rustc foo.rs (pid 1001)", summary)
 
 
 if __name__ == "__main__":

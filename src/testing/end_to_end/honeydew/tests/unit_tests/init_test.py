@@ -11,7 +11,6 @@ from collections.abc import Callable
 from typing import Any
 from unittest import mock
 
-import fuchsia_controller_py as fuchsia_controller
 import honeydew
 from honeydew import device_classes, errors
 from honeydew.device_classes import (
@@ -26,7 +25,6 @@ from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fuchsia_controller_transport,
 )
-from honeydew.transports.sl4f import sl4f as sl4f_transport
 from honeydew.typing import custom_types
 from parameterized import param, parameterized
 
@@ -41,7 +39,6 @@ _SHARED_DATA: str = "/tmp/shared_data"
 
 _INPUT_ARGS: dict[str, Any] = {
     "ffx_config_data": ffx_config.FfxConfigData(
-        isolate_dir=fuchsia_controller.IsolateDir("/tmp/isolate"),
         logs_dir="/tmp/logs",
         binary_path="/bin/ffx",
         logs_level="debug",
@@ -96,11 +93,6 @@ class InitTests(unittest.TestCase):
         return_value=FuchsiaDevice,
         autospec=True,
     )
-    @mock.patch.object(
-        sl4f_transport.SL4F,
-        "check_connection",
-        autospec=True,
-    )
     @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
     @mock.patch.object(
         fuchsia_controller_transport.FuchsiaController,
@@ -113,7 +105,6 @@ class InitTests(unittest.TestCase):
         mock_fc_context: mock.Mock,
         mock_fc_check_connection: mock.Mock,
         mock_ffx_check_connection: mock.Mock,
-        mock_sl4f_check_connection: mock.Mock,
         mock_get_device_class: mock.Mock,
     ) -> None:
         """Test case for honeydew.create_device()."""
@@ -139,12 +130,10 @@ class InitTests(unittest.TestCase):
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
             },
-            isolate_dir=_INPUT_ARGS["ffx_config_data"].isolate_dir,
             target=_INPUT_ARGS["target_name"],
         )
         mock_fc_check_connection.assert_called()
         mock_ffx_check_connection.assert_called()
-        mock_sl4f_check_connection.assert_not_called()
 
     @mock.patch.object(
         honeydew,
@@ -190,7 +179,6 @@ class InitTests(unittest.TestCase):
                 "connectivity.enable_usb": "false",
                 "connectivity.usb_driver_autostart": "false",
             },
-            isolate_dir=_INPUT_ARGS["ffx_config_data"].isolate_dir,
             target=str(_INPUT_ARGS["target_ip_port"]),
         )
         mock_fc_check_connection.assert_called()

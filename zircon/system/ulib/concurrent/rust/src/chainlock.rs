@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::marker::PhantomPinned;
+use core::marker::{PhantomData, PhantomPinned};
 use core::mem::offset_of;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
@@ -95,7 +95,10 @@ struct AttemptResult {
 pub struct ChainLock<T: Transaction> {
     state: AtomicToken,
     contention_state: T::ContentionState,
-    _pin: PhantomPinned,
+    // Wrapped in `PhantomData` so `#[repr(C)]` structs embedding a `ChainLock` (e.g. the kernel's
+    // `Thread`) stay FFI-safe when named in `extern` signatures (`improper_ctypes` rejects a bare
+    // `PhantomPinned`, but ignores `PhantomData` fields).
+    _pin: PhantomData<PhantomPinned>,
 }
 
 impl<T: Transaction> ChainLock<T> {
@@ -108,7 +111,7 @@ impl<T: Transaction> ChainLock<T> {
         Self {
             state: AtomicToken::new(Self::UNLOCKED_TOKEN),
             contention_state: T::ContentionState::INIT,
-            _pin: PhantomPinned,
+            _pin: PhantomData,
         }
     }
 
@@ -316,16 +319,18 @@ impl<T: Transaction> ChainLock<T> {
     /// Asserts in debug builds that the lock is held by the current transaction.
     #[inline]
     pub fn assert_held(&self, token: &ChainLockTransactionToken<T>) {
-        let transaction = T::active_ref(token);
-        let tx_token = transaction.token();
-        let lock_token = self.state.load(Ordering::Relaxed);
-        debug_assert_eq!(
-            lock_token,
-            tx_token,
-            "Failed to assert ChainLock is held (lock token {:#x}, our token {:#x}).",
-            lock_token.value(),
-            tx_token.value()
-        );
+        if cfg!(debug_assertions) {
+            let transaction = T::active_ref(token);
+            let tx_token = transaction.token();
+            let lock_token = self.state.load(Ordering::Relaxed);
+            debug_assert_eq!(
+                lock_token,
+                tx_token,
+                "Failed to assert ChainLock is held (lock token {:#x}, our token {:#x}).",
+                lock_token.value(),
+                tx_token.value()
+            );
+        }
     }
 
     /// Asserts in debug builds that the lock is held by the current transaction and must be

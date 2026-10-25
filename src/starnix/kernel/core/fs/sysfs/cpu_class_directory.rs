@@ -12,18 +12,21 @@ use crate::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use crate::vfs::{FsNodeOps, FsString};
 use fidl_fuchsia_hardware_cpu_ctrl as fcpuctrl;
 use fidl_fuchsia_hardware_power_stats as fpowerstats;
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_cpu as fcpu;
-use fidl_fuchsia_power_cpu_manager as fcpumanager;
 use fuchsia_component::client::connect_to_protocol_sync;
 use itertools::Itertools;
 use starnix_logging::{bug_ref, log_warn};
-use starnix_sync::{CpuC2ProxyCacheLock, CpuFreqProxyCacheLock, LockDepMutex};
+use starnix_sync::{
+    CpuC2ProxyCacheLock, CpuC2SuspendAccountingLock, CpuFreqProxyCacheLock, LockDepMutex,
+};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
 use starnix_uapi::{errno, error, from_status_like_fdio};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use zx;
 
 #[derive(Clone)]
@@ -58,7 +61,7 @@ pub fn register_cpu_devices(kernel: &Kernel) {
         });
 
     let cpu_bus = registry.objects.get_or_create_bus("cpu".into());
-    let c2_provider = Arc::new(CpuC2Provider::default());
+    let c2_provider = kernel.expando.get::<CpuC2Provider>();
     for (core_id, domain) in &core_to_domain_map {
         let name: FsString = format!("cpu{}", core_id).into();
         let c2_provider = c2_provider.clone();
@@ -293,20 +296,12 @@ fn build_cpuidle_directory(
         dir.entry("desc", BytesFile::new_node(b"idle\n".to_vec()), mode!(IFREG, 0o444));
         dir.entry(
             "time",
-            BytesFile::new_node(CpuIdleStatFile {
-                core_id,
-                stat_type: CpuIdleStatType::Time,
-                c2_provider: state0_c2_provider.clone(),
-            }),
+            BytesFile::new_node(CpuIdleStatFile::new_time(core_id, state0_c2_provider)),
             mode!(IFREG, 0o444),
         );
         dir.entry(
             "usage",
-            BytesFile::new_node(CpuIdleStatFile {
-                core_id,
-                stat_type: CpuIdleStatType::Usage,
-                c2_provider: state0_c2_provider,
-            }),
+            BytesFile::new_node(CpuIdleStatFile::new_usage(core_id)),
             mode!(IFREG, 0o444),
         );
     });
@@ -367,8 +362,8 @@ fn add_min_freq_entry(
     name: &'static str,
     domain: &Arc<CpuFreqDomain>,
 ) {
-    // Mirror `add_max_freq_entry`: only expose active min-frequency voting when the domain is
-    // tunable, falling back to an inert node reporting `lowest_khz()` otherwise.
+    // A domain that reports no operating points cannot have its minimum frequency controlled, so
+    // fall back to an inert node rather than one that would fail every write.
     if domain.is_tunable() {
         dir.entry(name, ScalingMinFreqFile::new_node(domain, name), mode!(IFREG, 0o644));
     } else {
@@ -391,8 +386,8 @@ fn build_cpufreq_directory(dir: &SimpleDirectoryMutator, domain: &Arc<CpuFreqDom
     });
 
     // Android Power HAL and thermal/debug tooling vote through `cpufreq/vote_manager/*`. Each
-    // max-frequency node (including `scaling_max_freq`) registers its own persistent vote in
-    // `CpuFreqDomain`, which enforces the most restrictive ceiling across all active voters.
+    // max/min-frequency node (including `scaling_max_freq` and `scaling_min_freq`) holds its own
+    // persistent `DomainController` lease in `CpuFreqDomain`.
     dir.subdir("vote_manager", 0o755, |dir| {
         for name in VOTE_MANAGER_MAX_FREQ_NODES {
             add_max_freq_entry(dir, name, domain);
@@ -415,7 +410,6 @@ fn build_cpufreq_directory(dir: &SimpleDirectoryMutator, domain: &Arc<CpuFreqDom
     );
 
     add_min_freq_entry(dir, "scaling_min_freq", domain);
-
     add_max_freq_entry(dir, "scaling_max_freq", domain);
 
     dir.entry(
@@ -478,31 +472,23 @@ impl BytesFileOps for CpuFreqStatsResetFile {
 
 #[derive(Default)]
 struct CpuFreqDomainState {
-    /// Active ceiling votes keyed by voter name (`voter -> opp_index`), aggregated using Linux
-    /// `freq_qos` / `vote_manager` semantics (the lowest maximum frequency wins).
-    votes: HashMap<&'static str, u64>,
+    /// Active ceiling leases keyed by voter name (`voter -> (opp_index, lease_token)`).
+    /// Each voter holds its own lease on `DomainController`; dropping the `fbroker::LeaseToken`
+    /// releases that voter's ceiling lease in `cpu-manager`.
+    votes: HashMap<&'static str, (u64, fbroker::LeaseToken)>,
 
-    /// Active floor votes in kHz keyed by voter name (`voter -> khz` where `khz > lowest_khz`),
-    /// aggregated using Linux `freq_qos` / `vote_manager` semantics (the highest minimum
-    /// frequency wins).
-    min_votes: HashMap<&'static str, u64>,
-
-    /// The effective ceiling (`Some(opp_index)` or `None` when uncapped) last applied to
-    /// `DomainController`, or `None` when unknown, either because no vote has been applied yet
-    /// or because the last call failed.
-    applied_opp: Option<Option<u64>>,
+    /// Active floor leases keyed by voter name (`voter -> (opp_index, lease_token)`).
+    /// Each voter holds its own lease on `DomainController`; dropping the `fbroker::LeaseToken`
+    /// releases that voter's floor lease in `cpu-manager`.
+    min_votes: HashMap<&'static str, (u64, fbroker::LeaseToken)>,
 
     /// Lazily established connection to the server, dropped if a call fails at the transport
     /// level so that the next caller reconnects.
     domain_controller: Option<fcpu::DomainControllerSynchronousProxy>,
+}
 
-    /// Lazily established connection to `fuchsia.power.cpu.manager.Boost`, dropped if a call
-    /// fails at the transport level so that the next caller reconnects.
-    boost_proxy: Option<fcpumanager::BoostSynchronousProxy>,
-
-    /// Active boost token held while `min_votes` is non-empty. Dropping this token signals
-    /// `ZX_EVENTPAIR_PEER_CLOSED` to `cpu-manager`, releasing this domain's boost vote.
-    boost_token: Option<zx::EventPair>,
+fn is_lease_open(token: &fbroker::LeaseToken) -> bool {
+    token.wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST).is_err()
 }
 
 impl CpuFreqDomainState {
@@ -517,13 +503,39 @@ impl CpuFreqDomainState {
         let max_hz = opps_hz.iter().max().copied();
         match domain_controller.get_max_frequency(domain_id, zx::MonotonicInstant::INFINITE) {
             Ok(Ok(opp_index)) => match opps_hz.get(opp_index as usize).copied() {
-                Some(hz) if Some(hz) == max_hz => {
-                    Self { applied_opp: Some(None), ..Self::default() }
-                }
+                Some(hz) if Some(hz) == max_hz => Self::default(),
                 Some(_) => {
-                    let mut votes = HashMap::new();
-                    votes.insert(SOFT_MAX_FREQ_VOTER, opp_index);
-                    Self { votes, applied_opp: Some(Some(opp_index)), ..Self::default() }
+                    let lease_name = format!("starnix:{SOFT_MAX_FREQ_VOTER}");
+                    match domain_controller.lease_max_frequency(
+                        domain_id,
+                        opp_index,
+                        &lease_name,
+                        zx::MonotonicInstant::INFINITE,
+                    ) {
+                        Ok(Ok(token)) => {
+                            match domain_controller
+                                .clear_max_frequency(domain_id, zx::MonotonicInstant::INFINITE)
+                            {
+                                Ok(Ok(())) => {}
+                                other => log_warn!(
+                                    "Failed to clear initial max frequency for domain {}: {:?}",
+                                    domain_id,
+                                    other
+                                ),
+                            }
+                            let mut votes = HashMap::new();
+                            votes.insert(SOFT_MAX_FREQ_VOTER, (opp_index, token));
+                            Self { votes, ..Self::default() }
+                        }
+                        other => {
+                            log_warn!(
+                                "Failed to lease initial soft_max_freq for domain {}: {:?}",
+                                domain_id,
+                                other
+                            );
+                            Self::default()
+                        }
+                    }
                 }
                 None => {
                     log_warn!(
@@ -560,11 +572,11 @@ pub struct CpuFreqDomain {
 
     /// Available frequencies in Hz, in `DomainInfo.available_frequencies_hz` order.
     ///
-    /// This is operating point order: `DomainController.SetMaxFrequency` takes an index into
-    /// this list. It is deliberately kept apart from `sorted_khz` below, which is what
-    /// `scaling_available_frequencies` reports, because sorting reorders the entries. The two
-    /// lists are not positionally related, so a frequency must be matched by value to find its
-    /// operating point.
+    /// This is operating point order: `DomainController.LeaseMaxFrequency` and
+    /// `LeaseMinFrequency` take an index into this list. It is deliberately kept apart from
+    /// `sorted_khz` below, which is what `scaling_available_frequencies` reports, because sorting
+    /// reorders the entries. The two lists are not positionally related, so a frequency must be
+    /// matched by value to find its operating point.
     opps_hz: Vec<u64>,
 
     /// `opps_hz` in kHz, sorted ascending and deduplicated.
@@ -611,7 +623,11 @@ impl CpuFreqDomain {
     }
 
     pub fn get_vote(&self, voter: &'static str) -> Option<u64> {
-        self.state.lock().votes.get(voter).copied()
+        self.state
+            .lock()
+            .votes
+            .get(voter)
+            .and_then(|(index, token)| is_lease_open(token).then_some(*index))
     }
 
     /// Returns `voter`'s active ceiling in kHz, or the domain's highest frequency when `voter` has
@@ -623,8 +639,25 @@ impl CpuFreqDomain {
             .or_else(|| self.highest_khz())
     }
 
+    fn get_min_vote(&self, voter: &'static str) -> Option<u64> {
+        self.state
+            .lock()
+            .min_votes
+            .get(voter)
+            .and_then(|(index, token)| is_lease_open(token).then_some(*index))
+    }
+
+    /// Returns `voter`'s active floor in kHz, or the domain's lowest frequency when `voter` has
+    /// no active floor.
+    fn min_voter_frequency_khz(&self, voter: &'static str) -> Option<u64> {
+        self.get_min_vote(voter)
+            .and_then(|index| self.opps_hz.get(index as usize))
+            .map(|&hz| hz_to_khz(hz))
+            .or_else(|| self.lowest_khz())
+    }
+
     /// Whether the domain is backed by `DomainController` and reports operating points, and can
-    /// therefore have its maximum frequency controlled.
+    /// therefore have its frequency bounds controlled.
     pub fn is_tunable(&self) -> bool {
         self.has_domain_controller && !self.opps_hz.is_empty()
     }
@@ -658,55 +691,81 @@ impl CpuFreqDomain {
             .map(|(index, _)| index as u64)
     }
 
-    /// Updates `voter`'s ceiling vote (`Some(opp_index)` or `None` to release) and applies the
-    /// most restrictive ceiling across all active voters on this domain.
+    /// Maps a frequency in kHz to the operating point that sets the domain's floor there.
+    ///
+    /// Returns `None` when the request is at or below the domain's lowest operating point,
+    /// meaning "no floor". A client releases a floor by writing `0` or the domain's minimum
+    /// frequency (`cpuinfo_min_freq`), which lands here.
+    ///
+    /// Otherwise the request is snapped up to the lowest operating point that meets or exceeds
+    /// it, or to the highest operating point if it overshoots them all.
+    fn opp_index_for_min_khz(&self, khz: u64) -> Option<u64> {
+        if khz <= self.lowest_khz()? {
+            return None;
+        }
+        self.opps_hz
+            .iter()
+            .enumerate()
+            .filter(|(_, hz)| hz_to_khz(**hz) >= khz)
+            .min_by_key(|(_, hz)| **hz)
+            .or_else(|| self.opps_hz.iter().enumerate().max_by_key(|(_, hz)| **hz))
+            .map(|(index, _)| index as u64)
+    }
+
+    /// Updates `voter`'s ceiling lease (`Some(opp_index)` or `None` to release) on
+    /// `DomainController`.
     pub fn update_vote(&self, voter: &'static str, opp_index: Option<u64>) -> Result<(), Errno> {
+        self.update_lease_vote(voter, opp_index, |s| &mut s.votes, Self::lease_max_frequency)
+    }
+
+    /// Updates `voter`'s floor lease (`Some(opp_index)` or `None` to release) on
+    /// `DomainController`.
+    fn update_min_vote(&self, voter: &'static str, opp_index: Option<u64>) -> Result<(), Errno> {
+        self.update_lease_vote(voter, opp_index, |s| &mut s.min_votes, Self::lease_min_frequency)
+    }
+
+    fn update_lease_vote(
+        &self,
+        voter: &'static str,
+        opp_index: Option<u64>,
+        votes_mut: impl Fn(
+            &mut CpuFreqDomainState,
+        ) -> &mut HashMap<&'static str, (u64, fbroker::LeaseToken)>,
+        acquire_lease: impl FnOnce(
+            &Self,
+            &mut CpuFreqDomainState,
+            u64,
+            &str,
+        ) -> Result<fbroker::LeaseToken, Errno>,
+    ) -> Result<(), Errno> {
         if let Some(index) = opp_index {
             if index as usize >= self.opps_hz.len() {
                 return error!(EINVAL);
             }
         }
         let mut state = self.state.lock();
-        let previous = match opp_index {
-            Some(index) => state.votes.insert(voter, index),
-            None => state.votes.remove(voter),
-        };
-        let result = self.apply_effective_vote(&mut state);
-        if result.is_err() {
-            match previous {
-                Some(prev) => {
-                    state.votes.insert(voter, prev);
+        match opp_index {
+            Some(index) => {
+                if let Some((existing_index, existing_token)) = votes_mut(&mut state).get(voter) {
+                    if *existing_index == index && is_lease_open(existing_token) {
+                        return Ok(());
+                    }
                 }
-                None => {
-                    state.votes.remove(voter);
-                }
+                let lease_name = format!("starnix:{voter}");
+                let token = acquire_lease(self, &mut state, index, &lease_name)?;
+                votes_mut(&mut state).insert(voter, (index, token));
+            }
+            None => {
+                votes_mut(&mut state).remove(voter);
             }
         }
-        result
-    }
-
-    fn apply_effective_vote(&self, state: &mut CpuFreqDomainState) -> Result<(), Errno> {
-        let effective_opp = state
-            .votes
-            .values()
-            .copied()
-            .min_by_key(|&index| (self.opps_hz[index as usize], std::cmp::Reverse(index)));
-        if state.applied_opp == Some(effective_opp) {
-            return Ok(());
-        }
-        state.applied_opp = None;
-        match effective_opp {
-            Some(index) => self.set_max_frequency(state, index)?,
-            None => self.clear_max_frequency(state)?,
-        }
-        state.applied_opp = Some(effective_opp);
         Ok(())
     }
 
     /// Runs `call` against a lazily connected `DomainController`.
     ///
-    /// A transport failure invalidates the cached connection and `applied_opp`; a protocol-level
-    /// error leaves the connection in place for the caller to interpret.
+    /// A transport failure invalidates the cached connection; a protocol-level error leaves the
+    /// connection in place for the caller to interpret.
     fn with_domain_controller<T, E: std::fmt::Debug>(
         &self,
         state: &mut CpuFreqDomainState,
@@ -724,7 +783,6 @@ impl CpuFreqDomain {
             Err(e) => {
                 log_warn!("DomainController call failed for domain {}: {:?}", self.domain_id, e);
                 state.domain_controller = None;
-                state.applied_opp = None;
                 error!(EIO)
             }
         }
@@ -745,91 +803,59 @@ impl CpuFreqDomain {
         Ok(hz_to_khz(*hz))
     }
 
-    fn set_max_frequency(&self, state: &mut CpuFreqDomainState, index: u64) -> Result<(), Errno> {
-        self.with_domain_controller(state, |dc| {
-            dc.set_max_frequency(self.domain_id, index, zx::MonotonicInstant::INFINITE)
-        })?
-        .map_err(|e| {
-            log_warn!("set_max_frequency failed for domain {}: {:?}", self.domain_id, e);
-            errno!(EINVAL)
-        })
-    }
-
-    fn clear_max_frequency(&self, state: &mut CpuFreqDomainState) -> Result<(), Errno> {
-        self.with_domain_controller(state, |dc| {
-            dc.clear_max_frequency(self.domain_id, zx::MonotonicInstant::INFINITE)
-        })?
-        .map_err(|e| {
-            log_warn!("clear_max_frequency failed for domain {}: {:?}", self.domain_id, e);
-            errno!(EINVAL)
-        })
-    }
-
-    /// Returns the effective minimum frequency in kHz for `scaling_min_freq`, or `voter`'s active
-    /// floor in kHz for `vote_manager/*_min_freq`, falling back to the domain's lowest frequency.
-    fn min_frequency_khz(&self, voter: &'static str) -> Option<u64> {
-        let state = self.state.lock();
-        let active_vote = if voter == "scaling_min_freq" {
-            state.min_votes.values().copied().max()
-        } else {
-            state.min_votes.get(voter).copied()
-        };
-        active_vote.or_else(|| self.lowest_khz())
-    }
-
-    /// Updates `voter`'s floor vote in kHz and acquires or releases a `cpu-manager` `Boost` token
-    /// for this domain when the set of active floor votes transitions between empty and non-empty.
-    pub fn update_min_vote(
+    fn lease_max_frequency(
         &self,
-        kernel: Option<&Kernel>,
-        voter: &'static str,
-        khz: u64,
-    ) -> Result<(), Errno> {
-        let lowest_khz = self.lowest_khz().unwrap_or(0);
-        let highest_khz = self.highest_khz().unwrap_or(u64::MAX);
-        let mut state = self.state.lock();
-        if khz <= lowest_khz {
-            state.min_votes.remove(voter);
-        } else {
-            state.min_votes.insert(voter, khz.min(highest_khz));
-        }
+        state: &mut CpuFreqDomainState,
+        index: u64,
+        lease_name: &str,
+    ) -> Result<fbroker::LeaseToken, Errno> {
+        self.with_domain_controller(state, |dc| {
+            dc.lease_max_frequency(
+                self.domain_id,
+                index,
+                lease_name,
+                zx::MonotonicInstant::INFINITE,
+            )
+        })?
+        .map_err(|e| {
+            log_warn!("lease_max_frequency failed for domain {}: {:?}", self.domain_id, e);
+            errno!(EINVAL)
+        })
+    }
 
-        if !state.min_votes.is_empty() && state.boost_token.is_none() {
-            if state.boost_proxy.is_none() {
-                state.boost_proxy = kernel
-                    .and_then(|k| {
-                        k.connect_to_protocol_at_container_svc::<fcpumanager::BoostMarker>()
-                            .ok()
-                            .map(|c| c.into_sync_proxy())
-                    })
-                    .or_else(|| connect_to_protocol_sync::<fcpumanager::BoostMarker>().ok());
-            }
-            if let Some(ref proxy) = state.boost_proxy {
-                match proxy.boost(zx::MonotonicInstant::INFINITE) {
-                    Ok(Ok(token)) => {
-                        state.boost_token = Some(token);
-                    }
-                    Ok(Err(e)) => {
-                        log_warn!(
-                            "cpu-manager Boost returned error for domain {}: {:?}",
-                            self.domain_id,
-                            e
-                        );
-                    }
-                    Err(e) => {
-                        log_warn!(
-                            "cpu-manager Boost FIDL call failed for domain {}: {:?}",
-                            self.domain_id,
-                            e
-                        );
-                        state.boost_proxy = None;
-                    }
-                }
-            }
-        } else if state.min_votes.is_empty() && state.boost_token.is_some() {
-            state.boost_token = None;
-        }
-        Ok(())
+    /// Reads back the frequency in kHz that the domain's minimum is currently set to.
+    fn min_frequency_khz(&self) -> Result<u64, Errno> {
+        let mut state = self.state.lock();
+        let index = self
+            .with_domain_controller(&mut state, |dc| {
+                dc.get_min_frequency(self.domain_id, zx::MonotonicInstant::INFINITE)
+            })?
+            .map_err(|e| {
+                log_warn!("get_min_frequency failed for domain {}: {:?}", self.domain_id, e);
+                errno!(EINVAL)
+            })?;
+        let hz = self.opps_hz.get(index as usize).ok_or_else(|| errno!(EINVAL))?;
+        Ok(hz_to_khz(*hz))
+    }
+
+    fn lease_min_frequency(
+        &self,
+        state: &mut CpuFreqDomainState,
+        index: u64,
+        lease_name: &str,
+    ) -> Result<fbroker::LeaseToken, Errno> {
+        self.with_domain_controller(state, |dc| {
+            dc.lease_min_frequency(
+                self.domain_id,
+                index,
+                lease_name,
+                zx::MonotonicInstant::INFINITE,
+            )
+        })?
+        .map_err(|e| {
+            log_warn!("lease_min_frequency failed for domain {}: {:?}", self.domain_id, e);
+            errno!(EINVAL)
+        })
     }
 }
 
@@ -866,11 +892,10 @@ impl BytesFileOps for ScalingMaxFreqFile {
 }
 
 /// A writable min-frequency node (`scaling_min_freq` and `vote_manager/*_min_freq`), backed by
-/// `fuchsia.power.cpu.manager/Boost`.
+/// `fuchsia.power.cpu/DomainController`.
 ///
-/// While any voter on a domain requests a floor above `lowest_khz`, the domain holds a
-/// ref-counted `Boost` token with `cpu-manager`; when all floor votes are cleared
-/// (`<= lowest_khz`), the token is dropped.
+/// Votes are keyed by the sysfs node identity (`voter`) in `CpuFreqDomain` and persist across
+/// `close()` until overwritten or cleared with a value at or below the domain minimum.
 struct ScalingMinFreqFile {
     domain: Arc<CpuFreqDomain>,
     voter: &'static str,
@@ -884,12 +909,17 @@ impl ScalingMinFreqFile {
 
 impl BytesFileOps for ScalingMinFreqFile {
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        Ok(format_freq_khz(self.domain.min_frequency_khz(self.voter)).into_bytes().into())
+        let content = if self.voter == "scaling_min_freq" {
+            format!("{}\n", self.domain.min_frequency_khz()?)
+        } else {
+            format_freq_khz(self.domain.min_voter_frequency_khz(self.voter))
+        };
+        Ok(content.into_bytes().into())
     }
 
-    fn write(&self, current_task: &CurrentTask, data: Vec<u8>) -> Result<(), Errno> {
-        let khz = parse_unsigned_file::<u64>(&data)?;
-        self.domain.update_min_vote(Some(current_task.kernel()), self.voter, khz)
+    fn write(&self, _current_task: &CurrentTask, data: Vec<u8>) -> Result<(), Errno> {
+        let opp_index = self.domain.opp_index_for_min_khz(parse_unsigned_file::<u64>(&data)?);
+        self.domain.update_min_vote(self.voter, opp_index)
     }
 }
 
@@ -992,21 +1022,158 @@ enum CpuIdleStatType {
     Usage,
 }
 
-/// Computes C1 residency in microseconds from Zircon's aggregate `idle_time` (in nanoseconds)
-/// by subtracting C2 residency (reported in milliseconds) when available.
-fn c1_time_us(zircon_idle_ns: i64, c2_residency: Option<&fpowerstats::StateResidency>) -> u64 {
-    let total_idle_us = u64::try_from(zircon_idle_ns).unwrap_or(0) / 1000;
-    let c2_time_us = c2_residency.map_or(0, |state| state.total_time_ms.saturating_mul(1000));
-    total_idle_us.saturating_sub(c2_time_us)
+/// Returns the total time the system has spent suspended since boot.
+///
+/// The monotonic clock pauses while the system is suspended, whereas the boot clock keeps
+/// advancing, so the difference between the two is the accumulated suspended time. Reading the
+/// monotonic clock before the boot clock ensures that any execution delay or suspend between the
+/// two reads inflates (rather than reduces) `boot_ns - mono_ns`.
+fn suspended_time() -> zx::BootDuration {
+    let mono_ns = zx::MonotonicInstant::get().into_nanos();
+    let boot_ns = zx::BootInstant::get().into_nanos();
+    zx::BootDuration::from_nanos(boot_ns.saturating_sub(mono_ns))
+}
+
+/// Per-core firmware C2 residency, annotated with the portion accrued while the system was
+/// awake.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct CoreC2Residency {
+    /// Core identifier matching the firmware C2 state id.
+    id: i32,
+    /// Total C2 residency reported by firmware.
+    total_time: zx::BootDuration,
+    /// Number of C2 entries reported by firmware.
+    entry_count: u64,
+    /// Portion of `total_time` accrued while the system was awake.
+    awake_time: zx::MonotonicDuration,
+}
+
+/// Computes C1 residency from Zircon's per-CPU `total_idle` duration by subtracting the C2
+/// residency accrued while the system was awake.
+///
+/// Zircon's `idle_time` is measured on the monotonic timeline and therefore excludes time spent in
+/// system suspend, whereas firmware may or may not count system suspend as C2 residency (and this
+/// may differ between cores and between suspends). Only C2 residency accrued while awake overlaps
+/// with `total_idle`.
+///
+/// When `c2_residency` is `None` (because C2 residency reporting is unsupported on the platform or
+/// not reported for the core), all of `total_idle` is reported as C1 residency.
+fn compute_c1_residency(
+    total_idle: zx::MonotonicDuration,
+    c2_residency: Option<CoreC2Residency>,
+) -> zx::MonotonicDuration {
+    let awake_c2 = c2_residency.map_or(zx::MonotonicDuration::ZERO, |c2| c2.awake_time);
+    (total_idle - awake_c2).max(zx::MonotonicDuration::ZERO)
+}
+
+/// Per-core accounting state for [`C2SuspendAccounting`].
+#[derive(Clone, Copy, Default)]
+struct CoreC2Accounting {
+    /// Accumulated suspended time at the previous sample for this core.
+    last_suspended: zx::BootDuration,
+    /// Firmware C2 residency at the previous sample for this core.
+    last_c2: zx::BootDuration,
+    /// Accumulated C2 residency accrued while the system was awake.
+    awake_c2: zx::MonotonicDuration,
+}
+
+/// Tracks per-core firmware C2 residency accrued while the system was awake, excluding C2
+/// residency accrued during system suspend.
+///
+/// Between two samples for a core, C2 growth up to the suspended time that elapsed between those
+/// samples is attributed to suspend; any excess growth (`c2_delta - suspended_delta`) was accrued
+/// while awake. Cores whose firmware counts suspend as C2 thus have the suspend excluded from
+/// `awake_c2`, whereas cores whose firmware does not count it retain their awake C2 growth outside
+/// the suspend window.
+///
+/// Sampling immediately before and after container suspension (see
+/// [`sample_cpu_c2_residency`]) keeps the window around each suspend tight, so little awake C2
+/// time is lost on cores that do not count suspend as C2.
+#[derive(Default)]
+struct C2SuspendAccounting {
+    /// Per-core accounting keyed by the firmware C2 state id.
+    cores: HashMap<i32, CoreC2Accounting>,
+}
+
+impl C2SuspendAccounting {
+    fn boot_duration_from_ms(ms: u64) -> zx::BootDuration {
+        zx::BootDuration::from_millis(i64::try_from(ms).unwrap_or(i64::MAX))
+    }
+
+    /// Records a sample of accumulated suspended time and per-core C2 residencies.
+    ///
+    /// Samples older than a previously recorded one contribute no additional awake residency.
+    fn record(&mut self, suspended: zx::BootDuration, residencies: &[fpowerstats::StateResidency]) {
+        // Quantize suspended time to milliseconds to match firmware C2 residency granularity.
+        let suspended = zx::BootDuration::from_millis(suspended.into_millis().max(0));
+        for residency in residencies {
+            let total_c2 = Self::boot_duration_from_ms(residency.total_time_ms);
+            let core = self.cores.entry(residency.id).or_default();
+            let suspended_delta = (suspended - core.last_suspended).max(zx::BootDuration::ZERO);
+            let c2_delta = (total_c2 - core.last_c2).max(zx::BootDuration::ZERO);
+            let awake_delta =
+                zx::MonotonicDuration::from_nanos((c2_delta - suspended_delta).into_nanos().max(0));
+            core.awake_c2 += awake_delta;
+            core.last_suspended = core.last_suspended.max(suspended);
+            core.last_c2 = core.last_c2.max(total_c2);
+        }
+    }
+
+    /// Returns the C2 residency accrued while awake for `core_id`.
+    fn awake_c2(&self, core_id: i32) -> zx::MonotonicDuration {
+        self.cores.get(&core_id).map_or(zx::MonotonicDuration::ZERO, |core| core.awake_c2)
+    }
+
+    /// Pairs raw firmware residencies with the current per-core awake C2 accounting.
+    fn snapshot(&self, residencies: Vec<fpowerstats::StateResidency>) -> Vec<CoreC2Residency> {
+        residencies
+            .into_iter()
+            .map(|state| CoreC2Residency {
+                id: state.id,
+                total_time: Self::boot_duration_from_ms(state.total_time_ms),
+                entry_count: u64::from(state.entry_count),
+                awake_time: self.awake_c2(state.id),
+            })
+            .collect()
+    }
+}
+
+/// Statistic type and state for a `/sys/devices/system/cpu/cpuN/cpuidle/state0/{time,usage}` node.
+enum CpuIdleC1Stat {
+    Time {
+        c2_provider: Arc<CpuC2Provider>,
+        /// Highest C1 residency (in microseconds) reported so far.
+        ///
+        /// Zircon idle time and firmware C2 residency are sampled at slightly different instants
+        /// (and C2 at millisecond granularity), so the computed C1 residency may transiently
+        /// regress. Userspace treats `time` as a monotonic counter, so reads never report a value
+        /// lower than a previously reported one.
+        last_time_us: AtomicU64,
+    },
+    Usage,
 }
 
 /// Backing [`BytesFileOps`] implementation for `/sys/devices/system/cpu/cpuN/cpuidle/state0/time`
 /// and `state0/usage`, reporting per-core C1 residency (in microseconds) and reschedule count
-/// from Zircon's `PerCpuStats`, subtracting C2 residency when available.
+/// from Zircon's `PerCpuStats`, subtracting awake C2 residency when available.
 struct CpuIdleStatFile {
     core_id: u64,
-    stat_type: CpuIdleStatType,
-    c2_provider: Arc<CpuC2Provider>,
+    stat: CpuIdleC1Stat,
+}
+
+impl CpuIdleStatFile {
+    fn new_time(core_id: u64, c2_provider: Arc<CpuC2Provider>) -> Self {
+        Self { core_id, stat: CpuIdleC1Stat::Time { c2_provider, last_time_us: AtomicU64::new(0) } }
+    }
+
+    fn new_usage(core_id: u64) -> Self {
+        Self { core_id, stat: CpuIdleC1Stat::Usage }
+    }
+
+    fn clamp_c1_residency_us(last_time_us: &AtomicU64, c1: zx::MonotonicDuration) -> u64 {
+        let c1_us = u64::try_from(c1.into_micros()).unwrap_or(0);
+        last_time_us.fetch_max(c1_us, Ordering::Relaxed).max(c1_us)
+    }
 }
 
 impl BytesFileOps for CpuIdleStatFile {
@@ -1019,13 +1186,16 @@ impl BytesFileOps for CpuIdleStatFile {
             .map_err(|_| errno!(EINVAL))?;
         let per_cpu_stats = cpu_stats.per_cpu_stats.ok_or_else(|| errno!(EINVAL))?;
         let per_cpu = per_cpu_stats.get(self.core_id as usize).ok_or_else(|| errno!(EINVAL))?;
-        let value = match self.stat_type {
-            CpuIdleStatType::Time => {
-                let idle_ns = per_cpu.idle_time.ok_or_else(|| errno!(EINVAL))?;
-                let c2 = self.c2_provider.residency(self.core_id)?;
-                c1_time_us(idle_ns, c2.as_ref())
+        let value = match &self.stat {
+            CpuIdleC1Stat::Time { c2_provider, last_time_us } => {
+                let total_idle = zx::MonotonicDuration::from_nanos(
+                    per_cpu.idle_time.ok_or_else(|| errno!(EINVAL))?,
+                );
+                let c2 = c2_provider.residency(self.core_id)?;
+                let c1 = compute_c1_residency(total_idle, c2);
+                Self::clamp_c1_residency_us(last_time_us, c1)
             }
-            CpuIdleStatType::Usage => per_cpu.reschedules.ok_or_else(|| errno!(EINVAL))?,
+            CpuIdleC1Stat::Usage => per_cpu.reschedules.ok_or_else(|| errno!(EINVAL))?,
         };
         Ok(format!("{value}\n").into_bytes().into())
     }
@@ -1036,6 +1206,10 @@ const CPU_C2_ENTITY_NAME: &str = "cpu_c2";
 
 /// Maximum time to wait for a synchronous `fuchsia.hardware.power.stats.Device` call.
 const POWER_STATS_FIDL_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(2);
+
+/// Maximum difference between back-to-back [`suspended_time`] reads attributed to non-atomic
+/// reading of the boot and monotonic clocks rather than an intervening system suspend.
+const CLOCK_READ_JITTER_TOLERANCE: zx::BootDuration = zx::BootDuration::from_millis(1);
 
 /// Connection state of [`CpuC2Provider`] to the `fuchsia.hardware.power.stats.Service` instance
 /// that reports `"cpu_c2"`.
@@ -1050,7 +1224,7 @@ enum ProviderState {
     /// and fail with `EIO` until the service recovers, avoiding non-monotonic `0` counter drops.
     Disconnected,
     /// No `fuchsia.hardware.power.stats.Service` instance in `/svc` reported `"cpu_c2"` during
-    /// initial discovery, so C2 residency is unsupported on this platform and reads report `0`.
+    /// initial discovery, so C2 residency is unsupported on this platform.
     Unavailable,
 }
 
@@ -1062,11 +1236,11 @@ enum ProviderState {
 ///
 /// # Caching and Recovery
 /// Connection discovery in `/svc/fuchsia.hardware.power.stats.Service` is performed lazily on
-/// the first read:
+/// the first read or suspend sample:
 /// - If an instance reporting the `"cpu_c2"` entity is found, its proxy is cached in
 ///   [`ProviderState::Connected`].
 /// - If no such instance exists during initial discovery, [`ProviderState::Unavailable`] is cached
-///   so subsequent reads return `Ok(None)` (`0` residency) without repeatedly scanning `/svc`.
+///   so subsequent reads return `Ok(None)` without repeatedly scanning `/svc`.
 /// - If a `GetStats` call fails after a connection was established, the state transitions to
 ///   [`ProviderState::Disconnected`] and the read fails with `EIO` so userspace does not observe
 ///   monotonic counters dropping to `0`. Subsequent reads attempt to reconnect without permanently
@@ -1076,9 +1250,12 @@ enum ProviderState {
 /// `state` is locked only briefly to inspect or update [`ProviderState`] and clone the `Arc`
 /// wrapping the synchronous proxy. The lock is released before scanning `/svc` or issuing FIDL
 /// calls so concurrent sysfs reads across CPU cores do not serialize behind the mutex.
+/// `suspend_accounting` is likewise locked only to record a sample and snapshot the accounting;
+/// the two locks are never held at the same time.
 #[derive(Default)]
 struct CpuC2Provider {
     state: LockDepMutex<ProviderState, CpuC2ProxyCacheLock>,
+    suspend_accounting: LockDepMutex<C2SuspendAccounting, CpuC2SuspendAccountingLock>,
 }
 
 impl CpuC2Provider {
@@ -1117,11 +1294,31 @@ impl CpuC2Provider {
         }
     }
 
-    fn residency(&self, core_id: u64) -> Result<Option<fpowerstats::StateResidency>, Errno> {
-        let core_id = i32::try_from(core_id).map_err(|_| errno!(EINVAL))?;
-        let Some(proxy) = self.proxy()? else {
-            return Ok(None);
-        };
+    /// Updates `suspend_accounting` if the sample did not race a system suspend, and returns a
+    /// consistent [`CoreC2Residency`] snapshot while holding the accounting lock.
+    fn record_sample(
+        &self,
+        suspended_before: zx::BootDuration,
+        suspended_after: zx::BootDuration,
+        residencies: Vec<fpowerstats::StateResidency>,
+    ) -> Vec<CoreC2Residency> {
+        let mut accounting = self.suspend_accounting.lock();
+        // If the system suspended while the stats were being read, it is unknown whether the
+        // residencies include that suspend, so do not use them for attribution. The tolerance
+        // absorbs jitter from reading the boot and monotonic clocks non-atomically.
+        if suspended_after - suspended_before <= CLOCK_READ_JITTER_TOLERANCE {
+            accounting.record(suspended_after, &residencies);
+        }
+        accounting.snapshot(residencies)
+    }
+
+    /// Reads the per-core C2 residencies from `proxy`, updates `suspend_accounting`, and returns
+    /// the resulting [`CoreC2Residency`] snapshot.
+    fn sample(
+        &self,
+        proxy: &Arc<fpowerstats::DeviceSynchronousProxy>,
+    ) -> Result<Vec<CoreC2Residency>, Errno> {
+        let suspended_before = suspended_time();
         let deadline = zx::MonotonicInstant::after(POWER_STATS_FIDL_TIMEOUT);
         let reports = match proxy.get_stats(deadline) {
             Ok(reports) => reports,
@@ -1130,36 +1327,68 @@ impl CpuC2Provider {
                 let mut state = self.state.lock();
                 if matches!(
                     &*state,
-                    ProviderState::Connected(current) if Arc::ptr_eq(current, &proxy)
+                    ProviderState::Connected(current) if Arc::ptr_eq(current, proxy)
                 ) {
                     *state = ProviderState::Disconnected;
                 }
                 return error!(EIO);
             }
         };
-        Ok(reports
+        let suspended_after = suspended_time();
+        let residencies = reports
             .into_iter()
             .find(|stats| stats.entity == CPU_C2_ENTITY_NAME)
-            .and_then(|stats| stats.state_residency_data.into_iter().find(|s| s.id == core_id)))
+            .map_or_else(Vec::new, |stats| stats.state_residency_data);
+        Ok(self.record_sample(suspended_before, suspended_after, residencies))
     }
+
+    /// Connects if needed and records a C2 residency sample when C2 reporting is available.
+    fn sample_all(&self) {
+        if let Ok(Some(proxy)) = self.proxy() {
+            let _ = self.sample(&proxy);
+        }
+    }
+
+    fn residency(&self, core_id: u64) -> Result<Option<CoreC2Residency>, Errno> {
+        let core_id = i32::try_from(core_id).map_err(|_| errno!(EINVAL))?;
+        let Some(proxy) = self.proxy()? else {
+            return Ok(None);
+        };
+        Ok(self.sample(&proxy)?.into_iter().find(|s| s.id == core_id))
+    }
+}
+
+/// Samples per-core CPU C2 residency so that C2 residency accrued during system suspend is
+/// excluded from awake C2 residency rather than subtracted from C1 idle time.
+///
+/// Call immediately before and after suspending the container so the sampling window tightly
+/// brackets each suspend.
+pub fn sample_cpu_c2_residency(kernel: &Kernel) {
+    kernel.expando.get::<CpuC2Provider>().sample_all();
 }
 
 /// Backing [`BytesFileOps`] implementation for `/sys/devices/system/cpu/cpuN/cpuidle/state1/time`
 /// and `state1/usage`, reporting per-core C2 residency (in microseconds) and entry count from
-/// [`CpuC2Provider`], or `0` when C2 residency is unsupported on the platform.
+/// [`CpuC2Provider`], or `ENODEV` when C2 residency is unavailable for the core.
 struct CpuIdleC2StatFile {
     core_id: u64,
     stat_type: CpuIdleStatType,
     provider: Arc<CpuC2Provider>,
 }
 
+impl CpuIdleC2StatFile {
+    fn read_value(&self) -> Result<u64, Errno> {
+        let state = self.provider.residency(self.core_id)?.ok_or_else(|| errno!(ENODEV))?;
+        Ok(match self.stat_type {
+            CpuIdleStatType::Time => u64::try_from(state.total_time.into_micros()).unwrap_or(0),
+            CpuIdleStatType::Usage => state.entry_count,
+        })
+    }
+}
+
 impl BytesFileOps for CpuIdleC2StatFile {
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let value =
-            self.provider.residency(self.core_id)?.map_or(0, |state| match self.stat_type {
-                CpuIdleStatType::Time => state.total_time_ms.saturating_mul(1000),
-                CpuIdleStatType::Usage => u64::from(state.entry_count),
-            });
+        let value = self.read_value()?;
         Ok(format!("{value}\n").into_bytes().into())
     }
 }
@@ -1210,13 +1439,14 @@ mod tests {
             state: LockDepMutex::new(ProviderState::Connected(Arc::new(
                 fpowerstats::DeviceSynchronousProxy::new(client),
             ))),
+            suspend_accounting: Default::default(),
         };
         let core1 = provider
             .residency(/* core_id = */ 1)
             .expect("residency call must succeed")
             .expect("core 1 residency must be present");
         assert_eq!(core1.entry_count, 56);
-        assert_eq!(core1.total_time_ms, 78);
+        assert_eq!(core1.total_time, zx::BootDuration::from_millis(78));
 
         server_thread.join().expect("server thread panicked");
 
@@ -1229,117 +1459,342 @@ mod tests {
         assert!(matches!(*provider.state.lock(), ProviderState::Disconnected));
 
         // When no service is present on initial discovery, the provider transitions from
-        // Unconnected to Unavailable and returns Ok(None).
-        let unconfigured = CpuC2Provider::default();
+        // Unconnected to Unavailable and returns Ok(None), while CpuIdleC2StatFile fails with
+        // ENODEV rather than reporting 0.
+        let unconfigured = Arc::new(CpuC2Provider::default());
         assert_eq!(unconfigured.residency(/* core_id = */ 0), Ok(None));
         assert!(matches!(*unconfigured.state.lock(), ProviderState::Unavailable));
+        let c2_file = CpuIdleC2StatFile {
+            core_id: 0,
+            stat_type: CpuIdleStatType::Time,
+            provider: unconfigured,
+        };
+        assert_eq!(c2_file.read_value(), error!(ENODEV));
     }
 
-    #[::fuchsia::test]
-    fn c1_time_subtracts_c2_residency_and_saturates_at_zero() {
-        let c2 = fpowerstats::StateResidency {
-            id: 0,
-            name: "C2_CPU0".to_string(),
-            total_time_ms: 1_899,
+    fn c2_residency(id: i32, total_time_ms: u64) -> fpowerstats::StateResidency {
+        fpowerstats::StateResidency {
+            id,
+            name: format!("C2_CPU{id}"),
+            total_time_ms,
             entry_count: 1,
             last_entry_timestamp_ms: 0,
-        };
-
-        // 5,000,000 us total idle - 1,899,000 us C2 = 3,101,000 us C1.
-        assert_eq!(c1_time_us(/* zircon_idle_ns = */ 5_000_000_000, Some(&c2)), 3_101_000);
-
-        // When C2 residency is unavailable, report aggregate idle time.
-        assert_eq!(c1_time_us(/* zircon_idle_ns = */ 5_000_000_000, None), 5_000_000);
-
-        // Saturate at 0 if C2 residency exceeds aggregate idle time due to sampling skew.
-        assert_eq!(c1_time_us(/* zircon_idle_ns = */ 1_000_000_000, Some(&c2)), 0);
+        }
     }
 
     #[::fuchsia::test]
-    fn min_freq_votes_manage_boost_token_lifecycle() {
+    fn c1_time_subtracts_awake_c2_residency_and_saturates_at_zero() {
+        let c2 = CoreC2Residency {
+            id: 0,
+            total_time: zx::BootDuration::from_millis(1_899),
+            entry_count: 1,
+            awake_time: zx::MonotonicDuration::from_millis(1_899),
+        };
+
+        // 5,000,000 us idle - 1,899,000 us awake C2 = 3,101,000 us C1.
+        assert_eq!(
+            compute_c1_residency(zx::MonotonicDuration::from_seconds(5), Some(c2)),
+            zx::MonotonicDuration::from_micros(3_101_000)
+        );
+
+        // When C2 residency is unavailable, report all of total_idle as C1.
+        assert_eq!(
+            compute_c1_residency(zx::MonotonicDuration::from_seconds(5), None),
+            zx::MonotonicDuration::from_seconds(5)
+        );
+
+        // Saturate at 0 if awake C2 residency exceeds idle time due to sampling skew.
+        assert_eq!(
+            compute_c1_residency(zx::MonotonicDuration::from_seconds(1), Some(c2)),
+            zx::MonotonicDuration::ZERO
+        );
+
+        // C2 residency accrued during suspend (excluded from awake_time) is not subtracted.
+        let c2 = CoreC2Residency {
+            id: 0,
+            total_time: zx::BootDuration::from_millis(154_160),
+            entry_count: 2,
+            awake_time: zx::MonotonicDuration::from_millis(1_860),
+        };
+        assert_eq!(
+            compute_c1_residency(zx::MonotonicDuration::from_millis(252_370), Some(c2)),
+            zx::MonotonicDuration::from_micros(250_510_000)
+        );
+    }
+
+    #[::fuchsia::test]
+    fn c2_suspend_accounting_attributes_suspend_per_core() {
+        let mut accounting = C2SuspendAccounting::default();
+
+        // Before suspend: core 0 accrued 10 s of awake C2, core 1 accrued 2 s.
+        accounting.record(
+            zx::BootDuration::from_millis(0),
+            &[c2_residency(0, 10_000), c2_residency(1, 2_000)],
+        );
+        assert_eq!(accounting.awake_c2(0), zx::MonotonicDuration::from_millis(10_000));
+        assert_eq!(accounting.awake_c2(1), zx::MonotonicDuration::from_millis(2_000));
+
+        // A 152 s suspend. Firmware counts it as C2 on core 1 (plus 0.5 s of awake C2 within the
+        // sampling window) but not on core 0, which only accrued 0.2 s of awake C2.
+        accounting.record(
+            zx::BootDuration::from_millis(152_000),
+            &[c2_residency(0, 10_200), c2_residency(1, 154_500)],
+        );
+        assert_eq!(accounting.awake_c2(0), zx::MonotonicDuration::from_millis(10_000));
+        assert_eq!(accounting.awake_c2(1), zx::MonotonicDuration::from_millis(2_500));
+
+        // Awake C2 accrued without further suspend is added in full. Core 2 appears for the first
+        // time after the 152 s suspend with 153 s of total C2; its per-core last_suspended starts
+        // at 0 so the 152 s suspend is still deducted.
+        accounting.record(
+            zx::BootDuration::from_millis(152_000),
+            &[c2_residency(0, 70_000), c2_residency(1, 160_000), c2_residency(2, 153_000)],
+        );
+        assert_eq!(accounting.awake_c2(0), zx::MonotonicDuration::from_millis(69_800));
+        assert_eq!(accounting.awake_c2(1), zx::MonotonicDuration::from_millis(8_000));
+        assert_eq!(accounting.awake_c2(2), zx::MonotonicDuration::from_millis(1_000));
+
+        // A stale sample (older suspended time and residencies) adds no awake residency.
+        accounting.record(
+            zx::BootDuration::from_millis(100_000),
+            &[c2_residency(0, 10_000), c2_residency(1, 100_000)],
+        );
+        assert_eq!(accounting.awake_c2(0), zx::MonotonicDuration::from_millis(69_800));
+        assert_eq!(accounting.awake_c2(1), zx::MonotonicDuration::from_millis(8_000));
+
+        // Unknown cores have no awake C2 residency.
+        assert_eq!(accounting.awake_c2(7), zx::MonotonicDuration::ZERO);
+    }
+
+    #[::fuchsia::test]
+    fn record_sample_discards_sample_that_raced_suspend() {
+        let provider = CpuC2Provider::default();
+
+        // Initial sample while awake is recorded.
+        let snapshot = provider.record_sample(
+            zx::BootDuration::from_millis(0),
+            zx::BootDuration::from_millis(0),
+            vec![c2_residency(0, 10_000)],
+        );
+        assert_eq!(
+            snapshot,
+            vec![CoreC2Residency {
+                id: 0,
+                total_time: zx::BootDuration::from_millis(10_000),
+                entry_count: 1,
+                awake_time: zx::MonotonicDuration::from_millis(10_000),
+            }]
+        );
+
+        // A sample across a 50 s suspend exceeds CLOCK_READ_JITTER_TOLERANCE: accounting is not
+        // updated, and the snapshot preserves the previously recorded awake_time rather than
+        // misattributing the ambiguous sample.
+        let raced = provider.record_sample(
+            zx::BootDuration::from_millis(0),
+            zx::BootDuration::from_millis(50_000),
+            vec![c2_residency(0, 60_000)],
+        );
+        assert_eq!(
+            raced,
+            vec![CoreC2Residency {
+                id: 0,
+                total_time: zx::BootDuration::from_millis(60_000),
+                entry_count: 1,
+                awake_time: zx::MonotonicDuration::from_millis(10_000),
+            }]
+        );
+
+        // The next un-raced sample (with 1 ms of clock-read jitter within
+        // CLOCK_READ_JITTER_TOLERANCE) attributes the 50 s suspend and records the 500 ms of
+        // awake C2 accrued since the initial sample.
+        let after = provider.record_sample(
+            zx::BootDuration::from_millis(49_999),
+            zx::BootDuration::from_millis(50_000),
+            vec![c2_residency(0, 60_500)],
+        );
+        assert_eq!(
+            after,
+            vec![CoreC2Residency {
+                id: 0,
+                total_time: zx::BootDuration::from_millis(60_500),
+                entry_count: 1,
+                awake_time: zx::MonotonicDuration::from_millis(10_500),
+            }]
+        );
+    }
+
+    #[::fuchsia::test]
+    fn c1_residency_clamps_to_high_water_mark() {
+        let last_time_us = AtomicU64::new(0);
+        assert_eq!(
+            CpuIdleStatFile::clamp_c1_residency_us(
+                &last_time_us,
+                zx::MonotonicDuration::from_micros(3_101_000),
+            ),
+            3_101_000
+        );
+        // Transient regression from sampling skew is clamped to the previous high-water mark.
+        assert_eq!(
+            CpuIdleStatFile::clamp_c1_residency_us(
+                &last_time_us,
+                zx::MonotonicDuration::from_micros(3_100_500),
+            ),
+            3_101_000
+        );
+        // Subsequent growth advances the high-water mark.
+        assert_eq!(
+            CpuIdleStatFile::clamp_c1_residency_us(
+                &last_time_us,
+                zx::MonotonicDuration::from_micros(3_200_000),
+            ),
+            3_200_000
+        );
+    }
+
+    #[::fuchsia::test]
+    fn min_freq_votes_manage_domain_controller_leases() {
         let (client, server) = zx::Channel::create();
-        let (token_tx, token_rx) = std::sync::mpsc::channel::<zx::EventPair>();
+        let (lease_tx, lease_rx) = std::sync::mpsc::channel();
+        let (prev_token_tx, prev_token_rx) = std::sync::mpsc::channel::<zx::EventPair>();
         let server_thread = std::thread::spawn(move || {
             let mut executor = fuchsia_async::LocalExecutor::default();
             executor.run_singlethreaded(async move {
-                let mut stream = fcpumanager::BoostRequestStream::from_channel(
+                let mut stream = fcpu::DomainControllerRequestStream::from_channel(
                     fuchsia_async::Channel::from_channel(server),
                 );
-                while let Some(fcpumanager::BoostRequest::Boost { responder }) =
-                    stream.try_next().await.expect("failed to read Boost request")
+                while let Some(request) =
+                    stream.try_next().await.expect("failed to read DomainController request")
                 {
-                    let (client_token, server_token) = zx::EventPair::create();
-                    responder.send(Ok(client_token)).expect("failed to send Boost response");
-                    token_tx.send(server_token).expect("failed to forward server token");
+                    match request {
+                        fcpu::DomainControllerRequest::GetMaxFrequency { domain_id, responder } => {
+                            assert_eq!(domain_id, 0);
+                            responder.send(Ok(2)).expect("failed to send max frequency");
+                        }
+                        fcpu::DomainControllerRequest::LeaseMinFrequency {
+                            domain_id,
+                            frequency_index,
+                            lease_name,
+                            responder,
+                        } => {
+                            assert_eq!(domain_id, 0);
+                            if let Ok(prev_token) = prev_token_rx.try_recv() {
+                                assert!(is_lease_open(&prev_token));
+                            }
+                            let (client_token, server_token) = zx::EventPair::create();
+                            responder.send(Ok(client_token)).expect("failed to send lease token");
+                            lease_tx
+                                .send((lease_name, frequency_index, server_token))
+                                .expect("failed to forward lease token");
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    }
                 }
             });
         });
 
+        let proxy = fcpu::DomainControllerSynchronousProxy::new(client);
         let domain = CpuFreqDomain::new(
             &fcpu::DomainInfo {
                 id: Some(0),
                 core_ids: Some(vec![0, 1]),
                 available_frequencies_hz: Some(vec![820_000_000, 1_200_000_000, 1_632_000_000]),
-                name: Some("little".to_string()),
+                name: Some("cluster0".to_string()),
                 ..Default::default()
             },
-            None,
+            Some(&proxy),
         );
-        domain.state.lock().boost_proxy = Some(fcpumanager::BoostSynchronousProxy::new(client));
+        domain.state.lock().domain_controller = Some(proxy);
 
-        assert_eq!(domain.min_frequency_khz("powerhint_min_freq"), Some(820_000));
-        assert_eq!(domain.min_frequency_khz("soft_min_freq"), Some(820_000));
-        assert_eq!(domain.min_frequency_khz("scaling_min_freq"), Some(820_000));
-
-        // 1. Writing khz > lowest_khz to powerhint_min_freq requests a Boost token and updates
-        //    powerhint_min_freq and scaling_min_freq reads.
-        domain
-            .update_min_vote(None, "powerhint_min_freq", 1_632_000)
-            .expect("update_min_vote must succeed");
-        let server_token = token_rx.recv().expect("must receive a Boost token");
+        // Voting above cpuinfo_min_freq acquires a per-voter LeaseMinFrequency token.
         assert_eq!(
-            server_token
-                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
-            zx::WaitResult::TimedOut(zx::Signals::NONE)
+            domain.update_min_vote("powerhint_min_freq", domain.opp_index_for_min_khz(1_632_000)),
+            Ok(())
         );
-        assert_eq!(domain.min_frequency_khz("powerhint_min_freq"), Some(1_632_000));
-        assert_eq!(domain.min_frequency_khz("soft_min_freq"), Some(820_000));
-        assert_eq!(domain.min_frequency_khz("scaling_min_freq"), Some(1_632_000));
+        assert_eq!(domain.min_voter_frequency_khz("powerhint_min_freq"), Some(1_632_000));
+        assert_eq!(domain.min_voter_frequency_khz("soft_min_freq"), Some(820_000));
+        let (name1, opp1, token1) = lease_rx.recv().expect("expected first lease token");
+        assert_eq!(name1, "starnix:powerhint_min_freq");
+        assert_eq!(opp1, 2);
+        assert!(is_lease_open(&token1));
 
-        // 2. While another voter (soft_min_freq) also holds a vote > lowest_khz, clearing
-        //    powerhint_min_freq (<= lowest_khz) keeps the boost token alive.
-        domain
-            .update_min_vote(None, "soft_min_freq", 1_200_000)
-            .expect("update_min_vote must succeed");
-        assert!(token_rx.try_recv().is_err(), "must reuse existing Boost token");
-        assert_eq!(domain.min_frequency_khz("soft_min_freq"), Some(1_200_000));
-        assert_eq!(domain.min_frequency_khz("scaling_min_freq"), Some(1_632_000));
-
-        domain
-            .update_min_vote(None, "powerhint_min_freq", 820_000)
-            .expect("clearing powerhint_min_freq must succeed");
-        assert_eq!(domain.min_frequency_khz("powerhint_min_freq"), Some(820_000));
-        assert_eq!(domain.min_frequency_khz("soft_min_freq"), Some(1_200_000));
-        assert_eq!(domain.min_frequency_khz("scaling_min_freq"), Some(1_200_000));
+        // Re-applying the same OPP index while the token is open does not issue a duplicate
+        // LeaseMinFrequency call or drop the existing lease.
         assert_eq!(
-            server_token
-                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
-            zx::WaitResult::TimedOut(zx::Signals::NONE)
+            domain.update_min_vote("powerhint_min_freq", domain.opp_index_for_min_khz(1_632_000)),
+            Ok(())
         );
+        assert!(lease_rx.try_recv().is_err());
+        assert!(is_lease_open(&token1));
 
-        // 3. Clearing all min votes (<= lowest_khz or 0) drops the zx::EventPair token
-        //    (ZX_EVENTPAIR_PEER_CLOSED observed by the server end) and restores scaling_min_freq
-        //    to lowest_khz.
-        domain
-            .update_min_vote(None, "soft_min_freq", 0)
-            .expect("clearing soft_min_freq must succeed");
-        assert_eq!(domain.min_frequency_khz("soft_min_freq"), Some(820_000));
-        assert_eq!(domain.min_frequency_khz("scaling_min_freq"), Some(820_000));
-        let closed_signals = server_token
-            .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
-            .to_result()
-            .expect("server_token must observe ZX_EVENTPAIR_PEER_CLOSED");
-        assert!(closed_signals.contains(zx::Signals::EVENTPAIR_PEER_CLOSED));
+        // A second voter acquires an independent LeaseMinFrequency token while keeping the first alive.
+        assert_eq!(
+            domain.update_min_vote("soft_min_freq", domain.opp_index_for_min_khz(1_200_000)),
+            Ok(())
+        );
+        assert_eq!(domain.min_voter_frequency_khz("soft_min_freq"), Some(1_200_000));
+        let (name2, opp2, token2) = lease_rx.recv().expect("expected second lease token");
+        assert_eq!(name2, "starnix:soft_min_freq");
+        assert_eq!(opp2, 1);
+        assert!(is_lease_open(&token1));
+        assert!(is_lease_open(&token2));
+
+        // Updating an existing voter from one active OPP to another acquires the new lease before
+        // token1 observes EVENTPAIR_PEER_CLOSED, and then drops token1.
+        prev_token_tx
+            .send(token1.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate token1"))
+            .expect("send previous token");
+        assert_eq!(
+            domain.update_min_vote("powerhint_min_freq", domain.opp_index_for_min_khz(1_200_000)),
+            Ok(())
+        );
+        assert_eq!(domain.min_voter_frequency_khz("powerhint_min_freq"), Some(1_200_000));
+        let (name3, opp3, token3) = lease_rx.recv().expect("expected replacement lease token");
+        assert_eq!(name3, "starnix:powerhint_min_freq");
+        assert_eq!(opp3, 1);
+        assert_eq!(
+            token1.wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE),
+            zx::WaitResult::Ok(zx::Signals::EVENTPAIR_PEER_CLOSED)
+        );
+        assert!(is_lease_open(&token3));
+        assert!(is_lease_open(&token2));
+
+        // Dropping the server peer token invalidates the cached vote until re-applied, at which
+        // point re-applying the same OPP index acquires a new lease.
+        drop(token3);
+        assert_eq!(domain.get_min_vote("powerhint_min_freq"), None);
+        assert_eq!(domain.min_voter_frequency_khz("powerhint_min_freq"), Some(820_000));
+        assert_eq!(
+            domain.update_min_vote("powerhint_min_freq", domain.opp_index_for_min_khz(1_200_000)),
+            Ok(())
+        );
+        assert_eq!(domain.min_voter_frequency_khz("powerhint_min_freq"), Some(1_200_000));
+        let (name4, opp4, token4) = lease_rx.recv().expect("expected re-leased token");
+        assert_eq!(name4, "starnix:powerhint_min_freq");
+        assert_eq!(opp4, 1);
+        assert!(is_lease_open(&token4));
+
+        // Lowering powerhint_min_freq to cpuinfo_min_freq drops only its lease while soft_min_freq stays active.
+        assert_eq!(
+            domain.update_min_vote("powerhint_min_freq", domain.opp_index_for_min_khz(820_000)),
+            Ok(())
+        );
+        assert_eq!(domain.min_voter_frequency_khz("powerhint_min_freq"), Some(820_000));
+        assert_eq!(
+            token4.wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE),
+            zx::WaitResult::Ok(zx::Signals::EVENTPAIR_PEER_CLOSED)
+        );
+        assert!(is_lease_open(&token2));
+
+        // Clearing soft_min_freq drops the remaining lease.
+        assert_eq!(
+            domain.update_min_vote("soft_min_freq", domain.opp_index_for_min_khz(0)),
+            Ok(())
+        );
+        assert_eq!(domain.min_voter_frequency_khz("soft_min_freq"), Some(820_000));
+        assert_eq!(
+            token2.wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE),
+            zx::WaitResult::Ok(zx::Signals::EVENTPAIR_PEER_CLOSED)
+        );
 
         drop(domain);
         server_thread.join().expect("server thread panicked");

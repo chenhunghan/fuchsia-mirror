@@ -64,7 +64,7 @@ use linux_uapi::{
 use selinux::{FileSystemMountOptions, InitialSid, SecurityPermission, SecurityServer, TaskAttrs};
 use starnix_logging::{CATEGORY_STARNIX_SECURITY, log_debug};
 use starnix_uapi::arc_key::WeakKey;
-use starnix_uapi::auth::{Credentials, PtraceAccessMode};
+use starnix_uapi::auth::{CAP_SETUID, Credentials, PtraceAccessMode};
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{Access, FileMode};
@@ -391,8 +391,6 @@ pub fn file_system_init_security(
 
 /// Gives the hooks subsystem an opportunity to note that the new `file_system` needs labeling, if
 /// SELinux is enabled, but no policy has yet been loaded.
-// TODO: https://fxbug.dev/366405587 - Merge this logic into `file_system_resolve_security()` and
-// remove this extra hook.
 pub fn file_system_post_init_security(kernel: &Kernel, file_system: &FileSystemHandle) {
     track_hook_duration!("security.hooks.file_system_post_init_security");
     if let Some(state) = &kernel.security_state.state {
@@ -426,7 +424,7 @@ pub fn file_system_resolve_security(
 /// Used to return an extended attribute name and value to apply to a [`crate::vfs::FsNode`].
 pub struct FsNodeSecurityXattr {
     pub name: &'static FsStr,
-    pub value: FsString,
+    pub value: Box<[u8]>,
 }
 
 /// Checks whether the `current_task` is allowed to mmap `file` or memory using the given
@@ -545,19 +543,6 @@ pub fn fs_node_init_with_dentry_no_xattr(
     }
 }
 
-// Temporary work-around for lack of a `CurrentTask` during creation of `DirEntry`s for some initial
-// file-systems.
-// TODO: https://fxbug.dev/455771186 - Clean up with-DirEntry initialization and remove this.
-pub fn fs_node_init_with_dentry_deferred(kernel: &Kernel, dir_entry: &DirEntryHandle) {
-    track_hook_duration!("security.hooks.fs_node_init_with_dentry_no_xattr");
-    let Some(dir_entry) = NonPrivateDirEntry::new(dir_entry) else {
-        return;
-    };
-    if kernel.security_state.state.is_some() {
-        selinux_hooks::fs_node::fs_node_init_with_dentry_deferred(dir_entry);
-    }
-}
-
 /// Applies the given label to the given node without checking any permissions.
 /// Used by file-system implementations to set the label for a node, for example when it has
 /// prefetched the label in the xattr rather than letting it get fetched by
@@ -568,10 +553,10 @@ pub fn fs_node_notify_security_context(
     current_task: &CurrentTask,
     fs_node: &FsNode,
     context: &FsStr,
-) -> Result<(), Errno> {
+) {
     track_hook_duration!("security.hooks.fs_node_notify_security_context");
     let Some(fs_node) = NonPrivateFsNode::new(fs_node) else {
-        return Ok(());
+        return;
     };
     if_selinux_else(
         current_task,
@@ -582,7 +567,7 @@ pub fn fs_node_notify_security_context(
                 context,
             )
         },
-        || error!(ENOTSUP),
+        || (),
     )
 }
 
@@ -615,6 +600,39 @@ pub fn fs_node_init_on_create(
             current_task,
             new_node,
             Some(parent),
+            name,
+        )
+    })
+}
+
+/// Called by remote file-system implementations before creating a new `FsNode` with `mode` and
+/// `name` under `parent`, to obtain the extended attribute with which the new node should be
+/// labeled, so that it can be supplied to the remote file-system inline with the creation request.
+///
+/// Once the node has been created, the file-system implementation should call
+/// `fs_node_notify_security_context()` with the attribute's value, so that the node's security
+/// state reflects the label that was applied remotely.
+///
+/// Returns `Ok(None)` if SELinux is not enabled, no policy has yet been loaded, or the file-system
+/// does not persist labels as extended attributes.
+///
+/// Corresponds to the `dentry_init_security()` LSM hook.
+pub fn dentry_init_security(
+    current_task: &CurrentTask,
+    parent: &FsNode,
+    mode: FileMode,
+    name: &FsStr,
+) -> Result<Option<FsNodeSecurityXattr>, Errno> {
+    track_hook_duration!("security.hooks.dentry_init_security");
+    let Some(parent) = NonPrivateFsNode::assert_from(parent) else {
+        return Ok(None);
+    };
+    if_selinux_else_default_ok(current_task, |security_server| {
+        selinux_hooks::fs_node::dentry_init_security(
+            security_server,
+            current_task,
+            parent,
+            mode,
             name,
         )
     })
@@ -982,8 +1000,6 @@ pub fn check_file_ioctl_access(
 ///
 /// - fs_node: The "lower" filesystem node that is to be copied-up.
 /// - fs: The OverlayFS instance performing the copy-up operation.
-// TODO: https://fxbug.dev/398696739 - Revise this API to accept the overlay FsNode for which
-// copy-up is being performed, rather than separate "lower" `fs_node` and overlay `fs`.
 ///
 /// Corresponds to the `security_inode_copy_up()` LSM hook.
 pub fn fs_node_copy_up(
@@ -1610,12 +1626,20 @@ pub fn bprm_creds_from_file(
     resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.bprm_creds_from_file");
-    let mask_caps = {
+    let (no_new_privs, is_ptraced_without_cap_sys_ptrace) = {
         let state = current_task.read();
-        state.no_new_privs() || state.is_ptraced_without_cap_sys_ptrace()
+        (state.no_new_privs(), state.is_ptraced_without_cap_sys_ptrace())
     };
+    let is_unsafe_share_or_ptrace =
+        is_ptraced_without_cap_sys_ptrace || current_task.has_shared_fs();
+    let mask_caps = no_new_privs || is_unsafe_share_or_ptrace;
 
-    let enable_suid = current_task.kernel().features.enable_suid && !mask_caps;
+    // When sharing filesystem context (`CLONE_FS`) or traced by an unprivileged
+    // tracer, set-user-ID and set-group-ID transitions are both gated on
+    // `CAP_SETUID` (Linux does not check `CAP_SETGID` here).
+    let enable_suid = current_task.kernel().features.enable_suid
+        && !no_new_privs
+        && (!is_unsafe_share_or_ptrace || is_task_capable_noaudit(current_task, CAP_SETUID));
     if enable_suid {
         resolved_program.file.name().apply_suid_and_sgid(&mut resolved_program.creds);
     }
@@ -2043,7 +2067,7 @@ pub fn check_fs_node_setxattr_access(
     current_task: &CurrentTask,
     fs_node: &FsNode,
     name: &FsStr,
-    value: &FsStr,
+    value: &[u8],
     op: XattrOp,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.check_fs_node_setxattr_access");
@@ -2176,7 +2200,7 @@ pub fn fs_node_getsecurity(
     fs_node: &FsNode,
     name: &FsStr,
     max_size: usize,
-) -> Result<ValueOrSize<FsString>, Errno> {
+) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
     track_hook_duration!("security.hooks.fs_node_getsecurity");
     let Some(non_private_node) = NonPrivateFsNode::new(fs_node) else {
         return fs_node.ops().get_xattr(fs_node, current_task, name, max_size);
@@ -2210,7 +2234,7 @@ pub fn fs_node_setsecurity(
     current_task: &CurrentTask,
     fs_node: &FsNode,
     name: &FsStr,
-    value: &FsStr,
+    value: &[u8],
     op: XattrOp,
 ) -> Result<(), Errno> {
     track_hook_duration!("security.hooks.fs_node_setsecurity");
@@ -2399,7 +2423,7 @@ pub fn set_procattr(
     )
 }
 
-/// Returns true if SELinux is enabled on the kernel for this task.
+/// Returns true if the file system persists labels in extended attributes.
 pub fn fs_is_xattr_labeled(fs: FileSystemHandle) -> bool {
     fs.security_state.state.supports_xattr()
 }
@@ -2970,7 +2994,7 @@ mod tests {
                     &current_task,
                     &node,
                     XATTR_NAME_SELINUX.to_bytes().into(),
-                    "!".into(), // Note: Not a valid security context.
+                    b"!", // Note: Not a valid security context.
                     XattrOp::Set,
                 )
                 .is_err()
@@ -2993,7 +3017,7 @@ mod tests {
                 &current_task,
                 &node,
                 XATTR_NAME_SELINUX.to_bytes().into(),
-                "!".into(), // Note: Not a valid security context.
+                b"!", // Note: Not a valid security context.
                 XattrOp::Set,
             )
             .expect("set_xattr(security.selinux) failed");
@@ -3044,13 +3068,13 @@ mod tests {
             let node = &testing::create_test_file(current_task).entry.node;
 
             // Set a mismatched value in `node`'s "security.seliux" attribute.
-            const TEST_VALUE: &str = "Something Random";
+            const TEST_VALUE: &[u8] = b"Something Random";
             node.ops()
                 .set_xattr(
                     node,
                     current_task,
                     XATTR_NAME_SELINUX.to_bytes().into(),
-                    TEST_VALUE.into(),
+                    TEST_VALUE,
                     XattrOp::Set,
                 )
                 .expect("set_xattr(security.selinux) failed");
@@ -3064,10 +3088,7 @@ mod tests {
             // Reading the security attribute should return the Security Context for the SID, rather than delegating.
             let result =
                 fs_node_getsecurity(current_task, node, XATTR_NAME_SELINUX.to_bytes().into(), 4096);
-            assert_eq!(
-                result,
-                Ok(ValueOrSize::Value(FsString::new(VALID_SECURITY_CONTEXT_WITH_NUL.into())))
-            );
+            assert_eq!(result, Ok(ValueOrSize::Value(VALID_SECURITY_CONTEXT_WITH_NUL.into())));
         })
         .await;
     }
@@ -3080,12 +3101,12 @@ mod tests {
             // Set an invalid value in `node`'s "security.selinux" attribute.
             // This requires SELinux to be in permissive mode, otherwise the "relabelto" permission check will fail.
             security_server.set_enforcing(false);
-            const TEST_VALUE: &str = "Something Random";
+            const TEST_VALUE: &[u8] = b"Something Random";
             fs_node_setsecurity(
                 &current_task,
                 node,
                 XATTR_NAME_SELINUX.to_bytes().into(),
-                TEST_VALUE.into(),
+                TEST_VALUE,
                 XattrOp::Set,
             )
             .expect("set_xattr(security.selinux) failed");
@@ -3094,7 +3115,7 @@ mod tests {
             // Reading the security attribute should pass-through to read the value from the file system.
             let result =
                 fs_node_getsecurity(current_task, node, XATTR_NAME_SELINUX.to_bytes().into(), 4096);
-            assert_eq!(result, Ok(ValueOrSize::Value(FsString::new(TEST_VALUE.into()))));
+            assert_eq!(result, Ok(ValueOrSize::Value(TEST_VALUE.into())));
         })
         .await;
     }

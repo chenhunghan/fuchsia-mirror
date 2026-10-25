@@ -91,7 +91,7 @@
             availability: "optional",
         },
         {
-            protocol: "fuchsia.memory.attribution.PageRefaultSink",
+            protocol: "fuchsia.memory.attribution.PagerStatsSink",
             from: "parent",
             to: "#fxfs",
             dependency: "weak",
@@ -102,6 +102,12 @@
             service: "fuchsia.fxfs.CryptService",
             from: "#fxfs-crypt",
             to: "#fxfs",
+        },
+        {
+            config: "fuchsia.diagnostics.StorageStallWatchdogEnabled",
+            from: "parent",
+            to: "#fxfs",
+            availability: "optional",
         },
     ],
     expose: [

@@ -30,23 +30,20 @@ rustc_library("lib") {
     ":logmessage_measure_tape",
     "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
     "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust",
     "//sdk/fidl/fuchsia.diagnostics.system:fuchsia.diagnostics.system_rust",
     "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
     "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
-    "//sdk/fidl/fuchsia.inspect.deprecated:fuchsia.inspect.deprecated_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
     "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
-    "//src/diagnostics/lib/inspect-fidl-load",
     "//src/lib/diagnostics/data/rust",
     "//src/lib/diagnostics/hierarchy/rust",
     "//src/lib/diagnostics/inspect/contrib/rust",
     "//src/lib/diagnostics/inspect/format/rust",
-    "//src/lib/sandbox",
 
     # Archivist needs to use InspectSink from itself, so it does not
     # include the normal inspect/client.shard.cml.
@@ -154,7 +151,6 @@ archivist_optimized_binary("bin") {
   deps = [
     ":archivist-config",
     ":lib",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
     "//sdk/rust/zx",
     "//src/diagnostics/lib/ring-buffer",
@@ -214,7 +210,6 @@ group("archivist-for-embedding-bundle") {
   visibility = [
     "//src/diagnostics/*",
     "//src/lib/diagnostics/*",
-    "//src/lib/syslog/go:*",
     "//src/sys/component_manager/tests/*",
     "//src/sys/test_manager:*",
     "//src/sys/time/httpsdate_time_source/tests:*",

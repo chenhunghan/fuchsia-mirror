@@ -17,6 +17,7 @@
 #include <zircon/types.h>
 
 #include <fbl/alloc_checker.h>
+#include <kernel/ffi.h>
 #include <ktl/utility.h>
 #include <vm/physmap.h>
 #include <vm/vm.h>
@@ -50,7 +51,6 @@ void rust_vm_object_physical_state_init(void* state, paddr_t base, uint64_t size
 void rust_vm_object_physical_state_destroy(void* state);
 Lock<CriticalMutex>* rust_vm_object_physical_state_get_lock(const void* state);
 uint64_t rust_vm_object_physical_state_get_size(const void* state);
-paddr_t rust_vm_object_physical_state_get_base(const void* state);
 bool rust_vm_object_physical_state_get_is_slice(const void* state);
 uint64_t rust_vm_object_physical_state_get_parent_user_id(const void* state);
 VmObjectPhysical* rust_vm_object_physical_state_get_parent_locked(const void* state);
@@ -275,7 +275,8 @@ VmObjectPhysical* cpp_vm_object_physical_create(paddr_t base, size_t size, zx_st
 VmObject* cpp_vm_object_physical_as_vm_object(VmObjectPhysical* vmo);
 zx_status_t cpp_vm_object_lookup_fn_invoke(const VmObject::LookupFunction* lookup_fn,
                                            uint64_t offset, paddr_t pa);
-arch_mmu_flags_t cpp_vm_object_get_mapping_cache_policy_locked(const VmObjectPhysical* vmo);
+arch_mmu_flags_t cpp_vm_object_physical_get_mapping_cache_policy_locked(
+    const VmObjectPhysical* vmo);
 size_t cpp_vm_object_num_mappings_locked(const VmObjectPhysical* vmo);
 bool cpp_child_list_lock_acquire();
 void cpp_child_list_lock_release(bool should_clear);
@@ -297,8 +298,9 @@ zx_status_t cpp_vm_object_lookup_fn_invoke(const VmObject::LookupFunction* looku
   return (*lookup_fn)(offset, pa);
 }
 
-arch_mmu_flags_t cpp_vm_object_get_mapping_cache_policy_locked(const VmObjectPhysical* vmo)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
+// TODO(https://fxbug.dev/537458631): Remove the annotation once cross-language inlining works.
+FFI_ALWAYS_INLINE arch_mmu_flags_t cpp_vm_object_physical_get_mapping_cache_policy_locked(
+    const VmObjectPhysical* vmo) TA_NO_THREAD_SAFETY_ANALYSIS {
   return vmo->GetMappingCachePolicyLocked();
 }
 

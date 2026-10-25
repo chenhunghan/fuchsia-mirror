@@ -44,10 +44,14 @@ template("driver_tools_lib") {
     if (is_host) {
       deps += [ "//src/devices/lib/driver-static-checks:lib" ]
     }
+    if (is_fuchsia) {
+      deps += [ "//sdk/rust/zx" ]
+    }
     if (defined(invoker.deps)) {
       deps += invoker.deps
     }
     test_deps = [
+      "//src/lib/fidl/rust/fidl",
       "//src/lib/fuchsia",
       "//src/lib/fuchsia-async",
     ]
@@ -73,6 +77,8 @@ template("driver_tools_lib") {
       "src/subcommands/dump/mod.rs",
       "src/subcommands/enable/args.rs",
       "src/subcommands/enable/mod.rs",
+      "src/subcommands/health_check/args.rs",
+      "src/subcommands/health_check/mod.rs",
       "src/subcommands/host/args.rs",
       "src/subcommands/host/mod.rs",
       "src/subcommands/host/subcommands/list/args.rs",
@@ -149,6 +155,10 @@ driver_tools_lib("lib_fdomain") {
     "//src/lib/fdomain/client:flex_fdomain",
   ]
   test_deps = [ "//src/lib/fdomain/local" ]
+
+  # Tests compare golden command output that includes formatted `anyhow::Error`
+  # values, which include a backtrace when `RUST_BACKTRACE=1` is set.
+  args = [ "env RUST_LIB_BACKTRACE=0" ]
   features = [ "fdomain" ]
 }
 

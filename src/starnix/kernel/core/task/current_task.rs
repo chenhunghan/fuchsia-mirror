@@ -3,18 +3,20 @@
 // found in the LICENSE file.
 
 use crate::arch::task::handle_hardware_exception;
-use crate::execution::{TaskInfo, create_zircon_process};
-use crate::mm::{DumpPolicy, MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor};
-use crate::ptrace::{PtraceCoreState, PtraceEvent, PtraceEventData, PtraceOptions, StopState};
+use crate::execution::{CreateDuringShutdown, TaskInfo, create_zircon_process};
+use crate::mm::{
+    DumpPolicy, MappingAccess, MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor,
+};
+use crate::ptrace::{PtraceEvent, PtraceEventData, PtraceOptions, StopState};
 use crate::security;
-use crate::signals::{SignalDetail, SignalInfo, send_signal_first, send_standard_signal};
+use crate::signals::{SignalInfo, send_standard_signal};
 use crate::task::loader::{
     ResolvedProgram, load_executable, resolve_elf_interpreter, resolve_executable,
 };
 use crate::task::{
     CurrentTaskCredentialsWriteGuard, ExitStatus, PageFaultExceptionReport, RobustListHeadPtr,
     RunState, SeccompFilter, SeccompFilterContainer, SeccompState, SeccompStateValue, Task,
-    TaskRunningState, ThreadState, Waiter,
+    TaskFlags, TaskRunningState, ThreadState, Waiter,
 };
 use crate::vfs::{
     AccessCheck, CreationStatus, DirEntry, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle,
@@ -32,6 +34,7 @@ use starnix_syscalls::decls::Syscall;
 use starnix_task_command::TaskCommand;
 use starnix_types::futex_address::FutexAddress;
 use starnix_types::ownership::{Releasable, release_on_error};
+use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::auth::{
     CAP_KILL, CAP_SYS_ADMIN, Credentials, FsCred, PTRACE_MODE_FSCREDS, PTRACE_MODE_REALCREDS,
     PtraceAccessMode,
@@ -50,8 +53,8 @@ use starnix_uapi::{
     CLONE_INTO_CGROUP, CLONE_NEWUTS, CLONE_PARENT, CLONE_PARENT_SETTID, CLONE_PTRACE, CLONE_SETTLS,
     CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VFORK, CLONE_VM, FUTEX_OWNER_DIED,
     FUTEX_TID_MASK, ROBUST_LIST_LIMIT, SECCOMP_FILTER_FLAG_LOG, SECCOMP_FILTER_FLAG_NEW_LISTENER,
-    SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH, clone_args, errno, error, pid_t,
-    sock_filter, ucred,
+    SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH, errno, error, pid_t, sock_filter,
+    ucred,
 };
 use std::cell::{Ref, RefCell};
 use std::collections::VecDeque;
@@ -140,6 +143,9 @@ pub struct CurrentTask {
     /// cache a reference to its `FdTable`.
     pub files: RefCell<Option<Arc<FdTable>>>,
 
+    /// The cached memory manager of the task.
+    pub mm: Option<Arc<MemoryManager>>,
+
     /// The current subjective credentials of the task.
     // TODO(https://fxbug.dev/433548348): Avoid interior mutability here by passing a
     // &mut CurrentTask around instead of &CurrentTask.
@@ -197,11 +203,13 @@ impl CurrentTask {
         let current_creds = RefCell::new(CurrentCreds::Cached(task.clone_creds()));
         let running_state = task.running_state().expect("CurrentTask must have TaskRunningState");
         let files = running_state.files().expect("CurrentTask must have FdTable");
+        let mm = running_state.mm.upgrade();
         Self {
             task,
             thread_state,
             running_state: Some(running_state),
             files: RefCell::new(Some(files)),
+            mm,
             current_creds,
             security_state: Default::default(),
             _local_marker: Default::default(),
@@ -248,13 +256,15 @@ impl CurrentTask {
         // on the exiting thread, where no locks are held. `proc_pid_directory_cache` only holds an
         // `FsNodeHandle`, whose release is already deferred to the delayed releaser.
 
-        if let Some(running_state) = self.running_state.take() {
+        if let Some(ref running_state) = self.running_state {
             *running_state.files.lock() = None;
             running_state.mm.update(None);
-            running_state.fs.update(None);
+            running_state.fs.update(&self, None);
         }
+        self.running_state = None;
 
         *self.files.borrow_mut() = None;
+        self.mm = None;
         self.task.running_state.update(None);
 
         self.trigger_delayed_releaser();
@@ -303,6 +313,31 @@ impl CurrentTask {
         self.files.borrow().as_ref().expect("CurrentTask must have FdTable").clone()
     }
 
+    /// Looks up a file descriptor in the cached [`FdTable`] without cloning the [`Arc<FdTable>`].
+    #[inline]
+    pub fn get_file(&self, fd: FdNumber) -> Result<FileHandle, Errno> {
+        self.files.borrow().as_ref().expect("CurrentTask must have FdTable").get(fd)
+    }
+
+    /// Looks up a file descriptor (allowing `O_PATH`) in the cached [`FdTable`] without cloning
+    /// the [`Arc<FdTable>`].
+    #[inline]
+    pub fn get_file_allowing_opath(&self, fd: FdNumber) -> Result<FileHandle, Errno> {
+        self.files.borrow().as_ref().expect("CurrentTask must have FdTable").get_allowing_opath(fd)
+    }
+
+    /// Returns the cached [`MemoryManager`] for the [`CurrentTask`], avoiding RCU read-scope and
+    /// [`Arc`] reference-count traffic on every user memory access.
+    #[inline]
+    pub fn mm(&self) -> Result<&Arc<MemoryManager>, Errno> {
+        self.mm.as_ref().ok_or_else(|| errno!(EINVAL))
+    }
+
+    pub fn set_mm_for_test(&mut self, mm: Arc<MemoryManager>) {
+        self.running_state().mm.update(Some(mm.clone()));
+        self.mm = Some(mm);
+    }
+
     /// Returns the [`FsContext`] for the [`Task`].
     ///
     /// # Panics
@@ -314,16 +349,15 @@ impl CurrentTask {
         self.running_state().fs().expect("CurrentTask must have FsContext")
     }
 
+    /// Returns whether another running task shares this task's [`FsContext`].
     pub fn has_shared_fs(&self) -> bool {
-        let fs = self.fs();
-        // This check is incorrect because someone else could be holding a temporary Arc to the
-        // FsContext and therefore increasing the strong count.
-        Arc::strong_count(&fs) > 2usize
+        self.fs().is_shared()
     }
 
+    /// Replaces this task's [`FsContext`] with an unshared copy.
     pub fn unshare_fs(&self) {
         let new_fs = self.fs().fork();
-        self.running_state().fs.update(new_fs);
+        self.running_state().fs.update(self, new_fs);
     }
 
     /// Returns the current subjective credentials of the task.
@@ -525,6 +559,10 @@ impl CurrentTask {
         self.read().is_interrupt_pending()
     }
 
+    pub fn is_work_cancelled(&self) -> bool {
+        self.flags().contains(TaskFlags::WORK_CANCELLED)
+    }
+
     /// Set the RunState for the current task to the given value and then call the given callback.
     ///
     /// When the callback is done, the run_state is restored to `RunState::Running`.
@@ -569,7 +607,7 @@ impl CurrentTask {
 
             // `SIGKILL` and `ThreadGroup::kill` mark tasks `EXITED` synchronously without queueing
             // a per-task signal, so check `is_exitted()` before blocking.
-            if self.is_exitted() {
+            if self.is_exitted() || self.is_work_cancelled() {
                 return error!(EINTR);
             }
             if run_state.ignores_signals() {
@@ -662,7 +700,7 @@ impl CurrentTask {
             //   directory.
             //
             // See https://man7.org/linux/man-pages/man2/open.2.html
-            let file = self.files().get_allowing_opath(dir_fd)?;
+            let file = self.get_file_allowing_opath(dir_fd)?;
             file.name.to_passive()
         };
 
@@ -1155,7 +1193,8 @@ impl CurrentTask {
             return Err(err);
         }
 
-        self.ptrace_event(PtraceOptions::TRACEEXEC, self.task.tid.id as u64);
+        let tid = self.get_tid() as u64;
+        self.ptrace().on_event(PtraceOptions::TRACEEXEC, tid);
         self.signal_vfork();
         self.task.thread_group.sync_syscall_log_level();
 
@@ -1181,11 +1220,12 @@ impl CurrentTask {
         let mm = {
             let new_mm = MemoryManager::exec(
                 self.thread_group().root_vmar.unowned(),
-                self.mm().ok(),
+                self.mm().ok().cloned(),
                 resolved_program.file.name().to_passive(),
                 elf_arch_width,
             )?;
             self.running_state().mm.update(Some(new_mm.clone()));
+            self.mm = Some(new_mm.clone());
             new_mm
         };
         // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
@@ -1194,7 +1234,7 @@ impl CurrentTask {
         //   execve(). Mutual exclusion locks, condition variables, and other
         //   pthreads objects are not preserved.
         //
-        // TODO(https://fxbug.dev/42082680): Implement thread destruction.
+        // TODO(https://fxbug.dev/297434895): Implement thread destruction.
 
         // Filesystem context sharing (via CLONE_FS with clone(2)) is preserved across
         // execve under Linux, as verified by `CloneAndExecTest.ExecDoesNotUnshareCloneFs`.
@@ -1253,7 +1293,7 @@ impl CurrentTask {
 
         let regs: zx_restricted_state_t = start_info.into();
         self.thread_state.registers.load(regs);
-        self.thread_state.extended_pstate.reset();
+        self.thread_state.extended_pstate.reset_with_arch(self.thread_state.arch_width());
 
         // The exit signal (and that of the children) is reset to SIGCHLD.
         {
@@ -1309,6 +1349,10 @@ impl CurrentTask {
         // while doing a tsync.  So, you hold the process lock while making any changes.
         let state = self.thread_group().write();
 
+        if self.seccomp_filter_state.get() == SeccompStateValue::Strict {
+            return error!(EINVAL);
+        }
+
         if flags & SECCOMP_FILTER_FLAG_TSYNC != 0 {
             // TSYNC synchronizes all filters for all threads in the current process to
             // the current thread's
@@ -1346,19 +1390,37 @@ impl CurrentTask {
 
                 other_task_state.enable_no_new_privs();
                 other_task_state.seccomp_filters = filters.clone();
+                task.seccomp_filter_state.set_always_allow(&filters.always_allow);
                 task.set_seccomp_state(SeccompStateValue::UserDefined)?;
             }
         } else {
             let mut task_state = self.task.write();
 
             task_state.seccomp_filters.add_filter(new_filter, code.len() as u16)?;
+            let always_allow = task_state.seccomp_filters.always_allow;
+            self.seccomp_filter_state.set_always_allow(&always_allow);
             self.set_seccomp_state(SeccompStateValue::UserDefined)?;
         }
 
         if let Some(fd) = maybe_fd { Ok(fd.into()) } else { Ok(().into()) }
     }
 
+    #[inline]
     pub fn run_seccomp_filters(
+        &mut self,
+        syscall: &Syscall,
+    ) -> Option<Result<SyscallResult, Errno>> {
+        if !self.is_arch32()
+            && self.seccomp_filter_state.is_syscall_always_allowed(syscall.decl.number)
+        {
+            return None;
+        }
+        self.run_seccomp_filters_slow(syscall)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn run_seccomp_filters_slow(
         &mut self,
         syscall: &Syscall,
     ) -> Option<Result<SyscallResult, Errno>> {
@@ -1656,6 +1718,7 @@ impl CurrentTask {
         let scheduler_state;
         let no_new_privs;
         let seccomp_filters;
+        let seccomp_state;
         let robust_list_head = RobustListHeadPtr::null(self);
         let child_signal_mask;
         let timerslack_ns;
@@ -1666,10 +1729,18 @@ impl CurrentTask {
             // new task because of CLONE_PARENT.
             let weak_original_parent;
             let original_parent;
+            // Whether this process may create processes during shutdown. Determined before
+            // CLONE_PARENT switches to the original parent's state.
+            let create_during_shutdown;
 
             // Make sure to drop these locks ASAP to avoid inversion
             let (thread_group_state, creator_task) = {
                 let thread_group_state = self.thread_group().write();
+                create_during_shutdown = if thread_group_state.is_deferred_shutdown_process() {
+                    CreateDuringShutdown::UntilDeadline
+                } else {
+                    CreateDuringShutdown::Never
+                };
                 if clone_parent {
                     // With the CLONE_PARENT flag, the parent of the new task is our parent
                     // instead of ourselves.
@@ -1684,16 +1755,20 @@ impl CurrentTask {
                 }
             };
 
+            scheduler_state = self.scheduler_state.lock().fork();
             let state = self.read();
 
             no_new_privs = state.no_new_privs();
             seccomp_filters = state.seccomp_filters.clone();
+            // Capture the seccomp state while holding the task lock so that it stays consistent
+            // with `seccomp_filters`. A concurrent `SECCOMP_FILTER_FLAG_TSYNC` from a sibling
+            // thread updates both under this task's write lock.
+            seccomp_state = SeccompState::from(&self.seccomp_filter_state);
             child_signal_mask = state.signal_mask();
 
             pid = pids.allocate_pid()?;
             command = self.command();
             creds = self.current_creds().clone();
-            scheduler_state = state.scheduler_state.fork();
             timerslack_ns = state.timerslack_ns;
 
             uts_ns = if clone_newuts {
@@ -1706,7 +1781,7 @@ impl CurrentTask {
             if clone_thread {
                 TaskInfo {
                     thread_group: self.thread_group().clone(),
-                    memory_manager: self.mm().ok(),
+                    memory_manager: self.mm().ok().cloned(),
                 }
             } else {
                 // Drop the lock on this task before entering `create_zircon_process`, because it will
@@ -1731,6 +1806,7 @@ impl CurrentTask {
                         child_exit_signal,
                         signal_actions,
                         command.clone(),
+                        create_during_shutdown,
                     )?
                 };
 
@@ -1763,10 +1839,7 @@ impl CurrentTask {
             abstract_vsock_namespace = running_state.abstract_vsock_namespace.clone();
         }
 
-        let (pgid_pid, sid_pid) = {
-            let tg_state = thread_group.read();
-            (tg_state.process_group.clone(), tg_state.session.clone())
-        };
+        let sid_pid = thread_group.read().session.clone();
 
         let mut child = TaskBuilder::new(Task::new(
             pid,
@@ -1784,7 +1857,7 @@ impl CurrentTask {
             scheduler_state,
             uts_ns,
             no_new_privs,
-            SeccompState::from(&self.seccomp_filter_state),
+            seccomp_state,
             seccomp_filters,
             robust_list_head,
             timerslack_ns,
@@ -1820,7 +1893,7 @@ impl CurrentTask {
                 std::mem::drop(pids);
             } else {
                 child.thread_group().add(Arc::clone(&child.task))?;
-                pids.attach_pgid(&pgid_pid, child.thread_group());
+                pids.attach_pgid(&child.thread_group().pgid(), child.thread_group());
                 pids.attach_sid(&sid_pid, child.thread_group());
                 std::mem::drop(pids);
 
@@ -1856,7 +1929,7 @@ impl CurrentTask {
                 // supported.
                 assert!(!clone_thread);
                 let child_mm = MemoryManager::snapshot_of(
-                    &self.mm()?,
+                    self.mm()?,
                     child.thread_group.root_vmar.unowned(),
                     self.thread_state.arch_width(),
                 )?;
@@ -1886,7 +1959,7 @@ impl CurrentTask {
             // by making a copy-on-write clone of the memory from the original process.
             if clone_vm && !clone_thread {
                 let child_mm = MemoryManager::snapshot_of(
-                    &self.mm()?,
+                    self.mm()?,
                     child.thread_group.root_vmar.unowned(),
                     self.thread_state.arch_width(),
                 )?;
@@ -2006,62 +2079,6 @@ impl CurrentTask {
             // Maybe go from stopping to stopped, if we are currently stopping
             // again.
             self.finalize_stop_state();
-        }
-    }
-
-    /// For traced tasks, this will return the data neceessary for a cloned task
-    /// to attach to the same tracer.
-    pub fn get_ptrace_core_state_for_clone(
-        &mut self,
-        clone_args: &clone_args,
-    ) -> (PtraceOptions, Option<PtraceCoreState>) {
-        let state = self.write();
-        if let Some(ptrace) = &state.ptrace {
-            ptrace.get_core_state_for_clone(clone_args)
-        } else {
-            (PtraceOptions::empty(), None)
-        }
-    }
-
-    /// If currently being ptraced with the given option, emit the appropriate
-    /// event.  PTRACE_EVENTMSG will return the given message.  Also emits the
-    /// appropriate event for execve in the absence of TRACEEXEC.
-    ///
-    /// Note that the Linux kernel has a documented bug where, if TRACEEXIT is
-    /// enabled, SIGKILL will trigger an event.  We do not exhibit this
-    /// behavior.
-    pub fn ptrace_event(&mut self, trace_kind: PtraceOptions, msg: u64) {
-        if !trace_kind.is_empty() {
-            {
-                let mut state = self.write();
-                if let Some(ptrace) = &mut state.ptrace {
-                    if !ptrace.has_option(trace_kind) {
-                        // If this would be a TRACEEXEC, but TRACEEXEC is not
-                        // turned on, then send a SIGTRAP.
-                        if trace_kind == PtraceOptions::TRACEEXEC && !ptrace.is_seized() {
-                            // Send a SIGTRAP so that the parent can gain control.
-                            send_signal_first(self, state, SignalInfo::kernel(SIGTRAP));
-                        }
-
-                        return;
-                    }
-                    let ptrace_event = PtraceEvent::from_option(&trace_kind) as u32;
-                    let siginfo = SignalInfo::with_detail(
-                        SIGTRAP,
-                        ((ptrace_event << 8) | SIGTRAP.number()) as i32,
-                        SignalDetail::None,
-                    );
-                    state.set_stopped(
-                        StopState::PtraceEventStopping,
-                        Some(siginfo),
-                        None,
-                        Some(PtraceEventData::new(trace_kind, msg)),
-                    );
-                } else {
-                    return;
-                }
-            }
-            self.block_if_stopped();
         }
     }
 
@@ -2278,6 +2295,22 @@ impl TaskMemoryAccessor for CurrentTask {
     fn maximum_valid_address(&self) -> Option<UserAddress> {
         self.mm().ok().map(|mm| mm.maximum_valid_user_address)
     }
+
+    fn ensure_buffers_mapped_in_user_vmar(
+        &self,
+        buffers: &[UserBuffer],
+        access: MappingAccess,
+    ) -> Result<(), Errno> {
+        let mut ranges = buffers
+            .iter()
+            .filter(|b| !b.is_empty())
+            .map(|b| (b.address, Some(b.length)))
+            .peekable();
+        if ranges.peek().is_some() {
+            self.mm()?.ensure_ranges_mapped_in_user_vmar_for_access(ranges, access)?;
+        }
+        Ok(())
+    }
 }
 
 pub enum ExceptionResult {
@@ -2297,6 +2330,7 @@ mod tests {
     use super::*;
     use crate::ptrace::{PtraceAttachType, ptrace_attach};
     use crate::testing::{create_task, spawn_kernel_and_run};
+    use starnix_uapi::CLONE_FS;
     use starnix_uapi::auth::{Credentials, PTRACE_MODE_READ_FSCREDS};
     use std::sync::Arc;
 
@@ -2326,6 +2360,47 @@ mod tests {
 
             assert!(running_state.fs().is_err());
             assert!(fs.upgrade().is_none(), "FsContext should be dropped by exit()");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_has_shared_fs_ignores_transient_refs() {
+        spawn_kernel_and_run(async move |current_task| {
+            assert!(!current_task.has_shared_fs());
+
+            let transient_fs = current_task.fs();
+            assert!(!current_task.has_shared_fs());
+            std::mem::drop(transient_fs);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_has_shared_fs_clone_and_unshare() {
+        spawn_kernel_and_run(async move |current_task| {
+            let child = current_task.clone_task_for_test(CLONE_FS as u64, Some(SIGCHLD));
+            assert!(current_task.has_shared_fs());
+            assert!(child.has_shared_fs());
+
+            child.unshare_fs();
+            assert!(!current_task.has_shared_fs());
+            assert!(!child.has_shared_fs());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_has_shared_fs_cleared_on_peer_exit() {
+        spawn_kernel_and_run(async move |current_task| {
+            let child = current_task.clone_task_for_test(CLONE_FS as u64, Some(SIGCHLD));
+            let child_running_state =
+                child.task.running_state().expect("child task should be running");
+            assert!(current_task.has_shared_fs());
+
+            std::mem::drop(child);
+            assert!(!current_task.has_shared_fs());
+            std::mem::drop(child_running_state);
         })
         .await;
     }

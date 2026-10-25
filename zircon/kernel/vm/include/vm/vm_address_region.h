@@ -245,7 +245,16 @@ extern "C" {
 void rust_vm_address_region_or_mapping_state_init(void* storage, vaddr_t base, size_t size,
                                                   uint32_t flags, VmAspace* aspace,
                                                   VmAddressRegion* parent, bool is_mapping);
-void rust_vm_address_region_or_mapping_destruct(void* storage);
+void rust_vm_address_region_or_mapping_destruct(VmAddressRegionOrMapping* region_or_mapping);
+void rust_vm_address_region_or_mapping_recycle(VmAddressRegionOrMapping* region_or_mapping);
+zx_status_t rust_vm_address_region_or_mapping_destroy(VmAddressRegionOrMapping* region_or_mapping);
+zx_status_t rust_vm_address_region_or_mapping_destroy_locked(
+    VmAddressRegionOrMapping* region_or_mapping);
+zx_status_t rust_vm_address_region_or_mapping_activate(VmAddressRegionOrMapping* region_or_mapping);
+void rust_vm_address_region_or_mapping_dump_locked(
+    const VmAddressRegionOrMapping* region_or_mapping, uint32_t depth, bool verbose);
+void rust_vm_address_region_or_mapping_commit_high_memory_priority(
+    VmAddressRegionOrMapping* region_or_mapping);
 vaddr_t rust_vm_address_region_or_mapping_base(const VmAddressRegionOrMapping* region_or_mapping);
 size_t rust_vm_address_region_or_mapping_size(const VmAddressRegionOrMapping* region_or_mapping);
 uint32_t rust_vm_address_region_or_mapping_flags(const VmAddressRegionOrMapping* region_or_mapping);
@@ -723,8 +732,10 @@ class RegionList final {
   ChildList regions_;
 };
 
+using VmMappingProtectionRanges = btree::BTree<vaddr_t, arch_mmu_flags_t>;
+
 extern "C" {
-void cpp_vm_address_region_free(VmAddressRegion* vmar);
+void cpp_vm_address_region_destruct(VmAddressRegion* vmar);
 VmAddressRegionOrMapping* cpp_vm_address_region_subregions_find_region(const VmAddressRegion* vmar,
                                                                        vaddr_t addr);
 VmAddressRegionOrMapping* cpp_vm_address_region_subregions_include_or_higher(
@@ -732,13 +743,22 @@ VmAddressRegionOrMapping* cpp_vm_address_region_subregions_include_or_higher(
 zx_status_t cpp_vm_address_region_subregions_insert_region(VmAddressRegion* vmar,
                                                            VmAddressRegionOrMapping* region);
 size_t cpp_vm_address_region_subregions_size_slow(const VmAddressRegion* vmar);
+void cpp_vm_address_region_subregions_remove_region(VmAddressRegion* vmar,
+                                                    VmAddressRegionOrMapping* region);
+bool cpp_vm_address_region_subregions_is_empty(const VmAddressRegion* vmar);
+VmAddressRegionOrMapping* cpp_vm_address_region_subregions_front(VmAddressRegion* vmar);
 void cpp_vm_address_region_subregions_for_each(const VmAddressRegion* vmar,
                                                void (*cb)(VmAddressRegionOrMapping*, void*),
                                                void* ctx);
+VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges(VmMapping* mapping);
+const VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges_const(
+    const VmMapping* mapping);
+void cpp_vm_address_region_commit_high_memory_priority(VmAddressRegion* vmar);
 }
 
 // A representation of a contiguous range of virtual address space
-class VmAddressRegion final : public VmAddressRegionOrMapping {
+class VmAddressRegion final : public VmAddressRegionOrMapping,
+                              public fbl::Recyclable<VmAddressRegion> {
  public:
   // Creates a root region.  This will span the entire aspace
   static zx_status_t CreateRootLocked(VmAspace& aspace, uint32_t vmar_flags,
@@ -764,7 +784,6 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   // Finds the child region that contains the given addr.  If addr is in a gap,
   // returns nullptr.  This is a non-recursive search.
   fbl::RefPtr<VmAddressRegionOrMapping> FindRegion(vaddr_t addr);
-  fbl::RefPtr<VmAddressRegionOrMapping> FindRegionLocked(vaddr_t addr) TA_REQ(lock());
 
   // Applies the given memory priority to this VMAR, which may or may not result in a change. Up to
   // the derived type to know how to apply and update the memory priority.
@@ -818,12 +837,6 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   using AttributionCounts = VmObject::AttributionCounts;
   AttributionCounts GetAttributedMemory() const;
 
-  // Constructors are public as LazyInit cannot use them otherwise, even if friended, but
-  // otherwise should be considered private and Create...() should be used instead.
-  VmAddressRegion(VmAspace& aspace, vaddr_t base, size_t size, uint32_t vmar_flags);
-  VmAddressRegion(VmAddressRegion& parent, vaddr_t base, size_t size, uint32_t vmar_flags,
-                  const char* name);
-
   // Traverses this vmar (and any sub-vmars) starting at this node, in depth-first pre-order. See
   // VmEnumerator for more details. If this vmar is not alive (in the LifeCycleState sense) or
   // otherwise not enumerable this returns ZX_ERR_BAD_STATE, otherwise the result of enumeration is
@@ -835,6 +848,11 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   friend lazy_init::Access;
   friend void vm_init_preheap();
 
+  // Should be considered private and Create...() should be used instead.
+  VmAddressRegion(VmAspace& aspace, vaddr_t base, size_t size, uint32_t vmar_flags);
+  VmAddressRegion(VmAddressRegion& parent, vaddr_t base, size_t size, uint32_t vmar_flags,
+                  const char* name);
+
   // constructor for use in creating the kernel aspace singleton
   explicit VmAddressRegion(VmAspace& kernel_aspace);
 
@@ -844,8 +862,7 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
   friend class VmAddressRegionEnumerator;
 
   ~VmAddressRegion();
-  friend fbl::RefPtr<VmAddressRegion>;
-  friend void ::cpp_vm_address_region_free(VmAddressRegion*);
+  friend void ::cpp_vm_address_region_destruct(VmAddressRegion*);
   friend void* ::cpp_vm_address_region_state(VmAddressRegion*);
   friend VmAddressRegionOrMapping* ::cpp_vm_address_region_subregions_find_region(
       const VmAddressRegion*, vaddr_t);
@@ -853,20 +870,25 @@ class VmAddressRegion final : public VmAddressRegionOrMapping {
       const VmAddressRegion*, vaddr_t);
   friend zx_status_t(::cpp_vm_address_region_subregions_insert_region)(VmAddressRegion*,
                                                                        VmAddressRegionOrMapping*);
+  friend void ::cpp_vm_address_region_subregions_remove_region(VmAddressRegion*,
+                                                               VmAddressRegionOrMapping*);
   friend size_t(::cpp_vm_address_region_subregions_size_slow)(const VmAddressRegion*);
+  friend bool ::cpp_vm_address_region_subregions_is_empty(const VmAddressRegion*);
+  friend VmAddressRegionOrMapping* ::cpp_vm_address_region_subregions_front(VmAddressRegion*);
   friend void ::cpp_vm_address_region_subregions_for_each(
       const VmAddressRegion*, void (*)(VmAddressRegionOrMapping*, void*), void*);
+  friend void ::cpp_vm_address_region_commit_high_memory_priority(VmAddressRegion*);
 
  private:
+  friend class fbl::Recyclable<VmAddressRegion>;
+  void fbl_recycle();
+
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmAddressRegion);
 
   void AssertCanary() const;
   OpaqueStorage<kVmAddressRegionStateSize, kVmAddressRegionStateAlign> opaque_storage_;
 
-  void DumpLockedImpl(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
   void CommitHighMemoryPriorityImpl() TA_EXCL(lock());
-  zx_status_t DestroyLockedImpl() TA_REQ(lock()) TA_REQ(region_lock());
-  zx_status_t ActivateImpl() TA_REQ(region_lock()) TA_REQ(lock());
 
   // Helpers to share code between CreateSubVmar and CreateVmMapping
   zx_status_t CreateSubVmarInternal(size_t offset, size_t size, uint8_t align_pow2,
@@ -929,13 +951,19 @@ void rust_vm_address_region_destruct(void* storage);
 const char* rust_vm_address_region_name(const VmAddressRegion* vmar);
 void rust_vm_address_region_assert_canary(const VmAddressRegion* vmar);
 bool rust_vm_address_region_has_parent(const VmAddressRegion* vmar);
+VmAddressRegion* rust_vm_address_region_create_root(VmAspace* aspace, vaddr_t base, size_t size,
+                                                    uint32_t vmar_flags);
+VmAddressRegion* rust_vm_address_region_create_child(VmAddressRegion* parent, vaddr_t base,
+                                                     size_t size, uint32_t vmar_flags,
+                                                     const char* name);
+void rust_vm_address_region_recycle(VmAddressRegion* vmar);
+VmAddressRegion* rust_vm_address_region_kernel_root_init(VmAspace* kernel_aspace);
+VmAddressRegion* rust_vm_address_region_kernel_heap_init(VmAddressRegion* parent, vaddr_t base,
+                                                         size_t size, uint32_t vmar_flags,
+                                                         const char* name);
 VmAddressRegionOrMapping* rust_vm_address_region_find_region(const VmAddressRegion* vmar,
                                                              vaddr_t addr);
-VmAddressRegionOrMapping* rust_vm_address_region_find_region_locked(const VmAddressRegion* vmar,
-                                                                    vaddr_t addr);
 VmMapping* rust_vm_address_region_find_mapping_locked(const VmAddressRegion* vmar, vaddr_t va);
-zx_status_t rust_vm_address_region_activate(VmAddressRegion* vmar);
-void rust_vm_address_region_dump_locked(const VmAddressRegion* vmar, uint32_t depth, bool verbose);
 }
 
 inline const char* VmAddressRegion::name() const { return rust_vm_address_region_name(this); }
@@ -943,12 +971,12 @@ inline void VmAddressRegion::AssertCanary() const { rust_vm_address_region_asser
 inline bool VmAddressRegion::has_parent() const { return rust_vm_address_region_has_parent(this); }
 
 extern "C" {
-void cpp_vm_mapping_free(VmMapping* mapping);
+void cpp_vm_mapping_destruct(VmMapping* mapping);
 zx_status_t cpp_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping);
 }
 
 // A representation of the mapping of a VMO into the address space
-class VmMapping final : public VmAddressRegionOrMapping {
+class VmMapping final : public VmAddressRegionOrMapping, public fbl::Recyclable<VmMapping> {
  public:
   enum class Mergeable : bool { YES = true, NO = false };
 
@@ -959,18 +987,10 @@ class VmMapping final : public VmAddressRegionOrMapping {
       TA_REQ(lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
     return FlagsRangeAtAddrLocked(offset).mmu_flags;
   }
-  arch_mmu_flags_t arch_mmu_flags_locked_object(vaddr_t offset) const
-      TA_REQ(object_locked()->lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return FlagsRangeAtAddrLocked(offset).mmu_flags;
-  }
   struct FlagsRange {
     arch_mmu_flags_t mmu_flags;
     uint64_t region_top;
   };
-  FlagsRange arch_mmu_flags_range_locked(vaddr_t offset) const
-      TA_REQ(lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return FlagsRangeAtAddrLocked(offset);
-  }
   uint64_t object_offset() const;
 
   Lock<CriticalMutex>* object_lock() const TA_RET_CAP(object_locked()->lock()) TA_REQ(lock()) {
@@ -1059,6 +1079,20 @@ class VmMapping final : public VmAddressRegionOrMapping {
     kNone = 0u,
     OnlyHasZeroPages = (1u << 0),
     Harvest = (1u << 1),
+  };
+
+  // Internal fully locked version of Destroy. Has controls to both skip the arch aspace unmapping
+  // as well as removal from the parent subregions list. These controls facilitate the fine grained
+  // control needed when splitting, merging and replacing mappings.
+  // If unmap is |No| then this method is defined to never fail. |remove_region| does not impact
+  // success or failure of the operation.
+  enum class DestroyUnmap : bool {
+    No,
+    Yes,
+  };
+  enum class DestroyRemoveFromParent : bool {
+    No,
+    Yes,
   };
 
   // Unmap any pages that map the passed in vmo range from the arch aspace.
@@ -1180,18 +1214,23 @@ class VmMapping final : public VmAddressRegionOrMapping {
 
  protected:
   ~VmMapping();
-  friend fbl::RefPtr<VmMapping>;
-  friend void ::cpp_vm_mapping_free(VmMapping*);
+  friend void ::cpp_vm_mapping_destruct(VmMapping*);
   friend void* ::cpp_vm_mapping_state(VmMapping*);
+  friend VmMappingProtectionRanges* ::cpp_vm_mapping_rest_protection_ranges(VmMapping*);
+  friend const VmMappingProtectionRanges* ::cpp_vm_mapping_rest_protection_ranges_const(
+      const VmMapping*);
 
  private:
+  friend class fbl::Recyclable<VmMapping>;
+  friend lazy_init::Access;
+  void fbl_recycle();
+
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmMapping);
 
   void AssertCanary() const;
   OpaqueStorage<kVmMappingStateSize, kVmMappingStateAlign> opaque_storage_;
 
   const fbl::RefPtr<VmObject>& object_locked() const TA_REQ(lock());
-  void reset_object_locked() TA_REQ(lock()) TA_REQ(object_locked()->lock());
   bool private_clone() const;
   bool object_reset() const;
   Mergeable mergeable_locked() const TA_REQ(lock());
@@ -1214,22 +1253,6 @@ class VmMapping final : public VmAddressRegionOrMapping {
             arch_mmu_flags_t first_mmu_flags, btree::BTree<vaddr_t, arch_mmu_flags_t>&& ranges,
             Mergeable mergeable);
 
-  void DumpLockedImpl(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
-  zx_status_t DestroyLockedImpl() TA_REQ(region_lock()) TA_REQ(lock());
-
-  // Internal fully locked version of Destroy. Has controls to both skip the arch aspace unmapping
-  // as well as removal from the parent subregions list. These controls facilitate the fine grained
-  // control needed when splitting, merging and replacing mappings.
-  // If unmap is |No| then this method is defined to never fail. |remove_region| does not impact
-  // success or failure of the operation.
-  enum class DestroyUnmap : bool {
-    No,
-    Yes,
-  };
-  enum class DestroyRemoveFromParent : bool {
-    No,
-    Yes,
-  };
   zx_status_t DestroyLockedObject(DestroyUnmap unmap, DestroyRemoveFromParent remove_region)
       TA_REQ(region_lock()) TA_REQ(lock()) TA_REQ(object_locked()->lock());
 
@@ -1313,10 +1336,6 @@ class VmMapping final : public VmAddressRegionOrMapping {
   void SetMemoryPriorityHighAlreadyPositiveLockedObject() TA_REQ(lock())
       TA_REQ(object_locked()->lock());
 
-  void CommitHighMemoryPriorityImpl() TA_EXCL(lock());
-
-  zx_status_t ActivateImpl() TA_REQ(region_lock()) TA_REQ(lock());
-
   // Fully locked version of Activate that can additionally control whether the region is installed
   // into the parent subregion list and vmo mapping list or not. This control exists to facilitate
   // the fine grained control needed for splitting, merging and replacing of mappings as when set to
@@ -1325,16 +1344,11 @@ class VmMapping final : public VmAddressRegionOrMapping {
     No,
     Yes,
   };
-  zx_status_t ActivateLocked(ActivateInsertRegions insert_region) TA_REQ(region_lock())
-      TA_REQ(lock()) TA_REQ(object_locked()->lock());
 
-  // Wrapper for ActivateLocked that does not insert into the parent region, and therefore cannot
+  // Wrapper for activate_locked that does not insert into the parent region, and therefore cannot
   // fail.
   void ActivateNoInsertLocked() TA_REQ(region_lock()) TA_REQ(lock())
-      TA_REQ(object_locked()->lock()) {
-    [[maybe_unused]] zx_status_t status = ActivateLocked(ActivateInsertRegions::No);
-    ASSERT(status == ZX_OK);
-  }
+      TA_REQ(object_locked()->lock());
 
   // Takes a range relative to the vmo and converts it into a virtual address range relative
   // to aspace(). Returns true if a non zero sized intersection was found, false otherwise. If false
@@ -1402,7 +1416,7 @@ extern "C" {
 void rust_vm_mapping_state_init(void* storage, VmObject* vmo, uint64_t vmo_offset,
                                 arch_mmu_flags_t first_mmu_flags, bool private_clone,
                                 VmMapping::Mergeable mergeable);
-void rust_vm_mapping_destruct(void* storage);
+void rust_vm_mapping_destruct(VmMapping* mapping);
 void rust_vm_mapping_assert_canary(const VmMapping* mapping);
 const fbl::RefPtr<VmObject>* rust_vm_mapping_object(const VmMapping* mapping);
 uint64_t rust_vm_mapping_object_offset(const VmMapping* mapping);
@@ -1414,15 +1428,24 @@ void* rust_vm_mapping_currently_faulting(const VmMapping* mapping);
 void rust_vm_mapping_set_currently_faulting(VmMapping* mapping, void* faulting);
 arch_mmu_flags_t rust_vm_mapping_first_region_arch_mmu_flags(const VmMapping* mapping);
 void rust_vm_mapping_set_first_region_arch_mmu_flags(VmMapping* mapping, arch_mmu_flags_t flags);
-void rust_vm_mapping_reset_object_locked(VmMapping* mapping);
 VmObject* rust_vm_mapping_vmo(const VmMapping* mapping);
+VmMapping* rust_vm_mapping_create(VmAddressRegion* parent, bool private_clone, vaddr_t base,
+                                  size_t size, uint32_t vmar_flags, VmObject* vmo,
+                                  uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
+                                  VmMapping::Mergeable mergeable);
+VmMapping* rust_vm_mapping_create_with_ranges(VmAddressRegion* parent, bool private_clone,
+                                              vaddr_t base, size_t size, uint32_t vmar_flags,
+                                              VmObject* vmo, uint64_t vmo_offset,
+                                              arch_mmu_flags_t first_mmu_flags,
+                                              VmMappingProtectionRanges* ranges,
+                                              VmMapping::Mergeable mergeable);
+void rust_vm_mapping_recycle(VmMapping* mapping);
 zx_status_t rust_vm_mapping_decommit_range(VmMapping* mapping, size_t offset, size_t len);
 bool rust_vm_mapping_object_range_to_vaddr_range(const VmMapping* mapping, uint64_t offset,
                                                  uint64_t len, vaddr_t* base,
                                                  uint64_t* virtual_len);
 uint64_t rust_vm_mapping_trimmed_object_range_locked(const VmMapping* mapping, uint64_t offset,
                                                      uint64_t len);
-void rust_vm_mapping_dump_locked(const VmMapping* mapping, uint32_t depth, bool verbose);
 void rust_vm_mapping_set_mem_priority_locked(VmMapping* mapping,
                                              VmAddressRegion::MemoryPriority priority);
 void rust_vm_mapping_set_mem_priority_locked_split(VmMapping* mapping,
@@ -1431,14 +1454,15 @@ void rust_vm_mapping_set_mem_priority_default_locked_object(VmMapping* mapping);
 void rust_vm_mapping_set_mem_priority_default_locked_object_split(VmMapping* mapping);
 void rust_vm_mapping_set_mem_priority_high_already_positive_locked_object(VmMapping* mapping);
 void rust_vm_mapping_set_mem_priority_high_already_positive_locked_object_split(VmMapping* mapping);
-void rust_vm_mapping_commit_high_memory_priority(VmMapping* mapping);
+void rust_vm_mapping_activate_no_insert_locked(VmMapping* mapping);
+zx_status_t rust_vm_mapping_destroy_locked_object(VmMapping* mapping, VmMapping::DestroyUnmap unmap,
+                                                  VmMapping::DestroyRemoveFromParent remove_region);
 }
 
 inline void VmMapping::AssertCanary() const { rust_vm_mapping_assert_canary(this); }
 inline const fbl::RefPtr<VmObject>& VmMapping::object_locked() const {
   return *rust_vm_mapping_object(this);
 }
-inline void VmMapping::reset_object_locked() { rust_vm_mapping_reset_object_locked(this); }
 inline uint64_t VmMapping::object_offset() const { return rust_vm_mapping_object_offset(this); }
 inline bool VmMapping::private_clone() const { return rust_vm_mapping_private_clone(this); }
 inline bool VmMapping::object_reset() const { return rust_vm_mapping_object_reset(this); }

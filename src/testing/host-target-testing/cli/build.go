@@ -39,130 +39,13 @@ func (k repeatableBuildKind) String() string {
 	}
 }
 
-type BuildConfig struct {
-	archiveConfig    *ArchiveConfig
-	deviceConfig     *DeviceConfig
-	prefix           string
-	builderName      string
-	buildID          string
-	fuchsiaBuildDir  string
-	productBundleDir string
-}
-
-func NewBuildConfig(
-	fs *flag.FlagSet,
-	archiveConfig *ArchiveConfig,
-	deviceConfig *DeviceConfig,
-	defaultBuildID string,
-) *BuildConfig {
-	return NewBuildConfigWithPrefix(fs, archiveConfig, deviceConfig, defaultBuildID, "")
-}
-
-func NewBuildConfigWithPrefix(
-	fs *flag.FlagSet,
-	archiveConfig *ArchiveConfig,
-	deviceConfig *DeviceConfig,
-	defaultBuildID string,
-	prefix string,
-) *BuildConfig {
-	c := &BuildConfig{
-		prefix:        prefix,
-		archiveConfig: archiveConfig,
-		deviceConfig:  deviceConfig,
-	}
-
-	fs.StringVar(&c.builderName, fmt.Sprintf("%sbuilder-name", prefix), "", "Pave to the latest version of this builder")
-	fs.StringVar(&c.buildID, fmt.Sprintf("%sbuild-id", prefix), defaultBuildID, "Pave to this specific build id")
-	fs.StringVar(&c.fuchsiaBuildDir, fmt.Sprintf("%sfuchsia-build-dir", prefix), "", "Pave to the build in this fuchsia build output directory")
-	fs.StringVar(&c.productBundleDir, fmt.Sprintf("%sproduct-bundle-dir", prefix), "", "Flash to the build in this product bundle directory")
-
-	return c
-}
-
-func (c *BuildConfig) Validate() error {
-	defined := 0
-	for _, s := range []string{
-		c.builderName,
-		c.buildID,
-		c.fuchsiaBuildDir,
-		c.productBundleDir,
-	} {
-		if s != "" {
-			defined += 1
-		}
-	}
-	if defined > 1 {
-		return fmt.Errorf("--%sbuilder-name, --%sbuild-id, --%sfuchsia-build-dir, and %sproduct-bundle-dir are mutually exclusive",
-			c.prefix,
-			c.prefix,
-			c.prefix,
-			c.prefix,
-		)
-	}
-
-	return nil
-}
-
-func (c *BuildConfig) GetBuilder() (*artifacts.Builder, error) {
-	if c.builderName == "" {
-		return nil, fmt.Errorf("builder not specified")
-	}
-
-	return c.archiveConfig.BuildArchive().GetBuilder(c.builderName), nil
-}
-
-func (c *BuildConfig) getBuildID(ctx context.Context) (string, error) {
-	if c.builderName != "" && c.buildID == "" {
-		b, err := c.GetBuilder()
-		if err != nil {
-			return "", err
-		}
-		id, err := b.GetLatestBuildID(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to lookup build id: %w", err)
-		}
-		c.buildID = id
-	}
-
-	return c.buildID, nil
-}
-
-func (c *BuildConfig) GetBuild(
-	ctx context.Context,
-	deviceClient *device.Client,
-	outputDir string,
-) (artifacts.Build, error) {
-	buildID, err := c.getBuildID(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var build artifacts.Build
-	if buildID != "" {
-		build, err = c.archiveConfig.BuildArchive().GetBuildByID(
-			ctx,
-			buildID,
-			outputDir,
-		)
-	} else if c.fuchsiaBuildDir != "" {
-		build, err = artifacts.NewFuchsiaDirBuild(c.fuchsiaBuildDir), nil
-	} else if c.productBundleDir != "" {
-		build, err = artifacts.NewProductBundleDirBuild(c.productBundleDir), nil
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return build, nil
-}
-
 type RepeatableBuildConfig struct {
-	archiveConfig  *ArchiveConfig
-	deviceConfig   *DeviceConfig
-	defaultBuildID string
-	blobFetchMode  artifacts.BlobFetchMode
-	builds         []repeatableBuild
+	archiveConfig     *ArchiveConfig
+	deviceConfig      *DeviceConfig
+	defaultBuildID    string
+	blobFetchMode     artifacts.BlobFetchMode
+	productBundleName string
+	builds            []repeatableBuild
 }
 
 func NewRepeatableBuildConfig(
@@ -204,6 +87,12 @@ func NewRepeatableBuildConfig(
 		fmt.Sprintf("%sblob-fetch-mode", prefix),
 		"Default blob fetch mode for builds ('prefetch' or 'lazy', default is 'unspecified')",
 	)
+	fs.StringVar(
+		&c.productBundleName,
+		fmt.Sprintf("%sproduct-bundle-name", prefix),
+		"",
+		"Name of the product bundle to use",
+	)
 
 	return c
 }
@@ -223,26 +112,16 @@ func (c *RepeatableBuildConfig) GetBuilds(
 	var builds []artifacts.BuildWithVersion
 	for _, b := range c.builds {
 		var build artifacts.Build
-		var err error
 		switch b.kind {
 		case builderNameKind:
 			builder := c.archiveConfig.BuildArchive().GetBuilder(b.value)
-			buildID, err := builder.GetLatestBuildID(ctx)
+			artifactsBuild, err := builder.GetLatestBuild(ctx, outputDir)
 			if err != nil {
 				return nil, fmt.Errorf("failed to lookup build id: %w", err)
 			}
-
-			build, err = c.archiveConfig.BuildArchive().GetBuildByID(
-				ctx,
-				buildID,
-				outputDir,
-			)
-			if err != nil {
-				return nil, err
-			}
-
+			build = artifactsBuild
 		case buildIdKind:
-			build, err = c.archiveConfig.BuildArchive().GetBuildByID(
+			artifactsBuild, err := c.archiveConfig.BuildArchive().GetBuildByID(
 				ctx,
 				b.value,
 				outputDir,
@@ -250,13 +129,18 @@ func (c *RepeatableBuildConfig) GetBuilds(
 			if err != nil {
 				return nil, err
 			}
+			build = artifactsBuild
 		case fuchsiaBuildDirKind:
 			build = artifacts.NewFuchsiaDirBuild(b.value)
 		case productBundleDirKind:
 			build = artifacts.NewProductBundleDirBuild(b.value)
 		}
+		productBundle, err := build.GetProductBundle(ctx, c.productBundleName)
+		if err != nil {
+			return nil, err
+		}
 		builds = append(builds, artifacts.BuildWithVersion{
-			Build:         build,
+			ProductBundle: productBundle,
 			Version:       ffx.FfxVersionPolicy(b.versionPolicy),
 			BlobFetchMode: c.blobFetchMode,
 		})
@@ -272,9 +156,13 @@ func (c *RepeatableBuildConfig) GetBuilds(
 		if err != nil {
 			return nil, err
 		}
+		productBundle, err := build.GetProductBundle(ctx, c.productBundleName)
+		if err != nil {
+			return nil, err
+		}
 
 		builds = append(builds, artifacts.BuildWithVersion{
-			Build:         build,
+			ProductBundle: productBundle,
 			Version:       ffx.FfxVersionPolicyLatest,
 			BlobFetchMode: c.blobFetchMode,
 		})

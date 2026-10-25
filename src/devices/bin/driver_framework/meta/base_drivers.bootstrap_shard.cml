@@ -190,6 +190,15 @@
             to: "#base-drivers",
         },
         {
+            config: [
+                "fuchsia.storage.ufs.AutoHibernateTimerUs",
+                "fuchsia.storage.ufs.EnableAutoHibernate",
+            ],
+            from: "void",
+            to: "#base-drivers",
+            availability: "optional",
+        },
+        {
             service: [
                 "fuchsia.hardware.adc.Service",
                 "fuchsia.hardware.backlight.Service",
@@ -247,6 +256,7 @@
                 "fuchsia.hardware.google.odpm.Service",
                 "fuchsia.hardware.haptics.Service",
                 "fuchsia.hardware.nfc.Service",
+                "fuchsia.hardware.power.charger.DebugService",
                 "fuchsia.hardware.power.suspend.SuspendService",
                 "fuchsia.hardware.power.usb.DebugService",
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
@@ -332,6 +342,7 @@
                 "fuchsia.hardware.usb.device.Service",
                 "fuchsia.hardware.usb.peripheral.Service",
                 "fuchsia.hardware.usb.tester.Service",
+                "fuchsia.hardware.usb.UsbService",
                 "fuchsia.hardware.usb.virtualbustest.Service",
                 "fuchsia.input.report.Service",
                 "fuchsia.lowpan.spinel.Service",

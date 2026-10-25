@@ -202,6 +202,7 @@ impl TimerDispatcher {
         Ok(())
     }
 
+    /// Timer callback.
     pub fn on_timer_fired(&self) -> OnTimerFiredAction {
         self.state().canary.assert();
 
@@ -279,7 +280,7 @@ impl TimerDispatcher {
         // `set()` using `fbl::RefPtr::add_ref(self)`. That reference is released either when the
         // callback completes or in `cancel_timer_locked()`.
         unsafe {
-            fields.timer.set_deadline(&slack_deadline, timer_irq_callback, dpc_ptr);
+            fields.timer.as_ref().set_deadline(&slack_deadline, timer_irq_callback, dpc_ptr);
         }
     }
 
@@ -309,7 +310,7 @@ impl TimerDispatcher {
         // Refcount is at least 2 because there is a pending timer that we need to cancel.
         let timer_canceled = fields.timer.cancel();
         if timer_canceled {
-            // Managed to cancel before OnTimerFired() ran. So we need to decrement the
+            // Managed to cancel before on_timer_fired() ran. So we need to decrement the
             // ref count here. The caller must be holding a reference as well, so
             // the refcount must be at least 2 before dropping.
             debug_assert!(self.ref_count().ref_count_debug() >= 2);

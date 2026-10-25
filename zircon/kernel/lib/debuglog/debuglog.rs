@@ -31,9 +31,11 @@ unsafe extern "C" {
     ) -> i32;
     fn cpp_dlog_serial_write(ptr: *const c_char, len: usize);
     fn cpp_dlog_serial_write_interruptible(ptr: *const c_char, len: usize) -> i32;
+    fn cpp_serial_write(ptr: *const c_char, len: usize);
     fn cpp_dlog_sync();
     fn cpp_dlog_panic_start();
     fn cpp_dlog_bluescreen_init();
+    fn cpp_dlog_render_to_crashlog(ptr: *mut c_char, len: usize) -> usize;
 }
 
 /// Shutdown the debuglog subsystem.
@@ -56,6 +58,12 @@ pub fn dlog_write(severity: u32, flags: u32, bytes: &[u8]) -> Result<(), Status>
 pub fn dlog_serial_write(bytes: &[u8]) {
     // SAFETY: `bytes.as_ptr()` points to `bytes.len()` initialized bytes.
     unsafe { cpp_dlog_serial_write(bytes.as_ptr() as *const c_char, bytes.len()) }
+}
+
+/// Writes `bytes` directly to the kernel serial port without going through debuglog.
+pub fn serial_write(bytes: &[u8]) {
+    // SAFETY: `bytes.as_ptr()` points to `bytes.len()` initialized bytes.
+    unsafe { cpp_serial_write(bytes.as_ptr() as *const c_char, bytes.len()) }
 }
 
 /// Like `dlog_serial_write`, except that if the calling thread must wait for the serial debug port
@@ -86,6 +94,15 @@ pub fn dlog_panic_start() {
 pub fn dlog_bluescreen_init() {
     // SAFETY: takes no arguments; the debuglog owns all the state it changes.
     unsafe { cpp_dlog_bluescreen_init() }
+}
+
+/// Renders as many of the recent debug log entries as will fit into `target`. Returns the number
+/// of bytes of `target` which were filled.
+pub fn dlog_render_to_crashlog(target: &mut [u8]) -> usize {
+    let len = target.len();
+    // SAFETY: `target` is valid for writes of `len` bytes for the duration of the call;
+    // the callee writes only within that range and does not retain the pointer.
+    unsafe { cpp_dlog_render_to_crashlog(target.as_mut_ptr().cast::<c_char>(), len) }
 }
 
 #[repr(C, align(8))]

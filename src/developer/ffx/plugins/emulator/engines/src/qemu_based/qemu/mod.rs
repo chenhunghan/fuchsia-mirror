@@ -12,22 +12,28 @@ use crate::qemu_based::QemuBasedEngine;
 use crate::qemu_based::comms::QemuSocket;
 use async_trait::async_trait;
 use emulator_instance::{
-    CpuArchitecture, EmulatorConfiguration, EmulatorInstanceData, EmulatorInstanceInfo,
+    CpuArchitecture, DiskImage, EmulatorConfiguration, EmulatorInstanceData, EmulatorInstanceInfo,
     EmulatorInstances, EngineState, EngineType, NetworkingMode, PointingDevice, write_to_disk,
 };
 use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config::QEMU_TOOL;
-use ffx_emulator_common::find_unused_vsock_cid;
-use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail};
-use fho::{Result, bug, return_bug, user_error};
+use ffx_emulator_common::{find_unused_vsock_cid, validate_snapshot_name};
+use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail, SnapshotInfo};
+use fho::{Result, bug, return_bug, return_user_error};
+use monitor::Monitor;
 use serde_json::{Deserializer, Value, json};
-use std::env;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 
 mod image_conversion;
+mod monitor;
+
+/// The line which `qemu-img snapshot -l` prints above the table of the snapshots in an image.
+const IMAGE_SNAPSHOTS_HEADING: &str = "Snapshot list:";
+
+/// Timeout for opening the QMP socket, and for each QMP command.
+const QMP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct QemuEngine {
@@ -60,10 +66,108 @@ impl QemuEngine {
         }
         self.validate_network_flags(&self.data.get_emulator_configuration())
             .and_then(|()| self.check_required_files(&self.data.get_emulator_configuration().guest))
+            .and_then(|()| self.validate_snapshot_support())
     }
 
     fn validate_staging(&self) -> Result<()> {
         self.check_required_files(&self.data.get_emulator_configuration().guest)
+    }
+
+    /// Checks that snapshots, if they are enabled, are supported for the way the guest is booted.
+    fn validate_snapshot_support(&self) -> Result<()> {
+        let emu_config = self.data.get_emulator_configuration();
+        if !emu_config.runtime.snapshots_enabled {
+            return Ok(());
+        }
+        // Booting through UEFI uses additional writable firmware and disk images, which are not
+        // set up to hold snapshots. That is how --uefi boots the guest, and also how the guests
+        // of some products are booted without it.
+        if emu_config.guest.is_gpt {
+            return_user_error!(
+                "Snapshots are not supported for emulators which boot using UEFI. \
+                Start the emulator without --uefi to use snapshots."
+            );
+        }
+        if emu_config.guest.is_efi() {
+            return_user_error!(
+                "Snapshots are not supported for emulators which boot using UEFI, and the guest \
+                of this product bundle is booted using UEFI."
+            );
+        }
+        match emu_config.guest.disk_image {
+            Some(DiskImage::Fvm(_)) | Some(DiskImage::Fxfs(_)) => Ok(()),
+            _ => return_user_error!(
+                "Snapshots are saved in the emulator's disk image, but the product bundle does \
+                not provide a disk image which supports them."
+            ),
+        }
+    }
+
+    /// Connects to the monitor of the running emulator, to manage its snapshots.
+    fn connect_to_snapshot_monitor(&self) -> Result<Monitor> {
+        let name = self.data.get_name();
+        if self.get_engine_state() != EngineState::Running {
+            return_user_error!(
+                "Emulator '{name}' is not running (current state: {}). Snapshots can only be \
+                saved and loaded while the emulator is running. To resume a stopped emulator \
+                from a snapshot, use `ffx emu start --from-snapshot <snapshot>`.",
+                self.get_engine_state()
+            );
+        }
+        self.check_snapshots_enabled()?;
+        let emu_config = self.data.get_emulator_configuration();
+        let socket_path = self.get_path_for_console_type(
+            &emu_config.runtime.instance_directory,
+            EngineConsoleType::Command,
+        );
+        let memory = emu_config.device.memory.as_bytes().unwrap_or(u64::MAX);
+        Monitor::connect(&socket_path, monitor::snapshot_timeout(memory))
+    }
+
+    /// Returns the snapshots which are stored in the disk image of the stopped emulator, as
+    /// listed by the `qemu-img` tool. While the emulator is running it holds a lock on the image,
+    /// and the snapshots are listed through its monitor instead.
+    fn stored_snapshots(&self) -> Result<Vec<SnapshotInfo>> {
+        self.check_snapshots_enabled()?;
+        // The snapshots are stored in the qcow2 image which the instance was staged with.
+        let image_path = match &self.data.get_emulator_configuration().guest.disk_image {
+            Some(DiskImage::Fvm(path)) | Some(DiskImage::Fxfs(path)) => path,
+            _ => return_bug!(
+                "Emulator '{}' has no disk image which can hold snapshots.",
+                self.data.get_name()
+            ),
+        };
+        let qemu_img = super::get_qemu_img_tool(&self.context)?;
+        let mut list_command = Command::new(&qemu_img);
+        list_command.args(["snapshot", "-l", "-f", "qcow2"]).arg(image_path);
+        log::debug!("Running command to list the snapshots of the disk image: {:?}", list_command);
+
+        let list_result =
+            list_command.output().map_err(|e| bug!("Error running {}: {e}", qemu_img.display()))?;
+        if !list_result.status.success() {
+            return_bug!(
+                "Error reading the snapshots of {}: {}",
+                image_path.display(),
+                String::from_utf8_lossy(&list_result.stderr)
+            );
+        }
+        monitor::parse_snapshot_table(
+            &String::from_utf8_lossy(&list_result.stdout),
+            IMAGE_SNAPSHOTS_HEADING,
+        )
+    }
+
+    /// Checks that the instance was staged with support for snapshots.
+    fn check_snapshots_enabled(&self) -> Result<()> {
+        if !self.data.get_emulator_configuration().runtime.snapshots_enabled {
+            return_user_error!(
+                "Emulator '{}' does not support snapshots. Snapshot support has to be \
+                enabled when the emulator instance is created, by starting it with \
+                `ffx emu start --enable-snapshots`.",
+                self.data.get_name()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +272,24 @@ impl EmulatorEngine for QemuEngine {
         self.attach_to(&self.data.get_emulator_configuration().runtime.instance_directory, console)
     }
 
+    async fn save_snapshot(&mut self, name: &str) -> Result<()> {
+        validate_snapshot_name(name)?;
+        self.connect_to_snapshot_monitor()?.save_snapshot(name)
+    }
+
+    async fn load_snapshot(&mut self, name: &str) -> Result<()> {
+        validate_snapshot_name(name)?;
+        self.connect_to_snapshot_monitor()?.load_snapshot(name)
+    }
+
+    async fn list_snapshots(&mut self) -> Result<Vec<SnapshotInfo>> {
+        if self.get_engine_state() == EngineState::Running {
+            self.connect_to_snapshot_monitor()?.list_snapshots()
+        } else {
+            self.stored_snapshots()
+        }
+    }
+
     /// Build the Command to launch Qemu emulator running Fuchsia.
     fn build_emulator_cmd(&self) -> Command {
         let mut cmd = Command::new(&self.data.get_emulator_binary());
@@ -193,8 +315,11 @@ impl EmulatorEngine for QemuEngine {
         if self.data.get_emulator_configuration().flags.envs.len() > 0 {
             // Add environment variables if not already present.
             // This does not overwrite any existing values.
-            let unset_envs =
-                emulator_configuration.flags.envs.iter().filter(|(k, _)| env::var(k).is_err());
+            let unset_envs = emulator_configuration
+                .flags
+                .envs
+                .iter()
+                .filter(|(k, _)| self.context.env_var(k).is_err());
             if unset_envs.clone().count() > 0 {
                 cmd.envs(unset_envs);
             }
@@ -274,66 +399,29 @@ impl QemuEngine {
         let console_path =
             self.get_path_for_console_type(&instance_dir, EngineConsoleType::Machine);
 
-        const MAX_ELAPSED: Duration = Duration::from_secs(10);
         let mut socket = QemuSocket::new(&console_path);
-        let start = Instant::now();
-        let stream = self.open_socket(&mut socket, &MAX_ELAPSED).await?;
+        let stream = self.open_socket(&mut socket, &QMP_TIMEOUT).await?;
 
         let mut responses = Deserializer::from_reader(&stream).into_iter::<Value>();
 
         let filename = absolute_path.to_str().ok_or_else(|| bug!("Invalid target path"))?;
-        let command_id = format!(
-            "screendump-{}",
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("system time before epoch!")
-                .as_nanos()
-        );
 
         // We take a two-step approach to capture the screenshot:
         // 1. Capture the screenshot in PPM format from QEMU to the temporary destination.
         // 2. Read the PPM file into memory and overwrite it with its PNG-encoded version.
         // This avoids creating extra temporary files on the host filesystem.
-        let request = json!({
-            "execute": "screendump",
-            "id": command_id,
-            "arguments": {
-                "filename": filename,
-                "format": "ppm"
-            }
-        });
-        let request_cmd = format!("{}\n", request);
+        crate::qemu_based::qmp_execute(
+            &stream,
+            &mut responses,
+            "screendump",
+            Some(json!({ "filename": filename, "format": "ppm" })),
+            QMP_TIMEOUT,
+        )?;
 
-        (&stream)
-            .write_all(request_cmd.as_bytes())
-            .map_err(|e| user_error!("Error writing screendump: {e}"))?;
-
-        // Wait for the specific response with our ID.
-        loop {
-            if start.elapsed() > MAX_ELAPSED {
-                return Err(user_error!(
-                    "Timed out ({} s) waiting for screendump response.",
-                    MAX_ELAPSED.as_secs()
-                ));
-            }
-            let data = responses
-                .next()
-                .ok_or_else(|| user_error!("QMP connection closed while waiting for screendump"))?
-                .map_err(|e| user_error!("Error reading QMP response: {e}"))?;
-
-            if data.get("id").and_then(|id| id.as_str()) == Some(&command_id) {
-                if let Some(error) = data.get("error") {
-                    return Err(user_error!("Screenshot error from emulator: {}", error));
-                }
-                if let Some(_return_value) = data.get("return") {
-                    return image_conversion::convert_ppm_to_png(
-                        /* ppm_source= */ absolute_path,
-                        /* png_destination= */ absolute_path,
-                    );
-                }
-                return Err(user_error!("Unknown QMP response for screendump: {:?}", data));
-            }
-        }
+        image_conversion::convert_ppm_to_png(
+            /* ppm_source= */ absolute_path,
+            /* png_destination= */ absolute_path,
+        )
     }
 }
 
@@ -357,13 +445,244 @@ impl QemuBasedEngine for QemuEngine {
 
 #[cfg(test)]
 mod tests {
+    use super::monitor::tests::{SNAPSHOT_LIST, start_fake_monitor};
     use super::*;
     use crate::EngineBuilder;
     use crate::qemu_based::tests::make_fake_sdk;
     use emulator_instance::{NetworkingMode, PortMapping};
     use std::ffi::OsStr;
-    use std::fs;
+    use std::io::Write as _;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+    use std::{fs, thread};
     use tempfile::tempdir;
+
+    /// Returns an engine for an emulator instance which appears to be running, and which keeps
+    /// its console sockets in `instance_directory`.
+    fn running_engine(
+        env: &ffx_config::TestEnv,
+        instance_directory: &Path,
+        snapshots_enabled: bool,
+    ) -> QemuEngine {
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "test-emu".to_string();
+        cfg.runtime.instance_directory = instance_directory.to_path_buf();
+        cfg.runtime.snapshots_enabled = snapshots_enabled;
+        let mut data = EmulatorInstanceData::new(cfg, EngineType::Qemu, EngineState::Running);
+        // Set the emulator PID to the PID of the test, so that the engine state is Running.
+        data.set_pid(std::process::id());
+        QemuEngine::new(
+            &env.context,
+            data,
+            EmulatorInstances::new(instance_directory.to_path_buf()),
+        )
+    }
+
+    #[fuchsia::test]
+    async fn test_save_snapshot() {
+        let env = ffx_config::test_init().unwrap();
+        let (temp, _socket_path, monitor) = start_fake_monitor(vec![("savevm booted", "")]);
+        let mut engine = running_engine(&env, temp.path(), true);
+
+        engine.save_snapshot("booted").await.expect("save snapshot");
+
+        assert_eq!(monitor.join().unwrap(), vec!["savevm booted"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_load_snapshot() {
+        let env = ffx_config::test_init().unwrap();
+        let (temp, _socket_path, monitor) = start_fake_monitor(vec![
+            ("info snapshots", SNAPSHOT_LIST),
+            ("loadvm booted", ""),
+            ("info status", "VM status: running\r\n"),
+        ]);
+        let mut engine = running_engine(&env, temp.path(), true);
+
+        engine.load_snapshot("booted").await.expect("load snapshot");
+
+        assert_eq!(monitor.join().unwrap(), vec!["info snapshots", "loadvm booted", "info status"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_list_snapshots() {
+        let env = ffx_config::test_init().unwrap();
+        let (temp, _socket_path, monitor) =
+            start_fake_monitor(vec![("info snapshots", SNAPSHOT_LIST)]);
+        let mut engine = running_engine(&env, temp.path(), true);
+
+        let snapshots = engine.list_snapshots().await.expect("list snapshots");
+
+        assert_eq!(
+            snapshots.iter().map(|snapshot| snapshot.name.as_str()).collect::<Vec<_>>(),
+            vec!["booted", "second"]
+        );
+        assert_eq!(monitor.join().unwrap(), vec!["info snapshots"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_snapshots_require_running_emulator() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "test-emu".to_string();
+        cfg.runtime.instance_directory = temp.path().to_path_buf();
+        cfg.runtime.snapshots_enabled = true;
+        let data = EmulatorInstanceData::new(cfg, EngineType::Qemu, EngineState::Staged);
+        let mut engine =
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()));
+
+        let expected = "Emulator 'test-emu' is not running";
+        let err = engine.save_snapshot("booted").await.expect_err("save fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
+        let err = engine.load_snapshot("booted").await.expect_err("load fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
+    }
+
+    #[fuchsia::test]
+    async fn test_snapshots_require_snapshot_support() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let mut engine = running_engine(&env, temp.path(), false);
+
+        let expected = "Emulator 'test-emu' does not support snapshots";
+        let err = engine.save_snapshot("booted").await.expect_err("save fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
+        let err = engine.load_snapshot("booted").await.expect_err("load fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
+        let err = engine.list_snapshots().await.expect_err("list fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
+    }
+
+    #[fuchsia::test]
+    async fn test_snapshots_require_valid_name() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        // There is no monitor for the engine to connect to, so these would fail differently if
+        // the names were not checked before they are sent to the emulator.
+        let mut engine = running_engine(&env, temp.path(), true);
+
+        for name in ["", "two words", "booted\nquit", "-booted"] {
+            let err = engine.save_snapshot(name).await.expect_err("save fails").to_string();
+            assert!(err.contains("Invalid snapshot name"), "unexpected error: {err}");
+            let err = engine.load_snapshot(name).await.expect_err("load fails").to_string();
+            assert!(err.contains("Invalid snapshot name"), "unexpected error: {err}");
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_list_snapshots_of_stopped_emulator() {
+        let builder = ffx_config::test_env();
+        let builder = make_fake_sdk(builder).await;
+        let env = builder.build().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        // The fake qemu-img tool lists the snapshots in an image by printing its contents.
+        let image_path = temp.path().join("fxfs.blk.qcow2");
+        fs::write(
+            &image_path,
+            "Snapshot list:\n\
+            ID      TAG               VM_SIZE                DATE        VM_CLOCK     ICOUNT\n\
+            1       booted            382 MiB 2026-09-30 22:30:24  0000:00:19.615         --\n\
+            2       second           1.45 GiB 2026-10-01 08:15:00  0001:02:03.004         --\n",
+        )
+        .expect("write image");
+
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "test-emu".to_string();
+        cfg.runtime.snapshots_enabled = true;
+        cfg.guest.disk_image = Some(DiskImage::Fxfs(image_path));
+        let stopped_engine = |cfg: &EmulatorConfiguration| {
+            let data =
+                EmulatorInstanceData::new(cfg.clone(), EngineType::Qemu, EngineState::Staged);
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()))
+        };
+
+        // The snapshots are read from the disk image, without the emulator having to run.
+        let snapshots = stopped_engine(&cfg).list_snapshots().await.expect("list snapshots");
+        assert_eq!(
+            snapshots,
+            vec![
+                SnapshotInfo {
+                    name: "booted".to_string(),
+                    vm_size: "382 MiB".to_string(),
+                    date: "2026-09-30 22:30:24".to_string(),
+                    vm_clock: "0000:00:19.615".to_string(),
+                },
+                SnapshotInfo {
+                    name: "second".to_string(),
+                    vm_size: "1.45 GiB".to_string(),
+                    date: "2026-10-01 08:15:00".to_string(),
+                    vm_clock: "0001:02:03.004".to_string(),
+                },
+            ]
+        );
+
+        // An instance which was staged without support for snapshots can't hold any.
+        cfg.runtime.snapshots_enabled = false;
+        let err = stopped_engine(&cfg).list_snapshots().await.expect_err("no snapshots");
+        assert!(
+            err.to_string().contains("Emulator 'test-emu' does not support snapshots"),
+            "unexpected error: {err}"
+        );
+
+        // The disk image has to be readable.
+        cfg.runtime.snapshots_enabled = true;
+        cfg.guest.disk_image = Some(DiskImage::Fxfs(temp.path().join("missing.qcow2")));
+        let err = stopped_engine(&cfg).list_snapshots().await.expect_err("no disk image");
+        assert!(
+            err.to_string().contains("Error reading the snapshots of"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_validate_snapshot_support() {
+        let env = ffx_config::test_init().unwrap();
+        let validate = |cfg: &EmulatorConfiguration| {
+            let data = EmulatorInstanceData::new(cfg.clone(), EngineType::Qemu, EngineState::New);
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()))
+                .validate_snapshot_support()
+        };
+
+        // Guests which boot from a kernel and a FVM or Fxfs disk image support snapshots.
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.snapshots_enabled = true;
+        cfg.guest.kernel_image = Some("/path/to/kernel".into());
+        cfg.guest.disk_image = Some(DiskImage::Fxfs("/path/to/fxfs.blk".into()));
+        assert!(validate(&cfg).is_ok());
+        cfg.guest.disk_image = Some(DiskImage::Fvm("/path/to/fvm.blk".into()));
+        assert!(validate(&cfg).is_ok());
+
+        // There has to be a disk image for the snapshots to be saved in.
+        cfg.guest.disk_image = None;
+        let err = validate(&cfg).expect_err("no disk image").to_string();
+        assert!(err.contains("does not provide a disk image"), "unexpected error: {err}");
+
+        // Guests which boot using UEFI don't support snapshots. Only --uefi can be left out to
+        // boot the guest differently.
+        cfg.guest.disk_image = Some(DiskImage::Gpt("/path/to/gpt.img".into()));
+        cfg.guest.is_gpt = true;
+        let err = validate(&cfg).expect_err("GPT disk image").to_string();
+        assert!(err.contains("boot using UEFI"), "unexpected error: {err}");
+        assert!(err.contains("without --uefi"), "unexpected error: {err}");
+
+        cfg.guest.disk_image = Some(DiskImage::Fat("/path/to/bootloader.fat".into()));
+        cfg.guest.kernel_image = None;
+        cfg.guest.is_gpt = false;
+        let err = validate(&cfg).expect_err("EFI bootloader").to_string();
+        assert!(err.contains("boot using UEFI"), "unexpected error: {err}");
+        assert!(!err.contains("--uefi"), "unexpected error: {err}");
+
+        cfg.guest.disk_image = Some(DiskImage::Fxfs("/path/to/fxfs.blk".into()));
+        cfg.guest.kernel_image = Some("/path/to/kernel.efi".into());
+        let err = validate(&cfg).expect_err("EFI kernel").to_string();
+        assert!(err.contains("boot using UEFI"), "unexpected error: {err}");
+        assert!(!err.contains("--uefi"), "unexpected error: {err}");
+
+        // None of this matters when snapshots are not enabled.
+        cfg.runtime.snapshots_enabled = false;
+        assert!(validate(&cfg).is_ok());
+    }
 
     #[fuchsia::test]
     fn test_configure_assigns_host_ports() {
@@ -409,8 +728,10 @@ mod tests {
 
     #[fuchsia::test]
     fn test_build_emulator_cmd_existing_env() {
-        unsafe { env::set_var("FLAG_NAME_THAT_DOES_EXIST", "preset_value") };
-        let env = ffx_config::test_env().build().unwrap();
+        let env = ffx_config::test_env()
+            .env_var("FLAG_NAME_THAT_DOES_EXIST", "preset_value")
+            .build()
+            .unwrap();
         let program_name = "/test_femu_bin";
         let mut cfg = EmulatorConfiguration::default();
         cfg.host.networking = NetworkingMode::User;
@@ -474,5 +795,70 @@ mod tests {
         ];
 
         assert_eq!(actual, expected)
+    }
+
+    /// An error that the fake QMP server returns for one command.
+    struct FakeQmpError {
+        /// Index of the failing command, not counting `qmp_capabilities`.
+        command_index: usize,
+        desc: &'static str,
+    }
+
+    /// Starts a fake QMP server on `<instance_dir>/qmp` for one connection.
+    ///
+    /// The server answers every command with success, except for the one selected by `error`.
+    /// It sends each request, except `qmp_capabilities`, to the returned receiver.
+    fn start_fake_qmp(
+        instance_dir: &Path,
+        error: Option<FakeQmpError>,
+    ) -> (mpsc::Receiver<Value>, thread::JoinHandle<()>) {
+        let listener = UnixListener::bind(instance_dir.join("qmp")).expect("bind fake qmp socket");
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let greeting = json!({"QMP": {"version": {}, "capabilities": []}});
+            stream.write_all(format!("{greeting}\n").as_bytes()).expect("greeting");
+            let reader = stream.try_clone().expect("clone");
+            let mut command_index = 0;
+            for request in Deserializer::from_reader(reader).into_iter::<Value>() {
+                let Ok(request) = request else { break };
+                let reply = if request["execute"] == "qmp_capabilities" {
+                    json!({"return": {}})
+                } else {
+                    sender.send(request.clone()).expect("send");
+                    let reply = match &error {
+                        Some(error) if error.command_index == command_index => json!({
+                            "error": {"class": "GenericError", "desc": error.desc},
+                            "id": request["id"]
+                        }),
+                        _ => json!({"return": {}, "id": request["id"]}),
+                    };
+                    command_index += 1;
+                    reply
+                };
+                if stream.write_all(format!("{reply}\n").as_bytes()).is_err() {
+                    break;
+                }
+            }
+        });
+        (receiver, handle)
+    }
+
+    #[fuchsia::test]
+    async fn test_screenshot_qmp_error() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let error = FakeQmpError { command_index: 0, desc: "no display" };
+        let (receiver, handle) = start_fake_qmp(temp.path(), Some(error));
+        let mut engine = running_engine(&env, temp.path(), false);
+
+        let output = temp.path().join("screenshot.png");
+        let err = engine.capture_screenshot_qmp(&output).await.unwrap_err().to_string();
+        assert_eq!(err, "QMP command 'screendump' failed: no display");
+        let request = receiver.try_recv().expect("screendump request");
+        assert_eq!(request["execute"], "screendump");
+        assert_eq!(request["arguments"]["filename"], output.to_str().unwrap());
+        drop(engine);
+        handle.join().unwrap();
     }
 }

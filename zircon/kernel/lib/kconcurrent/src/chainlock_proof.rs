@@ -20,6 +20,9 @@
 //! - **From a pre-existing hold (`unsafe`):** [`ChainLockProof::new`] and
 //!   [`ChainLockProof::assume_held`] verify at runtime that `O`'s lock is held before minting;
 //!   [`ChainLockProof::assume_held_unchecked`] skips the runtime check.
+//! - **For synchronized reads without the lock (`unsafe`):**
+//!   [`ChainLockProof::assume_synchronized_read_only`] mints a read-only proof for state which
+//!   another held lock (or quiescence) keeps from changing.
 //!
 //! # Soundness
 //!
@@ -39,6 +42,7 @@
 
 use core::marker::PhantomData;
 
+use concurrent::{AllowFinalized, RecordBackoff};
 use ksync::LockToken;
 
 use super::chainlock::{ChainLock, ChainLockGuard, ChainLockTransactionToken};
@@ -94,6 +98,19 @@ impl<Class> ClassedChainLock<Class> {
     #[inline]
     pub fn is_held(&self, token: &ChainLockTransactionToken) -> bool {
         self.lock.is_held(token)
+    }
+
+    /// Asserts in debug builds that the lock is held by the transaction `token` belongs to.
+    #[inline]
+    pub fn assert_held(&self, token: &ChainLockTransactionToken) {
+        self.lock.assert_held(token);
+    }
+
+    /// Asserts in debug builds that the lock is held by the transaction `token` belongs to and
+    /// must be released by the caller's scope.
+    #[inline]
+    pub fn assert_acquired(&self, token: &ChainLockTransactionToken) {
+        self.lock.assert_acquired(token);
     }
 
     /// Returns `true` if the lock is unlocked.
@@ -158,6 +175,8 @@ pub unsafe trait ChainLocked {
 pub struct ChainLockProof<'p, O: ChainLocked> {
     // Safety invariant: `owner.lock()` is held by the current CPU's active transaction for `'p`,
     // and no other live proof or guard concurrently accesses state protected by `owner.lock()`.
+    // The one exception is a proof minted by `assume_synchronized_read_only`, which need not hold
+    // the lock, and is only used for shared reads of state which cannot change for `'p`.
     owner: &'p O,
     token: LockToken<'p, O::Class>,
 }
@@ -168,9 +187,10 @@ impl<'p, O: ChainLocked> ChainLockProof<'p, O> {
     ///
     /// # Safety
     ///
-    /// No other [`ChainLockGuard`] or proof for `owner.lock()` may be live in the current
-    /// transaction while the returned proof exists (e.g. a `ChainLockGuard::adopt` duplicate of
-    /// `guard`), and nothing may release the lock while the proof lives.
+    /// While the returned proof is live, no other [`ChainLockGuard`] or proof for `owner.lock()`
+    /// in the current transaction may be used to access the state protected by `owner.lock()`
+    /// (e.g. through a `ChainLockGuard::adopt` duplicate of `guard`), and nothing may release the
+    /// lock.
     ///
     /// # Panics
     ///
@@ -229,11 +249,40 @@ impl<'p, O: ChainLocked> ChainLockProof<'p, O> {
     /// # Safety
     ///
     /// In addition to the requirements of [`Self::assume_held`], the current execution context
-    /// must hold `owner.lock()` for the entirety of `'p`.
+    /// must hold `owner.lock()` for the entirety of `'p` (which is not checked at runtime).
     #[inline]
     pub unsafe fn assume_held_unchecked(owner: &'p O) -> Self {
         // SAFETY: Held for `'p`, uniqueness, and no release behind the proof: the caller's
         // contract.
+        let token = unsafe { LockToken::new() };
+        Self { owner, token }
+    }
+
+    /// Mints a proof for *read-only* access to `owner`'s lock-protected state when `owner.lock()`
+    /// is not necessarily held, because some other synchronization keeps that state from
+    /// changing.
+    ///
+    /// This is for state which is only written while holding `owner.lock()`, but which may be read
+    /// while holding some other lock (for example, a blocked thread's wait queue state cannot
+    /// change while the thread remains in a wait queue whose lock is held), or while `owner` is
+    /// quiescent. The returned proof does not satisfy the "lock is held" half of the type's
+    /// invariant, so it must never be used where that matters.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - No execution context writes any field of `owner` which is read through the returned
+    ///   proof for the whole of `'p` (because every writer must hold some lock which is held for
+    ///   `'p`, or because `owner` is quiescent).
+    /// - The returned proof is only used for shared (`&self`) read accessors. It must not be used
+    ///   to mutate `owner`'s state (including through [`Self::token_mut`], [`Self::split_mut`], or
+    ///   `_mut` accessors), to mint other proofs (through [`Self::reborrow`] or [`Self::retag`]),
+    ///   or be passed to any API which relies on `owner.lock()` actually being held (such as one
+    ///   which releases, adopts, or asserts it).
+    #[inline]
+    pub unsafe fn assume_synchronized_read_only(owner: &'p O) -> Self {
+        // SAFETY: The caller guarantees that the state read through this proof is stable for
+        // `'p`, and that the proof is only used for such reads (see the type's safety invariant).
         let token = unsafe { LockToken::new() };
         Self { owner, token }
     }
@@ -363,6 +412,23 @@ impl<'a, O: ChainLocked> OwnerGuard<'a, O> {
         Self { guard: ChainLockGuard::adopt(owner.lock().raw(), token), owner }
     }
 
+    /// Adopts `owner.lock()` exactly like [`Self::adopt`], but only checks that the lock is held
+    /// in debug builds.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::adopt`]. The check is skipped in release builds, so the caller must not rely on
+    /// it to detect a violation.
+    #[inline]
+    #[track_caller]
+    pub unsafe fn adopt_unchecked(owner: &'a O, token: &'a ChainLockTransactionToken) -> Self {
+        debug_assert!(
+            owner.lock().is_held(token),
+            "OwnerGuard::adopt_unchecked: lock is not held by this transaction"
+        );
+        Self { guard: ChainLockGuard::adopt(owner.lock().raw(), token), owner }
+    }
+
     /// Conditionally acquires `owner.lock()`, returning `None` if the transaction must back off.
     #[inline]
     #[must_use]
@@ -379,6 +445,54 @@ impl<'a, O: ChainLocked> OwnerGuard<'a, O> {
         let mut guard = ChainLockGuard::defer(owner.lock().raw(), token);
         // `Self` is only returned once the deferred guard has actually acquired the lock.
         if guard.try_acquire() { Some(Self { guard, owner }) } else { None }
+    }
+
+    /// Conditionally acquires `owner.lock()` with the given `allow_finalized` and
+    /// `record_backoff` options, returning `None` on failure.
+    #[inline]
+    #[must_use]
+    pub fn try_acquire_with_options(
+        owner: &'a O,
+        token: &'a ChainLockTransactionToken,
+        allow_finalized: AllowFinalized,
+        record_backoff: RecordBackoff,
+    ) -> Option<Self> {
+        let mut guard = ChainLockGuard::defer(owner.lock().raw(), token);
+        // `Self` is only returned once the deferred guard has actually acquired the lock.
+        if guard.try_acquire_with_options(allow_finalized, record_backoff) {
+            Some(Self { guard, owner })
+        } else {
+            None
+        }
+    }
+
+    /// Conditionally acquires `owner.lock()` using the given `callable`, returning `None` on
+    /// failure.
+    ///
+    /// # Safety
+    ///
+    /// - If `callable` returns `true`, it must have acquired `owner.lock()` for the active
+    ///   transaction associated with `token`, no other guard or proof for `owner.lock()` may
+    ///   conflict or double-release it, and responsibility for releasing `owner.lock()` is
+    ///   transferred to the returned `OwnerGuard`.
+    /// - If `callable` returns `false`, `owner.lock()` must not have been acquired by `callable`.
+    #[inline]
+    #[must_use]
+    pub unsafe fn try_acquire_with<F>(
+        owner: &'a O,
+        token: &'a ChainLockTransactionToken,
+        callable: F,
+    ) -> Option<Self>
+    where
+        F: FnOnce(&'a ChainLock) -> bool,
+    {
+        let mut guard = ChainLockGuard::defer(owner.lock().raw(), token);
+        if guard.try_acquire_with(callable) {
+            debug_assert!(owner.lock().is_held(token));
+            Some(Self { guard, owner })
+        } else {
+            None
+        }
     }
 
     /// Mints a proof that `owner.lock()` is held: identity and hold by construction, uniqueness
@@ -662,6 +776,42 @@ mod proof_tests {
         expect_eq!(sum, 3);
         expect_true!(first.lock().is_unlocked());
         expect_true!(second.lock().is_unlocked());
+    }
+
+    /// Verifies `OwnerGuard::try_acquire_with_options` success path and `release`.
+    #[test]
+    fn owner_guard_try_acquire_with_options() {
+        let owner = Guarded { lock: ClassedChainLock::new(), value: KCell::new(11) };
+        let mut held = false;
+        let mut value = 0;
+        let mut unlocked_after_release = false;
+
+        ChainLockTransaction::until_done(
+            IRQ_SAVE_OPTION,
+            clt_tag!("owner_try_acquire_opts"),
+            |token| {
+                let Some(mut guard) = OwnerGuard::try_acquire_with_options(
+                    &owner,
+                    token,
+                    AllowFinalized::No,
+                    RecordBackoff::No,
+                ) else {
+                    panic!("uncontended try_acquire_with_options failed");
+                };
+                ChainLockTransaction::finalize(token);
+                held = guard.is_held() && owner.lock().is_held(token);
+                *guard.proof().value_mut() += 31;
+                value = *guard.proof().value();
+                guard.release();
+                unlocked_after_release = owner.lock().is_unlocked();
+                DONE
+            },
+        );
+
+        expect_true!(held);
+        expect_eq!(value, 42);
+        expect_true!(unlocked_after_release);
+        expect_true!(owner.lock().is_unlocked());
     }
 
     /// Verifies the safe, check-free owned scope path via `single_chain_lock_guard_owned!`.

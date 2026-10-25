@@ -12,6 +12,13 @@ load(
     "flag_set",
     "with_feature_set",
 )
+load(
+    "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "DEFAULT_WARNINGS_CFLAGS",
+    "DEFAULT_WARNINGS_DEFINES",
+    "THREAD_SAFETY_CFLAGS",
+    "THREAD_SAFETY_DEFINES",
+)
 
 _all_actions = [
     ACTION_NAMES.assemble,
@@ -154,11 +161,23 @@ _flag_configs = struct(
     pic = _make_flag_config(
         cflags = ["-fPIC"],
     ),
+    language_c11 = _make_flag_config(
+        conlyflags = ["-std=c11"],
+        combine_cflags_with_ldflags = False,
+    ),
     language_cxx17 = _make_flag_config(
         ccflags = ["-std=c++17"],
     ),
     language_cxx20 = _make_flag_config(
         ccflags = ["-std=c++20"],
+    ),
+    libcpp_remove_transitive_includes = _make_flag_config(
+        cflags = ["-D_LIBCPP_REMOVE_TRANSITIVE_INCLUDES"],
+        combine_cflags_with_ldflags = False,
+    ),
+    no_template_backtrace_limit = _make_flag_config(
+        ccflags = ["-ftemplate-backtrace-limit=0"],
+        combine_cflags_with_ldflags = False,
     ),
     no_frame_pointers = _make_flag_config(
         cflags = ["-fomit-frame-pointer"],
@@ -181,7 +200,9 @@ _flag_configs = struct(
     ),
     optimize_size = _make_flag_config(
         cflags = ["-Os"],
-        ldflags = ["-Wl,-O2"],
+        ldflags = [
+            "-Wl,-O2",
+        ],
     ),
     # LINT.IfChange
     debuginfo = _make_flag_config(
@@ -200,42 +221,10 @@ _flag_configs = struct(
         combine_cflags_with_ldflags = False,
     ),
     # LINT.ThenChange(//build/bazel/debug_symbols/README.md)
-
-    # LINT.IfChange(default_warnings)
     default_warnings = _make_flag_config(
-        cflags = [
-            # TODO(https://fxbug.dev/542707525): Suppress unused variable warnings in libc++ containers.
-            "-D_LIBCPP_DISABLE_UNUSED_STRUCT_WARNINGS",
-            "-Wall",
-            "-Wextra",
-            "-Wextra-semi",
-            "-Wnewline-eof",
-            # TODO(b/315062126) Some in-tree builds are failing because we
-            # are shadowing variables.
-            #"-Wshadow",
-            "-Wstrict-prototypes",
-            "-Wwrite-strings",
-            "-Wno-sign-conversion",
-            "-Wno-unused-parameter",
-            "-Wnonportable-system-include-path",
-
-            # This is still needed for -Wmaybe-uninitialized which is added as a pragma in source code.
-            # Clang hasn't implemented this yet.
-            "-Wno-unknown-warning-option",
-            "-Wno-missing-field-initializers",
-
-            # TODO(https://fxbug.dev/477786942): Fix violations and enable the following checks.
-            # "-Wconversion",
-            # "-Wimplicit-fallthrough",
-
-            # TODO(https://fxbug.dev/534361287): Clean up unused templates in first-party code.
-            # This is currently applied globally to unblock the toolchain update.
-            # Eventually, this should be removed from default_warnings and only applied
-            # to third_party targets.
-            "-Wno-unused-template",
-        ],
+        cflags = ["-D" + d for d in DEFAULT_WARNINGS_DEFINES] + DEFAULT_WARNINGS_CFLAGS,
+        combine_cflags_with_ldflags = False,
     ),
-    # LINT.ThenChange(//build/config/BUILD.gn:default_warnings)
     werror = _make_flag_config(
         cflags = [
             "-Werror",
@@ -311,16 +300,7 @@ _flag_configs = struct(
         combine_cflags_with_ldflags = False,
     ),
     thread_safety_annotations = _make_flag_config(
-        cflags = [
-            "-Wthread-safety",
-
-            # TODO(https://fxbug.dev/42085252): Clang is catching instances of these in the kernel and drivers.
-            # Temporarily disable them for now to facilitate the roll then come back and
-            # fix them.
-            "-Wno-unknown-warning-option",
-            "-Wno-thread-safety-reference-return",
-            "-D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS=1",
-        ],
+        cflags = THREAD_SAFETY_CFLAGS + ["-D" + d for d in THREAD_SAFETY_DEFINES],
         combine_cflags_with_ldflags = False,
     ),
 )
@@ -333,7 +313,8 @@ _flag_configs = struct(
 def get_default_compile_flags_feature(
         clang_info,
         target_os,
-        sysroot = ""):
+        sysroot = "",
+        use_default_build_flags = False):
     """Compute the special "default_compile_flags" feature().
 
     This feature is special because Bazel will place all its flags before all
@@ -343,6 +324,11 @@ def get_default_compile_flags_feature(
        clang_info: A ClangInfo provider value.
        target_os: Target OS, following Fuchsia conventions.
        sysroot: Optional path to sysroot to use.
+       use_default_build_flags: True when building in-tree with
+           @fuchsia_rules_common//build_flags:use_default_build_flags
+           enabled. When True, flags that are already provided by
+           @fuchsia_build_info//default_build_flags are omitted to prevent
+           duplicate/conflicting flags and allow disable_build_flags to work.
 
     Returns:
        A new feature() value.
@@ -370,6 +356,78 @@ def get_default_compile_flags_feature(
         combine_cflags_with_ldflags = False,
     )
 
+    # Flags not yet in @fuchsia_build_info//default_build_flags (to be moved to
+    # oot_only_* as their corresponding build_flags() targets are added in
+    # //build/config/**/BUILD.bazel):
+    in_tree_remaining_cflags = [
+        default_system_flags,
+        _flag_configs.color_diagnostics,
+        _flag_configs.pic,
+        _flag_configs.linker_gc,
+        _flag_configs.no_frame_pointers,
+        _flag_configs.default_warnings,
+        _flag_configs.symbol_visibility_hidden,
+        _flag_configs.ffp_contract_off,
+    ]
+
+    # Already in @fuchsia_build_info//default_build_flags (auto_var_init,
+    # default_debuginfo, libcpp_remove_transitive_includes, relative_paths,
+    # thread_safety_annotations).
+    # NOTE: //build/config/fuchsia:zircon_asserts (ZX_ASSERT_LEVEL) is not
+    # supported OOT.
+    oot_only_cflags = [] if use_default_build_flags else [
+        _flag_configs.auto_var_init,
+        _flag_configs.debuginfo,
+        _flag_configs.libcpp_remove_transitive_includes,
+        _flag_configs.relpath_debug_info,
+        _flag_configs.thread_safety_annotations,
+    ]
+
+    in_tree_remaining_conlyflags = [
+        default_system_flags,
+    ]
+
+    # Already in @fuchsia_build_info//default_build_flags (language):
+    oot_only_conlyflags = [] if use_default_build_flags else [
+        _flag_configs.language_c11,
+    ]
+
+    in_tree_remaining_ccflags = [
+        default_system_flags,
+        _flag_configs.no_rtti,
+        _flag_configs.symbol_visibility_hidden,
+    ]
+
+    # Already in @fuchsia_build_info//default_build_flags (language, no_exceptions,
+    # no-template-backtrace-limit, relative_paths):
+    oot_only_ccflags = [] if use_default_build_flags else [
+        # NOTE: In-tree //build/config:language uses -std=c++23, but OOT keeps
+        # -std=c++20 to avoid breaking petals.
+        _flag_configs.language_cxx20,
+        _flag_configs.no_exceptions,
+        _flag_configs.no_template_backtrace_limit,
+        _flag_configs.relpath_debug_info,
+    ]
+
+    in_tree_remaining_ldflags = [
+        default_system_flags,
+        _flag_configs.driver_mode,
+        _flag_configs.color_diagnostics,
+        _flag_configs.no_frame_pointers,
+        _flag_configs.linker_gc,
+        _flag_configs.no_rtti,
+        _flag_configs.pic,
+    ]
+
+    # Already in @fuchsia_build_info//default_build_flags (default_debuginfo,
+    # no_exceptions, icf, relative_paths):
+    oot_only_ldflags = [] if use_default_build_flags else [
+        _flag_configs.debuginfo,
+        _flag_configs.no_exceptions,
+        _flag_configs.icf,
+        _flag_configs.relpath_debug_info,
+    ]
+
     return feature(
         name = "default_compile_flags",
         flag_sets = [
@@ -377,20 +435,7 @@ def get_default_compile_flags_feature(
             flag_set(
                 actions = _all_compile_actions,
                 flag_groups = _iter_cflags(
-                    [
-                        default_system_flags,
-                        _flag_configs.color_diagnostics,
-                        _flag_configs.pic,
-                        _flag_configs.linker_gc,
-                        _flag_configs.no_frame_pointers,
-                        _flag_configs.debuginfo,
-                        _flag_configs.default_warnings,
-                        _flag_configs.symbol_visibility_hidden,
-                        _flag_configs.ffp_contract_off,
-                        _flag_configs.auto_var_init,
-                        _flag_configs.thread_safety_annotations,
-                        _flag_configs.relpath_debug_info,
-                    ] + (
+                    in_tree_remaining_cflags + oot_only_cflags + (
                         [
                             # TODO(b/430020292): Re-enable werror for
                             # strict-prototypes on host when we have a better
@@ -408,21 +453,16 @@ def get_default_compile_flags_feature(
             # These are conlyflags that will be added to all builds
             flag_set(
                 actions = _all_conly_compile_actions,
-                flag_groups = _iter_conlyflags([
-                    default_system_flags,
-                ]),
+                flag_groups = _iter_conlyflags(
+                    in_tree_remaining_conlyflags + oot_only_conlyflags,
+                ),
             ),
             # These are ccflags that will be added to all builds
             flag_set(
                 actions = _all_cpp_compile_actions,
-                flag_groups = _iter_ccflags([
-                    default_system_flags,
-                    _flag_configs.language_cxx20,
-                    _flag_configs.no_exceptions,
-                    _flag_configs.no_rtti,
-                    _flag_configs.symbol_visibility_hidden,
-                    _flag_configs.relpath_debug_info,
-                ]),
+                flag_groups = _iter_ccflags(
+                    in_tree_remaining_ccflags + oot_only_ccflags,
+                ),
             ),
             # These are cflags that will be added to dbg builds
             flag_set(
@@ -452,19 +492,9 @@ def get_default_compile_flags_feature(
             # These are ldflags that are applied to all builds
             flag_set(
                 actions = _all_link_actions,
-                flag_groups = _iter_ldflags([
-                    default_system_flags,
-                    _flag_configs.driver_mode,
-                    _flag_configs.color_diagnostics,
-                    _flag_configs.no_frame_pointers,
-                    _flag_configs.linker_gc,
-                    _flag_configs.debuginfo,
-                    _flag_configs.no_exceptions,
-                    _flag_configs.no_rtti,
-                    _flag_configs.pic,
-                    _flag_configs.icf,
-                    _flag_configs.relpath_debug_info,
-                ]) + (
+                flag_groups = _iter_ldflags(
+                    in_tree_remaining_ldflags + oot_only_ldflags,
+                ) + (
                     _iter_ldflags([
                         _flag_configs.link_zircon,
                     ]) if target_os == "fuchsia" else []

@@ -27,6 +27,7 @@ fn main() {
 
     check_thermal_zone_is_available();
     check_emul_temp();
+    check_trip_points();
 
     check_cpu_cooling_device_is_available();
     check_cpu_cooling_device();
@@ -36,6 +37,8 @@ fn main() {
 
     check_cooling_fcc_is_available();
     check_cooling_fcc();
+
+    check_powercap();
 
     let thermal_mcast_groups = check_thermal_is_available();
     let sampling_group_id =
@@ -94,6 +97,50 @@ fn check_emul_temp() {
     let real_temp_str = std::fs::read("/sys/class/thermal/thermal_zone0/temp").unwrap();
     let expected_real_temp = celsius_to_millicelsius(EXPECTED_TEMP_C) as u32;
     assert_eq!(&format!("{}\n", expected_real_temp), str::from_utf8(&real_temp_str).unwrap());
+}
+
+fn check_trip_points() {
+    let temp_path = "/sys/class/thermal/thermal_zone0/trip_point_0_temp";
+    let hyst_path = "/sys/class/thermal/thermal_zone0/trip_point_0_hyst";
+
+    // Initial trip point values are 0.
+    assert_eq!("0\n", std::fs::read_to_string(temp_path).unwrap());
+    assert_eq!("0\n", std::fs::read_to_string(hyst_path).unwrap());
+
+    // Configure hysteresis then trip temperature (matching Android Thermal HAL order).
+    std::fs::write(hyst_path, "2000\n").unwrap();
+    assert_eq!("2000\n", std::fs::read_to_string(hyst_path).unwrap());
+
+    std::fs::write(temp_path, "75000\n").unwrap();
+    assert_eq!("75000\n", std::fs::read_to_string(temp_path).unwrap());
+
+    // Updating hysteresis while a trip point is active updates the low threshold.
+    std::fs::write(hyst_path, "3000").unwrap();
+    assert_eq!("3000\n", std::fs::read_to_string(hyst_path).unwrap());
+
+    // Negative hysteresis is rejected with EINVAL.
+    let err = std::fs::write(hyst_path, "-1000").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    assert_eq!("3000\n", std::fs::read_to_string(hyst_path).unwrap());
+
+    // Out-of-range trip temperature (below absolute zero) is rejected by the driver with
+    // ZX_ERR_OUT_OF_RANGE, which maps to EINVAL and leaves trip_point_0_temp unchanged.
+    let err = std::fs::write(temp_path, "-300000").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    assert_eq!("75000\n", std::fs::read_to_string(temp_path).unwrap());
+
+    // Writing 0 clears the trip point.
+    std::fs::write(temp_path, "0").unwrap();
+    assert_eq!("0\n", std::fs::read_to_string(temp_path).unwrap());
+    std::fs::write(hyst_path, "0").unwrap();
+    assert_eq!("0\n", std::fs::read_to_string(hyst_path).unwrap());
+
+    // Leave a known non-zero trip point and hysteresis configured so the host integration test
+    // can verify the programmed OneshotTempAbove and OneshotTempBelow descriptors over FIDL.
+    std::fs::write(hyst_path, "3000\n").unwrap();
+    std::fs::write(temp_path, "75000\n").unwrap();
+    assert_eq!("3000\n", std::fs::read_to_string(hyst_path).unwrap());
+    assert_eq!("75000\n", std::fs::read_to_string(temp_path).unwrap());
 }
 
 /// The test harness caps domain 0 (`policy0`, 4 OPPs) at intermediate OPP 1 (`1512000` kHz)
@@ -191,6 +238,7 @@ fn check_cpufreq() {
     check_cpufreq_policy_dir(2, 1, "2 3 4 5");
 
     check_scaling_max_freq();
+    check_scaling_min_freq();
 }
 
 fn read_sysfs(path: &str) -> String {
@@ -333,28 +381,92 @@ fn check_scaling_max_freq() {
     assert_eq!("2024000\n", read_sysfs(POLICY0));
 }
 
-/// Checks the cpufreq min-frequency voter nodes and inert governor nodes.
-fn check_inert_cpufreq_nodes(dir: &str, min_frequency_str: &str) {
-    let min_khz: u64 = min_frequency_str.parse().unwrap();
-    let expected_vote = 1_000_000u64.max(min_khz);
-    for rel_path in [
-        "scaling_min_freq",
-        "vote_manager/powerhint_min_freq",
-        "vote_manager/soft_min_freq",
-        "vote_manager/debug_min_freq",
-    ] {
-        let path = format!("{dir}/{rel_path}");
-        std::fs::write(&path, "1000000").unwrap();
-        assert_eq!(&format!("{expected_vote}\n"), &read_sysfs(&path));
-        assert_eq!(&format!("{expected_vote}\n"), &read_sysfs(&format!("{dir}/scaling_min_freq")));
-        std::fs::write(&path, "0").unwrap();
-        assert_eq!(&format!("{min_frequency_str}\n"), &read_sysfs(&path));
-        assert_eq!(
-            &format!("{min_frequency_str}\n"),
-            &read_sysfs(&format!("{dir}/scaling_min_freq"))
-        );
-    }
+/// Exercises `scaling_min_freq` and `vote_manager/*_min_freq`, where each voter holds its own
+/// persistent `fuchsia.power.cpu/DomainController` lease in `CpuFreqDomain`.
+fn check_scaling_min_freq() {
+    const POLICY0: &str = "/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq";
+    const POLICY2: &str = "/sys/devices/system/cpu/cpufreq/policy2/scaling_min_freq";
+    const CPU1: &str = "/sys/devices/system/cpu/cpu1/cpufreq/scaling_min_freq";
 
+    // Initially unconstrained, reporting the lowest operating point of each cluster.
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+    assert_eq!("512000\n", read_sysfs(POLICY2));
+
+    // An exact match raises the floor to that operating point and persists across `close()`.
+    // 1512000 sits at sorted position 2 but at operating point 1.
+    std::fs::write(POLICY0, "1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    assert_eq!("1512000\n", read_sysfs(CPU1));
+    assert_eq!("512000\n", read_sysfs(POLICY2));
+
+    // Writing the domain's lowest frequency (`cpuinfo_min_freq`, which is what `libperfmgr` uses
+    // as `DefaultIndex`) or `0` (used by `Release_Hints`) clears the floor.
+    std::fs::write(CPU1, "1128000").unwrap();
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+
+    // A request that falls between two operating points snaps up to the higher one.
+    std::fs::write(POLICY0, "1300000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+
+    // A request above every operating point clamps to the highest one.
+    std::fs::write(POLICY0, "9999999").unwrap();
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+
+    // Writing `0` on a held descriptor also releases the floor. An invalid write must fail with
+    // EINVAL without disturbing an active floor.
+    let mut file = std::fs::OpenOptions::new().write(true).open(POLICY0).unwrap();
+    file.write_all(b"1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    let err = file.write_all(b"not_a_number").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    file.write_all(b"0").unwrap();
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+    drop(file);
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+
+    // Concurrent min-frequency voters aggregate by taking the highest floor, persist across
+    // `close()`, and step down to the remaining active floor when cleared. Each
+    // `vote_manager/*_min_freq` node reads back its own floor (or the domain minimum when
+    // unconstrained), while `scaling_min_freq` reads back the aggregated domain floor.
+    const POWERHINT_MIN: &str =
+        "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/powerhint_min_freq";
+    const SOFT_MIN: &str = "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/soft_min_freq";
+    const DEBUG_MIN: &str = "/sys/devices/system/cpu/cpu0/cpufreq/vote_manager/debug_min_freq";
+    assert_eq!("1128000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("1128000\n", read_sysfs(POWERHINT_MIN));
+    assert_eq!("1128000\n", read_sysfs(DEBUG_MIN));
+
+    std::fs::write(SOFT_MIN, "1256000").unwrap();
+    assert_eq!("1256000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("1128000\n", read_sysfs(POWERHINT_MIN));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    std::fs::write(POWERHINT_MIN, "1512000").unwrap();
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MIN));
+    assert_eq!("1256000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(DEBUG_MIN, "2024000").unwrap();
+    assert_eq!("2024000\n", read_sysfs(DEBUG_MIN));
+    assert_eq!("1512000\n", read_sysfs(POWERHINT_MIN));
+    assert_eq!("1256000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("2024000\n", read_sysfs(POLICY0));
+
+    // Clearing the highest voter steps down to the next highest active voter's floor.
+    std::fs::write(DEBUG_MIN, "1128000").unwrap();
+    assert_eq!("1128000\n", read_sysfs(DEBUG_MIN));
+    assert_eq!("1512000\n", read_sysfs(POLICY0));
+    std::fs::write(POWERHINT_MIN, "0").unwrap();
+    assert_eq!("1128000\n", read_sysfs(POWERHINT_MIN));
+    assert_eq!("1256000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("1256000\n", read_sysfs(POLICY0));
+    std::fs::write(SOFT_MIN, "0").unwrap();
+    assert_eq!("1128000\n", read_sysfs(SOFT_MIN));
+    assert_eq!("1128000\n", read_sysfs(POLICY0));
+}
+
+/// Checks the cpufreq nodes that the Power HAL writes but that Fuchsia cannot act on: they must
+/// accept writes and report a stable value, rather than failing the write.
+fn check_inert_cpufreq_nodes(dir: &str) {
     std::fs::write(format!("{dir}/scaling_governor"), "schedutil").unwrap();
     assert_eq!("performance\n", read_sysfs(&format!("{dir}/scaling_governor")));
     assert_eq!("performance\n", read_sysfs(&format!("{dir}/scaling_available_governors")));
@@ -416,10 +528,7 @@ fn check_cpufreq_policy_dir(policy_id: u64, cluster_id: u64, expected_related_cp
         .unwrap()
     );
 
-    check_inert_cpufreq_nodes(
-        &format!("/sys/devices/system/cpu/cpufreq/policy{policy_id}"),
-        min_frequency_str,
-    );
+    check_inert_cpufreq_nodes(&format!("/sys/devices/system/cpu/cpufreq/policy{policy_id}"));
 }
 
 fn check_cpufreq_dir(core_id: u64, cluster_id: u64) {
@@ -467,10 +576,7 @@ fn check_cpufreq_dir(core_id: u64, cluster_id: u64) {
         .unwrap()
     );
 
-    check_inert_cpufreq_nodes(
-        &format!("/sys/devices/system/cpu/cpu{core_id}/cpufreq"),
-        min_frequency_str,
-    );
+    check_inert_cpufreq_nodes(&format!("/sys/devices/system/cpu/cpu{core_id}/cpufreq"));
 
     assert!(std::fs::exists(format!("/sys/devices/system/cpu/cpu{core_id}/topology")).unwrap());
     assert_eq!(
@@ -547,22 +653,7 @@ fn check_nlctrl_is_available() {
 }
 
 fn check_cooling_fcc_is_available() {
-    // The fcc cooling device is registered asynchronously when ChargerService
-    // is discovered. Loop until the sysfs entry is available.
-    let start = Instant::now();
-    let sensor_name = loop {
-        match std::fs::read("/sys/class/thermal/cooling_device2/type") {
-            Ok(name) => break name,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                assert!(
-                    start.elapsed() < Duration::from_secs(30),
-                    "cooling_device2 did not appear within 30s"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("Failed to read cooling_device2/type: {e:?}"),
-        }
-    };
+    let sensor_name = std::fs::read("/sys/class/thermal/cooling_device2/type").unwrap();
     assert_eq!("fcc\n", str::from_utf8(&sensor_name).unwrap());
     let cur_state = std::fs::read("/sys/class/thermal/cooling_device2/cur_state").unwrap();
     assert_eq!("0\n", str::from_utf8(&cur_state).unwrap());
@@ -770,4 +861,110 @@ fn check_thermal_sampling_returns_samples(sampling_group_id: u32) {
     // This assumes the thermal netlink server serves samples every 2 seconds
     // plus some buffer time for test variance.
     assert!(now.elapsed().as_secs() < 10);
+}
+
+fn check_powercap() {
+    let expected_zones = [
+        ("gpc:0", "/sys/devices/virtual/powercap/gpc:0", "gpc"),
+        ("gpc:0:0", "/sys/devices/virtual/powercap/gpc:0/gpc:0:0", "TestZone"),
+        ("gpc:0:0:0", "/sys/devices/virtual/powercap/gpc:0/gpc:0:0/gpc:0:0:0", "LITTLE"),
+        ("gpc:0:0:1", "/sys/devices/virtual/powercap/gpc:0/gpc:0:0/gpc:0:0:1", "MID"),
+        ("gpc:0:0:2", "/sys/devices/virtual/powercap/gpc:0/gpc:0:0/gpc:0:0:2", "BIG"),
+        ("gpc:0:0:3", "/sys/devices/virtual/powercap/gpc:0/gpc:0:0/gpc:0:0:3", "GPU"),
+    ];
+
+    for (zone_path, canonical_dir, expected_name) in expected_zones {
+        let class_link = format!("/sys/class/powercap/{zone_path}");
+        let meta = std::fs::symlink_metadata(&class_link).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "Expected {class_link} to be a DT_LNK symlink for ThermalHelperImpl"
+        );
+        assert_eq!(
+            std::path::PathBuf::from(canonical_dir),
+            std::fs::canonicalize(&class_link).unwrap()
+        );
+        assert_eq!(format!("{expected_name}\n"), read_sysfs(&format!("{class_link}/name")));
+        assert_eq!(format!("{expected_name}\n"), read_sysfs(&format!("{canonical_dir}/name")));
+    }
+
+    // Invalid, duplicate, orphaned, and cyclic nodes returned by `GetPowercapTree` must be skipped.
+    for rejected in [
+        "gpc:missing-id",
+        "gpc:missing-name",
+        "gpc:dup-id",
+        "gpc:orphan",
+        "gpc:cycle-a",
+        "gpc:cycle-b",
+        "name",
+        "uevent",
+    ] {
+        assert!(
+            !std::fs::exists(format!("/sys/class/powercap/{rejected}")).unwrap(),
+            "Expected rejected zone {rejected} to be absent from /sys/class/powercap"
+        );
+    }
+
+    // `PowercapError::Internal` from `GetPowerLimit` on `gpc:0` maps to `EIO`.
+    let read_err = std::fs::read("/sys/class/powercap/gpc:0/constraint_0_power_limit_uw")
+        .expect_err("Expected EIO when reading gpc:0 constraint_0_power_limit_uw");
+    assert_eq!(read_err.raw_os_error(), Some(libc::EIO));
+
+    // Intermediate aggregator zone (`gpc:0:0`) exposes constraint limits but no discrete power
+    // levels or bypass timer.
+    assert_eq!("TestConstraint\n", read_sysfs("/sys/class/powercap/gpc:0:0/constraint_0_name"));
+    assert_eq!("15000000\n", read_sysfs("/sys/class/powercap/gpc:0:0/constraint_0_max_power_uw"));
+    assert_eq!("1150000\n", read_sysfs("/sys/class/powercap/gpc:0:0/constraint_0_min_power_uw"));
+    assert_eq!("15000000\n", read_sysfs("/sys/class/powercap/gpc:0:0/constraint_0_power_limit_uw"));
+    assert!(!std::fs::exists("/sys/class/powercap/gpc:0:0/power_levels_uw").unwrap());
+    assert!(!std::fs::exists("/sys/class/powercap/gpc:0:0/power_limit_bypass_msec").unwrap());
+
+    // Leaf zone (`gpc:0:0:2` / `BIG`) exposes discrete power levels, writable power limit, and
+    // writable bypass timer.
+    const BIG_CLASS: &str = "/sys/class/powercap/gpc:0:0:2";
+    const BIG_DEV: &str = "/sys/devices/virtual/powercap/gpc:0/gpc:0:0/gpc:0:0:2";
+    assert_eq!("TestConstraint\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_name")));
+    assert_eq!("4565000\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_max_power_uw")));
+    assert_eq!("400000\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_min_power_uw")));
+    assert_eq!(
+        "4565000 3500000 2200000 1100000 400000\n",
+        read_sysfs(&format!("{BIG_CLASS}/power_levels_uw"))
+    );
+    assert_eq!("4565000\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_power_limit_uw")));
+
+    // Write a new power limit via `/sys/class/powercap` and read back via both paths.
+    std::fs::write(format!("{BIG_CLASS}/constraint_0_power_limit_uw"), "2200000").unwrap();
+    assert_eq!("2200000\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_power_limit_uw")));
+    assert_eq!("2200000\n", read_sysfs(&format!("{BIG_DEV}/constraint_0_power_limit_uw")));
+
+    // Invalid writes to `constraint_0_power_limit_uw` must fail with EINVAL and preserve the limit,
+    // and `PowercapError::Internal` must map to `EIO`.
+    let mut limit_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("{BIG_CLASS}/constraint_0_power_limit_uw"))
+        .unwrap();
+    let err = limit_file.write_all(b"invalid").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    let internal_err = limit_file.write_all(u64::MAX.to_string().as_bytes()).unwrap_err();
+    assert_eq!(internal_err.raw_os_error(), Some(libc::EIO));
+    assert_eq!("2200000\n", read_sysfs(&format!("{BIG_CLASS}/constraint_0_power_limit_uw")));
+
+    // Exercise `power_limit_bypass_msec` (used by PowerHAL `CPU_LOAD_SPIKE` / `LAUNCH` hints).
+    assert_eq!("0\n", read_sysfs(&format!("{BIG_CLASS}/power_limit_bypass_msec")));
+    std::fs::write(format!("{BIG_CLASS}/power_limit_bypass_msec"), "100\n").unwrap();
+    assert_eq!("100\n", read_sysfs(&format!("{BIG_CLASS}/power_limit_bypass_msec")));
+    assert_eq!("100\n", read_sysfs(&format!("{BIG_DEV}/power_limit_bypass_msec")));
+
+    let mut bypass_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("{BIG_CLASS}/power_limit_bypass_msec"))
+        .unwrap();
+    let err = bypass_file.write_all(b"not_a_number").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+    let internal_err = bypass_file.write_all(u64::MAX.to_string().as_bytes()).unwrap_err();
+    assert_eq!(internal_err.raw_os_error(), Some(libc::EIO));
+    assert_eq!("100\n", read_sysfs(&format!("{BIG_CLASS}/power_limit_bypass_msec")));
+
+    std::fs::write(format!("{BIG_CLASS}/power_limit_bypass_msec"), "0").unwrap();
+    assert_eq!("0\n", read_sysfs(&format!("{BIG_CLASS}/power_limit_bypass_msec")));
 }

@@ -27,7 +27,7 @@ use net_types::ip::{
     Ipv4, Ipv4Addr, Ipv6, Ipv6Addr, Mtu, Subnet, SubnetEither,
 };
 use net_types::{MulticastAddr, SpecifiedAddr, UnicastAddr, Witness as _};
-use netstack3_base::sync::{DynDebugReferences, Mutex};
+use netstack3_base::sync::DynDebugReferences;
 use netstack3_base::testutil::{
     AlwaysDefaultsSettingsContext, FakeAtomicInstant, FakeCryptoRng, FakeFrameCtx, FakeInstant,
     FakeNetwork, FakeNetworkLinks, FakeNetworkSpec, FakeSendToken, FakeTimerCtx, FakeTimerCtxExt,
@@ -646,9 +646,17 @@ type InnerFakeBindingsCtx = netstack3_base::testutil::FakeBindingsCtx<
     DispatchedFrame,
 >;
 
+type Mutex<T> = netstack3_base::sync::Mutex<T, netstack3_base::sync::lock_impl::RawMutex>;
+
 /// Test-only implementation of [`BindingsContext`].
 #[derive(Default, Clone)]
 pub struct FakeBindingsCtx(Arc<Mutex<InnerFakeBindingsCtx>>);
+
+impl netstack3_base::BindingsSyncTypes for FakeBindingsCtx {
+    type Mutex = netstack3_base::sync::lock_impl::RawMutex;
+    type RwLock = netstack3_base::sync::lock_impl::RawRwLock;
+    type Once = netstack3_base::sync::lock_impl::Once;
+}
 
 /// A wrapper type that makes it easier to implement `Deref` (and optionally
 /// `DerefMut`) for a value that is protected by a lock.

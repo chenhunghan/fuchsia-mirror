@@ -15,12 +15,12 @@ rustc_library(
         "src/signal.rs",
     ],
     edition = "2024",
-    # @bazel2gn:skip
     test_deps = [
         "//src/lib/fuchsia",
         "//third_party/rust_crates/vendor:futures",
     ],
     visibility = [
+        "//src/storage/erofs:__pkg__",
         "//src/storage/fxfs/platform:__pkg__",
         "//src/storage/fxfs/test:__pkg__",
         "//src/storage/gpt/component:__pkg__",
@@ -28,7 +28,6 @@ rustc_library(
         "//src/storage/lib/block_server:__pkg__",
         "//src/storage/lib/mapping:__pkg__",
     ],
-    # @bazel2gn:skip
     with_unit_tests = True,
     deps = [
         "//sdk/rust/zx",
@@ -40,7 +39,6 @@ rustc_library(
     ],
 )
 
-# @bazel2gn:skip
 fx_unittest_package(
     name = "vmo-fifo-tests",
     package_name = "vmo-fifo-tests",

@@ -32,7 +32,6 @@ cc_library(
     alwayslink = True,
 )
 
-# @bazel2gn:skip
 fx_cc_binary(
     name = "backoff_unittests",
     testonly = True,

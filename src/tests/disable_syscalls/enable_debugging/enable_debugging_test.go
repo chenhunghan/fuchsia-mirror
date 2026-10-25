@@ -21,7 +21,7 @@ func TestEnableDebuggingSyscalls(t *testing.T) {
 	})
 	arch := distro.TargetCPU()
 	device := emulator.DefaultVirtualDevice(string(arch))
-	device.KernelArgs = append(device.KernelArgs, "kernel.enable-debugging-syscalls=true ", "kernel.enable-serial-syscalls=true")
+	device.KernelArgs = append(device.KernelArgs, "kernel.enable-debugging-syscalls=true", "kernel.enable-serial-syscalls=true")
 
 	stdout, stderr := distro.RunNonInteractive(
 		"/boot/bin/syscall-check",
@@ -34,7 +34,8 @@ func TestEnableDebuggingSyscalls(t *testing.T) {
 	ensureContains(t, stdout, "zx_debug_send_command: enabled")
 	ensureContains(t, stdout, "zx_debug_write: enabled")
 	ensureContains(t, stdout, "zx_process_write_memory: enabled")
-	ensureContains(t, stdout, "zx_thread_write_state: enabled")
+	ensureContains(t, stdout, "zx_thread_write_state(ZX_THREAD_STATE_DEBUG_REGS): enabled")
+	ensureContains(t, stdout, "zx_thread_write_state(ZX_THREAD_STATE_SINGLE_STEP): enabled")
 
 	if stderr != "" {
 		t.Fatal(stderr)

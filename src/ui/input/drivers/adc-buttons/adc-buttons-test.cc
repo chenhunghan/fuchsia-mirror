@@ -53,8 +53,8 @@ class TestEnv : public fdf_testing::Environment {
     auto* dispatcher = fdf::Dispatcher::GetCurrent()->async_dispatcher();
 
     // Serve metadata.
-    std::vector<fuchsia_input_report::ConsumerControlButton> func_types = {
-        fuchsia_input_report::ConsumerControlButton::kFunction};
+    std::vector<fuchsia_input::ConsumerControlButton> func_types = {
+        fuchsia_input::ConsumerControlButton::kFunction};
     fuchsia_buttons::AdcButtonConfig func_adc_config{{
         .channel_idx = kChannel,
         .release_threshold = kReleaseThreshold,
@@ -115,13 +115,9 @@ class AdcButtonsDeviceTest : public ::testing::Test {
     zx::result<> result = driver_test().StartDriver();
     ASSERT_EQ(ZX_OK, result.status_value());
     // Connect to InputDevice.
-    auto connect_result =
-        driver_test().RunInNodeContext<zx::result<zx::channel>>([](fdf_testing::TestNode& node) {
-          return node.children().at("adc-buttons").ConnectToDevice();
-        });
+    zx::result connect_result = driver_test().Connect<fuchsia_input_report::Service::InputDevice>();
     EXPECT_EQ(ZX_OK, connect_result.status_value());
-    client_.Bind(
-        fidl::ClientEnd<fuchsia_input_report::InputDevice>(std::move(connect_result.value())));
+    client_.Bind(std::move(connect_result.value()));
   }
 
   void FakeAdcSetSample(uint32_t sample) {
@@ -223,7 +219,7 @@ TEST_F(AdcButtonsDeviceTest, GetDescriptorTest) {
   ASSERT_TRUE(result->descriptor.consumer_control().input().has_buttons());
   EXPECT_EQ(result->descriptor.consumer_control().input().buttons().size(), 1);
   EXPECT_EQ(result->descriptor.consumer_control().input().buttons()[0],
-            fuchsia_input_report::wire::ConsumerControlButton::kFunction);
+            fuchsia_input::wire::ConsumerControlButton::kFunction);
 }
 
 TEST_F(AdcButtonsDeviceTest, ReadInputReportsTest) {
@@ -262,7 +258,7 @@ TEST_F(AdcButtonsDeviceTest, ReadInputReportsTest) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           EXPECT_EQ(consumer_control.pressed_buttons().size(), 1u);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kFunction);
+                    fuchsia_input::wire::ConsumerControlButton::kFunction);
           got_report = true;
         });
     EXPECT_EQ(ZX_OK, status);

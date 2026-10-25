@@ -121,7 +121,7 @@ assembly_input_bundle(
     bootfs_packages = [
         "//bundles/assembly/bazel_inputs/src/bringup/bin/critical-services:package",
         "//bundles/assembly/bazel_inputs/src/diagnostics/archivist:package",
-        "//bundles/assembly/bazel_inputs/src/power/shutdown-shim:package",
+        "//src/power/shutdown-shim:package",
     ],
     root_shards = [
         "//src/sys/root:root.cml",
@@ -1358,7 +1358,7 @@ assembly_input_bundle(
                     "destination": "inspect/offer.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:offer.shard.cml",
+                    "source": "//sdk/lib/syslog:offer.shard",
                     "destination": "syslog/offer.shard.cml",
                 },
                 {
@@ -1488,8 +1488,7 @@ assembly_input_bundle(
 # Network realm definition.
 #
 # This AIB defines the base network package, which lays out the network realm.
-# It must be used in conjunction with network_realm_packages or
-# network_realm_packages_gub.
+# It must be used in conjunction with network_realm_packages.
 # buildifier: leave-alone
 assembly_input_bundle(
     name = "network_realm",
@@ -1512,7 +1511,7 @@ assembly_input_bundle(
                     "destination": "trace/offer.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:offer.shard.cml",
+                    "source": "//sdk/lib/syslog:offer.shard",
                     "destination": "syslog/offer.shard.cml",
                 },
             ],
@@ -1520,117 +1519,22 @@ assembly_input_bundle(
     ],
 )
 
-# Network realm packages without unified binary.
+# Network realm packages.
 #
 # This AIB includes all the packages that are common across all products that
-# require networking. It provides the network realm using packages that utilize
-# separate, more-optimized, binaries, trading space for performance. This is
-# the default implementation used.
-#
-# It is mutually-exclusive with 'network_realm_packages_gub'.
+# require networking.
 # buildifier: leave-alone
 assembly_input_bundle(
     name = "network_realm_packages",
     base_packages = [
+        "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package",
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package",
-    ],
-)
-
-# Network realm packages with unified binary.
-#
-# This AIB is equivalent to network_realm_packages. It provides the network
-# realm using packages that utilize a "grand unified binary" (GUB), saving space
-# at the cost of a minor loss in performance.  This is for space- constrained
-# devices that don't have the space for the non-GUB binaries.
-#
-# It is mutually-exclusive with 'network_realm_packages'.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "network_realm_packages_gub",
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package_gub",
-        "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package_gub",
-        "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package_gub",
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package_gub",
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package_gub",
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package_gub",
-    ],
-)
-
-# networking_with_virtualization
-#
-# This AIB adds the networking capabilities that include virtualization support.
-# It is mutually-exclusive with networking_basic.
-#
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "networking_with_virtualization",
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-advanced",
-    ],
-    compiled_packages = [
-        {
-            "name": "network",
-            "components": [
-                {
-                    "component_name": "network",
-                    "shards": ["//src/connectivity/network:meta/network-with-virtualization.shard.cml"],
-                },
-            ],
-        },
-    ],
-)
-
-# Basic networking.
-#
-# This AIB adds the basic networking capabilities. It is mutually-exclusive with
-# networking_with_virtualization.
-#
-# It must be used in conjunction with either network_basic_packages or
-# network_basic_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "networking_basic",
-    compiled_packages = [
-        {
-            "name": "network",
-            "components": [
-                {
-                    "component_name": "network",
-                    "shards": ["//src/connectivity/network:meta/network-basic.shard.cml"],
-                },
-            ],
-        },
-    ],
-)
-
-# Basic networking packages without unified binary.
-#
-# This AIB provides packages for the networking_basic configuration. It is
-# mutually exlucisve with networking_basic_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "networking_basic_packages",
-    base_packages = [
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic",
-    ],
-)
-
-# Basic networking packages with unified binary.
-#
-# This AIB provides space-saving equivalent packages for the networking_basic
-# configuration as found in networking_basic_packages. It is mutually exlucisve
-# with networking_basic_packages.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "networking_basic_packages_gub",
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic_gub",
+        "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package",
     ],
 )
 
@@ -1861,13 +1765,13 @@ assembly_input_bundle(
     ],
     core_shards = [
         # The process_resolver core shard (either the base-resolver or
-        # pkg-resolver variant) should only be present in
+        # full-resolver variant) should only be present in
         # the `core_realm_development_access` AIB, but it's required
         # here to avoid a userdebug and eng variant of that AIB.
         #
-        # eng uses the pkg-resolver, as opposed to the base-resolver,
+        # eng uses the full-resolver, as opposed to the base-resolver,
         # to support ephemeral resolution of shell packages.
-        "//src/sys/process-resolver:meta/process_resolver.pkg-resolver.core_shard.cml",
+        "//src/sys/process-resolver:meta/process_resolver.full-resolver.core_shard.cml",
         "//src/sys/core:meta/core-env-full-resolver.core_shard.cml",
         "//src/sys/core:meta/unrestricted-storage.core_shard.cml",
         "//src/sys/tools/debug-dash-launcher:meta/debug_dash_launcher.core_shard.cml",
@@ -1921,12 +1825,12 @@ assembly_input_bundle(
         "//src/sys/core:meta/core-env-base-resolver.core_shard.cml",
 
         # The process_resolver core shard (either the base-resolver or
-        # pkg-resolver variant) should only be present in
+        # full-resolver variant) should only be present in
         # the `core_realm_development_access` AIB, but it's required
         # here to avoid a userdebug and eng variant of that AIB.
         #
         # user and userdebug only have the base-resolver, not the
-        # pkg-resolver.
+        # full-resolver.
         "//src/sys/process-resolver:meta/process_resolver.base-resolver.core_shard.cml",
 
         # user and userdebug restrict access to the Storage capability
@@ -2166,7 +2070,7 @@ assembly_input_bundle(
         "eng",
     ],
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/network/tools/sockscripter:package",
+        "//src/connectivity/network/tools/sockscripter:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/mdns/util:mdns-util",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/net-cli",
         "//bundles/assembly/bazel_inputs/third_party/iperf:iperf3_pkg",
@@ -3120,7 +3024,6 @@ assembly_input_bundle(
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/elf:elf-test-create-raw-processes-runner",
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/elf:elf-test-create-raw-processes-ambient-exec-runner",
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/fuzz:fuzz-test-runner",
-        "//bundles/assembly/bazel_inputs/src/sys/test_runners/gotests:go-test-runner",
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:gtest-runner",
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/gtest:zxtest-runner",
         "//bundles/assembly/bazel_inputs/src/sys/test_runners/gunit:gunit-runner",
@@ -3233,15 +3136,15 @@ assembly_input_bundle(
                     "destination": "inspect/use.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:client.shard.cml",
+                    "source": "//sdk/lib/syslog:client.shard",
                     "destination": "syslog/client.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:offer.shard.cml",
+                    "source": "//sdk/lib/syslog:offer.shard",
                     "destination": "syslog/offer.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:use.shard.cml",
+                    "source": "//sdk/lib/syslog:use.shard",
                     "destination": "syslog/use.shard.cml",
                 },
                 {
@@ -3292,7 +3195,22 @@ assembly_input_bundle(
     allowed_in = [
         "eng",
     ],
-    bootfs_files_package = "//bundles/assembly/bazel_inputs:fshost_eng.bootfs_files_package",
+    bootfs_packages = [
+        "//bundles/assembly/bazel_inputs/src/devices/block/bin:block_tools",
+    ],
+    shell_commands = [
+        {
+            "bootfs_package": True,
+            "package": "block_tools",
+            "components": [
+                "biotime",
+                "gpt",
+                "iochk",
+                "iotime",
+                "lsblk",
+            ],
+        },
+    ],
     compiled_packages = [
         {
             "bootfs_package": True,
@@ -3763,50 +3681,6 @@ assembly_input_bundle(
     ],
     bootstrap_shards = [
         "//src/paravirtualization/vsock:meta/vsock_service.bootstrap_shard.cml",
-    ],
-)
-
-# Netstack3 as the netstack for use by base networking.
-#
-# To be used in conjunction with netstack3_packages or netstack3_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack3",
-    compiled_packages = [
-        {
-            "name": "network",
-            "components": [
-                {
-                    "component_name": "network",
-                    "shards": ["//src/connectivity/network:meta/netstack3.shard.cml"],
-                },
-            ],
-        },
-    ],
-)
-
-# Netstack3 packages without unified binary.
-#
-# This AIB provides packages for the netstack3 configuration. It is mutually
-# exclusive with netstack3_packages_gub.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack3_packages",
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3",
-    ],
-)
-
-# Netstack3 packages with unified binary.
-#
-# This AIB provides space-saving equivalent packages for the netstack3
-# configuration as found in netstack3_packages. It is mutually exclusive with
-# netstack3_packages.
-# buildifier: leave-alone
-assembly_input_bundle(
-    name = "netstack3_packages_gub",
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3_gub",
     ],
 )
 
@@ -4889,7 +4763,7 @@ assembly_input_bundle(
             ],
             "component_includes": [
                 {
-                    "source": "//sdk/lib/syslog:client.shard.cml",
+                    "source": "//sdk/lib/syslog:client.shard",
                     "destination": "syslog/client.shard.cml",
                 },
                 {
@@ -4901,7 +4775,7 @@ assembly_input_bundle(
                     "destination": "inspect/offer.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:offer.shard.cml",
+                    "source": "//sdk/lib/syslog:offer.shard",
                     "destination": "syslog/offer.shard.cml",
                 },
                 {
@@ -4909,7 +4783,7 @@ assembly_input_bundle(
                     "destination": "inspect/use.shard.cml",
                 },
                 {
-                    "source": "//sdk/lib/syslog:use.shard.cml",
+                    "source": "//sdk/lib/syslog:use.shard",
                     "destination": "syslog/use.shard.cml",
                 },
             ],

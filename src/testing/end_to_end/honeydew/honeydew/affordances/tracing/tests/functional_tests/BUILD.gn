@@ -23,9 +23,9 @@ if (is_host) {
       sherlock_env,
     ]
     honeydew_config = {
-      transports = {
-        adb = {
-          enabled = false
+      affordances = {
+        tracing = {
+          implementation = "fuchsia-controller"
         }
       }
     }
@@ -51,11 +51,6 @@ if (is_host) {
       affordances = {
         tracing = {
           implementation = "ffx"
-        }
-      }
-      transports = {
-        adb = {
-          enabled = false
         }
       }
     }

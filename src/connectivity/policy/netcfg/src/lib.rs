@@ -14,7 +14,6 @@ mod interface;
 mod masquerade;
 pub mod network;
 pub mod telemetry;
-mod virtualization;
 
 use ::dhcpv4::protocol::FromFidlExt as _;
 use std::collections::hash_map::Entry;
@@ -44,22 +43,18 @@ use fidl_fuchsia_net_matchers_ext as fnet_matchers_ext;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_ndp as fnet_ndp;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
-use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_net_resources as fnet_resources;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
 use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
-use fidl_fuchsia_net_stack as fnet_stack;
-use fidl_fuchsia_net_virtualization as fnet_virtualization;
 use fuchsia_async as fasync;
 
 use anyhow::{Context as _, anyhow, format_err};
 use assert_matches::assert_matches;
-use async_trait::async_trait;
 use async_utils::stream::WithTag as _;
 use dns_server_watcher::{DEFAULT_DNS_PORT, DnsServers, DnsServersUpdateSource};
 use futures::stream::BoxStream;
-use futures::{FutureExt, StreamExt as _, TryFutureExt as _, TryStreamExt as _};
+use futures::{FutureExt, StreamExt as _, TryStreamExt as _};
 use log::{debug, error, info, trace, warn};
 use net_declare::fidl_ip_v4;
 use net_declare::net::prefix_length_v4;
@@ -304,15 +299,15 @@ impl From<DeviceClass> for InterfaceType {
     }
 }
 
-impl From<DeviceClass> for fnp_socketproxy::NetworkType {
+impl From<DeviceClass> for fnp_properties::NetworkType {
     fn from(device_class: DeviceClass) -> Self {
         match device_class {
-            DeviceClass::WlanClient | DeviceClass::WlanAp => fnp_socketproxy::NetworkType::Wifi,
+            DeviceClass::WlanClient | DeviceClass::WlanAp => fnp_properties::NetworkType::Wifi,
             DeviceClass::Ethernet
             | DeviceClass::Bridge
             | DeviceClass::Virtual
-            | DeviceClass::Lowpan => fnp_socketproxy::NetworkType::Ethernet,
-            DeviceClass::Ppp | DeviceClass::Blackhole => fnp_socketproxy::NetworkType::Unknown,
+            | DeviceClass::Lowpan => fnp_properties::NetworkType::Ethernet,
+            DeviceClass::Ppp | DeviceClass::Blackhole => fnp_properties::NetworkType::Unknown,
         }
     }
 }
@@ -431,9 +426,9 @@ struct Config {
     // permit a subset of device classes, specify this in configuration.
     #[serde(default)]
     pub allowed_upstream_device_classes: AllowedDeviceClasses,
-    // NB: See above.
+    // TODO(b/568493656): Remove this temporary field once OOT configs stop setting it.
     #[serde(default)]
-    pub allowed_bridge_upstream_device_classes: AllowedDeviceClasses,
+    pub allowed_bridge_upstream_device_classes: serde::de::IgnoredAny,
     // TODO(https://fxbug.dev/42173732): default to false.
     #[serde(default = "dhcpv6_enabled_default")]
     pub enable_dhcpv6: bool,
@@ -637,7 +632,7 @@ impl InterfaceState {
                         network::NetworkId::fuchsia(properties.id),
                         network::NetworkUpdate::Properties(network::NetworkPropertiesChange {
                             added: true,
-                            marks: None,
+                            delegated: None,
                             dns_servers: None,
                             connectivity_state: None,
                             name: Some(properties.name.clone()),
@@ -696,7 +691,6 @@ impl InterfaceState {
 
 /// Network Configuration state.
 pub struct NetCfg<'a> {
-    stack: fnet_stack::StackProxy,
     lookup_admin: fnet_name::LookupAdminProxy,
     filter_control: FilterControl,
     interface_state: fnet_interfaces::StateProxy,
@@ -720,8 +714,7 @@ pub struct NetCfg<'a> {
 
     dns_servers: DnsServers,
     dns_server_watch_responders: dns::DnsServerWatchResponders,
-    route_advertisement_watcher_provider:
-        Option<fnet_ndp::RouterAdvertisementOptionWatcherProviderProxy>,
+    route_advertisement_watcher_provider: fnet_ndp::RouterAdvertisementOptionWatcherProviderProxy,
 
     forwarded_device_classes: ForwardedDeviceClasses,
 
@@ -912,26 +905,26 @@ fn start_dhcpv6_client(
 }
 
 enum RequestStream {
-    Virtualization(fnet_virtualization::ControlRequestStream),
     Dhcpv6PrefixProvider(fnet_dhcpv6::PrefixProviderRequestStream),
     Masquerade(fnet_masquerade::FactoryRequestStream),
     DnsServerWatcher(fnet_name::DnsServerWatcherRequestStream),
     NetworkAttributes(fnp_properties::NetworksRequestStream),
-    DelegatedNetworks(fnp_socketproxy::NetworkRegistryRequestStream),
+    DelegatedNetworks(fnp_properties::NetworkRegistryRequestStream),
     NetworkTokenResolver(fnp_properties::NetworkTokenResolverRequestStream),
+    PrivilegedNetworkLookup(fnp_properties::PrivilegedNetworkLookupRequestStream),
     Reachability(freachability::MonitorRequestStream),
 }
 
 impl std::fmt::Debug for RequestStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
-            RequestStream::Virtualization(_) => write!(f, "Virtualization"),
             RequestStream::Dhcpv6PrefixProvider(_) => write!(f, "Dhcpv6PrefixProvider"),
             RequestStream::Masquerade(_) => write!(f, "Masquerade"),
             RequestStream::DnsServerWatcher(_) => write!(f, "DnsServerWatcher"),
             RequestStream::NetworkAttributes(_) => write!(f, "NetworkAttributes"),
             RequestStream::DelegatedNetworks(_) => write!(f, "DelegatedNetworks"),
             RequestStream::NetworkTokenResolver(_) => write!(f, "NetworkTokenResolver"),
+            RequestStream::PrivilegedNetworkLookup(_) => write!(f, "PrivilegedNetworkLookup"),
             RequestStream::Reachability(_) => write!(f, "Reachability"),
         }
     }
@@ -985,7 +978,6 @@ enum ProvisioningEvent {
     DnsServerWatcherRequest(
         (dns::ConnectionId, Result<fnet_name::DnsServerWatcherRequest, fidl::Error>),
     ),
-    VirtualizationEvent(virtualization::Event),
     MasqueradeEvent(masquerade::Event),
     NdpDnsExpired(InterfaceId, net_types::ip::Ipv6Addr),
 }
@@ -1009,9 +1001,6 @@ impl<'a> NetCfg<'a> {
         inspector: fuchsia_inspect::Inspector,
     ) -> Result<NetCfg<'a>, anyhow::Error> {
         let svc_dir = clone_namespace_svc().context("error cloning svc directory handle")?;
-        let stack = svc_connect::<fnet_stack::StackMarker>(&svc_dir)
-            .await
-            .context("could not connect to stack")?;
         let lookup_admin = svc_connect::<fnet_name::LookupAdminMarker>(&svc_dir)
             .await
             .context("could not connect to lookup admin")?;
@@ -1047,11 +1036,11 @@ impl<'a> NetCfg<'a> {
         let installer = svc_connect::<fnet_interfaces_admin::InstallerMarker>(&svc_dir)
             .await
             .context("could not connect to installer")?;
-        let route_advertisement_watcher_provider = optional_svc_connect::<
+        let route_advertisement_watcher_provider = svc_connect::<
             fnet_ndp::RouterAdvertisementOptionWatcherProviderMarker,
         >(&svc_dir)
         .await
-        .context("could not connect to fuchsia.net.ndp.RouteAdvertisementOptionWatcherProvider")?;
+        .context("could not connect to fuchsia.net.ndp.RouterAdvertisementOptionWatcherProvider")?;
         let interface_naming_config =
             interface::InterfaceNamingConfig::from_naming_rules(interface_naming_policy);
         let telemetry_node = inspector.root().create_child(TELEMETRY_INSPECT_NODE_NAME);
@@ -1060,7 +1049,6 @@ impl<'a> NetCfg<'a> {
             .context("failed to initialize network registry inspect")?;
 
         Ok(NetCfg {
-            stack,
             lookup_admin,
             filter_control,
             interface_state,
@@ -1245,10 +1233,7 @@ impl<'a> NetCfg<'a> {
     ///
     /// The device directory will be monitored for device events and the netstack will be
     /// configured with a new interface on new device discovery.
-    async fn run(
-        &mut self,
-        mut virtualization_handler: impl virtualization::Handler,
-    ) -> Result<(), anyhow::Error> {
+    async fn run(&mut self) -> Result<(), anyhow::Error> {
         let netdev_stream =
             self.create_device_stream().await.context("create netdevice stream")?.fuse();
         let mut netdev_stream = pin!(netdev_stream);
@@ -1263,17 +1248,16 @@ impl<'a> NetCfg<'a> {
 
         let mut masquerade_handler = MasqueradeHandler::default();
 
-        // Serve fuchsia.net.virtualization/Control.
         let mut fs = ServiceFs::new_local();
         let _: &mut ServiceFsDir<'_, _> = fs
             .dir("svc")
-            .add_fidl_service(RequestStream::Virtualization)
             .add_fidl_service(RequestStream::Dhcpv6PrefixProvider)
             .add_fidl_service(RequestStream::Masquerade)
             .add_fidl_service(RequestStream::DnsServerWatcher)
             .add_fidl_service(RequestStream::NetworkAttributes)
             .add_fidl_service(RequestStream::DelegatedNetworks)
             .add_fidl_service(RequestStream::NetworkTokenResolver)
+            .add_fidl_service(RequestStream::PrivilegedNetworkLookup)
             .add_fidl_service(RequestStream::Reachability);
 
         let _inspect_server_task =
@@ -1286,10 +1270,6 @@ impl<'a> NetCfg<'a> {
 
         let mut dhcpv6_prefix_provider_requests =
             futures::stream::SelectAll::<fnet_dhcpv6::PrefixProviderRequestStream>::new();
-
-        // Maintain a queue of virtualization events to be dispatched to the virtualization handler.
-        let mut virtualization_events =
-            futures::stream::SelectAll::<virtualization::EventStream>::new();
 
         // Maintain a queue of masquerade events to be dispatched to the masquerade handler.
         let mut masquerade_events = futures::stream::SelectAll::<masquerade::EventStream>::new();
@@ -1412,11 +1392,6 @@ impl<'a> NetCfg<'a> {
                         ProvisioningEvent::DnsServerWatcherRequest(req)
                     )
                 }
-                virt_event = virtualization_events.select_next_some() => {
-                    Event::ProvisioningEvent(
-                        ProvisioningEvent::VirtualizationEvent(virt_event)
-                    )
-                }
                 masq_event = masquerade_events.select_next_some() => {
                     Event::ProvisioningEvent(
                         ProvisioningEvent::MasqueradeEvent(
@@ -1502,8 +1477,6 @@ impl<'a> NetCfg<'a> {
                         &mut dns_watchers,
                         &mut dhcpv6_prefix_provider_requests,
                         &mut dns_server_watcher_incoming_requests,
-                        &mut virtualization_handler,
-                        &mut virtualization_events,
                         &mut masquerade_handler,
                         &mut masquerade_events,
                     )
@@ -1521,8 +1494,6 @@ impl<'a> NetCfg<'a> {
             fnet_dhcpv6::PrefixProviderRequestStream,
         >,
         dns_server_watcher_incoming_requests: &mut dns::DnsServerWatcherRequestStreams,
-        virtualization_handler: &mut impl virtualization::Handler,
-        virtualization_events: &mut futures::stream::SelectAll<virtualization::EventStream>,
         masquerade_handler: &mut MasqueradeHandler,
         masquerade_events: &mut futures::stream::SelectAll<masquerade::EventStream>,
     ) -> Result<(), anyhow::Error> {
@@ -1534,7 +1505,7 @@ impl<'a> NetCfg<'a> {
                 trace!("got interfaces watcher event = {:?}", event);
 
                 if let Some(removed_id) = self
-                    .handle_interface_watcher_event(event, dns_watchers, virtualization_handler)
+                    .handle_interface_watcher_event(event, dns_watchers)
                     .await
                     .context("handle interface watcher event")?
                 {
@@ -1632,14 +1603,6 @@ impl<'a> NetCfg<'a> {
             // state.
             ProvisioningEvent::RequestStream(req_stream) => {
                 match req_stream.context("ServiceFs ended unexpectedly")? {
-                    RequestStream::Virtualization(req_stream) => virtualization_handler
-                        .handle_event(
-                            virtualization::Event::ControlRequestStream(req_stream),
-                            virtualization_events,
-                        )
-                        .await
-                        .context("handle virtualization event")
-                        .or_else(errors::Error::accept_non_fatal)?,
                     RequestStream::Dhcpv6PrefixProvider(req_stream) => {
                         dhcpv6_prefix_provider_requests.push(req_stream);
                     }
@@ -1662,6 +1625,9 @@ impl<'a> NetCfg<'a> {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
                     RequestStream::NetworkTokenResolver(req_stream) => {
+                        self.netpol_networks_service.add_stream(req_stream);
+                    }
+                    RequestStream::PrivilegedNetworkLookup(req_stream) => {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
                     RequestStream::Reachability(req_stream) => {
@@ -1809,13 +1775,6 @@ impl<'a> NetCfg<'a> {
             }
             ProvisioningEvent::DnsServerWatcherRequest((id, req)) => {
                 self.dns_server_watch_responders.handle_request(id, req, &self.dns_servers)?;
-            }
-            ProvisioningEvent::VirtualizationEvent(event) => {
-                virtualization_handler
-                    .handle_event(event, virtualization_events)
-                    .await
-                    .context("handle virtualization event")
-                    .or_else(errors::Error::accept_non_fatal)?;
             }
             ProvisioningEvent::MasqueradeEvent(event) => {
                 masquerade_handler
@@ -1993,7 +1952,6 @@ impl<'a> NetCfg<'a> {
         &mut self,
         event: fnet_interfaces_ext::EventWithInterest<fnet_interfaces_ext::DefaultInterest>,
         watchers: &mut DnsServerWatchers<'_>,
-        virtualization_handler: &mut impl virtualization::Handler,
     ) -> Result<Option<InterfaceId>, anyhow::Error> {
         let Self {
             interface_properties,
@@ -2086,12 +2044,6 @@ impl<'a> NetCfg<'a> {
             dhcpv6_prefix_provider_handler.as_mut(),
         )
         .context("maybe send PrefixControl.WatchPrefix response")?;
-
-        virtualization_handler
-            .handle_interface_update_result(&update_result)
-            .await
-            .context("handle interface update for virtualization")
-            .or_else(errors::Error::accept_non_fatal)?;
 
         Ok(removed_id)
     }
@@ -2235,7 +2187,7 @@ impl<'a> NetCfg<'a> {
                                             network::NetworkUpdate::Properties(
                                                 network::NetworkPropertiesChange {
                                                     added: true,
-                                                    marks: None,
+                                                    delegated: None,
                                                     dns_servers: None,
                                                     connectivity_state: None,
                                                     name: Some(name.clone()),
@@ -2999,11 +2951,13 @@ impl<'a> NetCfg<'a> {
 
             info!("discovered host interface with id={}, configuring interface", interface_id);
 
-            if let Some(watcher_provider) = &self.route_advertisement_watcher_provider {
-                dns::add_rdnss_watcher(&watcher_provider, interface_id, dns_watchers)
-                    .await
-                    .map_err(errors::Error::NonFatal)?;
-            }
+            dns::add_rdnss_watcher(
+                &self.route_advertisement_watcher_provider,
+                interface_id,
+                dns_watchers,
+            )
+            .await
+            .map_err(errors::Error::NonFatal)?;
 
             if self.enable_socket_proxy && provisioning_type.track_in_network_registry() {
                 if self.locally_provisioned_network_rule_set.is_none() {
@@ -3730,7 +3684,7 @@ impl<'a> NetCfg<'a> {
     }
 }
 
-pub async fn run<M: Mode>() -> Result<(), anyhow::Error> {
+pub async fn run() -> Result<(), anyhow::Error> {
     let opt: Opt = argh::from_env();
     let Opt { min_severity: LogLevel(min_severity), config_data } = &opt;
 
@@ -3750,8 +3704,7 @@ pub async fn run<M: Mode>() -> Result<(), anyhow::Error> {
         filter_enabled_interface_types,
         interface_metrics,
         allowed_upstream_device_classes: AllowedDeviceClasses(allowed_upstream_device_classes),
-        allowed_bridge_upstream_device_classes:
-            AllowedDeviceClasses(allowed_bridge_upstream_device_classes),
+        allowed_bridge_upstream_device_classes: serde::de::IgnoredAny,
         enable_dhcpv6,
         forwarded_device_classes,
         interface_naming_policy,
@@ -3821,62 +3774,11 @@ pub async fn run<M: Mode>() -> Result<(), anyhow::Error> {
     debug!("updating default servers to {:?}", servers);
     netcfg.update_dns_servers(DnsServersUpdateSource::Default, servers).await;
 
-    M::run(netcfg, allowed_bridge_upstream_device_classes)
-        .map_err(|e| {
-            let err_str = format!("fatal error running main: {:?}", e);
-            error!("{}", err_str);
-            anyhow!(err_str)
-        })
-        .await
-}
-
-/// Allows callers of `netcfg::run` to configure at compile time which features
-/// should be enabled.
-///
-/// This trait may be expanded to support combinations of features that can be
-/// assembled together for specific netcfg builds.
-#[async_trait(?Send)]
-pub trait Mode {
-    async fn run<'a>(
-        netcfg: NetCfg<'a>,
-        allowed_bridge_upstream_device_classes: HashSet<DeviceClass>,
-    ) -> Result<(), anyhow::Error>;
-}
-
-/// In this configuration, netcfg acts as the policy manager for netstack,
-/// watching for device events and configuring the netstack with new interfaces
-/// as needed on new device discovery. It does not implement any FIDL protocols.
-pub enum BasicMode {}
-
-#[async_trait(?Send)]
-impl Mode for BasicMode {
-    async fn run<'a>(
-        mut netcfg: NetCfg<'a>,
-        _allowed_bridge_upstream_device_classes: HashSet<DeviceClass>,
-    ) -> Result<(), anyhow::Error> {
-        netcfg.run(virtualization::Stub).await.context("event loop")
-    }
-}
-
-/// In this configuration, netcfg implements the base functionality included in
-/// `BasicMode`, and also serves the `fuchsia.net.virtualization/Control`
-/// protocol, allowing clients to create virtual networks.
-pub enum VirtualizationEnabled {}
-
-#[async_trait(?Send)]
-impl Mode for VirtualizationEnabled {
-    async fn run<'a>(
-        mut netcfg: NetCfg<'a>,
-        allowed_bridge_upstream_device_classes: HashSet<DeviceClass>,
-    ) -> Result<(), anyhow::Error> {
-        let handler = virtualization::Virtualization::new(
-            netcfg.allowed_upstream_device_classes,
-            allowed_bridge_upstream_device_classes,
-            virtualization::BridgeHandlerImpl::new(netcfg.stack.clone()),
-            netcfg.installer.clone(),
-        );
-        netcfg.run(handler).await.context("event loop")
-    }
+    netcfg.run().await.context("event loop").map_err(|e| {
+        let err_str = format!("fatal error running main: {:?}", e);
+        error!("{}", err_str);
+        anyhow!(err_str)
+    })
 }
 
 fn map_control_error(
@@ -4078,7 +3980,6 @@ mod tests {
     }
 
     fn test_netcfg(args: NetcfgTestArgs) -> Result<(NetCfg<'static>, ServerEnds), anyhow::Error> {
-        let (stack, _stack_server) = fidl::endpoints::create_proxy::<fnet_stack::StackMarker>();
         let (lookup_admin, lookup_admin_server) =
             fidl::endpoints::create_proxy::<fnet_name::LookupAdminMarker>();
         let (filter_control, _filter_server) = crate::masquerade::test::MockFilter::default()
@@ -4097,6 +3998,9 @@ mod tests {
             fidl::endpoints::create_proxy::<fidl_fuchsia_net_interfaces_admin::InstallerMarker>();
         let (route_set_v4_provider, route_set_v4_provider_server) =
             fidl::endpoints::create_proxy::<fnet_routes_admin::RouteTableV4Marker>();
+        let (route_advertisement_watcher_provider, _route_advertisement_watcher_provider_server) =
+            fidl::endpoints::create_proxy::<fnet_ndp::RouterAdvertisementOptionWatcherProviderMarker>(
+            );
 
         let (netcfg_dhcpv4_client_provider, netcfg_route_set_v4_provider) = if args
             .serve_noop_dhcpv4
@@ -4119,7 +4023,6 @@ mod tests {
 
         Ok((
             NetCfg {
-                stack,
                 lookup_admin,
                 filter_control,
                 interface_state,
@@ -4134,7 +4037,7 @@ mod tests {
                 interface_metrics: Default::default(),
                 dns_servers: Default::default(),
                 dns_server_watch_responders: Default::default(),
-                route_advertisement_watcher_provider: Default::default(),
+                route_advertisement_watcher_provider,
                 forwarded_device_classes: Default::default(),
                 dhcpv6_prefix_provider_handler: Default::default(),
                 allowed_upstream_device_classes: &DEFAULT_ALLOWED_UPSTREAM_DEVICE_CLASSES,
@@ -4219,10 +4122,7 @@ mod tests {
             addresses,
             ..Default::default()
         });
-        netcfg
-            .handle_interface_watcher_event(event.into(), dns_watchers, &mut virtualization::Stub)
-            .await
-            .map(|_| ())
+        netcfg.handle_interface_watcher_event(event.into(), dns_watchers).await.map(|_| ())
     }
 
     /// Make sure that a new DHCPv6 client was requested, and verify its parameters.
@@ -4368,7 +4268,6 @@ mod tests {
                 })
                 .into(),
                 &mut dns_watchers,
-                &mut virtualization::Stub,
             )
             .await
             .expect("error handling interface added event with interface up and sockaddr1");
@@ -4452,7 +4351,6 @@ mod tests {
                 })
                 .into(),
                 dns_watchers,
-                &mut virtualization::Stub,
             )
             .await
             .expect("error handling interface change event with interface online");
@@ -4514,7 +4412,6 @@ mod tests {
 
         // Have Netcfg observe the new interface being added.
         let mut dns_watchers = DnsServerWatchers::empty();
-        let mut virt_stub = virtualization::Stub;
         let start_serving_fut = {
             let netcfg_fut = netcfg
                 .handle_interface_watcher_event(
@@ -4530,7 +4427,6 @@ mod tests {
                     })
                     .into(),
                     &mut dns_watchers,
-                    &mut virt_stub,
                 )
                 .map(|result| {
                     let _removed_interface_id: Option<InterfaceId> =
@@ -4643,7 +4539,6 @@ mod tests {
                     })
                     .into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await
                 .expect("error handling interface added event");
@@ -4827,7 +4722,6 @@ mod tests {
                         .handle_interface_watcher_event(
                             fnet_interfaces::Event::Removed(INTERFACE_ID.get()).into(),
                             &mut dns_watchers,
-                            &mut virtualization::Stub,
                         )
                         .await
                         .expect("error handling interface removed event");
@@ -5027,7 +4921,6 @@ mod tests {
                 })
                 .into(),
                 &mut dns_watchers,
-                &mut virtualization::Stub,
             )
             .await
             .expect("error handling interface added event");
@@ -5177,7 +5070,6 @@ mod tests {
                     })
                     .into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await
                 .expect("error handling interface added event");
@@ -5317,7 +5209,6 @@ mod tests {
                 })
                 .into(),
                 &mut dns_watchers,
-                &mut virtualization::Stub,
             )
             .await
             .expect("error handling interface added event with interface up and sockaddr1");
@@ -5465,7 +5356,6 @@ mod tests {
                 .handle_interface_watcher_event(
                     fnet_interfaces::Event::Removed(INTERFACE_ID.get()).into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .map(|r| {
                     let _removed_interface_id: Option<InterfaceId> =
@@ -5625,11 +5515,11 @@ mod tests {
 
                     (
                         device_class,
-                        Some(
-                            fidl::endpoints::ServerEnd
-                                ::<fnet_interfaces_admin::ControlMarker>
-                                ::from(control_inner.into_channel().into_zx_channel()),
-                        ),
+                        Some(fidl::endpoints::ServerEnd::<
+                            fnet_interfaces_admin::ControlMarker,
+                        >::from(
+                            control_inner.into_channel().into_zx_channel()
+                        )),
                     )
                 }
             };
@@ -5652,7 +5542,6 @@ mod tests {
                         ..Default::default()
                     }).into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await
                 .unwrap_or_else(|e| panic!("error handling interface added event for {} with interface up and link-local addr: {}", id, e));
@@ -6054,7 +5943,6 @@ mod tests {
                         ..Default::default()
                     }).into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await
                 .unwrap_or_else(|e| panic!("error handling interface added event for {} with interface up and link-local addr: {:?}", id, e));
@@ -6180,7 +6068,6 @@ mod tests {
                     }))
                     .into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await;
             assert_matches::assert_matches!(watcher_result, Ok(None));
@@ -6215,7 +6102,6 @@ mod tests {
                     }))
                     .into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await,
             Ok(None)
@@ -6241,7 +6127,6 @@ mod tests {
                     }))
                     .into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await,
             Ok(None)
@@ -6253,13 +6138,8 @@ mod tests {
             fnet_interfaces::Event::Removed(id) => Some(InterfaceId::new(*id).unwrap()),
             _ => None,
         };
-        let watcher_result = netcfg
-            .handle_interface_watcher_event(
-                final_event.into(),
-                &mut dns_watchers,
-                &mut virtualization::Stub,
-            )
-            .await;
+        let watcher_result =
+            netcfg.handle_interface_watcher_event(final_event.into(), &mut dns_watchers).await;
         let watcher_result = watcher_result.expect("watcher_result error");
         assert_eq!(watcher_result, expected_result);
 
@@ -6344,7 +6224,6 @@ mod tests {
     "blackhole_metric": 123
   },
   "allowed_upstream_device_classes": ["ethernet", "wlanclient"],
-  "allowed_bridge_upstream_device_classes": ["ethernet"],
   "enable_dhcpv6": true,
   "forwarded_device_classes": { "ipv4": [ "ethernet" ], "ipv6": [ "wlanclient" ] },
   "interface_naming_policy": [ { "matchers": [
@@ -6379,7 +6258,7 @@ mod tests {
             filter_enabled_interface_types,
             interface_metrics,
             allowed_upstream_device_classes,
-            allowed_bridge_upstream_device_classes,
+            allowed_bridge_upstream_device_classes: serde::de::IgnoredAny,
             enable_dhcpv6,
             forwarded_device_classes,
             interface_naming_policy,
@@ -6409,10 +6288,6 @@ mod tests {
         assert_eq!(
             AllowedDeviceClasses(HashSet::from([DeviceClass::Ethernet, DeviceClass::WlanClient])),
             allowed_upstream_device_classes
-        );
-        assert_eq!(
-            AllowedDeviceClasses(HashSet::from([DeviceClass::Ethernet])),
-            allowed_bridge_upstream_device_classes
         );
 
         assert_eq!(enable_dhcpv6, true);
@@ -6505,7 +6380,7 @@ mod tests {
             filter_config: _,
             filter_enabled_interface_types: _,
             allowed_upstream_device_classes,
-            allowed_bridge_upstream_device_classes,
+            allowed_bridge_upstream_device_classes: serde::de::IgnoredAny,
             interface_metrics,
             enable_dhcpv6,
             forwarded_device_classes: _,
@@ -6516,7 +6391,6 @@ mod tests {
         } = Config::load_str(config_str).unwrap();
 
         assert_eq!(allowed_upstream_device_classes, Default::default());
-        assert_eq!(allowed_bridge_upstream_device_classes, Default::default());
         assert_eq!(interface_metrics, Default::default());
         assert_eq!(enable_dhcpv6, true);
         assert_eq!(interface_naming_policy.len(), 0);
@@ -6557,7 +6431,7 @@ mod tests {
             filter_config: _,
             filter_enabled_interface_types: _,
             allowed_upstream_device_classes: _,
-            allowed_bridge_upstream_device_classes: _,
+            allowed_bridge_upstream_device_classes: serde::de::IgnoredAny,
             enable_dhcpv6: _,
             interface_metrics,
             forwarded_device_classes: _,
@@ -6665,18 +6539,6 @@ mod tests {
   },
   "filter_enabled_interface_types": [],
   "allowed_upstream_device_classes": ["speling"]
-}
-"#,
-            r#"
-{
-  "dns_config": { "servers": [] },
-  "filter_config": {
-    "rules": [],
-    "nat_rules": [],
-    "rdr_rules": []
-  },
-  "filter_enabled_interface_types": [],
-  "allowed_bridge_upstream_device_classes": ["speling"]
 }
 "#,
             r#"
@@ -7016,7 +6878,6 @@ mod tests {
             .handle_interface_watcher_event(
                 fnet_interfaces::Event::Removed(IFACE_2.get()).into(),
                 &mut dns_watchers,
-                &mut virtualization::Stub,
             )
             .await,
             Ok(Some(id)) => assert_eq!(id, IFACE_2)
@@ -7032,7 +6893,6 @@ mod tests {
                 .handle_interface_watcher_event(
                     fnet_interfaces::Event::Removed(IFACE_1.get()).into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await,
             Ok(Some(IFACE_1))
@@ -7078,7 +6938,6 @@ mod tests {
                 .handle_interface_watcher_event(
                     fnet_interfaces::Event::Removed(IFACE_ID.get()).into(),
                     &mut dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await,
             Ok(Some(IFACE_ID))
@@ -7138,7 +6997,6 @@ mod tests {
                     })
                     .into(),
                     dns_watchers,
-                    &mut virtualization::Stub,
                 )
                 .await,
             Ok(None)

@@ -13,18 +13,19 @@ use crate::resource_accessor::{
 };
 use crate::shared_memory::SharedMemory;
 use crate::thread::{
-    BinderThread, Command, QueuedCommand, RegistrationState, generate_dead_replies,
+    BinderThread, BinderThreadState, Command, QueuedCommand, RegistrationState,
+    generate_dead_replies,
 };
 use crossbeam::queue::SegQueue;
 use starnix_core::mm::MemoryAccessor;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::mutable_state::Guard;
-use starnix_core::task::{CurrentTask, Kernel, Pid, Task};
+use starnix_core::task::{Kernel, Pid, Task};
 use starnix_core::vfs::FdNumber;
 use starnix_logging::{log_trace, log_warn, track_stub};
 use starnix_sync::{
-    BinderFreezeLevel, BinderProcessSharedMemoryLevel, BinderProcessStateLevel, LockDepGuard,
-    LockDepMutex,
+    BinderFreezeLevel, BinderProcessSharedMemoryLevel, BinderProcessStateLevel,
+    BinderThreadPoolLevel, LockDepGuard, LockDepMutex,
 };
 use starnix_types::ownership::{
     DropGuard, OwnedRef, Releasable, ReleaseGuard, Share, TempRef, WeakRef, release_after,
@@ -50,10 +51,10 @@ use std::vec::Vec;
 pub struct BinderProcessState {
     /// Maximum number of thread to spawn.
     pub max_thread_count: usize,
+    /// The number of threads in the pool with registration state `Auxiliary`.
+    pub auxiliary_threads_count: usize,
     /// Whether a new thread has been requested, but not registered yet.
     pub thread_requested: bool,
-    /// The set of threads that are interacting with the binder driver.
-    pub thread_pool: ThreadPool,
     /// Binder objects hosted by the process shared with other processes.
     pub objects: BTreeMap<UserAddress, Arc<BinderObject>>,
     /// Handle table of remote binder objects.
@@ -158,13 +159,15 @@ pub struct FreezeStatus {
 pub struct ActiveTransaction {
     /// The transaction's request type.
     pub request_type: RequestType,
-    /// The state associated with the transaction. Not read, exists to be dropped along with the
-    /// [`ActiveTransaction`] object.
+    /// The state associated with the transaction.
+    ///
+    /// Invariant: `state.proc` always points to the receiving [`BinderProcess`] whose
+    /// `active_transactions` map owns this [`ActiveTransaction`].
     pub state: ReleaseGuard<TransactionState>,
 }
 
 impl Releasable for ActiveTransaction {
-    type Context<'a> = ();
+    type Context<'a> = &'a mut RefCountActions;
 
     fn release<'a>(self, context: Self::Context<'a>) {
         self.state.release(context);
@@ -175,7 +178,8 @@ impl Releasable for ActiveTransaction {
 /// state is dropped, decrementing temporary strong references to binder objects.
 #[derive(Debug)]
 pub struct TransactionState {
-    /// The process whose handle table `handles` belong to.
+    /// The process whose handle table `handles` belong to. When stored in
+    /// `BinderProcessState::active_transactions`, this always refers to that owning process.
     pub proc: WeakRef<BinderProcess>,
     /// The target process.
     pub key: Pid,
@@ -191,37 +195,45 @@ pub struct TransactionState {
     pub owned_fds: smallvec::SmallVec<[FdNumber; 2]>,
 }
 
-impl Releasable for TransactionState {
-    type Context<'a> = ();
-
-    fn release<'a>(self, _: Self::Context<'a>) {
-        log_trace!("Releasing binder TransactionState");
-        let mut drop_actions = RefCountActions::default();
-        // Release the owned objects unconditionally.
-        for guard in self.guards {
-            guard.release(&mut drop_actions);
-        }
-        if !self.handles.is_empty() {
-            if let Some(proc) = self.proc.upgrade() {
-                // Release handles only if the owning process is still alive.
-                let mut proc_state = proc.lock();
-                for handle in &self.handles {
-                    if let Err(error) =
-                        proc_state.handles.dec_strong(handle.object_index(), &mut drop_actions)
-                    {
-                        // Ignore the error because there is little we can do about it.
-                        // Panicking would be wrong, in case the client issued an extra strong decrement.
-                        log_warn!(
-                            "Error when dropping transaction state for process {}: {:?}",
-                            proc.key,
-                            error
-                        );
-                    }
-                }
+impl TransactionState {
+    /// Decrements temporary strong references for `self.handles` in `proc_state`, recording any
+    /// deferred refcount actions in `actions`.
+    fn release_handles(
+        &mut self,
+        proc_state: &mut BinderProcessGuard<'_>,
+        actions: &mut RefCountActions,
+    ) {
+        debug_assert!(WeakRef::ptr_eq(&self.proc, &proc_state.base.weak_self));
+        for handle in self.handles.drain(..) {
+            if let Err(error) = proc_state.handles.dec_strong(handle.object_index(), actions) {
+                // Ignore the error because there is little we can do about it.
+                // Panicking would be wrong, in case the client issued an extra strong decrement.
+                log_warn!(
+                    "Error when dropping transaction state for process {}: {:?}",
+                    proc_state.base.key,
+                    error
+                );
             }
         }
-        // Releasing action must be done without holding BinderProcess lock.
-        drop_actions.release(());
+    }
+}
+
+impl Releasable for TransactionState {
+    type Context<'a> = &'a mut RefCountActions;
+
+    fn release<'a>(mut self, drop_actions: Self::Context<'a>) {
+        log_trace!("Releasing binder TransactionState");
+        // Release the owned objects unconditionally.
+        for guard in self.guards.drain(..) {
+            guard.release(drop_actions);
+        }
+        if !self.handles.is_empty() {
+            if let Some(proc) = self.proc.upgrade().map(TempRef::into_static) {
+                // Release handles only if the owning process is still alive.
+                let mut proc_state = proc.lock();
+                self.release_handles(&mut proc_state, drop_actions);
+            }
+        }
 
         // Close the owned fd.
         if !self.owned_fds.is_empty() {
@@ -261,7 +273,9 @@ impl<'a> Releasable for TransientTransactionState<'a> {
         if !self.transient_fds.is_empty() {
             let _ = self.accessor.close_files(self.transient_fds.into_vec());
         }
-        self.state.release(());
+        let mut drop_actions = RefCountActions::default();
+        self.state.release(&mut drop_actions);
+        drop_actions.release(());
         self.drop_guard.disarm();
     }
 }
@@ -349,9 +363,6 @@ pub struct BinderProcess {
     /// Weak reference to self.
     pub weak_self: WeakRef<BinderProcess>,
 
-    /// A global identifier at the driver level for this binder process.
-    pub identifier: u64,
-
     /// The identifier of the process associated with this binder process.
     pub key: Pid,
 
@@ -362,10 +373,10 @@ pub struct BinderProcess {
     /// The credentials of the process when it opened the binder device.
     pub creds: Arc<Credentials>,
 
-    // The mutable state of `BinderProcess` is protected by 3 locks. For ordering purpose, locks
-    // must be taken in the order they are defined in this class, even across `BinderProcess`
-    // instances.
-    // Moreover, any `BinderThread` lock must be ordered after any `state` lock from a
+    // The mutable state of `BinderProcess` is protected by 4 locks: `shared_memory`,
+    // `freeze_state`, `state`, and `thread_pool`. For ordering purposes, locks must be taken in
+    // the order they are defined in this struct, even across `BinderProcess` instances.
+    // Moreover, any `BinderThread` lock must be ordered after `state` and `thread_pool` from a
     // `BinderProcess`.
     /// The [`SharedMemory`] region mapped in both the driver and the binder process. Allows for
     /// transactions to copy data once from the sender process into the receiver process.
@@ -384,6 +395,11 @@ pub struct BinderProcess {
     /// A lock-free queue of threads that are available to handle commands.
     /// A thread adds itself to this queue when it transitions to being available.
     pub available_threads: Arc<SegQueue<WeakRef<BinderThread>>>,
+
+    /// The set of threads that are interacting with the binder driver.
+    /// Protected by a dedicated mutex to allow thread lookup on the ioctl hot path without
+    /// acquiring the contended process `state` mutex.
+    pub thread_pool: LockDepMutex<BTreeMap<Pid, OwnedRef<BinderThread>>, BinderThreadPoolLevel>,
 }
 
 pub struct BinderProcessGuard<'a>(Guard<'a, BinderProcess, LockDepGuard<'a, BinderProcessState>>);
@@ -404,15 +420,12 @@ impl<'a> DerefMut for BinderProcessGuard<'a> {
 impl BinderProcess {
     #[allow(clippy::let_and_return)]
     pub fn new(
-        identifier: u64,
         key: Pid,
         remote_resource_accessor: Option<Arc<RemoteResourceAccessor>>,
         creds: Arc<Credentials>,
     ) -> OwnedRef<BinderProcess> {
-        log_trace!("new BinderProcess id={}", identifier);
-        OwnedRef::new_cyclic(|weak_self| Self {
+        let result = OwnedRef::new_cyclic(|weak_self| Self {
             weak_self,
-            identifier,
             key,
             remote_resource_accessor,
             creds,
@@ -421,19 +434,68 @@ impl BinderProcess {
             state: Default::default(),
             process_waiters: Default::default(),
             available_threads: Arc::new(SegQueue::new()),
-        })
+            thread_pool: Default::default(),
+        });
+        log_trace!("new BinderProcess id={}", result.identifier());
+        result
+    }
+
+    /// A global identifier at the driver level for this binder process.
+    pub fn identifier(&self) -> u64 {
+        self.weak_self.as_ptr() as u64
     }
 
     pub fn lock<'a>(&'a self) -> BinderProcessGuard<'a> {
         BinderProcessGuard(Guard::new(self, self.state.lock()))
     }
 
+    /// Return the `BinderThread` with the given `task.tid`, creating it if it doesn't exist.
+    pub fn find_or_register_thread(&self, task: &Task) -> Result<OwnedRef<BinderThread>, Errno> {
+        let mut thread_pool = self.thread_pool.lock();
+        if let Some(thread) = thread_pool.get(&task.tid) {
+            return Ok(OwnedRef::share(thread));
+        }
+        let running_state = task.running_state()?;
+        let handle = running_state
+            .thread
+            .get()
+            .map_or_else(|| Arc::new(zx::Thread::invalid()), |t| t.thread.clone());
+        let thread = BinderThread::new(self, task.tid.clone(), handle);
+        thread_pool.insert(task.tid.clone(), OwnedRef::share(&thread));
+        Ok(thread)
+    }
+
+    /// Unregister the `BinderThread` with the given `tid`.
+    pub fn unregister_thread(&self, kernel: &Kernel, tid: &Pid) {
+        let removed = {
+            let mut state = self.lock();
+            let removed = self.thread_pool.lock().remove(tid);
+            if let Some(thread) = &removed {
+                if thread.registration.load(Ordering::Acquire)
+                    == RegistrationState::Auxiliary.to_u8()
+                {
+                    state.auxiliary_threads_count = state
+                        .auxiliary_threads_count
+                        .checked_sub(1)
+                        .expect("Attempt to decrement auxiliary_threads_count below 0");
+                }
+            }
+            removed
+        };
+        if let Some(thread) = removed {
+            thread.release(kernel);
+        }
+    }
+
     pub fn close(&self) {
-        log_trace!("closing BinderProcess id={}", self.identifier);
+        log_trace!("closing BinderProcess id={}", self.identifier());
         let mut state = self.lock();
         if !state.closed {
             state.closed = true;
-            state.thread_pool.notify_all();
+            for thread in self.thread_pool.lock().values() {
+                thread.command_queue_waiters.notify_all();
+                thread.command_queue_poll_waiters.notify_all();
+            }
             self.process_waiters.notify_all();
         }
     }
@@ -441,12 +503,12 @@ impl BinderProcess {
     /// Make all blocked threads stop waiting and return nothing. This is used by flush to
     /// make userspace recheck whether binder is being shut down.
     pub fn kick_all_threads(&self) {
-        log_trace!("kicking threads for BinderProcess id={}", self.identifier);
-        let state = self.lock();
-        for thread in state.thread_pool.threads.values() {
+        log_trace!("kicking threads for BinderProcess id={}", self.identifier());
+        for thread in self.thread_pool.lock().values() {
             thread.lock().request_kick = true;
+            thread.command_queue_waiters.notify_all();
+            thread.command_queue_poll_waiters.notify_all();
         }
-        state.thread_pool.notify_all();
     }
 
     /// Return the `ResourceAccessor` to use to access the resources of this process.
@@ -501,7 +563,11 @@ impl BinderProcess {
         &self,
         command: QueuedCommand,
     ) -> Option<TempRef<'static, BinderThread>> {
-        log_trace!("BinderProcess id={} enqueuing command {:?}", self.identifier, command.command);
+        log_trace!(
+            "BinderProcess id={} enqueuing command {:?}",
+            self.identifier(),
+            command.command
+        );
         // Handle oneway transactions explicitly. They should always target the process queue to
         // avoid accidentally handling them during an ongoing transaction.
         if matches!(command.command, Command::OnewayTransaction(_)) {
@@ -562,35 +628,48 @@ impl BinderProcess {
     /// A binder thread is done reading a buffer allocated to a transaction. The binder
     /// driver can reclaim this buffer.
     pub fn handle_free_buffer(&self, buffer_ptr: UserAddress) -> Result<(), Errno> {
-        log_trace!("BinderProcess id={} freeing buffer {:?}", self.identifier, buffer_ptr);
-        // Drop the state associated with the now completed transaction.
-        let active_transaction = self.lock().active_transactions.remove(&buffer_ptr);
-        release_after!(active_transaction, (), {
-            // Check if this was a oneway transaction and schedule the next oneway if this is the case.
-            if let Some(ActiveTransaction {
-                request_type: RequestType::Oneway { object }, ..
-            }) = active_transaction.as_ref().map(|at| at.deref())
-            {
-                let mut object_state = object.lock();
-                assert!(
-                    object_state.handling_oneway_transaction,
-                    "freeing a oneway buffer implies that a oneway transaction was being handled"
-                );
-                if let Some((transaction, trace)) = object_state.oneway_transactions.pop_front() {
-                    // Drop the lock, as we've completed all mutations and don't want to hold this
-                    // lock while acquiring any others.
-                    drop(object_state);
-
-                    // Schedule the transaction
-                    self.enqueue_command(QueuedCommand::new(
-                        Command::OnewayTransaction(transaction),
-                        trace,
-                    ));
-                } else {
-                    // No more oneway transactions queued, mark the queue handling as done.
-                    object_state.handling_oneway_transaction = false;
+        log_trace!("BinderProcess id={} freeing buffer {:?}", self.identifier(), buffer_ptr);
+        // Drop the state associated with the now completed transaction, releasing any temporary
+        // strong handle references under the same process lock acquisition.
+        let mut drop_actions = RefCountActions::default();
+        release_after!(drop_actions, (), {
+            let active_transaction = {
+                let mut proc_state = self.lock();
+                let mut active_transaction = proc_state.active_transactions.remove(&buffer_ptr);
+                if let Some(active_transaction) = active_transaction.as_mut() {
+                    active_transaction.state.release_handles(&mut proc_state, &mut drop_actions);
                 }
-            }
+                active_transaction
+            };
+            release_after!(active_transaction, &mut drop_actions, {
+                // Check if this was a oneway transaction and schedule the next oneway if this is the case.
+                if let Some(ActiveTransaction {
+                    request_type: RequestType::Oneway { object },
+                    ..
+                }) = active_transaction.as_ref().map(|at| at.deref())
+                {
+                    let mut object_state = object.lock();
+                    assert!(
+                        object_state.handling_oneway_transaction,
+                        "freeing a oneway buffer implies that a oneway transaction was being handled"
+                    );
+                    if let Some((transaction, trace)) = object_state.oneway_transactions.pop_front()
+                    {
+                        // Drop the lock, as we've completed all mutations and don't want to hold this
+                        // lock while acquiring any others.
+                        drop(object_state);
+
+                        // Schedule the transaction
+                        self.enqueue_command(QueuedCommand::new(
+                            Command::OnewayTransaction(transaction),
+                            trace,
+                        ));
+                    } else {
+                        // No more oneway transactions queued, mark the queue handling as done.
+                        object_state.handling_oneway_transaction = false;
+                    }
+                }
+            });
         });
 
         // Reclaim the memory.
@@ -782,7 +861,7 @@ impl BinderProcess {
         state.command_queue.retain(
             |queued| !matches!(queued.command, Command::FrozenBinder(info) if info.cookie == cookie),
         );
-        for thread in state.thread_pool.threads.values() {
+        for thread in self.thread_pool.lock().values() {
             thread.lock().command_queue.retain(
                 |queued| !matches!(queued.command, Command::FrozenBinder(info) if info.cookie == cookie),
             );
@@ -830,29 +909,6 @@ impl BinderProcess {
 }
 
 impl<'a> BinderProcessGuard<'a> {
-    /// Return the `BinderThread` with the given `tid`, creating it if it doesn't exist.
-    pub fn find_or_register_thread(
-        &mut self,
-        task: &Task,
-    ) -> Result<OwnedRef<BinderThread>, Errno> {
-        if let Some(thread) = self.thread_pool.threads.get(&task.tid) {
-            return Ok(OwnedRef::share(thread));
-        }
-        let running_state = task.running_state()?;
-        let handle = running_state
-            .thread
-            .get()
-            .map_or_else(|| Arc::new(zx::Thread::invalid()), |t| t.thread.clone());
-        let thread = BinderThread::new(self, task.tid.clone(), handle);
-        self.thread_pool.threads.insert(task.tid.clone(), OwnedRef::share(&thread));
-        Ok(thread)
-    }
-
-    /// Unregister the `BinderThread` with the given `tid`.
-    pub fn unregister_thread(&mut self, current_task: &CurrentTask, tid: &Pid) {
-        self.thread_pool.remove(current_task, tid);
-    }
-
     /// Inserts a reference to a binder object, returning a handle that represents it.
     /// The handle may be an existing handle if the object was already present in the table.
     /// The object must have at least a strong reference guarded by `guard` to ensure it is kept
@@ -967,10 +1023,18 @@ impl<'a> BinderProcessGuard<'a> {
     }
 
     /// Whether the driver should request that the client starts a new thread.
+    #[cfg(test)]
     pub fn should_request_thread(&self, thread: &BinderThread) -> bool {
+        self.should_request_thread_locked(&thread.lock())
+    }
+
+    /// Whether the driver should request that the client starts a new thread,
+    /// using an already-acquired `BinderThreadState` lock guard.
+    #[inline]
+    pub fn should_request_thread_locked(&self, thread_state: &BinderThreadState) -> bool {
         !self.thread_requested
-            && self.thread_pool.auxilliary_threads() < self.max_thread_count
-            && thread.lock().is_main_or_registered()
+            && self.auxiliary_threads_count < self.max_thread_count
+            && thread_state.is_main_or_registered()
             && self.base.available_threads.is_empty()
     }
 
@@ -984,7 +1048,8 @@ impl Releasable for BinderProcess {
     type Context<'a> = &'a Kernel;
 
     fn release<'a>(self, context: Self::Context<'a>) {
-        log_trace!("Releasing BinderProcess id={}", self.identifier);
+        let identifier = self.identifier();
+        log_trace!("Releasing BinderProcess id={}", identifier);
         let state = self.state.into_inner();
         // Notify any subscribers that the objects this process owned are now dead.
         for (proc, cookie) in state.death_subscribers {
@@ -996,54 +1061,18 @@ impl Releasable for BinderProcess {
         // Generate dead replies for transactions currently in the command queue of this process.
         // Transactions that have been scheduled with a specific thread will generate dead replies
         // when the threads are released below.
-        generate_dead_replies(state.command_queue, self.identifier, None);
+        generate_dead_replies(state.command_queue, identifier, None);
 
+        let mut drop_actions = RefCountActions::default();
         for transaction in state.active_transactions.into_values() {
-            transaction.release(());
+            transaction.release(&mut drop_actions);
         }
+        drop_actions.release(());
 
         state.handles.release(());
 
-        for thread in state.thread_pool.threads.into_values() {
+        for thread in self.thread_pool.into_inner().into_values() {
             thread.release(context);
-        }
-    }
-}
-
-/// The set of threads that are interacting with the binder driver for a given process.
-#[derive(Debug, Default)]
-pub struct ThreadPool {
-    pub threads: BTreeMap<Pid, OwnedRef<BinderThread>>,
-    auxilliary_threads_count: usize,
-}
-
-impl ThreadPool {
-    fn notify_all(&self) {
-        for t in self.threads.values() {
-            t.command_queue_waiters.notify_all();
-        }
-    }
-
-    /// The number of threads in the pool with registration state Auxilliary.
-    fn auxilliary_threads(&self) -> usize {
-        self.auxilliary_threads_count
-    }
-
-    pub fn inc_auxilliary_threads(&mut self) {
-        self.auxilliary_threads_count += 1;
-    }
-
-    pub fn remove(&mut self, current_task: &CurrentTask, tid: &Pid) {
-        if let Some(thread) = self.threads.remove(tid) {
-            if thread.registration.load(Ordering::Acquire) == RegistrationState::Auxilliary.to_u8()
-            {
-                if self.auxilliary_threads_count > 0 {
-                    self.auxilliary_threads_count -= 1;
-                } else {
-                    panic!("Attempt to decrement auxilliary_threads_count below 0");
-                }
-            }
-            thread.release(current_task.kernel());
         }
     }
 }

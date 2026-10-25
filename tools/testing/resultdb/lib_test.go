@@ -28,7 +28,7 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 )
 
-func TestParseSummary(t *testing.T) {
+func TestParseSummaryTests(t *testing.T) {
 	const testCount = 10
 	summary := createTestSummary(testCount)
 	testResults, _, _ := SummaryToResultSink(summary, []*resultpb.StringPair{}, "")
@@ -37,19 +37,8 @@ func TestParseSummary(t *testing.T) {
 			"Parsed incorrect number of resultdb tests in TestSummary, got %d, want %d",
 			len(testResults), testCount)
 	}
-	requests := createTestResultsRequests(testResults, testCount)
-	if len(requests) != 1 {
-		t.Errorf(
-			"Grouped incorrect chunks of ResultDB sink requests, got %d, want 1",
-			len(requests))
-	}
-	if len(requests[0].TestResults) != testCount {
-		t.Errorf(
-			"Incorrect number of TestResult in the first chunk, got %d, want %d",
-			len(requests[0].TestResults), testCount)
-	}
-	if requests[0].TestResults[0].TestId != "test_0" {
-		t.Errorf("Incorrect TestId parsed for first suite. got %s, want test_0", requests[0].TestResults[0].TestId)
+	if testResults[0].TestId != "test_0" {
+		t.Errorf("Incorrect TestId parsed for first suite. got %s, want test_0", testResults[0].TestId)
 	}
 }
 
@@ -1160,80 +1149,70 @@ func TestExoneratedSummaryToResultSink(t *testing.T) {
 	}
 }
 
-func TestRequestsChunking(t *testing.T) {
-	t.Run("TestResults_Chunking", func(t *testing.T) {
-		const resultCount = MaxBatchSize*2 + 1
-		results := make([]*sinkpb.TestResult, resultCount)
-		for i := 0; i < resultCount; i++ {
-			results[i] = &sinkpb.TestResult{
-				TestId: fmt.Sprintf("test_result_%d", i),
+func TestForEachSummaryTest(t *testing.T) {
+	tests := []struct {
+		name      string
+		jsonInput string
+		wantNames []string
+		wantErr   bool
+	}{
+		{
+			name:      "unknown fields before and after tests",
+			jsonInput: `{"outputs":{"a":"b"},"tests":[{"name":"t1","result":"PASS"},{"name":"t2","result":"FAIL"}],"extra":[1,2,3]}`,
+			wantNames: []string{"t1", "t2"},
+		},
+		{
+			name:      "null tests followed by another key",
+			jsonInput: `{"tests":null,"outputs":{"a":"b"}}`,
+			wantNames: nil,
+		},
+		{
+			name:      "empty tests array",
+			jsonInput: `{"tests":[]}`,
+			wantNames: nil,
+		},
+		{
+			name:      "top-level array instead of object",
+			jsonInput: `[{"name":"t1"}]`,
+			wantErr:   true,
+		},
+		{
+			name:      "tests field is not an array",
+			jsonInput: `{"tests":{"name":"t1"}}`,
+			wantErr:   true,
+		},
+		{
+			name:      "truncated JSON inside tests array",
+			jsonInput: `{"tests":[{"name":"t1"`,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			summaryPath := filepath.Join(t.TempDir(), "summary.json")
+			if err := os.WriteFile(summaryPath, []byte(tc.jsonInput), 0o600); err != nil {
+				t.Fatalf("failed writing summary.json: %s", err)
 			}
-		}
-
-		resultRequests := createTestResultsRequests(results, MaxBatchSize)
-
-		// Expected partition chunks: MaxBatchSize, MaxBatchSize, 1 (total 3 chunks)
-		if len(resultRequests) != 3 {
-			t.Fatalf("Expected 3 TestResults request chunks, got: %d", len(resultRequests))
-		}
-		if len(resultRequests[0].TestResults) != MaxBatchSize {
-			t.Errorf("First chunk should have %d results, got: %d", MaxBatchSize, len(resultRequests[0].TestResults))
-		}
-		if len(resultRequests[1].TestResults) != MaxBatchSize {
-			t.Errorf("Second chunk should have %d results, got: %d", MaxBatchSize, len(resultRequests[1].TestResults))
-		}
-		if len(resultRequests[2].TestResults) != 1 {
-			t.Errorf("Third chunk should have 1 result, got: %d", len(resultRequests[2].TestResults))
-		}
-		expectedLastResultId := fmt.Sprintf("test_result_%d", resultCount-1)
-		if resultRequests[2].TestResults[0].TestId != expectedLastResultId {
-			t.Errorf("Unexpected TestId in last chunk: got %s, want %s", resultRequests[2].TestResults[0].TestId, expectedLastResultId)
-		}
-	})
-
-	t.Run("TestResults_Empty", func(t *testing.T) {
-		emptyResults := createTestResultsRequests(nil, MaxBatchSize)
-		if emptyResults != nil {
-			t.Errorf("Expected nil for empty results chunking, got: %+v", emptyResults)
-		}
-	})
-
-	t.Run("TestExonerations_Chunking", func(t *testing.T) {
-		const exonerationCount = MaxBatchSize*2 + 1
-		exonerations := make([]*sinkpb.TestExoneration, exonerationCount)
-		for i := 0; i < exonerationCount; i++ {
-			exonerations[i] = &sinkpb.TestExoneration{
-				TestId: fmt.Sprintf("test_exoneration_%d", i),
+			var gotNames []string
+			err := forEachSummaryTest(summaryPath, func(test *runtests.TestDetails) error {
+				gotNames = append(gotNames, test.Name)
+				return nil
+			})
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("forEachSummaryTest(%s) succeeded, want error", tc.jsonInput)
+				}
+				return
 			}
-		}
-
-		exonerationRequests := createTestExonerationsRequests(exonerations, MaxBatchSize)
-
-		// Expected partition chunks: MaxBatchSize, MaxBatchSize, 1 (total 3 chunks)
-		if len(exonerationRequests) != 3 {
-			t.Fatalf("Expected 3 TestExonerations request chunks, got: %d", len(exonerationRequests))
-		}
-		if len(exonerationRequests[0].TestExonerations) != MaxBatchSize {
-			t.Errorf("First chunk should have %d exonerations, got: %d", MaxBatchSize, len(exonerationRequests[0].TestExonerations))
-		}
-		if len(exonerationRequests[1].TestExonerations) != MaxBatchSize {
-			t.Errorf("Second chunk should have %d exonerations, got: %d", MaxBatchSize, len(exonerationRequests[1].TestExonerations))
-		}
-		if len(exonerationRequests[2].TestExonerations) != 1 {
-			t.Errorf("Third chunk should have 1 exoneration, got: %d", len(exonerationRequests[2].TestExonerations))
-		}
-		expectedLastExonerationId := fmt.Sprintf("test_exoneration_%d", exonerationCount-1)
-		if exonerationRequests[2].TestExonerations[0].TestId != expectedLastExonerationId {
-			t.Errorf("Unexpected TestId in last chunk: got %s, want %s", exonerationRequests[2].TestExonerations[0].TestId, expectedLastExonerationId)
-		}
-	})
-
-	t.Run("TestExonerations_Empty", func(t *testing.T) {
-		emptyExonerations := createTestExonerationsRequests(nil, MaxBatchSize)
-		if emptyExonerations != nil {
-			t.Errorf("Expected nil for empty exonerations chunking, got: %+v", emptyExonerations)
-		}
-	})
+			if err != nil {
+				t.Fatalf("forEachSummaryTest(%s) failed: %s", tc.jsonInput, err)
+			}
+			if diff := cmp.Diff(tc.wantNames, gotNames); diff != "" {
+				t.Errorf("test names differ (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestParseTestLocation(t *testing.T) {
@@ -1501,7 +1480,7 @@ func TestSetTestMetadata_Location(t *testing.T) {
 			GNLabel:     "//src/gn/bar:bar_test",
 		}
 		r := &sinkpb.TestResult{}
-		setTestMetadata(r, detail, "foo")
+		setTestMetadata(r, &detail, "foo")
 		if r.TestMetadata == nil || r.TestMetadata.Location == nil {
 			t.Fatalf("expected Location to be populated")
 		}
@@ -1519,7 +1498,7 @@ func TestSetTestMetadata_Location(t *testing.T) {
 			GNLabel: "//src/gn/bar:bar_test(//build/toolchain:x64)",
 		}
 		r := &sinkpb.TestResult{}
-		setTestMetadata(r, detail, "bar")
+		setTestMetadata(r, &detail, "bar")
 		if r.TestMetadata == nil || r.TestMetadata.Location == nil {
 			t.Fatalf("expected Location to be populated from GNLabel fallback")
 		}
@@ -1537,7 +1516,7 @@ func TestSetTestMetadata_Location(t *testing.T) {
 			SourceLabel: "invalid label with spaces",
 		}
 		r := &sinkpb.TestResult{}
-		setTestMetadata(r, detail, "invalid")
+		setTestMetadata(r, &detail, "invalid")
 		if r.TestMetadata == nil {
 			t.Fatalf("expected TestMetadata to not be nil")
 		}
@@ -2343,10 +2322,147 @@ func TestDetermineScheme(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := determineScheme(tc.detail)
+			got := DetermineScheme(tc.detail)
 			if got != tc.wantScheme {
-				t.Errorf("determineScheme() = %q, want %q", got, tc.wantScheme)
+				t.Errorf("DetermineScheme() = %q, want %q", got, tc.wantScheme)
 			}
 		})
+	}
+}
+
+func TestParentInvocationLevelArtifacts(t *testing.T) {
+	tempDir := t.TempDir()
+	logFile := filepath.Join(tempDir, "syslog.txt")
+	if err := os.WriteFile(logFile, []byte("syslog"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := parentInvocationLevelArtifacts(tempDir, []string{"syslog.txt"})
+	if _, ok := artifacts["parent/syslog.txt"]; !ok {
+		t.Errorf("expected key parent/syslog.txt, got keys %v", artifacts)
+	}
+}
+
+func TestTestToUploadRequests(t *testing.T) {
+	outputRoot := t.TempDir()
+	detail := &runtests.TestDetails{
+		Name:      "fuchsia-pkg://fuchsia.com/my-pkg#meta/my-test.cm",
+		Status:    runtests.TestSuccess,
+		StartTime: time.Now(),
+		TestResult: runtests.TestResult{
+			Cases: []runtests.TestCaseResult{
+				{
+					SuiteName: "MySuite",
+					CaseName:  "MyCase",
+					Status:    runtests.TestSuccess,
+					Format:    "Rust",
+				},
+				{
+					SuiteName: "MySuite",
+					CaseName:  "MyExoneratedCase",
+					Status:    runtests.TestExonerated,
+					Format:    "Rust",
+				},
+			},
+		},
+	}
+
+	reqs, skipped, err := TestToUploadRequests(detail, []*resultpb.StringPair{}, outputRoot, nil)
+	if err != nil {
+		t.Fatalf("TestToUploadRequests failed: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("Unexpected skipped tests: %v", skipped)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("Got %d upload requests, want 2 (results + exonerations)", len(reqs))
+	}
+
+	if reqs[0].Endpoint != "ReportTestResults" {
+		t.Errorf("reqs[0].Endpoint = %q, want ReportTestResults", reqs[0].Endpoint)
+	}
+	var testResultsReq sinkpb.ReportTestResultsRequest
+	if err := protojson.Unmarshal(reqs[0].Data, &testResultsReq); err != nil {
+		t.Fatalf("Failed to unmarshal ReportTestResultsRequest: %v", err)
+	}
+	if len(testResultsReq.TestResults) != 3 {
+		// 2 test cases + 1 suite-level test detail (suite-level results are omitted in stacked CL per b/527958757)
+		t.Errorf("Got %d test results in request, want 3", len(testResultsReq.TestResults))
+	}
+
+	if reqs[1].Endpoint != "ReportTestExonerations" {
+		t.Errorf("reqs[1].Endpoint = %q, want ReportTestExonerations", reqs[1].Endpoint)
+	}
+	var testExonerationsReq sinkpb.ReportTestExonerationsRequest
+	if err := protojson.Unmarshal(reqs[1].Data, &testExonerationsReq); err != nil {
+		t.Fatalf("Failed to unmarshal ReportTestExonerationsRequest: %v", err)
+	}
+	if len(testExonerationsReq.TestExonerations) != 1 {
+		t.Errorf("Got %d test exonerations in request, want 1", len(testExonerationsReq.TestExonerations))
+	}
+
+	// 2. With OutputFiles: sub-invocation-level artifacts request is appended.
+	outputDir := "my_output_dir"
+	if err := os.MkdirAll(filepath.Join(outputRoot, outputDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(outputRoot, outputDir, "stdout-and-stderr.txt")
+	if err := os.WriteFile(logFile, []byte("log content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	detail.OutputDir = outputDir
+	detail.OutputFiles = []string{"stdout-and-stderr.txt"}
+
+	reqsWithArtifacts, skipped, err := TestToUploadRequests(detail, []*resultpb.StringPair{}, outputRoot, nil)
+	if err != nil {
+		t.Fatalf("TestToUploadRequests with artifacts failed: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("Unexpected skipped tests: %v", skipped)
+	}
+	if len(reqsWithArtifacts) != 3 {
+		t.Fatalf("Got %d upload requests, want 3 (results + exonerations + artifacts)", len(reqsWithArtifacts))
+	}
+	if reqsWithArtifacts[2].Endpoint != "ReportInvocationLevelArtifacts" {
+		t.Errorf("reqsWithArtifacts[2].Endpoint = %q, want ReportInvocationLevelArtifacts", reqsWithArtifacts[2].Endpoint)
+	}
+	var invArtifactsReq sinkpb.ReportInvocationLevelArtifactsRequest
+	if err := protojson.Unmarshal(reqsWithArtifacts[2].Data, &invArtifactsReq); err != nil {
+		t.Fatalf("Failed to unmarshal ReportInvocationLevelArtifactsRequest: %v", err)
+	}
+	if len(invArtifactsReq.Artifacts) != 1 {
+		t.Errorf("Got %d artifacts in request, want 1", len(invArtifactsReq.Artifacts))
+	}
+	if artifact, ok := invArtifactsReq.Artifacts["stdout-and-stderr.txt"]; !ok {
+		t.Errorf("Artifact stdout-and-stderr.txt not found in request: %+v", invArtifactsReq.Artifacts)
+	} else if artifact.GetFilePath() != logFile {
+		t.Errorf("Artifact FilePath = %q, want %q", artifact.GetFilePath(), logFile)
+	}
+
+	// 3. With parent invocation artifacts: sub-invocation includes artifacts with "parent/" prefix.
+	parentLogFile := filepath.Join(outputRoot, "infra_and_test_std_and_klog.txt")
+	if err := os.WriteFile(parentLogFile, []byte("parent log content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	reqsWithParent, skipped, err := TestToUploadRequests(detail, []*resultpb.StringPair{}, outputRoot, []string{"infra_and_test_std_and_klog.txt"})
+	if err != nil {
+		t.Fatalf("TestToUploadRequests with parent artifacts failed: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("Unexpected skipped tests: %v", skipped)
+	}
+	if len(reqsWithParent) != 3 {
+		t.Fatalf("Got %d upload requests, want 3", len(reqsWithParent))
+	}
+	var parentInvArtifactsReq sinkpb.ReportInvocationLevelArtifactsRequest
+	if err := protojson.Unmarshal(reqsWithParent[2].Data, &parentInvArtifactsReq); err != nil {
+		t.Fatalf("Failed to unmarshal ReportInvocationLevelArtifactsRequest: %v", err)
+	}
+	if len(parentInvArtifactsReq.Artifacts) != 2 {
+		t.Errorf("Got %d artifacts in request, want 2", len(parentInvArtifactsReq.Artifacts))
+	}
+	if artifact, ok := parentInvArtifactsReq.Artifacts["parent/infra_and_test_std_and_klog.txt"]; !ok {
+		t.Errorf("parent/infra_and_test_std_and_klog.txt not found in request: %+v", parentInvArtifactsReq.Artifacts)
+	} else if artifact.GetFilePath() != parentLogFile {
+		t.Errorf("parent artifact FilePath = %q, want %q", artifact.GetFilePath(), parentLogFile)
 	}
 }

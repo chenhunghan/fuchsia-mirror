@@ -12,7 +12,7 @@ use crate::vfs::socket::{
 };
 use crate::vfs::{
     Anon, DowncastedFile, FileHandle, FileObject, FileObjectState, FileOps, FsNodeFlags,
-    FsNodeInfo, fileops_impl_nonseekable, fileops_impl_noop_sync,
+    FsNodeInfo, SpliceOutputBuffer, fileops_impl_nonseekable, fileops_impl_noop_sync,
 };
 use starnix_syscalls::{SyscallArg, SyscallResult};
 use starnix_uapi::auth::Credentials;
@@ -44,6 +44,7 @@ impl SocketFile {
         kernel_private: bool,
     ) -> Result<FileHandle, Errno> {
         let fs = socket_fs(current_task.kernel());
+        security::file_system_resolve_security(current_task, &fs)?;
         let mode = mode!(IFSOCK, 0o777);
         let flags = if kernel_private { FsNodeFlags::IS_PRIVATE } else { FsNodeFlags::empty() };
         let node = fs.create_node_with_flags(
@@ -99,6 +100,30 @@ impl FileOps for SocketFile {
             return Ok(0);
         }
         let info = self.recvmsg(current_task, file, data, SocketMessageFlags::empty(), None)?;
+        Ok(info.bytes_read)
+    }
+
+    fn splice_read(
+        &self,
+        file: &FileObject,
+        current_task: &CurrentTask,
+        offset: usize,
+        data: &mut SpliceOutputBuffer<'_>,
+        non_blocking: bool,
+    ) -> Result<usize, Errno> {
+        debug_assert!(offset == 0);
+        if data.available() == 0 {
+            return Ok(0);
+        }
+        let flags = if non_blocking
+            && self.socket.domain == SocketDomain::Unix
+            && self.socket.socket_type == SocketType::Stream
+        {
+            SocketMessageFlags::DONTWAIT
+        } else {
+            SocketMessageFlags::empty()
+        };
+        let info = self.recvmsg(current_task, file, data, flags, None)?;
         Ok(info.bytes_read)
     }
 

@@ -123,12 +123,7 @@ class SetupCommandTest(BaseTestCase):
                 for g in grants["allow"]
             )
         )
-        self.assertTrue(
-            any(
-                g.startswith("command(regex:") and "git" in g and "push" in g
-                for g in grants["deny"]
-            )
-        )
+        self.assertIn("command(git push --force)", grants["deny"])
 
     def test_run_with_profile(self) -> None:
         """Verify setting profile populates category grants."""
@@ -158,12 +153,7 @@ class SetupCommandTest(BaseTestCase):
                 for g in grants["allow"]
             )
         )
-        self.assertTrue(
-            any(
-                g.startswith("command(regex:") and "git" in g and "clean" in g
-                for g in grants["deny"]
-            )
-        )
+        self.assertIn("command(git clean)", grants["deny"])
 
     def test_run_default_profile(self) -> None:
         """Verify running setup without explicit args defaults to local-changes profile."""
@@ -474,6 +464,124 @@ class SetupCommandTest(BaseTestCase):
                 for g in grants["allow"]
             )
         )
+
+    def test_run_adhoc_rules_default_to_local_changes_when_state_clean(
+        self,
+    ) -> None:
+        """Verify ad-hoc rules resolve and apply DEFAULT_PROFILE when state.json is missing or empty."""
+        list_file = self.mock_root / "extra_rules.txt"
+        list_file.write_text("fx extra_list_cmd\n", encoding="utf-8")
+
+        adhoc_cases = [
+            ("allow_flag", ["-a", "fx custom_allow"], "allow", "custom_allow"),
+            ("deny_flag", ["-d", "fx custom_deny"], "deny", "custom_deny"),
+            ("ask_flag", ["-k", "fx custom_ask"], "ask", "custom_ask"),
+            (
+                "allow_list",
+                ["--allow-list", str(list_file)],
+                "allow",
+                "extra_list_cmd",
+            ),
+            (
+                "deny_list",
+                ["--deny-list", str(list_file)],
+                "deny",
+                "extra_list_cmd",
+            ),
+            (
+                "ask_list",
+                ["--ask-list", str(list_file)],
+                "ask",
+                "extra_list_cmd",
+            ),
+        ]
+
+        for state_mode in ("missing", "empty_active_profile"):
+            for case_name, cli_flags, target_cat, expected_token in adhoc_cases:
+                with self.subTest(state_mode=state_mode, case=case_name):
+                    sub_dir = self.mock_root / f"{state_mode}_{case_name}"
+                    sub_state_dir = sub_dir / "state"
+                    sub_state_dir.mkdir(parents=True, exist_ok=True)
+                    config_path = sub_dir / "config.json"
+
+                    if state_mode == "empty_active_profile":
+                        state.save_state(
+                            state.StateJournal(active_profile=""),
+                            sub_state_dir / "state.json",
+                        )
+
+                    parser = argparse.ArgumentParser()
+                    setup.add_arguments(parser)
+                    args = parser.parse_args(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--state-dir",
+                            str(sub_state_dir),
+                            "--no-git-hooks",
+                            *cli_flags,
+                        ]
+                    )
+
+                    self.assertEqual(setup.run(args), 0)
+
+                    journal = state.load_state(sub_state_dir / "state.json")
+                    self.assertEqual(
+                        journal.active_profile, setup.DEFAULT_PROFILE
+                    )
+                    self.assertEqual(
+                        journal.history[-1]["profile"], setup.DEFAULT_PROFILE
+                    )
+
+                    with config_path.open("r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    grants = data["userSettings"]["globalPermissionGrants"]
+
+                    # Verify default profile (local-changes) grants are applied
+                    self.assertTrue(
+                        any(
+                            g.startswith("command(regex:")
+                            and "fx" in g
+                            and "status" in g
+                            for g in grants["allow"]
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            g.startswith("command(regex:")
+                            and "git" in g
+                            and "commit" in g
+                            for g in grants["allow"]
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            g.startswith("command(")
+                            and not g.startswith("command(regex:")
+                            and "git" in g
+                            and "clean" in g
+                            for g in grants["deny"]
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            g.startswith("command(regex:")
+                            and "git" in g
+                            and "push" in g
+                            for g in grants["ask"]
+                        )
+                    )
+                    # Verify ad-hoc grant is also applied in its target category
+                    expected_prefix = (
+                        "command(" if target_cat == "deny" else "command(regex:"
+                    )
+                    self.assertTrue(
+                        any(
+                            g.startswith(expected_prefix)
+                            and expected_token in g
+                            for g in grants[target_cat]
+                        )
+                    )
 
     def test_git_hooks_cli_flags(self) -> None:
         """Verify BooleanOptionalAction flags for --git-hooks and --no-git-hooks."""
@@ -860,6 +968,39 @@ class SetupCommandTest(BaseTestCase):
                     self.assertEqual(setup.run(args), 0)
                     mock_status.assert_called_once_with(self.fuchsia_dir)
                     self.assertIn(expected_str, self.stdout)
+
+    def test_setup_no_agent_hooks_flag(self) -> None:
+        """Verify --no-agent-hooks removes hooks.json while updating config.json."""
+        config_path = self.mock_root / "config.json"
+        hooks_path = self.mock_root / "hooks.json"
+        parser = argparse.ArgumentParser()
+        setup.add_arguments(parser)
+
+        args_enable = parser.parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--state-dir",
+                str(self.state_dir),
+                "--no-git-hooks",
+            ]
+        )
+        self.assertEqual(setup.run(args_enable), 0)
+        self.assertTrue(hooks_path.exists())
+
+        args_disable = parser.parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--state-dir",
+                str(self.state_dir),
+                "--no-git-hooks",
+                "--no-agent-hooks",
+            ]
+        )
+        self.assertEqual(setup.run(args_disable), 0)
+        self.assertTrue(config_path.exists())
+        self.assertFalse(hooks_path.exists())
 
 
 if __name__ == "__main__":

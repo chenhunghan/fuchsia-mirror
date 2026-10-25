@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use argh::{ArgsInfo, FromArgs};
-use async_trait::async_trait;
 use errors::ffx_bail;
 use ffx_config::EnvironmentContext;
 use ffx_writer::VerifiedMachineWriter;
@@ -62,12 +61,11 @@ pub struct StarnixTool {
     #[command]
     cmd: StarnixCommand,
     rcs_connector: Connector<RemoteControlProxyHolder>,
-    ssh_addr: Result<SshAddrHolder>,
+    ssh_addr: Deferred<SshAddrHolder>,
     nodename: Deferred<NodenameHolder>,
     context: EnvironmentContext,
 }
 
-#[async_trait(?Send)]
 impl FfxMain for StarnixTool {
     type Writer = VerifiedMachineWriter<StarnixToolOutput>;
 
@@ -76,12 +74,7 @@ impl FfxMain for StarnixTool {
     async fn main(self, mut writer: Self::Writer) -> Result<()> {
         let output = match self.cmd.subcommand {
             StarnixSubCommand::Adb(command) => command
-                .run(
-                    &self.context,
-                    &self.rcs_connector,
-                    self.ssh_addr?,
-                    self.nodename.await?.into_inner(),
-                )
+                .run(&self.context, &self.rcs_connector, self.ssh_addr, self.nodename)
                 .await
                 .map(StarnixToolOutput::Adb),
             StarnixSubCommand::Console(command) => {

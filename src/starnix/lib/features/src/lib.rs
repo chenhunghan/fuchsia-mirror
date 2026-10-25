@@ -33,17 +33,19 @@ pub enum Feature {
     // Until dynamic IIO numbering is supported, they must not be used at the same time.
     GoogleOdpm,
     Gralloc,
-    // Note: HvdcpOpti statically registers IIO devices (`iio:device0`, `iio:device1`).
+    // Note: HvdcpOpti statically registers IIO devices (`iio:device0`, `iio:device3`).
     // Conflicts with `GoogleOdpm`, which also statically registers `iio:device0`.
     // Until dynamic IIO numbering is supported, they must not be used at the same time.
     HvdcpOpti,
     Kgsl,
     Magma,
     MagmaSupportedVendors,
+    MmcblkStub,
     Nanohub,
     NetworkManager,
     Perfetto,
     Thermal,
+    Usbfs,
     WakeupTest,
 
     // Container and kernel behavior features.
@@ -53,13 +55,13 @@ pub enum Feature {
     Bpf,
     Container,
     CustomArtifacts,
+    Devtmpfs,
     EnableSuid,
     ErrorOnFailedReboot,
     // TODO(https://fxbug.dev/485370648) remove when unnecessary
     FakeIon,
     IoUring,
     LogSysfsLookupMisses,
-    MmcblkStub,
     PingGroupRange,
     RemotevolInProcess,
     RootfsRw,
@@ -80,18 +82,9 @@ impl Feature {
     pub fn try_parse(s: &str) -> Result<Feature, UnsupportedFeatureError> {
         Feature::from_str(s).map_err(|_| UnsupportedFeatureError(s.to_string()))
     }
-
-    /// Parses a feature and args from a string.
-    pub fn try_parse_feature_and_args(
-        s: &str,
-    ) -> Result<(Feature, Option<String>), UnsupportedFeatureError> {
-        let (raw_flag, raw_args) =
-            s.split_once(':').map(|(f, a)| (f, Some(a.to_string()))).unwrap_or((s, None));
-        Self::try_parse(raw_flag).map(|feature| (feature, raw_args))
-    }
 }
 
-/// A feature together with any arguments that go along with it, if specified.
+/// Feature together with any arguments that go along with it, if specified.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureAndArgs {
     /// The feature.
@@ -134,6 +127,7 @@ mod test {
             (Feature::AspectRatio, "aspect_ratio"),
             (Feature::Container, "container"),
             (Feature::CustomArtifacts, "custom_artifacts"),
+            (Feature::Devtmpfs, "devtmpfs"),
             (Feature::Ashmem, "ashmem"),
             (Feature::BootNotifier, "boot_notifier"),
             (Feature::BootNotifierCpuBoost, "boot_notifier_cpu_boost"),
@@ -165,6 +159,7 @@ mod test {
             (Feature::MmcblkStub, "mmcblk_stub"),
             (Feature::AndroidUsb, "android_usb"),
             (Feature::GoogleOdpm, "google_odpm"),
+            (Feature::Usbfs, "usbfs"),
             // TODO(https://fxbug.dev/485370648) remove when unnecessary
             (Feature::FakeIon, "fake_ion"),
             (Feature::UnifiedTracing, "unified_tracing"),

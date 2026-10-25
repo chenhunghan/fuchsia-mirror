@@ -9,12 +9,20 @@ import("//src/starnix/build/args.gni")
 rustc_library("starnix_syscall_loop") {
   edition = "2024"
   with_unit_tests = true
+
+  # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+  exclude_toolchain_tags = [
+    "asan",
+    "hwasan",
+  ]
+
   sources = [
     "src/lib.rs",
     "src/table.rs",
   ]
 
   deps = [
+    ":module_changes_breakpoint",
     ":restricted_trampoline",
     "//sdk/rust/zx",
     "//src/lib/debug/rust",
@@ -38,6 +46,7 @@ rustc_library("starnix_syscall_loop") {
 }
 
 fuchsia_unittest_package("starnix_syscall_loop_tests") {
+  manifest = "meta/starnix_syscall_loop_tests.cml"
   deps = [ ":starnix_syscall_loop_test" ]
   test_type = "starnix"
 }
@@ -79,6 +88,17 @@ static_library("restricted_trampoline") {
     sources = [ "src/trampoline_riscv64.S" ]
   } else if (current_cpu == "x64") {
     sources = [ "src/trampoline_x64.S" ]
+  }
+  deps = [ "//src/starnix/lib/asm_utils" ]
+  visibility = [ ":*" ]
+}
+static_library("module_changes_breakpoint") {
+  if (current_cpu == "arm64") {
+    sources = [ "src/breakpoint_arm64.S" ]
+  } else if (current_cpu == "riscv64") {
+    sources = [ "src/breakpoint_riscv64.S" ]
+  } else if (current_cpu == "x64") {
+    sources = [ "src/breakpoint_x64.S" ]
   }
   deps = [ "//src/starnix/lib/asm_utils" ]
   visibility = [

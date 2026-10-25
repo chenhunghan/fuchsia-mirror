@@ -22,7 +22,10 @@
     ],
     offer: [
         {
-            config: [ "fuchsia.diagnostics.ExceptionHandlerAvailable" ],
+            config: [
+                "fuchsia.diagnostics.ExceptionHandlerAvailable",
+                "fuchsia.diagnostics.StorageStallWatchdogEnabled",
+            ],
             from: "parent",
             to: "#critical-services",
         },
@@ -93,6 +96,20 @@
             ],
             from: "parent",
             to: [ "#critical-services" ],
+        },
+
+        // For critical-services' storage stall watchdog, which only runs on boards that opt in.
+        {
+            protocol: "fuchsia.boot.Arguments",
+            from: "parent",
+            to: "#critical-services",
+        },
+        {
+            // Weak, so that Archivist's shutdown doesn't wait for critical-services.
+            protocol: "fuchsia.diagnostics.ArchiveAccessor",
+            from: "#archivist/diagnostics-accessors",
+            to: "#critical-services",
+            dependency: "weak",
         },
         {
             directory: "dev-class",

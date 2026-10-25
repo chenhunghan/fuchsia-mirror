@@ -56,7 +56,7 @@
         },
         {
             protocol: [
-                "fuchsia.memory.attribution.PageRefaultSink",
+                "fuchsia.memory.attribution.PagerStatsSink",
                 "fuchsia.power.system.ActivityGovernor",
                 "fuchsia.power.system.BootControl",
                 "fuchsia.settings.Privacy",
@@ -143,14 +143,16 @@
                 "fuchsia.hardware.google.nanohub.DisplayDevice",
                 "fuchsia.hardware.qualcomm.fastrpc.SecureFastRpc",
                 "fuchsia.hardware.sockettunnel.Device",
-                "fuchsia.net.policy.socketproxy.NetworkRegistry",
+                "fuchsia.net.policy.properties.NetworkRegistry",
                 "fuchsia.net.stack.Stack",
                 "fuchsia.net.tun.Control",
                 "fuchsia.power.battery.BatteryManager",
                 "fuchsia.power.broker.Topology",
                 "fuchsia.power.cpu.DomainController",
+                "fuchsia.power.powercap.Client",
                 "fuchsia.power.suspend.Stats",
                 "fuchsia.power.system.ActivityGovernor",
+                "fuchsia.storage.mapping.FileMapper",
                 "fuchsia.time.external.Adjust",
                 "fuchsia.tracing.provider.Registry",
                 "fuchsia.ui.composition.Allocator",
@@ -159,6 +161,7 @@
                 "fuchsia.ui.display.singleton.DisplayPower",
                 "fuchsia.ui.display.singleton.Info",
                 "fuchsia.ui.input.DeviceListenerRegistry",
+                "fuchsia.ui.input.internal.InputOwnership",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.policy.DeviceListenerRegistry",
                 "fuchsia.ui.test.input.Registry",
@@ -204,6 +207,12 @@
             to: [ "#kernels" ],
         },
         {
+            service: "fuchsia.gpu.magma.PowerService",
+            from: "parent",
+            to: [ "#kernels" ],
+            availability: "optional",
+        },
+        {
             service: [
                 "fuchsia.hardware.adb.Service",
                 "fuchsia.hardware.cpu.ctrl.Service",
@@ -214,10 +223,17 @@
                 "fuchsia.hardware.qcom.hvdcpopti.Service",
                 "fuchsia.hardware.qualcomm.fastrpc.SecureService",
                 "fuchsia.hardware.qualcomm.router.ClientService",
+                "fuchsia.hardware.usb.UsbService",
                 "fuchsia.power.battery.ChargerService",
             ],
             from: "parent",
             to: [ "#kernels" ],
+        },
+        {
+            service: "fuchsia.input.report.Service",
+            from: "parent",
+            to: [ "#kernels" ],
+            availability: "optional",
         },
         {
             config: [
@@ -228,6 +244,16 @@
             ],
             from: "parent",
             to: [ "#kernels" ],
+        },
+        {
+            config: [
+                "fuchsia.kernel.oom.CriticalMb",
+                "fuchsia.kernel.oom.OutOfMemoryMb",
+                "fuchsia.kernel.oom.WarningMb",
+            ],
+            from: "parent",
+            to: [ "#kernels" ],
+            availability: "optional",
         },
         {
             protocol: [ "fuchsia.kernel.StallResource" ],

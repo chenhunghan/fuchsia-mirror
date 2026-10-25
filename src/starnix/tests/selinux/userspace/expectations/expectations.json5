@@ -12,31 +12,15 @@
         {
             type: "expect_failure",
             matchers: [
-                // TODO(https://fxbug.dev/521343708) - Support SELinux context= and rootcontext=
+                // TODO: https://fxbug.dev/398662840 - Support SELinux context= and rootcontext=
                 // mount options on cgroupfs v2.
                 "CgroupFs/CgroupFsTest.SecondMountWithDifferentOptionsChangesLabels/Context",
                 "CgroupFs/CgroupFsTest.SecondMountWithDifferentOptionsChangesLabels/RootContext",
-
-                // TODO: https://fxbug.dev/505326546 - Implement the security_uring_cmd hook once
-                // the IORING_OP_URING_CMD flag is supported by Fuchsia.
-                "IoUringTest/IoUringCmdTest.Cmd/Allowed",
-                "IoUringTest/IoUringCmdTest.Cmd/Denied",
-
-                // TODO: https://fxbug.dev/505326006 - Implement the uring_override_creds hook once
-                // the IORING_REGISTER_PERSONALITY flag is supported in io_uring_register by
-                // Fuchsia.
-                "IoUringTest/IoUringOverrideCredsTest.OverrideCreds/Allowed",
-                "IoUringTest/IoUringOverrideCredsTest.OverrideCreds/Denied",
 
                 // TODO: https://fxbug.dev/532921178 - io_uring memory accounting is not implemented
                 // in Starnix.
                 "IoUringTest.IoUringSetupMemlockLimitCumulative",
                 "IoUringTest.IoUringSetupMemlockLimit",
-
-                // TODO: https://fxbug.dev/505326546 - Implement the uring_sqpoll hook once
-                // the IORING_SETUP_SQPOLL flag is supported by Fuchsia.
-                "IoUringTest.IoUringSqpollAllowed",
-                "IoUringTest.IoUringSqpollDenied",
 
                 // TODO: https://fxbug.dev/334094811 - Reject SELinux mount options before a
                 // policy is loaded.
@@ -58,30 +42,23 @@
                 "PtraceTest.PtraceExecVanillaCapCheckUsesCachedCreds",
                 "PtraceTest.PtraceExecSelinuxCapCheckUsesCachedCreds",
 
-                // TODO: https://fxbug.dev/361552580 - Fix SELinuxFS API handling of unknown policy class Ids.
+                // TODO: https://fxbug.dev/574857992 - Reject subsequent writes with EBUSY even if
+                // the initial write failed.
+                "SeLinuxFsContext.OneRequestPerInstanceFailedWrite",
+
+                // TODO: https://fxbug.dev/574857992 - Fix SELinuxFS API handling of unknown policy class Ids.
                 "SeLinuxFsCreate.InvalidComputeCreateClassId",
                 "SeLinuxFsAccess.UnknownClassIdIsAccepted",
 
-                // TODO: https://fxbug.dev/361552580 - Fix SELinuxFS API validation of fields.
+                // TODO: https://fxbug.dev/574857992 - Fix SELinuxFS API validation of fields.
                 "SeLinuxFsAccess.ClassIdMayHaveTrailingNonNumericData",
                 "SeLinuxFsAccess.FourthArgumentIsNotValidated",
 
                 // TODO: https://fxbug.dev/566091911 - Label new sysfs nodes via
                 // `kernfs_init_security` when their parent has a `security.selinux` xattr.
-                // TODO: https://fxbug.dev/567514429 - The loop driver creates the `loop` sysfs
-                // attribute group at device creation rather than on `LOOP_SET_FD`.
-                // TODO: https://fxbug.dev/567481478 - `LOOP_CTL_REMOVE` fails after `LOOP_CLR_FD`
-                // on Starnix, failing the test teardown.
                 "SysFs/SysFsTest.SubdirectoryLabels/InheritsParentXattrLabel",
                 "SysFs/SysFsTest.SubdirectoryLabels/AppliesTypeTransitionWhenParentHasXattr",
                 "SysFs/SysFsTest.SubdirectoryLabels/UsesFscreateLabelWhenParentHasXattr",
-
-                // TODO: https://fxbug.dev/567514429 - The loop driver creates the `loop` sysfs
-                // attribute group at device creation rather than on `LOOP_SET_FD`.
-                // TODO: https://fxbug.dev/567481478 - `LOOP_CTL_REMOVE` fails after `LOOP_CLR_FD`
-                // on Starnix, failing the test teardown.
-                "SysFs/SysFsTest.SubdirectoryLabels/UsesDefaultLabelWhenParentHasNoXattr",
-                "SysFs/SysFsTest.SubdirectoryLabels/IgnoresFscreateLabelWhenParentHasNoXattr",
 
                 // TODO: https://fxbug.dev/455799917 - Fix test setup for Starnix to match Linux.
                 "UnlabeledFsTest.CreateFileInUnlabeledFs",
@@ -90,7 +67,7 @@
         {
             type: "skip",
             matchers: [
-                // TODO: https://fxbug.dev/451606455 - Wait on `PTRACE_ATTACH` to finish.
+                // TODO: https://fxbug.dev/439799293 - Wait on `PTRACE_ATTACH` to finish.
                 "PtraceTest.PtraceAttachAllowed",
                 "PtraceTest.PtraceAttachThenExecDenied",
                 "PtraceTest.PtraceAttachThenExecAllowed",

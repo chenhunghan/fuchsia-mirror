@@ -33,6 +33,9 @@ class DriverServer2;
 
 namespace fdf {
 
+template <typename Protocol>
+class ServerBinding;
+
 using DriverStartArgs = fuchsia_driver_framework::DriverStartArgs;
 
 class DriverBase2;
@@ -287,6 +290,40 @@ class DriverBase2 {
   }
 #endif
 
+  // Unlike the other fdf::*Completer types, this is a bare fit::callback whose drop is tolerated: a
+  // diagnostic hook must never close the Driver channel, so DriverServer2 converts a dropped
+  // completer into HealthCheckError::kInternalError. Invoke it at most once, on the driver
+  // dispatcher, and invoke or drop it before the driver object is destroyed.
+  using HealthCheckCompleter =
+      fit::callback<void(fit::result<fuchsia_driver_framework::HealthCheckError,
+                                     fuchsia_driver_framework::HealthCheckResponse>)>;
+
+  // Optional active health check hook. By default, replies with an empty HealthCheckResponse (OK)
+  // for HealthCheckRequest::kPing and HealthCheckError::kNotSupported for deeper levels. Drivers
+  // may override this method to inspect hardware state (synchronously or asynchronously) and pass
+  // structured diagnostics to `completer`.
+  virtual void HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
+                           HealthCheckCompleter completer) {
+    if (request == fuchsia_driver_framework::HealthCheckRequest::kPing) {
+      completer(fit::ok(fuchsia_driver_framework::HealthCheckResponse{}));
+    } else {
+      completer(fit::error(fuchsia_driver_framework::HealthCheckError::kNotSupported));
+    }
+  }
+
+  // Proactively emits an asynchronous `OnHealthAlert` FIDL event over the `Driver` channel to the
+  // Driver Framework. If `alert.Which()` is `HealthAlert::Tag::kSelfFault`, the self-fault
+  // `HealthCheckResponse` is also mirrored into the driver's Inspect tree if `CreateInspector()`
+  // was called.
+  //
+  // Must be called from the driver dispatcher. It is a no-op once the driver has been asked to
+  // stop (after the `Stop` completer is invoked).
+  //
+  // `HealthAlert::Tag::kSelfFault` alerts are edge-triggered: send one when the driver's overall
+  // status worsens and once with an empty `conditions` list (OK) on recovery, never once per
+  // occurrence.
+  void ReportHealthAlert(fuchsia_driver_framework::HealthAlert alert);
+
   // This can be used to log in driver factories:
   // `driver->logger().log(fdf::INFO, "...");`
   Logger& logger() { return *logger_; }
@@ -373,6 +410,34 @@ class DriverBase2 {
   async_dispatcher_t* dispatcher() const { return driver_dispatcher_->async_dispatcher(); }
 
  private:
+  // DriverServer2 installs (and clears) the Driver channel binding used by ReportHealthAlert and
+  // drives RecordHealthCheckToInspect.
+  template <typename DriverBaseImpl>
+  friend class fdf_internal::DriverServer2;
+
+  // `binding` is borrowed, not owned. It must outlive this driver or be cleared (nullptr) before
+  // it is destroyed. Only touched on the driver dispatcher. Kept as a plain pointer (rather than a
+  // callback bound in DriverServer2) so that the OnHealthAlert send path lives only in
+  // ReportHealthAlert and is dead-stripped from drivers that never call it.
+  void SetHealthAlertBinding(ServerBinding<fuchsia_driver_framework::Driver>* binding) {
+    health_alert_binding_ = binding;
+  }
+
+  // Mirrors the result of the latest health check into the driver's Inspect tree under
+  // root/driver_health_check if CreateInspector() was called. `level` is the requested level of
+  // the check, or std::nullopt when the record does not come from a health check request. Errors
+  // are recorded as status "ERROR" with an "error" property. The previous record is replaced
+  // wholesale.
+  void RecordHealthCheckToInspect(
+      std::optional<fuchsia_driver_framework::HealthCheckRequest> level,
+      const fit::result<fuchsia_driver_framework::HealthCheckError,
+                        fuchsia_driver_framework::HealthCheckResponse>& result);
+
+  // Set by DriverContext::CreateInspector; `health_check_node_` holds the latest
+  // root/driver_health_check record.
+  std::optional<inspect::Inspector> health_check_inspector_;
+  std::optional<inspect::Node> health_check_node_;
+  ServerBinding<fuchsia_driver_framework::Driver>* health_alert_binding_ = nullptr;
   std::string name_;
   fidl::ClientEnd<fuchsia_driver_framework::Node> node_;
   std::shared_ptr<OutgoingDirectory> outgoing_;

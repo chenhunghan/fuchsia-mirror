@@ -7,10 +7,10 @@
 use fuchsia_rcu::RcuReadScope;
 use once_cell::sync::OnceCell;
 use rand::RngExt as _;
-use starnix_core::fs::tmpfs::{TmpFs, TmpFsDirectory};
+use starnix_core::fs::tmpfs::TmpFs;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::security::{self, PermissionFlags};
-use starnix_core::task::{CurrentTask, Kernel};
+use starnix_core::task::CurrentTask;
 use starnix_core::vfs::fs_args::MountParams;
 use starnix_core::vfs::rw_queue::{RwQueueReadGuard, RwQueueWriteGuard};
 use starnix_core::vfs::{
@@ -20,7 +20,7 @@ use starnix_core::vfs::{
     FsNodeFlags, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo,
     OutputBuffer, RenameContext, RenameFlags, SeekTarget, StatxFlags, SymlinkTarget, UnlinkKind,
     ValueOrSize, VecInputBuffer, VecOutputBuffer, XattrOp, default_seek, emit_dotdot,
-    fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_seekable,
+    fileops_impl_directory, fileops_impl_seekable,
 };
 use starnix_logging::{log_error, log_warn, track_stub};
 use starnix_sync::{
@@ -40,7 +40,7 @@ use syncio::zxio_node_attr_has_t;
 // Name and value for the xattr used to mark opaque directories in the upper FS.
 // See https://docs.kernel.org/filesystems/overlayfs.html#whiteouts-and-opaque-directories
 const OPAQUE_DIR_XATTR: &str = "trusted.overlay.opaque";
-const OPAQUE_DIR_XATTR_VALUE: &str = "y";
+const OPAQUE_DIR_XATTR_VALUE: &[u8] = b"y";
 
 #[derive(Clone)]
 struct DirEntryInfo {
@@ -130,7 +130,7 @@ impl ActiveEntry {
             current_task,
             self.mount(),
             OPAQUE_DIR_XATTR.into(),
-            OPAQUE_DIR_XATTR_VALUE.into(),
+            OPAQUE_DIR_XATTR_VALUE,
             XattrOp::Set,
         )
     }
@@ -143,7 +143,7 @@ impl ActiveEntry {
             OPAQUE_DIR_XATTR.into(),
             OPAQUE_DIR_XATTR_VALUE.len(),
         ) {
-            Ok(ValueOrSize::Value(v)) if v == OPAQUE_DIR_XATTR_VALUE => true,
+            Ok(ValueOrSize::Value(v)) if &*v == OPAQUE_DIR_XATTR_VALUE => true,
             _ => false,
         }
     }
@@ -867,13 +867,20 @@ impl FsNodeOps for OverlayNodeOps {
         })
     }
 
+    fn sync(&self, _node: &FsNode, current_task: &CurrentTask) -> Result<(), Errno> {
+        self.node.as_mounter(current_task, || match self.node.upper.get() {
+            Some(upper) => upper.entry().node.ops().sync(&upper.entry().node, current_task),
+            None => Ok(()),
+        })
+    }
+
     fn get_xattr(
         &self,
         _node: &FsNode,
         current_task: &CurrentTask,
         name: &FsStr,
         max_size: usize,
-    ) -> Result<ValueOrSize<FsString>, Errno> {
+    ) -> Result<ValueOrSize<Box<[u8]>>, Errno> {
         let entry = self
             .node
             .upper
@@ -890,7 +897,7 @@ impl FsNodeOps for OverlayNodeOps {
         node: &FsNode,
         current_task: &CurrentTask,
         name: &FsStr,
-        value: &FsStr,
+        value: &[u8],
         op: XattrOp,
     ) -> Result<(), Errno> {
         self.node.as_mounter(current_task, || {
@@ -975,7 +982,6 @@ impl OverlayDirectory {
 
 impl FileOps for OverlayDirectory {
     fileops_impl_directory!();
-    fileops_impl_noop_sync!();
 
     fn seek(
         &self,
@@ -1098,6 +1104,14 @@ impl FileOps for OverlayFile {
         })
     }
 
+    fn flush(&self, _file: &FileObject, current_task: &CurrentTask) {
+        self.node.as_mounter(current_task, || {
+            let state = self.state.read();
+            let file = state.file();
+            file.ops().flush(file, current_task)
+        })
+    }
+
     fn get_memory(
         &self,
         _file: &FileObject,
@@ -1179,31 +1193,26 @@ impl OverlayStack {
 
     /// Given a filesystem, wraps it in a tmpfs-backed writable overlayfs.
     pub fn wrap_fs_in_writable_layer(
-        kernel: &Kernel,
+        current_task: &CurrentTask,
         rootfs: FileSystemHandle,
     ) -> Result<FileSystemHandle, Errno> {
+        let kernel = current_task.kernel();
         let lower = ActiveEntry { entry: rootfs.root().clone(), mount: MountInfo::detached() };
 
         // Create upper and work directories in an invisible tmpfs.
         let invisible_tmp = TmpFs::new_fs(kernel);
-
-        let create_directory = |fs: &FileSystemHandle| {
-            let ino = fs.allocate_ino();
-            let info = FsNodeInfo::new(mode!(IFDIR, 0o777), FsCred::root());
-            let node = fs.create_detached_node(ino, TmpFsDirectory::new(), info);
-            let dir_entry = DirEntry::new(node, None, FsString::default());
-
-            // TODO: https://fxbug.dev/455771186 - Revise FsNode initialization to better ensure
-            // that all the things are appropriately labeled.
-            security::fs_node_init_with_dentry_deferred(kernel, &dir_entry);
-
-            dir_entry
+        let create_dir = |name: &FsStr| -> Result<ActiveEntry, Errno> {
+            let create_dir_node = |dir: &FsNodeHandle, mount: &MountInfo, name: &FsStr| {
+                let mode = mode!(IFDIR, 0o777);
+                dir.create_node(current_task, mount, name, mode, DeviceId::NONE, FsCred::root())
+            };
+            let mount = MountInfo::detached();
+            let root = invisible_tmp.root();
+            let entry = root.create_entry(current_task, &mount, name, create_dir_node)?;
+            Ok(ActiveEntry { entry, mount })
         };
-
-        let upper =
-            ActiveEntry { entry: create_directory(&invisible_tmp), mount: MountInfo::detached() };
-        let work =
-            ActiveEntry { entry: create_directory(&invisible_tmp), mount: MountInfo::detached() };
+        let upper = create_dir("upper".into())?;
+        let work = create_dir("work".into())?;
 
         let lower_fs = rootfs;
         let upper_fs = invisible_tmp;
@@ -1298,6 +1307,11 @@ impl FileSystemOps for OverlayFs {
     fn statfs(&self, _fs: &FileSystem, current_task: &CurrentTask) -> Result<statfs, Errno> {
         current_task
             .override_creds(self.stack.mounter.clone(), || self.stack.upper_fs.statfs(current_task))
+    }
+
+    fn sync(&self, _fs: &FileSystem, current_task: &CurrentTask) -> Result<(), Errno> {
+        current_task
+            .override_creds(self.stack.mounter.clone(), || self.stack.upper_fs.sync(current_task))
     }
 
     fn name(&self) -> &'static FsStr {
@@ -1434,4 +1448,117 @@ fn copy_file_content(
     to_file.ops().data_sync(&to_file, current_task)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use fidl_fuchsia_io as fio;
+    use fxfs_testing::{Hooks, TestFixture, TestFixtureOptions};
+    use starnix_core::fs::fuchsia::RemoteFs;
+    use starnix_core::testing::spawn_kernel_and_run;
+    use starnix_core::vfs::{FdFlags, LookupContext, Namespace, NamespaceNode, WhatToMount};
+    use starnix_uapi::mount_flags::MountpointFlags;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use storage_device::DeviceHolder;
+    use storage_device::fake_device::FakeDevice;
+
+    /// Returns an Fxfs fixture, a channel to its root and a count of its transaction commits.
+    async fn new_fxfs() -> (TestFixture, zx::Channel, Arc<AtomicUsize>, Hooks<'static>) {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commits_clone = commits.clone();
+        let (mut hooks, fs_hooks) = Hooks::new();
+        hooks.set_pre_commit(move |_transaction| {
+            commits_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions { hooks: Some(fs_hooks), ..Default::default() },
+        )
+        .await;
+        let (server, client) = zx::Channel::create();
+        fixture.root().clone(server.into()).expect("clone failed");
+        (fixture, client, commits, hooks)
+    }
+
+    /// Mounts `remote` at /remote and returns an overlay whose upper layer is on it.
+    fn new_overlay(current_task: &CurrentTask, remote: zx::Channel) -> FileSystemHandle {
+        let rights = fio::PERM_READABLE | fio::PERM_WRITABLE;
+        let remote = RemoteFs::new_fs(current_task.kernel(), remote, Default::default(), rights)
+            .expect("new_fs failed");
+        remote.root().create_dir_for_testing(current_task, "upper".into()).expect("mkdir failed");
+        remote.root().create_dir_for_testing(current_task, "work".into()).expect("mkdir failed");
+        let root = current_task.fs().root();
+        root.entry.create_dir_for_testing(current_task, "lower".into()).expect("mkdir failed");
+        root.entry.create_dir_for_testing(current_task, "remote".into()).expect("mkdir failed");
+        root.lookup_child(current_task, &mut LookupContext::default(), "remote".into())
+            .expect("lookup failed")
+            .mount(WhatToMount::Fs(remote), MountpointFlags::empty())
+            .expect("mount failed");
+        let params = "lowerdir=/lower,upperdir=/remote/upper,workdir=/remote/work";
+        let params = MountParams::parse(params.into()).expect("parse failed");
+        new_overlay_fs(current_task, FileSystemOptions { params, ..Default::default() })
+            .expect("new_overlay_fs failed")
+    }
+
+    /// Creates and writes a file in `dir`, leaving unflushed data in Fxfs.
+    fn write_new_file(current_task: &CurrentTask, dir: &NamespaceNode) -> FileHandle {
+        let file = dir
+            .create_node(current_task, "file".into(), mode!(IFREG, 0o666), DeviceId::NONE)
+            .expect("create_node failed")
+            .open(current_task, OpenFlags::RDWR)
+            .expect("open failed");
+        file.write(current_task, &mut VecInputBuffer::new(b"hello")).expect("write failed");
+        file
+    }
+
+    #[::fuchsia::test]
+    async fn test_close_flushes_upper_file() {
+        let (fixture, remote, commits, _hooks) = new_fxfs().await;
+        spawn_kernel_and_run(async move |current_task| {
+            let root = Namespace::new(new_overlay(current_task, remote)).root();
+            let file = write_new_file(current_task, &root);
+            let fd = current_task.add_file(file, FdFlags::empty()).expect("add_file failed");
+
+            let commits_before = commits.load(Ordering::SeqCst);
+            current_task.files().close(fd).expect("close failed");
+            current_task.trigger_delayed_releaser();
+            assert!(commits.load(Ordering::SeqCst) > commits_before);
+        })
+        .await;
+        fixture.close().await;
+    }
+
+    // These rely on Fxfs flushing all file data on directory sync.
+    #[::fuchsia::test]
+    async fn test_dir_fsync_syncs_upper_dir() {
+        let (fixture, remote, commits, _hooks) = new_fxfs().await;
+        spawn_kernel_and_run(async move |current_task| {
+            let root = Namespace::new(new_overlay(current_task, remote)).root();
+            let _file = write_new_file(current_task, &root);
+            let dir = root.open(current_task, OpenFlags::RDONLY).expect("open failed");
+
+            let commits_before = commits.load(Ordering::SeqCst);
+            dir.sync(current_task).expect("fsync failed");
+            assert!(commits.load(Ordering::SeqCst) > commits_before);
+        })
+        .await;
+        fixture.close().await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_syncfs_syncs_upper_fs() {
+        let (fixture, remote, commits, _hooks) = new_fxfs().await;
+        spawn_kernel_and_run(async move |current_task| {
+            let overlay = new_overlay(current_task, remote);
+            let _file = write_new_file(current_task, &Namespace::new(overlay.clone()).root());
+
+            let commits_before = commits.load(Ordering::SeqCst);
+            overlay.sync(current_task).expect("syncfs failed");
+            assert!(commits.load(Ordering::SeqCst) > commits_before);
+        })
+        .await;
+        fixture.close().await;
+    }
 }

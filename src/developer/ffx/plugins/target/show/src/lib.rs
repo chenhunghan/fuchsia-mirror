@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use crate::show::TargetData;
-use async_trait::async_trait;
 use fdomain_fuchsia_buildinfo::ProviderProxy;
 use fdomain_fuchsia_feedback::{DeviceIdProviderProxy, LastRebootInfoProviderProxy};
 use fdomain_fuchsia_hwinfo::{Architecture, BoardProxy, DeviceProxy, ProductProxy};
@@ -91,7 +90,6 @@ pub enum ShowError {
 
 fho::embedded_plugin!(ShowTool, ShowError);
 
-#[async_trait(?Send)]
 impl FfxMain for ShowTool {
     type Writer = VerifiedMachineWriter<TargetShowInfo>;
     type Error = ShowError;
@@ -365,7 +363,7 @@ mod tests {
         \n    SSH Address: \u{1b}[38;5;2m\"127.0.0.1:22\"\u{1b}[m\
         \n    Last Reboot Graceful: \"true\"\
         \n    Last Reboot Reason: \"ZbiSwap\"\
-        \n    Uptime (ns): \"65000\"\
+        \n    Last boot uptime (ns): \"65000\"\
         \nBoard: \
         \n    Name: \"fake_name\"\
         \n    Revision: \"fake_revision\"\
@@ -460,10 +458,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_cmd_impl() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,
@@ -638,11 +637,12 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_verify_machine_schema() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let mut output =
             VerifiedMachineWriter::<TargetShowInfo>::new_test(Some(Format::JsonPretty), &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,
@@ -690,10 +690,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_cmd_impl_direct_connection() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,
@@ -749,10 +750,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_rcs_host_identification_error() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,
@@ -810,10 +812,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_cmd_impl_fidl_error() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,
@@ -853,10 +856,11 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_show_cmd_impl_missing_services() {
+        let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::default();
+        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
         target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
             target_behavior::setup_fake_resolution(None).await,

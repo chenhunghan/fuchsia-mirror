@@ -179,6 +179,9 @@ pub(crate) mod for_tests {
                         .capability(Capability::configuration(
                             "fuchsia.pkgcache.UseDriverBlobPaging",
                         ))
+                        .capability(Capability::configuration(
+                            "fuchsia.fshost.StartupProfilingSeconds",
+                        ))
                         .from(Ref::void())
                         .to(&pkg_cache),
                 )
@@ -232,6 +235,7 @@ pub(crate) mod for_tests {
                 .add_route(
                     Route::new()
                         .capability(Capability::protocol_by_name("fuchsia.pkg.PackageCache"))
+                        .capability(Capability::protocol_by_name("fuchsia.pkg.PackageResolver-ota"))
                         .capability(Capability::protocol_by_name("fuchsia.pkg.RetainedPackages"))
                         .capability(Capability::protocol_by_name(
                             "fuchsia.pkg.garbagecollector.Manager",

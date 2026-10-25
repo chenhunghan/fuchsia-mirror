@@ -454,8 +454,25 @@ func (c *Client) Suspend(ctx context.Context) error {
 	})
 }
 
+// notifyIntentionalDisconnect tells the ffx monitor (if one is running, as
+// in infra) that this device is about to disconnect on purpose, so the
+// disconnect is not counted as unexpected. Best-effort: never fails the
+// caller and is bounded by a short timeout.
+func (c *Client) notifyIntentionalDisconnect(ctx context.Context) {
+	if c.nodeName == "" || !ffx.HasMonitor() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := ffx.NotifyIntentionalDisconnect(ctx, c.nodeName); err != nil {
+		logger.Warningf(ctx, "failed to notify ffx monitor of intentional disconnect of %q: %v", c.nodeName, err)
+	}
+}
+
 func (c *Client) ExpectDisconnect(ctx context.Context, f func() error) error {
 	ch := c.DisconnectionListener()
+
+	c.notifyIntentionalDisconnect(ctx)
 
 	if err := f(); err != nil {
 		return err
@@ -531,6 +548,8 @@ func (c *Client) ExpectReboot(
 	initialBootCount := *c.bootCounter
 
 	ch := c.DisconnectionListener()
+
+	c.notifyIntentionalDisconnect(ctx)
 
 	if err := f(); err != nil {
 		return err
@@ -859,11 +878,11 @@ func (c *Client) Pave(
 	return nil
 }
 
-// Flash the device to the specified build. Does not reconnect to the device.
+// Flash the device to the specified product bundle. Does not reconnect to the device.
 func (c *Client) Flash(
 	ctx context.Context,
 	ffxTool *ffx.FFXTool,
-	build artifacts.Build,
+	productBundle artifacts.ProductBundle,
 	publicKey ssh.PublicKey,
 ) error {
 	flasher := ffxTool.Flasher()
@@ -872,12 +891,12 @@ func (c *Client) Flash(
 	flasher.SetRetrySleep(c.flashRetrySleep)
 	flasher.SetSSHPublicKey(publicKey)
 
-	if productBundleDir, err := build.GetProductBundleDir(ctx); err == nil {
+	if productBundleDir, err := productBundle.GetProductBundleDir(ctx); err == nil {
 		logger.Infof(ctx, "Flashing with the product bundle %s", productBundleDir)
 		flasher.SetProductBundle(productBundleDir)
 	} else {
 		logger.Warningf(ctx, "Failed to download the product bundle, trying to fall back to the flash manifest: %v", err)
-		manifest, errMan := build.GetFlashManifest(ctx)
+		manifest, errMan := productBundle.Build().GetFlashManifest(ctx)
 		if errMan != nil {
 			return fmt.Errorf("failed to get flash manifest from build: %w", errMan)
 		}

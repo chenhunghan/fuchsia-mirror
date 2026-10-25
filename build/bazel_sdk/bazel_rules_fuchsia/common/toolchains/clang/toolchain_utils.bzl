@@ -4,6 +4,7 @@
 
 """Helper functions to define Clang toolchain related targets."""
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load(
     "@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl",
@@ -31,7 +32,7 @@ load(
     "to_clang_target_tuple",
 )
 load("//common:toolchains/clang/providers.bzl", "ClangInfo", "FuchsiaApiLevelInfo")
-load("//common:toolchains/clang/sanitizer.bzl", "sanitizer_features")
+load("//common:toolchains/clang/sanitizer.bzl", "get_sanitizer_features")
 load("//common/platforms:utils.bzl", "to_fuchsia_cpu_name", "to_fuchsia_os_name")
 
 # buildifier: disable=unused-variable
@@ -42,7 +43,8 @@ def compute_clang_features(
         target_cpu,
         fuchsia_api_level,
         sysroot = "",
-        default_flags_set = None):
+        default_flags_set = None,
+        enabled_features = []):
     """Compute list of C++ toolchain features required by Clang.
 
     Args:
@@ -53,6 +55,7 @@ def compute_clang_features(
       fuchsia_api_level: Optional target Fuchsia API level.
       sysroot: Optional path to sysroot.
       default_flags_set: Optional DefaultBuildFlagsSetInfo value.
+      enabled_features: Optional list of feature names to enable by default.
 
     Returns:
       A list of feature() objects.
@@ -65,7 +68,14 @@ def compute_clang_features(
 
     clang_tuple = to_clang_target_tuple(target_os, target_cpu)
 
-    default_compile_flags_feature = get_default_compile_flags_feature(clang_info, target_os, sysroot = sysroot)
+    use_default_build_flags = default_flags_set != None
+
+    default_compile_flags_feature = get_default_compile_flags_feature(
+        clang_info,
+        target_os,
+        sysroot = sysroot,
+        use_default_build_flags = use_default_build_flags,
+    )
 
     # A feature that adds a --target=<clang_tuple> to compiler and linker commands.
     target_system_name_feature = feature(
@@ -148,6 +158,7 @@ def compute_clang_features(
 
     ml_inliner_feature = feature(
         name = "ml_inliner",
+        enabled = "ml_inliner" in enabled_features,
         flag_sets = [
             flag_set(
                 actions = [
@@ -170,8 +181,10 @@ def compute_clang_features(
         ],
     )
 
+    # LINT.IfChange(coverage)
     coverage_feature = feature(
         name = "coverage",
+        enabled = "coverage" in enabled_features,
         flag_sets = [
             flag_set(
                 actions = [
@@ -241,6 +254,10 @@ def compute_clang_features(
             ] if is_fuchsia else []
         ),
     )
+    # LINT.ThenChange(
+    #   //build/config/BUILD.gn:optimize_coverage,
+    #   //build/config/profile/BUILD.gn:coverage,
+    # )
 
     generate_linkmap_feature = feature(
         name = "generate_linkmap",
@@ -319,7 +336,11 @@ def compute_clang_features(
         opt_feature,
         clang_driver_mode_cxx_feature,
         static_cpp_standard_library_feature,
-    ] + sanitizer_features
+    ] + get_sanitizer_features(
+        target_os,
+        use_default_build_flags = use_default_build_flags,
+        enabled_features = enabled_features,
+    )
 
     # This feature adds an RPATH entry into the final binary. We do not want this
     # because it is not valid for fuchsia since we install all of our libraries
@@ -363,6 +384,16 @@ def compute_clang_features(
                 default_flags_set = default_flags_set,
             ),
         )
+
+    known_feature_names = {f.name: None for f in features}
+    for feature_name in enabled_features:
+        if feature_name not in known_feature_names:
+            fail(
+                "Unknown C++ toolchain feature in enabled_features: %s (known: %s)" % (
+                    feature_name,
+                    sorted(known_feature_names.keys()),
+                ),
+            )
 
     return features
 
@@ -514,8 +545,18 @@ def _prebuilt_clang_cc_toolchain_config_impl(ctx):
         # `copts` directly. See https://fxbug.dev/548409875.
         fuchsia_api_level = None
 
+    use_default_build_flags = ctx.attr._use_default_build_flags[BuildSettingInfo].value
     build_flags_toolchain = ctx.toolchains["@fuchsia_rules_common//build_flags:toolchain_type"]
-    default_flags_set = build_flags_toolchain.default_flags if build_flags_toolchain else None
+    if use_default_build_flags and not build_flags_toolchain:
+        fail("@fuchsia_rules_common//build_flags:use_default_build_flags is True, but no @fuchsia_rules_common//build_flags:toolchain_type toolchain is registered.")
+    default_flags_set = (
+        build_flags_toolchain.default_flags if (use_default_build_flags and build_flags_toolchain) else None
+    )
+    enabled_features = [
+        f
+        for f in ctx.attr._enabled_features[BuildSettingInfo].value
+        if f
+    ]
 
     features = compute_clang_features(
         clang_info,
@@ -525,6 +566,7 @@ def _prebuilt_clang_cc_toolchain_config_impl(ctx):
         fuchsia_api_level = fuchsia_api_level,
         sysroot = sysroot_path,
         default_flags_set = default_flags_set,
+        enabled_features = enabled_features,
     )
 
     return cc_common.create_cc_toolchain_config_info(
@@ -566,6 +608,14 @@ _prebuilt_clang_cc_toolchain_config = rule(
         "fuchsia_api_level": attr.label(
             default = None,
             providers = [FuchsiaApiLevelInfo],
+        ),
+        "_use_default_build_flags": attr.label(
+            default = "@fuchsia_rules_common//build_flags:use_default_build_flags",
+            providers = [BuildSettingInfo],
+        ),
+        "_enabled_features": attr.label(
+            default = "@fuchsia_rules_common//build_flags:enabled_features",
+            providers = [BuildSettingInfo],
         ),
     },
     toolchains = [

@@ -259,6 +259,8 @@ async fn apply_command_line_options(
     emu_config.runtime.instance_directory =
         emu_instances.get_instance_dir(&emu_config.runtime.name, true)?;
     emu_config.runtime.reuse = cmd.reuse;
+    emu_config.runtime.snapshots_enabled = cmd.enable_snapshots;
+    emu_config.runtime.from_snapshot = cmd.from_snapshot.clone();
 
     // Collapsing multiple binary options into related fields.
     if cmd.console {
@@ -695,6 +697,46 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_apply_command_line_options_snapshots() -> Result<()> {
+        let env = ffx_config::test_env().build().unwrap();
+        let temp_dir = tempdir().unwrap();
+        let emulator_instances = EmulatorInstances::new(temp_dir.path().to_path_buf());
+        let emu_config = EmulatorConfiguration::default();
+
+        // Snapshots are neither enabled nor loaded by default.
+        let cmd = StartCommand { net: Some("user".to_string()), ..Default::default() };
+        let opts =
+            apply_command_line_options(emu_config.clone(), &cmd, &emulator_instances, &env.context)
+                .await?;
+        assert_eq!(opts.runtime.snapshots_enabled, false);
+        assert_eq!(opts.runtime.from_snapshot, None);
+
+        let cmd = StartCommand {
+            enable_snapshots: true,
+            net: Some("user".to_string()),
+            ..Default::default()
+        };
+        let opts =
+            apply_command_line_options(emu_config.clone(), &cmd, &emulator_instances, &env.context)
+                .await?;
+        assert_eq!(opts.runtime.snapshots_enabled, true);
+        assert_eq!(opts.runtime.from_snapshot, None);
+
+        let cmd = StartCommand {
+            from_snapshot: Some("booted".to_string()),
+            net: Some("user".to_string()),
+            ..Default::default()
+        };
+        let opts =
+            apply_command_line_options(emu_config.clone(), &cmd, &emulator_instances, &env.context)
+                .await?;
+        assert_eq!(opts.runtime.snapshots_enabled, false);
+        assert_eq!(opts.runtime.from_snapshot, Some("booted".to_string()));
 
         Ok(())
     }

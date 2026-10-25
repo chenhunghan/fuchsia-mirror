@@ -5,12 +5,14 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <lib/fit/defer.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/fsuid.h>
 #include <sys/inotify.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -541,6 +543,67 @@ TEST_F(ProcTaskDirTest, SelfStatIsNotEmpty) {
   ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &contents));
   ASSERT_THAT(contents.size(), testing::Gt(0));
 }
+
+std::optional<std::string> ExtractStatComm(const std::string& stat_contents) {
+  size_t open_paren = stat_contents.find('(');
+  size_t close_paren = stat_contents.rfind(')');
+  if (open_paren == std::string::npos || close_paren == std::string::npos ||
+      close_paren <= open_paren) {
+    return std::nullopt;
+  }
+  return stat_contents.substr(open_paren + 1, close_paren - open_paren - 1);
+}
+
+TEST_F(ProcTaskDirTest, SelfStatCommTruncatedToTaskCommLen) {
+  constexpr size_t kMaxCommLen = 15;  // TASK_COMM_LEN - 1
+
+  std::string stat_contents;
+  ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &stat_contents));
+  std::optional<std::string> stat_comm = ExtractStatComm(stat_contents);
+  ASSERT_TRUE(stat_comm.has_value()) << stat_contents;
+  EXPECT_LE(stat_comm->size(), kMaxCommLen) << *stat_comm;
+
+  std::string comm_contents;
+  ASSERT_TRUE(files::ReadFileToString("/proc/self/comm", &comm_contents));
+  if (!comm_contents.empty() && comm_contents.back() == '\n') {
+    comm_contents.pop_back();
+  }
+  EXPECT_EQ(*stat_comm, comm_contents);
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    // Setting a 16-byte non-null string must truncate the comm field in /proc/self/stat to 15
+    // bytes.
+    ASSERT_THAT(prctl(PR_SET_NAME, "0123456789abcdef"), SyscallSucceeds());
+    std::string child_stat;
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &child_stat));
+    std::optional<std::string> child_comm = ExtractStatComm(child_stat);
+    ASSERT_TRUE(child_comm.has_value()) << child_stat;
+    EXPECT_EQ(*child_comm, "0123456789abcde");
+
+    // Setting a multi-byte UTF-8 string whose codepoint straddles the 15-byte boundary must raw-
+    // truncate to 15 bytes rather than expanding invalid trailing UTF-8 into a 3-byte replacement
+    // character (\xef\xbf\xbd).
+    ASSERT_THAT(prctl(PR_SET_NAME, "0123456789abcd\xc3\xa9"), SyscallSucceeds());
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &child_stat));
+    child_comm = ExtractStatComm(child_stat);
+    ASSERT_TRUE(child_comm.has_value()) << child_stat;
+    EXPECT_EQ(*child_comm, "0123456789abcd\xc3");
+    std::string child_comm_file;
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/comm", &child_comm_file));
+    EXPECT_EQ(child_comm_file, "0123456789abcd\xc3\n");
+
+    // Setting a substring of argv[0] (which triggers TaskCommand::try_embed in Starnix) must still
+    // report only the comm name in /proc/self/stat rather than the full argv[0] basename.
+    ASSERT_THAT(prctl(PR_SET_NAME, "procfs_test"), SyscallSucceeds());
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &child_stat));
+    child_comm = ExtractStatComm(child_stat);
+    ASSERT_TRUE(child_comm.has_value()) << child_stat;
+    EXPECT_EQ(*child_comm, "procfs_test");
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
 TEST_F(ProcTaskDirTest, KthreadStatIsNotEmpty) {
   if (!test_helper::HasSysAdmin()) {
     GTEST_SKIP() << "Not running with sysadmin capabilities, skipping.";
@@ -674,6 +737,72 @@ TEST_F(ProcTaskDirTest, ParentFieldsValidWithCapSysPtrace) {
     EXPECT_NE(fields[51], "0") << "env_end(51)";
 
     // exit_code(52) will be zero.
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(ProcTaskDirTest, SelfStatPriorityAndNice) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    auto read_stat_fields = [] {
+      std::string contents;
+      EXPECT_TRUE(files::ReadFileToString("/proc/self/stat", &contents));
+      return ProcPidStatElements(contents);
+    };
+
+    sched_param zero_param = {.sched_priority = 0};
+    ASSERT_THAT(sched_setscheduler(0, SCHED_OTHER, &zero_param), SyscallSucceeds());
+    if (getpriority(PRIO_PROCESS, 0) < 0) {
+      ASSERT_THAT(setpriority(PRIO_PROCESS, 0, 0), SyscallSucceeds());
+    }
+
+    int initial_nice = getpriority(PRIO_PROCESS, 0);
+    auto fields = read_stat_fields();
+    ASSERT_GT(fields.size(), 19u);
+    EXPECT_EQ(fields[18], std::to_string(20 + initial_nice)) << "priority(18)";
+    EXPECT_EQ(fields[19], std::to_string(initial_nice)) << "nice(19)";
+
+    int raised_nice = std::min(19, initial_nice + 5);
+    ASSERT_THAT(setpriority(PRIO_PROCESS, 0, raised_nice), SyscallSucceeds());
+    fields = read_stat_fields();
+    ASSERT_GT(fields.size(), 19u);
+    EXPECT_EQ(fields[18], std::to_string(20 + raised_nice)) << "priority(18)";
+    EXPECT_EQ(fields[19], std::to_string(raised_nice)) << "nice(19)";
+
+    ASSERT_THAT(sched_setscheduler(0, SCHED_BATCH, &zero_param), SyscallSucceeds());
+    fields = read_stat_fields();
+    ASSERT_GT(fields.size(), 19u);
+    EXPECT_EQ(fields[18], std::to_string(20 + raised_nice)) << "priority(18)";
+    EXPECT_EQ(fields[19], std::to_string(raised_nice)) << "nice(19)";
+
+    ASSERT_THAT(sched_setscheduler(0, SCHED_IDLE, &zero_param), SyscallSucceeds());
+    fields = read_stat_fields();
+    ASSERT_GT(fields.size(), 19u);
+    EXPECT_EQ(fields[18], std::to_string(20 + raised_nice)) << "priority(18)";
+    EXPECT_EQ(fields[19], std::to_string(raised_nice)) << "nice(19)";
+
+    if (test_helper::HasCapabilityEffective(CAP_SYS_NICE)) {
+      ASSERT_THAT(sched_setscheduler(0, SCHED_OTHER, &zero_param), SyscallSucceeds());
+      ASSERT_THAT(setpriority(PRIO_PROCESS, 0, -5), SyscallSucceeds());
+      fields = read_stat_fields();
+      ASSERT_GT(fields.size(), 19u);
+      EXPECT_EQ(fields[18], "15") << "priority(18)";
+      EXPECT_EQ(fields[19], "-5") << "nice(19)";
+
+      sched_param fifo_param = {.sched_priority = 10};
+      ASSERT_THAT(sched_setscheduler(0, SCHED_FIFO, &fifo_param), SyscallSucceeds());
+      fields = read_stat_fields();
+      ASSERT_GT(fields.size(), 19u);
+      EXPECT_EQ(fields[18], "-11") << "priority(18)";
+      EXPECT_EQ(fields[19], "-5") << "nice(19)";
+
+      sched_param rr_param = {.sched_priority = 99};
+      ASSERT_THAT(sched_setscheduler(0, SCHED_RR, &rr_param), SyscallSucceeds());
+      fields = read_stat_fields();
+      ASSERT_GT(fields.size(), 19u);
+      EXPECT_EQ(fields[18], "-100") << "priority(18)";
+      EXPECT_EQ(fields[19], "-5") << "nice(19)";
+    }
   });
   ASSERT_TRUE(helper.WaitForChildren());
 }
@@ -942,6 +1071,61 @@ TEST_F(ProcfsTest, ZoneInfo) {
                                      "        present  [0-9]+\n"
                                      "(    .*\n)*"
                                      "  pagesets\n"));
+
+  // On Linux the `Normal` zone may be empty (e.g. x86_64 with < 4GiB of RAM), so only
+  // check the watermarks on Starnix, where there is a single `Normal` zone whose
+  // watermarks are derived from the host kernel's OOM thresholds.
+  if (!test_helper::IsStarnix()) {
+    return;
+  }
+
+  std::istringstream iss(content);
+  std::string line;
+  bool in_normal_zone = false;
+  std::optional<uint64_t> min_pages;
+  std::optional<uint64_t> low_pages;
+  std::optional<uint64_t> high_pages;
+  std::optional<uint64_t> present_pages;
+
+  while (std::getline(iss, line)) {
+    if (line.starts_with("Node ")) {
+      in_normal_zone = (line.find("zone   Normal") != std::string::npos);
+      continue;
+    }
+    if (!in_normal_zone) {
+      continue;
+    }
+    std::istringstream line_ss(line);
+    std::string key;
+    uint64_t val = 0;
+    if (line_ss >> key >> val) {
+      if (key == "min") {
+        min_pages = val;
+      } else if (key == "low") {
+        low_pages = val;
+      } else if (key == "high") {
+        high_pages = val;
+      } else if (key == "present") {
+        present_pages = val;
+      }
+    }
+  }
+
+  ASSERT_TRUE(min_pages.has_value());
+  ASSERT_TRUE(low_pages.has_value());
+  ASSERT_TRUE(high_pages.has_value());
+  ASSERT_TRUE(present_pages.has_value());
+
+  EXPECT_LT(*high_pages, *present_pages);
+
+  // The test realm uses the default watermarks from `starnix_kernel.cml`.
+  const long raw_page_size = sysconf(_SC_PAGESIZE);
+  ASSERT_GT(raw_page_size, 0);
+  const uint64_t page_size = static_cast<uint64_t>(raw_page_size);
+  constexpr uint64_t kBytesPerMb = 1024ULL * 1024ULL;
+  EXPECT_EQ(*min_pages, (50ULL * kBytesPerMb) / page_size);
+  EXPECT_EQ(*low_pages, (150ULL * kBytesPerMb) / page_size);
+  EXPECT_EQ(*high_pages, (300ULL * kBytesPerMb) / page_size);
 }
 
 // Verify that /proc/vmstat shape is reasonable.

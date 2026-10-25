@@ -11,10 +11,11 @@ import json
 import os
 import pathlib
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agents.lib import paths, state
+from agents.lib.agent_hooks import installer
 
 
 def get_default_config_path() -> pathlib.Path:
@@ -59,6 +60,8 @@ def apply_grants(
     dry_run: bool = False,
     state_dir: pathlib.Path | None = None,
     selected_profile: str = "",
+    grant_reasons: Mapping[str, str] | None = None,
+    agent_hooks: bool = True,
 ) -> bool:
     """Load config.json, reconcile allow/deny/ask grants, create backup, and update state journal."""
     config_path = config_path or get_default_config_path()
@@ -109,7 +112,16 @@ def apply_grants(
     user_settings["globalPermissionGrants"] = final_grants
 
     if dry_run:
+        hooks_path = installer.get_hooks_path(config_path)
         print(f"\n[DRY RUN] Would write updated config to: {config_path}")
+        if agent_hooks:
+            print(
+                f"[DRY RUN] Would configure PreToolUse agent hook at: {hooks_path}"
+            )
+        else:
+            print(
+                f"[DRY RUN] Would remove PreToolUse agent hook from: {hooks_path}"
+            )
         print(f"[DRY RUN] Would update state journal at: {state_path}")
         if config_path.exists():
             print(f"[DRY RUN] Would create backup in: {backups_dir}")
@@ -131,17 +143,26 @@ def apply_grants(
         fuchsia_root_str = str(paths.find_fuchsia_dir())
     except RuntimeError:
         fuchsia_root_str = ""
+
+    if agent_hooks:
+        installer.install_agent_hooks(config_path, state_path)
+    else:
+        installer.uninstall_agent_hooks(config_path)
     journal.schema_version = 1
     journal.last_updated = now_str
     journal.fuchsia_root = fuchsia_root_str
+    resolved_reasons = dict(grant_reasons or {})
     journal.active_profile = selected_profile
     journal.managed_grants = target_managed
+    journal.grant_reasons = resolved_reasons
     journal.history.append(
         {
             "timestamp": now_str,
             "profile": selected_profile,
             "backup_file": str(backup_path) if backup_path else None,
             "managed_grants": target_managed,
+            "grant_reasons": resolved_reasons,
+            "agent_hooks": agent_hooks,
         }
     )
     state.save_state(journal, state_path)

@@ -29,7 +29,7 @@ use super::process_dispatcher_ffi::{
     cpp_process_dispatcher_set_critical_to_job, cpp_process_dispatcher_set_debug_addr,
     cpp_process_dispatcher_set_dyn_break_on_load, cpp_process_dispatcher_shareable_state,
     cpp_process_dispatcher_start, cpp_process_dispatcher_state, cpp_process_dispatcher_suspend,
-    cpp_process_dispatcher_vdso_base_address, cpp_process_get_job_koid, cpp_process_remove_thread,
+    cpp_process_dispatcher_vdso_base_address, cpp_process_remove_thread,
     cpp_shareable_process_state_aspace,
 };
 use super::thread_dispatcher::ThreadDispatcher;
@@ -142,8 +142,10 @@ impl ProcessDispatcher {
     /// Returns a reference to this process's [`HandleTable`].
     #[inline]
     pub fn handle_table(&self) -> &HandleTable {
-        // SAFETY: `self` is a valid `ProcessDispatcher`, and its handle table is valid for the
-        // lifetime of `self`.
+        // SAFETY: `self` is a valid `ProcessDispatcher`. In C++, the `HandleTable` is owned by
+        // `shareable_state_` which is held by `ProcessDispatcher` for its entire lifetime.
+        // Therefore, the returned `&HandleTable` reference tied to `&self` is guaranteed to
+        // remain valid for the lifetime of `self`.
         unsafe { &*cpp_process_dispatcher_handle_table(self.as_ffi()) }
     }
 
@@ -170,10 +172,7 @@ impl ProcessDispatcher {
         arg_handle: Option<HandleOwner>,
         arg2: usize,
     ) -> Result<(), Status> {
-        let arg_handle_ptr = match arg_handle {
-            Some(h) => h.release(),
-            None => core::ptr::null_mut(),
-        };
+        let arg_handle_ptr = HandleOwner::release_opt(arg_handle);
         let raw_thread = fbl::RefPtr::into_raw(thread) as *mut _;
         // SAFETY: `self` is a valid reference, `raw_thread` transfers an acquired refcount,
         // and `arg_handle_ptr` ownership is transferred to C++.
@@ -183,13 +182,17 @@ impl ProcessDispatcher {
                 raw_thread,
                 pc,
                 sp,
-                arg_handle_ptr,
+                arg_handle_ptr.cast::<core::ffi::c_void>(),
                 arg2,
             )
         };
         Status::ok(status)
     }
 
+    /// Removes a handle from this process's handle table and returns the owned handle if found.
+    pub fn remove_handle(&self, handle: HandleValue) -> Option<HandleOwner> {
+        self.handle_table().remove_handle(self, handle)
+    }
     /// Kills this process with the given return code.
     pub fn kill(&self, retcode: i64) {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
@@ -291,6 +294,25 @@ impl ProcessDispatcher {
         slack
     }
 
+    /// Returns the KOID of this process's handle table.
+    #[inline]
+    pub fn handle_table_koid(&self) -> zx_types::zx_koid_t {
+        self.handle_table().koid()
+    }
+
+    /// Resolves a handle to a dispatcher of type `T` with the required `rights` in this process's
+    /// handle table.
+    #[inline]
+    pub fn get_dispatcher_with_rights<T>(
+        &self,
+        handle_value: HandleValue,
+        rights: zx_rights_t,
+    ) -> Result<fbl::RefPtr<T>, Status>
+    where
+        T: DispatcherOps + fbl::HasRefCount + fbl::Recyclable,
+    {
+        self.handle_table().get_dispatcher_with_rights::<T>(self, handle_value, rights)
+    }
     /// Returns information about this process.
     pub fn get_info(&self) -> zx_info_process_t {
         // SAFETY: `self` is a valid `ProcessDispatcher` reference.
@@ -366,8 +388,9 @@ impl ProcessDispatcher {
         vmos: &mut impl VmoInfoWriter,
         max: usize,
     ) -> Result<(usize, usize), Status> {
-        if self.state() != ProcessState::Running {
-            return Err(Status::BAD_STATE);
+        match self.state() {
+            ProcessState::Initial | ProcessState::Running => {}
+            ProcessState::Dying | ProcessState::Dead => return Err(Status::BAD_STATE),
         }
 
         let (actual, available) = get_process_vmos(self, vmos, max)?;
@@ -626,17 +649,6 @@ impl ProcessDispatcher {
         unsafe { &*cpp_process_dispatcher_futex_context(self.as_ffi()).cast() }
     }
 
-    /// Grows the futex state pool for this process.
-    pub fn futex_context_grow_pool(&self) -> Result<(), Status> {
-        self.futex_context().grow_futex_state_pool()
-    }
-
-    /// Shrinks the futex state pool for this process.
-    pub fn futex_context_shrink_pool(&self) -> Result<(), Status> {
-        self.futex_context().shrink_futex_state_pool();
-        Ok(())
-    }
-
     /// Attaches the normal address space of this process to `core_thread`.
     pub fn attach_normal_aspace_to_thread(&self, core_thread: ThreadPtr) {
         // SAFETY: `self` is a valid `ProcessDispatcher`, and `core_thread` upholds the
@@ -644,12 +656,6 @@ impl ProcessDispatcher {
         let status =
             unsafe { cpp_process_attach_aspace_to_thread(self.as_ffi(), core_thread.as_raw()) };
         debug_assert_eq!(status, zx_types::ZX_OK);
-    }
-
-    /// Returns the parent job koid.
-    pub fn job_koid(&self) -> zx_types::zx_koid_t {
-        // SAFETY: `self` is a valid `ProcessDispatcher`.
-        unsafe { cpp_process_get_job_koid(self.as_ffi()) }
     }
 
     /// Transitions `thread` from the initialized state to a runnable state and adds it to the
@@ -675,10 +681,20 @@ impl ProcessDispatcher {
         Status::ok(status)
     }
 
-    /// Removes `thread` from the thread list of this process.
-    pub fn remove_thread(&self, thread: &ThreadDispatcher) {
-        // SAFETY: `self` and `thread` are valid references.
-        unsafe { cpp_process_remove_thread(self.as_ffi(), thread as *const _) }
+    /// Removes `thread` from the thread list of this process. If `thread` was the last thread,
+    /// the process transitions to the dead state.
+    ///
+    /// This is called within `thread`'s context when it is exiting.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must currently be linked into this process's thread list (i.e. it was added by
+    /// [`Self::add_initialized_thread`] and has not been removed since); unlinking a thread that
+    /// is not in the list corrupts it.
+    pub(crate) unsafe fn remove_thread(&self, thread: &ThreadDispatcher) {
+        // SAFETY: `self` and `thread` are valid references, and the caller guarantees that
+        // `thread` is currently in this process's thread list.
+        unsafe { cpp_process_remove_thread(self.as_ffi_mut(), thread as *const _ as *mut _) }
     }
 
     /// Returns the process's normal `Exceptionate`.
@@ -711,6 +727,20 @@ impl ProcessDispatcher {
         let ptr = unsafe { cpp_process_dispatcher_lookup_thread_by_id(self.as_ffi_mut(), koid) };
         // SAFETY: `ptr` is exported via `fbl::ExportToRawPtr` with an acquired refcount, or null.
         unsafe { fbl::RefPtr::try_from_raw(ptr) }
+    }
+
+    /// Maps a handle to its user-visible `HandleValue` for this process.
+    #[inline]
+    pub fn map_handle_to_value(&self, handle: super::handle::HandleRef<'_>) -> HandleValue {
+        self.handle_table().map_handle_to_value(handle)
+    }
+
+    /// Removes a slice of raw handle values from this process's handle table.
+    ///
+    /// `ZX_HANDLE_INVALID` entries are skipped, and if any non-zero handle is missing, returns
+    /// `ZX_ERR_BAD_HANDLE` after processing the remaining handles.
+    pub fn remove_handles(&self, handles: &[zx_types::zx_handle_t]) -> Result<(), Status> {
+        self.handle_table().remove_handles(self, handles)
     }
 }
 

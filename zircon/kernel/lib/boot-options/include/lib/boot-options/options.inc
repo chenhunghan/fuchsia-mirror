@@ -251,6 +251,7 @@ The current memory availability state can be queried with the command
 `k mem dump`.
 )""")
 
+// LINT.IfChange
 DEFINE_OPTION("kernel.oom.outofmemory-mb", uint64_t, oom_out_of_memory_threshold_mb, {50}, R"""(
 This option specifies the free memory threshold at which the kernel will signal an out-of-memory
 event and take action as specified by `kernel.oom.behavior`, if there is no reclaimable memory that
@@ -266,6 +267,7 @@ DEFINE_OPTION("kernel.oom.warning-mb", uint64_t, oom_warning_threshold_mb, {300}
 This option specifies the free memory threshold at which the kernel will signal a Warning memory
 pressure event, signaling that processes should slow down memory allocations.
 )""")
+// LINT.ThenChange(//src/starnix/kernel/meta/starnix_kernel.cml)
 
 DEFINE_OPTION("kernel.oom.debounce-mb", uint64_t, oom_debounce_mb, {1}, R"""(
 This option specifies the memory debounce value used when computing the memory
@@ -338,10 +340,6 @@ DEFINE_OPTION("kernel.oom.trigger-on-alloc-failure", bool, oom_trigger_on_alloc_
               R"""(
 This option controls whether potentially user-visible PMM allocation failures due to running out of
 memory trigger an OOM response.
-)""")
-
-DEFINE_OPTION("kernel.phys.next", SmallString, phys_next, {"physboot"}, R"""(
-The name of the file within the kernel storage filesystem physload will load.
 )""")
 
 DEFINE_OPTION("kernel.phys.verbose", bool, phys_verbose, {true}, R"""(
@@ -966,19 +964,6 @@ be set from the debugger attached to the kernel (e.g. via QEMU's -s) for boot to
 continue.  This makes it easy to let the virtual boot CPU run through the boot
 loader and early boot code with the debugger attached and then interrupt the
 spin interactively in the debugger to set breakpoints or step through boot code.
-)""")
-
-// TODO(https://fxbug.dev/568786401): Remove this option along with
-// platform_serial_prepare_for_suspend and platform_serial_wakeup_from_suspend.
-DEFINE_OPTION("kernel.allow_debug_uart_suspend", bool,
-              allow_debug_uart_suspend, {false},
-              R"""(
-This option enables feature which manages suspending and resuming the UART
-hardware and its clocks when entering deeper suspend states on HW which needs
-assistance from the kernel to suspend and resume the debug UART.  By default, it
-is disabled, but may be enabled in the build configuration for hardware which
-both needs the behavior, and for which the feature is sufficiently stable to
-enable it.
 )""")
 
 DEFINE_OPTION("kernel.oom.experimental_expand_memory_stall", bool, experimental_expand_memory_stall, {false}, R"""(

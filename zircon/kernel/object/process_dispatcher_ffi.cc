@@ -266,11 +266,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatc
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_koid_t cpp_process_get_job_koid(const ProcessDispatcher* process) {
-  return process->job()->get_koid();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process,
                                                                  ThreadDispatcher* thread,
                                                                  bool ensure_initial_thread,

@@ -41,12 +41,12 @@ _TOKIO_HOST_FEATURES = [
 
 _TOKIO_HOST_DEPS = [
     "//third_party/rust_crates/ask2patch/memchr",
-    "//third_party/rust_crates/forks/libc-0.2.189:libc",
+    "//third_party/rust_crates/forks/libc-0.2.190:libc",
     "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
     "//third_party/rust_crates/vendor/mio-1.2.1:mio",
     "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
     "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
-    "//third_party/rust_crates/vendor/socket2-0.6.4:socket2",
+    "//third_party/rust_crates/vendor/socket2-0.6.5:socket2",
 ]
 
 CRATE_ANNOTATION_OVERWRITES = {
@@ -139,7 +139,7 @@ CRATE_ANNOTATION_OVERWRITES = {
     ],
     "thiserror": [
         crate.annotation(
-            version = "2.0.20",
+            version = "2.0.21",
             # TODO(https://github.com/rust-lang/rust/pull/99301): Making this exception for
             # an unstable feature is currently the only viable way we get thiserror to build in
             # the Fuchsia tree.
@@ -199,7 +199,7 @@ CRATE_ANNOTATION_OVERWRITES = {
                     ],
                 },
             ),
-            rustc_flags = ["--cfg=fasync"],
+            rustc_flags = ["--cfg=export_testing_macro"],
         ),
     ],
     "pin-init": [
@@ -218,6 +218,12 @@ CRATE_ANNOTATION_OVERWRITES = {
             rustc_flags = [
                 "--cfg=USE_RUSTC_FEATURES",
             ],
+        ),
+    ],
+    "libc": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
         ),
     ],
 }

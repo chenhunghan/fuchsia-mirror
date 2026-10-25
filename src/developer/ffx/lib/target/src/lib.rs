@@ -32,12 +32,14 @@ mod cache;
 mod error;
 mod fdomain_transport;
 mod fidl_pipe;
+mod registry;
 mod resolve;
+mod store;
 mod target_connector;
 
 pub use cache::{
-    RegisteredTarget, create_target_cache, get_discovery_cache_dir, get_discovery_cache_file,
-    get_discovery_cache_recheck_time, register_targets, remove_target_cache, targets_file_path,
+    create_target_cache, get_discovery_cache_dir, get_discovery_cache_file,
+    get_discovery_cache_recheck_time, remove_target_cache,
 };
 pub use connection::{Connection, ConnectionError};
 pub use discovery::desc::{Description, FastbootInterface};
@@ -46,6 +48,7 @@ pub use error::FfxTargetCrateError;
 pub use fidl_pipe::{FidlPipe, create_overnet_socket};
 pub use info::TargetInfo;
 pub use list::list_targets;
+pub use registry::{RegisteredTarget, register_targets, targets_file_path};
 pub use resolve::{
     DefaultTargetResolver, Resolution, TargetResolver, build_discovery,
     build_discovery_builder_common, build_discovery_from_config, discover_single_default_target,
@@ -123,6 +126,14 @@ pub enum WaitFor {
 }
 
 const DOWN_REPOLL_DELAY_MS: u64 = 500;
+
+// LINT.IfChange(timeout_reaching_target)
+const TIMEOUT_REACHING_TARGET_MSG: &str = "Timeout attempting to reach target";
+// LINT.ThenChange(
+//     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx.py:timeout_reaching_target,
+//     //tools/lib/ffxutil/constants/constants.go:timeout_reaching_target,
+//     //tools/testing/tefmocheck/check-configs.yaml:timeout_reaching_target
+// )
 
 pub async fn wait_for_device(
     wait_timeout: Option<Duration>,
@@ -233,7 +244,7 @@ async fn wait_for_discovered_state(
     futures_lite::FutureExt::or(discover_fut, async move {
         timer.await;
         Err(ffx_command_error::Error::User(anyhow::anyhow!(
-            "Timeout attempting to reach the target {target_str}."
+            "{TIMEOUT_REACHING_TARGET_MSG} {target_str}."
         )))
     })
     .await
@@ -306,7 +317,7 @@ async fn wait_for_device_inner(
         let was_knocked = ever_knocked_clone.load(std::sync::atomic::Ordering::Relaxed);
         Err(ffx_command_error::Error::User(match behavior {
             WaitFor::DeviceOnline | WaitFor::Fastboot | WaitFor::Product => {
-                anyhow::anyhow!("Timeout attempting to reach the target {target_str}.").into()
+                anyhow::anyhow!("{TIMEOUT_REACHING_TARGET_MSG} {target_str}.").into()
             }
             WaitFor::DeviceOffline => {
                 if was_knocked {
@@ -400,13 +411,8 @@ pub(crate) async fn knock_target_impl(
     let knock_timeout = knock_timeout.unwrap_or(DEFAULT_RCS_KNOCK_TIMEOUT * 2);
     let res_future = async {
         log::debug!("resolving target spec address from {target_spec:?}");
-        let source = target_source_for_query(target_spec, context);
-        let discovery = build_discovery_from_config(context);
-        let resolver = resolve::DefaultTargetResolver::new(discovery);
-        let res = resolver
-            .resolve_target_address(target_spec, use_cache, context, source)
-            .await
-            .map_err(|e| match e {
+        let res = resolve_target_address(target_spec, use_cache, context).await.map_err(|e| {
+            match e {
                 // When knocking, it's not critical if we have not yet found the target. The caller should just retry
                 FfxTargetError::OpenTargetError {
                     err: ffx::OpenTargetError::TargetNotFound,
@@ -415,7 +421,8 @@ pub(crate) async fn knock_target_impl(
                     target: format!("{:?}", target_spec),
                 }),
                 _ => KnockError::Critical(KnockCriticalError::TargetError(format!("{:?}", e))),
-            })?;
+            }
+        })?;
 
         if let Some(ever_found) = ever_found {
             ever_found.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -888,7 +895,12 @@ mod test {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
-        assert!(res.is_err(), "{:?}", res);
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"foo\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
     }
 
     #[fuchsia::test]
@@ -954,7 +966,12 @@ mod test {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
-        assert!(res.is_err(), "{:?}", res);
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"foo\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
     }
 
     #[fuchsia::test]
@@ -1127,7 +1144,12 @@ mod test {
             WaitFor::Fastboot,
         )
         .await;
-        assert!(res.is_err(), "{:?}", res);
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"foo\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
     }
 
     #[fuchsia::test]
@@ -1152,7 +1174,12 @@ mod test {
             WaitFor::Product,
         )
         .await;
-        assert!(res.is_err(), "{:?}", res);
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"foo\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
     }
 
     #[fuchsia::test]

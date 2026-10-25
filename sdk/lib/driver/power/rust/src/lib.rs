@@ -44,6 +44,14 @@ pub struct Suspendable<T: Driver> {
     driver: Arc<T>,
 }
 
+impl<T: Driver> core::ops::Deref for Suspendable<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
 async fn run_suspend_blocker<T: SuspendableDriver>(
     driver: Weak<T>,
     mut service: fpower::SuspendBlockerRequestStream,
@@ -127,6 +135,9 @@ impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
         let scope = if driver.suspend_enabled() {
             let scope = fasync::Scope::new_with_name("suspend");
             if let Some(runner) = runner.take() {
+                let runner = fidl::endpoints::ServerEnd::<fpower_broker::ElementRunnerMarker>::new(
+                    runner.into_untyped(),
+                );
                 let weak_driver = Arc::downgrade(&driver);
                 scope.spawn(
                     async move { run_element_runner(weak_driver, runner.into_stream()).await },
@@ -174,6 +185,13 @@ impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
     async fn stop(&self) {
         self.driver.stop().await;
     }
+
+    async fn health_check(
+        &self,
+        request: fdf_component::HealthCheckRequest,
+    ) -> Result<fdf_component::HealthCheckResponse, fdf_component::HealthCheckError> {
+        self.driver.health_check(request).await
+    }
 }
 
 /// Extension trait for [`DriverContext`] to simplify connecting to power resources.
@@ -205,7 +223,10 @@ impl PowerExt for DriverContext {
 mod tests {
     use super::*;
     use fdf_component::testing::harness::TestHarness;
-    use fidl_fuchsia_driver_framework as fdf;
+    use fdf_component::{
+        HealthCheckError, HealthCheckRequest, HealthCheckResponse, HealthCondition, HealthStatus,
+    };
+    use fidl_next_fuchsia_driver_framework as fdf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct TestDriver {
@@ -213,6 +234,7 @@ mod tests {
         resume_called: Arc<AtomicBool>,
         suspend_enabled: bool,
         stop_called: Arc<AtomicBool>,
+        health_check_called: AtomicBool,
     }
 
     impl Driver for TestDriver {
@@ -224,11 +246,30 @@ mod tests {
                 resume_called: Arc::new(AtomicBool::new(false)),
                 suspend_enabled: true,
                 stop_called: Arc::new(AtomicBool::new(false)),
+                health_check_called: AtomicBool::new(false),
             })
         }
 
         async fn stop(&self) {
             self.stop_called.store(true, Ordering::SeqCst);
+        }
+
+        async fn health_check(
+            &self,
+            request: HealthCheckRequest,
+        ) -> Result<HealthCheckResponse, HealthCheckError> {
+            self.health_check_called.store(true, Ordering::SeqCst);
+            match request {
+                HealthCheckRequest::Fast => Ok(HealthCheckResponse {
+                    conditions: Some(vec![HealthCondition {
+                        status: Some(HealthStatus::Degraded),
+                        reason_code: Some("TEST_DEGRADED".to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                _ => Err(HealthCheckError::NotSupported),
+            }
         }
     }
 
@@ -252,7 +293,12 @@ mod tests {
             fidl::endpoints::create_endpoints::<fpower_broker::ElementRunnerMarker>();
 
         let mut harness = TestHarness::<Suspendable<TestDriver>>::new().set_power_element_args(
-            fdf::PowerElementArgs { runner_server: Some(runner_server), ..Default::default() },
+            fdf::PowerElementArgs {
+                runner_server: Some(fidl_next::ServerEnd::from_untyped(
+                    runner_server.into_channel(),
+                )),
+                ..Default::default()
+            },
         );
 
         let driver_under_test = harness.start_driver().await.expect("Failed to start driver");
@@ -282,5 +328,47 @@ mod tests {
 
         driver_under_test.stop_driver().await;
         assert!(test_driver_stop_called.load(Ordering::SeqCst));
+    }
+
+    #[fuchsia::test]
+    async fn test_health_check_forwards_to_inner_driver() {
+        let (_runner_client, runner_server) =
+            fidl::endpoints::create_endpoints::<fpower_broker::ElementRunnerMarker>();
+        let mut harness = TestHarness::<Suspendable<TestDriver>>::new().set_power_element_args(
+            fdf::PowerElementArgs {
+                runner_server: Some(fidl_next::ServerEnd::from_untyped(
+                    runner_server.into_channel(),
+                )),
+                ..Default::default()
+            },
+        );
+        let driver_under_test = harness.start_driver().await.expect("Failed to start driver");
+        let suspendable = driver_under_test.get_driver().expect("Failed to get driver");
+
+        // `Suspendable<T>` derefs to the wrapped driver.
+        assert!(!suspendable.health_check_called.load(Ordering::SeqCst));
+
+        // `Suspendable<T>`'s own `Driver::health_check` forwards to the wrapped driver rather than
+        // answering with the trait default.
+        let result = <Suspendable<TestDriver> as Driver>::health_check(
+            suspendable,
+            HealthCheckRequest::Fast,
+        )
+        .await;
+        assert!(suspendable.health_check_called.load(Ordering::SeqCst));
+        let response = result.expect("FAST is answered by the wrapped driver");
+        let conditions = response.conditions.expect("conditions");
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].status, Some(HealthStatus::Degraded));
+        assert_eq!(conditions[0].reason_code.as_deref(), Some("TEST_DEGRADED"));
+
+        let result = <Suspendable<TestDriver> as Driver>::health_check(
+            suspendable,
+            HealthCheckRequest::Deep,
+        )
+        .await;
+        assert_eq!(result, Err(HealthCheckError::NotSupported));
+
+        driver_under_test.stop_driver().await;
     }
 }

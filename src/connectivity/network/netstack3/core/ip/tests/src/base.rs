@@ -44,7 +44,9 @@ use packet_formats::ipv6::{
     IPV6_FIXED_HDR_LEN, Ipv6Packet, Ipv6PacketBuilder, Ipv6PacketBuilderBeforeFragment,
     Ipv6PacketBuilderWithFragmentHeader, Ipv6PacketBuilderWithHbhOptions,
 };
-use packet_formats::testutil::parse_icmp_packet_in_ip_packet_in_ethernet_frame;
+use packet_formats::testutil::{
+    parse_icmp_packet_in_ip_packet_in_ethernet_frame, parse_ip_packet_in_ethernet_frame,
+};
 use packet_formats::udp::UdpPacketBuilder;
 use rand::RngExt as _;
 use test_case::test_case;
@@ -62,7 +64,8 @@ use netstack3_core::device::{
     RecvEthernetFrameMeta,
 };
 use netstack3_core::filter::{
-    Action, Hook, IpRoutines, NatRoutines, PacketMatcher, Routine, Routines, Rule, Tuple,
+    Action, Hook, IpRoutines, MarkAction, NatRoutines, PacketMatcher, Routine, Routines, Rule,
+    Tuple,
 };
 use netstack3_core::ip::MarkDomain;
 use netstack3_core::socket::{
@@ -676,6 +679,21 @@ fn ipv6_atomic_fragment_with_dest_opts(dest_opts_option: [u8; 6]) -> Buf<Vec<u8>
     wrap_body(builder, body)
 }
 
+/// An unrecognized Destination Options option with action = discard & send
+/// ICMP.
+///
+/// According to RFC 8200:
+///
+///   The Option Type identifiers are internally encoded such that their
+///   highest-order 2 bits specify the action that must be taken if the
+///   processing IPv6 node does not recognize the Option Type:
+///
+///      10 - discard the packet and, regardless of whether or not the
+///      packet's Destination Address was a multicast address, send an
+///      ICMP Parameter Problem, Code 2, message to the packet's
+///      Source Address, pointing to the unrecognized Option Type.
+const UNRECOGNIZED_DISCARD_SEND_ICMP_OPTION: [u8; 6] = [0b1000_0000, 4, 0, 0, 0, 0];
+
 // Test that an atomic fragment whose Fragmentable Part begins with an
 // extension header is processed as a fully reassembled packet and
 // dispatched to the upper layer.
@@ -703,31 +721,19 @@ fn test_ipv6_atomic_fragment_with_dest_opts_unrecognized_option() {
     let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(TEST_ADDRS_V6).build();
     let device: DeviceId<_> = device_ids[0].clone().into();
 
-    // Unrecognized option type with action = discard & send ICMP.
-    // According to RFC 8200:
-    //
-    //   The Option Type identifiers are internally encoded such that their
-    //   highest-order 2 bits specify the action that must be taken if the
-    //   processing IPv6 node does not recognize the Option Type:
-    //
-    //      10 - discard the packet and, regardless of whether or not the
-    //      packet's Destination Address was a multicast address, send an
-    //      ICMP Parameter Problem, Code 2, message to the packet's
-    //      Source Address, pointing to the unrecognized Option Type.
-    let unrecognized_option = [0b1000_0000, 4, 0, 0, 0, 0];
     ctx.test_api().receive_ip_packet::<Ipv6, _>(
         &device,
         Some(LocalFrameDestination::Individual { local: () }),
-        ipv6_atomic_fragment_with_dest_opts(unrecognized_option),
+        ipv6_atomic_fragment_with_dest_opts(UNRECOGNIZED_DISCARD_SEND_ICMP_OPTION),
     );
 
     let frames = ctx.bindings_ctx.take_ethernet_frames();
     let (_dev, frame) = assert_matches!(&frames[..], [frame] => frame);
-    // The option type is located after the IPv6 fixed header, the Fragment
-    // header and the Destination Options' Next Header and Hdr Ext Len fields.
     const DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN: usize = 2;
-    let option_type_offset =
-        IPV6_FIXED_HDR_LEN + IPV6_FRAGMENT_EXT_HDR_LEN + DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN;
+    // Note that the fragment header in the atomic fragment has been removed
+    // by the time the ICMP error is generated, so the offset does not
+    // include it.
+    let option_type_offset = IPV6_FIXED_HDR_LEN + DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN;
     verify_icmp_for_unrecognized_ext_hdr_option(
         Icmpv6ParameterProblemCode::UnrecognizedIpv6Option,
         u32::try_from(option_type_offset).unwrap(),
@@ -775,6 +781,83 @@ fn test_ipv6_reassembled_packet_with_fragment_header_dropped() {
     IpCounterExpectations::<Ipv6> {
         receive_ip_packet: 1,
         fragment_reassembly_error: 1,
+        ..Default::default()
+    }
+    .assert_counters(&ctx.core_ctx(), &device);
+}
+
+// Test that the options in an extension header following the Fragment
+// header of a fragmented packet are processed after the packet is
+// reassembled.
+#[test]
+fn test_ipv6_fragmented_packet_with_dest_opts_unrecognized_option() {
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(TEST_ADDRS_V6).build();
+    let device: DeviceId<_> = device_ids[0].clone().into();
+    let frame_dst = LocalFrameDestination::Individual { local: () };
+
+    const FRAGMENT_ID: u32 = 5;
+    let fragment = |offset: u16, more_fragments: bool, body: Vec<u8>| {
+        let builder = Ipv6PacketBuilderWithFragmentHeader::new(
+            Ipv6PacketBuilder::new(
+                TEST_ADDRS_V6.remote_ip,
+                TEST_ADDRS_V6.local_ip,
+                64,
+                Ipv6Proto::Other(Ipv6ExtHdrType::DestinationOptions.into()),
+            ),
+            FragmentOffset::new(offset).unwrap(),
+            more_fragments,
+            FRAGMENT_ID,
+        );
+        wrap_body(builder, body)
+    };
+
+    // Fragment #0: an 8-byte Destination Options header (Next Header = No Next
+    // Header, Hdr Ext Len = 0, followed by the unrecognized option).
+    let body_0: Vec<u8> = [Ipv6Proto::NoNextHeader.into(), 0]
+        .into_iter()
+        .chain(UNRECOGNIZED_DISCARD_SEND_ICMP_OPTION)
+        .collect();
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device,
+        Some(frame_dst),
+        fragment(0, /* more_fragments */ true, body_0),
+    );
+
+    // Extension headers following the Fragment header are not parsed until the
+    // packet is reassembled, so no ICMP error is sent yet.
+    assert_matches!(ctx.bindings_ctx.take_ethernet_frames()[..], []);
+    IpCounterExpectations::<Ipv6> {
+        receive_ip_packet: 1,
+        need_more_fragments: 1,
+        ..Default::default()
+    }
+    .assert_counters(&ctx.core_ctx(), &device);
+
+    // Fragment #1: the last fragment, starting at offset 1 (8 bytes).
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device,
+        Some(frame_dst),
+        fragment(1, /* more_fragments */ false, vec![0; 8]),
+    );
+
+    // The unrecognized option is detected when parsing the reassembled packet.
+    let frames = ctx.bindings_ctx.take_ethernet_frames();
+    let (_dev, frame) = assert_matches!(&frames[..], [frame] => frame);
+    const DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN: usize = 2;
+    // The reassembled packet does not include the Fragment header, so the
+    // offset does not include it.
+    let option_type_offset = IPV6_FIXED_HDR_LEN + DEST_OPTS_NEXT_HEADER_AND_HDR_EXT_LEN;
+    verify_icmp_for_unrecognized_ext_hdr_option(
+        Icmpv6ParameterProblemCode::UnrecognizedIpv6Option,
+        u32::try_from(option_type_offset).unwrap(),
+        &frame[..],
+    );
+    IpCounterExpectations::<Ipv6> {
+        receive_ip_packet: 2,
+        need_more_fragments: 1,
+        fragment_reassembly_error: 1,
+        parameter_problem: 1,
+        send_ip_packet: 1,
         ..Default::default()
     }
     .assert_counters(&ctx.core_ctx(), &device);
@@ -3644,6 +3727,151 @@ fn conntrack_entry_retained_across_loopback<I: TestDualStackIpExt + IpExt>(
         [packet] => assert_eq!(packet, HELLO)
     );
     ctx.test_api().clear_routes_and_remove_device(loopback);
+}
+
+/// Tests that when the LOCAL_EGRESS filtering hook modifies a packet's marks,
+/// the packet is re-routed using its new marks.
+///
+/// Note that re-routing is subject to the strong host model: the packet's
+/// source address was already selected when the socket was created, so the
+/// re-routed packet is only sent via a different device if that device is also
+/// assigned the source address. Otherwise, route resolution falls through to
+/// the main table and the packet is sent via the original device.
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
+#[ip_test(I)]
+#[test_case(true; "shared address")]
+#[test_case(false; "distinct addresses")]
+fn local_egress_mark_change_triggers_reroute<I: IpExt + TestIpExt>(shared_address: bool) {
+    set_logger_for_test();
+
+    const MARK: u32 = 1;
+    const REMOTE_PORT: NonZeroU16 = NonZeroU16::new(1234).unwrap();
+
+    let first_dev_addr = I::TEST_ADDRS.local_ip;
+    let second_dev_addr =
+        if shared_address { first_dev_addr } else { I::get_other_ip_address(254) };
+
+    // Create two devices in the same subnet.
+    let mut builder = FakeCtxBuilder::default();
+    for addr in [first_dev_addr, second_dev_addr] {
+        let idx =
+            builder.add_device_with_ip(I::TEST_ADDRS.local_mac, addr.get(), I::TEST_ADDRS.subnet);
+        builder.add_arp_or_ndp_table_entry(idx, I::TEST_ADDRS.remote_ip, I::TEST_ADDRS.remote_mac);
+    }
+    let (mut ctx, device_ids) = builder.build();
+    let [first_dev_eth, second_dev_eth] =
+        device_ids.try_into().expect("there should be two devices");
+    let first_dev: DeviceId<_> = first_dev_eth.clone().into();
+    let second_dev: DeviceId<_> = second_dev_eth.clone().into();
+
+    let subnet_route = |device: DeviceId<_>| {
+        ip::Entry {
+            subnet: I::TEST_ADDRS.subnet,
+            device,
+            gateway: None,
+            metric: ip::Metric::ExplicitMetric(RawMetric(0)),
+            route_preference: Default::default(),
+        }
+        .with_generation(ip::Generation::initial())
+    };
+
+    // Replace the routes installed by the builder so that the main routing
+    // table only contains an on-link route for the subnet via the first device.
+    let main_table = ctx.core_api().routes::<I>().main_table_id();
+    ctx.core_api().routes::<I>().set_routes(&main_table, vec![subnet_route(first_dev)]);
+
+    // Install a second routing table that routes the subnet via the second
+    // device, and a policy routing rule that uses that table for packets
+    // carrying `MARK` in `Mark1`. Note that the rule for marked packets must be
+    // ordered before the rule for the main table so that the route in the
+    // second table takes precedence over the route in the main table.
+    let second_table = ctx.core_api().routes::<I>().new_table(());
+    ctx.core_api().routes::<I>().set_routes(&second_table, vec![subnet_route(second_dev)]);
+    ctx.test_api().set_rules::<I>(vec![
+        ip::Rule {
+            matcher: ip::RuleMatcher {
+                mark_matchers: MarkMatchers::new([(
+                    MarkDomain::Mark1,
+                    MarkMatcher::Marked { mask: !0, start: MARK, end: MARK, invert: false },
+                )]),
+                ..ip::RuleMatcher::match_all_packets()
+            },
+            action: ip::RuleAction::Lookup(second_table),
+        },
+        ip::Rule {
+            matcher: ip::RuleMatcher::match_all_packets(),
+            action: ip::RuleAction::Lookup(main_table),
+        },
+    ]);
+
+    let _: Vec<_> = ctx.bindings_ctx.take_ethernet_frames();
+
+    // Sends a packet from the (unmarked) UDP socket and returns the device it
+    // was sent via, along with the source address of the packet.
+    let socket = ctx.core_api().udp::<I>().create();
+    let send_and_capture_frame = |ctx: &mut FakeCtx| {
+        ctx.core_api()
+            .udp::<I>()
+            .send_to(
+                &socket,
+                Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)),
+                REMOTE_PORT.into(),
+                Buf::new(b"hello".to_vec(), ..),
+                Default::default(),
+            )
+            .unwrap();
+        let (dev, frame) = assert_matches!(
+            &ctx.bindings_ctx.take_ethernet_frames()[..],
+            [(dev, frame)] => (dev.clone(), frame.clone())
+        );
+        let (_body, _src_mac, _dst_mac, src_ip, dst_ip, _proto, _ttl) =
+            parse_ip_packet_in_ethernet_frame::<I>(&frame, EthernetFrameLengthCheck::NoCheck)
+                .expect("parse sent frame");
+        assert_eq!(dst_ip, I::TEST_ADDRS.remote_ip.get());
+        (dev, src_ip)
+    };
+
+    // Before any filtering rules are installed, the packet is unmarked and is
+    // routed via the first device.
+    assert_eq!(send_and_capture_frame(&mut ctx), (first_dev_eth.downgrade(), first_dev_addr.get()));
+
+    // Install a filter rule in the LOCAL_EGRESS hook that applies `MARK` to
+    // all locally generated packets.
+    fn mark_routines<I: IpExt>() -> Routines<I, FakeBindingsCtx, &'static str> {
+        Routines {
+            ip: IpRoutines {
+                local_egress: Hook {
+                    routines: vec![Routine {
+                        rules: vec![Rule {
+                            matcher: PacketMatcher::default(),
+                            action: Action::Mark {
+                                domain: MarkDomain::Mark1,
+                                action: MarkAction::SetMark { mark: MARK, clearing_mask: 0 },
+                            },
+                            validation_info: "mark in local egress",
+                        }],
+                    }],
+                },
+                ..Default::default()
+            },
+            nat: NatRoutines::default(),
+        }
+    }
+    ctx.core_api()
+        .filter()
+        .set_filter_state(mark_routines::<Ipv4>(), mark_routines::<Ipv6>())
+        .expect("install mark rule");
+
+    // The LOCAL_EGRESS hook now marks the packet, so it is re-routed with the
+    // new marks. The packet's source address was already selected as the first
+    // device's address, so the route via the second device is only usable if
+    // the second device is also assigned that address.
+    let (expected_dev, expected_src) = if shared_address {
+        (second_dev_eth.downgrade(), second_dev_addr.get())
+    } else {
+        (first_dev_eth.downgrade(), first_dev_addr.get())
+    };
+    assert_eq!(send_and_capture_frame(&mut ctx), (expected_dev, expected_src));
 }
 
 #[test]

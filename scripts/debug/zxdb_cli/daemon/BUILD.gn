@@ -26,6 +26,7 @@ if (is_host) {
       "handlers/async_backtrace.py",
       "handlers/attach.py",
       "handlers/break_req.py",
+      "handlers/console.py",
       "handlers/continue_req.py",
       "handlers/detach.py",
       "handlers/evaluate.py",
@@ -50,6 +51,7 @@ if (is_host) {
       "//scripts/lib/package_server",
       "//src/lib/debug/dap/python:lib",
       "//src/lib/debug/dap/python/zxdb:zxdb_dap",
+      "//third_party/python_portpicker:portpicker",
     ]
   }
 

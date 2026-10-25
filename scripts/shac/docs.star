@@ -12,9 +12,15 @@ def _doc_checker(ctx):
 
     affected_files = set(ctx.scm.affected_files())
 
-    # If a Markdown change is present (including a deletion of a markdown file),
-    # check the entire project.
-    if not ctx.scm.affected_files(glob = "*.md"):
+    # doc-checker validates more than Markdown prose: it also checks YAML such
+    # as _toc.yaml and the glossary, and in-tree links to images and other
+    # static assets under //docs. Trigger on any change beneath //docs so all
+    # of those are covered. Deletions must be included: removing a file is
+    # precisely what invalidates links elsewhere in the tree.
+    if not ctx.scm.affected_files(
+        glob = ["*.md", "/docs/**"],
+        include_deleted = True,
+    ):
         return
 
     exe = compiled_tool_path(ctx, "doc-checker")
@@ -88,7 +94,7 @@ def _codelinks(ctx):
     # documentation files by path (e.g. "//docs/foo/bar.md") rather than URL,
     # with some exceptions for reference docs.
     for f, meta in ctx.scm.affected_files(glob = ["!/docs/**"]).items():
-        for num, line in meta.new_lines():
+        for num, line in meta.affected_lines():
             for match in ctx.re.allmatches(
                 r"(https?://)?fuchsia.googlesource.com/fuchsia/\+/(refs/heads/)?\w+/docs/(?P<path>\S+)\.md",
                 line,

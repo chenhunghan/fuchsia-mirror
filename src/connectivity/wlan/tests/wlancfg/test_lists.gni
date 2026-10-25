@@ -36,19 +36,22 @@ wlancfg_tests_for_wlan_presubmit = [
 # These tests run in blocking CI (~once per hour).
 wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:beacon_loss_test",
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_duplicate_address_test",
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_basic_test",
-  "//src/connectivity/wlan/tests/wlancfg:dhcpv4_interop_combinatorial_options_test",
   "//src/connectivity/wlan/tests/wlancfg:hidden_networks_test",
   "//src/connectivity/wlan/tests/wlancfg:ping_test",
   "//src/connectivity/wlan/tests/wlancfg:policy_scan_test",
   "//src/connectivity/wlan/tests/wlancfg:regulatory_recovery_test",
+  "//src/connectivity/wlan/tests/wlancfg:security_type_test",
   "//src/connectivity/wlan/tests/wlancfg:soft_ap_lifecycle_test",
   "//src/connectivity/wlan/tests/wlancfg:vape_interop_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_misc_scenario_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_wireless_network_management_test",
-  "//src/testing/end_to_end/antlion/tests/wlan/compliance:wlan_security_type_test",
+
+  # TODO(https://fxbug.dev/555756211): Remove once CI runs
+  # //src/connectivity/policy E2E tests directly.
+  "//src/connectivity/policy/tests/e2e:dhcpv4_duplicate_address_test",
+  "//src/connectivity/policy/tests/e2e:dhcpv4_interop_basic_test",
+  "//src/connectivity/policy/tests/e2e:dhcpv4_interop_combinatorial_options_test",
 ]
 
 # If you're writing a new test, add it to FYI first until it has a sufficient

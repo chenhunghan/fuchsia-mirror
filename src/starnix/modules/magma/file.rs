@@ -129,9 +129,7 @@ use magma::{
 };
 use starnix_core::fileops_impl_nonseekable;
 use starnix_core::fs::fuchsia::sync_file::{SyncFence, SyncFile, SyncPoint, Timeline};
-use starnix_core::fs::fuchsia::{
-    AnonymousRemoteFileObject, RemoteFileObject, RemoteZxioFileObject,
-};
+use starnix_core::fs::fuchsia::{AnonymousRemoteFileObject, RemoteZxioFileObject, is_remote_file};
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::mm::{MemoryAccessorExt, ProtectionFlags};
 use starnix_core::task::CurrentTask;
@@ -306,7 +304,7 @@ impl MagmaFile {
         current_task: &CurrentTask,
         fd: FdNumber,
     ) -> Result<(MemoryObject, BufferInfo), Errno> {
-        let file = current_task.files().get(fd)?;
+        let file = current_task.get_file(fd)?;
         if let Some(file) = file.downcast_file::<ImageFile>() {
             let buffer = BufferInfo::Image(file.info.clone());
             Ok((
@@ -319,7 +317,7 @@ impl MagmaFile {
                 file.memory.duplicate_handle(zx::Rights::SAME_RIGHTS).map_err(impossible_error)?,
                 buffer,
             ))
-        } else if file.downcast_file::<RemoteFileObject>().is_some()
+        } else if is_remote_file(&file)
             || file.downcast_file::<RemoteZxioFileObject>().is_some()
             || file.downcast_file::<AnonymousRemoteFileObject>().is_some()
         {
@@ -401,7 +399,7 @@ impl MagmaFile {
         let mut result_semaphore_id = 0;
 
         if let (Ok(connection), Ok(file)) =
-            (self.get_connection(control.connection), current_task.files().get(fd))
+            (self.get_connection(control.connection), current_task.get_file(fd))
         {
             let mut handles: Vec<magma_semaphore_t> = vec![];
             let mut ids: Vec<magma_semaphore_id_t> = vec![];

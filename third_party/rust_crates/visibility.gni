@@ -224,7 +224,6 @@ regex_visibility = [
   "//examples/intl/wisdom/tests:*",
   "//src/connectivity/bluetooth/tools/bt-cli:*",
   "//src/connectivity/lowpan/drivers/lowpan-ot-driver:*",
-  "//src/connectivity/network/lib/todo_unused:*",
   "//src/connectivity/network/tests/integration/inspect:*",
   "//src/connectivity/wlan/lib/ieee80211-testutils:*",
   "//src/connectivity/wlan/lib/sme:*",
@@ -246,7 +245,6 @@ regex_visibility = [
   "//src/developer/ffx/plugins/profile/memory:*",
   "//src/developer/ffx/plugins/profile/network/activity:*",
   "//src/developer/ffx/plugins/profile/temperature/logger:*",
-  "//src/developer/ffx/plugins/sdk:*",
   "//src/developer/ffx/plugins/setui/keyboard:*",
   "//src/developer/ffx/plugins/target/list:*",
   "//src/developer/ffx/plugins/trace:*",
@@ -278,8 +276,6 @@ regex_visibility = [
   "//src/sys/fuzzing/fuzzctl:*",
   "//src/sys/lib/cm_fidl_validator:*",
   "//src/sys/run_test_suite/tests:*",
-  "//src/sys/test_runners/gotests:*",
-  "//src/sys/test_runners/gotests/tests:*",
   "//src/sys/test_runners/rust:*",
   "//src/ui/lib/input_pipeline:*",
   "//third_party/tcpdump/tests:*",
@@ -289,7 +285,6 @@ regex_visibility = [
   "//tools/gn_desc/bin:*",
   "//tools/pretty_serial:*",
   "//tools/shush:*",
-  "//tools/zedmon/client:*",
 
   # Allow generic usage within vendor directories without exposing internal
   # paths

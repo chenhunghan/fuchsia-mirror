@@ -111,12 +111,27 @@ pub struct StartCommand {
     #[argh(switch)]
     pub edit: bool,
 
+    /// set up the emulator so that snapshots of its state can be saved and loaded with
+    /// `ffx emu snapshot`. The disk image is staged in the qcow2 format, which can hold
+    /// snapshots, and the guest is given a CPU model whose state can be saved. Snapshots are
+    /// only supported by the "qemu" engine, and cannot be used together with `--uefi`.
+    #[argh(switch)]
+    pub enable_snapshots: bool,
+
     /// emulation engine to use for this instance. Allowed values are "femu" which is based on
     /// Android Emulator, and "qemu" which uses the version of Qemu packaged with Fuchsia. Default
     /// is "femu", which can be overridden by running `ffx config set emu.engine <type>`. Engine
-    /// defaults are overridden to "qemu" in cases of incompatibility (cross cpu or uefi emulation).
+    /// defaults are overridden to "qemu" in cases of incompatibility (cross cpu or uefi emulation,
+    /// or snapshots).
     #[argh(option)]
     pub engine: Option<String>,
+
+    /// resume the emulator from the named snapshot, instead of booting it. The snapshot must have
+    /// been saved with `ffx emu snapshot save` by an emulator with the same name as this
+    /// instance, which was then stopped with `ffx emu stop --persist`. As with `--reuse`, the
+    /// stopped instance's image files and configuration are used as they are.
+    #[argh(option)]
+    pub from_snapshot: Option<String>,
 
     /// GPU acceleration mode. Allowed values are "swiftshader_indirect", "lavapipe", "software",
     /// "host", or "auto". Default is "swiftshader_indirect". "host" and "auto" are for

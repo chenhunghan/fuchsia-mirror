@@ -2,7 +2,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "zxdb-cli Protocol Schema",
     "description": "JSON schema for requests and responses in the zxdb-cli UDS protocol",
-    "version": 16,
+    "version": 17,
     "requests": {
         "$defs": {
             "AsyncBacktraceRequest": {
@@ -157,6 +157,67 @@
                     "line"
                 ],
                 "title": "BreakRequest",
+                "type": "object"
+            },
+            "ConsoleRequest": {
+                "description": "Request execution of a raw zxdb console command.",
+                "properties": {
+                    "command": {
+                        "const": "console",
+                        "default": "console",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "input": {
+                        "title": "Input",
+                        "type": "string"
+                    },
+                    "thread_id": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Thread Id"
+                    },
+                    "frame_index": {
+                        "default": 0,
+                        "title": "Frame Index",
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "input"
+                ],
+                "title": "ConsoleRequest",
                 "type": "object"
             },
             "ContinueRequest": {
@@ -655,6 +716,31 @@
                         "default": false,
                         "title": "Raw",
                         "type": "boolean"
+                    },
+                    "force_remote_unwind": {
+                        "default": false,
+                        "title": "Force Remote Unwind",
+                        "type": "boolean"
+                    },
+                    "unwinder": {
+                        "anyOf": [
+                            {
+                                "enum": [
+                                    "cfi",
+                                    "fp",
+                                    "scs",
+                                    "plt",
+                                    "armehabi",
+                                    "sigreturn"
+                                ],
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Unwinder"
                     }
                 },
                 "title": "StackTraceRequest",
@@ -1081,6 +1167,7 @@
                 "async-backtrace": "#/$defs/AsyncBacktraceRequest",
                 "attach": "#/$defs/AttachRequest",
                 "break": "#/$defs/BreakRequest",
+                "console": "#/$defs/ConsoleRequest",
                 "continue": "#/$defs/ContinueRequest",
                 "detach": "#/$defs/DetachRequest",
                 "evaluate": "#/$defs/EvaluateRequest",
@@ -1109,6 +1196,9 @@
             },
             {
                 "$ref": "#/$defs/BreakRequest"
+            },
+            {
+                "$ref": "#/$defs/ConsoleRequest"
             },
             {
                 "$ref": "#/$defs/ContinueRequest"
@@ -1245,6 +1335,21 @@
                 "title": "AsyncTaskNode",
                 "type": "object"
             },
+            "ConsoleResponse": {
+                "additionalProperties": false,
+                "description": "Response containing the console command output.",
+                "properties": {
+                    "output": {
+                        "title": "Output",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "output"
+                ],
+                "title": "ConsoleResponse",
+                "type": "object"
+            },
             "EvaluateResponse": {
                 "additionalProperties": false,
                 "description": "Unified response containing the evaluation result and optional children.",
@@ -1365,7 +1470,7 @@
                 "type": "object"
             },
             "Source": {
-                "description": "A Source is a descriptor for source code.\n\nAttributes:\n    name: The short name of the source.\n    path: The path of the source to be shown in the UI.\n    source_reference: If the value > 0 the contents of the source must be\n        retrieved through the `source` request.\n    origin: The origin of this source (e.g., 'internal module', 'inlined content\n        from source map').",
+                "description": "A Source is a descriptor for source code.\n\nAttributes:\n    name: The short name of the source.\n    path: The path of the source to be shown in the UI.\n    source_reference: If the value > 0 the contents of the source must be\n        retrieved through the `source` request.\n    origin: The origin of this source (e.g., 'internal module', 'inlined\n        content from source map').",
                 "properties": {
                     "name": {
                         "anyOf": [
@@ -1460,6 +1565,18 @@
                         ],
                         "default": null,
                         "title": "Presentation Hint"
+                    },
+                    "trust": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Trust"
                     }
                 },
                 "required": [
@@ -1619,6 +1736,9 @@
                 "anyOf": [
                     {
                         "$ref": "#/$defs/GetStateResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/ConsoleResponse"
                     },
                     {
                         "$ref": "#/$defs/EvaluateResponse"

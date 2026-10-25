@@ -18,6 +18,7 @@ from daemon.handlers import (
     async_backtrace,
     attach,
     break_req,
+    console,
     continue_req,
     detach,
     evaluate,
@@ -179,7 +180,7 @@ class Daemon:
     ) -> None:
         self.registry = CommandHandlerRegistry()
         self.dap_client = ZxdbDapClient()
-        self.background_tasks: set[asyncio.Task[None]] = set()
+        self.background_tasks: set[asyncio.Task[Any]] = set()
         self.active_handlers: set[asyncio.Task[Any]] = set()
         self.event_queue: asyncio.Queue[Any] = asyncio.Queue()
         self.event_waiter = DapEventWaiter()
@@ -219,6 +220,7 @@ class Daemon:
             async_backtrace,
             attach,
             break_req,
+            console,
             continue_req,
             detach,
             evaluate,
@@ -363,15 +365,37 @@ class Daemon:
         loop.add_signal_handler(signal.SIGUSR1, handle_sigusr1)
 
         try:
-            await asyncio.wait_for(signal_fut, timeout=30.0)
-            print("Received SIGUSR1 from zxdb.")
-            return None
-        except asyncio.TimeoutError:
-            print("Timed out waiting for SIGUSR1 from zxdb.")
-            return Response(
-                success=False,
-                message="Timed out waiting for SIGUSR1 from zxdb",
+            dap_wait_task = asyncio.create_task(
+                self.dap_proc.run_to_completion()
             )
+            done, pending = await asyncio.wait(
+                [signal_fut, dap_wait_task],
+                timeout=30.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if signal_fut in done:
+                print("Received SIGUSR1 from zxdb.")
+                # We don't cancel dap_wait_task here because we want it to
+                # keep consuming output from zxdb in the background to prevent
+                # unbounded memory growth.
+                self.background_tasks.add(dap_wait_task)
+                return None
+            elif dap_wait_task in done:
+                for task in pending:
+                    task.cancel()
+                output = dap_wait_task.result()
+                err_msg = f"zxdb exited early with code {output.return_code}"
+                print(err_msg)
+                return Response(success=False, message=err_msg)
+            else:
+                for task in pending:
+                    task.cancel()
+                print("Timed out waiting for SIGUSR1 from zxdb.")
+                return Response(
+                    success=False,
+                    message="Timed out waiting for SIGUSR1 from zxdb",
+                )
         finally:
             loop.remove_signal_handler(signal.SIGUSR1)
 
@@ -390,6 +414,10 @@ class Daemon:
                 os.close(self.ready_fd)
             except OSError as e:
                 print(f"Failed to write to ready-fd: {e}")
+
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, self.stop_event.set)
+        loop.add_signal_handler(signal.SIGTERM, self.stop_event.set)
 
         # Wait for stop event (sent by handle_stop)
         await self.stop_event.wait()
@@ -684,9 +712,7 @@ class Daemon:
         single_thread: bool = False,
     ) -> None:
         """Updates thread stopped state when execution resumes."""
-
-        # |thread_id| cannot be None if |single_thread| is True.
-        if single_thread is True and thread_id is None:
+        if single_thread and thread_id is None:
             raise ValueError(
                 "Single thread resumed without providing thread_id!"
             )
@@ -696,12 +722,14 @@ class Daemon:
             if thread is not None:
                 thread.resume()
         else:
-            # When |single_thread| is False, it means that all threads in the system were resumed
-            # via a Continue request. For now the default behavior of all thread control DAP
-            # commands in zxdb's DAP server will always set single_thread to True, so this case is
-            # only relevant for Continue.
+            # When single_thread is False, all threads in the system were
+            # resumed via a Continue request. Also iterate self.threads
+            # directly so threads recorded before their parent process is
+            # known (process_id=None) have their stopped state cleared.
             for p in self.processes.values():
                 p.resume()
+            for t in self.threads.values():
+                t.resume()
 
     def _handle_breakpoint_changed(self, body: dict[str, Any]) -> None:
         """Handles DAP `breakpoint` events with reason "changed".

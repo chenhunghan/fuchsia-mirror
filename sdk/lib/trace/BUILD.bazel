@@ -10,5 +10,9 @@ exports_files(
         "client.shard.cml",
         "use.shard.cml",
     ],
-    visibility = ["//bundles/assembly:__subpackages__"],
+    visibility = [
+        "//bundles/assembly:__subpackages__",
+        "//sdk/lib/vulkan:__pkg__",
+        "//src/connectivity/policy/http-client:__pkg__",
+    ],
 )

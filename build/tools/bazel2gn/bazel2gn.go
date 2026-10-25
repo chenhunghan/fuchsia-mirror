@@ -7,6 +7,7 @@ package bazel2gn
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.starlark.net/syntax"
@@ -42,6 +43,53 @@ func unwrapParenExpr(expr syntax.Expr) syntax.Expr {
 	}
 }
 
+// FileToGN converts all statements in a Bazel file to GN.
+func FileToGN(f *syntax.File) ([]string, error) {
+	if err := inlineRustTestCrates(f); err != nil {
+		return nil, err
+	}
+	if err := resolveComponentTargets(f); err != nil {
+		return nil, err
+	}
+	var lines []string
+	for _, stmt := range f.Stmts {
+		stmtLines, err := StmtToGN(stmt)
+		if err != nil {
+			return nil, stmtError(stmt, err)
+		}
+		lines = append(lines, stmtLines...)
+	}
+	return lines, nil
+}
+
+// FileError is an error caused by the contents of a specific file, such as a
+// statement in a BUILD.bazel file that can't be converted to GN.
+type FileError struct {
+	// Path is the path of the file. For errors from this package, it's the
+	// path passed to ParseBytes.
+	Path string
+	// Line is the 1-based line in the file, or 0 if unknown.
+	Line int
+	Err  error
+}
+
+// stmtError returns a FileError for an error converting `stmt` to GN.
+func stmtError(stmt syntax.Stmt, err error) *FileError {
+	start, _ := stmt.Span()
+	return &FileError{Path: start.Filename(), Line: int(start.Line), Err: err}
+}
+
+func (e *FileError) Error() string {
+	if e.Line > 0 {
+		return fmt.Sprintf("%s:%d: %v", e.Path, e.Line, e.Err)
+	}
+	return fmt.Sprintf("%s: %v", e.Path, e.Err)
+}
+
+func (e *FileError) Unwrap() error {
+	return e.Err
+}
+
 // StmtToGN converts a Bazel statement [0] to GN.
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#statements
@@ -57,11 +105,23 @@ func StmtToGN(stmt syntax.Stmt) ([]string, error) {
 
 	switch v := stmt.(type) {
 	case *syntax.LoadStmt:
+		if hasRawAttributeAnnotation(v) {
+			return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above a target definition to take effect")
+		}
 		// Load statements are ignored during conversion.
 		return nil, nil
 	case *syntax.ExprStmt:
+		if call, ok := v.X.(*syntax.CallExpr); ok {
+			return callExprToGN(call, v.Comments())
+		}
+		if hasRawAttributeAnnotation(v) {
+			return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above a target definition to take effect")
+		}
 		return exprToGN(v.X, nil)
 	case *syntax.AssignStmt:
+		if hasRawAttributeAnnotation(v) {
+			return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above a target definition to take effect")
+		}
 		return assignStmtToGN(v)
 	default:
 		return nil, fmt.Errorf("statement of type %T is not supported to be converted to GN, node details: %#v", stmt, stmt)
@@ -88,7 +148,7 @@ func exprToGN(expr syntax.Expr, transformers []transformer) ([]string, error) {
 		// NOTE: I'm not sure whether we need to plumb transformers here, so far it
 		// is not necessary. callExprToGN should be a top-level entry point for
 		// macro and rules.
-		return callExprToGN(v)
+		return callExprToGN(v, v.Comments())
 	case *syntax.BinaryExpr:
 		return binaryExprToGN(v, transformers)
 	case *syntax.Ident:
@@ -215,30 +275,65 @@ func targetCompatibleWithToGNConditions(expr syntax.Expr) ([]string, error) {
 // be macro or Bazel rules known to the converter.
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#function-and-method-calls
-func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
+func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]string, error) {
 	fn, ok := expr.Fn.(*syntax.Ident)
 	if !ok {
 		return nil, fmt.Errorf("expected identifier for call expression, got %T", expr.Fn)
 	}
 	bazelRule := fn.Name
+	start, _ := expr.Span()
+	rawAttrs, err := rawAttributesFromComments(start.Line, stmtComments, expr.Comments())
+	if err != nil {
+		return nil, err
+	}
+
 	if bazelRule == "rustc_check_cfg_build_flags" {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
 		return rustcCheckCfgBuildFlagsToGN(expr)
 	}
-	gnTemplateName, ok := bazelRuleToGNTemplate[bazelRule]
-	if !ok {
-		return nil, fmt.Errorf("%s is not a known Bazel rule to convert to GN", bazelRule)
+	var gnTemplateName string
+	if bazelRule == internalRenamedBinaryRule {
+		gnTemplateName = "renamed_binary"
+	} else {
+		var ok bool
+		gnTemplateName, ok = bazelRuleToGNTemplate[bazelRule]
+		if !ok {
+			return nil, fmt.Errorf("%s is not a known Bazel rule to convert to GN", bazelRule)
+		}
 	}
 
-	if gnTemplateName == noGNEquivalent {
-		return nil, nil
+	switch bazelRule {
+	case "cml_shard":
+		if err := validateCmlShard(expr); err != nil {
+			return nil, err
+		}
+	case "fx_component_manifest":
+		if err := validateFxComponentManifest(expr); err != nil {
+			return nil, err
+		}
+	case "fx_component":
+		if err := validateFxComponent(expr); err != nil {
+			return nil, err
+		}
 	}
-
 	// TODO(jayzhuang): Handle package level settings, e.g. visibility.
-	if bazelRule == "package" {
+	if gnTemplateName == noGNEquivalent || bazelRule == "package" {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
 		return nil, nil
+	}
+	if bazelRule == "fx_unittest_package" {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
+		return fxUnittestPackageToGN(expr)
 	}
 
 	attrsToOmit := attrsToOmitByRules[bazelRule]
+	unsupportedAttrs := unsupportedAttrsByRules[bazelRule]
 
 	// Loops through all arguments to handle special ones first.
 	var name string
@@ -258,6 +353,9 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 		if shouldSkip {
 			continue
 		}
+		if hasRawAttributeAnnotation(binaryExpr) {
+			return nil, fmt.Errorf("found raw_attribute annotation on attribute, it should be above the target definition to take effect")
+		}
 
 		ident, ok := binaryExpr.X.(*syntax.Ident)
 		if !ok {
@@ -265,6 +363,9 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 		}
 		if attrsToOmit[ident.Name] {
 			continue
+		}
+		if unsupportedAttrs[ident.Name] {
+			return nil, fmt.Errorf("bazel2gn doesn't support attribute %q of %s; use # @bazel2gn:skip and write the GN copy by hand", ident.Name, bazelRule)
 		}
 		if ident.Name == "name" {
 			lines, err := exprToGN(binaryExpr.Y, nil)
@@ -296,6 +397,9 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 	}
 	if name == "" {
 		return nil, errors.New("missing `name` attribute in Bazel target")
+	}
+	if cond, ok := implicitConditionsByRules[bazelRule]; ok && !slices.Contains(wrappingConditions, cond) {
+		wrappingConditions = append(wrappingConditions, cond)
 	}
 
 	// `compiled_action()` args can refer to outputs, so collect them first.
@@ -331,6 +435,7 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 	if extra, ok := extraGnExpressionByRules[bazelRule]; ok {
 		ret = append(ret, indent([]string{extra}, 1)...)
 	}
+	ret = append(ret, indent(rawAttrs, 1)...)
 
 	ret = append(ret, "}")
 	if len(wrappingConditions) > 0 {
@@ -340,6 +445,53 @@ func callExprToGN(expr *syntax.CallExpr) ([]string, error) {
 		ret = append(ret, "}")
 	}
 	return ret, nil
+}
+
+// validateCmlShard enforces the `cml_shard` naming convention required for
+// compatibility with `bazel2gn` for now: `name` must end in `.shard`, and
+// `shard` must be specified and equal to `name + ".cml"` (or `":" + name + ".cml"`).
+// This allows `bazel2gn` to convert `cml_shard` target labels (e.g. in
+// `expect_includes`) into `.cml` file paths without cross-target lookup.
+func validateCmlShard(expr *syntax.CallExpr) error {
+	var name, shard string
+	for _, arg := range expr.Args {
+		binaryExpr, ok := arg.(*syntax.BinaryExpr)
+		if !ok || binaryExpr.Op != syntax.EQ {
+			return fmt.Errorf("only attribute assignments (e.g. `attr = value`) are allowed in cml_shard, got %#v", arg)
+		}
+		ident, ok := binaryExpr.X.(*syntax.Ident)
+		if !ok {
+			return fmt.Errorf("unexpected node type on the left hand side of binary expression in cml_shard, want syntax.Ident, got %T", binaryExpr.X)
+		}
+		switch ident.Name {
+		case "name":
+			lit, ok := binaryExpr.Y.(*syntax.Literal)
+			if !ok {
+				return fmt.Errorf("cml_shard name must be a string literal, got %T", binaryExpr.Y)
+			}
+			name, _ = lit.Value.(string)
+		case "shard":
+			lit, ok := binaryExpr.Y.(*syntax.Literal)
+			if !ok {
+				return fmt.Errorf("cml_shard shard must be a string literal, got %T", binaryExpr.Y)
+			}
+			shard, _ = lit.Value.(string)
+		}
+	}
+	if name == "" {
+		return errors.New("missing `name` attribute in cml_shard target")
+	}
+	if !strings.HasSuffix(name, ".shard") {
+		return fmt.Errorf("cml_shard name %q must end in \".shard\" (for bazel2gn compatibility)", name)
+	}
+	if shard == "" {
+		return fmt.Errorf("missing `shard` attribute in cml_shard target %q", name)
+	}
+	wantShard := name + ".cml"
+	if strings.TrimPrefix(shard, ":") != wantShard {
+		return fmt.Errorf("cml_shard %q must set `shard = %q` (got %q) for bazel2gn compatibility", name, wantShard, shard)
+	}
+	return nil
 }
 
 // convertAttrName converts input Bazel attrName to the corresponding parameter name in GN.
@@ -580,7 +732,7 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 	switch attrName {
 	case "visibility":
 		transformers = append(transformers, bazelVisibilityToGN)
-	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "non_rust_deps", "sdk_deps":
+	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "non_rust_deps", "sdk_deps", "validations", "cm_label", "source_deps":
 		transformers = append(transformers, bazelDepToGN)
 	case "public_deps":
 		transformers = append(transformers, bazelDepToGN)
@@ -601,6 +753,14 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 		} else {
 			transformers = append(transformers, bazelFilePathsToGN)
 		}
+	case "includes":
+		if bazelRule == "expect_includes" {
+			transformers = append(transformers, bazelCmlIncludesToGN)
+		}
+	case "manifest":
+		if bazelRule == "fx_component_manifest" {
+			transformers = append(transformers, bazelFilePathsToGN)
+		}
 	case "args":
 		if bazelRule == compiledActionRule {
 			transformers = append(transformers, compiledActionArgsTransformer(compiledActionOutputs))
@@ -611,6 +771,12 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 		}
 	case "config_data":
 		if bazelRule == "ffx_plugin" {
+			transformers = append(transformers, bazelFilePathsToGN)
+		}
+	case "checked_in_source":
+		// `rustc_bindgen_golden()` takes a file label in Bazel and a file path
+		// in GN. Its `headers` are source paths in both.
+		if bazelRule == "rustc_bindgen_golden" {
 			transformers = append(transformers, bazelFilePathsToGN)
 		}
 	case "ldflags":
@@ -914,4 +1080,68 @@ func transformersFromComments(comments *syntax.Comments) ([]transformer, error) 
 		return nil, err
 	}
 	return append(before, suffix...), nil
+}
+
+// rawAttributesFromComments extracts raw GN lines from `@bazel2gn:raw_attribute:`
+// comment annotations placed before a target definition.
+func rawAttributesFromComments(targetStartLine int32, commentsList ...*syntax.Comments) ([]string, error) {
+	var rawAttrs []string
+	seen := make(map[*syntax.Comments]bool)
+	for _, comments := range commentsList {
+		if comments == nil || seen[comments] {
+			continue
+		}
+		seen[comments] = true
+		seenRawAttr := false
+		for i, c := range comments.Before {
+			if after, ok := strings.CutPrefix(c.Text, rawAttributeAnnotationPrefix); ok {
+				expectedLine := targetStartLine - int32(len(comments.Before)-i)
+				if c.Start.Line != expectedLine {
+					return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above the target definition to take effect")
+				}
+				seenRawAttr = true
+				trimmed := strings.TrimSpace(after)
+				if trimmed == "" {
+					return nil, fmt.Errorf("empty %q annotation", rawAttributeAnnotationPrefix)
+				}
+				rawAttrs = append(rawAttrs, trimmed)
+			} else if seenRawAttr {
+				return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above the target definition to take effect")
+			}
+		}
+		for _, c := range append(comments.Suffix, comments.After...) {
+			if strings.HasPrefix(c.Text, rawAttributeAnnotationPrefix) {
+				return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above the target definition to take effect")
+			}
+		}
+	}
+	return rawAttrs, nil
+}
+
+// hasRawAttributeAnnotation reports whether any comment in the AST subtree
+// rooted at `node` starts with `rawAttributeAnnotationPrefix`.
+func hasRawAttributeAnnotation(node syntax.Node) bool {
+	if node == nil {
+		return false
+	}
+	var found bool
+	syntax.Walk(node, func(n syntax.Node) bool {
+		if n == nil {
+			return true
+		}
+		comments := n.Comments()
+		if comments == nil {
+			return true
+		}
+		for _, list := range [][]syntax.Comment{comments.Before, comments.Suffix, comments.After} {
+			for _, c := range list {
+				if strings.HasPrefix(c.Text, rawAttributeAnnotationPrefix) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
 }

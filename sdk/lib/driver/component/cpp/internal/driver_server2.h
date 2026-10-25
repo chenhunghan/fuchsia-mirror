@@ -54,9 +54,16 @@ class DriverServer2 final : public fdf::WireServer<fuchsia_driver_framework::Dri
     binding_.emplace(always_on_dispatcher,
                      fdf::ServerEnd<fuchsia_driver_framework::Driver>(fdf::Channel(server_handle)),
                      this, fidl::kIgnoreBindingClosure);
+    driver_->SetHealthAlertBinding(&binding_.value());
   }
 
-  ~DriverServer2() final = default;
+  ~DriverServer2() final {
+    // Clear the borrowed binding so that a driver destructor calling ReportHealthAlert cannot
+    // reach this partially destroyed server.
+    if (driver_) {
+      driver_->SetHealthAlertBinding(nullptr);
+    }
+  }
 
   void Start(StartRequestView request, fdf::Arena& arena,
              StartCompleter::Sync& completer) override {
@@ -110,6 +117,35 @@ class DriverServer2 final : public fdf::WireServer<fuchsia_driver_framework::Dri
   }
 #endif
 
+  void HealthCheck(HealthCheckRequestView request, fdf::Arena& arena,
+                   HealthCheckCompleter::Sync& completer) override {
+    ZX_ASSERT(driver_);
+
+    fuchsia_driver_framework::HealthCheckRequest level = request->request;
+
+    fdf::DriverBase2::HealthCheckCompleter hc_completer(
+        [guard =
+             HealthCheckReplyGuard(driver_.get(), level, std::move(arena), completer.ToAsync())](
+            fit::result<fuchsia_driver_framework::HealthCheckError,
+                        fuchsia_driver_framework::HealthCheckResponse>
+                result) mutable {
+          // A reply is only needed once; a second invocation of the completer (or one after the
+          // binding went away) must not touch Inspect or the binding.
+          if (!guard.completer.is_reply_needed()) {
+            return;
+          }
+          guard.driver->RecordHealthCheckToInspect(guard.level, result);
+          if (result.is_ok()) {
+            guard.completer.buffer(guard.arena)
+                .ReplySuccess(fidl::ToWire(guard.arena, result.value()));
+          } else {
+            guard.completer.buffer(guard.arena).ReplyError(result.error_value());
+          }
+        });
+
+    driver_->HealthCheck(level, std::move(hc_completer));
+  }
+
   void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_driver_framework::Driver> metadata,
                              fidl::UnknownMethodCompleter::Sync& completer) override {
     if (driver_) {
@@ -126,9 +162,35 @@ class DriverServer2 final : public fdf::WireServer<fuchsia_driver_framework::Dri
   }
 
  private:
+  // Ensures that if a custom `HealthCheck` implementation drops its `HealthCheckCompleter`
+  // without invoking it (e.g., due to an early return or cancelled async task), the FIDL server
+  // replies with `HealthCheckError::kInternalError` instead of closing the driver channel. The
+  // error is also mirrored to Inspect so that a stale record from an earlier check does not
+  // survive.
+  struct HealthCheckReplyGuard {
+    fdf::DriverBase2* driver;
+    fuchsia_driver_framework::HealthCheckRequest level;
+    fdf::Arena arena;
+    HealthCheckCompleter::Async completer;
+
+    HealthCheckReplyGuard(fdf::DriverBase2* d, fuchsia_driver_framework::HealthCheckRequest l,
+                          fdf::Arena a, HealthCheckCompleter::Async c)
+        : driver(d), level(l), arena(std::move(a)), completer(std::move(c)) {}
+    HealthCheckReplyGuard(HealthCheckReplyGuard&&) noexcept = default;
+    HealthCheckReplyGuard& operator=(HealthCheckReplyGuard&&) = delete;
+    ~HealthCheckReplyGuard() {
+      if (completer.is_reply_needed()) {
+        driver->RecordHealthCheckToInspect(
+            level, fit::error(fuchsia_driver_framework::HealthCheckError::kInternalError));
+        completer.buffer(arena).ReplyError(
+            fuchsia_driver_framework::wire::HealthCheckError::kInternalError);
+      }
+    }
+  };
+
   void StopBinding() {
     if (fdf_dispatcher_get_current_dispatcher() == dispatcher_) {
-      binding_.reset();
+      ClearHealthAlertBindingAndBinding();
       return;
     }
 
@@ -138,13 +200,25 @@ class DriverServer2 final : public fdf::WireServer<fuchsia_driver_framework::Dri
     fdf_dispatcher_t* always_on_dispatcher = dispatcher_;
 #endif
     async::PostTask(fdf_dispatcher_get_async_dispatcher(always_on_dispatcher),
-                    [this]() { binding_.reset(); });
+                    [this]() { ClearHealthAlertBindingAndBinding(); });
+  }
+
+  // Must run on the dispatcher: `ReportHealthAlert` reads the binding pointer from the driver
+  // dispatcher, so clearing it anywhere else would race with an in-flight alert.
+  void ClearHealthAlertBindingAndBinding() {
+    if (driver_) {
+      driver_->SetHealthAlertBinding(nullptr);
+    }
+    binding_.reset();
   }
 
   fdf_dispatcher_t* dispatcher_;
 
-  std::optional<fdf::ServerBinding<fuchsia_driver_framework::Driver>> binding_;
+  // `driver_` is declared before `binding_` so that it is destroyed after it: tearing down the
+  // binding first guarantees that no in-flight request (or a HealthCheckReplyGuard held by the
+  // driver) can reach a partially destroyed driver.
   std::unique_ptr<fdf::DriverBase2> driver_;
+  std::optional<fdf::ServerBinding<fuchsia_driver_framework::Driver>> binding_;
 };
 
 }  // namespace fdf_internal

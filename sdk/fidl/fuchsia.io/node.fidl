@@ -233,7 +233,6 @@ type FscryptPolicy = struct {
     flags FscryptPolicyFlags;
 };
 
-// TODO(https://fxbug.dev/42057114): Inline this into its only reference when fidlgen_go is fixed.
 type ConnectionInfo = resource table {
     /// The rights possessed by the current connection. Note: `rights` limits
     /// the set of operations allowed on the connection, but does not guarantee
@@ -623,7 +622,7 @@ open protocol Node {
     /// This method does not require any rights. Note that the token identifies
     /// the connection, hence carries the rights information on this connection.
     @selector("fuchsia.io/Node.GetToken")
-    @available(added=NEXT)
+    @available(added=33)
     flexible GetToken() -> (resource struct {
         token Token;
     }) error zx.Status;

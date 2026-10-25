@@ -157,12 +157,21 @@ impl HelperDef for DiskImageHelper {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct EnvironmentHelper {}
+#[derive(Clone, Default)]
+pub struct EnvironmentHelper {
+    context: Option<ffx_config::EnvironmentContext>,
+}
+
+impl EnvironmentHelper {
+    pub fn new(context: Option<ffx_config::EnvironmentContext>) -> Self {
+        Self { context }
+    }
+}
 
 /// This Handlebars helper is used for substitution of an environment variable.
 /// Rather than pulling the value from a data structure, it will call
-/// std::env::var(value), where value is the parameter to the helper. If the
+/// `EnvironmentContext::env_var` (or `std::env::var(value)` when no context is
+/// provided), where value is the parameter to the helper. If the
 /// specified environment variable is unset, the resulting output will be empty.
 ///
 /// Example:
@@ -194,12 +203,16 @@ impl HelperDef for EnvironmentHelper {
         _: &mut RenderContext<'reg, 'rc>,
         out: &mut dyn Output,
     ) -> HelperResult {
-        // Get the key specified in param(0) and retrieve the value from std::env.
+        // Get the key specified in param(0) and retrieve the value from the environment.
         let param = h.param(0).ok_or_else(|| {
             RenderErrorReason::Other(format!("Parameter 0 is missing in {:?}", h))
         })?;
         if let Some(key) = param.value().as_str() {
-            match std::env::var(key) {
+            let val = match &self.context {
+                Some(ctx) => ctx.env_var(key),
+                None => std::env::var(key),
+            };
+            match val {
                 Ok(val) => out.write(&json_escape(&val))?,
                 Err(_) => (), // An Err means the variable isn't set or the key is invalid.
             }
@@ -209,6 +222,20 @@ impl HelperDef for EnvironmentHelper {
 }
 
 pub fn process_flag_template(emu_config: &EmulatorConfiguration) -> Result<FlagData> {
+    process_flag_template_optional_context(emu_config, None)
+}
+
+pub fn process_flag_template_with_context(
+    emu_config: &EmulatorConfiguration,
+    context: &ffx_config::EnvironmentContext,
+) -> Result<FlagData> {
+    process_flag_template_optional_context(emu_config, Some(context))
+}
+
+fn process_flag_template_optional_context(
+    emu_config: &EmulatorConfiguration,
+    context: Option<&ffx_config::EnvironmentContext>,
+) -> Result<FlagData> {
     let template_text = if let Some(template_path) = &emu_config.runtime.template {
         std::fs::read_to_string(template_path).context(format!(
             "couldn't locate template file from path {:?}",
@@ -221,7 +248,7 @@ pub fn process_flag_template(emu_config: &EmulatorConfiguration) -> Result<FlagD
             DEFAULT_FLAGS_TEMPLATE_STR.to_string()
         }
     };
-    let flag_data = process_flag_template_inner(&template_text, emu_config)?;
+    let flag_data = process_flag_template_inner_with_context(&template_text, emu_config, context)?;
     dedupe_kernel_args(flag_data, &emu_config.runtime.addl_kernel_args)
 }
 
@@ -283,6 +310,14 @@ pub(crate) fn process_flags_from_str(
     process_flag_template_inner(text, emu_config)
 }
 
+pub(crate) fn process_flags_from_str_with_context(
+    text: &str,
+    emu_config: &EmulatorConfiguration,
+    context: &ffx_config::EnvironmentContext,
+) -> Result<FlagData> {
+    process_flag_template_inner_with_context(text, emu_config, Some(context))
+}
+
 /// Escapes string content for safe interpolation into JSON flag templates.
 ///
 /// Emulator flag templates are rendered as raw JSON text using Handlebars before
@@ -306,11 +341,19 @@ fn process_flag_template_inner(
     template_text: &str,
     emu_config: &EmulatorConfiguration,
 ) -> Result<FlagData> {
+    process_flag_template_inner_with_context(template_text, emu_config, None)
+}
+
+fn process_flag_template_inner_with_context(
+    template_text: &str,
+    emu_config: &EmulatorConfiguration,
+    context: Option<&ffx_config::EnvironmentContext>,
+) -> Result<FlagData> {
     // This performs all the variable substitution and condition resolution.
     let mut handlebars = Handlebars::new();
     handlebars.set_strict_mode(true);
     handlebars.register_escape_fn(json_escape);
-    handlebars.register_helper("env", Box::new(EnvironmentHelper {}));
+    handlebars.register_helper("env", Box::new(EnvironmentHelper::new(context.cloned())));
     handlebars.register_helper("eq", Box::new(EqHelper {}));
     handlebars.register_helper("ua", Box::new(UnitAbbreviationHelper {}));
     handlebars.register_helper("di", Box::new(DiskImageHelper {}));
@@ -327,7 +370,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use emulator_instance::{DeviceConfig, GuestConfig, HostConfig, NetworkingMode, VirtualCpu};
+    use emulator_instance::{
+        AccelerationMode, DeviceConfig, EngineType, GuestConfig, HostConfig, NetworkingMode,
+        OperatingSystem, RuntimeConfig, VirtualCpu,
+    };
     use ffx_emulator_config::AudioModel;
     use serde::Serialize;
 
@@ -348,7 +394,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_env_helper() {
-        unsafe { std::env::set_var("MY_VARIABLE", "my_value") };
+        let env = ffx_config::test_env().env_var("MY_VARIABLE", "my_value").build().unwrap();
 
         let var_template = "{{env units}}";
         let literal_template = r#"{{env "MY_VARIABLE"}}"#;
@@ -356,7 +402,7 @@ mod tests {
 
         let mut handlebars = Handlebars::new();
         handlebars.set_strict_mode(true);
-        handlebars.register_helper("env", Box::new(EnvironmentHelper {}));
+        handlebars.register_helper("env", Box::new(EnvironmentHelper::new(Some(env.context))));
 
         let json = handlebars.render_template(&var_template, &string_struct);
         assert!(json.is_ok());
@@ -1146,6 +1192,174 @@ mod tests {
         assert_eq!(actual.args, expected_args)
     }
 
+    /// Returns the configuration of an x64 guest which is booted from a kernel and a disk image by
+    /// the QEMU engine, accelerated by KVM on a Linux host.
+    fn kvm_accelerated_x64_config() -> EmulatorConfiguration {
+        EmulatorConfiguration {
+            guest: GuestConfig {
+                disk_image: Some(DiskImage::Fxfs("/path/to/fxfs.blk".into())),
+                kernel_image: Some(PathBuf::from("/path/to/kernel")),
+                ..Default::default()
+            },
+            host: HostConfig {
+                acceleration: AccelerationMode::Hyper,
+                networking: NetworkingMode::None,
+                os: OperatingSystem::Linux,
+                ..Default::default()
+            },
+            device: DeviceConfig {
+                cpu: VirtualCpu { architecture: sdk_metadata::CpuArchitecture::X64, count: 2 },
+                ..Default::default()
+            },
+            runtime: RuntimeConfig { engine_type: EngineType::Qemu, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    /// Returns the argument which follows the given flag in the emulator's arguments.
+    fn flag_value<'a>(flags: &'a FlagData, flag: &str) -> &'a str {
+        let index = flags
+            .args
+            .iter()
+            .position(|arg| arg == flag)
+            .unwrap_or_else(|| panic!("{flag} not found in {:?}", flags.args));
+        &flags.args[index + 1]
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_snapshots_disabled() {
+        let config = kvm_accelerated_x64_config();
+        assert!(!config.runtime.snapshots_enabled);
+
+        let flags = process_flag_template(&config).expect("ok processing");
+
+        // By default the disk is a raw image, and the guest is given all of the host's CPU
+        // features, including the ones which keep its state from being saved.
+        assert_eq!(
+            flag_value(&flags, "-drive"),
+            "file=/path/to/fxfs.blk,format=raw,if=none,id=vdisk,cache=unsafe"
+        );
+        assert_eq!(flag_value(&flags, "-cpu"), "host,migratable=no,+invtsc");
+        assert!(flags.args.contains(&"-enable-kvm".to_string()));
+        assert!(!flags.args.contains(&"-loadvm".to_string()));
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_snapshots_enabled() {
+        let mut config = kvm_accelerated_x64_config();
+        config.guest.disk_image = Some(DiskImage::Fxfs("/path/to/fxfs.blk.qcow2".into()));
+        config.runtime.snapshots_enabled = true;
+
+        let flags = process_flag_template(&config).expect("ok processing");
+
+        // The disk is in a format which can hold snapshots, and the CPU model does not include
+        // the non-migratable features which block the VM's state from being saved.
+        assert_eq!(
+            flag_value(&flags, "-drive"),
+            "file=/path/to/fxfs.blk.qcow2,format=qcow2,if=none,id=vdisk,cache=unsafe"
+        );
+        assert_eq!(flag_value(&flags, "-cpu"), "host");
+        assert!(flags.args.contains(&"-enable-kvm".to_string()));
+        // Enabling snapshots doesn't load one.
+        assert!(!flags.args.contains(&"-loadvm".to_string()));
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_snapshots_enabled_avx2_disabled() {
+        let mut config = kvm_accelerated_x64_config();
+        config.runtime.snapshots_enabled = true;
+        config.device.avx2_enabled = false;
+
+        let flags = process_flag_template(&config).expect("ok processing");
+
+        let cpu_flags = flag_value(&flags, "-cpu");
+        assert!(cpu_flags.starts_with("host,-avx2,-avx512f,"), "unexpected cpu flags: {cpu_flags}");
+        assert!(!cpu_flags.contains("migratable=no"), "unexpected cpu flags: {cpu_flags}");
+        assert!(!cpu_flags.contains("invtsc"), "unexpected cpu flags: {cpu_flags}");
+
+        // Without snapshots, the non-migratable features come before the disabled ones.
+        config.runtime.snapshots_enabled = false;
+        let flags = process_flag_template(&config).expect("ok processing");
+        let cpu_flags = flag_value(&flags, "-cpu");
+        assert!(
+            cpu_flags.starts_with("host,migratable=no,+invtsc,-avx2,-avx512f,"),
+            "unexpected cpu flags: {cpu_flags}"
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_snapshots_enabled_without_acceleration() {
+        let mut config = kvm_accelerated_x64_config();
+        config.host.acceleration = AccelerationMode::None;
+        let cpu_flags_without_snapshots =
+            flag_value(&process_flag_template(&config).expect("ok processing"), "-cpu").to_string();
+
+        config.runtime.snapshots_enabled = true;
+        let flags = process_flag_template(&config).expect("ok processing");
+
+        // The emulated CPU model is the same with and without snapshots; only the format of the
+        // disk changes.
+        assert_eq!(flag_value(&flags, "-cpu"), cpu_flags_without_snapshots);
+        assert!(cpu_flags_without_snapshots.starts_with("Haswell,"));
+        assert_eq!(
+            flag_value(&flags, "-drive"),
+            "file=/path/to/fxfs.blk,format=qcow2,if=none,id=vdisk,cache=unsafe"
+        );
+        assert!(!flags.args.contains(&"-enable-kvm".to_string()));
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_snapshots_enabled_riscv64() {
+        let mut config = kvm_accelerated_x64_config();
+        config.device.cpu.architecture = sdk_metadata::CpuArchitecture::Riscv64;
+        config.host.acceleration = AccelerationMode::None;
+
+        let flags = process_flag_template(&config).expect("ok processing");
+        assert_eq!(
+            flag_value(&flags, "-drive"),
+            "file=/path/to/fxfs.blk,format=raw,if=none,id=vdisk"
+        );
+
+        config.runtime.snapshots_enabled = true;
+        let flags = process_flag_template(&config).expect("ok processing");
+        assert_eq!(
+            flag_value(&flags, "-drive"),
+            "file=/path/to/fxfs.blk,format=qcow2,if=none,id=vdisk"
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_default_template_from_snapshot() {
+        let mut config = kvm_accelerated_x64_config();
+        config.runtime.snapshots_enabled = true;
+        config.runtime.from_snapshot = Some("booted".to_string());
+        config.runtime.addl_emu_args = vec!["-extra-arg".to_string()];
+
+        let flags = process_flag_template(&config).expect("ok processing");
+
+        assert_eq!(flag_value(&flags, "-loadvm"), "booted");
+        // Arguments which the user adds still come last, so that they take precedence.
+        assert_eq!(flags.args.last(), Some(&"-extra-arg".to_string()));
+
+        // The snapshot is only loaded when it is asked for.
+        config.runtime.from_snapshot = None;
+        let flags = process_flag_template(&config).expect("ok processing");
+        assert!(!flags.args.contains(&"-loadvm".to_string()));
+    }
+
+    #[fuchsia::test]
+    fn test_json_injection_from_snapshot() {
+        let malicious_snapshot = r#"booted", "-fsdev", "local,path=/,id=hostfs"#;
+        let mut config = kvm_accelerated_x64_config();
+        config.runtime.snapshots_enabled = true;
+        config.runtime.from_snapshot = Some(malicious_snapshot.to_string());
+
+        let flags = process_flag_template(&config).expect("ok processing");
+        assert!(!flags.args.contains(&"-fsdev".to_string()));
+        assert!(!flags.args.contains(&"local,path=/,id=hostfs".to_string()));
+        assert_eq!(flag_value(&flags, "-loadvm"), malicious_snapshot);
+    }
+
     #[test]
     fn test_json_escape() {
         assert_eq!(json_escape(""), "");
@@ -1216,7 +1430,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_json_injection_env_helper() {
-        unsafe { std::env::set_var("EVIL_INJECT_VAR", r#"val", "injected_arg"#) };
+        let env = ffx_config::test_env()
+            .env_var("EVIL_INJECT_VAR", r#"val", "injected_arg"#)
+            .build()
+            .unwrap();
         let template = r#"
         {
             "args": ["{{env "EVIL_INJECT_VAR"}}"],
@@ -1226,7 +1443,9 @@ mod tests {
             "options": []
         }"#;
         let emu_config = EmulatorConfiguration::default();
-        let flags = process_flag_template_inner(template, &emu_config).expect("processed");
+        let flags =
+            process_flag_template_inner_with_context(template, &emu_config, Some(&env.context))
+                .expect("processed");
         assert_eq!(flags.args.len(), 1);
         assert_eq!(flags.args[0], r#"val", "injected_arg"#);
     }

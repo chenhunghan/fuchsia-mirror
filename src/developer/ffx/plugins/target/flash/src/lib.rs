@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use discovery::{TargetHandle, TargetState};
 use errors::ffx_bail;
@@ -288,7 +287,6 @@ pub enum FlashError {
     Fho(#[from] fho::Error),
 }
 
-#[async_trait(?Send)]
 impl FfxMain for FlashTool {
     type Writer = VerifiedMachineWriter<FlashMessage>;
     type Error = FlashError;
@@ -918,6 +916,25 @@ mod test {
     }
 
     #[fuchsia::test]
+    async fn test_preprocess_flash_command_uses_ssh_pub_config() {
+        let builder = ffx_config::test_env().user_config("product.path", "foo");
+        let (builder, _tmp_ssh_priv, tmp_ssh_pub) = setup_ssh_paths(builder);
+        let expected_ssh_pub = tmp_ssh_pub.path().to_string_lossy().to_string();
+        let env = builder.build().expect("Failed to initialize test env");
+        let buffers = TestBuffers::default();
+        let mut writer =
+            VerifiedMachineWriter::<FlashMessage>::new_test(Some(Format::Json), &buffers);
+        let cmd = preprocess_flash_cmd(
+            &env.context,
+            &mut writer,
+            &FlashCommand { skip_authorized_keys: false, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cmd.authorized_keys, Some(expected_ssh_pub));
+    }
+
+    #[fuchsia::test]
     async fn test_nonexistent_file_throws_err() {
         let (builder, _tmp_ssh_priv, _tmp_ssh_pub) = setup_ssh_paths(ffx_config::test_env());
         let env = builder.build().expect("Failed to initialize test env");
@@ -1220,7 +1237,7 @@ mod test {
         true
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_progress_indicator() {
         let mut indicator = ProgressIndicator::new();
 

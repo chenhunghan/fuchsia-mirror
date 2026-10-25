@@ -5,8 +5,10 @@
 use component_events::events::{EventStream, ExitStatus, Stopped};
 use component_events::matcher::EventMatcher;
 use fidl_fuchsia_hardware_cpu_ctrl as fcpuctrl;
+use fidl_fuchsia_hardware_trippoint as ftrippoint;
 use fidl_fuchsia_power_battery as fbattery;
 use fidl_fuchsia_power_cpu as fcpu;
+use fidl_fuchsia_power_powercap as fpowercap;
 use fidl_fuchsia_thermal as fthermal;
 use fuchsia_component_test::{
     Capability, ChildOptions, LocalComponentHandles, RealmBuilder, RealmBuilderParams, Ref, Route,
@@ -15,6 +17,7 @@ use log::info;
 
 mod fake_battery;
 mod fake_cpu_ctrl;
+mod fake_powercap;
 
 #[fuchsia::main]
 async fn main() {
@@ -153,6 +156,28 @@ async fn main() {
         .await
         .unwrap();
 
+    let powercap_state = fake_powercap::FakePowercapState::new_default();
+    let powercap_mock = builder
+        .add_local_child(
+            "powercap",
+            move |handles: LocalComponentHandles| {
+                Box::pin(fake_powercap::mock_powercap_service(handles, powercap_state.clone()))
+            },
+            ChildOptions::new(),
+        )
+        .await
+        .unwrap();
+
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::protocol::<fpowercap::ClientMarker>())
+                .from(&powercap_mock)
+                .to(Ref::child("kernel")),
+        )
+        .await
+        .unwrap();
+
     info!("starting realm");
     let instance = builder.build().await.unwrap();
 
@@ -180,6 +205,38 @@ async fn main() {
     info!(status:?; "thermal_client stopped");
     assert_eq!(status, ExitStatus::Clean);
 
-    let battery_charger_enable_requests = battery_charger_enable_requests.lock();
-    assert_eq!(*battery_charger_enable_requests, vec![false, true]);
+    assert_eq!(*battery_charger_enable_requests.lock(), vec![false, true]);
+
+    let sensor_manager =
+        instance.root.connect_to_protocol_at_exposed_dir::<fthermal::SensorManagerProxy>().unwrap();
+    let (trippoint, trippoint_server_end) = fidl::endpoints::create_proxy();
+    sensor_manager
+        .connect(fthermal::SensorManagerConnectRequest {
+            name: Some("fake-trippoint".to_string()),
+            server_end: Some(fthermal::SensorServer_::Trippoint(trippoint_server_end)),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let descriptors = trippoint.get_trip_point_descriptors().await.unwrap().unwrap();
+    assert_eq!(
+        descriptors,
+        vec![
+            ftrippoint::TripPointDescriptor {
+                index: 0,
+                type_: ftrippoint::TripPointType::OneshotTempAbove,
+                configuration: ftrippoint::TripPointValue::OneshotTempAboveTripPoint(
+                    ftrippoint::OneshotTempAboveTripPoint { critical_temperature_celsius: 75.0 },
+                ),
+            },
+            ftrippoint::TripPointDescriptor {
+                index: 1,
+                type_: ftrippoint::TripPointType::OneshotTempBelow,
+                configuration: ftrippoint::TripPointValue::OneshotTempBelowTripPoint(
+                    ftrippoint::OneshotTempBelowTripPoint { critical_temperature_celsius: 72.0 },
+                ),
+            },
+        ]
+    );
 }

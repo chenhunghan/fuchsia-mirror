@@ -359,8 +359,7 @@ class ButtonsTest : public ::testing::Test {
 
   fidl::ClientEnd<fuchsia_input_report::InputDevice> GetClient() {
     // Connect to InputDevice.
-    zx::result connect_result =
-        driver_test().ConnectThroughDevfs<fuchsia_input_report::InputDevice>("buttons");
+    zx::result connect_result = driver_test().Connect<fuchsia_input_report::Service::InputDevice>();
     EXPECT_EQ(ZX_OK, connect_result.status_value());
     return std::move(connect_result.value());
   }
@@ -498,7 +497,7 @@ TEST_P(ParameterizedButtonsTest, DirectButtonPushReleaseReport) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+                    fuchsia_input::wire::ConsumerControlButton::kVolumeUp);
         });
     ASSERT_OK(status);
 
@@ -569,7 +568,7 @@ TEST_P(ParameterizedButtonsTest, DirectButtonPushReleaseReportWithoutPower) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+                    fuchsia_input::wire::ConsumerControlButton::kVolumeUp);
         });
     ASSERT_OK(status);
   }
@@ -646,7 +645,7 @@ TEST_P(ParameterizedButtonsTest, DirectButtonFlaky) {
         ASSERT_TRUE(consumer_control.has_pressed_buttons());
         ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
         EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                  fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+                  fuchsia_input::wire::ConsumerControlButton::kVolumeUp);
       });
   ASSERT_OK(status);
 }
@@ -693,7 +692,7 @@ TEST_P(ParameterizedButtonsTest, MatrixButtonPush) {
         ASSERT_TRUE(consumer_control.has_pressed_buttons());
         ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
         EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                  fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+                  fuchsia_input::wire::ConsumerControlButton::kVolumeUp);
       });
   ASSERT_OK(status);
 
@@ -791,15 +790,15 @@ TEST_P(ParameterizedButtonsTest, DuplicateReports) {
 
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 3U);
-          std::set<fuchsia_input_report::wire::ConsumerControlButton> pressed_buttons;
-          for (const fuchsia_input_report::wire::ConsumerControlButton& button :
+          std::set<fuchsia_input::wire::ConsumerControlButton> pressed_buttons;
+          for (const fuchsia_input::wire::ConsumerControlButton& button :
                consumer_control.pressed_buttons()) {
             pressed_buttons.insert(button);
           }
-          const std::set<fuchsia_input_report::wire::ConsumerControlButton> expected_buttons = {
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp,
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeDown,
-              fuchsia_input_report::wire::ConsumerControlButton::kFactoryReset};
+          const std::set<fuchsia_input::wire::ConsumerControlButton> expected_buttons = {
+              fuchsia_input::wire::ConsumerControlButton::kVolumeUp,
+              fuchsia_input::wire::ConsumerControlButton::kVolumeDown,
+              fuchsia_input::wire::ConsumerControlButton::kFactoryReset};
           EXPECT_EQ(expected_buttons, pressed_buttons);
         });
     ASSERT_OK(status);
@@ -826,7 +825,7 @@ TEST_P(ParameterizedButtonsTest, DuplicateReports) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kVolumeDown);
+                    fuchsia_input::wire::ConsumerControlButton::kVolumeDown);
         });
     ASSERT_OK(status);
   }
@@ -872,7 +871,7 @@ TEST_P(ParameterizedButtonsTest, CamMute) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kCameraDisable);
+                    fuchsia_input::wire::ConsumerControlButton::kCameraDisable);
         });
     ASSERT_OK(status);
   }
@@ -941,7 +940,7 @@ TEST_P(ParameterizedButtonsTest, PollOneButton) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp);
+                    fuchsia_input::wire::ConsumerControlButton::kVolumeUp);
         });
     ASSERT_OK(status);
   }
@@ -969,14 +968,14 @@ TEST_P(ParameterizedButtonsTest, PollOneButton) {
 
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 2U);
-          std::set<fuchsia_input_report::wire::ConsumerControlButton> pressed_buttons;
-          for (const fuchsia_input_report::wire::ConsumerControlButton& button :
+          std::set<fuchsia_input::wire::ConsumerControlButton> pressed_buttons;
+          for (const fuchsia_input::wire::ConsumerControlButton& button :
                consumer_control.pressed_buttons()) {
             pressed_buttons.insert(button);
           }
-          const std::set<fuchsia_input_report::wire::ConsumerControlButton> expected_buttons = {
-              fuchsia_input_report::wire::ConsumerControlButton::kVolumeUp,
-              fuchsia_input_report::wire::ConsumerControlButton::kMicMute};
+          const std::set<fuchsia_input::wire::ConsumerControlButton> expected_buttons = {
+              fuchsia_input::wire::ConsumerControlButton::kVolumeUp,
+              fuchsia_input::wire::ConsumerControlButton::kMicMute};
           EXPECT_EQ(expected_buttons, pressed_buttons);
         });
     ASSERT_OK(status);
@@ -1004,7 +1003,7 @@ TEST_P(ParameterizedButtonsTest, PollOneButton) {
           ASSERT_TRUE(consumer_control.has_pressed_buttons());
           ASSERT_EQ(consumer_control.pressed_buttons().size(), 1U);
           EXPECT_EQ(consumer_control.pressed_buttons()[0],
-                    fuchsia_input_report::wire::ConsumerControlButton::kMicMute);
+                    fuchsia_input::wire::ConsumerControlButton::kMicMute);
         });
     ASSERT_OK(status);
   }

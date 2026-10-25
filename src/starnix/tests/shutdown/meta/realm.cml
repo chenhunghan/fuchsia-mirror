@@ -13,12 +13,32 @@
         },
         {
             name: "container",
-            url: "debian#meta/debian_container.cm",
+            url: "#meta/container.cm",
             environment: "#starnix_runner_env",
         },
         {
             name: "zombie_shutdown",
             url: "#meta/zombie_shutdown.cm",
+            environment: "#starnix_container_runner_env",
+        },
+        {
+            name: "stopped_first",
+            url: "#meta/stopped_first.cm",
+            environment: "#starnix_container_runner_env",
+        },
+        {
+            name: "stopped_last",
+            url: "#meta/stopped_last.cm",
+            environment: "#starnix_container_runner_env",
+        },
+        {
+            name: "crash_during_shutdown",
+            url: "#meta/crash_during_shutdown.cm",
+            environment: "#starnix_container_runner_env",
+        },
+        {
+            name: "crash_past_deadline",
+            url: "#meta/crash_past_deadline.cm",
             environment: "#starnix_container_runner_env",
         },
     ],
